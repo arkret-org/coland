@@ -141,27 +141,66 @@ async fn current_binding(
         .bind::<Text,_>(scope.realm_id().as_str()).bind::<Text,_>(applet.as_str())
         .get_result::<AcceptedRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(unavailable)?;
-    let event: arkret_wire::Event = decode(current.envelope)?;
-    let payload: AppletRegistrationPayload =
-        decode(serde_json::to_value(&event.payload).map_err(PersistenceError::database)?)?;
-    let full = accepted(conn, &event.event_id).await?;
-    if payload.service_id != *service {
-        return Ok(inactive);
-    }
-    if event.scope_ref != *scope || payload.applet_id != *applet {
+    let current_event: arkret_wire::Event = decode(current.envelope)?;
+    let current_full = accepted(conn, &current_event.event_id).await?;
+    let current_value =
+        serde_json::to_value(&current_full.event.payload).map_err(PersistenceError::database)?;
+    let current_payload: AppletRegistrationPayload = decode(current_value.clone())?;
+    if current_full.event.kind != EventKind::AppletRegistration
+        || current_full.event.realm_id != *scope.realm_id()
+        || current_payload.applet_id != *applet
+    {
         return Err(unavailable());
     }
-    let instance = sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM applet_registration_current_results r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref WHERE r.realm_id=$1 AND r.applet_id=$2 AND a.registration_event_ref=$3)) AS value")
-        .bind::<Text,_>(scope.realm_id().as_str()).bind::<Text,_>(applet.as_str())
-        .bind::<Text,_>(installation.pointer("/registration_event/event_id").and_then(Value::as_str).ok_or_else(unavailable)?)
-        .get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    if instance.value == Value::Bool(false)
+    if current_payload.service_id != *service {
+        return Ok(inactive);
+    }
+
+    // The Realm-wide singleton may have been re-proved in another scope. Its
+    // security instance governs liveness, while this exact installation's
+    // accepted registration remains the scope-local source of the binding.
+    let original: arkret_wire::Event = decode(installation["registration_event"].clone())?;
+    let full = accepted(conn, &original.event_id).await?;
+    let value = serde_json::to_value(&full.event.payload).map_err(PersistenceError::database)?;
+    let payload: AppletRegistrationPayload = decode(value.clone())?;
+    if full.event.kind != EventKind::AppletRegistration
+        || full.event.scope_ref != *scope
+        || full.event.realm_id != *scope.realm_id()
+        || payload.applet_id != *applet
+        || payload.service_id != *service
         || installation
             .pointer("/package/registration_epoch")
             .and_then(Value::as_str)
             != Some(payload.registration_epoch.as_str())
+        || serde_json::to_value(&full.event).map_err(PersistenceError::database)?
+            != serde_json::to_value(&original).map_err(PersistenceError::database)?
     {
+        return Err(unavailable());
+    }
+    #[derive(QueryableByName)]
+    struct RegistrationInstance {
+        #[diesel(sql_type=Text)]
+        instance_event_ref: String,
+        #[diesel(sql_type=Text)]
+        current_instance_event_ref: String,
+        #[diesel(sql_type=Text)]
+        accepted_commit_id: String,
+    }
+    let instance = sql_query("SELECT a.instance_event_ref,r.instance_event_ref AS current_instance_event_ref,a.accepted_commit_id FROM applet_registration_current_results r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id WHERE r.realm_id=$1 AND r.applet_id=$2 AND a.registration_event_ref=$3")
+        .bind::<Text,_>(scope.realm_id().as_str()).bind::<Text,_>(applet.as_str())
+        .bind::<Text,_>(full.event.event_id.as_str())
+        .get_result::<RegistrationInstance>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+        .ok_or_else(unavailable)?;
+    if instance.accepted_commit_id != full.commit.commit_id.as_str() {
+        return Err(unavailable());
+    }
+    if instance.instance_event_ref != instance.current_instance_event_ref {
         return Ok(inactive);
+    }
+    if crate::applet_current_results::registration_security_value(&current_value)
+        != crate::applet_current_results::registration_security_value(&value)
+    {
+        return Err(unavailable());
     }
     let fenced = sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM applet_managed_identities WHERE applet_id=$1 AND target_station_id=$2 AND record->>'globally_fenced_at' IS NOT NULL)) AS value")
         .bind::<Text,_>(applet.as_str())

@@ -5,6 +5,7 @@ async fn admission_authorize_recipient(
     key_seed: u8,
     deadline: chrono::DateTime<chrono::Utc>,
 ) -> coland_storage::AppletManagedDeviceAuthority {
+    let deadline = arkret_canonical::normalize_timestamp_canonical(deadline);
     let accepted = fixture
         .state
         .test_persistence()

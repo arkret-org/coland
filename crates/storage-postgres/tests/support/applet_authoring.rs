@@ -2033,8 +2033,9 @@ mod realm_native_fixture {
             let endpoint = format!("https://{authority}/");
             let native = fixture_applet_service_inception(&authority);
             let did = Did::new(native.did.clone()).unwrap();
+            let namespace = format!("realm-native-{}", safe_did_token(applet.as_str()));
             let mut package =
-                signed_applet_package(applet.as_str(), "realm-native", station, Some(&endpoint));
+                signed_applet_package(applet.as_str(), &namespace, station, Some(&endpoint));
             package.service_id = project_did_to_core_id(&did).unwrap();
             package.webhook_auth.key_ref = DidUrl::new(native.did_key_id.clone()).unwrap();
             package.namespaces.actors = vec![AppletNamespaceEntry::exclusive(format!(
@@ -2770,6 +2771,9 @@ mod realm_native_fixture {
             .unwrap()
             .unwrap();
         let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+        let expires_at = arkret_canonical::normalize_timestamp_canonical(
+            expires_at.unwrap_or(at + chrono::Duration::hours(1)),
+        );
         let key = SigningKey::from_bytes(&[key_seed; 32]);
         let mut hpke = vec![0xec, 0x01];
         hpke.extend([key_seed + 1; 32]);
@@ -2781,7 +2785,8 @@ mod realm_native_fixture {
             "device_key_algorithm":"Ed25519",
             "authorized_by":candidate.actor_id.signing_principal_id(),
             "scopes":scopes,
-            "not_before":at, "expires_at":expires_at.unwrap_or(at+chrono::Duration::hours(1)),
+            "not_before":arkret_canonical::format_timestamp_canonical(at),
+            "expires_at":arkret_canonical::format_timestamp_canonical(expires_at),
             "authorization_binding_kind":"realm_managed_delegation", "authorized_generation_ref":1,
             "device_signature":"unsigned", "applet_id":candidate.applet_id,
             "expected_control_revision":{"commit_id":creation_commit.commit_id,"stream_position":creation_commit.stream_position},

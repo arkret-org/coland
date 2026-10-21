@@ -90,6 +90,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::SchemaDefine
         | EventKind::RealmPolicyBundle
         | EventKind::PolicySet
+        | EventKind::PolicyAction
         | EventKind::DirectConversationBound
         | EventKind::RealmSetDefaultStrand
         | EventKind::ScopeReadReceiptPolicy
@@ -942,6 +943,7 @@ mod tests {
             EventKind::RealmPolicyBundle,
             EventKind::RealmGovernanceStationChange,
             EventKind::PolicySet,
+            EventKind::PolicyAction,
             EventKind::DirectConversationBound,
             EventKind::InviteClaim,
             EventKind::CircleCreate,
@@ -1081,6 +1083,7 @@ mod tests {
             EventKind::RealmPolicyBundle,
             EventKind::RealmGovernanceStationChange,
             EventKind::PolicySet,
+            EventKind::PolicyAction,
             EventKind::SchemaDefine,
             EventKind::SidecarContextAttach,
             EventKind::AgentSidecarExchangeControl,

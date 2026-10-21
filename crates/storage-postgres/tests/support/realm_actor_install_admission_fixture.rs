@@ -103,6 +103,7 @@ pub(super) async fn prepare_expiring_install(
     scope_label: &str,
     expires_at: chrono::DateTime<chrono::Utc>,
 ) -> AppletInstallRequestBody {
+    let expires_at = arkret_canonical::normalize_timestamp_canonical(expires_at);
     let unit = boxed_step(|| async { factory.prepare_install(applet, scope_label).await }).await;
     let coland_storage::AppletAdmissionRequest::Install(body) = unit.input.candidate.request else {
         panic!("actual install request required")
@@ -111,12 +112,12 @@ pub(super) async fn prepare_expiring_install(
     for original in &mut body.authoring_request_basis.capability_grant_events {
         let mut payload: CapabilityGrantPayload =
             serde_json::from_value(json!(original.payload)).unwrap();
-        payload.grant.constraints.push(
-            serde_json::from_value(
-                json!({"constraint_kind":"temporal","effect":"allow","expires_at":expires_at}),
-            )
-            .unwrap(),
+        let mut temporal = GrantConstraint::new(
+            arkret_models_collaboration::governance::grant_constraint::GrantConstraintKind::Temporal,
+            arkret_models_collaboration::governance::grant_constraint::GrantConstraintEffect::Allow,
         );
+        temporal.expires_at = Some(expires_at);
+        payload.grant.constraints.push(temporal);
         *original = factory.fixture.admin_event(
             EventKind::CapabilityGrant,
             body.authoring_request_basis.effective_scope.clone(),
@@ -300,6 +301,82 @@ pub(super) async fn run_install_admission(pool: PgPool) {
     );
 }
 
+async fn install_admission_exact_material_binding(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    scope: &ScopeRef,
+    install: &AppletInstallOutcome,
+) -> arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialOutcome {
+    use arkret_models_collaboration::applet_installation_authority::{
+        AppletAuthorityMaterialOutcome, AppletAuthorityMaterialRequestBody,
+        AppletInstallationCurrentBinding,
+    };
+    let request = AppletAuthorityMaterialRequestBody {
+        effective_scope: scope.clone(),
+        grant_ids: install.capability_grant_refs.clone(),
+    };
+    let path = format!(
+        "/_arkret/self/applets/{}/authority/material",
+        install.applet_id
+    );
+    let footprint = boxed_step(|| install_admission_footprint(fixture)).await;
+    let read_key = uuid::Uuid::now_v7().to_string();
+    let (status, value) = boxed_step(|| async {
+        fixture
+            .service_post(
+                package,
+                &path,
+                arkret_wire::ServiceOperationId::SelfAppletAuthorityReadMaterialV1.as_str(),
+                &json!(request),
+                &read_key,
+            )
+            .await
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "exact installation material: {value}"
+    );
+    let material: AppletAuthorityMaterialOutcome = serde_json::from_value(value).unwrap();
+    material
+        .validate_for_request(&install.applet_id, &request)
+        .unwrap();
+    let original = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&install.registration_event_ref)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(material.registration.event.scope_ref, *scope);
+    assert_eq!(json!(material.registration.event), json!(original.event));
+    assert_eq!(json!(material.registration.commit), json!(original.commit));
+    let AppletInstallationCurrentBinding::Active {
+        registration_ref,
+        registration_epoch,
+        service_id,
+    } = &material.current_binding
+    else {
+        panic!("accepted exact installation must remain active");
+    };
+    assert_eq!(&registration_ref.event_id, &install.registration_event_ref);
+    assert_eq!(registration_ref.commit_id, original.commit.commit_id);
+    assert_eq!(registration_ref.stream_ref, original.commit.stream_ref);
+    assert_eq!(
+        registration_ref.stream_position,
+        original.commit.stream_position
+    );
+    assert_eq!(registration_epoch, &install.registration_epoch);
+    assert_eq!(json!(service_id), original.event.payload["service_id"]);
+    assert_eq!(
+        boxed_step(|| install_admission_footprint(fixture)).await,
+        footprint
+    );
+    material
+}
+
 async fn install_admission_reproof_and_missing_creation(factory: &AppletAuthoringFactory) {
     // A proof refresh changes neither security epoch nor an already accepted
     // Realm installation. A distinct Circle has its own registration original.
@@ -349,6 +426,15 @@ async fn install_admission_reproof_and_missing_creation(factory: &AppletAuthorin
         &signer,
     )
     .unwrap();
+    let first_material = boxed_step(|| {
+        install_admission_exact_material_binding(
+            &factory.fixture,
+            &service.package,
+            &first_body.authoring_request_basis.effective_scope,
+            &first_outcome,
+        )
+    })
+    .await;
     let prior_proof = service.package.proof.clone();
     let prior_epoch = service.package.registration_epoch.clone();
     // Fresh proof is real and time-distinct, but the security transcript is unchanged.
@@ -381,6 +467,32 @@ async fn install_admission_reproof_and_missing_creation(factory: &AppletAuthorin
         first_outcome.registration_epoch,
         second_outcome.registration_epoch
     );
+    let refreshed_material = boxed_step(|| {
+        install_admission_exact_material_binding(
+            &factory.fixture,
+            &service.package,
+            &first_body.authoring_request_basis.effective_scope,
+            &first_outcome,
+        )
+    })
+    .await;
+    assert_eq!(
+        json!(refreshed_material.registration),
+        json!(first_material.registration)
+    );
+    assert_eq!(
+        json!(refreshed_material.grant_events),
+        json!(first_material.grant_events)
+    );
+    boxed_step(|| {
+        install_admission_exact_material_binding(
+            &factory.fixture,
+            &service.package,
+            &second.effective_scope,
+            &second_outcome,
+        )
+    })
+    .await;
     let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
         arkret_wire::EventAdmissionSubmission::new(pending.clone()),
     );
@@ -802,7 +914,9 @@ pub(super) async fn admission_native_endpoint(
             &candidate,
             &accepted.commit,
             key_seed,
-            chrono::Utc::now() + chrono::Duration::minutes(15),
+            arkret_canonical::normalize_timestamp_canonical(
+                chrono::Utc::now() + chrono::Duration::minutes(15),
+            ),
         )
     })
     .await;

@@ -124,7 +124,9 @@ pub(super) async fn keypackage_admission(
             candidate,
             &original.commit,
             90,
-            chrono::Utc::now() + chrono::Duration::minutes(15),
+            arkret_canonical::normalize_timestamp_canonical(
+                chrono::Utc::now() + chrono::Duration::minutes(15),
+            ),
         )
     })
     .await;

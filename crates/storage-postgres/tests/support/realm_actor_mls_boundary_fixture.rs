@@ -1106,6 +1106,128 @@ pub(super) async fn run_boundary(
 
 // #59. The only PCR here belongs to the genuine Human counterpart. The native
 // requester retains its complete RealmActor identity and has no personal PCR.
+async fn boundary_refresh_accepted_human_pcr(human: &mut Fixture) {
+    let persistence = human.state.test_persistence();
+    let history = &mut human.pcr.history;
+    assert_eq!(history.events.len(), history.commits.len());
+    let stream = history.commits[0].stream_ref.clone();
+    let cached = history.commits.last().unwrap().clone();
+    // A local fixture cache is never an authority source. Confirm its entire
+    // prefix against the actual accepted originals before extending it.
+    for (event, commit) in history.events.iter().zip(&history.commits) {
+        let accepted = persistence
+            .authority_commits()
+            .committed_event(&event.event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&accepted.event, event);
+        assert_eq!(&accepted.commit, commit);
+    }
+    let head = persistence
+        .authority_commits()
+        .stream_head(&stream)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.stream_ref, stream);
+    assert!(head.stream_position >= cached.stream_position);
+    let mut cursor = head.commit_id.clone();
+    let mut missing = Vec::new();
+    while cursor != cached.commit_id {
+        assert!(
+            missing.len() < 32,
+            "bounded fixture PCR refresh must reach its accepted prefix"
+        );
+        let accepted = persistence
+            .authority_commits()
+            .committed_event_by_commit_id(&cursor)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(accepted.commit.commit_id, cursor);
+        assert_eq!(accepted.commit.stream_ref, stream);
+        assert!(accepted.commit.stream_position > cached.stream_position);
+        assert_eq!(accepted.commit.event_ref, accepted.event.event_id);
+        assert_eq!(
+            accepted.event.actor_id,
+            ActorId::account(history.account.clone())
+        );
+        assert_eq!(
+            accepted.event.scope_ref,
+            ScopeRef::Realm {
+                realm_id: history.events[0].realm_id.clone()
+            }
+        );
+        accepted.commit.validate_shape().unwrap();
+        accepted.commit.verify_commit_id_matches_content().unwrap();
+        let suite = accepted.event.realm_id.digest_suite_code().digest_suite();
+        accepted
+            .event
+            .verify_event_id_matches_content_with_digest_suite(suite)
+            .unwrap();
+        let proof = accepted.event.producer_proof.as_ref().unwrap();
+        assert_eq!(
+            proof.verification_method,
+            history.device_verification_method
+        );
+        arkret_signatures::verify_ed25519_detached_jws_proof_with_digest_suite(
+            proof,
+            &arkret_signatures::EventProofBuilder::new()
+                .envelope_bytes(&accepted.event)
+                .unwrap(),
+            &accepted.event.actor_id,
+            &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                bytes: SigningKey::from_bytes(&history.founding_device_signing_seed)
+                    .verifying_key()
+                    .to_bytes()
+                    .to_vec(),
+            },
+            suite,
+        )
+        .unwrap();
+        assert_eq!(
+            accepted.commit.signature.verification_method,
+            human
+                .state
+                .service_verification_method("notary-key")
+                .unwrap()
+        );
+        arkret_signatures::detached_object::verify_detached_object_signature(
+            &accepted.commit.signature,
+            &arkret_canonical::unsigned_value(&accepted.commit, &["signature"]).unwrap(),
+            arkret_wire::DetachedSignatureContext::RealmCommit,
+            &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                bytes: human.state.notary_verifying_key().to_bytes().to_vec(),
+            },
+        )
+        .unwrap();
+        cursor = accepted
+            .commit
+            .previous_commit_ref
+            .clone()
+            .expect("accepted PCR suffix must retain its previous Commit");
+        missing.push(accepted);
+    }
+    for accepted in missing.into_iter().rev() {
+        assert_eq!(
+            accepted.commit.stream_position,
+            history.commits.len() as u64
+        );
+        assert_eq!(
+            accepted.commit.previous_commit_ref.as_ref(),
+            Some(&history.commits.last().unwrap().commit_id)
+        );
+        history.events.push(accepted.event);
+        history.commits.push(accepted.commit);
+    }
+    assert_eq!(history.commits.last().unwrap().commit_id, head.commit_id);
+    assert_eq!(
+        history.commits.last().unwrap().stream_position,
+        head.stream_position
+    );
+}
+
 async fn boundary_human_pcr_handoff(
     fixture: &Fixture,
     authority: &coland_storage::AppletManagedDeviceAuthority,
@@ -1135,6 +1257,7 @@ async fn boundary_human_pcr_handoff(
         "counterpart must be a different accepted Human PCR at this Station"
     );
     assert_ne!(human.pcr.history.account, fixture.pcr.history.account);
+    boxed_step(|| boundary_refresh_accepted_human_pcr(&mut human)).await;
     let human_persistence = human.state.test_persistence();
     let revoker = boxed_step(|| {
         human

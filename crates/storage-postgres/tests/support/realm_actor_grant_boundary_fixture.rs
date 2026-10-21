@@ -174,12 +174,12 @@ pub(super) async fn grant_authority_boundaries(
         .await;
     assert_eq!(
         status,
-        StatusCode::FORBIDDEN,
-        "wrong managed executor/source: {problem}"
+        StatusCode::CONFLICT,
+        "wrong current managed issuer/source: {problem}"
     );
     assert_eq!(
         problem["type"],
-        "https://arkret.org/problems/capability_denied"
+        "https://arkret.org/problems/failed_precondition"
     );
     assert_eq!(
         boxed_step(|| obligation_mls_footprint(fixture)).await,

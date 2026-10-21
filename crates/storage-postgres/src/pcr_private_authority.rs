@@ -110,7 +110,7 @@ pub(crate) async fn ensure_export_supported(
         #[diesel(sql_type=Bool)]
         unsupported: bool,
     }
-    let row=sql_query("SELECT EXISTS(SELECT 1 FROM canonical_events e WHERE e.realm_id=$1 AND (e.state<>'committed' OR e.kind NOT IN ('ak.realm.create','ak.device.authorize','ak.device.reanchor','ak.profile.create','ak.profile.update','ak.identity.resolution.update','ak.consent.grant','ak.consent.revoke','ak.realm.governance_station.change'))) AS unsupported")
+    let row=sql_query("SELECT EXISTS(SELECT 1 FROM canonical_events e WHERE e.realm_id=$1 AND (e.state<>'committed' OR e.kind NOT IN ('ak.realm.create','ak.device.authorize','ak.device.reanchor','ak.profile.create','ak.profile.update','ak.identity.resolution.update','ak.consent.replace','ak.realm.governance_station.change'))) AS unsupported")
         .bind::<Text,_>(realm.as_str()).get_result::<Unsupported>(conn).await.map_err(PersistenceError::database)?;
     if row.unsupported {
         return Err(unavailable(

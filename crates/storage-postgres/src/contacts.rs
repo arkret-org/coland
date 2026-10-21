@@ -254,6 +254,17 @@ fn contact_record_from_row(row: ContactRow) -> PersistenceResult<ContactRecord> 
         updated_at: row.updated_at,
     })
 }
+/// Parse large closed Contact evidence away from nested async poll frames.
+/// The transaction keeps its connection and locks while awaiting this pure work.
+async fn decode_contact_rows(rows: Vec<ContactRow>) -> PersistenceResult<Vec<ContactRecord>> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    tokio::task::spawn_blocking(move || rows.into_iter().map(contact_record_from_row).collect())
+        .await
+        .map_err(|error| PersistenceError::Internal(format!("Contact row decode task: {error}")))?
+}
+
 const CONTACT_COLUMNS: &str = "requester_id, target_id, contact_round_id, granted_to_target_scopes, granted_to_requester_scopes, status, pending_incoming_admitted, request_event_ref, request_slot_states, request_receipts, request_mirror_receipts, contact_round_evidence, current_state, response_event_ref, tombstone_event_ref, message, peer_id AS peer_host_id, peer_service_resolution, created_at, updated_at";
 /// Both directional Contact rows of an exact pair, share-locked so a
 /// concurrent Contact change cannot commit inside the reading transaction.
@@ -262,7 +273,7 @@ pub(crate) async fn pair_contacts_in_connection(
     left: &ActorId,
     right: &ActorId,
 ) -> PersistenceResult<Vec<ContactRecord>> {
-    sql_query(format!(
+    let rows = sql_query(format!(
         "SELECT {CONTACT_COLUMNS} FROM contacts \
          WHERE (requester_id = $1 AND target_id = $2) OR (requester_id = $2 AND target_id = $1) \
          ORDER BY updated_at ASC, requester_id ASC FOR SHARE"
@@ -271,10 +282,8 @@ pub(crate) async fn pair_contacts_in_connection(
     .bind::<Text, _>(right.to_string())
     .load::<ContactRow>(&mut *conn)
     .await
-    .map_err(PersistenceError::database)?
-    .into_iter()
-    .map(contact_record_from_row)
-    .collect()
+    .map_err(PersistenceError::database)?;
+    decode_contact_rows(rows).await
 }
 
 /// Read the pair at a repeatable-read Snapshot cut without row locks.
@@ -285,7 +294,7 @@ pub(crate) async fn pair_contacts_snapshot_in_connection(
     left: &ActorId,
     right: &ActorId,
 ) -> PersistenceResult<Vec<ContactRecord>> {
-    sql_query(format!(
+    let rows = sql_query(format!(
         "SELECT {CONTACT_COLUMNS} FROM contacts \
          WHERE (requester_id = $1 AND target_id = $2) OR (requester_id = $2 AND target_id = $1) \
          ORDER BY updated_at ASC, requester_id ASC"
@@ -294,10 +303,8 @@ pub(crate) async fn pair_contacts_snapshot_in_connection(
     .bind::<Text, _>(right.to_string())
     .load::<ContactRow>(&mut *conn)
     .await
-    .map_err(PersistenceError::database)?
-    .into_iter()
-    .map(contact_record_from_row)
-    .collect()
+    .map_err(PersistenceError::database)?;
+    decode_contact_rows(rows).await
 }
 
 /// The one Contact row of a pair, in either orientation, locked for update.
@@ -306,7 +313,7 @@ pub(crate) async fn lock_pair_contact_in_connection(
     left: &ActorId,
     right: &ActorId,
 ) -> PersistenceResult<Option<ContactRecord>> {
-    sql_query(format!(
+    let rows = sql_query(format!(
         "SELECT {CONTACT_COLUMNS} FROM contacts \
          WHERE (requester_id = $1 AND target_id = $2) OR (requester_id = $2 AND target_id = $1) \
          FOR UPDATE"
@@ -316,9 +323,10 @@ pub(crate) async fn lock_pair_contact_in_connection(
     .get_result::<ContactRow>(&mut *conn)
     .await
     .optional()
-    .map_err(PersistenceError::database)?
-    .map(contact_record_from_row)
-    .transpose()
+    .map_err(PersistenceError::database)?;
+    decode_contact_rows(rows.into_iter().collect())
+        .await
+        .map(|mut rows| rows.pop())
 }
 
 /// The exact Contact row of a pair at revision `updated_at`, locked for the
@@ -329,7 +337,7 @@ pub(crate) async fn lock_pair_contact_at_in_connection(
     right: &ActorId,
     updated_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<Option<ContactRecord>> {
-    sql_query(format!(
+    let rows = sql_query(format!(
         "SELECT {CONTACT_COLUMNS} FROM contacts \
          WHERE ((requester_id = $1 AND target_id = $2) OR (requester_id = $2 AND target_id = $1)) \
            AND updated_at = $3 \
@@ -341,9 +349,10 @@ pub(crate) async fn lock_pair_contact_at_in_connection(
     .get_result::<ContactRow>(&mut *conn)
     .await
     .optional()
-    .map_err(PersistenceError::database)?
-    .map(contact_record_from_row)
-    .transpose()
+    .map_err(PersistenceError::database)?;
+    decode_contact_rows(rows.into_iter().collect())
+        .await
+        .map(|mut rows| rows.pop())
 }
 
 pub(crate) async fn put_if_updated_at_in_connection(
@@ -487,7 +496,9 @@ impl ContactStore for PgContactStore {
         .await
         .optional()
         .map_err(PersistenceError::database)?;
-        row.map(contact_record_from_row).transpose()
+        decode_contact_rows(row.into_iter().collect())
+            .await
+            .map(|mut rows| rows.pop())
     }
 
     async fn put(&self, record: &ContactRecord) -> PersistenceResult<()> {
@@ -600,7 +611,7 @@ impl ContactStore for PgContactStore {
         .get_results::<ContactRow>(&mut *conn)
         .await
         .map_err(PersistenceError::database)?;
-        rows.into_iter().map(contact_record_from_row).collect()
+        decode_contact_rows(rows).await
     }
 
     async fn delete(&self, requester_id: &ActorId, target_id: &ActorId) -> PersistenceResult<()> {
@@ -676,6 +687,125 @@ impl MimiConsentCorrelationStore for PgMimiConsentCorrelationStore {
         .optional()
         .map(|row| row.map(MimiConsentCorrelationRecord::from))
         .map_err(PersistenceError::database)
+    }
+
+    async fn update_outcome(
+        &self,
+        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::mimi_operations::MimiUpdateConsentOutcome>,
+    > {
+        #[derive(QueryableByName)]
+        struct Outcome {
+            #[diesel(sql_type=Nullable<Jsonb>)]
+            terminal_outcome: Option<serde_json::Value>,
+        }
+        if self.update_binding(request).await? != Some(true) {
+            return Err(PersistenceError::Conflict(
+                "MIMI original is not frozen".into(),
+            ));
+        }
+        let mut conn = pg_conn(&self.pool).await?;
+        let row =
+            sql_query("SELECT terminal_outcome FROM mimi_consent_updates WHERE consent_id=$1")
+                .bind::<Text, _>(request.consent_id.as_str())
+                .get_result::<Outcome>(&mut *conn)
+                .await
+                .map_err(PersistenceError::database)?;
+        let outcome: Option<
+            arkret_models_collaboration::mimi_operations::MimiUpdateConsentOutcome,
+        > = row
+            .terminal_outcome
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(PersistenceError::database)?;
+        if outcome.as_ref().is_some_and(|o| {
+            o.consent_id != request.consent_id
+                || o.decision != request.decision
+                || o.event_ref != request.consent_event.event.event_id
+                || o.updated_at != request.consent_event.event.created_at
+        }) {
+            return Err(PersistenceError::Conflict(
+                "MIMI terminal binding is corrupt".into(),
+            ));
+        }
+        Ok(outcome)
+    }
+    async fn complete_update(
+        &self,
+        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
+        outcome: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentOutcome,
+    ) -> PersistenceResult<()> {
+        if self.update_binding(request).await? != Some(true)
+            || outcome.consent_id != request.consent_id
+            || outcome.decision != request.decision
+            || outcome.event_ref != request.consent_event.event.event_id
+            || outcome.updated_at != request.consent_event.event.created_at
+        {
+            return Err(PersistenceError::Conflict(
+                "MIMI terminal does not bind its frozen original".into(),
+            ));
+        }
+        let mut conn = pg_conn(&self.pool).await?;
+        let value = serde_json::to_value(outcome).map_err(PersistenceError::database)?;
+        let changed=sql_query("UPDATE mimi_consent_updates SET terminal_outcome=$2 WHERE consent_id=$1 AND (terminal_outcome IS NULL OR terminal_outcome=$2)")
+            .bind::<Text,_>(request.consent_id.as_str()).bind::<Jsonb,_>(value).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+        if changed != 1 {
+            return Err(PersistenceError::Conflict(
+                "MIMI original has another terminal".into(),
+            ));
+        }
+        Ok(())
+    }
+    async fn update_binding(
+        &self,
+        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
+    ) -> PersistenceResult<Option<bool>> {
+        #[derive(QueryableByName)]
+        struct Binding {
+            #[diesel(sql_type=Text)]
+            consent_id: String,
+            #[diesel(sql_type=Text)]
+            decision: String,
+            #[diesel(sql_type=Text)]
+            event_id: String,
+            #[diesel(sql_type=Jsonb)]
+            submission: serde_json::Value,
+        }
+        let mut conn = pg_conn(&self.pool).await?;
+        let rows=sql_query("SELECT consent_id,decision,event_id,submission FROM mimi_consent_updates WHERE consent_id=$1 OR event_id=$2")
+            .bind::<Text,_>(request.consent_id.as_str()).bind::<Text,_>(request.consent_event.event.event_id.as_str()).get_results::<Binding>(&mut *conn).await.map_err(PersistenceError::database)?;
+        let decision =
+            serde_json::to_value(request.decision).map_err(PersistenceError::database)?;
+        let submission =
+            serde_json::to_value(&request.consent_event).map_err(PersistenceError::database)?;
+        Ok((!rows.is_empty()).then(|| {
+            rows.iter().all(|row| {
+                row.consent_id == request.consent_id.as_str()
+                    && row.decision == decision.as_str().unwrap_or("")
+                    && row.event_id == request.consent_event.event.event_id.as_str()
+                    && row.submission == submission
+            })
+        }))
+    }
+    async fn freeze_update(
+        &self,
+        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
+    ) -> PersistenceResult<()> {
+        let mut conn = pg_conn(&self.pool).await?;
+        let decision =
+            serde_json::to_value(request.decision).map_err(PersistenceError::database)?;
+        sql_query("INSERT INTO mimi_consent_updates(consent_id,decision,event_id,submission) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
+            .bind::<Text,_>(request.consent_id.as_str()).bind::<Text,_>(decision.as_str().ok_or_else(||PersistenceError::SchemaViolation("invalid MIMI decision".into()))?)
+            .bind::<Text,_>(request.consent_event.event.event_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&request.consent_event).map_err(PersistenceError::database)?)
+            .execute(&mut *conn).await.map_err(PersistenceError::database)?;
+        drop(conn);
+        if self.update_binding(request).await? != Some(true) {
+            return Err(PersistenceError::Conflict(
+                "MIMI update correlation or Event is already frozen".into(),
+            ));
+        }
+        Ok(())
     }
 
     async fn put(&self, record: &MimiConsentCorrelationRecord) -> PersistenceResult<()> {

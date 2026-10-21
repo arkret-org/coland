@@ -2176,17 +2176,12 @@ pub(crate) fn disclose_to_actor(
                         rejected("Direct Conversation binding current value is not closed")
                     })?;
                 binding
-                    .binding_digest()
-                    .map_err(|_| rejected("Direct Conversation binding endorsements disagree"))?;
-                if binding.endorsements.iter().any(|endorsement| {
-                    endorsement.value.validate_shape().is_err()
-                        || endorsement.value.pair_key != *pair_key
-                        || endorsement.value.realm_id != material.realm_id
-                        || !endorsement
-                            .value
-                            .unordered_participant_ids
-                            .contains(&caller)
-                }) {
+                    .validate_shape()
+                    .map_err(|_| rejected("invalid Direct Conversation binding"))?;
+                if binding.binding.pair_key != *pair_key
+                    || binding.binding.realm_id != material.realm_id
+                    || !binding.binding.unordered_participant_ids.contains(&caller)
+                {
                     return Err(rejected(
                         "Direct Conversation binding is not disclosed to this exact participant",
                     ));
@@ -3639,10 +3634,8 @@ mod tests {
     #[test]
     fn direct_conversation_binding_requires_exact_participant_and_selector() {
         use arkret_models_collaboration::events_payloads::direct_conversation::{
-            DirectConversationBindingCurrentValue, DirectConversationBindingEndorsementEntry,
-            DirectConversationBoundPayload,
+            DirectConversationBindingCurrentValue, DirectConversationBoundPayload,
         };
-        use arkret_models_collaboration::exact_current_results::CanonicalEventDot;
 
         let (alice, mut material, facts) = fixture();
         let pair_key = arkret_wire::Hash::new(format!("sha256:{}", "71".repeat(32))).unwrap();
@@ -3663,10 +3656,8 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         let value = serde_json::to_value(DirectConversationBindingCurrentValue {
-            endorsements: vec![DirectConversationBindingEndorsementEntry {
-                tag_id: CanonicalEventDot::new(event_id(0x77), 0).unwrap(),
-                value: payload,
-            }],
+            binding_event_ref: event_id(0x77),
+            binding: payload,
         })
         .unwrap();
         material.current_state_entries.push(row(

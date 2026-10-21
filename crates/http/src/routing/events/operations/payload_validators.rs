@@ -253,19 +253,6 @@ pub(crate) fn validate_history_access_payload(operation: &Operation) -> Result<(
     Ok(())
 }
 
-pub(crate) fn validate_observed_dots_payload(operation: &Operation) -> Result<(), &'static str> {
-    if operation
-        .payload
-        .get("observed_dot_ids")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|dots| !dots.is_empty())
-    {
-        Ok(())
-    } else {
-        Err("consent revoke observed_dot_ids must be a non-empty array")
-    }
-}
-
 pub(crate) fn validate_read_scope_track(track: &str) -> Result<(), &'static str> {
     let mut bytes = track.bytes();
     let Some(first) = bytes.next() else {

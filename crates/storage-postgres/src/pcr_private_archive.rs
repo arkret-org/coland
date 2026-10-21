@@ -92,6 +92,10 @@ const TABLES: &[(&str, &str)] = &[
         "mimi_consent_correlations",
         "t.holder_account_id::jsonb=v.holder",
     ),
+    (
+        "mimi_consent_updates",
+        "EXISTS(SELECT 1 FROM mimi_consent_correlations c WHERE c.consent_id=t.consent_id AND c.holder_account_id::jsonb=v.holder)",
+    ),
 ];
 fn invalid(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::SchemaViolation(format!("native PCR archive: {detail}"))

@@ -82,7 +82,7 @@ async fn require_agent_membership_keypackage(
 ) -> PersistenceResult<()> {
     let candidate = sql_query(
         "SELECT e.envelope,c.commit_json,kp.endpoint_verification_method AS verification_method \
-         FROM mls_key_packages kp JOIN accounts a ON a.principal_id=kp.owner_actor_id->>'principal_id' AND a.station_id=kp.owner_actor_id->>'station_id' \
+         FROM mls_key_packages kp JOIN accounts a ON a.principal_id=kp.owner_actor_id->'account_id'->>'principal_id' AND a.station_id=kp.owner_actor_id->'account_id'->>'station_id' \
          JOIN canonical_events e ON e.id=kp.agent_key_authorize_event_id AND e.state='committed' \
            AND e.kind='ak.agent.key.authorize' \
          JOIN realm_commits c ON c.event_pk=e.pk AND c.realm_id=$1 \

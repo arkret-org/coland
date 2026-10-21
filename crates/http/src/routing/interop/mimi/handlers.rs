@@ -483,36 +483,37 @@ pub(super) async fn mimi_consent_update(
             AppError::schema_violation(format!("MIMI consent Event identity: {error}"))
                 .with_reason_code(arkret_wire::ReasonCode::EVENT_ID_DIGEST_MISMATCH)
         })?;
-    let (session, source_id) = verify_mimi_consent_update_authority(state, req, aa, &body).await?;
+    let (_session, source_id) = verify_mimi_consent_update_authority(state, req, aa, &body).await?;
     verify_mimi_consent_correlation(state, &body, source_id.as_deref()).await?;
-    let event_ref = body.consent_event.event.event_id.clone();
-    let updated_at = body.consent_event.event.created_at;
-    // mimi-interop.md section 10: the facade hands the exact submission to
-    // the same holder-private Consent admission as the self Consent routes;
-    // it never re-signs, rebuilds or synthesizes the Event.
-    match session {
-        Some(session) => {
-            crate::state::authority_pcr::submit_self(state, &session, &body.consent_event)
-                .await
-                .and_then(|outcome| {
-                    outcome.map(|_| ()).ok_or_else(|| {
-                        coland_services::ServiceError::SchemaViolation(
-                            "MIMI Consent is outside the accepted holder PCR".into(),
-                        )
-                    })
-                })
-        }
-        None => {
-            crate::state::authority_consent::submit_mimi_forward(state, &body.consent_event).await
-        }
+    // Recheck the current caller and correlation disclosure before returning a
+    // retained outcome. Native producer verification belongs to the accepting PCR.
+    if let Some(outcome) = state
+        .persistence()
+        .mimi_consent_update_outcome(&body)
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("MIMI original outcome persistence: {error}"))
+        })?
+    {
+        return json_ok(outcome);
     }
-    .map_err(|error| mimi_consent_admission_error(body.decision, error))?;
-    json_ok(MimiUpdateConsentOutcome {
-        consent_id: body.consent_id,
+    crate::state::authority_consent::submit_mimi_forward(state, &body.consent_event)
+        .await
+        .map_err(|error| mimi_consent_admission_error(body.decision, error))?;
+    let outcome = MimiUpdateConsentOutcome {
+        consent_id: body.consent_id.clone(),
         decision: body.decision,
-        updated_at,
-        event_ref,
-    })
+        updated_at: body.consent_event.event.created_at,
+        event_ref: body.consent_event.event.event_id.clone(),
+    };
+    state
+        .persistence()
+        .complete_mimi_consent_update(&body, &outcome)
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("MIMI original outcome persistence: {error}"))
+        })?;
+    json_ok(outcome)
 }
 
 pub(super) async fn verify_mimi_consent_write_authority(
@@ -904,7 +905,6 @@ fn mimi_consent_purpose(purpose: MimiConsentPurpose) -> &'static str {
         MimiConsentPurpose::VoiceCall => "voice_call",
         MimiConsentPurpose::VideoCall => "video_call",
         MimiConsentPurpose::Presence => "presence",
-        MimiConsentPurpose::Any => "any",
     }
 }
 
@@ -916,14 +916,9 @@ fn mimi_consent_admission_error(
     decision: arkret_models_collaboration::mimi_operations::MimiConsentDecision,
     error: coland_services::ServiceError,
 ) -> AppError {
-    use arkret_models_collaboration::mimi_operations::MimiConsentDecision;
     use coland_storage::ConflictCode;
-    // Revoke can lose the PCR race after correlation preflight. Preserve the
-    // same private refusal class as an absent or already-revoked current.
+    let _ = decision;
     if matches!(
-        decision,
-        MimiConsentDecision::Deny | MimiConsentDecision::Revoke
-    ) && matches!(
         error.conflict_code(),
         Some(ConflictCode::CasConflict | ConflictCode::FailedPrecondition)
     ) {
@@ -994,54 +989,78 @@ async fn verify_mimi_consent_correlation(
 
     let correlation_peer = mimi_correlation_peer(&correlation.requester_actor_id);
 
-    match body.decision {
-        arkret_models_collaboration::mimi_operations::MimiConsentDecision::Accept => {
-            let payload = &body.consent_event.event.payload;
-            let peer_matches = payload
-                .get("peer")
-                .cloned()
-                .and_then(|peer| serde_json::from_value::<ConsentPeer>(peer).ok())
-                .is_some_and(|peer| correlation_peer.as_ref() == Some(&peer));
-            if !peer_matches
-                || payload.get("consent_scope").and_then(Value::as_str)
-                    != Some(correlation.purpose.as_str())
-            {
-                return Err(mimi_consent_correlation_unavailable());
-            }
-        }
-        arkret_models_collaboration::mimi_operations::MimiConsentDecision::Deny
-        | arkret_models_collaboration::mimi_operations::MimiConsentDecision::Revoke => {
-            let revoke: arkret_models_collaboration::governance_payloads::ConsentRevokePayload =
-                serde_json::from_value(
-                    serde_json::to_value(&body.consent_event.event.payload)
-                        .map_err(|_| mimi_consent_correlation_unavailable())?,
-                )
-                .map_err(|_| mimi_consent_correlation_unavailable())?;
-            // Correlate the exact signed historical CAS basis. Only the actual
-            // accepting authority decides whether it is still current.
+    match state
+        .persistence()
+        .mimi_consent_update_binding(body)
+        .await
+        .map_err(|_| mimi_consent_correlation_unavailable())?
+    {
+        Some(true) => return Ok(()),
+        Some(false) => return Err(mimi_consent_correlation_unavailable()),
+        None => {}
+    }
+    use arkret_models_collaboration::events_payloads::consent::{
+        ConsentExpectedCurrent, ConsentReplacePayload,
+    };
+    let payload: ConsentReplacePayload = serde_json::from_value(
+        serde_json::to_value(&body.consent_event.event.payload)
+            .map_err(|_| mimi_consent_correlation_unavailable())?,
+    )
+    .map_err(|_| mimi_consent_correlation_unavailable())?;
+    let peer = correlation_peer.ok_or_else(mimi_consent_correlation_unavailable)?;
+    if payload.peer != peer {
+        return Err(mimi_consent_correlation_unavailable());
+    }
+    let previous = match &payload.expected_current {
+        ConsentExpectedCurrent::NeverWritten {} => Vec::new(),
+        ConsentExpectedCurrent::Present { revision } => {
             let basis = state
                 .persistence()
-                .consent_historical_basis(
-                    body_holder_account_id,
-                    &body.consent_id,
-                    &revoke.expected_revision,
-                )
+                .consent_historical_basis(body_holder_account_id, peer.actor_id(), revision)
                 .await
-                .map_err(|_| mimi_consent_correlation_unavailable())?
-                .ok_or_else(mimi_consent_correlation_unavailable)?;
-            let grant: arkret_models_collaboration::events_payloads::consent::ConsentGrantPayload =
-                serde_json::from_value(
+                .map_err(|_| mimi_consent_correlation_unavailable())?;
+            if let Some(basis) = basis {
+                let basis: ConsentReplacePayload = serde_json::from_value(
                     serde_json::to_value(&basis.event.payload)
                         .map_err(|_| mimi_consent_correlation_unavailable())?,
                 )
                 .map_err(|_| mimi_consent_correlation_unavailable())?;
-            let matches = correlation_peer.as_ref() == Some(&grant.peer)
-                && grant.consent_scope.as_str() == correlation.purpose;
-            if !matches {
-                return Err(mimi_consent_correlation_unavailable());
+                if basis.peer != peer {
+                    return Err(mimi_consent_correlation_unavailable());
+                }
+                basis.permissions
+            } else {
+                let read=arkret_models_collaboration::consent_operations::ConsentCurrentReadRequestBody {holder_account_id:body_holder_account_id.clone(),peer:peer.clone(),audience_actor_id:arkret_wire::ActorId::service(body_holder_account_id.station_id.clone()),nonce:crate::routing::call_admission::nonce()};
+                let current = crate::routing::call_admission::verified_holder_current(state, &read)
+                    .await
+                    .map_err(|_| mimi_consent_correlation_unavailable())?;
+                match current.current {
+                    arkret_models_collaboration::consent_operations::ConsentCurrentReadState::Present{result} if result.revision==*revision=>result.value.permissions,
+                    _=>return Err(mimi_consent_correlation_unavailable()),
+                }
             }
         }
-    }
+    };
+    let scope = correlation
+        .purpose
+        .parse::<arkret_wire::ConsentScope>()
+        .map_err(|_| mimi_consent_correlation_unavailable())?;
+    payload
+        .validate_scope_diff(
+            &previous,
+            scope,
+            matches!(
+                body.decision,
+                arkret_models_collaboration::mimi_operations::MimiConsentDecision::Accept
+            ),
+        )
+        .map_err(|_| mimi_consent_correlation_unavailable())?;
+
+    state
+        .persistence()
+        .freeze_mimi_consent_update(body)
+        .await
+        .map_err(|_| mimi_consent_correlation_unavailable())?;
     Ok(())
 }
 
@@ -1499,13 +1518,12 @@ mod consent_proof_tests {
             RealmId::new("ak:realm:Aaqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq".to_owned())
                 .unwrap();
         let consent_event = crate::test_event::raw_event_at(
-            EventKind::ConsentGrant.as_str(),
+            EventKind::ConsentReplace.as_str(),
             ScopeRef::Realm { realm_id },
             crate::test_actor_id(&actor_did),
             1,
             Hlc::new(state.hlc().now()).unwrap(),
             json!({
-                "consent_id": consent_id,
                 "peer": {
                     "kind": "actor",
                     "actor_id": {
@@ -1516,7 +1534,7 @@ mod consent_proof_tests {
                         },
                     },
                 },
-                "consent_scope": "voice_call"
+                "expected_current":{"state":"never_written"},"permissions":[{"consent_scope":"voice_call"}]
             }),
             now(),
         )
@@ -1675,7 +1693,6 @@ mod consent_proof_tests {
 
     #[tokio::test]
     async fn consent_deny_and_revoke_use_exact_current_and_preserve_accepted_retry() {
-        use arkret_models_collaboration::consent_operations::ConsentState;
         use coland_storage::ConsentAdmissionOutcome;
         use coland_test_support::AppStateTestExt as _;
         async fn footprint(pool: &coland_storage_postgres::PgPool) -> Value {
@@ -1686,7 +1703,7 @@ mod consent_proof_tests {
                 value: Value,
             }
             let mut conn = pool.get().await.unwrap();
-            diesel::sql_query("SELECT jsonb_build_array((SELECT count(*) FROM canonical_events),(SELECT count(*) FROM realm_commits),(SELECT jsonb_agg(to_jsonb(r) ORDER BY consent_id) FROM consent_current_results r),(SELECT count(*) FROM consent_result_versions),(SELECT count(*) FROM account_data_changes)) AS value")
+            diesel::sql_query("SELECT jsonb_build_array((SELECT count(*) FROM canonical_events),(SELECT count(*) FROM realm_commits),(SELECT jsonb_agg(to_jsonb(r) ORDER BY peer_id) FROM consent_current_results r),(SELECT count(*) FROM consent_result_versions),(SELECT count(*) FROM account_data_changes)) AS value")
                 .get_result::<Row>(&mut conn).await.unwrap().value
         }
         for (decision, scope) in [
@@ -1734,11 +1751,10 @@ mod consent_proof_tests {
                 )
             };
             body.consent_event = EventAdmissionSubmission::new(signed_event(
-                EventKind::ConsentGrant,
+                EventKind::ConsentReplace,
                 json!({
-                    "consent_id": body.consent_id,
                     "peer": {"kind": "actor", "actor_id": test_requester_actor(&state)},
-                    "consent_scope": scope
+                    "expected_current":{"state":"never_written"},"permissions":[{"consent_scope":scope}]
                 }),
             ));
             install_correlation(&state, &body, &fixture.history.account).await;
@@ -1755,10 +1771,12 @@ mod consent_proof_tests {
                 panic!("first grant must commit")
             };
             body.decision = decision;
+            body.consent_id = ConsentId::new_v7_at(chrono::Utc::now().timestamp_millis() as u64);
+            install_correlation(&state, &body, &fixture.history.account).await;
             body.consent_event = EventAdmissionSubmission::new(signed_event(
-                EventKind::ConsentRevoke,
+                EventKind::ConsentReplace,
                 json!({
-                    "consent_id": body.consent_id, "expected_revision": granted.view().revision
+                    "peer":{"kind":"actor","actor_id":test_requester_actor(&state)},"expected_current":{"state":"present","revision":granted.view().revision},"permissions":[]
                 }),
             ));
             body.validate_consent_event().unwrap();
@@ -1785,9 +1803,9 @@ mod consent_proof_tests {
             let mut stale_revision = granted.view().revision;
             stale_revision.stream_position -= 1;
             stale.consent_event = EventAdmissionSubmission::new(signed_event(
-                EventKind::ConsentRevoke,
+                EventKind::ConsentReplace,
                 json!({
-                    "consent_id": body.consent_id, "expected_revision": stale_revision
+                    "peer":{"kind":"actor","actor_id":test_requester_actor(&state)},"expected_current":{"state":"present","revision":stale_revision},"permissions":[]
                 }),
             ));
             stale.validate_consent_event().unwrap();
@@ -1811,7 +1829,7 @@ mod consent_proof_tests {
             else {
                 panic!("first revoke must commit")
             };
-            assert_eq!(revoked.value.status, ConsentState::Revoked);
+            assert!(revoked.value.permissions.is_empty());
             assert!(revoked.commit.stream_position > granted.commit.stream_position);
             let after = footprint(&pool).await;
             verify_mimi_consent_correlation(&state, &body, None)
@@ -1829,16 +1847,18 @@ mod consent_proof_tests {
 
             let mut another_revoke = body.clone();
             another_revoke.consent_event = EventAdmissionSubmission::new(signed_event(
-                EventKind::ConsentRevoke,
+                EventKind::ConsentReplace,
                 json!({
-                    "consent_id": body.consent_id, "expected_revision": granted.view().revision, "reason": "another_event"
+                    "peer":{"kind":"actor","actor_id":test_requester_actor(&state)},"expected_current":{"state":"present","revision":granted.view().revision},"permissions":[]
                 }),
             ));
-            // Correlation authenticates the immutable original Grant basis;
-            // only the native authority's final CAS decides current permission.
-            verify_mimi_consent_correlation(&state, &another_revoke, None)
-                .await
-                .unwrap();
+            assert_eq!(
+                verify_mimi_consent_correlation(&state, &another_revoke, None)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::NotFound
+            );
             assert_eq!(footprint(&pool).await, after);
             let refused = mimi_consent_correlation_unavailable();
             let error =

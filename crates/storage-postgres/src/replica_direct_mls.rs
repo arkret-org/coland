@@ -118,9 +118,9 @@ async fn cut_in_connection(
     else {
         return Ok(None);
     };
-    binding.binding_digest().map_err(invalid)?;
-    let participants = binding.endorsements[0]
-        .value
+    binding.validate_shape().map_err(invalid)?;
+    let participants = binding
+        .binding
         .unordered_participant_ids
         .iter()
         .cloned()
@@ -134,7 +134,7 @@ async fn cut_in_connection(
         .collect::<Vec<_>>()
         .try_into()
         .map_err(|_| invalid("participant cardinality"))?;
-    let pair_key = &binding.endorsements[0].value.pair_key;
+    let pair_key = &binding.binding.pair_key;
     let Some((verified_head, entries)) =
         crate::replica_authorization::direct_current_evidence(conn, realm, pair_key, &pair).await?
     else {
@@ -185,10 +185,7 @@ pub(crate) async fn input_in_connection(
         crate::direct_conversation_admission::binding_current_snapshot_in_connection(conn, realm)
             .await?
             .ok_or_else(|| invalid("binding disappeared"))?;
-    let expected_initial_pair_ref = binding.endorsements[0]
-        .value
-        .initial_exact_pair_group_state_ref
-        .clone();
+    let expected_initial_pair_ref = binding.binding.initial_exact_pair_group_state_ref.clone();
     let mut base = None;
     if let Some(cache) = cache_in_connection(conn, realm).await? {
         let cached: Cut = serde_json::from_value(cache.cut).map_err(invalid)?;

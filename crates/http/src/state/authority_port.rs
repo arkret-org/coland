@@ -50,7 +50,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
     match kind {
         EventKind::KeyBackupActiveSeries => Ok(SelfEventRoute::KeyBackupPointer),
         EventKind::IdentityAccountabilityGrant => Ok(SelfEventRoute::AccountabilityGrant),
-        EventKind::ConsentGrant | EventKind::ConsentRevoke => Ok(SelfEventRoute::Consent),
+        EventKind::ConsentReplace => Ok(SelfEventRoute::Consent),
         EventKind::MlsGenesis | EventKind::MlsCommit => Ok(SelfEventRoute::Mls),
         EventKind::RealmActorStatusSet
         | EventKind::RealmActorRecoverySet
@@ -541,10 +541,7 @@ impl AuthorityProtocolPort for AppState {
         {
             return Ok(outcome);
         }
-        if matches!(
-            event.kind,
-            arkret_wire::EventKind::ConsentGrant | arkret_wire::EventKind::ConsentRevoke
-        ) {
+        if matches!(event.kind, arkret_wire::EventKind::ConsentReplace) {
             let result =
                 crate::boxed_future(|| super::authority_consent::submit(self, session, &request))
                     .await?;
@@ -1017,8 +1014,7 @@ mod tests {
             EventKind::RealmActorStatusSet,
             EventKind::RealmActorRecoverySet,
             EventKind::AppletBridgeError,
-            EventKind::ConsentGrant,
-            EventKind::ConsentRevoke,
+            EventKind::ConsentReplace,
             EventKind::KeyBackupActiveSeries,
             EventKind::IdentityAccountabilityGrant,
             EventKind::MlsGenesis,

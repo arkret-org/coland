@@ -395,15 +395,16 @@ async fn contact_list_rows(
         {
             // Reverify the selected durable round before projecting its peer
             // producer. Failure omits a selector instead of guessing a device.
-            if Box::pin(contact_write::verify_stored_contact_evidence_for_read(
+            match Box::pin(contact_write::verify_stored_contact_evidence_for_read(
                 state, &record,
             ))
             .await
-            .is_ok()
             {
-                contact_peer_endpoint(&record, &peer)
-            } else {
-                None
+                Ok(()) => contact_peer_endpoint(&record, &peer),
+                Err(error) => {
+                    tracing::debug!(%error, "stored Contact peer endpoint evidence unavailable");
+                    None
+                }
             }
         } else {
             None

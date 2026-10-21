@@ -381,7 +381,6 @@ fn arkret_protocol_router(
                 // (ak.self.realm_link.*).
                 .push(realms::router())
                 .push(realm_join::self_router())
-                .push(message_authoring::router())
                 .push(invites::self_router())
                 // self/realms/{realm_id}/organizations (ak.self.realm_organization.read.list.v1).
                 .push(realm_organization::router())

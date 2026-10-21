@@ -254,14 +254,7 @@ const EFFECT_MANIFEST: &[EffectRegistration] = &[
         slot: CacheSlot::Shared(apply_circle_update_dispatch),
     },
     EffectRegistration {
-        kind: arkret_wire::CapabilityActionId::CONSENT_GRANT,
-        owner: EventEffectOwnership::TypedResultWriter,
-        scope: EventWireScope::DurableEvent,
-        reducer_input: true,
-        slot: CacheSlot::FailClosed,
-    },
-    EffectRegistration {
-        kind: arkret_wire::CapabilityActionId::CONSENT_REVOKE,
+        kind: arkret_wire::CapabilityActionId::CONSENT_REPLACE,
         owner: EventEffectOwnership::TypedResultWriter,
         scope: EventWireScope::DurableEvent,
         reducer_input: true,

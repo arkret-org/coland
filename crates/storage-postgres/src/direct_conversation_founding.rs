@@ -914,10 +914,9 @@ fn same_distinct_glare_attestations(
         && local == source
 }
 
-/// The two Stations can store their own attestation first. The Contact round's
-/// request array has a mandatory wire order; the two independently signed
-/// attestations have no prescribed order. Keep every signed byte and all
-/// other founding material exact while comparing this pair by unique full subject.
+/// Preserve exact signed participant originals and directional current facts.
+/// Unordered carrier collections and independently verified proof renewals do
+/// not choose another fixed identity. Glare requests retain their wire order.
 fn same_peer_founding_evidence(
     local: &DirectConversationFoundingAuthorityEvidence,
     source: &DirectConversationFoundingAuthorityEvidence,
@@ -946,6 +945,49 @@ fn same_peer_founding_evidence(
         if !same_distinct_glare_attestations(local_attestations, source_attestations) {
             return false;
         }
+    }
+    if let (
+        DirectConversationFoundingAuthorityEvidence::Human {
+            contact_round_evidence: a,
+        },
+        DirectConversationFoundingAuthorityEvidence::Human {
+            contact_round_evidence: b,
+        },
+    ) = (&mut local, &mut source)
+    {
+        for bundle in [&mut *a, &mut *b] {
+            bundle
+                .current_operations
+                .sort_by_key(|op| op.holder().contact_actor_id());
+            bundle
+                .current_proofs
+                .sort_by_key(|p| p.holder.contact_actor_id());
+            bundle
+                .scope_grants
+                .sort_by_key(|op| op.event().event_id.clone());
+        }
+        if a.current_proofs.len() != 2 || b.current_proofs.len() != 2 {
+            return false;
+        }
+        for (a, b) in a.current_proofs.iter().zip(&b.current_proofs) {
+            if a.trust_domain_id != b.trust_domain_id
+                || a.holder != b.holder
+                || a.peer != b.peer
+                || a.initial_contact_round_id != b.initial_contact_round_id
+                || a.contact_round_id != b.contact_round_id
+                || a.issuer_id != b.issuer_id
+                || a.head_event_ref != b.head_event_ref
+                || a.version != b.version
+                || a.scope_instances != b.scope_instances
+                || a.closed_round != b.closed_round
+            {
+                return false;
+            }
+        }
+        // Both carriers are independently authenticated before this comparison.
+        // A renewed proof certifies the same exact directional current; its
+        // assertion window/signature is not part of the fixed founding identity.
+        a.current_proofs.clone_from(&b.current_proofs);
     }
     local == source
 }

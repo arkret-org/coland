@@ -186,6 +186,8 @@ DROP TABLE IF EXISTS event_collision_variants CASCADE;
 DROP TABLE IF EXISTS identity_anchor_account_slots CASCADE;
 DROP SEQUENCE IF EXISTS history_rhrk_archive_sequence CASCADE;
 DROP TABLE IF EXISTS consent_result_versions CASCADE;
+DROP TABLE IF EXISTS mimi_consent_updates CASCADE;
+DROP TABLE IF EXISTS consent_result_versions CASCADE;
 DROP TABLE IF EXISTS consent_current_results CASCADE;
 DROP TABLE IF EXISTS mimi_consent_correlations CASCADE;
 DROP TABLE IF EXISTS contact_completion_intents CASCADE;

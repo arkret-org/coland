@@ -3442,8 +3442,7 @@ async fn dc_footprint(pool: &PgPool, realm_id: &RealmId) -> [i64; 8] {
         .await,
         count(
             pool,
-            "SELECT COALESCE(SUM(jsonb_array_length(value->'endorsements')),0)::bigint AS count \
-             FROM direct_conversation_binding_current_results WHERE realm_id=$1",
+            "SELECT COUNT(*) AS count FROM direct_conversation_binding_current_results WHERE realm_id=$1",
             realm_id,
         )
         .await,
@@ -3484,7 +3483,7 @@ async fn group_state(pool: &PgPool, realm_id: &RealmId) -> (bool, Option<String>
 /// cut: the root's materialization mask admits the one group Genesis; the
 /// bootstrap source's provisional phase lets only the founder send and Add the
 /// peer; once the peer's Welcome of the first exact-pair Commit is durable,
-/// the completion phase admits only binding endorsements, whose integrity is
+/// the completion phase admits one immutable participant binding, whose integrity is
 /// checked against the founding facts and that Commit; after the first
 /// endorsement both phases exit and every participant write names the binding
 /// under the participant source, with the pair's Contact still granting
@@ -3962,8 +3961,7 @@ async fn participant_authority_scenario() {
         uow.commit_event(peer_endorsement.clone()).await.unwrap();
         let binding_ref = peer_endorsement.authority_commit.event.event_id.clone();
 
-        // Found: a compatible endorsement by the other participant accumulates;
-        // the bootstrap source no longer carries a Message.
+        // Only the original Event survives; a different participant Event is a zero-write conflict.
         let founder_endorsement = boxed_source(|| {
             sourced_cited(
                 &pair,
@@ -3975,9 +3973,35 @@ async fn participant_authority_scenario() {
             )
         })
         .await;
-        uow.commit_event(founder_endorsement.clone()).await.unwrap();
-        let head = founder_endorsement.authority_commit.clone();
-        assert_eq!(dc_footprint(&pool, &realm_id).await[6], 2);
+        let before = dc_footprint(&pool, &realm_id).await;
+        assert_eq!(
+            refused(&founder_endorsement).await,
+            ConflictCode::DuplicateConflict
+        );
+        assert_eq!(dc_footprint(&pool, &realm_id).await, before);
+        uow.commit_event(peer_endorsement.clone()).await.unwrap();
+        assert_eq!(dc_footprint(&pool, &realm_id).await, before);
+        let head = peer_endorsement.authority_commit.clone();
+        // Invalid coordinates remain binding_invalid even after a valid first binding.
+        for mut payload in [endorsement(&genesis_ref, 1), endorsement(&add_ref, 1)] {
+            payload["pair_key"] = serde_json::json!(fixture_hash('9'));
+            let invalid = boxed_source(|| {
+                sourced_cited(
+                    &pair,
+                    &head,
+                    EventKind::DirectConversationBound,
+                    founder.clone(),
+                    payload,
+                    Cites::Bootstrap(&create_ref),
+                )
+            })
+            .await;
+            assert_eq!(
+                refused(&invalid).await,
+                ConflictCode::DirectConversationBindingInvalid
+            );
+        }
+        assert_eq!(dc_footprint(&pool, &realm_id).await[6], 1);
         (head, binding_ref, founder_endorsement)
     })
     .await;
@@ -4009,9 +4033,8 @@ async fn participant_authority_scenario() {
         );
         let value: arkret_models_collaboration::events_payloads::direct_conversation::DirectConversationBindingCurrentValue =
             serde_json::from_value(binding.1.clone()).unwrap();
-        assert_eq!(value.endorsements.len(), 2);
-        assert!(value.endorsed_by(&binding_ref));
-        assert!(value.endorsed_by(&founder_endorsement.authority_commit.event.event_id));
+        assert_eq!(value.binding_event_ref,binding_ref);
+        assert_ne!(value.binding_event_ref,founder_endorsement.authority_commit.event.event_id);
     }
     let stranger = AccountId::new(
         DidCoreId::new("ak:did_core:web:outsider.example".to_owned()).unwrap(),
@@ -4072,7 +4095,7 @@ async fn participant_authority_scenario() {
             .expect("accepted direct Realm resolves to its durable cut"),
         durable
     );
-    assert_eq!(durable.binding.unwrap().endorsements.len(), 2);
+    assert_eq!(durable.binding.unwrap().binding_event_ref,binding_ref);
     assert_eq!(
         refused(
             &boxed_source(|| sourced_cited(
@@ -4219,7 +4242,7 @@ async fn participant_authority_scenario() {
         assert_eq!(count(&pool, "SELECT COUNT(*) AS count FROM strand_watch_current_results WHERE realm_id=$1 AND value->>'level'='all'", &realm_id).await, rows_before + 1);
     }
 
-    // Both participants send under the binding, citing either endorsement.
+    // Both participants cite the same original binding Event.
     let peer_message = boxed_source(|| sourced_cited(
         &pair,
         &head,
@@ -4236,7 +4259,7 @@ async fn participant_authority_scenario() {
         EventKind::MessageCreate,
         founder.clone(),
         ciphertext(&facts.main_strand_id, 1, &add_ref),
-        Cites::Participant(&founder_endorsement.authority_commit.event.event_id),
+        Cites::Participant(&binding_ref),
     ))
     .await;
     uow.commit_event(founder_message.clone()).await.unwrap();

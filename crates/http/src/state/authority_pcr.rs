@@ -57,16 +57,11 @@ pub(crate) async fn commit(
     }
     if !matches!(
         event.kind,
-        EventKind::ConsentGrant
-            | EventKind::ConsentRevoke
-            | EventKind::RealmGovernanceStationChange
+        EventKind::ConsentReplace | EventKind::RealmGovernanceStationChange
     ) {
         return Err(unavailable("registered native unit is not connected"));
     }
-    if matches!(
-        event.kind,
-        EventKind::ConsentGrant | EventKind::ConsentRevoke
-    ) {
+    if matches!(event.kind, EventKind::ConsentReplace) {
         let (status, record) = match super::authority_consent::commit(state, request).await? {
             coland_storage::ConsentAdmissionOutcome::Committed(record) => {
                 (AuthorityCommitStatus::Committed, record)
@@ -134,9 +129,7 @@ pub(crate) async fn submit_self(
     };
     if !matches!(
         event.kind,
-        EventKind::ConsentGrant
-            | EventKind::ConsentRevoke
-            | EventKind::RealmGovernanceStationChange
+        EventKind::ConsentReplace | EventKind::RealmGovernanceStationChange
     ) {
         return Ok(None);
     }

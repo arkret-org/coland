@@ -92,6 +92,7 @@ pub(super) fn claim_outcome(
         source_id: controller.station_id.clone(),
         destination_id: agent.station_id.clone(),
         request,
+        claim_authority_ref: None,
         claimed_at: at,
         expires_at,
         signature: arkret_models_crypto::KeyOperationSignature {
@@ -127,7 +128,13 @@ pub(super) fn add_witness(
         MlsAddAuthorityAttestation, MlsAttestAddRequestBody,
     };
     let mut attestation = MlsAddAuthorityAttestation {
-        attestor_station_id: delivery.recipient_actor_id.route_service_id().clone(),
+        claim_authority_ref: None,
+        attestor_station_id: delivery
+            .recipient_actor_id
+            .as_account_id()
+            .expect("Agent Account recipient")
+            .station_id
+            .clone(),
         realm_id: delivery.realm_id.clone(),
         effective_scope: delivery.effective_scope.clone(),
         mls_group_id: base.effective_scope.canonical_mls_group_id().unwrap(),
@@ -168,5 +175,6 @@ pub(super) fn add_witness(
         signed_attest_add_request_canonical_json: arkret_canonical::canonical_json_bytes(&request)
             .unwrap(),
         local_attestor_resolution: Some(resolution),
+        claim_issuer_resolution: None,
     }
 }

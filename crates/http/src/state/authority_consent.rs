@@ -40,8 +40,8 @@ pub(crate) async fn submit_mimi_forward(
     request: &EventAdmissionSubmission,
 ) -> ServiceResult<()> {
     validate_submission(request)?;
-    super::authority_producer_validation::verify_mimi_binding_producer(state, &request.event)
-        .await?;
+    // The accepting PCR verifies the original producer at its admission cut.
+    // A current retry caller may use a different Device from the accepted original.
     super::authority_pcr::submit_from_host(state, request).await?;
     Ok(())
 }
@@ -51,10 +51,7 @@ fn validate_submission(request: &EventAdmissionSubmission) -> ServiceResult<()> 
         .validate()
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
     if request.approval_signatures.is_some()
-        || !matches!(
-            request.event.kind,
-            arkret_wire::EventKind::ConsentGrant | arkret_wire::EventKind::ConsentRevoke
-        )
+        || !matches!(request.event.kind, arkret_wire::EventKind::ConsentReplace)
     {
         return Err(ServiceError::SchemaViolation(
             "invalid Consent submission".into(),

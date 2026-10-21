@@ -91,6 +91,8 @@ async fn enforce_realm_snapshot_capacity_in_connection(
             )
         })?;
     let snapshot = arkret_wire::RealmStateSnapshot {
+        purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+        history_basis: None,
         snapshot_id: arkret_wire::RealmSnapshotId::from_digest([0; 32]),
         realm_id: material.realm_id,
         governance_generation: material.governance_generation,
@@ -128,6 +130,8 @@ mod snapshot_capacity_tests {
         };
         let created_at = chrono::Utc.timestamp_opt(1_800_000_000, 0).unwrap();
         arkret_wire::RealmStateSnapshot {
+            purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+            history_basis: None,
             snapshot_id: arkret_wire::RealmSnapshotId::from_digest([2; 32]),
             realm_id,
             governance_generation: 0,

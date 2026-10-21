@@ -68,17 +68,26 @@ pub(crate) async fn holder_location(
         .ok_or_else(|| unavailable("accepted holder PCR origin is unavailable"))?;
     let governance =
         arkret_wire::GenesisGovernance::from_genesis(&origin.genesis_event).map_err(unavailable)?;
-    if let arkret_wire::GenesisGovernance::Human(account) = governance {
-        if account != *holder {
-            return Err(unavailable("Human inception differs from the full holder"));
+    if let arkret_wire::GenesisGovernance::Human(account)
+    | arkret_wire::GenesisGovernance::Agent(account) = &governance
+    {
+        let subject = if governance.is_human() {
+            "Human"
+        } else {
+            "Agent"
+        };
+        if account != holder {
+            return Err(unavailable(format!(
+                "{subject} inception differs from the full holder"
+            )));
         }
         let current = state
             .authority_commits()
             .current_authority(&origin.pcr_realm_id)
             .await
             .map_err(unavailable)?
-            .ok_or_else(|| unavailable("Human PCR authority is unavailable"))?;
-        arkret_wire::GenesisGovernance::Human(account)
+            .ok_or_else(|| unavailable(format!("{subject} PCR authority is unavailable")))?;
+        governance
             .validate_current(&current.service_id, current.generation)
             .map_err(unavailable)?;
         return Ok((origin.pcr_realm_id, holder.station_id.clone()));

@@ -4659,8 +4659,7 @@ CREATE TABLE invite_lifecycle_current_results (
  updated_at TIMESTAMPTZ NOT NULL,
  PRIMARY KEY(realm_id,invite_id),
  CHECK(jsonb_typeof(value)='string'),
- CHECK((value #>> '{}') IN ('pending','claimed','send_failed','accepted','rejected','revoked',
-  'expired','revoked_by_capability_loss','revoked_by_inviter_left','invalidated_by_rate_limit'))
+ CHECK((value #>> '{}') IN ('pending','claimed','accepted','rejected','revoked','expired'))
 );
 
 -- Rebuildable 3PID create index. The immutable commitment and Invite identity

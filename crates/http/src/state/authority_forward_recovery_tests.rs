@@ -469,7 +469,7 @@ fn bootstrap_admission_on_default_worker_stack(operation_target: bool) {
 
 /// The same real CA/leaf fixture used by federation_outbox. Production egress
 /// loads this explicit trust store and keeps certificate/hostname validation.
-/// The driver must supply SSL_CERT_FILE; missing trust is a failure, not a skip.
+/// The driver supplies isolated TLS material shared with production DID egress.
 struct RegisteredTlsPeer {
     listener: std::net::TcpListener,
     tls: Arc<rustls::ServerConfig>,
@@ -477,24 +477,25 @@ struct RegisteredTlsPeer {
 }
 
 fn registered_tls_peer() -> Arc<RegisteredTlsPeer> {
-    let expected = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../server/tests/fixtures/outbox-test-ca.pem")
-        .canonicalize()
-        .unwrap();
-    let configured = std::env::var_os("SSL_CERT_FILE")
-        .and_then(|path| std::path::Path::new(&path).canonicalize().ok());
+    use rustls::pki_types::pem::PemObject as _;
+    let read = |name: &str| {
+        let path = std::env::var_os(name).unwrap_or_else(|| {
+            panic!("{name} is required; run via cotest/scripts/run-native-rust-tests.py")
+        });
+        std::fs::read(path).unwrap()
+    };
     assert_eq!(
-        configured.as_deref(),
-        Some(expected.as_path()),
-        "recovery executor requires the checked-in federation outbox test CA"
+        read("SSL_CERT_FILE"),
+        read("COTEST_RUN_SCOPED_CA_PEM"),
+        "fixture and production DID egress must trust the same run-scoped CA"
     );
-    let certificate = rustls::pki_types::CertificateDer::from(
-        include_bytes!("../../../server/tests/fixtures/outbox-test-cert.der").to_vec(),
-    );
+    let certificates =
+        rustls::pki_types::CertificateDer::pem_slice_iter(&read("COLAND_TLS_CERT_PATH"))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("native fixture certificate chain PEM");
     let private_key =
-        rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
-            include_bytes!("../../../server/tests/fixtures/outbox-test-key.der").to_vec(),
-        ));
+        rustls::pki_types::PrivateKeyDer::from_pem_slice(&read("COLAND_TLS_KEY_PATH"))
+            .expect("native fixture private key PEM");
     let tls = Arc::new(
         rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
@@ -502,7 +503,7 @@ fn registered_tls_peer() -> Arc<RegisteredTlsPeer> {
         .with_safe_default_protocol_versions()
         .unwrap()
         .with_no_client_auth()
-        .with_single_cert(vec![certificate], private_key)
+        .with_single_cert(certificates, private_key)
         .unwrap(),
     );
     Arc::new(RegisteredTlsPeer {

@@ -443,3 +443,436 @@ async fn native_control_exact_replay_uses_originals_after_runtime_revocation_and
         before
     );
 }
+
+async fn complete_database_digest(pool: &PgPool) -> serde_json::Value {
+    use diesel_async::RunQueryDsl;
+    #[derive(diesel::QueryableByName)]
+    struct Table {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        name: String,
+    }
+    #[derive(diesel::QueryableByName)]
+    struct Rows {
+        #[diesel(sql_type = diesel::sql_types::Jsonb)]
+        value: serde_json::Value,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let tables = diesel::sql_query(
+        "SELECT tablename AS name FROM pg_tables WHERE schemaname='public' ORDER BY tablename",
+    )
+    .get_results::<Table>(&mut conn)
+    .await
+    .unwrap();
+    let mut result = serde_json::Map::new();
+    for table in tables {
+        let name = table.name.replace('"', "\"\"");
+        let rows = diesel::sql_query(format!("SELECT COALESCE(jsonb_agg(value ORDER BY value::text),'[]'::jsonb) AS value FROM (SELECT to_jsonb(t) AS value FROM \"{name}\" t) r"))
+            .get_result::<Rows>(&mut conn).await.unwrap();
+        result.insert(table.name, serde_json::json!({"count":rows.value.as_array().unwrap().len(),"digest":arkret_canonical::canonical_sha256(&rows.value).unwrap()}));
+    }
+    serde_json::Value::Object(result)
+}
+
+#[tokio::test]
+async fn accepted_agent_pcr_rejects_every_independent_handoff_entry_without_effects() {
+    use arkret_models_collaboration::authority_commit::{
+        ManagementPrivateHandoffManifest, PcrPrivateHandoffManifest,
+        PeerAuthorityForwardEventRequest,
+    };
+    use arkret_wire::{
+        CommitStreamHead, DetachedSignatureContext, Hash, RealmAuthorityHandoff,
+        RealmAuthorityHandoffId,
+    };
+    let mut f = Fixture::new().await;
+    let store = PgAuthorityCommitStore {
+        pool: f.pool.clone(),
+    };
+    let tail = &f.originals.last().unwrap().1;
+    let current = store
+        .current_authority(&f.genesis.realm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.generation, 0);
+    assert_eq!(current.service_id, f.agent.station_id);
+    assert_eq!(f.agent.station_id, f.pcr.history.account.station_id);
+    let change = f.control(
+        EventKind::RealmGovernanceStationChange,
+        serde_json::json!({
+            "expected_governance_generation":0,"expected_realm_stream_commit_id":tail.commit_id,
+            "new_governance_station_id":"ak:did_core:web:other.example"
+        }),
+    );
+    arkret_event_draft::validate_event_for_submit(&change).unwrap();
+    let submission = EventAdmissionSubmission::new(change.clone());
+    let transaction = f
+        .state
+        .authority_commits()
+        .prepare_self_event_transaction(
+            &change,
+            &f.state.service_core_id(),
+            f.method.clone(),
+            f.state.notary_signing_key().as_ref(),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let before = complete_database_digest(&f.pool).await;
+    let error = f
+        .state
+        .submit_self_event(&f.session, submission.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.conflict_code(),
+        Some(coland_storage::ConflictCode::FailedPrecondition)
+    );
+    assert!(
+        error.to_string().contains("failed_precondition")
+            && error.to_string().contains("Agent PCR"),
+        "{error}"
+    );
+    let error = store
+        .admit_pcr_governance_change(&transaction)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Agent PCR"), "{error}");
+    let peer = coland_services::authority_commit::AuthenticatedPeerContext {
+        source_service_id: f.agent.station_id.clone(),
+        replay_receipt: None,
+    };
+    let forward = PeerAuthorityForwardEventRequest::new(submission, None, None).unwrap();
+    let error = super::super::authority_pcr::admit_forwarded(&f.state, &peer, &forward)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.conflict_code(),
+        Some(coland_storage::ConflictCode::FailedPrecondition)
+    );
+    assert!(error.to_string().contains("Agent PCR"), "{error}");
+    let error = store.export_pcr_private_state(&f.agent).await.unwrap_err();
+    assert!(error.to_string().contains("Agent PCR"), "{error}");
+    // Complete format/inventory, but the exact genesis is a genuinely accepted
+    // Agent original. Policy must reject before looking at or inserting rows.
+    let mut tables = serde_json::Map::new();
+    for table in [
+        "accounts",
+        "canonical_realms",
+        "canonical_events",
+        "realm_authorities",
+        "realm_commits",
+        "realm_commit_event_kinds",
+        "realm_authority_handoffs",
+        "pcr_private_handoff_imports",
+        "realm_state_snapshots",
+        "realm_bootstrap_current_results",
+        "realm_authority_root_current_results",
+        "realm_policy_bundle_current_results",
+        "member_state_current_results",
+        "current_result_heads",
+        "current_result_versions",
+        "relation_current_results",
+        "governance_current_ready",
+        "realm_meta",
+        "principal_resolutions",
+        "principal_resolution_events",
+        "pcr_device_generation_current_results",
+        "pcr_device_authorization_current_results",
+        "pcr_device_revocation_proposals",
+        "actor_profile_current_results",
+        "actor_profile_result_versions",
+        "consent_current_results",
+        "consent_result_versions",
+        "agent_producer_signer_keys",
+        "account_datas",
+        "actor_private_events",
+        "account_global_versions",
+        "invite_receive_policies",
+        "invite_new_source_hmac_keys",
+        "invite_new_source_ledgers",
+        "consent_private_effect_jobs",
+        "consent_private_proxy_fences",
+        "mimi_consent_correlations",
+        "mimi_consent_decision_attempts",
+    ] {
+        tables.insert(table.into(), serde_json::json!([]));
+    }
+    tables["canonical_events"] = serde_json::json!([{"envelope":f.genesis}]);
+    let archive = serde_json::json!({"format":"postgres-native-v1","holder_account_id":f.agent,"realm_id":f.genesis.realm_id,"tables":tables});
+    let bytes = arkret_canonical::canonical_json_bytes(&archive).unwrap();
+    let manifest = PcrPrivateHandoffManifest {
+        realm_id: f.genesis.realm_id.clone(),
+        holder_account_id: f.agent.clone(),
+        governance_generation: 0,
+        effective_stream_head: CommitStreamHead {
+            stream_ref: tail.stream_ref.clone(),
+            stream_position: tail.stream_position,
+            commit_id: tail.commit_id.clone(),
+        },
+        nonce: arkret_canonical::base64url_encode([9u8; 32]),
+        state_digest: Hash::new(arkret_canonical::sha256_digest(&bytes)).unwrap(),
+    };
+    let (_target_lease, target_pool) =
+        coland_test_support::app_state_with_pool(coland_test_support::app_config());
+    let target_before = complete_database_digest(&target_pool).await;
+    let target = PgAuthorityCommitStore {
+        pool: target_pool.clone(),
+    };
+    let error = target
+        .import_pcr_private_state(&manifest, &bytes)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Agent PCR"), "{error}");
+    assert_eq!(complete_database_digest(&target_pool).await, target_before);
+    let material = store
+        .realm_state_snapshot_material(&f.genesis.realm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let now = arkret_canonical::normalize_timestamp_canonical(Utc::now());
+    let snapshot = coland_services::authority_commit::build_signed_realm_state_snapshot(
+        &material,
+        f.method.clone(),
+        f.state.notary_signing_key().as_ref(),
+        now,
+    )
+    .unwrap();
+    let heads = material.visible_stream_heads.clone();
+    let management = ManagementPrivateHandoffManifest {
+        realm_id: f.genesis.realm_id.clone(),
+        governance_generation: 0,
+        final_stream_heads_digest: Hash::new(arkret_canonical::canonical_sha256(&heads).unwrap())
+            .unwrap(),
+        nonce: arkret_canonical::base64url_encode([8u8; 32]),
+        state_digest: Hash::new(arkret_canonical::sha256_digest(b"{}")).unwrap(),
+    };
+    let mut handoff = RealmAuthorityHandoff {
+        management_private_state_digest: Some(management.digest().unwrap()),
+        pcr_private_state_digest: Some(manifest.digest().unwrap()),
+        handoff_id: RealmAuthorityHandoffId::from_digest([0x43; 32]),
+        realm_id: f.genesis.realm_id.clone(),
+        from_generation: 0,
+        to_generation: 1,
+        from_service_id: f.agent.station_id.clone(),
+        to_service_id: "ak:did_core:web:other.example".parse().unwrap(),
+        change_event_ref: change.event_id,
+        change_commit_id: transaction.commit.commit_id,
+        final_stream_heads_digest: management.final_stream_heads_digest.clone(),
+        historical_signer_facts_digest: None,
+        snapshot_ref: snapshot.snapshot_id.clone(),
+        old_authority_signature: tail.signature.clone(),
+        new_authority_acceptance_signature: tail.signature.clone(),
+    };
+    let unsigned = arkret_canonical::unsigned_value(
+        &handoff,
+        &[
+            "old_authority_signature",
+            "new_authority_acceptance_signature",
+        ],
+    )
+    .unwrap();
+    handoff.old_authority_signature = arkret_signatures::detached_object::sign_detached_object(
+        &unsigned,
+        DetachedSignatureContext::RealmAuthorityHandoffOld,
+        f.method.clone(),
+        now,
+        f.state.notary_signing_key().as_ref(),
+    )
+    .unwrap();
+    handoff.new_authority_acceptance_signature =
+        arkret_signatures::detached_object::sign_detached_object(
+            &unsigned,
+            DetachedSignatureContext::RealmAuthorityHandoffNewAcceptance,
+            DidUrl::new("did:web:other.example#authority").unwrap(),
+            now,
+            &SigningKey::from_bytes(&[0xb2; 32]),
+        )
+        .unwrap();
+    handoff.validate_shape().unwrap();
+    let error = store
+        .install_handoff_with_private_state(
+            &handoff,
+            &heads,
+            &snapshot,
+            Some(&manifest),
+            &management,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Agent PCR"), "{error}");
+    assert_eq!(
+        store
+            .current_authority(&f.genesis.realm_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        current
+    );
+    assert_eq!(complete_database_digest(&f.pool).await, before);
+    // A refused transfer never freezes the real Agent. A subsequent native
+    // controller lifecycle write and its immutable retry remain available.
+    let at = arkret_canonical::format_timestamp_canonical(Utc::now());
+    let pause = f.control(
+        EventKind::SelfAgentPause,
+        serde_json::json!({"transition":"pause","previous_status":"active","status_changed_at":at}),
+    );
+    let pause_transaction = f
+        .state
+        .authority_commits()
+        .prepare_self_event_transaction(
+            &pause,
+            &f.state.service_core_id(),
+            f.method.clone(),
+            f.state.notary_signing_key().as_ref(),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    // Adversarial persisted tuples do not turn a fixed Agent into a mobile
+    // authority. The mutation itself is outside the zero-effect measurement.
+    for (service, generation) in [
+        ("ak:did_core:web:other.example", 0_i64),
+        (f.agent.station_id.as_str(), 1_i64),
+    ] {
+        use diesel::sql_types::{BigInt, Text};
+        use diesel_async::RunQueryDsl;
+        let mut conn = f.pool.get().await.unwrap();
+        diesel::sql_query(
+            "UPDATE realm_authorities SET service_id=$2,generation=$3,last_handoff_ref=CASE WHEN $3>0 THEN $4 ELSE NULL END WHERE realm_id=$1",
+        )
+        .bind::<Text, _>(f.genesis.realm_id.as_str())
+        .bind::<Text, _>(service)
+        .bind::<BigInt, _>(generation)
+        .bind::<Text, _>(RealmAuthorityHandoffId::from_digest([0xd4; 32]).as_str())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        drop(conn);
+        let corrupted = complete_database_digest(&f.pool).await;
+        let error = store
+            .current_authority(&f.genesis.realm_id)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Agent PCR"), "{error}");
+        let error = PgActorProfileStore {
+            pool: f.pool.clone(),
+        }
+        .admit_agent_control_event(AgentControlAdmissionWrite {
+            commit: pause_transaction.clone(),
+            queued_at: Utc::now(),
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Agent PCR"), "{error}");
+        assert_eq!(complete_database_digest(&f.pool).await, corrupted);
+    }
+    {
+        use diesel::sql_types::Text;
+        use diesel_async::RunQueryDsl;
+        let mut conn = f.pool.get().await.unwrap();
+        diesel::sql_query(
+            "UPDATE realm_authorities SET service_id=$2,generation=0,last_handoff_ref=NULL WHERE realm_id=$1",
+        )
+        .bind::<Text, _>(f.genesis.realm_id.as_str())
+        .bind::<Text, _>(f.agent.station_id.as_str())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    }
+    assert_eq!(complete_database_digest(&f.pool).await, before);
+    f.accept(pause.clone()).await;
+    let expected = f.originals.last().unwrap().1.clone();
+    let after_control = complete_database_digest(&f.pool).await;
+    let outcome = f
+        .state
+        .submit_self_event(&f.session, EventAdmissionSubmission::new(pause))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome,AuthoritySubmitOutcome::Accepted {status:AuthorityCommitStatus::Duplicate,commit} if commit==expected)
+    );
+    assert_eq!(complete_database_digest(&f.pool).await, after_control);
+}
+
+#[tokio::test]
+async fn accepted_agent_rejects_private_proxy_and_effect_publication_without_effects() {
+    use arkret_models_collaboration::consent_private::*;
+    let f = Fixture::new().await;
+    let store = PgAuthorityCommitStore {
+        pool: f.pool.clone(),
+    };
+    let authority = store
+        .current_authority(&f.genesis.realm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let tail = &f.originals.last().unwrap().1;
+    let head = arkret_wire::CommitStreamHead {
+        stream_ref: tail.stream_ref.clone(),
+        stream_position: tail.stream_position,
+        commit_id: tail.commit_id.clone(),
+    };
+    let before = complete_database_digest(&f.pool).await;
+    // A structural candidate is not an accepted Agent Device/session. The
+    // fixed-PCR eligibility gate must reject before any remote lookup or
+    // downstream device gate can confer such a capability.
+    let context = ConsentPrivateContext::HolderSession(ConsentPrivateHolderSessionContext {
+        kind: ConsentPrivateHolderSessionContextKind::HolderSession,
+        actor_id: ActorId::account(f.agent.clone()),
+        device_id: f.pcr.history.founding_device_id.clone(),
+    });
+    let command = ConsentPrivateCommand::List(ConsentPrivateListCommand {
+        kind: ConsentPrivateListCommandKind::List,
+        body: ConsentPrivateEmptyBody {},
+    });
+    let error = crate::routing::consent_private::execute(&f.state, &f.agent, context, command)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, crate::error::ErrorCode::FailedPrecondition);
+    assert!(error.to_string().contains("Agent PCR"), "{error}");
+    assert_eq!(complete_database_digest(&f.pool).await, before);
+    let at = arkret_canonical::normalize_timestamp_canonical(Utc::now());
+    let publication = ConsentPrivateEffectsPublishRequest {
+        holder_account_id: f.agent.clone(),
+        realm_id: f.genesis.realm_id.clone(),
+        governance_generation: 0,
+        nonce: arkret_canonical::base64url_encode([0xe9; 32]),
+        effective_stream_head: head.clone(),
+        evaluated_at: at,
+        expires_at: at + Duration::seconds(30),
+        effects: ConsentPrivateEffects {
+            holder_quarantine: None,
+            invite_delivery: None,
+            invite_receive_policy: None,
+        },
+    };
+    publication
+        .validate_for_authority(
+            &f.agent.station_id,
+            &f.agent.station_id,
+            &f.genesis.realm_id,
+            &authority.service_id,
+            0,
+            at,
+        )
+        .unwrap();
+    let error = f
+        .state
+        .persistence()
+        .project_consent_effect_publication(
+            &publication,
+            &f.agent.station_id,
+            &f.agent.station_id,
+            &authority,
+            &head,
+        )
+        .await
+        .err()
+        .expect("fixed Agent publication must be refused");
+    assert!(error.to_string().contains("Agent PCR"), "{error}");
+    assert!(
+        matches!(&error, coland_storage::PersistenceError::Conflict(detail)
+        if detail.starts_with("failed_precondition:"))
+    );
+    assert_eq!(complete_database_digest(&f.pool).await, before);
+}

@@ -34,7 +34,7 @@ fn signature_refused(error: impl std::fmt::Display) -> ServiceError {
 
 // This is an eligibility refusal, never an authority or signature witness.
 // Derive it from the complete content-addressed genesis, before the bundle's
-// impossible Direct successor is reported as a generic shape failure.
+// impossible fixed-governor successor is reported as a generic shape failure.
 fn require_transferable_genesis(
     genesis: &arkret_wire::Event,
     realm: &arkret_wire::RealmId,
@@ -55,14 +55,9 @@ fn require_transferable_genesis(
         ));
     }
     let governance = arkret_wire::GenesisGovernance::from_genesis(genesis).map_err(refused)?;
-    if matches!(
-        governance,
-        arkret_wire::GenesisGovernance::DirectConversation(_)
-    ) {
-        governance
-            .require_transferable()
-            .map_err(|error| ServiceError::Conflict(format!("failed_precondition: {error}")))?;
-    }
+    governance
+        .require_transferable()
+        .map_err(|error| ServiceError::Conflict(format!("failed_precondition: {error}")))?;
     Ok(())
 }
 
@@ -552,6 +547,38 @@ mod tests {
         assert_eq!(genesis, original);
         let collaboration = governance_genesis("collaboration");
         require_transferable_genesis(&collaboration, &collaboration.realm_id).unwrap();
+    }
+
+    #[test]
+    fn managed_agent_handoff_eligibility_is_failed_precondition() {
+        // Restriction classification only; native accepted provenance is
+        // exercised separately by the real PostgreSQL Agent control fixture.
+        let mut genesis = governance_genesis("agent_control");
+        genesis.payload.get_mut("object").unwrap()["initial_resolution"] = serde_json::json!({
+            "did":"did:web:handoff-holder.example",
+            "method_history_head":format!("sha256:{}", "12".repeat(32)),
+            "version_id":"fixture"
+        });
+        genesis.executed_by = Some(arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+            "ak:did_core:web:handoff-controller.example"
+                .parse()
+                .unwrap(),
+            "ak:did_core:web:handoff-origin.example".parse().unwrap(),
+        )));
+        genesis.authorization_ref = Some(
+            arkret_wire::AuthorizationRef::new("did:web:handoff-holder.example#controller")
+                .unwrap(),
+        );
+        genesis
+            .refresh_content_bound_identity_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
+            .unwrap();
+        let error = require_transferable_genesis(&genesis, &genesis.realm_id).unwrap_err();
+        assert_eq!(
+            error.conflict_code(),
+            Some(coland_storage::ConflictCode::FailedPrecondition),
+            "{error}"
+        );
+        assert!(error.to_string().contains("Agent PCR"), "{error}");
     }
 
     #[test]

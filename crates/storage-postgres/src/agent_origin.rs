@@ -820,7 +820,6 @@ pub(crate) async fn assemble_state_in_connection(
             realm_id: realm,
             genesis_event: genesis.0.clone(),
             genesis_commit: genesis.1.clone(),
-            authority_transitions: Vec::new(),
             signer_histories: vec![history],
         },
         commits,

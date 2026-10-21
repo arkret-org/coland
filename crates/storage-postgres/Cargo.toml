@@ -59,7 +59,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 arkret-http-client.workspace = true
-arkret-bridge-runtime = { path = "../../../bridges-realm-actors/crates/runtime", default-features = false, features = ["full", "postgres"] }
+arkret-bridge-runtime = { path = "../../../bridges/crates/runtime", default-features = false, features = ["full", "postgres"] }
 arkret = { workspace = true, features = ["mls"] }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 tracing-subscriber.workspace = true

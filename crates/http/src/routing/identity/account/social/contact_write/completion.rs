@@ -87,57 +87,63 @@ async fn materialize_one(
             "Contact source signature requires the exact committed command"
         ));
     }
-    let outcome = sign_outcome(state, &ready.intent).await?;
+    let outcome = Box::pin(sign_outcome(state, &ready.intent)).await?;
     // A normal round whose requester is also this Station's holder completes
     // both directions here: the requester's own request is its direction head.
     // A local tombstone also confirms the opposite direction's terminal fence.
     let counterpart_proof = match &outcome {
+        ContactAcceptedOutcome::Request {
+            request_acceptance_receipt,
+            ..
+        } => {
+            let peer = &request_acceptance_receipt.core.peer;
+            let record = state
+                .contacts()
+                .contact_any(
+                    &ready.intent.plan.holder.contact_actor_id(),
+                    &peer.contact_actor_id(),
+                )
+                .await
+                .map_err(|e| AppError::internal(e.to_string()))?
+                .ok_or_else(|| AppError::internal("Contact source row unavailable"))?;
+            let mut current = record.current_state.clone();
+            current
+                .apply_confirmed(ContactOperationEvidence::Request {
+                    signed_event: ready.intent.plan.event.clone(),
+                    request_receipt: request_acceptance_receipt.clone(),
+                })
+                .map_err(|e| AppError::internal(e.to_string()))?;
+            Some(
+                Box::pin(
+                    crate::routing::identity::contact_federation::refresh_local_contact_direction(
+                        state,
+                        &current,
+                        &ready.intent.plan.holder,
+                    ),
+                )
+                .await?,
+            )
+        }
         ContactAcceptedOutcome::Response {
             normal_response_acceptance_receipt,
             ..
         } => {
-            super::local_requester_current_proof(
+            Box::pin(super::local_requester_current_proof(
                 state,
                 &normal_response_acceptance_receipt.contact_round_id,
                 &normal_response_acceptance_receipt.request_receipt,
-            )
+            ))
             .await?
-        }
-        ContactAcceptedOutcome::Tombstone { current_proof, .. }
-            if !ready.intent.requires_delivery() =>
-        {
-            let peer = &ready.intent.plan.target.contact_address.recipient;
-            let holder = &ready.intent.plan.event.actor_id;
-            let record = state
-                .contacts()
-                .contact_any(holder, &peer.contact_actor_id())
-                .await
-                .map_err(|error| AppError::internal(error.to_string()))?
-                .ok_or_else(|| {
-                    crate::app_error!(
-                        TemporarilyUnavailable,
-                        "Contact terminal source projection is unavailable"
-                    )
-                })?;
-            Some(
-                crate::routing::identity::contact_federation::terminal_ack_contact_current_proof(
-                    state,
-                    &record,
-                    &peer.contact_actor_id(),
-                    ready.intent.plan.holder.clone(),
-                    current_proof,
-                )
-                .await?,
-            )
         }
         _ => None,
     };
     let delivery = if ready.intent.requires_delivery() {
         let target = &ready.intent.plan.target;
-        let carrier = ready
+        let mut carrier = ready
             .intent
             .finalized_carrier(&outcome)
             .map_err(|error| AppError::internal(error.to_string()))?;
+        if let arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::Request{current_proof,..}=&mut carrier {*current_proof=counterpart_proof.clone();}
         let row = crate::routing::identity::contact_federation::prepare_peer_contact_carrier(
             state,
             target.contact_address.delivery_station_id().as_str(),
@@ -163,13 +169,35 @@ async fn materialize_one(
         .finalize_contact_completion_intent(
             ready,
             &ContactCompletionResult::Accepted {
-                outcome: Box::new(outcome),
+                outcome: Box::new(outcome.clone()),
             },
             delivery.as_ref(),
             counterpart_proof.as_ref(),
         )
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
+    if let ContactAcceptedOutcome::Request {
+        request_acceptance_receipt,
+        ..
+    } = &outcome
+    {
+        if request_acceptance_receipt
+            .core
+            .peer
+            .delivery_station_id()
+            .as_str()
+            == state.service_id()
+        {
+            Box::pin(
+                crate::routing::identity::contact_federation::enqueue_glare_finalize_if_ready(
+                    state,
+                    &ready.intent.plan.holder.contact_actor_id(),
+                    &request_acceptance_receipt.core.peer.contact_actor_id(),
+                ),
+            )
+            .await?;
+        }
+    }
     Ok(())
 }
 async fn sign_outcome(
@@ -239,6 +267,10 @@ async fn sign_outcome(
             )
             .map_err(|error| AppError::internal(error.to_string()))?;
             let receipt = NormalResponseAcceptanceReceipt::sign_with(
+                payload.trust_domain_id.clone(),
+                payload.initial_contact_round_id.clone(),
+                payload.version,
+                payload.predecessor_event_ref.clone(),
                 payload.contact_round_id.clone(),
                 request_receipt.as_ref().clone(),
                 event.event_id.clone(),
@@ -250,21 +282,28 @@ async fn sign_outcome(
             )
             .map_err(error)?;
             let lineage = ContactLineage::sign_with(
-                payload.contact_round_id.clone(),
+                payload.trust_domain_id.clone(),
+                payload.initial_contact_round_id.clone(),
+                Some(payload.contact_round_id.clone()),
                 intent.plan.holder.clone(),
                 payload.peer.clone(),
                 payload.version,
-                None,
+                payload.predecessor_event_ref.clone(),
                 event.event_id.clone(),
                 producer,
                 payload.granted_to_peer_scopes,
-                None,
+                accepted_at,
                 sign_lineage,
             )
             .map_err(error)?;
-            let current_proof =
-                latest_direction_proof(state, intent, &payload.contact_round_id, &payload.peer)
-                    .await?;
+            let current_proof = Box::pin(latest_direction_proof(
+                state,
+                intent,
+                &payload.contact_round_id,
+                &payload.peer,
+                None,
+            ))
+            .await?;
             ContactAcceptedOutcome::Response {
                 operation_id,
                 normal_response_acceptance_receipt: receipt,
@@ -275,6 +314,25 @@ async fn sign_outcome(
         ContactCompletionAction::Reject { request_receipt } => ContactAcceptedOutcome::Reject {
             operation_id,
             reject_acceptance_receipt: RejectAcceptanceReceipt::sign_with(
+                state.config().trust_domain.clone(),
+                serde_json::from_value::<ContactRejectedPayload>(
+                    serde_json::to_value(&event.payload)
+                        .map_err(|e| AppError::internal(e.to_string()))?,
+                )
+                .map_err(|e| AppError::internal(e.to_string()))?
+                .initial_contact_round_id,
+                event
+                    .payload
+                    .get("version")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| AppError::internal("Contact reject version missing"))?,
+                event
+                    .payload
+                    .get("predecessor_event_ref")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|e| AppError::internal(e.to_string()))?,
                 request_receipt.as_ref().clone(),
                 event.event_id.clone(),
                 producer,
@@ -291,7 +349,9 @@ async fn sign_outcome(
             )
             .map_err(|error| AppError::internal(error.to_string()))?;
             let lineage = ContactLineage::sign_with(
-                payload.contact_round_id.clone(),
+                payload.trust_domain_id.clone(),
+                Some(payload.initial_contact_round_id.clone()),
+                Some(payload.contact_round_id.clone()),
                 intent.plan.holder.clone(),
                 payload.peer.clone(),
                 payload.version,
@@ -299,13 +359,18 @@ async fn sign_outcome(
                 event.event_id.clone(),
                 producer,
                 payload.granted_to_peer_scopes,
-                None,
+                accepted_at,
                 sign_lineage,
             )
             .map_err(error)?;
-            let current_proof =
-                latest_direction_proof(state, intent, &payload.contact_round_id, &payload.peer)
-                    .await?;
+            let current_proof = Box::pin(latest_direction_proof(
+                state,
+                intent,
+                &payload.contact_round_id,
+                &payload.peer,
+                None,
+            ))
+            .await?;
             ContactAcceptedOutcome::ScopeUpdate {
                 operation_id,
                 lineage,
@@ -319,7 +384,9 @@ async fn sign_outcome(
             )
             .map_err(|error| AppError::internal(error.to_string()))?;
             let lineage = ContactLineage::sign_with(
-                payload.contact_round_id.clone(),
+                payload.trust_domain_id.clone(),
+                Some(payload.initial_contact_round_id.clone()),
+                Some(payload.contact_round_id.clone()),
                 intent.plan.holder.clone(),
                 payload.peer.clone(),
                 payload.version,
@@ -327,13 +394,25 @@ async fn sign_outcome(
                 event.event_id.clone(),
                 producer,
                 Vec::new(),
-                Some(true),
+                accepted_at,
                 sign_lineage,
             )
             .map_err(error)?;
-            let current_proof =
-                latest_direction_proof(state, intent, &payload.contact_round_id, &payload.peer)
-                    .await?;
+            let current_proof = Box::pin(latest_direction_proof(
+                state,
+                intent,
+                &payload.contact_round_id,
+                &payload.peer,
+                Some(ContactRoundClosure {
+                    contact_round_id: payload.contact_round_id.clone(),
+                    operation: ContactTombstoneEvidence {
+                        kind: ContactTombstoneEvidenceKind::Tombstone,
+                        signed_event: event.clone(),
+                        lineage: lineage.clone(),
+                    },
+                }),
+            ))
+            .await?;
             ContactAcceptedOutcome::Tombstone {
                 operation_id,
                 lineage,
@@ -347,6 +426,7 @@ async fn latest_direction_proof(
     intent: &ContactCompletionIntent,
     round_id: &Hash,
     direction_peer: &ContactPeer,
+    closure: Option<ContactRoundClosure>,
 ) -> Result<ContactCurrentProof, AppError> {
     let holder = &intent.plan.event.actor_id;
     let peer = direction_peer.contact_actor_id();
@@ -376,21 +456,17 @@ async fn latest_direction_proof(
             "Contact current round is unavailable"
         ));
     }
-    // A tombstone terminates the whole round; its direction head is the
-    // holder's own tombstone.
-    let head = if record.status == "tombstoned" {
-        record.tombstone_event_ref.as_ref()
-    } else if &record.requester_id == holder {
-        record.request_event_ref.as_ref()
-    } else {
-        record.response_event_ref.as_ref()
-    }
-    .ok_or_else(|| {
-        crate::app_error!(
-            TemporarilyUnavailable,
-            "Contact current directional head is unavailable"
-        )
-    })?;
+    let head = record
+        .request_slot_states
+        .iter()
+        .find(|slot| slot.owner_id == *holder)
+        .map(|slot| &slot.head_event_ref)
+        .ok_or_else(|| {
+            crate::app_error!(
+                TemporarilyUnavailable,
+                "Contact own current head unavailable"
+            )
+        })?;
     let committed = state
         .persistence()
         .committed_event(head)
@@ -411,10 +487,12 @@ async fn latest_direction_proof(
             "Contact local directional history is incomplete"
         ));
     }
-    let next = signed_current_proof(
+    let next = Box::pin(signed_current_proof(
         state,
         round_id.clone(),
+        intent.plan.holder.clone(),
         direction_peer.clone(),
+        closure,
         &committed.event,
         committed
             .event
@@ -422,16 +500,8 @@ async fn latest_direction_proof(
             .event_digest()
             .digest_suite()
             .map_err(|error| AppError::internal(error.to_string()))?,
-    )
+    ))
     .await?;
-    if record.status == "tombstoned" && !next.terminal {
-        // A remote terminal fence requires its authenticated original lineage;
-        // it cannot be reconstructed by signing a local non-terminal head.
-        return Err(crate::app_error!(
-            TemporarilyUnavailable,
-            "Contact terminal fence history is incomplete"
-        ));
-    }
     Ok(next)
 }
 

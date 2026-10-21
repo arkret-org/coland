@@ -343,78 +343,156 @@ fn normal_round(
     response_event_ref: &arkret_wire::EventId,
     at: chrono::DateTime<chrono::Utc>,
 ) -> ContactRoundEvidenceBundle {
+    use arkret_models_collaboration::contact_operations::*;
+    let domain = arkret_wire::TrustDomainId::new(TRUST_DOMAIN).unwrap();
     let requester_peer = ContactPeer::Human {
         account_id: requester.clone(),
     };
     let responder_peer = ContactPeer::Human {
         account_id: responder.clone(),
     };
-    let mut request_receipt = RequestAcceptanceReceipt {
-        core: RequestAcceptanceReceiptCore {
-            holder: requester_peer.clone(),
-            peer: responder_peer.clone(),
-            slot_version: 1,
-            slot_predecessor: None,
-            previous_terminal_contact_round_id: None,
-            request_event_ref: request_event_ref.clone(),
-            producer_signer: producer_signer(requester),
-            source_checkpoint: fixture_hash('2'),
-            accepted_at: at,
-            issuer_id: requester.station_id.clone(),
-        },
-        receipt_digest: fixture_hash('0'),
-        signature: fixture_signature("did:web:contact-station.example", at),
+    let source_signature = |account: &AccountId| {
+        fixture_signature(
+            &account.station_id.as_str().replace("ak:did_core:", "did:"),
+            at,
+        )
     };
-    request_receipt.receipt_digest = request_receipt.computed_core_digest().unwrap();
-    let request_acceptance_receipt_digest =
-        Hash::new(arkret_canonical::canonical_sha256(&request_receipt).unwrap()).unwrap();
-    let mut sorted_pair_member_ids = [
+    let request_receipt=RequestAcceptanceReceipt::sign_with(RequestAcceptanceReceiptCore {
+        trust_domain_id:domain.clone(),holder:requester_peer.clone(),peer:responder_peer.clone(),version:1,predecessor_event_ref:None,initial_contact_round_id:None,request_event_ref:request_event_ref.clone(),producer_signer:producer_signer(requester),
+        source_checkpoint:Hash::new(arkret_canonical::domain_prefixed_canonical_sha256(arkret_wire::DomainSeparationId::CONTACT_REQUEST_SOURCE_CHECKPOINT_V1,&serde_json::json!({"event_ref":request_event_ref,"event_digest":request_event_ref.event_digest()})).unwrap()).unwrap(),accepted_at:at,issuer_id:requester.station_id.clone(),
+    },|_|Ok(source_signature(requester))).unwrap();
+    let mut pair = [
         ActorId::account(requester.clone()),
         ActorId::account(responder.clone()),
     ];
-    sorted_pair_member_ids.sort();
+    pair.sort_by_key(|actor| arkret_canonical::canonical_json_bytes(actor).unwrap());
     let contact_round = ContactRound::Normal {
-        sorted_pair_member_ids,
+        sorted_pair_member_ids: pair,
         request_event_ref: request_event_ref.clone(),
-        request_acceptance_receipt_digest,
+        request_acceptance_receipt_digest: request_receipt.computed_receipt_digest().unwrap(),
     };
-    let mut material = b"ak.contact.round.v1\n".to_vec();
-    material.extend(arkret_canonical::canonical_json_bytes(&contact_round).unwrap());
-    let contact_round_id = Hash::new(arkret_canonical::sha256_digest(material)).unwrap();
-    let proof =
-        |subject: &AccountId, peer: ContactPeer, head: &arkret_wire::EventId| ContactCurrentProof {
-            contact_round_id: contact_round_id.clone(),
-            issuer_id: subject.station_id.clone(),
-            peer,
-            terminal: false,
-            accepted_commit_event_ids: vec![head.clone()],
-            head_event_ref: head.clone(),
-            complete_through: 1,
-            fresh_until: at + chrono::Duration::hours(1),
-            signature: fixture_signature("did:web:contact-station.example", at),
-        };
-    ContactRoundEvidenceBundle {
+    let contact_round_id = contact_round.compute_id().unwrap();
+    let original = |account: &AccountId,
+                    peer: &ContactPeer,
+                    kind: EventKind,
+                    id: &arkret_wire::EventId,
+                    mut payload: serde_json::Value| {
+        payload["trust_domain_id"] = serde_json::json!(domain);
+        payload["peer"] = serde_json::json!(peer);
+        payload["version"] = serde_json::json!(1);
+        payload["granted_to_peer_scopes"] = serde_json::json!(["direct_message"]);
+        let mut event = arkret_wire::test_support::raw_event_for_actor_at(
+            kind.as_str(),
+            arkret_wire::ScopeRef::Realm {
+                realm_id: RealmId::from_event_id(id),
+            },
+            ActorId::account(account.clone()),
+            payload,
+            at,
+        )
+        .unwrap();
+        event.event_id = id.clone();
+        event.producer_proof = Some(arkret_wire::ProducerEventProof {
+            kind: arkret_wire::proof_kind::DETACHED_JWS.into(),
+            verification_method: producer_signer(account).verification_method().clone(),
+            event_digest: id.event_digest(),
+            created_at: at,
+            domain: None,
+            audience: None,
+            proof_purpose: None,
+            jws: arkret_wire::test_support::structural_only_detached_jws(&id.event_digest()),
+        });
+        event
+    };
+    // These storage admission fixtures are structurally bound originals. Live
+    // source/holder cryptography is independently covered by SDK and cotest.
+    let request = original(
+        requester,
+        &responder_peer,
+        EventKind::ContactRequested,
+        request_event_ref,
+        serde_json::json!({"introduction_evidence_digest":fixture_hash('1')}),
+    );
+    let response = original(
+        responder,
+        &requester_peer,
+        EventKind::ContactAccepted,
+        response_event_ref,
+        serde_json::json!({"contact_round_id":contact_round_id,"request_event_ref":request_event_ref,"request_acceptance_receipt_digest":request_receipt.computed_receipt_digest().unwrap()}),
+    );
+    let normal = NormalResponseAcceptanceReceipt {
+        trust_domain_id: domain.clone(),
+        initial_contact_round_id: None,
+        version: 1,
+        predecessor_event_ref: None,
         contact_round_id: contact_round_id.clone(),
-        previous_terminal_contact_round_id: None,
-        contact_round,
+        request_receipt: request_receipt.clone(),
+        response_event_ref: response_event_ref.clone(),
+        producer_signer: producer_signer(responder),
+        outgoing_slot_absence_digest: fixture_hash('5'),
+        accepted_at: at,
+        issuer_id: responder.station_id.clone(),
+        signature: source_signature(responder),
+    };
+    let operations = [
+        ContactOperationEvidence::Request {
+            signed_event: request.clone(),
+            request_receipt: request_receipt.clone(),
+        },
+        ContactOperationEvidence::Response {
+            signed_event: response.clone(),
+            response_receipt: normal.clone(),
+        },
+    ];
+    let basis = ContactRoundBasis {
+        contact_round_id: contact_round_id.clone(),
+        contact_round: contact_round.clone(),
         request_receipts: vec![request_receipt.clone()],
-        normal_response_receipt: Some(NormalResponseAcceptanceReceipt {
-            contact_round_id: contact_round_id.clone(),
-            request_receipt,
-            response_event_ref: response_event_ref.clone(),
-            producer_signer: producer_signer(responder),
-            outgoing_slot_absence_digest: fixture_hash('5'),
-            accepted_at: at,
-            issuer_id: responder.station_id.clone(),
-            signature: fixture_signature("did:web:contact-station.example", at),
-        }),
+        normal_response_receipt: Some(normal.clone()),
+        glare_concurrency_attestations: None,
+    };
+    let proof =
+        |account: &AccountId, peer: ContactPeer, head: &arkret_wire::EventId| ContactCurrentProof {
+            trust_domain_id: domain.clone(),
+            holder: ContactPeer::Human {
+                account_id: account.clone(),
+            },
+            peer,
+            initial_contact_round_id: Some(contact_round_id.clone()),
+            contact_round_id: Some(contact_round_id.clone()),
+            issuer_id: account.station_id.clone(),
+            head_event_ref: head.clone(),
+            version: 1,
+            scope_instances: vec![ContactScopeInstance {
+                contact_scope: ContactScope::DirectMessage,
+                grant_event_ref: head.clone(),
+            }],
+            closed_round: None,
+            issued_at: at,
+            fresh_until: at + chrono::Duration::hours(1),
+            signature: source_signature(account),
+        };
+    let evidence = ContactRoundEvidenceBundle {
+        contact_round_id: contact_round_id.clone(),
+        contact_round,
+        request_receipts: vec![request_receipt],
+        normal_response_receipt: Some(normal),
         glare_concurrency_attestations: None,
         current_proofs: vec![
             proof(requester, responder_peer, request_event_ref),
             proof(responder, requester_peer, response_event_ref),
         ],
-        continuity_checkpoint: None,
-    }
+        initial_identity: ContactInitialIdentity {
+            trust_domain_id: domain,
+            round: basis,
+            events: vec![request.clone(), response.clone()],
+        },
+        round_events: vec![request, response],
+        scope_grants: operations.to_vec(),
+        current_operations: operations,
+    };
+    evidence.validate_shape().unwrap();
+    evidence
 }
 
 /// Record the pair's accepted Contact the way Contact admission leaves it.
@@ -436,6 +514,21 @@ async fn accept_contact(
         at,
     );
     let contact_round_id = evidence.contact_round_id.clone();
+    let mut current =
+        arkret_models_collaboration::contact_operations::ContactPrivateState::default();
+    for op in &evidence.current_operations {
+        current.apply_confirmed(op.clone()).unwrap();
+    }
+    current
+        .establish(evidence.basis(), evidence.round_events.clone())
+        .unwrap();
+    for direction in &mut current.directions {
+        direction.current_proof = evidence
+            .current_proofs
+            .iter()
+            .find(|p| p.holder == *direction.head_operation.holder())
+            .cloned();
+    }
     PgContactStore { pool: pool.clone() }
         .put(&coland_storage::ContactRecord {
             requester_id: ActorId::account(requester.clone()),
@@ -446,12 +539,25 @@ async fn accept_contact(
             status: status.to_owned(),
             pending_incoming_admitted: true,
             request_event_ref: Some(request_event_ref),
-            request_slot_states: Vec::new(),
+            request_slot_states: evidence
+                .current_operations
+                .iter()
+                .map(|op| coland_storage::ContactRequestSlotState {
+                    owner_id: op.holder().contact_actor_id(),
+                    peer_id: op.peer().contact_actor_id(),
+                    version: op.version(),
+                    head_event_ref: op.event().event_id.clone(),
+                    operation_digest: Some(
+                        Hash::new(arkret_canonical::canonical_sha256(op).unwrap()).unwrap(),
+                    ),
+                    request_choice: None,
+                })
+                .collect(),
             request_receipts: evidence.request_receipts.clone(),
             request_mirror_receipts: Vec::new(),
             contact_round_evidence: Some(evidence),
-            contact_round_evidence_history: Vec::new(),
-            control_outcomes: Vec::new(),
+            current_state: current,
+
             response_event_ref: Some(response_event_ref),
             tombstone_event_ref: None,
             message: None,
@@ -3303,7 +3409,11 @@ async fn record_peer_welcome(
     .bind::<Text, _>(event.realm_id.as_str())
     .bind::<Text, _>(&scope_key)
     .bind::<Text, _>(event.event_id.as_str())
-    .bind::<Text, _>(peer.route_service_id().as_str())
+    .bind::<Text, _>(
+        peer.fixed_route_service_id()
+            .expect("Account fixture has a fixed Station")
+            .as_str(),
+    )
     .bind::<Text, _>(&claim_id)
     .bind::<Text, _>(format!("sha256:{}", "7".repeat(64)))
     .bind::<diesel::sql_types::Binary, _>(
@@ -4922,7 +5032,7 @@ async fn claim_human_peer_package(
                 id: package.keypackage_id.clone(),
                 keypackage_ref: package.keypackage_ref.to_string(),
                 keypackage_digest: package.keypackage_ref.to_string(),
-                owner_account_id: pair.peer.clone(),
+                owner_actor_id: ActorId::account(pair.peer.clone()),
                 effective_scope: None,
                 actor_id: pair.peer.principal_id.to_string(),
                 device_id: Some(device.to_string()),
@@ -5007,6 +5117,7 @@ async fn claim_human_peer_package(
     record.validate_shape().unwrap();
     let method = format!("{}#authority", pair.station_did.clone());
     let mut receipt = PeerKeyPackageClaimReceipt {
+        claim_authority_ref: None,
         claim_request_id: request_id.clone(),
         request_digest: Hash::new(digest.clone()).unwrap(),
         claims_digest: Hash::new(arkret_canonical::canonical_sha256(&[&record]).unwrap()).unwrap(),

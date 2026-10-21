@@ -89,8 +89,8 @@ mod tests {
                 request_receipts: Vec::new(),
                 request_mirror_receipts: Vec::new(),
                 contact_round_evidence: None,
-                contact_round_evidence_history: Vec::new(),
-                control_outcomes: Vec::new(),
+                current_state: Default::default(),
+
                 response_event_ref: None,
                 tombstone_event_ref: None,
                 message: None,

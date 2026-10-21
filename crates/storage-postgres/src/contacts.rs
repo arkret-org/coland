@@ -174,9 +174,7 @@ struct ContactRow {
     #[diesel(sql_type = Nullable<Jsonb>)]
     contact_round_evidence: Option<Value>,
     #[diesel(sql_type = Jsonb)]
-    contact_round_evidence_history: Value,
-    #[diesel(sql_type = Jsonb)]
-    control_outcomes: Value,
+    current_state: Value,
     #[diesel(sql_type = Nullable<Binary>)]
     response_event_ref: Option<Vec<u8>>,
     #[diesel(sql_type = Nullable<Binary>)]
@@ -238,11 +236,7 @@ fn contact_record_from_row(row: ContactRow) -> PersistenceResult<ContactRecord> 
             .contact_round_evidence
             .map(|value| decode_contact_json(value, "contact_round_evidence"))
             .transpose()?,
-        contact_round_evidence_history: decode_contact_json(
-            row.contact_round_evidence_history,
-            "contact_round_evidence_history",
-        )?,
-        control_outcomes: decode_contact_json(row.control_outcomes, "control_outcomes")?,
+        current_state: decode_contact_json(row.current_state, "current_state")?,
         response_event_ref: row
             .response_event_ref
             .as_deref()
@@ -260,7 +254,7 @@ fn contact_record_from_row(row: ContactRow) -> PersistenceResult<ContactRecord> 
         updated_at: row.updated_at,
     })
 }
-const CONTACT_COLUMNS: &str = "requester_id, target_id, contact_round_id, granted_to_target_scopes, granted_to_requester_scopes, status, pending_incoming_admitted, request_event_ref, request_slot_states, request_receipts, request_mirror_receipts, contact_round_evidence, contact_round_evidence_history, control_outcomes, response_event_ref, tombstone_event_ref, message, peer_id AS peer_host_id, peer_service_resolution, created_at, updated_at";
+const CONTACT_COLUMNS: &str = "requester_id, target_id, contact_round_id, granted_to_target_scopes, granted_to_requester_scopes, status, pending_incoming_admitted, request_event_ref, request_slot_states, request_receipts, request_mirror_receipts, contact_round_evidence, current_state, response_event_ref, tombstone_event_ref, message, peer_id AS peer_host_id, peer_service_resolution, created_at, updated_at";
 /// Both directional Contact rows of an exact pair, share-locked so a
 /// concurrent Contact change cannot commit inside the reading transaction.
 pub(crate) async fn pair_contacts_in_connection(
@@ -370,21 +364,18 @@ pub(crate) async fn put_if_updated_at_in_connection(
         .as_ref()
         .map(|value| encode_contact_json(value, "contact_round_evidence"))
         .transpose()?;
-    let contact_round_evidence_history = encode_contact_json(
-        &record.contact_round_evidence_history,
-        "contact_round_evidence_history",
-    )?;
-    let control_outcomes = encode_contact_json(&record.control_outcomes, "control_outcomes")?;
+    let current_state = encode_contact_json(&record.current_state, "current_state")?;
+
     let affected = sql_query(
             "UPDATE contacts SET requester_id = $1, target_id = $2, \
                 contact_round_id = $3, granted_to_target_scopes = $4, \
                 granted_to_requester_scopes = $5, status = $6, pending_incoming_admitted = $7, request_event_ref = $8, \
                 request_slot_states = $9, request_receipts = $10, request_mirror_receipts = $11, \
-                contact_round_evidence = $12, contact_round_evidence_history = $13, \
-                control_outcomes = $14, response_event_ref = $15, tombstone_event_ref = $16, \
-                message = $17, peer_id = $18, peer_service_resolution = $19, updated_at = $20 \
+                contact_round_evidence = $12, current_state = $13, \
+                response_event_ref = $14, tombstone_event_ref = $15, \
+                message = $16, peer_id = $17, peer_service_resolution = $18, updated_at = $19 \
              WHERE ((requester_id = $1 AND target_id = $2) OR \
-                    (requester_id = $2 AND target_id = $1)) AND updated_at = $21",
+                    (requester_id = $2 AND target_id = $1)) AND updated_at = $20",
         )
         .bind::<Text, _>(record.requester_id.to_string())
         .bind::<Text, _>(record.target_id.to_string())
@@ -398,8 +389,8 @@ pub(crate) async fn put_if_updated_at_in_connection(
         .bind::<Jsonb, _>(&request_receipts)
         .bind::<Jsonb, _>(&request_mirror_receipts)
         .bind::<Nullable<Jsonb>, _>(contact_round_evidence.as_ref())
-        .bind::<Jsonb, _>(&contact_round_evidence_history)
-        .bind::<Jsonb, _>(&control_outcomes)
+        .bind::<Jsonb, _>(&current_state)
+
         .bind::<Nullable<Binary>, _>(parse_contact_event_ref(record.response_event_ref.as_ref())?)
         .bind::<Nullable<Binary>, _>(parse_contact_event_ref(
             record.tombstone_event_ref.as_ref(),
@@ -417,6 +408,40 @@ pub(crate) async fn put_if_updated_at_in_connection(
 
 #[async_trait]
 impl ContactStore for PgContactStore {
+    async fn scope_intervals(
+        &self,
+        domain: &arkret_wire::TrustDomainId,
+        holder: &arkret_models_collaboration::contact_operations::ContactPeer,
+        peer: &arkret_models_collaboration::contact_operations::ContactPeer,
+        grants: &[arkret_wire::EventId],
+    ) -> PersistenceResult<
+        Vec<arkret_models_collaboration::contact_operations::ContactHistoricalScopeInterval>,
+    > {
+        if grants.len() > 5 {
+            return Err(PersistenceError::SchemaViolation(
+                "Contact historical request exceeds five grants".into(),
+            ));
+        }
+        let mut conn = pg_conn(&self.pool).await?;
+        let rows=sql_query("SELECT CASE WHEN closed_by IS NULL THEN interval_json ELSE interval_json || jsonb_build_object('closed_by',closed_by) END AS material FROM contact_scope_intervals WHERE trust_domain_id=$1 AND holder=$2 AND peer=$3 AND grant_event_ref=ANY($4) ORDER BY grant_event_ref,contact_scope LIMIT 6")
+            .bind::<Text,_>(domain.as_str()).bind::<Jsonb,_>(serde_json::to_value(holder).map_err(|e|PersistenceError::SchemaViolation(e.to_string()))?).bind::<Jsonb,_>(serde_json::to_value(peer).map_err(|e|PersistenceError::SchemaViolation(e.to_string()))?).bind::<Array<Text>,_>(grants.iter().map(ToString::to_string).collect::<Vec<_>>()).get_results::<ContactIndexedMaterial>(&mut conn).await.map_err(PersistenceError::database)?;
+        rows.into_iter()
+            .map(|r| decode_contact_json(r.material, "scope interval"))
+            .collect()
+    }
+    async fn known_round_closure(
+        &self,
+        domain: &arkret_wire::TrustDomainId,
+        holder: &arkret_models_collaboration::contact_operations::ContactPeer,
+        peer: &arkret_models_collaboration::contact_operations::ContactPeer,
+        round: &arkret_wire::Hash,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::contact_operations::ContactRoundClosure>,
+    > {
+        let mut conn = pg_conn(&self.pool).await?;
+        sql_query("SELECT material FROM contact_round_closures WHERE trust_domain_id=$1 AND ((holder=$2 AND peer=$3) OR (holder=$3 AND peer=$2)) AND contact_round_id=$4 ORDER BY holder LIMIT 1")
+            .bind::<Text,_>(domain.as_str()).bind::<Jsonb,_>(serde_json::to_value(holder).map_err(|e|PersistenceError::SchemaViolation(e.to_string()))?).bind::<Jsonb,_>(serde_json::to_value(peer).map_err(|e|PersistenceError::SchemaViolation(e.to_string()))?).bind::<Text,_>(round.as_str()).get_result::<ContactIndexedMaterial>(&mut conn).await.optional().map_err(PersistenceError::database)?.map(|r|decode_contact_json(r.material,"round closure")).transpose()
+    }
     async fn completion_for_request(
         &self,
         actor: &ActorId,
@@ -479,15 +504,12 @@ impl ContactStore for PgContactStore {
             .as_ref()
             .map(|value| encode_contact_json(value, "contact_round_evidence"))
             .transpose()?;
-        let contact_round_evidence_history = encode_contact_json(
-            &record.contact_round_evidence_history,
-            "contact_round_evidence_history",
-        )?;
-        let control_outcomes = encode_contact_json(&record.control_outcomes, "control_outcomes")?;
+        let current_state = encode_contact_json(&record.current_state, "current_state")?;
+
         sql_query(
             "INSERT INTO contacts \
-             (id, requester_id, target_id, contact_round_id, granted_to_target_scopes, granted_to_requester_scopes, status, pending_incoming_admitted, request_event_ref, request_slot_states, request_receipts, request_mirror_receipts, contact_round_evidence, contact_round_evidence_history, control_outcomes, response_event_ref, tombstone_event_ref, message, peer_id, peer_service_resolution, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) \
+             (id, requester_id, target_id, contact_round_id, granted_to_target_scopes, granted_to_requester_scopes, status, pending_incoming_admitted, request_event_ref, request_slot_states, request_receipts, request_mirror_receipts, contact_round_evidence, current_state, response_event_ref, tombstone_event_ref, message, peer_id, peer_service_resolution, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) \
              ON CONFLICT (requester_id, target_id) DO UPDATE SET \
                 contact_round_id = EXCLUDED.contact_round_id, \
                 granted_to_target_scopes = EXCLUDED.granted_to_target_scopes, \
@@ -499,8 +521,7 @@ impl ContactStore for PgContactStore {
                 request_receipts = EXCLUDED.request_receipts, \
                 request_mirror_receipts = EXCLUDED.request_mirror_receipts, \
                 contact_round_evidence = EXCLUDED.contact_round_evidence, \
-                contact_round_evidence_history = EXCLUDED.contact_round_evidence_history, \
-                control_outcomes = EXCLUDED.control_outcomes, \
+                current_state = EXCLUDED.current_state, \
                 response_event_ref = EXCLUDED.response_event_ref, \
                 tombstone_event_ref = EXCLUDED.tombstone_event_ref, \
                 message = EXCLUDED.message, \
@@ -521,8 +542,8 @@ impl ContactStore for PgContactStore {
         .bind::<Jsonb, _>(&request_receipts)
         .bind::<Jsonb, _>(&request_mirror_receipts)
         .bind::<Nullable<Jsonb>, _>(contact_round_evidence.as_ref())
-        .bind::<Jsonb, _>(&contact_round_evidence_history)
-        .bind::<Jsonb, _>(&control_outcomes)
+        .bind::<Jsonb, _>(&current_state)
+
         .bind::<Nullable<Binary>, _>(parse_contact_event_ref(record.response_event_ref.as_ref())?)
         .bind::<Nullable<Binary>, _>(parse_contact_event_ref(
             record.tombstone_event_ref.as_ref(),
@@ -843,4 +864,10 @@ mod invite_policy_tests {
             .is_err()
         );
     }
+}
+
+#[derive(QueryableByName)]
+struct ContactIndexedMaterial {
+    #[diesel(sql_type=Jsonb)]
+    material: Value,
 }

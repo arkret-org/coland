@@ -224,14 +224,10 @@ pub(super) fn mimi_provider_directory_value(
     state: &AppState,
 ) -> Result<arkret_models_collaboration::objects::interop::ProviderDirectory, AppError> {
     use arkret_models_collaboration::objects::interop::{
-        ProviderDirectory, ProviderDirectoryEndpoint, ProviderDirectoryMimi, ProviderDirectoryProof,
+        ProviderDirectory, ProviderDirectoryMimi, ProviderDirectoryProof,
     };
-    use arkret_wire::PayloadSigner as _;
-
-    // ProviderDirectory still carries the resolution-bearing DID shape. The
-    // service's stable core id is used in transport headers; obtain the full
-    // controller from the verified local resolution commitment instead of
-    // trying to reconstruct a DID from the core id.
+    // Resolve the full controller from current accepted service material;
+    // never reconstruct a DID from its stable core id.
     let service_did = state.service_resolution_commitment().did.clone();
     let service_id = arkret_wire::DidCoreId::new(state.service_id().clone())
         .map_err(|error| AppError::internal(format!("service core id invalid: {error}")))?;
@@ -262,22 +258,7 @@ pub(super) fn mimi_provider_directory_value(
             provider_id: MimiUri::new(mimi_provider_id(state)).map_err(|error| {
                 AppError::internal(format!("derived MIMI provider id is invalid: {error}"))
             })?,
-            endpoints: [
-                ("consent", "/consent/request"),
-                ("identifier_query", "/identifiers/query"),
-                ("key_material", "/key-material"),
-                ("notify", "/strands/{strand_id}/notify"),
-                ("proxy_download", "/proxy-download"),
-                ("report_abuse", "/report-abuse"),
-                ("room_update", "/strands/{strand_id}/update"),
-                ("submit_message", "/strands/{strand_id}/messages"),
-            ]
-            .into_iter()
-            .map(|(endpoint_id, relative_path)| ProviderDirectoryEndpoint {
-                endpoint_id: endpoint_id.to_owned(),
-                relative_path: relative_path.to_owned(),
-            })
-            .collect(),
+            endpoints: mimi_provider_directory_endpoints(&state.config().public_base_url)?,
             features: [
                 "consent",
                 "identifier_query",
@@ -317,30 +298,88 @@ pub(super) fn mimi_provider_directory_value(
         proof: ProviderDirectoryProof(placeholder),
         extra: Default::default(),
     };
-    let projection = directory.unsigned_projection_bytes().map_err(|error| {
-        AppError::internal(format!(
-            "MIMI provider directory canonicalization failed: {error}"
-        ))
+    directory.proof.0.payload_digest = directory
+        .payload_digest()
+        .map_err(|error| AppError::internal(format!("directory digest: {error}")))?;
+    let binding = directory
+        .proof_binding_bytes()
+        .map_err(|error| AppError::internal(format!("directory proof binding: {error}")))?;
+    directory.proof.0.jws =
+        arkret_signatures::sign_ed25519_detached_jws(state.notary_signing_key().as_ref(), &binding)
+            .map_err(|error| AppError::internal(format!("directory signing: {error}")))?;
+    directory.validate().map_err(|error| {
+        AppError::internal(format!("directory capability declaration: {error}"))
     })?;
-    let signer = arkret_signatures::Ed25519PayloadSigner::new(
-        state.notary_signing_key().as_ref().clone(),
-        service_did,
-        verification_method,
-    );
-    let signature = signer.sign_payload(&projection).map_err(|error| {
-        AppError::internal(format!("MIMI provider directory signing failed: {error}"))
-    })?;
-    directory.proof = ProviderDirectoryProof(arkret_wire::PayloadProof {
-        kind: "detached_jws".to_owned(),
-        verification_method: signature.verification_method,
-        payload_digest: signature.payload_digest,
-        created_at: signature.created_at,
-        domain: None,
-        audience: None,
-        proof_purpose: None,
-        jws: signature.jws,
-    });
     Ok(directory)
+}
+
+fn mimi_provider_directory_endpoints(
+    public_base: &str,
+) -> Result<Vec<arkret_models_collaboration::objects::interop::ProviderDirectoryEndpoint>, AppError>
+{
+    use arkret_models_collaboration::objects::interop::ProviderDirectoryEndpoint;
+    use arkret_wire::ServiceOperationId as Op;
+    let base = url::Url::parse(public_base)
+        .map_err(|error| AppError::internal(format!("directory service base: {error}")))?;
+    let prefix = base.path().trim_end_matches('/');
+    Ok([
+        ("consent", Op::OpenMimiCommandRequestConsentV1),
+        ("identifier_query", Op::OpenMimiReadIdentifiersV1),
+        ("key_material", Op::OpenMimiExchangeRequestKeyMaterialV1),
+        ("notify", Op::OpenMimiCommandNotifyV1),
+        ("proxy_download", Op::OpenMimiCommandProxyDownloadV1),
+        ("report_abuse", Op::OpenMimiCommandReportAbuseV1),
+        ("room_update", Op::OpenMimiCommandUpdateRoomV1),
+        ("submit_message", Op::OpenMimiCommandSubmitMessageV1),
+    ]
+    .into_iter()
+    .map(|(feature, operation)| {
+        let descriptor = arkret_wire::SERVICE_OPERATION_DESCRIPTORS
+            .iter()
+            .find(|row| row.id == operation)
+            .expect("registered MIMI operation");
+        ProviderDirectoryEndpoint {
+            endpoint_id: feature.to_owned(),
+            relative_path: format!("{prefix}{}", descriptor.http_path),
+        }
+    })
+    .collect())
+}
+
+#[cfg(test)]
+mod directory_endpoint_tests {
+    #[test]
+    fn registered_root_relative_routes_preserve_the_service_mount_prefix() {
+        for (base, prefix) in [
+            ("https://station.example/", ""),
+            ("https://station.example/tenant/", "/tenant"),
+        ] {
+            let rows = super::mimi_provider_directory_endpoints(base).unwrap();
+            assert_eq!(rows.len(), 8);
+            assert_eq!(
+                rows[0].relative_path,
+                format!("{prefix}/_arkret/open/mimi/consent/request")
+            );
+            assert_eq!(
+                rows[2].relative_path,
+                format!("{prefix}/_arkret/open/mimi/key-material")
+            );
+            for row in rows {
+                let url = url::Url::parse(base)
+                    .unwrap()
+                    .join(&row.relative_path)
+                    .unwrap();
+                assert_eq!(
+                    url.origin().ascii_serialization(),
+                    "https://station.example"
+                );
+                assert!(
+                    url.path()
+                        .starts_with(&format!("{prefix}/_arkret/open/mimi/"))
+                );
+            }
+        }
+    }
 }
 
 pub(super) fn mimi_base_url(state: &AppState) -> String {

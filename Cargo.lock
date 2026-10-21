@@ -540,7 +540,7 @@ dependencies = [
  "diesel",
  "getrandom 0.2.17",
  "getrandom 0.4.3",
- "salvo-oapi",
+ "salvo-oapi 1.0.1",
  "serde",
  "thiserror 2.0.21",
  "url",
@@ -592,7 +592,7 @@ dependencies = [
 name = "arkret-locale"
 version = "0.3.0"
 dependencies = [
- "salvo-oapi",
+ "salvo-oapi 1.0.1",
  "serde",
 ]
 
@@ -641,7 +641,7 @@ dependencies = [
  "chrono-tz",
  "hmac 0.13.0",
  "regex",
- "salvo-oapi",
+ "salvo-oapi 1.0.1",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -660,7 +660,7 @@ dependencies = [
  "chrono",
  "hex",
  "regex",
- "salvo-oapi",
+ "salvo-oapi 1.0.1",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -674,7 +674,7 @@ dependencies = [
  "arkret-models-identity",
  "arkret-wire",
  "chrono",
- "salvo-oapi",
+ "salvo-oapi 1.0.1",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -690,7 +690,7 @@ dependencies = [
  "arkret-models-crypto",
  "arkret-wire",
  "chrono",
- "salvo-oapi",
+ "salvo-oapi 1.0.1",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -706,7 +706,7 @@ dependencies = [
  "arkret-models-identity",
  "arkret-wire",
  "chrono",
- "salvo-oapi",
+ "salvo-oapi 1.0.1",
  "serde",
  "serde_json",
 ]
@@ -822,7 +822,7 @@ version = "0.3.0"
 dependencies = [
  "arkret-identifiers",
  "arkret-wire",
- "salvo-oapi",
+ "salvo-oapi 1.0.1",
  "thiserror 2.0.21",
 ]
 
@@ -862,7 +862,7 @@ dependencies = [
  "idna",
  "precis-profiles",
  "regex",
- "salvo-oapi",
+ "salvo-oapi 1.0.1",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -1897,7 +1897,6 @@ dependencies = [
  "diesel-async",
  "dotenvy",
  "ed25519-dalek 3.0.0",
- "floria-contracts",
  "futures-util",
  "garth",
  "getrandom 0.4.3",
@@ -1909,6 +1908,7 @@ dependencies = [
  "opentelemetry_sdk 0.32.1",
  "parking_lot",
  "proptest",
+ "rand 0.10.2",
  "rand_chacha 0.10.0",
  "reqwest 0.13.5",
  "rustls",
@@ -1938,7 +1938,7 @@ dependencies = [
  "arkret-models-crypto",
  "arkret-wire",
  "chrono",
- "salvo-oapi",
+ "salvo-oapi 1.0.1",
  "serde",
  "serde_json",
  "url",
@@ -2018,7 +2018,6 @@ dependencies = [
  "diesel",
  "diesel-async",
  "ed25519-dalek 3.0.0",
- "floria-contracts",
  "futures-util",
  "garth",
  "hex",
@@ -3799,13 +3798,6 @@ dependencies = [
  "crc32fast",
  "miniz_oxide",
  "zlib-rs",
-]
-
-[[package]]
-name = "floria-contracts"
-version = "0.3.0"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -8796,6 +8788,7 @@ version = "0.96.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cbc3f5a326bd3d31c4d794c4a333fd40d930ab20509247d4fa33da2a646fec0a"
 dependencies = [
+ "salvo-oapi 0.96.0",
  "salvo_core 0.96.0",
  "salvo_extra 0.96.0",
 ]
@@ -8807,7 +8800,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5195b16bb9086c424f32fea95fc4e57617f68b494cd419c4839f36c4e52a6432"
 dependencies = [
  "salvo-cors",
- "salvo-oapi",
+ "salvo-oapi 1.0.1",
  "salvo-otel",
  "salvo-proxy 1.0.1",
  "salvo-rate-limiter",
@@ -8872,6 +8865,41 @@ dependencies = [
 
 [[package]]
 name = "salvo-oapi"
+version = "0.96.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb93599148e6f51334a40fc7e4611400b48834b1ef3a3b9fb1a53121b771b44a"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "compact_str",
+ "futures-util",
+ "http",
+ "indexmap 2.14.0",
+ "inventory",
+ "mime-infer",
+ "parking_lot",
+ "regex",
+ "rust-embed",
+ "rust_decimal",
+ "salvo-oapi-macros 0.96.0",
+ "salvo_core 0.96.0",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "smallvec",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tracing",
+ "ulid",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "salvo-oapi"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebcc93544364bd6565b4af675649b87c0dd80b16f7a6bb48c4da2426648358fd"
@@ -8890,7 +8918,7 @@ dependencies = [
  "regex",
  "rust-embed",
  "rust_decimal",
- "salvo-oapi-macros",
+ "salvo-oapi-macros 1.0.1",
  "salvo_core 1.0.1",
  "serde",
  "serde_json",
@@ -8903,6 +8931,20 @@ dependencies = [
  "ulid",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "salvo-oapi-macros"
+version = "0.96.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53fb3afc3d6cc525ab788a7f20c12cd3c5b86f756e61e1da094753f4318a5b16"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "salvo-serde-util 0.96.0",
+ "salvo_core 0.96.0",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -9082,6 +9124,7 @@ dependencies = [
  "bytes",
  "chardetng 1.0.0",
  "content_inspector",
+ "cookie",
  "enumflags2",
  "form_urlencoded",
  "futures-channel",

@@ -3216,6 +3216,28 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
+    async fn prepare_applet_authoring_completion(
+        &self,
+        completion: &coland_storage::AppletAuthoringCompletion,
+        governor: &arkret_wire::DidCoreId,
+        delivery_key_digest: &arkret_wire::Hash,
+        sign: coland_storage::RealmActorMaterialSigner<'_>,
+    ) -> PersistenceResult<coland_storage::AppletAuthoringCompletion> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            Ok(crate::applet_completion::prepare(
+                conn,
+                completion,
+                governor,
+                delivery_key_digest,
+                sign,
+            )
+            .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn applet_registration_for_realm(
         &self,
         realm: &arkret_wire::RealmId,

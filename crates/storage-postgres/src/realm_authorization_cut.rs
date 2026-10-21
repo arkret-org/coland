@@ -2859,18 +2859,22 @@ impl RealmAuthorizationCut {
             let action = CapabilityActionId::from_wire(event.kind.as_str())
                 .ok_or_else(|| capability_denied("Exact authority action is unregistered"))?;
             let (target, mut facts) = self.event_operation(event);
-            self.complete_event_facts_in_connection(conn, event, &mut facts)
-                .await?;
-            return crate::approval_admission::require_governance(
-                conn,
-                event,
-                commit,
-                prepared,
-                action,
-                &target,
-                &facts,
-                &[],
-            )
+            crate::boxed_future(|| {
+                self.complete_event_facts_in_connection(conn, event, &mut facts)
+            })
+            .await?;
+            return crate::boxed_future(|| {
+                crate::approval_admission::require_governance(
+                    conn,
+                    event,
+                    commit,
+                    prepared,
+                    action,
+                    &target,
+                    &facts,
+                    &[],
+                )
+            })
             .await;
         }
         self.require_governed_member(&event.kind)?;
@@ -2885,7 +2889,7 @@ impl RealmAuthorizationCut {
             })
             .ok_or_else(|| capability_denied("Event has no unconditional registered action"))?;
         let (target, mut facts) = self.event_operation(event);
-        self.complete_event_facts_in_connection(conn, event, &mut facts)
+        crate::boxed_future(|| self.complete_event_facts_in_connection(conn, event, &mut facts))
             .await?;
         let target = self.current_event_target(event, target, &facts)?;
         if !self.needs_grant_approval_preparation(&actions, &target, prepared) {
@@ -4121,11 +4125,13 @@ pub(crate) fn authorize_capability_gated_event_with_source<'a>(
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = PersistenceResult<RealmAuthorizationCut>> + Send + 'a>,
 > {
-    Box::pin(async move {
+    crate::boxed_future(|| async move {
         lock_realm_authorization_cut(conn, &event.realm_id).await?;
-        let cut = RealmAuthorizationCut::read_for_event(conn, event).await?;
+        let cut =
+            crate::boxed_future(|| RealmAuthorizationCut::read_for_event(conn, event)).await?;
         let approved =
-            Box::pin(cut.require_event_with_approvals(conn, event, commit, prepared)).await?;
+            crate::boxed_future(|| cut.require_event_with_approvals(conn, event, commit, prepared))
+                .await?;
         crate::approval_admission::consume_and_audit(
             conn,
             event,

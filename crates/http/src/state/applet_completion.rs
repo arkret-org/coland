@@ -34,12 +34,13 @@ pub async fn deliver_pending_applet_completions(state: &AppState) -> Result<usiz
     let mut delivered = 0;
     for completion in pending {
         match deliver_one(state, &completion).await {
-            Ok(()) => {
+            Ok(delivery_key) => {
                 state
                     .event_queries()
                     .acknowledge_applet_authoring_completion(
                         &completion.applet_id,
                         &completion.request_digest,
+                        &delivery_key,
                         chrono::Utc::now(),
                     )
                     .await
@@ -57,12 +58,24 @@ pub async fn deliver_pending_applet_completions(state: &AppState) -> Result<usiz
 async fn deliver_one(
     state: &AppState,
     completion: &AppletAuthoringCompletion,
-) -> Result<(), String> {
-    completion
-        .context
-        .validate()
+) -> Result<String, String> {
+    let method = state.service_verification_method("notary-key")?;
+    let completion = state
+        .authority_commits()
+        .prepare_applet_authoring_completion(
+            completion,
+            &state.service_core_id(),
+            &method,
+            state.notary_signing_key().as_ref(),
+        )
+        .await
         .map_err(|error| error.to_string())?;
-    let material = &completion.context.material;
+    let context = completion
+        .context
+        .as_ref()
+        .ok_or("creation completion has no signed material")?;
+    context.validate().map_err(|error| error.to_string())?;
+    let material = &context.material;
     if completion.source_id != state.service_core_id()
         || material.requester_actor_id
             != arkret_wire::ActorId::service(completion.destination_id.clone())
@@ -112,7 +125,6 @@ async fn deliver_one(
         &key,
     )
     .map_err(|error| error.to_string())?;
-    let method = state.service_verification_method("notary-key")?;
     let (base, transport) = crate::security::validate_http_url_for_egress_with_pinned_client(
         &completion.endpoint,
         "Applet authoring completion",
@@ -134,7 +146,7 @@ async fn deliver_one(
         AppletTransactionRequestBody::Authoring(Box::new(AppletAuthoringTransactionRequestBody {
             applet_id: completion.applet_id.clone(),
             source_id: completion.source_id.clone(),
-            authoring_context: completion.context.clone(),
+            authoring_context: context.clone(),
         }));
     // Authoring returns accepted context; this branch publishes no new originals.
     let body = arkret_identity::VerifiedSubmission::from_verified_events(body, &[])
@@ -156,5 +168,5 @@ async fn deliver_one(
             "Applet did not acknowledge the complete accepted authoring context".to_owned(),
         );
     }
-    Ok(())
+    Ok(completion.idempotency_key)
 }

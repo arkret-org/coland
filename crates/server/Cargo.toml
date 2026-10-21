@@ -101,7 +101,6 @@ arkret-models-integration.workspace = true
 arkret-policy.workspace = true
 arkret-schema = { workspace = true }
 bs58 = { workspace = true }
-floria-contracts = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 parking_lot = { workspace = true }

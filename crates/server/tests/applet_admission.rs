@@ -37,7 +37,7 @@ async fn service_install_is_atomic_and_cannot_inject_bot_account_or_actor_invent
 }
 
 #[tokio::test]
-async fn realm_actor_control_device_transport_recovery_and_manager_sources_are_real() {
+async fn ghost_creation_quota_rolls_back_with_the_unit_and_counts_exact_retry_once() {
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     Box::pin(applet_authoring::realm_native_creation(database.pool())).await;
 }
@@ -75,4 +75,19 @@ async fn configuration_review_and_lost_creation_response_recover_the_exact_origi
 #[tokio::test]
 async fn widget_native_inventory_preserves_consent_scope_and_all_three_revoke_modes() {
     Box::pin(applet_authoring::widget_inventory_native_install_and_revoke()).await;
+}
+
+#[tokio::test]
+async fn same_realm_device_cross_circle_pages_ack_only_the_disclosed_prefix() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_bridge_cross_circle_queue_boundaries(database.pool())).await;
+}
+
+#[tokio::test]
+async fn realm_device_welcome_checkpoint_lost_consume_and_cold_ack_preserve_originals() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_bridge_welcome_recovery_boundaries(
+        database.pool(),
+    ))
+    .await;
 }

@@ -531,10 +531,10 @@ mod key_package_claim_transition_tests {
             keypackage_ref: "ak:mls:keypackage:kp-1".to_owned(),
             keypackage_digest:
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-            owner_account_id: AccountId::new(
+            owner_actor_id: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
                 arkret_wire::DidCoreId::new("ak:did_core:web:owner.example").unwrap(),
                 arkret_wire::DidCoreId::new("ak:did_core:web:station.example").unwrap(),
-            ),
+            )),
             effective_scope: None,
             actor_id: "ak:did_core:web:agent.example".to_owned(),
             device_id: Some("ak:device:01904100-0000-7000-8000-000000000001".to_owned()),
@@ -581,8 +581,10 @@ mod key_package_claim_transition_tests {
         claimed.claim_expires_at_unix_ms = Some(20_000);
         assert!(claimed.same_publication(&original));
         let mut changed = original.clone();
-        changed.owner_actor_id.station_id =
+        let mut other_station_owner = changed.owner_actor_id.as_account_id().unwrap().clone();
+        other_station_owner.station_id =
             arkret_wire::DidCoreId::new("ak:did_core:web:another-station.example").unwrap();
+        changed.owner_actor_id = arkret_wire::ActorId::account(other_station_owner);
         assert!(!claimed.same_publication(&changed));
         changed = original.clone();
         changed.effective_scope = Some(ScopeRef::Realm {

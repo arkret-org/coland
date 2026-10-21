@@ -353,7 +353,8 @@ impl Fixture {
             if let Some(key) = idempotency {
                 request = request.add_header("Idempotency-Key", key, true);
             }
-            let mut response = request.send(&service(self.state.clone())).await;
+            let router = service(self.state.clone());
+            let mut response = realm_native_fixture::boxed_step(|| request.send(&router)).await;
             let status = response.status_code.unwrap();
             (status, response.take_json().await.unwrap())
         })
@@ -1915,6 +1916,8 @@ pub async fn registered_service_pair(pool: PgPool) {
 mod realm_native_fixture {
     include!("applet_configuration_fixture.rs");
     include!("realm_actor_transport_fixture.rs");
+    include!("realm_actor_queue_boundary_fixture.rs");
+    include!("realm_actor_completion_fixture.rs");
     use arkret_canonical::canonical_sha256;
     use arkret_models_identity::*;
     use arkret_signatures::detached_object::sign_detached_object;
@@ -1957,6 +1960,17 @@ mod realm_native_fixture {
         }
     }
 
+    pub(super) fn native_http_client(timeout: std::time::Duration) -> reqwest::Client {
+        reqwest::Client::builder()
+            .tls_backend_rustls()
+            .tls_certs_only(
+                reqwest::Certificate::from_pem_bundle(&native_tls_material().ca).unwrap(),
+            )
+            .timeout(timeout)
+            .build()
+            .unwrap()
+    }
+
     struct ConfigurationResponseFault {
         completed: tokio::sync::oneshot::Sender<Value>,
         release: Option<std::sync::mpsc::Receiver<()>>,
@@ -1967,9 +1981,11 @@ mod realm_native_fixture {
         actor_log: Arc<Mutex<Vec<Value>>>,
         managed_router: Arc<Mutex<Option<Arc<salvo::Service>>>>,
         configuration_response_fault: Arc<Mutex<Option<ConfigurationResponseFault>>>,
+        completion_handler: Arc<Mutex<Option<CompletionHandler>>>,
         stop: Arc<std::sync::atomic::AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
+    type CompletionHandler = Arc<dyn Fn(Vec<u8>) -> (StatusCode, Value) + Send + Sync>;
     impl Drop for NativeService {
         fn drop(&mut self) {
             self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2031,6 +2047,8 @@ mod realm_native_fixture {
             let configuration_response_fault =
                 Arc::new(Mutex::new(None::<ConfigurationResponseFault>));
             let response_fault = configuration_response_fault.clone();
+            let completion_handler = Arc::new(Mutex::new(None::<CompletionHandler>));
+            let served_completion = completion_handler.clone();
             let service_resolution = fixture_applet_service_history(&package);
             let resolution_path =
                 arkret_models_identity::canonical_service_resolution_path(&package.service_id);
@@ -2051,6 +2069,7 @@ mod realm_native_fixture {
                     let published_actor = published_actor.clone();
                     let served_router = served_router.clone();
                     let response_fault = response_fault.clone();
+                    let served_completion = served_completion.clone();
                     let service_resolution = service_resolution.clone();
                     let resolution_path = resolution_path.clone();
                     let runtime = runtime.clone();
@@ -2069,6 +2088,22 @@ mod realm_native_fixture {
                         let mut first=request.lines().next().unwrap().split_whitespace();
                         let method=first.next().unwrap();
                         let path=first.next().unwrap();
+                        let completion=served_completion.lock().unwrap().clone();
+                        if method == "POST" && path == "/_arkret/edge/applet/transactions" && completion.is_some() {
+                            let length=request.lines().skip(1).filter_map(|line|line.split_once(':'))
+                                .find(|(name,_)|name.eq_ignore_ascii_case("content-length"))
+                                .map(|(_,value)|value.trim().parse::<usize>().unwrap()).unwrap();
+                            assert!(length<=4_194_304);
+                            while bytes.len()<header_end+length {
+                                let count=stream.read(&mut buffer).unwrap();assert!(count>0);bytes.extend_from_slice(&buffer[..count]);
+                            }
+                            bytes.truncate(header_end+length);
+                            let (status,body)=completion.unwrap()(bytes);
+                            let body=arkret_canonical::canonical_json_bytes(&body).unwrap();
+                            let header=format!("HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",status.as_u16(),status.canonical_reason().unwrap_or("Result"),body.len());
+                            stream.write_all(header.as_bytes()).unwrap();stream.write_all(&body).unwrap();stream.flush().unwrap();
+                            return;
+                        }
                         if method == "GET" && path == resolution_path && served_router.lock().unwrap().is_none() {
                             let body = arkret_canonical::canonical_json_bytes(&service_resolution).unwrap();
                             let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
@@ -2092,9 +2127,11 @@ mod realm_native_fixture {
                             let mut forwarded=if method=="POST" {TestClient::post(url)} else {TestClient::get(url)};
                             for (name,value) in headers { forwarded=forwarded.add_header(salvo::http::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),value,true); }
                             forwarded=forwarded.body(bytes[header_end..header_end+length].to_vec());
-                            let (status,body)=runtime.block_on(async {
+                            let (status,body,content_type)=runtime.block_on(async {
                                 let mut response=forwarded.send(router.as_ref()).await;
-                                (response.status_code.unwrap_or(StatusCode::OK), response.take_bytes(None).await.unwrap())
+                                let content_type=response.headers().get(salvo::http::header::CONTENT_TYPE)
+                                    .map(|value|value.to_str().unwrap().to_owned()).unwrap_or_else(||"application/json".into());
+                                (response.status_code.unwrap_or(StatusCode::OK), response.take_bytes(None).await.unwrap(),content_type)
                             });
                             if path == "/_arkret/edge/applet/configuration" && status.is_success() {
                                 let fault = response_fault.lock().unwrap().take();
@@ -2108,7 +2145,7 @@ mod realm_native_fixture {
                                     }
                                 }
                             }
-                            let header=format!("HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",status.as_u16(),status.canonical_reason().unwrap_or("Result"),body.len());
+                            let header=format!("HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",status.as_u16(),status.canonical_reason().unwrap_or("Result"),content_type,body.len());
                             let _=stream.write_all(header.as_bytes());let _=stream.write_all(&body);let _=stream.flush();
                             return;
                         }
@@ -2130,6 +2167,7 @@ mod realm_native_fixture {
                 actor_log,
                 managed_router,
                 configuration_response_fault,
+                completion_handler,
                 stop,
                 thread: Some(thread),
             }
@@ -2585,6 +2623,32 @@ mod realm_native_fixture {
             "control nonce must not be replayed"
         );
     }
+    pub(super) async fn authorize_obligation_device(
+        fixture: &Fixture,
+        candidate: &RealmActorCreatePayload,
+        creation_commit: &arkret_wire::RealmCommit,
+        key_seed: u8,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> arkret_wire::DeviceId {
+        boxed_step(|| {
+            authorize_device_until(
+                fixture,
+                candidate,
+                creation_commit,
+                key_seed,
+                &[
+                    "ak.applet.join",
+                    "ak.event.read",
+                    "ak.message.create",
+                    "ak.mls.commit",
+                    "ak.mls.genesis",
+                ],
+                Some(expires_at),
+            )
+        })
+        .await
+    }
+
     async fn first_device(
         fixture: &Fixture,
         candidate: &RealmActorCreatePayload,
@@ -2711,6 +2775,16 @@ mod realm_native_fixture {
             },
             nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
         };
+        if key_seed == 79 {
+            boxed_step(|| {
+                realm_device_wrong_possession_is_rejected(
+                    fixture, candidate, &payload, &metadata, at,
+                )
+            })
+            .await;
+        }
+        let mut metadata = metadata;
+        metadata.nonce = arkret_canonical::base64url_encode(rand::random::<[u8; 32]>());
         let (status, response) = control_post(
             fixture,
             &metadata,
@@ -4187,6 +4261,29 @@ mod realm_native_fixture {
         use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
         let fixture = &factory.fixture;
         let actor = &candidate.actor_id;
+        let completion = fixture
+            .state
+            .test_persistence()
+            .applets()
+            .pending_authoring_completions(128)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|task| &task.actor_id == actor)
+            .expect("original creation keeps its durable completion until real delivery ACK");
+        let notary_method = fixture
+            .state
+            .service_verification_method("notary-key")
+            .unwrap();
+        let original_completion = super::completion_application(&fixture.state)
+            .prepare_applet_authoring_completion(
+                &completion,
+                &fixture.state.service_core_id(),
+                &notary_method,
+                fixture.state.notary_signing_key().as_ref(),
+            )
+            .await
+            .unwrap();
         let control_ref = actor_current_ref(
             fixture,
             actor,
@@ -4548,6 +4645,52 @@ mod realm_native_fixture {
             "handover exact retry under the accepted new control: {response}"
         );
         assert_eq!(snapshot(fixture, actor).await, after);
+        let before_stale_ack = boxed_step(|| native_business_footprint(fixture)).await;
+        let stale_ack = fixture
+            .state
+            .test_persistence()
+            .applets()
+            .acknowledge_authoring_completion(
+                &original_completion.applet_id,
+                &original_completion.request_digest,
+                &original_completion.idempotency_key,
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(stale_ack, coland_storage::PersistenceError::NotFound(_)),
+            "{stale_ack}"
+        );
+        assert_eq!(
+            boxed_step(|| native_business_footprint(fixture)).await,
+            before_stale_ack,
+            "a former manager's in-flight delivery ACK cannot terminate its retained creation task"
+        );
+        assert!(
+            super::completion_application(&fixture.state)
+                .prepare_applet_authoring_completion(
+                    &original_completion,
+                    &fixture.state.service_core_id(),
+                    &notary_method,
+                    fixture.state.notary_signing_key().as_ref(),
+                )
+                .await
+                .is_err(),
+            "even an unexpired cached body must reprove today's manager"
+        );
+        assert!(
+            !fixture
+                .state
+                .test_persistence()
+                .applets()
+                .pending_authoring_completions(128)
+                .await
+                .unwrap()
+                .iter()
+                .any(|task| task.request_digest == original_completion.request_digest),
+            "a former manager's task cannot starve eligible current-manager tasks"
+        );
         for (package, expected) in [
             (&native.package, StatusCode::NOT_FOUND),
             (&receiving.package, StatusCode::OK),
@@ -5645,7 +5788,34 @@ mod realm_native_fixture {
             .unwrap()
     }
 
+    async fn commit_install_http(
+        fixture: &Fixture,
+        install: &AppletFormalCommitUnit,
+    ) -> AppletInstallOutcome {
+        let body = serde_json::to_value(&install.input.request).unwrap();
+        let (status, outcome) = boxed_step(|| {
+            fixture.admin_post(
+                "/_arkret/self/applets/install",
+                arkret_wire::ServiceOperationId::SELF_APPLET_COMMAND_INSTALL_V1,
+                &body,
+                Some(&install.input.idempotency_key),
+            )
+        })
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "actual scope installation: {outcome}"
+        );
+        serde_json::from_value(outcome).unwrap()
+    }
+
     pub(super) async fn run_bridge(pool: PgPool, circle: bool) {
+        run_bridge_recipient_mode(pool, circle, 0).await;
+    }
+
+    // Candidate modes add named coverage without changing the existing drivers.
+    pub(super) async fn run_bridge_recipient_mode(pool: PgPool, circle: bool, recipient_mode: u8) {
         use arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService;
         use arkret_bridge_runtime::managed_device::ManagedDeviceRuntime;
         use arkret_bridge_runtime::{
@@ -5655,6 +5825,7 @@ mod realm_native_fixture {
         struct LostRevokeReceipt {
             inner: FileAuthoringStore,
             armed: Arc<std::sync::atomic::AtomicBool>,
+            recipient_fault: Arc<NativeRecipientStoreFault>,
         }
         impl AuthoringStore for LostRevokeReceipt {
             fn load(&self, key: &str) -> arkret_bridge_runtime::Result<Option<String>> {
@@ -5671,6 +5842,8 @@ mod realm_native_fixture {
                 expected: &[(String, Option<String>)],
                 writes: &[(String, Option<String>)],
             ) -> arkret_bridge_runtime::Result<bool> {
+                self.recipient_fault
+                    .before_compare_exchange(expected, writes, &self.inner)?;
                 if expected.iter().any(|(key, value)| {
                     key.starts_with("managed-device-revocation/v1/") && value.is_some()
                 }) && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -5720,16 +5893,14 @@ mod realm_native_fixture {
         let install = boxed_step(|| factory.prepare_install(&id, install_label)).await;
         let content_scope = install.effective_scope.clone();
         install.commit(&PgAppletStore { pool }).await.unwrap();
-        if circle {
+        let parent_installation = if circle {
             let parent =
                 boxed_step(|| factory.prepare_install(&id, "bridge-parent-admission")).await;
-            parent
-                .commit(&PgAppletStore {
-                    pool: factory.fixture.pool.clone(),
-                })
-                .await
-                .unwrap();
-        }
+            let outcome = boxed_step(|| commit_install_http(&factory.fixture, &parent)).await;
+            Some((parent.effective_scope.clone(), outcome))
+        } else {
+            None
+        };
         let package = &native.package;
         let did = applet_service_did(package);
         let config: arkret_bridge_runtime::Config = serde_json::from_value(json!({
@@ -5737,7 +5908,8 @@ mod realm_native_fixture {
             "arkret": {
                 "server_url":factory.fixture.state.config().public_base_url,
                 "applet_base_url":package.base_url,
-                "service_did":did, "trust_domain":factory.fixture.state.config().trust_domain,
+                "service_did":did, "service_resolution":fixture_applet_service_history(package),
+                "trust_domain":factory.fixture.state.config().trust_domain,
                 "applet_id":id,"signing_key_seed_hex":"2a".repeat(32),
                 "verification_method_fragment":"#applet-service-key", "trusted_server_did":factory.fixture.state.service_did(),
                 "applet_namespaces":package.namespaces,
@@ -5773,6 +5945,7 @@ mod realm_native_fixture {
             .build()
             .unwrap();
         let lost_receipt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let recipient_fault = Arc::new(NativeRecipientStoreFault::default());
         let make_edge = || {
             Arc::new(
                 ArkretEdge::new_outbound(
@@ -5786,6 +5959,7 @@ mod realm_native_fixture {
                     AuthoringJournal::new(Arc::new(LostRevokeReceipt {
                         inner: FileAuthoringStore::new(path.clone()).unwrap(),
                         armed: lost_receipt.clone(),
+                        recipient_fault: recipient_fault.clone(),
                     })),
                 )
                 .unwrap(),
@@ -5848,8 +6022,41 @@ mod realm_native_fixture {
                 .unwrap(),
             PreparedGhost::Reuse { .. }
         ));
+        if recipient_mode == 3 {
+            drop(author);
+            drop(edge);
+            boxed_step(|| {
+                actual_completion_receiver(
+                    &factory.fixture,
+                    &native,
+                    &actor,
+                    &commit,
+                    &path,
+                    &make_edge,
+                )
+            })
+            .await;
+            std::fs::remove_file(&path).unwrap();
+            return;
+        }
         eprintln!("real Bridge runtime: current private control and native Device");
         let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
+        if let Some((scope, outcome)) = &parent_installation {
+            boxed_step(|| devices.remember_installation_outcome(scope, outcome))
+                .await
+                .unwrap();
+        }
+        if recipient_mode == 2 {
+            boxed_step(|| {
+                same_device_cross_circle_queue(&factory, package, &devices, &actor, &content_scope)
+            })
+            .await;
+            drop(devices);
+            drop(author);
+            drop(edge);
+            std::fs::remove_file(&path).unwrap();
+            return;
+        }
         let device = boxed_step(|| devices.device_for_actor(&actor))
             .await
             .unwrap();
@@ -5903,6 +6110,25 @@ mod realm_native_fixture {
         let mut human_group =
             boxed_step(|| realm_actor_mls_fixture::human_admits_runtime(&factory.fixture, &device))
                 .await;
+        if recipient_mode == 1 {
+            drop(reader);
+            drop(device);
+            drop(devices);
+            drop(author);
+            drop(edge);
+            boxed_step(|| {
+                welcome_checkpoint_consume_and_ack_recovery(
+                    &factory.fixture,
+                    &actor,
+                    &make_edge,
+                    &path,
+                    &recipient_fault,
+                )
+            })
+            .await;
+            std::fs::remove_file(&path).unwrap();
+            return;
+        }
         let progress = boxed_step(|| devices.poll_welcome_queue(&device, &reader))
             .await
             .unwrap();
@@ -6535,6 +6761,122 @@ mod realm_native_fixture {
         Box::pin(make())
     }
 
+    pub struct CompletionFixture {
+        pub state: AppState,
+        pub package: AppletPackage,
+        native: NativeService,
+        _governor: NetworkStation,
+    }
+    impl CompletionFixture {
+        pub fn set_delivery_handler(&self, handler: CompletionHandler) {
+            *self.native.completion_handler.lock().unwrap() = Some(handler);
+        }
+    }
+    pub(super) async fn completion_fixture(pool: PgPool, count: usize) -> CompletionFixture {
+        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+        let (fixture, governor) = boxed_step(|| network_fixture(pool.clone())).await;
+        let factory = AppletAuthoringFactory {
+            fixture,
+            packages: Default::default(),
+            scopes: Default::default(),
+        };
+        let id = AppletId::new(format!("ak:applet:{}", uuid::Uuid::now_v7())).unwrap();
+        let native = NativeService::new(&id, &factory.fixture.state.service_core_id());
+        let package = native.package.clone();
+        factory
+            .packages
+            .lock()
+            .await
+            .insert(id.to_string(), package.clone());
+        let install =
+            boxed_step(|| factory.prepare_install(&id, "realm-creation-completion")).await;
+        let store = PgAppletStore { pool: pool.clone() };
+        boxed_step(|| install.commit(&store)).await.unwrap();
+        let coland_storage::AppletAdmissionRequest::Install(body) = &install.input.request;
+        let source = body
+            .authoring_request_basis
+            .capability_grant_events
+            .iter()
+            .find(|event| {
+                event.payload.get("grant").unwrap()["actions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|action| action == "ak.applet.ghost.provision")
+            })
+            .unwrap();
+        let grant = arkret_wire::GrantId::from_event_id(&source.event_id);
+        for index in 0..count {
+            let (candidate, signer) = realm_candidate(
+                &package,
+                &factory.fixture.realm,
+                &body.authoring_request_basis.registration_event.event_id,
+                &grant,
+            );
+            let mut value = json!(candidate);
+            value.as_object_mut().unwrap().remove("control_signature");
+            value["request_id"] = json!(uuid::Uuid::now_v7().simple().to_string());
+            value["external_ref"]["external_id"] = json!(format!("completion-{index}"));
+            let transcript: RealmActorCreationTranscript =
+                serde_json::from_value(value.clone()).unwrap();
+            value["control_signature"] = json!(
+                sign_detached_object(
+                    &transcript,
+                    DetachedSignatureContext::RealmActorCreation,
+                    candidate.control_method_kid.clone(),
+                    candidate.control_signature.created_at,
+                    &SigningKey::from_bytes(&[33; 32])
+                )
+                .unwrap()
+            );
+            let candidate: RealmActorCreatePayload = serde_json::from_value(value).unwrap();
+            let event = arkret::author_realm_actor_create(
+                candidate.clone(),
+                arkret_canonical::DigestSuite::Sha256,
+                candidate.control_signature.created_at,
+                &signer,
+            )
+            .unwrap();
+            let request = SelfAuthoritySubmitRequest::Event(
+                arkret_wire::EventAdmissionSubmission::new(event.clone()),
+            );
+            let (status, outcome) = boxed_step(|| async {
+                factory
+                    .fixture
+                    .service_post(
+                        &package,
+                        "/_arkret/self/events",
+                        arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                        &json!(request),
+                        &format!("actual-completion-creation-{index}"),
+                    )
+                    .await
+            })
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "accepted original with atomic completion: {outcome}"
+            );
+            let original = factory
+                .fixture
+                .state
+                .test_persistence()
+                .authority_commits()
+                .committed_event(&event.event_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(original.event, event);
+        }
+        CompletionFixture {
+            state: factory.fixture.state.clone(),
+            package,
+            native,
+            _governor: governor,
+        }
+    }
+
     pub(super) async fn run(pool: PgPool, mls: bool) {
         use arkret_models_collaboration::authority_commit::{
             SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
@@ -6585,7 +6927,8 @@ mod realm_native_fixture {
                 .clone(),
         )
         .unwrap();
-        let creation_grant = arkret_wire::GrantId::from_event_id(&grant_event.event_id);
+        let creation_grant =
+            boxed_step(|| realm_creation_quota_grant(&factory.fixture, &grant_event)).await;
         let (candidate, signer) = realm_candidate(
             &package,
             &factory.fixture.realm,
@@ -6660,6 +7003,26 @@ mod realm_native_fixture {
             .unwrap()
             .unwrap();
         assert_eq!(replay.commit, before);
+        boxed_step(|| {
+            realm_creation_uniqueness_refuses_new_originals(
+                &factory.fixture,
+                &package,
+                &registration.event_id,
+                &grant_event,
+                &candidate,
+                &committed,
+            )
+        })
+        .await;
+        boxed_step(|| {
+            realm_creation_quota_exhaustion(
+                &factory.fixture,
+                &package,
+                &registration.event_id,
+                &creation_grant,
+            )
+        })
+        .await;
         eprintln!("native lifecycle: private material");
         Box::pin(private_material(&factory.fixture, &candidate, &before)).await;
         boxed_step(|| {
@@ -6764,4 +7127,43 @@ pub async fn realm_applet_configuration(pool: PgPool) {
 
 pub async fn widget_inventory_native_install_and_revoke() {
     applet_widget_inventory_fixture::run_widget_inventory().await;
+}
+
+pub async fn realm_creation_completion_fixture(
+    pool: PgPool,
+) -> realm_native_fixture::CompletionFixture {
+    Box::pin(realm_native_fixture::completion_fixture(pool, 1)).await
+}
+
+pub async fn realm_creation_completion_fixtures(
+    pool: PgPool,
+    count: usize,
+) -> realm_native_fixture::CompletionFixture {
+    Box::pin(realm_native_fixture::completion_fixture(pool, count)).await
+}
+
+/// Candidate: one physical Realm Device, two independently authorized Circles.
+pub async fn realm_bridge_cross_circle_queue_boundaries(pool: PgPool) {
+    realm_native_fixture::run_bridge_recipient_mode(pool, true, 2).await;
+}
+
+/// Candidate: real native Welcome and persistent receipt/ACK crash boundaries.
+pub async fn realm_bridge_welcome_recovery_boundaries(pool: PgPool) {
+    realm_native_fixture::run_bridge_recipient_mode(pool, false, 1).await;
+}
+
+/// Compose the existing application against the fixture's registered store.
+/// Test callers do not gain access to AppState's crate-private application port.
+pub fn completion_application(
+    state: &AppState,
+) -> coland_services::authority_commit::AuthorityCommitApplication {
+    coland_services::authority_commit::AuthorityCommitApplication::new(
+        coland_services::persistence::PersistenceHandle::from_shared(state.test_persistence()),
+        state.config().to_device_queue_capacity,
+    )
+}
+
+/// Real accepted creation delivered to the production Bridge transaction router.
+pub async fn realm_bridge_completion_receiver(pool: PgPool) {
+    realm_native_fixture::run_bridge_recipient_mode(pool, false, 3).await;
 }

@@ -254,72 +254,33 @@ impl AppletStore for PgAppletStore {
         &self,
         limit: u32,
     ) -> PersistenceResult<Vec<coland_storage::AppletAuthoringCompletion>> {
-        #[derive(QueryableByName)]
-        struct CompletionRow {
-            #[diesel(sql_type=Text)]
-            applet_id: String,
-            #[diesel(sql_type=Text)]
-            request_digest: String,
-            #[diesel(sql_type=Text)]
-            source_id: String,
-            #[diesel(sql_type=Text)]
-            destination_id: String,
-            #[diesel(sql_type=Text)]
-            endpoint: String,
-            #[diesel(sql_type=Text)]
-            idempotency_key: String,
-            #[diesel(sql_type=Jsonb)]
-            context: Value,
-            #[diesel(sql_type=Jsonb)]
-            projection_attestation: Value,
-        }
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        let rows=sql_query("SELECT applet_id,request_digest,source_id,destination_id,endpoint,idempotency_key,context,projection_attestation FROM applet_authoring_completions WHERE delivered_at IS NULL ORDER BY accepted_at,applet_id,request_digest LIMIT $1")
-            .bind::<diesel::sql_types::BigInt,_>(i64::from(limit.min(128)))
-            .load::<CompletionRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(coland_storage::AppletAuthoringCompletion {
-                    applet_id: row.applet_id.parse().map_err(PersistenceError::database)?,
-                    request_digest: row
-                        .request_digest
-                        .parse()
-                        .map_err(PersistenceError::database)?,
-                    source_id: row.source_id.parse().map_err(PersistenceError::database)?,
-                    destination_id: row
-                        .destination_id
-                        .parse()
-                        .map_err(PersistenceError::database)?,
-                    endpoint: row.endpoint,
-                    idempotency_key: row.idempotency_key,
-                    context: serde_json::from_value(row.context)
-                        .map_err(PersistenceError::database)?,
-                    projection_attestation: serde_json::from_value(row.projection_attestation)
-                        .map_err(PersistenceError::database)?,
-                })
-            })
-            .collect()
+        crate::applet_completion::pending(&mut conn, limit).await
     }
     async fn acknowledge_authoring_completion(
         &self,
         applet_id: &arkret_wire::AppletId,
         request_digest: &arkret_wire::Hash,
+        idempotency_key: &str,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<()> {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        let updated=sql_query("UPDATE applet_authoring_completions SET delivered_at=COALESCE(delivered_at,$3) WHERE applet_id=$1 AND request_digest=$2")
-            .bind::<Text,_>(applet_id.as_str()).bind::<Text,_>(request_digest.as_str()).bind::<Timestamptz,_>(at)
-            .execute(&mut *conn).await.map_err(PersistenceError::database)?;
-        if updated != 1 {
-            return Err(PersistenceError::NotFound(
-                "accepted Applet completion is absent".to_owned(),
-            ));
-        }
-        Ok(())
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            Ok(crate::applet_completion::acknowledge(
+                conn,
+                applet_id,
+                request_digest,
+                idempotency_key,
+                at,
+            )
+            .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
     }
     async fn admit_authoring_unit(
         &self,

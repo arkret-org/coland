@@ -381,6 +381,14 @@ pub struct AppletControlCarrier {
 /// Authenticated transport material; the private reader repeats current checks.
 #[derive(Clone)]
 pub enum RealmActorMaterialCaller {
+    /// An original creation task retained by the accepting transaction. The
+    /// reader must prove that task and the current exact manager before supply.
+    CreationCompletion {
+        applet_id: arkret_wire::AppletId,
+        request_digest: arkret_wire::Hash,
+        creation_ref: arkret_wire::CommittedEventRef,
+        service_id: arkret_wire::DidCoreId,
+    },
     Account {
         account_id: arkret_wire::AccountId,
         expires_at: DateTime<Utc>,
@@ -1937,6 +1945,19 @@ pub trait AuthorityCommitStore: Send + Sync {
         let _ = (request, caller, governor, sign);
         Err(PersistenceError::Conflict(
             "dependency_missing: private Realm material reader unavailable".into(),
+        ))
+    }
+
+    async fn prepare_applet_authoring_completion(
+        &self,
+        completion: &crate::AppletAuthoringCompletion,
+        governor: &arkret_wire::DidCoreId,
+        delivery_key_digest: &arkret_wire::Hash,
+        sign: RealmActorMaterialSigner<'_>,
+    ) -> PersistenceResult<crate::AppletAuthoringCompletion> {
+        let _ = (completion, governor, delivery_key_digest, sign);
+        Err(PersistenceError::Internal(
+            "durable creation completion material unavailable".into(),
         ))
     }
 

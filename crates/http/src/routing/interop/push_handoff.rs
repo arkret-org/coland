@@ -438,6 +438,53 @@ pub fn spawn_public_push_revoke_retry_worker(
     })))
 }
 
+/// Reconcile one full local Account without disclosing that Account upstream.
+/// Only the existing cryptographically verified and durably committed Gateway
+/// receipt completes a tombstone. Exhaust the stable paginated retry view so
+/// another Account's pending intent cannot be mistaken for this Account's work.
+pub(crate) async fn confirm_deactivated_account_push_revocations(
+    state: &AppState,
+    account: &AccountId,
+) -> Result<bool, AppError> {
+    let source_station_id = state.service_core_id();
+    if account.station_id != source_station_id {
+        return Err(AppError::internal("push deactivation Account is not local"));
+    }
+    state
+        .persistence()
+        .begin_public_push_account_deactivation(account, Utc::now())
+        .await
+        .map_err(service_storage_error)?;
+    let mut cursor = None;
+    let mut complete = true;
+    loop {
+        let page = state
+            .persistence()
+            .awaiting_public_push_revocations(
+                &source_station_id,
+                cursor.as_ref(),
+                REVOKE_RETRY_BATCH_LIMIT,
+            )
+            .await
+            .map_err(service_storage_error)?;
+        let full_page = page.len() == REVOKE_RETRY_BATCH_LIMIT;
+        // Capture the scan coordinate before receipt commits change updated_at.
+        cursor = page.last().map(PushRegistrationHandoffRetryCursor::after);
+        for intent in page {
+            if intent.local_route.account_id == *account
+                && confirm_revoked_intent(state, &source_station_id, intent)
+                    .await
+                    .is_err()
+            {
+                complete = false;
+            }
+        }
+        if !full_page {
+            return Ok(complete);
+        }
+    }
+}
+
 async fn confirm_revoked_intent(
     state: &AppState,
     source_station_id: &arkret_wire::DidCoreId,

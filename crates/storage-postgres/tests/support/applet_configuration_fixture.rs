@@ -72,16 +72,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
         "arkret-configuration-{}.redb",
         uuid::Uuid::now_v7()
     ));
-    let http = reqwest::Client::builder()
-        .add_root_certificate(
-            reqwest::Certificate::from_pem(include_bytes!(
-                "../../../server/tests/fixtures/outbox-test-ca.pem"
-            ))
-            .unwrap(),
-        )
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap();
+    let http = native_http_client(std::time::Duration::from_secs(30));
     let station_url: Url = factory
         .fixture
         .state
@@ -683,7 +674,11 @@ async fn configuration_handoff_resume(
             &arkret_models_identity::ServiceResolutionCarrier::ResolutionUrl {
                 resolution_url: format!(
                     "{}{}",
-                    previous.state.config().public_base_url.trim_end_matches('/'),
+                    previous
+                        .state
+                        .config()
+                        .public_base_url
+                        .trim_end_matches('/'),
                     arkret_models_identity::canonical_service_resolution_path(
                         &previous.state.service_core_id(),
                     ),
@@ -724,7 +719,10 @@ async fn configuration_handoff_resume(
     let mut facts = Vec::new();
     for full in source.handoff_originals(&previous.realm).await.unwrap() {
         assert_eq!(
-            arkret_identity::verification_method_did(full.commit.signature.verification_method.as_str()).unwrap(),
+            arkret_identity::verification_method_did(
+                full.commit.signature.verification_method.as_str()
+            )
+            .unwrap(),
             previous.state.service_did(),
             "handoff fixture must retain actual governance signatures: {}",
             full.event.event_id
@@ -844,7 +842,10 @@ async fn configuration_handoff_resume(
     let mut bundle: RealmAuthorityBundle = response.take_json().await.unwrap();
     assert_eq!(
         bundle.genesis_commit.signature.verification_method,
-        previous.state.service_verification_method("notary-key").unwrap(),
+        previous
+            .state
+            .service_verification_method("notary-key")
+            .unwrap(),
         "handoff genesis must carry the actual governance signature"
     );
     let resolution_path =
@@ -897,21 +898,38 @@ async fn configuration_handoff_resume(
     };
     activation.validate_new_handoff().unwrap();
     let mut invalid_signature = activation.clone();
-    invalid_signature.handoff.new_authority_acceptance_signature.sig =
-        Base64UrlString::new(arkret_canonical::base64url_encode([0u8; 64])).unwrap();
-    invalid_signature.authority_bundle.authority_transitions.last_mut().unwrap().handoff =
-        invalid_signature.handoff.clone();
+    invalid_signature
+        .handoff
+        .new_authority_acceptance_signature
+        .sig = Base64UrlString::new(arkret_canonical::base64url_encode([0u8; 64])).unwrap();
+    invalid_signature
+        .authority_bundle
+        .authority_transitions
+        .last_mut()
+        .unwrap()
+        .handoff = invalid_signature.handoff.clone();
     let (status, refused) = configuration_peer_post(
         previous,
         next,
         "/_arkret/peer/realm-authority/handoff",
         ServiceOperationId::PEER_REALM_AUTHORITY_COMMAND_HANDOFF_V1,
         &invalid_signature,
-    ).await;
+    )
+    .await;
     assert_ne!(status, StatusCode::OK);
-    assert_eq!(refused["type"], "https://arkret.org/problems/signature_invalid", "{refused}");
-    assert_eq!(target.current_authority(&previous.realm).await.unwrap().unwrap().generation,
-        manifest.governance_generation);
+    assert_eq!(
+        refused["type"], "https://arkret.org/problems/signature_invalid",
+        "{refused}"
+    );
+    assert_eq!(
+        target
+            .current_authority(&previous.realm)
+            .await
+            .unwrap()
+            .unwrap()
+            .generation,
+        manifest.governance_generation
+    );
     for (sender, receiver) in [(previous, next), (next, previous)] {
         let (status, result) = configuration_peer_post(
             sender,
@@ -941,8 +959,11 @@ async fn configuration_handoff_resume(
         .management_review_material(&actor, reference, &[])
         .await
         .unwrap();
-    assert_eq!(review.outcome.status, arkret_models_integration::ManagementReviewStatus::Pending,
-        "handoff preserves unchanged review pins for independent current revalidation");
+    assert_eq!(
+        review.outcome.status,
+        arkret_models_integration::ManagementReviewStatus::Pending,
+        "handoff preserves unchanged review pins for independent current revalidation"
+    );
     let mut continued = request.clone();
     continued.command = arkret_models_integration::AppletConfigurationCommand::Recover;
     continued.approval_signatures =
@@ -964,7 +985,10 @@ async fn configuration_handoff_resume(
         StatusCode::OK,
         "original Account resumes through the new governor: {resumed}"
     );
-    assert_eq!(resumed["admission_status"], "accepted", "continued configuration: {resumed}");
+    assert_eq!(
+        resumed["admission_status"], "accepted",
+        "continued configuration: {resumed}"
+    );
     assert_eq!(resumed["source_outcome"], pending["source_outcome"]);
     let accepted = target
         .committed_event(&candidate.event_id)
@@ -983,14 +1007,23 @@ async fn configuration_handoff_resume(
             .unwrap()
             .is_none()
     );
-    let (status, replay) = previous.admin_post(
-        &path,
-        ServiceOperationId::SELF_APPLET_CONFIGURATION_COMMAND_SUBMIT_V1,
-        &json!(continued),
-        Some(continued.intent.request_id.as_str()),
-    ).await;
-    assert_eq!(status, StatusCode::OK, "accepted continuation replay: {replay}");
-    assert_eq!(replay, resumed, "replay returns the original new-generation result");
+    let (status, replay) = previous
+        .admin_post(
+            &path,
+            ServiceOperationId::SELF_APPLET_CONFIGURATION_COMMAND_SUBMIT_V1,
+            &json!(continued),
+            Some(continued.intent.request_id.as_str()),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "accepted continuation replay: {replay}"
+    );
+    assert_eq!(
+        replay, resumed,
+        "replay returns the original new-generation result"
+    );
 }
 
 fn configuration_review_vote(
@@ -1351,16 +1384,7 @@ async fn configuration_peer_post_wire(
         source.state.notary_signing_key().as_ref(),
     )
     .unwrap();
-    let client = reqwest::Client::builder()
-        .add_root_certificate(
-            reqwest::Certificate::from_pem(include_bytes!(
-                "../../../server/tests/fixtures/outbox-test-ca.pem"
-            ))
-            .unwrap(),
-        )
-        .timeout(std::time::Duration::from_secs(45))
-        .build()
-        .unwrap();
+    let client = native_http_client(std::time::Duration::from_secs(45));
     let mut request = client.post(request_url);
     for (name, value) in parts.headers {
         request = request.header(name, value);

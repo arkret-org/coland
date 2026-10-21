@@ -836,9 +836,7 @@ fn materialize_capability_grant<'a>(
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = PersistenceResult<CapabilityGrant>> + Send + 'a>,
 > {
-    Box::pin(materialize_capability_grant_inner(
-        conn, event, commit, grant_id, body,
-    ))
+    crate::boxed_future(|| materialize_capability_grant_inner(conn, event, commit, grant_id, body))
 }
 
 /// The registry's owned source is an exclusive terminal execution/read root.
@@ -1067,29 +1065,36 @@ async fn materialize_capability_grant_inner(
     }
 
     if let CapabilitySubject::Actor(subject) = &body.subject {
-        let subject_cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
-            conn,
-            &event.realm_id,
-            subject,
-        )
-        .await?;
-        if let Some(controller) = subject_cut
-            .owned_controller_in_connection(conn, commit.committed_at)
-            .await?
-        {
-            crate::agent_management_admission::require_authorization_in_connection(
+        let subject_cut = crate::boxed_future(|| {
+            crate::realm_authorization_cut::RealmAuthorizationCut::read(
                 conn,
                 &event.realm_id,
-                controller
-                    .as_account_id()
-                    .ok_or_else(|| conflict("Agent authorization controller is not an account"))?,
-                subject
-                    .as_account_id()
-                    .ok_or_else(|| conflict("Agent authorization subject is not an account"))?,
-                &body.actions,
-                &body.resources,
-                commit.committed_at,
+                subject,
             )
+        })
+        .await?;
+        if let Some(controller) = crate::boxed_future(|| {
+            subject_cut.owned_controller_in_connection(conn, commit.committed_at)
+        })
+        .await?
+        {
+            let controller = controller
+                .as_account_id()
+                .ok_or_else(|| conflict("Agent authorization controller is not an account"))?;
+            let subject = subject
+                .as_account_id()
+                .ok_or_else(|| conflict("Agent authorization subject is not an account"))?;
+            crate::boxed_future(|| {
+                crate::agent_management_admission::require_authorization_in_connection(
+                    conn,
+                    &event.realm_id,
+                    controller,
+                    subject,
+                    &body.actions,
+                    &body.resources,
+                    commit.committed_at,
+                )
+            })
             .await?;
         }
     }
@@ -1098,9 +1103,9 @@ async fn materialize_capability_grant_inner(
         // This is the original signed Event, not a reference synthesized from
         // a principal row. Recheck the complete accepted source and current
         // controller coverage under the same transaction as the current write.
-        crate::realm_authorization_cut::RealmAuthorizationCut::require_owned_grant_coverage_in_connection(
+        crate::boxed_future(|| crate::realm_authorization_cut::RealmAuthorizationCut::require_owned_grant_coverage_in_connection(
             conn, event, &body, commit.committed_at,
-        ).await?;
+        )).await?;
         return Ok(materialized_grant(
             &event.realm_id,
             grant_id,
@@ -1411,7 +1416,10 @@ async fn commit_capability_grant_current_result_inner(
     };
 
     if let CapabilityGrantCurrentMutation::Create { body, .. } = &mutation {
-        require_agent_provision_ceiling_in_connection(conn, event, commit, body, evidence).await?;
+        crate::boxed_future(|| {
+            require_agent_provision_ceiling_in_connection(conn, event, commit, body, evidence)
+        })
+        .await?;
     }
     let (status, value) = match (mutation, current.as_ref()) {
         (CapabilityGrantCurrentMutation::Create { grant_id, body }, None) => (

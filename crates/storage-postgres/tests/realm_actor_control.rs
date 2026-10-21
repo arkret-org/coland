@@ -20,11 +20,6 @@ async fn realm_actor_control_lifecycle_and_account_audit_preserve_identity() {
         .with_max_level(tracing::Level::WARN)
         .with_test_writer()
         .try_init();
-    eprintln!(
-        "private delivery sizes: input={}, material={}",
-        std::mem::size_of::<coland_storage::AccountContentDeliveryInput>(),
-        std::mem::size_of::<arkret_models_integration::RealmActorMaterialOutcome>()
-    );
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     Box::pin(applet_authoring::realm_native_creation(database.pool())).await;
 }
@@ -60,6 +55,16 @@ async fn applet_configuration_preserves_original_intent_and_candidate_over_real_
         .try_init();
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     Box::pin(applet_authoring::realm_applet_configuration(
+        database.pool(),
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_completion_receiver_preserves_original_over_signed_retries_cold_recovery_and_expiry()
+ {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_bridge_completion_receiver(
         database.pool(),
     ))
     .await;

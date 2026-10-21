@@ -185,6 +185,7 @@ pub trait AppletStore: Send + Sync {
         &self,
         _applet_id: &arkret_wire::AppletId,
         _request_digest: &arkret_wire::Hash,
+        _idempotency_key: &str,
         _at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<()> {
         Err(super::PersistenceError::Internal(
@@ -194,16 +195,19 @@ pub trait AppletStore: Send + Sync {
 }
 
 /// Internal immutable delivery record written with its accepted authoring unit.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AppletAuthoringCompletion {
     pub applet_id: arkret_wire::AppletId,
+    pub realm_id: arkret_wire::RealmId,
+    pub actor_id: arkret_wire::ActorId,
+    pub creation_ref: arkret_wire::CommittedEventRef,
     pub request_digest: arkret_wire::Hash,
     pub source_id: arkret_wire::DidCoreId,
     pub destination_id: arkret_wire::DidCoreId,
     pub endpoint: String,
     pub idempotency_key: String,
-    pub context: arkret_models_integration::AppletManagedActorAuthoringContext,
-    pub projection_attestation: arkret_models_identity::PrincipalResolutionProjectionAttestation,
+    pub context: Option<arkret_models_integration::AppletManagedActorAuthoringContext>,
+    pub delivery_key_digest: Option<arkret_wire::Hash>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

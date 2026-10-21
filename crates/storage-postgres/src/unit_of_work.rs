@@ -3271,6 +3271,13 @@ async fn commit_prepared_event_inner(
         }
     }
     if matches!(authority_write, AuthorityCommitWriteOutcome::Committed) {
+        crate::boxed_future(|| {
+            crate::mls_group_current_results::require_fresh_claims_in_connection(
+                conn,
+                &request.authority_commit,
+            )
+        })
+        .await?;
         if matches!(
             event.kind,
             arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit

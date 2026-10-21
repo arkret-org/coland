@@ -6,9 +6,9 @@ use arkret_models_collaboration::governance::grant_constraint::{
     CapabilitySubject, GrantConstraintKind, GrantConstraintSubkind,
 };
 use arkret_models_integration::AppletRegistrationPayload;
-use arkret_wire::{ActorId, Event, EventId, EventKind, GrantId};
+use arkret_wire::{ActorId, Event, EventKind, GrantId};
 use coland_storage::{AppletEventProducerGuard, PersistenceError, PersistenceResult};
-use diesel::sql_types::{Binary, Jsonb, Text};
+use diesel::sql_types::{Jsonb, Text};
 use diesel::{OptionalExtension as _, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::Value;
@@ -22,11 +22,6 @@ use crate::capability_grant_current_results::{
 struct ValueRow {
     #[diesel(sql_type=Jsonb)]
     value: Value,
-}
-#[derive(diesel::QueryableByName)]
-struct EventRow {
-    #[diesel(sql_type=Jsonb)]
-    envelope: Value,
 }
 fn denied(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!("failed_precondition: {detail}"))
@@ -777,26 +772,6 @@ pub(crate) async fn require_source_global_refusals(
         _ => {}
     }
     Ok(accepted)
-}
-
-async fn accepted_event(conn: &mut AsyncPgConnection, id: &EventId) -> PersistenceResult<Event> {
-    let row=sql_query("SELECT e.envelope FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.id=$1 AND e.state='committed' AND c.realm_id=e.realm_id")
-        .bind::<Binary,_>(id.token_bytes().to_vec()).get_result::<EventRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
-        .ok_or_else(||denied("managed identity anchor has no accepted Event/Commit"))?;
-    serde_json::from_value(row.envelope).map_err(PersistenceError::database)
-}
-pub(crate) fn exact_ref(event: &Event, role: &str) -> PersistenceResult<EventId> {
-    let refs = event
-        .semantic_refs
-        .iter()
-        .filter(|reference| reference.role == role)
-        .collect::<Vec<_>>();
-    if refs.len() != 1 || !refs[0].critical {
-        return Err(denied(
-            "managed identity requires one exact critical anchor",
-        ));
-    }
-    refs[0].id.as_str().parse().map_err(denied)
 }
 
 pub(crate) async fn require_managed_actor_in_connection(

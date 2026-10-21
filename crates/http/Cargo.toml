@@ -59,7 +59,6 @@ bs58.workspace = true
 bytes.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 ed25519-dalek.workspace = true
-floria-contracts.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 hmac.workspace = true

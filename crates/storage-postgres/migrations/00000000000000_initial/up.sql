@@ -617,25 +617,29 @@ CREATE INDEX applet_transactions_received_idx ON public.applet_transactions USIN
 
 CREATE TABLE public.applet_authoring_completions (
     applet_id text NOT NULL,
+    realm_id text NOT NULL,
+    actor_id jsonb NOT NULL,
+    creation_ref jsonb NOT NULL,
     request_digest text NOT NULL,
     source_id text NOT NULL,
     destination_id text NOT NULL,
     endpoint text NOT NULL,
     idempotency_key text NOT NULL,
-    context jsonb NOT NULL,
-    projection_attestation jsonb NOT NULL,
+    context jsonb,
+    delivery_key_digest text,
+    next_attempt_at timestamp with time zone,
     accepted_at timestamp with time zone NOT NULL,
     delivered_at timestamp with time zone,
     PRIMARY KEY (applet_id, request_digest)
 );
 
 CREATE INDEX applet_authoring_completions_pending_idx
-    ON public.applet_authoring_completions (accepted_at)
+    ON public.applet_authoring_completions (next_attempt_at, accepted_at)
     WHERE delivered_at IS NULL;
 
-CREATE INDEX applet_authoring_completions_genesis_idx
+CREATE INDEX applet_authoring_completions_creation_idx
     ON public.applet_authoring_completions
-    ((context#>>'{committed_request,managed_actor_bundle,pcr_genesis_event,event_id}'));
+    ((creation_ref->>'event_id'));
 
 CREATE TABLE public.applet_authoring_previews (
     subject_key text NOT NULL,

@@ -477,12 +477,13 @@ impl crate::events::AppletPort for PersistenceEventReader {
         &self,
         applet_id: &arkret_wire::AppletId,
         request_digest: &arkret_wire::Hash,
+        idempotency_key: &str,
         at: chrono::DateTime<chrono::Utc>,
     ) -> crate::ServiceResult<()> {
         Ok(self
             .0
             .applets()
-            .acknowledge_authoring_completion(applet_id, request_digest, at)
+            .acknowledge_authoring_completion(applet_id, request_digest, idempotency_key, at)
             .await?)
     }
     async fn admit_applet_authoring_unit(

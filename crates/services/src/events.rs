@@ -524,6 +524,7 @@ pub trait AppletPort: Send + Sync {
         &self,
         _applet_id: &arkret_wire::AppletId,
         _request_digest: &arkret_wire::Hash,
+        _idempotency_key: &str,
         _at: DateTime<Utc>,
     ) -> ServiceResult<()> {
         Err(coland_storage::PersistenceError::Internal(
@@ -1152,10 +1153,11 @@ impl EventQueryService {
         &self,
         applet_id: &arkret_wire::AppletId,
         request_digest: &arkret_wire::Hash,
+        idempotency_key: &str,
         at: DateTime<Utc>,
     ) -> ServiceResult<()> {
         self.applets
-            .acknowledge_applet_authoring_completion(applet_id, request_digest, at)
+            .acknowledge_applet_authoring_completion(applet_id, request_digest, idempotency_key, at)
             .await
     }
 

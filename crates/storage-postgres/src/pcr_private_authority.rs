@@ -96,6 +96,28 @@ pub(crate) async fn require_transferable(
         .map_err(refused)
 }
 
+/// A stored current tuple cannot grant a managed Agent a foreign tenure.
+/// Fresh genesis has no accepted original yet and is checked by its native unit.
+pub(crate) async fn validate_agent_current(
+    conn: &mut AsyncPgConnection,
+    current: &coland_storage::CurrentRealmAuthority,
+) -> PersistenceResult<()> {
+    #[derive(diesel::QueryableByName)]
+    struct AgentOrigin {
+        #[diesel(sql_type = Bool)]
+        present: bool,
+    }
+    let origin = sql_query("SELECT EXISTS(SELECT 1 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',$1::text) AND c.stream_position=0 AND e.kind='ak.realm.create' AND e.state='committed' AND e.envelope#>>'{payload,object,purpose}'='agent_control') AS present")
+        .bind::<Text,_>(current.realm_id.as_str()).get_result::<AgentOrigin>(&mut *conn).await.map_err(PersistenceError::database)?;
+    if origin.present {
+        accepted_governance(conn, &current.realm_id)
+            .await?
+            .validate_current(&current.service_id, current.generation)
+            .map_err(refused)?;
+    }
+    Ok(())
+}
+
 /// The supported native export is deliberately closed. A PCR with a domain
 /// requiring an additional operational archive refuses before its change
 /// freezes the old authority, rather than activating a partial private copy.
@@ -229,7 +251,8 @@ fn unavailable(detail: impl std::fmt::Display) -> PersistenceError {
 }
 
 /// Acquire this before any holder account, policy, quota or private-cell lock.
-/// Human stays at its Account Station; only proven non-Human governance can split.
+/// Human and user-managed Agent PCRs stay at their original Account Station.
+/// Only independently accepted Organization governance can split from hosting.
 pub(crate) async fn lock_holder(
     conn: &mut AsyncPgConnection,
     holder: &AccountId,

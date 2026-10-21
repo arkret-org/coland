@@ -30,17 +30,17 @@ use super::{
     stream_key, to_i64,
 };
 
-/// A valid source signature does not authorize a forbidden governance change.
-/// Resolve fixed governance from accepted originals or the verified since-join
-/// genesis, before a receipt hit, Full upgrade or remote-authority write.
-async fn require_replica_governance_eligibility(
+/// Resolve governance eligibility from accepted originals or verified since-join
+/// genesis. This purpose-only gate also applies to historical receipts; it does
+/// not re-run membership, lifecycle or producer admission.
+pub(super) async fn require_replica_governance_eligibility(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
 ) -> Result<(), PgTransactionError> {
     if event.kind == arkret_wire::EventKind::RealmGovernanceStationChange {
         if locked_authority(conn, &event.realm_id).await?.is_none() {
             return Err(crate::pcr_private_authority::refused(
-                "replicated governance change has no accepted inception authority",
+                "governance change has no accepted inception authority",
             )
             .into());
         }

@@ -3930,7 +3930,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 .execute(&mut *conn)
                 .await?;
             if event.kind == arkret_wire::EventKind::RealmGovernanceStationChange {
-                crate::pcr_private_authority::require_transferable(conn, &event.realm_id).await?;
+                replica::require_replica_governance_eligibility(conn, event).await?;
             }
             if crate::direct_conversation_admission::direct_conversation_realm_in_connection(
                 conn,

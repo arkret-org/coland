@@ -352,11 +352,14 @@ pub(crate) async fn validate_installed_governance(
         #[diesel(sql_type = Bool)]
         has_handoffs: bool,
         #[diesel(sql_type = Bool)]
-        has_inception_commit: bool,
+        has_inception_original: bool,
     }
-    let row = sql_query("SELECT a.generation,a.service_id,EXISTS(SELECT 1 FROM realm_authority_handoffs h WHERE h.realm_id=a.realm_id) AS has_handoffs,EXISTS(SELECT 1 FROM realm_commits c WHERE c.realm_id=a.realm_id AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',a.realm_id) AND c.stream_position=0) AS has_inception_commit FROM realm_authorities a WHERE a.realm_id=$1")
+    let row = sql_query("SELECT a.generation,a.service_id,EXISTS(SELECT 1 FROM realm_authority_handoffs h WHERE h.realm_id=a.realm_id) AS has_handoffs,EXISTS(SELECT 1 FROM realm_commits c WHERE c.realm_id=a.realm_id AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',a.realm_id) AND c.stream_position=0 AND c.event_pk IS NOT NULL) AS has_inception_original FROM realm_authorities a WHERE a.realm_id=$1")
         .bind::<Text,_>(realm.as_str()).get_result::<Current>(&mut *conn).await.map_err(PersistenceError::database)?;
-    let governance = if row.has_inception_commit {
+    // A withheld position-zero Commit contains no Genesis Event. If a Full
+    // original is present, however, its corruption must never fall back to the
+    // retained snapshot's genesis current.
+    let governance = if row.has_inception_original {
         accepted_governance(conn, realm).await?
     } else {
         accepted_replica_governance(conn, realm).await?

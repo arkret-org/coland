@@ -3622,7 +3622,7 @@ async fn assert_direct_replica_governance_fixed(
     };
     let receipt = coland_storage::IdempotencyRecord {
         authenticated_actor: ActorId::service(pair.station.clone()),
-        operation_id: arkret_wire::OperationId::PEER_EVENTS_COMMAND_SUBMIT_V1.into(),
+        operation_id: arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1.into(),
         idempotency_key: format!("direct-change-refused:{}", transaction.event.event_id),
         request_hash: fixture_hash('d').to_string(),
         response_status: 200,
@@ -3636,6 +3636,12 @@ async fn assert_direct_replica_governance_fixed(
     };
     let before = governance_footprint(member_pool).await;
     for _ in 0..2 {
+        let error = member
+            .direct_conversation_admission(&replica.event)
+            .await
+            .unwrap_err();
+        direct_transfer_refused(&error);
+        assert_eq!(governance_footprint(member_pool).await, before);
         let error = member
             .install_committed_replica(&replica)
             .await
@@ -3668,6 +3674,15 @@ async fn assert_direct_replica_governance_fixed(
         pool: unknown_pool.clone(),
     };
     let absent_before = governance_footprint(&unknown_pool).await;
+    let error = unknown
+        .direct_conversation_admission(&replica.event)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, PersistenceError::Conflict(ref detail) if detail.starts_with("failed_precondition:")),
+        "{error}"
+    );
+    assert_eq!(governance_footprint(&unknown_pool).await, absent_before);
     let error = unknown
         .install_committed_replica(&replica)
         .await

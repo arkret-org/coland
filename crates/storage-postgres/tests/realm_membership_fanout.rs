@@ -3291,6 +3291,15 @@ async fn collaboration_governance_change_replica_case() {
         .await
         .unwrap();
     let replica = replica(&unit, &change, false);
+    let before = governance_gate_footprint(&member_pool).await;
+    assert_eq!(
+        member
+            .direct_conversation_admission(&replica.event)
+            .await
+            .unwrap(),
+        coland_storage::DirectConversationAdmissionCut::NotDirectConversation,
+    );
+    assert_eq!(governance_gate_footprint(&member_pool).await, before);
     assert_eq!(
         member.install_committed_replica(&replica).await.unwrap(),
         CommittedReplicaOutcome::Stored
@@ -3306,6 +3315,148 @@ async fn collaboration_governance_change_replica_case() {
         .unwrap();
     assert_eq!(held.event, replica.event);
     assert_eq!(held.commit, replica.commit);
+    // Its original expected head is now historical. Eligibility must not
+    // re-run the old CAS, producer admission or present-day lifecycle gates.
+    let before = governance_gate_footprint(&member_pool).await;
+    for _ in 0..2 {
+        assert_eq!(
+            member
+                .direct_conversation_admission(&replica.event)
+                .await
+                .unwrap(),
+            coland_storage::DirectConversationAdmissionCut::NotDirectConversation,
+        );
+        assert_eq!(governance_gate_footprint(&member_pool).await, before);
+        assert_eq!(
+            member
+                .committed_event(&replica.event.event_id)
+                .await
+                .unwrap(),
+            Some(held.clone())
+        );
+    }
+
+    #[derive(diesel::QueryableByName)]
+    struct OriginalRow {
+        #[diesel(sql_type = Jsonb)]
+        value: serde_json::Value,
+    }
+    // Exercise retained provenance with the actual accepted source genesis
+    // Commit, first withheld and then Full. These are fault-injection copies
+    // of originals; no governance change is manufactured as accepted state.
+    let mut source_conn = pool.get().await.unwrap();
+    let genesis_commit =
+        diesel::sql_query("SELECT to_jsonb(c) AS value FROM realm_commits c WHERE commit_id=$1")
+            .bind::<Text, _>(unit.transactions[0].commit.commit_id.as_str())
+            .get_result::<OriginalRow>(&mut source_conn)
+            .await
+            .unwrap()
+            .value;
+    let genesis_event = diesel::sql_query("SELECT to_jsonb(e) AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE c.commit_id=$1")
+        .bind::<Text,_>(unit.transactions[0].commit.commit_id.as_str())
+        .get_result::<OriginalRow>(&mut source_conn).await.unwrap().value;
+    drop(source_conn);
+    let mut conn = member_pool.get().await.unwrap();
+    diesel::sql_query("INSERT INTO realm_commits SELECT (jsonb_populate_record(NULL::realm_commits,$1 || jsonb_build_object('event_pk',NULL))).*")
+        .bind::<Jsonb,_>(&genesis_commit).execute(&mut conn).await.unwrap();
+    drop(conn);
+    let before = governance_gate_footprint(&member_pool).await;
+    assert_eq!(
+        member
+            .direct_conversation_admission(&replica.event)
+            .await
+            .unwrap(),
+        coland_storage::DirectConversationAdmissionCut::NotDirectConversation
+    );
+    assert_eq!(governance_gate_footprint(&member_pool).await, before);
+
+    #[derive(diesel::QueryableByName)]
+    struct OriginalPk {
+        #[diesel(sql_type = BigInt)]
+        pk: i64,
+    }
+    let mut conn = member_pool.get().await.unwrap();
+    let original_pk = diesel::sql_query("INSERT INTO canonical_events OVERRIDING USER VALUE SELECT (jsonb_populate_record(NULL::canonical_events,$1 || jsonb_build_object('realm_pk',NULL))).* RETURNING pk")
+        .bind::<Jsonb,_>(&genesis_event).get_result::<OriginalPk>(&mut conn).await.unwrap().pk;
+    diesel::sql_query("UPDATE realm_commits SET event_pk=$2 WHERE commit_id=$1")
+        .bind::<Text, _>(unit.transactions[0].commit.commit_id.as_str())
+        .bind::<BigInt, _>(original_pk)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    assert_eq!(
+        member
+            .direct_conversation_admission(&replica.event)
+            .await
+            .unwrap(),
+        coland_storage::DirectConversationAdmissionCut::NotDirectConversation
+    );
+    let mut conn = member_pool.get().await.unwrap();
+    diesel::sql_query("UPDATE realm_commits SET commit_json=jsonb_set(commit_json,'{event_ref}',to_jsonb($2::text)) WHERE commit_id=$1")
+        .bind::<Text,_>(unit.transactions[0].commit.commit_id.as_str())
+        .bind::<Text,_>(join.authority_commit.event.event_id.as_str()).execute(&mut conn).await.unwrap();
+    drop(conn);
+    let before = governance_gate_footprint(&member_pool).await;
+    let error = member
+        .direct_conversation_admission(&replica.event)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, coland_storage::PersistenceError::Conflict(ref detail) if detail.starts_with("failed_precondition:")),
+        "{error}"
+    );
+    assert_eq!(governance_gate_footprint(&member_pool).await, before);
+    let mut conn = member_pool.get().await.unwrap();
+    diesel::sql_query("UPDATE realm_commits SET commit_json=$2 WHERE commit_id=$1")
+        .bind::<Text, _>(unit.transactions[0].commit.commit_id.as_str())
+        .bind::<Jsonb, _>(&genesis_commit["commit_json"])
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    assert_eq!(
+        member
+            .direct_conversation_admission(&replica.event)
+            .await
+            .unwrap(),
+        coland_storage::DirectConversationAdmissionCut::NotDirectConversation
+    );
+    assert_eq!(
+        member
+            .committed_event(&replica.event.event_id)
+            .await
+            .unwrap(),
+        Some(held)
+    );
+}
+
+async fn governance_gate_footprint(pool: &PgPool) -> serde_json::Value {
+    #[derive(diesel::QueryableByName)]
+    struct Table {
+        #[diesel(sql_type = Text)]
+        name: String,
+    }
+    #[derive(diesel::QueryableByName)]
+    struct Rows {
+        #[diesel(sql_type = Jsonb)]
+        value: serde_json::Value,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let tables = diesel::sql_query(
+        "SELECT tablename AS name FROM pg_tables WHERE schemaname='public' ORDER BY tablename",
+    )
+    .load::<Table>(&mut conn)
+    .await
+    .unwrap();
+    let mut result = serde_json::Map::new();
+    for table in tables {
+        let quoted = table.name.replace('"', "\"\"");
+        let rows = diesel::sql_query(format!("SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) AS value FROM public.\"{quoted}\" t"))
+            .get_result::<Rows>(&mut conn).await.unwrap();
+        result.insert(table.name, rows.value);
+    }
+    serde_json::Value::Object(result)
 }
 
 /// Two real Stations preserve the original governance signature while the

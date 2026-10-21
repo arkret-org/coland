@@ -233,6 +233,27 @@ pub(super) fn validate_replay_event_identity(event: &Event) -> ServiceResult<()>
     Ok(())
 }
 
+/// An immutable inception restriction is not waived by an accepted receipt.
+/// Keep this gate separate from today's producer, ACL and lifecycle checks.
+pub(super) async fn require_governance_change_eligibility(
+    state: &AppState,
+    event: &Event,
+) -> ServiceResult<()> {
+    if event.kind == arkret_wire::EventKind::RealmGovernanceStationChange {
+        if let coland_storage::DirectConversationAdmissionCut::Refused(code) = state
+            .authority_commits()
+            .direct_conversation_admission(event)
+            .await?
+        {
+            return Err(ServiceError::Conflict(format!(
+                "{}: governance change is refused by immutable Realm inception",
+                code.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The original outcome of an exact duplicate Event, before any producer,
 /// evidence freshness or admission check runs again.
 pub(super) async fn exact_replay(
@@ -254,6 +275,7 @@ pub(super) async fn exact_replay(
         ));
     }
     if let Some(commit) = existing.committed {
+        require_governance_change_eligibility(state, event).await?;
         return Ok(Some(AuthoritySubmitOutcome::Accepted {
             status: AuthorityCommitStatus::Duplicate,
             commit,

@@ -1298,10 +1298,8 @@ CREATE TABLE public.contacts (
     request_receipts jsonb DEFAULT '[]'::jsonb NOT NULL,
     request_mirror_receipts jsonb DEFAULT '[]'::jsonb NOT NULL,
     contact_round_evidence jsonb,
-    -- Append-only verified basis snapshots preserve the full glare/recontact
-    -- lineage while `contact_round_evidence` remains the current accepted head.
-    contact_round_evidence_history jsonb DEFAULT '[]'::jsonb NOT NULL,
-    control_outcomes jsonb DEFAULT '[]'::jsonb NOT NULL,
+    -- Bounded private current: fixed first identity, original heads and grants.
+    current_state jsonb DEFAULT '{}'::jsonb NOT NULL,
     response_event_ref bytea CHECK (octet_length(response_event_ref) = 33),
     tombstone_event_ref bytea CHECK (octet_length(tombstone_event_ref) = 33),
     message text,
@@ -1310,6 +1308,132 @@ CREATE TABLE public.contacts (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+CREATE UNIQUE INDEX contacts_exact_pair_idx ON public.contacts
+    (LEAST(requester_id,target_id),GREATEST(requester_id,target_id));
+
+-- Exact history is indexed independently; the contacts row remains bounded.
+CREATE TABLE public.contact_round_closures (
+    trust_domain_id text NOT NULL,
+    holder jsonb NOT NULL,
+    peer jsonb NOT NULL,
+    contact_round_id text NOT NULL,
+    material jsonb NOT NULL,
+    PRIMARY KEY (trust_domain_id, holder, peer, contact_round_id)
+);
+CREATE TABLE public.contact_scope_intervals (
+    trust_domain_id text NOT NULL,
+    holder jsonb NOT NULL,
+    peer jsonb NOT NULL,
+    grant_event_ref text NOT NULL,
+    contact_scope text NOT NULL,
+    contact_round_id text NOT NULL,
+    interval_json jsonb NOT NULL,
+    closed_by jsonb,
+    PRIMARY KEY (trust_domain_id, holder, peer, grant_event_ref, contact_scope)
+);
+CREATE INDEX contact_scope_intervals_open_idx ON public.contact_scope_intervals
+    (trust_domain_id, holder, peer, contact_round_id) WHERE closed_by IS NULL;
+CREATE FUNCTION public.contact_operation_holder(op jsonb) RETURNS jsonb
+LANGUAGE sql IMMUTABLE STRICT AS $$ SELECT CASE op->>'kind'
+    WHEN 'request' THEN op#>'{request_receipt,core,holder}'
+    WHEN 'response' THEN op#>'{response_receipt,request_receipt,core,peer}'
+    WHEN 'reject' THEN op#>'{reject_receipt,request_receipt,core,peer}'
+    ELSE op#>'{lineage,issuer}' END $$;
+CREATE FUNCTION public.contact_operation_peer(op jsonb) RETURNS jsonb
+LANGUAGE sql IMMUTABLE STRICT AS $$ SELECT CASE op->>'kind'
+    WHEN 'request' THEN op#>'{request_receipt,core,peer}'
+    WHEN 'response' THEN op#>'{response_receipt,request_receipt,core,holder}'
+    WHEN 'reject' THEN op#>'{reject_receipt,request_receipt,core,holder}'
+    ELSE op#>'{lineage,peer}' END $$;
+CREATE FUNCTION public.index_contact_current() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE direction jsonb; op jsonb; holder_value jsonb; peer_value jsonb;
+    domain_value text; closure jsonb; instance jsonb; grant_op jsonb;
+    basis jsonb; previous_direction jsonb; previous_instance jsonb; previous_slot jsonb; next_slot jsonb;
+BEGIN
+    IF TG_OP='UPDATE' AND OLD.current_state->'initial_identity' IS NOT NULL
+       AND OLD.current_state->'initial_identity'<>'null'::jsonb
+       AND NEW.current_state->'initial_identity' IS DISTINCT FROM OLD.current_state->'initial_identity'
+    THEN RAISE EXCEPTION 'Contact immutable first identity changed'; END IF;
+    IF jsonb_array_length(NEW.request_slot_states)>2 THEN RAISE EXCEPTION 'Contact observed directions exceed bound'; END IF;
+    IF TG_OP='UPDATE' THEN
+        FOR previous_slot IN SELECT value FROM jsonb_array_elements(OLD.request_slot_states) LOOP
+            SELECT value INTO next_slot FROM jsonb_array_elements(NEW.request_slot_states) WHERE value->'owner_id'=previous_slot->'owner_id' LIMIT 1;
+            IF next_slot IS NULL OR next_slot->'peer_id' IS DISTINCT FROM previous_slot->'peer_id'
+               OR (next_slot->>'version')::bigint < (previous_slot->>'version')::bigint
+               OR ((next_slot->>'version')::bigint = (previous_slot->>'version')::bigint AND
+                   (next_slot->'head_event_ref' IS DISTINCT FROM previous_slot->'head_event_ref'
+                    OR (previous_slot->>'operation_digest' IS NOT NULL AND next_slot->'operation_digest' IS DISTINCT FROM previous_slot->'operation_digest')))
+            THEN RAISE EXCEPTION 'Contact immutable observed cursor changed or regressed'; END IF;
+        END LOOP;
+    END IF;
+    IF jsonb_array_length(COALESCE(NEW.current_state->'directions','[]'::jsonb))>2
+    THEN RAISE EXCEPTION 'Contact current directions exceed bound'; END IF;
+    IF TG_OP='UPDATE' AND OLD.current_state->>'initial_root_floor' IS NOT NULL
+       AND NEW.current_state->>'initial_root_floor' IS DISTINCT FROM OLD.current_state->>'initial_root_floor'
+    THEN RAISE EXCEPTION 'Contact observed first identity changed'; END IF;
+    op:=NEW.current_state->'observed_scope_update';
+    IF TG_OP='UPDATE' AND op IS NOT NULL AND op<>'null'::jsonb THEN
+        IF op->>'kind'<>'scope_update' THEN RAISE EXCEPTION 'Contact observation must be original scope update'; END IF;
+        holder_value:=contact_operation_holder(op); peer_value:=contact_operation_peer(op);
+        domain_value:=op#>>'{lineage,trust_domain_id}';
+        IF op#>>'{lineage,contact_round_id}'=OLD.current_state#>>'{round_basis,contact_round_id}' THEN
+            SELECT value INTO previous_direction FROM jsonb_array_elements(COALESCE(OLD.current_state->'directions','[]'::jsonb)) WHERE contact_operation_holder(value->'head_operation')=holder_value LIMIT 1;
+            FOR previous_instance IN SELECT value FROM jsonb_array_elements(COALESCE(previous_direction->'scope_instances','[]'::jsonb)) LOOP
+                SELECT value INTO grant_op FROM jsonb_array_elements(previous_direction->'scope_grants') WHERE value#>>'{signed_event,event_id}'=previous_instance->>'grant_event_ref' LIMIT 1;
+                IF (grant_op#>>'{signed_event,payload,version}')::bigint < (op#>>'{lineage,version}')::bigint
+                   AND NOT (op#>'{lineage,granted_to_peer_scopes}') ? (previous_instance->>'contact_scope') THEN
+                    UPDATE contact_scope_intervals SET closed_by=op WHERE trust_domain_id=domain_value AND holder=holder_value AND peer=peer_value AND grant_event_ref=previous_instance->>'grant_event_ref' AND contact_scope=previous_instance->>'contact_scope' AND closed_by IS NULL;
+                END IF;
+            END LOOP;
+            previous_direction:=NULL;
+        END IF;
+    END IF;
+    closure:=NEW.current_state->'observed_closure';
+    IF closure IS NOT NULL AND closure<>'null'::jsonb THEN
+        domain_value:=closure#>>'{operation,lineage,trust_domain_id}';
+        holder_value:=contact_operation_holder(closure->'operation');peer_value:=contact_operation_peer(closure->'operation');
+        IF EXISTS(SELECT 1 FROM contact_round_closures WHERE trust_domain_id=domain_value AND holder=holder_value AND peer=peer_value AND contact_round_id=closure->>'contact_round_id' AND material<>closure) THEN RAISE EXCEPTION 'Contact conflicting original closure'; END IF;
+        INSERT INTO contact_round_closures VALUES(domain_value,holder_value,peer_value,closure->>'contact_round_id',closure) ON CONFLICT DO NOTHING;
+        UPDATE contact_scope_intervals SET closed_by=closure->'operation' WHERE trust_domain_id=domain_value AND ((holder=holder_value AND peer=peer_value) OR (holder=peer_value AND peer=holder_value)) AND contact_round_id=closure->>'contact_round_id' AND closed_by IS NULL;
+    END IF;
+    basis:=NEW.current_state->'round_basis';
+    FOR direction IN SELECT value FROM jsonb_array_elements(COALESCE(NEW.current_state->'directions','[]'::jsonb)) LOOP
+        op:=direction->'head_operation';
+        holder_value:=contact_operation_holder(op); peer_value:=contact_operation_peer(op);
+        domain_value:=op#>>'{signed_event,payload,trust_domain_id}';
+        IF jsonb_array_length(direction->'scope_instances')>5 OR jsonb_array_length(direction->'scope_grants')>5
+        THEN RAISE EXCEPTION 'Contact current scopes exceed bound'; END IF;
+        IF TG_OP='UPDATE' THEN
+            SELECT value INTO previous_direction FROM jsonb_array_elements(COALESCE(OLD.current_state->'directions','[]'::jsonb)) WHERE contact_operation_holder(value->'head_operation')=holder_value LIMIT 1;
+            IF (previous_direction#>>'{head_operation,signed_event,payload,version}')::bigint=(op#>>'{signed_event,payload,version}')::bigint
+               AND previous_direction->'head_operation' IS DISTINCT FROM op
+            THEN RAISE EXCEPTION 'Contact same version changes immutable original'; END IF;
+        END IF;
+        closure:=direction->'closed_round';
+        IF closure IS NOT NULL AND closure<>'null'::jsonb THEN
+            INSERT INTO contact_round_closures VALUES(domain_value,contact_operation_holder(closure->'operation'),contact_operation_peer(closure->'operation'),closure->>'contact_round_id',closure) ON CONFLICT DO NOTHING;
+            UPDATE contact_scope_intervals SET closed_by=closure->'operation' WHERE trust_domain_id=domain_value AND ((holder=holder_value AND peer=peer_value) OR (holder=peer_value AND peer=holder_value)) AND contact_round_id=closure->>'contact_round_id' AND closed_by IS NULL;
+        END IF;
+        IF basis IS NOT NULL AND basis<>'null'::jsonb THEN
+            FOR instance IN SELECT value FROM jsonb_array_elements(direction->'scope_instances') LOOP
+                SELECT value INTO grant_op FROM jsonb_array_elements(direction->'scope_grants') WHERE value#>>'{signed_event,event_id}'=instance->>'grant_event_ref' LIMIT 1;
+                IF grant_op IS NULL THEN RAISE EXCEPTION 'Contact scope origin missing'; END IF;
+                INSERT INTO contact_scope_intervals VALUES(domain_value,holder_value,peer_value,instance->>'grant_event_ref',instance->>'contact_scope',basis->>'contact_round_id',jsonb_build_object('contact_scope',instance->'contact_scope','grant',grant_op,'round',basis,'round_events',NEW.current_state->'round_events'),NULL) ON CONFLICT DO NOTHING;
+            END LOOP;
+        END IF;
+        IF previous_direction IS NOT NULL AND op->>'kind' IN ('scope_update','tombstone') AND previous_direction->'head_operation' IS DISTINCT FROM op THEN
+            FOR previous_instance IN SELECT value FROM jsonb_array_elements(previous_direction->'scope_instances') LOOP
+                IF NOT EXISTS(SELECT 1 FROM jsonb_array_elements(direction->'scope_instances') instance_value WHERE instance_value=previous_instance) THEN
+                    UPDATE contact_scope_intervals SET closed_by=op WHERE trust_domain_id=domain_value AND holder=holder_value AND peer=peer_value AND grant_event_ref=previous_instance->>'grant_event_ref' AND contact_scope=previous_instance->>'contact_scope' AND closed_by IS NULL;
+                END IF;
+            END LOOP;
+        END IF;
+        previous_direction:=NULL;
+    END LOOP;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER contact_current_index AFTER INSERT OR UPDATE OF current_state ON public.contacts FOR EACH ROW EXECUTE FUNCTION public.index_contact_current();
 
 ALTER TABLE ONLY public.contacts
     ADD CONSTRAINT contacts_requester_target_key UNIQUE (requester_id, target_id);

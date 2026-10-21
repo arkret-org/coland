@@ -241,6 +241,22 @@ pub struct ConsentService {
 
 #[async_trait]
 pub trait ContactPort: Send + Sync {
+    async fn scope_intervals(
+        &self,
+        domain: &arkret_wire::TrustDomainId,
+        holder: &arkret_models_collaboration::contact_operations::ContactPeer,
+        peer: &arkret_models_collaboration::contact_operations::ContactPeer,
+        grants: &[arkret_wire::EventId],
+    ) -> ServiceResult<
+        Vec<arkret_models_collaboration::contact_operations::ContactHistoricalScopeInterval>,
+    >;
+    async fn known_round_closure(
+        &self,
+        domain: &arkret_wire::TrustDomainId,
+        holder: &arkret_models_collaboration::contact_operations::ContactPeer,
+        peer: &arkret_models_collaboration::contact_operations::ContactPeer,
+        round: &arkret_wire::Hash,
+    ) -> ServiceResult<Option<arkret_models_collaboration::contact_operations::ContactRoundClosure>>;
     async fn save_contact_with_result(
         &self,
         expected_updated_at: DateTime<Utc>,
@@ -315,6 +331,31 @@ impl ContactService {
         }
     }
 
+    pub async fn scope_intervals(
+        &self,
+        domain: &arkret_wire::TrustDomainId,
+        holder: &arkret_models_collaboration::contact_operations::ContactPeer,
+        peer: &arkret_models_collaboration::contact_operations::ContactPeer,
+        grants: &[arkret_wire::EventId],
+    ) -> ServiceResult<
+        Vec<arkret_models_collaboration::contact_operations::ContactHistoricalScopeInterval>,
+    > {
+        self.contacts
+            .scope_intervals(domain, holder, peer, grants)
+            .await
+    }
+    pub async fn known_round_closure(
+        &self,
+        domain: &arkret_wire::TrustDomainId,
+        holder: &arkret_models_collaboration::contact_operations::ContactPeer,
+        peer: &arkret_models_collaboration::contact_operations::ContactPeer,
+        round: &arkret_wire::Hash,
+    ) -> ServiceResult<Option<arkret_models_collaboration::contact_operations::ContactRoundClosure>>
+    {
+        self.contacts
+            .known_round_closure(domain, holder, peer, round)
+            .await
+    }
     pub async fn contact_any(
         &self,
         requester_id: &arkret_wire::ActorId,

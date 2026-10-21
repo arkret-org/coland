@@ -4,7 +4,6 @@ use arkret_models_collaboration::events_payloads::contact::*;
 use arkret_wire::{DomainSeparationId, Hash};
 
 use super::*;
-use crate::ContactRequestSlotState;
 fn invalid(error: impl ToString) -> crate::PersistenceError {
     crate::PersistenceError::SchemaViolation(error.to_string())
 }
@@ -17,8 +16,8 @@ fn digest(domain: &str, value: &impl serde::Serialize) -> PersistenceResult<Hash
 impl ContactCompletionIntent {
     pub fn request_receipt_core(&self) -> PersistenceResult<RequestAcceptanceReceiptCore> {
         let ContactCompletionAction::Request {
-            slot_version,
-            slot_predecessor,
+            version,
+            predecessor_event_ref,
         } = &self.plan.action
         else {
             return Err(invalid("Contact plan is not a request"));
@@ -28,11 +27,12 @@ impl ContactCompletionIntent {
         )
         .map_err(invalid)?;
         let core = RequestAcceptanceReceiptCore {
+            trust_domain_id: payload.trust_domain_id,
             holder: self.plan.holder.clone(),
             peer: payload.peer,
-            slot_version: *slot_version,
-            slot_predecessor: slot_predecessor.clone(),
-            previous_terminal_contact_round_id: payload.previous_terminal_contact_round_id,
+            version: *version,
+            predecessor_event_ref: predecessor_event_ref.clone(),
+            initial_contact_round_id: payload.initial_contact_round_id,
             request_event_ref: self.plan.event.event_id.clone(),
             producer_signer: self.producer_signer.clone(),
             source_checkpoint: digest(
@@ -163,7 +163,7 @@ impl ContactCompletionIntent {
                     payload.peer,
                     payload.contact_round_id.clone(),
                     payload.version,
-                    None,
+                    payload.predecessor_event_ref,
                     payload.granted_to_peer_scopes,
                     false,
                 ));
@@ -244,18 +244,17 @@ impl ContactCompletionIntent {
                 "Contact completion changed its confirmed business inputs",
             ));
         }
-        if let Some((lineage, proof, peer, round, version, predecessor, scopes, terminal)) =
+        if let Some((lineage, proof, peer, round, version, predecessor, scopes, _terminal)) =
             lineage_and_proof
             && (lineage.issuer != self.plan.holder
                 || lineage.peer != peer
-                || lineage.contact_round_id != round
+                || lineage.contact_round_id.as_ref() != Some(&round)
                 || lineage.version != version
                 || lineage.predecessor_event_ref != predecessor
                 || lineage.event_ref != event.event_id
                 || lineage.producer_signer != self.producer_signer
                 || lineage.granted_to_peer_scopes != scopes
-                || lineage.terminal != terminal.then_some(true)
-                || proof.contact_round_id != round
+                || proof.contact_round_id.as_ref() != Some(&round)
                 || proof.peer != peer
                 || &proof.issuer_id != issuer)
         {
@@ -270,122 +269,98 @@ impl ContactCompletionIntent {
 }
 
 impl ContactCompletionIntent {
-    /// The request-slot CAS this plan froze, recomputed from the pre-state row
-    /// the accepting transaction holds locked.
-    ///
-    /// A request advances its owner's slot with its receipt core digest as the
-    /// new head; a normal response advances the responder's slot with its
-    /// absence digest, and its `cas_revision` is exactly the slot's accepted
-    /// Event prefix plus the consumed request (contact-and-direct-conversation.md
-    /// section 2). Every other slot, and every slot of the other Contact
-    /// commands, stays unchanged.
+    /// Recompute the lifetime operation CAS from the actual locked pre-state.
+    /// Only this holder's new committed Event advances this direction.
     pub fn validate_slot_cas(
         &self,
         pre_state: Option<&ContactRecord>,
         post_state: &ContactRecord,
     ) -> PersistenceResult<()> {
         let owner = self.plan.holder.contact_actor_id();
-        let peer = self
+        let peer: ContactPeer = serde_json::from_value(
+            self.plan
+                .event
+                .payload
+                .get("peer")
+                .cloned()
+                .ok_or_else(|| invalid("Contact peer missing"))?,
+        )
+        .map_err(invalid)?;
+        let peer = peer.contact_actor_id();
+        let before = pre_state.and_then(|record| {
+            record
+                .request_slot_states
+                .iter()
+                .find(|slot| slot.owner_id == owner && slot.peer_id == peer)
+        });
+        let after = post_state
+            .request_slot_states
+            .iter()
+            .find(|slot| slot.owner_id == owner && slot.peer_id == peer)
+            .ok_or_else(|| invalid("Contact post-state operation cursor absent"))?;
+        let version = self
             .plan
             .event
             .payload
-            .get("peer")
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| invalid("Contact operation version missing"))?;
+        let predecessor = self
+            .plan
+            .event
+            .payload
+            .get("predecessor_event_ref")
             .cloned()
-            .ok_or_else(|| invalid("Contact peer is missing"))
-            .and_then(|value| serde_json::from_value::<ContactPeer>(value).map_err(invalid))?
-            .contact_actor_id();
-        let slot = |states: &'_ [ContactRequestSlotState]| {
-            states
+            .map(serde_json::from_value::<arkret_wire::EventId>)
+            .transpose()
+            .map_err(invalid)?;
+        if version != before.map_or(1, |slot| slot.version + 1)
+            || predecessor.as_ref() != before.map(|slot| &slot.head_event_ref)
+            || after.version != version
+            || after.head_event_ref != self.plan.event.event_id
+        {
+            return Err(crate::PersistenceError::Conflict(
+                "contact_lineage_conflict: operation CAS differs from the accepting cut".into(),
+            ));
+        }
+        let other = |record: &ContactRecord| {
+            record
+                .request_slot_states
                 .iter()
-                .find(|state| state.owner_id == owner && state.peer_id == peer)
-                .cloned()
-        };
-        let others = |states: &[ContactRequestSlotState]| {
-            states
-                .iter()
-                .filter(|state| !(state.owner_id == owner && state.peer_id == peer))
+                .filter(|slot| slot.owner_id != owner || slot.peer_id != peer)
                 .cloned()
                 .collect::<Vec<_>>()
         };
-        let pre_states = pre_state
-            .map(|record| record.request_slot_states.as_slice())
-            .unwrap_or_default();
-        let pre_slot = slot(pre_states);
-        let expected_sequence = match &pre_slot {
-            Some(current) => current
-                .accepted_sequence
-                .checked_add(1)
-                .ok_or_else(|| invalid("Contact request-slot sequence is exhausted"))?,
-            None => 1,
-        };
-        let expected_predecessor = pre_slot.as_ref().map(|current| current.head_digest.clone());
-        let pre_prefix = |observed: &[arkret_wire::EventId]| match &pre_slot {
-            Some(current) => current.prefix_with(observed),
-            None => coland_domain::identity::contact_event_prefix(observed),
-        };
-        let mismatch = || {
-            crate::PersistenceError::Conflict(
-                "contact_lineage_conflict: the request-slot CAS differs from the accepting cut"
-                    .to_owned(),
-            )
-        };
-        if others(pre_states) != others(&post_state.request_slot_states) {
-            return Err(mismatch());
+        if pre_state.map(other).unwrap_or_default() != other(post_state) {
+            return Err(invalid(
+                "Contact operation changes the opposite holder cursor",
+            ));
         }
-        let post_slot = slot(&post_state.request_slot_states);
-        let expected_post = match &self.plan.action {
-            ContactCompletionAction::Request {
-                slot_version,
-                slot_predecessor,
-            } => {
-                if *slot_version != expected_sequence
-                    || slot_predecessor.as_ref() != expected_predecessor.as_ref()
-                {
-                    return Err(mismatch());
-                }
-                Some(ContactRequestSlotState {
-                    owner_id: owner.clone(),
-                    peer_id: peer.clone(),
-                    accepted_sequence: *slot_version,
-                    head_digest: self.request_core_digest()?,
-                    accepted_event_refs: pre_prefix(std::slice::from_ref(
-                        &self.plan.event.event_id,
-                    )),
-                })
-            }
-            ContactCompletionAction::Response {
-                request_receipt,
-                absence,
-            } => {
-                let cas_revision = pre_prefix(std::slice::from_ref(
-                    &request_receipt.core.request_event_ref,
+        if let ContactCompletionAction::Response {
+            request_receipt,
+            absence,
+        } = &self.plan.action
+        {
+            if absence.request_slot_owner != owner
+                || absence.version != version
+                || absence.predecessor_event_ref != predecessor
+                || absence.request_event_ref != request_receipt.core.request_event_ref
+                || absence.observed_at != self.accepted_at()?
+            {
+                return Err(invalid(
+                    "Contact normal absence differs from exact locked operation",
                 ));
-                if absence.request_slot_owner != owner
-                    || absence.cas_sequence != expected_sequence
-                    || absence.slot_predecessor.as_ref() != expected_predecessor.as_ref()
-                    || absence.cas_revision != cas_revision
-                    || absence.observed_at != self.accepted_at()?
-                {
-                    return Err(mismatch());
-                }
-                let mut accepted_event_refs = cas_revision;
-                accepted_event_refs.push(self.plan.event.event_id.clone());
-                Some(ContactRequestSlotState {
-                    owner_id: owner.clone(),
-                    peer_id: peer.clone(),
-                    accepted_sequence: absence.cas_sequence,
-                    head_digest: absence.digest().map_err(invalid)?,
-                    accepted_event_refs: coland_domain::identity::contact_event_prefix(
-                        &accepted_event_refs,
-                    ),
-                })
             }
-            ContactCompletionAction::Reject { .. }
-            | ContactCompletionAction::ScopeUpdate
-            | ContactCompletionAction::Tombstone => pre_slot,
-        };
-        if post_slot != expected_post {
-            return Err(mismatch());
+            if pre_state.is_some_and(|record| {
+                record.conflicting_contact_request_choice(
+                    &owner,
+                    &request_receipt.core.request_event_ref,
+                )
+            }) {
+                return Err(invalid(
+                    "Contact normal accept cannot consume an outgoing or glare-selected request",
+                ));
+            }
         }
         Ok(())
     }

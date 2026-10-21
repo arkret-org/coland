@@ -1,8 +1,7 @@
 //! Contact command completion keyed by the authority's committed Event ref.
 
 use arkret_models_collaboration::contact_operations::{
-    ContactAcceptedOutcome, ContactCurrentProof, ContactPeer, ContactRound,
-    ContactRoundEvidenceBundle,
+    ContactAcceptedOutcome, ContactCurrentProof,
 };
 use arkret_wire::{ActorId, Hash};
 use coland_storage::{
@@ -197,7 +196,7 @@ pub(super) async fn finalize(
     match (ready.intent.requires_delivery(), delivery) {
         (true, Some(delivery)) => {
             validate_destination(&ready.intent.plan.target, delivery)?;
-            validate_delivery_payload(&ready.intent, outcome, delivery)?;
+            validate_delivery_payload(&ready.intent, outcome, delivery, counterpart_proof)?;
         }
         (false, None) => {}
         _ => {
@@ -258,7 +257,13 @@ pub(super) async fn finalize(
         } else {
             None
         };
-        install_evidence(conn, &ready.intent, outcome, counterpart_proof).await?;
+        Box::pin(install_evidence(
+            conn,
+            &ready.intent,
+            outcome,
+            counterpart_proof,
+        ))
+        .await?;
         persist_result(
             conn,
             ready.event_digest.as_str(),
@@ -287,187 +292,285 @@ async fn install_evidence(
     outcome: &ContactAcceptedOutcome,
     counterpart_proof: Option<&ContactCurrentProof>,
 ) -> PersistenceResult<()> {
+    use arkret_models_collaboration::contact_operations::*;
     let event = &intent.plan.event;
     let peer: ContactPeer = serde_json::from_value(
         event
             .payload
             .get("peer")
             .cloned()
-            .ok_or_else(|| invalid("Contact Event omits peer"))?,
+            .ok_or_else(|| invalid("Contact peer missing"))?,
     )
     .map_err(invalid)?;
-    let holder = &event.actor_id;
-    let peer_actor = peer.contact_actor_id();
-    let mut record = crate::contacts::lock_pair_contact_in_connection(conn, holder, &peer_actor)
-        .await?
-        .ok_or_else(|| invalid("committed Contact row is absent"))?;
+    let mut record = crate::contacts::lock_pair_contact_in_connection(
+        conn,
+        &event.actor_id,
+        &peer.contact_actor_id(),
+    )
+    .await?
+    .ok_or_else(|| invalid("committed Contact row absent"))?;
     let expected = record.updated_at;
-    let head_of = |record: &coland_storage::ContactRecord, issuer: &arkret_wire::ActorId| {
-        if &record.requester_id == issuer {
-            record.request_event_ref.clone()
-        } else {
-            record.response_event_ref.clone()
-        }
-    };
-    let binds_head = |record: &coland_storage::ContactRecord, proof: &ContactCurrentProof| {
-        let issuer = if proof.peer.contact_actor_id() == record.requester_id {
-            &record.target_id
-        } else {
-            &record.requester_id
-        };
-        record.contact_round_id.as_ref() == Some(&proof.contact_round_id)
-            && head_of(record, issuer).as_ref() == Some(&proof.head_event_ref)
-    };
-    let mut mirror = None;
-    match outcome {
+    let (operation, proof) = match outcome {
         ContactAcceptedOutcome::Request {
-            request_acceptance_receipt: receipt,
+            request_acceptance_receipt,
             ..
-        } => {
-            if let Some(prior) = record
-                .request_receipts
-                .iter()
-                .find(|prior| prior.core.request_event_ref == event.event_id)
-            {
-                if prior != receipt {
-                    return Err(invalid("Contact source receipt is immutable"));
-                }
-            } else {
-                record.request_receipts.push(receipt.clone());
-            }
-            if let Some(target) = &intent.plan.local_mirror_target {
-                mirror = Some(coland_storage::ContactVerifiedMirrorRecord {
-                    target_holder_principal_id: target.clone(),
-                    request_event_id: event.event_id.to_string(),
-                    request_digest: event.event_id.event_digest().to_string(),
-                    canonical_event_bytes: arkret_canonical::canonical_json_bytes(event)
-                        .map_err(invalid)?,
-                    source_receipt: receipt.clone(),
-                    issuer_id: receipt.core.issuer_id.to_string(),
-                    verified_at: intent.accepted_at()?,
-                });
-            }
-        }
+        } => (
+            ContactOperationEvidence::Request {
+                signed_event: event.clone(),
+                request_receipt: request_acceptance_receipt.clone(),
+            },
+            None,
+        ),
         ContactAcceptedOutcome::Response {
-            normal_response_acceptance_receipt: receipt,
+            normal_response_acceptance_receipt,
             current_proof,
             ..
-        } => {
-            let payload: arkret_models_collaboration::events_payloads::contact::ContactAcceptedPayload =
-                serde_json::from_value(serde_json::to_value(&event.payload).map_err(invalid)?)
-                    .map_err(invalid)?;
-            if !binds_head(&record, current_proof) {
-                return Err(PersistenceError::Conflict(
-                    "Contact current head changed before signature publication".into(),
-                ));
+        } => (
+            ContactOperationEvidence::Response {
+                signed_event: event.clone(),
+                response_receipt: normal_response_acceptance_receipt.clone(),
+            },
+            Some(current_proof),
+        ),
+        ContactAcceptedOutcome::Reject {
+            reject_acceptance_receipt,
+            ..
+        } => (
+            ContactOperationEvidence::Reject {
+                signed_event: event.clone(),
+                reject_receipt: reject_acceptance_receipt.clone(),
+            },
+            None,
+        ),
+        ContactAcceptedOutcome::ScopeUpdate {
+            lineage,
+            current_proof,
+            ..
+        } => (
+            ContactOperationEvidence::ScopeUpdate {
+                signed_event: event.clone(),
+                lineage: lineage.clone(),
+            },
+            Some(current_proof),
+        ),
+        ContactAcceptedOutcome::Tombstone {
+            lineage,
+            current_proof,
+            ..
+        } => (
+            ContactOperationEvidence::Tombstone {
+                signed_event: event.clone(),
+                lineage: lineage.clone(),
+            },
+            Some(current_proof),
+        ),
+    };
+    let cursor = record
+        .request_slot_states
+        .iter_mut()
+        .find(|slot| slot.owner_id == event.actor_id)
+        .ok_or_else(|| invalid("Contact operation cursor missing"))?;
+    if cursor.head_event_ref != event.event_id || cursor.version != operation.version() {
+        return Err(PersistenceError::Conflict(
+            "Contact head changed before source evidence publication".into(),
+        ));
+    }
+    let original_digest =
+        arkret_wire::Hash::new(arkret_canonical::canonical_sha256(&operation).map_err(invalid)?)
+            .map_err(invalid)?;
+    if cursor
+        .operation_digest
+        .as_ref()
+        .is_some_and(|known| known != &original_digest)
+    {
+        return Err(invalid(
+            "same operation version changes frozen source confirmation",
+        ));
+    }
+    cursor.operation_digest = Some(original_digest);
+    record
+        .current_state
+        .apply_confirmed(operation.clone())
+        .map_err(invalid)?;
+    let mut mirror = None;
+    if let ContactOperationEvidence::Request {
+        request_receipt, ..
+    } = &operation
+    {
+        if let Some(prior) = record
+            .request_receipts
+            .iter()
+            .find(|prior| prior.core.request_event_ref == event.event_id)
+        {
+            if prior != request_receipt {
+                return Err(invalid("Contact original source receipt immutable"));
             }
-            let mut current_proofs = vec![current_proof.clone()];
-            if let Some(counterpart) = counterpart_proof {
-                if counterpart.terminal
-                    || counterpart.peer != intent.plan.holder
-                    || !binds_head(&record, counterpart)
-                {
-                    return Err(invalid(
-                        "Contact requester proof does not bind its accepted request head",
-                    ));
-                }
-                current_proofs.push(counterpart.clone());
-            }
-            current_proofs.sort_by_key(|proof| proof.peer.contact_actor_id());
-            let mut pair = [
-                receipt.request_receipt.core.holder.contact_actor_id(),
-                receipt.request_receipt.core.peer.contact_actor_id(),
-            ];
-            if arkret_canonical::canonical_json_bytes(&pair[0]).map_err(invalid)?
-                > arkret_canonical::canonical_json_bytes(&pair[1]).map_err(invalid)?
-            {
-                pair.swap(0, 1);
-            }
-            record.contact_round_evidence = Some(ContactRoundEvidenceBundle {
-                contact_round_id: receipt.contact_round_id.clone(),
-                previous_terminal_contact_round_id: payload.previous_terminal_contact_round_id,
-                contact_round: ContactRound::Normal {
-                    sorted_pair_member_ids: pair,
-                    request_event_ref: payload.request_event_ref,
-                    request_acceptance_receipt_digest: payload.request_acceptance_receipt_digest,
-                },
-                request_receipts: vec![receipt.request_receipt.clone()],
-                normal_response_receipt: Some(receipt.clone()),
-                glare_concurrency_attestations: None,
-                current_proofs,
-                continuity_checkpoint: record
-                    .contact_round_evidence_history
-                    .iter()
-                    .find_map(|bundle| bundle.continuity_checkpoint.clone()),
+        } else {
+            record.request_receipts.push(request_receipt.clone());
+        }
+        if let Some(target) = &intent.plan.local_mirror_target {
+            mirror = Some(coland_storage::ContactVerifiedMirrorRecord {
+                target_holder_principal_id: target.clone(),
+                request_event_id: event.event_id.to_string(),
+                request_digest: event.event_id.event_digest().to_string(),
+                canonical_event_bytes: arkret_canonical::canonical_json_bytes(event)
+                    .map_err(invalid)?,
+                source_receipt: request_receipt.clone(),
+                issuer_id: request_receipt.core.issuer_id.to_string(),
+                verified_at: intent.accepted_at()?,
             });
         }
-        ContactAcceptedOutcome::ScopeUpdate { current_proof, .. }
-        | ContactAcceptedOutcome::Tombstone { current_proof, .. } => {
-            let terminal = matches!(outcome, ContactAcceptedOutcome::Tombstone { .. });
-            if record.contact_round_id.as_ref() != Some(&current_proof.contact_round_id)
-                || (!terminal && !binds_head(&record, current_proof))
-                || (terminal
-                    && record.tombstone_event_ref.as_ref() != Some(&current_proof.head_event_ref))
-            {
-                return Err(PersistenceError::Conflict(
-                    "Contact current head changed before signature publication".into(),
-                ));
-            }
-            if let Some(counterpart) = counterpart_proof {
-                let counterpart_head = head_of(&record, &peer_actor)
-                    .ok_or_else(|| invalid("Contact counterpart committed head is absent"))?;
-                if !terminal
-                    || !counterpart.terminal
-                    || counterpart.peer != intent.plan.holder
-                    || counterpart.contact_round_id != current_proof.contact_round_id
-                    || counterpart.head_event_ref != current_proof.head_event_ref
-                    || counterpart.issuer_id != *peer.delivery_station_id()
-                    || peer.delivery_station_id() != intent.plan.holder.delivery_station_id()
-                    || !counterpart
-                        .accepted_commit_event_ids
-                        .contains(&counterpart_head)
-                    || !counterpart
-                        .accepted_commit_event_ids
-                        .contains(&current_proof.head_event_ref)
-                {
-                    return Err(invalid(
-                        "Contact counterpart terminal proof changed its committed fence",
-                    ));
-                }
-            }
-            let bundle = record
-                .contact_round_evidence
-                .as_mut()
-                .ok_or_else(|| invalid("Contact original round evidence has not completed"))?;
-            bundle
-                .current_proofs
-                .retain(|proof| proof.peer != current_proof.peer);
-            bundle.current_proofs.push(current_proof.clone());
-            if let Some(counterpart) = counterpart_proof {
-                bundle
-                    .current_proofs
-                    .retain(|proof| proof.peer != counterpart.peer);
-                bundle.current_proofs.push(counterpart.clone());
-            }
-            bundle
-                .current_proofs
-                .sort_by_key(|proof| proof.peer.contact_actor_id());
-        }
-        ContactAcceptedOutcome::Reject { .. } => return Ok(()),
     }
+    if let ContactOperationEvidence::Response {
+        response_receipt, ..
+    } = &operation
+    {
+        let original = record
+            .current_state
+            .directions
+            .iter()
+            .find(|d| {
+                d.head_operation.event().event_id
+                    == response_receipt.request_receipt.core.request_event_ref
+            })
+            .ok_or_else(|| invalid("normal round original request unavailable"))?
+            .head_operation
+            .event()
+            .clone();
+        let mut pair = [
+            response_receipt
+                .request_receipt
+                .core
+                .holder
+                .contact_actor_id(),
+            response_receipt
+                .request_receipt
+                .core
+                .peer
+                .contact_actor_id(),
+        ];
+        if arkret_canonical::canonical_json_bytes(&pair[0]).map_err(invalid)?
+            > arkret_canonical::canonical_json_bytes(&pair[1]).map_err(invalid)?
+        {
+            pair.swap(0, 1);
+        }
+        let basis = ContactRoundBasis {
+            contact_round_id: response_receipt.contact_round_id.clone(),
+            contact_round: ContactRound::Normal {
+                sorted_pair_member_ids: pair,
+                request_event_ref: original.event_id.clone(),
+                request_acceptance_receipt_digest: response_receipt
+                    .request_receipt
+                    .computed_receipt_digest()
+                    .map_err(invalid)?,
+            },
+            request_receipts: vec![response_receipt.request_receipt.clone()],
+            normal_response_receipt: Some(response_receipt.clone()),
+            glare_concurrency_attestations: None,
+        };
+        record
+            .current_state
+            .establish(basis, vec![original, event.clone()])
+            .map_err(invalid)?;
+    }
+    if let ContactOperationEvidence::Tombstone { lineage, .. } = &operation {
+        record
+            .current_state
+            .close_round(ContactRoundClosure {
+                contact_round_id: lineage
+                    .contact_round_id
+                    .clone()
+                    .ok_or_else(|| invalid("tombstone round missing"))?,
+                operation: ContactTombstoneEvidence {
+                    kind: ContactTombstoneEvidenceKind::Tombstone,
+                    signed_event: event.clone(),
+                    lineage: lineage.clone(),
+                },
+            })
+            .map_err(invalid)?;
+    }
+    if let Some(proof) = proof {
+        proof.validate_shape().map_err(invalid)?;
+        let own = record
+            .current_state
+            .directions
+            .iter_mut()
+            .find(|d| d.head_operation.holder() == &intent.plan.holder)
+            .ok_or_else(|| invalid("source direction missing"))?;
+        if proof.trust_domain_id != *operation.trust_domain_id()
+            || proof.initial_contact_round_id
+                != record
+                    .current_state
+                    .initial_identity
+                    .as_ref()
+                    .map(|i| i.round.contact_round_id.clone())
+            || proof.contact_round_id
+                != record
+                    .current_state
+                    .round_basis
+                    .as_ref()
+                    .map(|r| r.contact_round_id.clone())
+            || proof.holder != intent.plan.holder
+            || proof.peer != peer
+            || proof.head_event_ref != event.event_id
+            || proof.version != operation.version()
+            || proof.scope_instances != own.scope_instances
+        {
+            return Err(invalid(
+                "source current differs from installed exact direction",
+            ));
+        }
+        own.current_proof = Some(proof.clone());
+    }
+    if let Some(proof) = counterpart_proof {
+        proof.validate_shape().map_err(invalid)?;
+        if proof.holder.delivery_station_id() != &proof.issuer_id
+            || proof.trust_domain_id != *operation.trust_domain_id()
+            || proof.initial_contact_round_id
+                != record
+                    .current_state
+                    .initial_identity
+                    .as_ref()
+                    .map(|i| i.round.contact_round_id.clone())
+            || proof.contact_round_id
+                != record
+                    .current_state
+                    .round_basis
+                    .as_ref()
+                    .map(|r| r.contact_round_id.clone())
+        {
+            return Err(invalid(
+                "additional source proof changes direction domain or fixed identity",
+            ));
+        }
+        let direction = record
+            .current_state
+            .directions
+            .iter_mut()
+            .find(|d| d.head_operation.holder() == &proof.holder)
+            .ok_or_else(|| invalid("counterpart original operation missing"))?;
+        if direction.head_operation.event().event_id != proof.head_event_ref
+            || direction.head_operation.version() != proof.version
+            || direction.scope_instances != proof.scope_instances
+        {
+            return Err(invalid("counterpart current changes original own head"));
+        }
+        direction.current_proof = Some(proof.clone());
+    }
+    record.contact_round_evidence = record.current_state.evidence_bundle().ok();
     record.updated_at = chrono::Utc::now().max(expected + chrono::Duration::microseconds(1));
-    crate::unit_of_work::commit_contact_projection(
+    Box::pin(crate::unit_of_work::commit_contact_projection(
         conn,
         None,
         coland_storage::ContactProjectionCommit {
             completion_intent: None,
-            record,
+            record: Box::new(record),
             expected_updated_at: Some(expected),
             conflict_code: "contact_lineage_conflict".into(),
             verified_mirror: mirror,
             invite_policy: None,
         },
-    )
+    ))
     .await
 }
 
@@ -568,8 +671,10 @@ fn validate_delivery_payload(
     intent: &ContactCompletionIntent,
     outcome: &arkret_models_collaboration::contact_operations::ContactAcceptedOutcome,
     delivery: &FederationOutboxRecord,
+    additional_proof: Option<&ContactCurrentProof>,
 ) -> PersistenceResult<()> {
-    let carrier = intent.finalized_carrier(outcome)?;
+    let mut carrier = intent.finalized_carrier(outcome)?;
+    if let arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::Request { current_proof, .. } = &mut carrier { *current_proof = additional_proof.cloned(); }
     let bytes = arkret_canonical::canonical_json_bytes(&carrier).map_err(invalid)?;
     if delivery.payload_json.as_bytes() != bytes.as_slice() {
         return Err(invalid(

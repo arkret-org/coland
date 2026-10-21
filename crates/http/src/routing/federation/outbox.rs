@@ -1581,55 +1581,11 @@ impl FederationDispatcher {
         )
         .await
         .map_err(|error| error.to_string())?;
-        match (&request, &outcome) {
+        match (&request,&outcome) {
             (
-                arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::Request {
-                    request_receipt,
-                    ..
-                },
-                arkret_models_collaboration::contact_operations::PeerContactSubmitOutcome::Event(
-                    event_outcome,
-                ),
-            ) => {
-                if !matches!(
-                    event_outcome.status,
-                    arkret_models_collaboration::contact_operations::PeerContactOutcome::Accepted
-                        | arkret_models_collaboration::contact_operations::PeerContactOutcome::Duplicate
-                ) || event_outcome.mirror_receipt.signed_event_ref
-                    != request_receipt.core.request_event_ref
-                    || event_outcome.mirror_receipt.signed_event_digest()
-                        != request_receipt.core.request_digest()
-                {
-                    return Err("Contact mirror receipt does not bind the outbound request".to_owned());
-                }
-                crate::routing::identity::contact_federation::validate_mirror_receipt_cryptography(
-                    &self.state,
-                    &event_outcome.mirror_receipt,
-                    row.delivery.peer_id.as_str(),
-                    "outbound_request_mirror_receipt",
-                )
-                .map_err(|error| error.to_string())?;
-                let holder_actor_id = request_receipt.core.holder.contact_actor_id();
-                let peer_actor_id = request_receipt.core.peer.contact_actor_id();
-                crate::routing::identity::contact_federation::persist_request_mirror_receipt(
-                    &self.state,
-                    &holder_actor_id,
-                    &peer_actor_id,
-                    &event_outcome.mirror_receipt,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                crate::routing::identity::contact_federation::enqueue_glare_finalize_if_ready(
-                    &self.state,
-                    &holder_actor_id,
-                    &peer_actor_id,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                Ok(())
-            }
-            (
-                arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::Response { .. }
+                arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::Request { .. }
+                    | arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::Reject { .. }
+                    | arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::Response { .. }
                     | arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::ScopeUpdate { .. }
                     | arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::Tombstone { .. },
                 arkret_models_collaboration::contact_operations::PeerContactSubmitOutcome::Event(
@@ -1645,7 +1601,7 @@ impl FederationDispatcher {
             .map_err(|error| error.to_string()),
             (
                 arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::GlareFinalize { .. }
-                    | arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::ProofRefresh { .. },
+                    | arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::CurrentRefresh { .. },
                 arkret_models_collaboration::contact_operations::PeerContactSubmitOutcome::ControlDeferred(deferred),
             ) => crate::routing::identity::contact_federation::reenqueue_deferred_contact_control(
                 &self.state,
@@ -1657,20 +1613,9 @@ impl FederationDispatcher {
             .map_err(|error| error.to_string()),
             (
                 arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::GlareFinalize { .. }
-                    | arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::ProofRefresh { .. },
+                    | arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::CurrentRefresh { .. },
                 _,
             ) => crate::routing::identity::contact_federation::accept_outbound_contact_control_outcome(
-                &self.state,
-                &request,
-                &outcome,
-                row.delivery.peer_id.as_str(),
-            )
-            .await
-            .map_err(|error| error.to_string()),
-            (
-                arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::ContinuityCheckpoint { .. },
-                _,
-            ) => crate::routing::identity::contact_federation::accept_outbound_continuity_checkpoint_outcome(
                 &self.state,
                 &request,
                 &outcome,

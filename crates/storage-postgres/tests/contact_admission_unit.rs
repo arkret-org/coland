@@ -4,7 +4,7 @@
 //! A Contact Event, its covering `RealmCommit`, the holder-private Contact row
 //! and the frozen completion intent commit in one transaction. The request-slot
 //! CAS the intent signs -- a request's slot version and predecessor, a normal
-//! response's `cas_sequence`, `slot_predecessor` and `cas_revision` -- is
+//! response's exact lifetime version and original predecessor -- is
 //! recomputed from the row that transaction locks, so a stale, foreign or
 //! rewritten observation refuses the whole unit with zero writes.
 
@@ -168,15 +168,16 @@ fn slot(
     owner: &ContactPeer,
     peer: &ContactPeer,
     sequence: u64,
-    head: Hash,
+    _head: Hash,
     refs: &[&EventId],
 ) -> ContactRequestSlotState {
     ContactRequestSlotState {
         owner_id: owner.contact_actor_id(),
         peer_id: peer.contact_actor_id(),
-        accepted_sequence: sequence,
-        head_digest: head,
-        accepted_event_refs: coland_storage::contact_event_prefix(refs.iter().copied()),
+        version: sequence,
+        head_event_ref: (*refs.last().unwrap()).clone(),
+        operation_digest: None,
+        request_choice: None,
     }
 }
 
@@ -229,6 +230,7 @@ async fn requested(database: &TestDatabase) -> Requested {
         EventKind::ContactRequested,
         &alice(),
         serde_json::json!({
+            "trust_domain_id":"ak:trust_domain:contact.test","version":1,
             "peer": bob(),
             "granted_to_peer_scopes": ["direct_message"],
             "introduction_evidence_digest": format!("sha256:{}", "e".repeat(64)),
@@ -242,8 +244,8 @@ async fn requested(database: &TestDatabase) -> Requested {
         &alice(),
         &bob(),
         ContactCompletionAction::Request {
-            slot_version: 1,
-            slot_predecessor: None,
+            version: 1,
+            predecessor_event_ref: None,
         },
         accepted_at,
     );
@@ -266,8 +268,8 @@ async fn requested(database: &TestDatabase) -> Requested {
         request_receipts: Vec::new(),
         request_mirror_receipts: Vec::new(),
         contact_round_evidence: None,
-        contact_round_evidence_history: Vec::new(),
-        control_outcomes: Vec::new(),
+        current_state: Default::default(),
+
         response_event_ref: None,
         tombstone_event_ref: None,
         message: None,
@@ -278,7 +280,7 @@ async fn requested(database: &TestDatabase) -> Requested {
     };
     request.contact_projection = Some(ContactProjectionCommit {
         completion_intent: Some(request_intent.clone()),
-        record: row.clone(),
+        record: Box::new(row.clone()),
         expected_updated_at: None,
         conflict_code: "contact_round_conflict".to_owned(),
         verified_mirror: None,
@@ -337,12 +339,13 @@ async fn response(
     )
     .unwrap();
     let mut absence = OutgoingSlotAbsenceTranscript {
+        trust_domain_id: arkret_wire::TrustDomainId::new("ak:trust_domain:contact.test").unwrap(),
+        request_event_ref: request_event.event_id.clone(),
         sorted_pair_member_ids: pair,
         request_slot_owner: bob().contact_actor_id(),
         contact_round_id: contact_round_id.clone(),
-        slot_predecessor: None,
-        cas_sequence: 1,
-        cas_revision: vec![request_event.event_id.clone()],
+        predecessor_event_ref: None,
+        version: 1,
         observed_at: arkret_canonical::normalize_timestamp_canonical(accepted_at),
         outgoing_request_state: OutgoingRequestState::Absent,
     };
@@ -354,6 +357,7 @@ async fn response(
         EventKind::ContactAccepted,
         &bob(),
         serde_json::json!({
+            "trust_domain_id":"ak:trust_domain:contact.test",
             "peer": alice(),
             "contact_round_id": contact_round_id,
             "version": 1,
@@ -384,15 +388,16 @@ async fn response(
     row.request_slot_states.push(ContactRequestSlotState {
         owner_id: bob().contact_actor_id(),
         peer_id: alice().contact_actor_id(),
-        accepted_sequence: absence.cas_sequence,
-        head_digest: absence.digest().unwrap(),
-        accepted_event_refs: coland_storage::contact_event_prefix(
-            absence.cas_revision.iter().chain([&event.event_id]),
-        ),
+        version: 1,
+        head_event_ref: event.event_id.clone(),
+        operation_digest: None,
+        request_choice: Some(coland_domain::identity::ContactRequestChoice::Normal {
+            request_event_ref: request_event.event_id.clone(),
+        }),
     });
     unit.contact_projection = Some(ContactProjectionCommit {
         completion_intent: Some(response_intent),
-        record: row,
+        record: Box::new(row),
         expected_updated_at: Some(requested.row.updated_at),
         conflict_code: "contact_lineage_conflict".to_owned(),
         verified_mirror: None,
@@ -508,11 +513,8 @@ async fn request_and_normal_response_commit_with_the_slot_cas_they_sign() {
         .iter()
         .find(|state| state.owner_id == bob().contact_actor_id())
         .unwrap();
-    assert_eq!(responder_slot.accepted_sequence, 1);
-    assert_eq!(
-        responder_slot.accepted_event_refs,
-        coland_storage::contact_event_prefix([&request_id, &response_id])
-    );
+    assert_eq!(responder_slot.version, 1);
+    assert_eq!(responder_slot.head_event_ref, response_id);
     assert_eq!(
         contacts
             .committed_completion_intents(8, None)
@@ -532,7 +534,7 @@ async fn wrong_revision_foreign_slot_and_lost_row_cas_refuse_with_zero_writes() 
     // A revision naming anything but the slot prefix plus the consumed request.
     let stale = EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [3_u8; 32]);
     let wrong_revision = response(&requested, |absence| {
-        absence.cas_revision = vec![stale.clone()];
+        absence.request_event_ref = stale.clone();
     })
     .await;
     assert!(uow.commit_event(wrong_revision.clone()).await.is_err());
@@ -548,7 +550,7 @@ async fn wrong_revision_foreign_slot_and_lost_row_cas_refuse_with_zero_writes() 
 
     // A predecessor or sequence the slot never accepted.
     let skipped = response(&requested, |absence| {
-        absence.cas_sequence = 2;
+        absence.version = 2;
     })
     .await;
     assert!(uow.commit_event(skipped.clone()).await.is_err());
@@ -597,7 +599,7 @@ async fn exact_replay_of_the_accepting_unit_installs_nothing_twice() {
 }
 
 #[tokio::test]
-async fn checkpoint_contact_cas_and_frozen_response_rollback_together_on_conflicting_result() {
+async fn current_contact_cas_and_frozen_response_rollback_together_on_conflicting_result() {
     use coland_storage::IdempotencyStore;
     let database = TestDatabase::lease().await;
     let requested = requested(&database).await;
@@ -615,8 +617,8 @@ async fn checkpoint_contact_cas_and_frozen_response_rollback_together_on_conflic
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let result = coland_storage::IdempotencyRecord {
         authenticated_actor: original.requester_id.clone(),
-        operation_id: "ak.self.contact.command.checkpoint".into(),
-        idempotency_key: "checkpoint-result-atomicity".into(),
+        operation_id: "ak.peer.contact.submit.v1".into(),
+        idempotency_key: "current-result-atomicity".into(),
         request_hash: format!("sha256:{}", "a".repeat(64)),
         response_status: 200,
         response_body: serde_json::json!({"frozen":"accepted-response"}),

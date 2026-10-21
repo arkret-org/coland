@@ -554,30 +554,36 @@ mod tests {
         .unwrap();
         let record = KeyPackageClaimRecord {
             claim_id: claim_id.as_str().to_owned(),
-            keypackage_ref: format!("sha256:{}", "1".repeat(64)),
+            keypackage_ref: arkret_canonical::sha256_digest([1]),
             actor_id: actor.clone(),
             principal_id: actor.signing_principal_id().clone(),
             device_id: None,
-            agent_id: None,
+            agent_id: Some(actor.signing_principal_id().clone()),
             agent_verification_method: Some(method.clone()),
             keypackage: "AQ".to_owned(),
-            capabilities: vec!["mls".to_owned()],
+            capabilities: vec![arkret_models_crypto::ARKRET_CONTENT_V1.to_owned()],
             device_authorize_event_id: None,
             agent_key_authorize_event_id: Some(event(14)),
             expires_at: at + chrono::TimeDelta::hours(1),
             revocation_status: None,
             last_resort: None,
         };
+        let mut claim_nonce = [0_u8; 16];
+        getrandom::fill(&mut claim_nonce).unwrap();
         let claim_request: PeerKeyPackagesClaimUnsignedRequest = serde_json::from_value(
             serde_json::json!({
-                "claim_request_id": "AQ",
+                "claim_request_id": arkret_canonical::base64url_encode(claim_nonce),
+                "target_agent_id": actor.signing_principal_id(),
+                "target_agent_verification_method": method,
+                "target_agent_key_authorize_event_id": event(14),
                 "intended_realm_id": realm_id,
                 "mls_group_id": group,
                 "claim_purpose": "realm_membership",
-                "required_capabilities": ["mls"],
-                "expires_at": arkret_canonical::format_timestamp_canonical(at + chrono::TimeDelta::hours(1)),
+                "required_capabilities": [arkret_models_crypto::ARKRET_CONTENT_V1],
+                "expires_at": arkret_canonical::format_timestamp_canonical(at + chrono::TimeDelta::minutes(5)),
             }),
         ).unwrap();
+        claim_request.validate_shape().unwrap();
         let placeholder = || KeyOperationSignature {
             kid: NonEmptyString::new(method.as_str().to_owned()).unwrap(),
             signature_algorithm: Some(NonEmptyString::new("Ed25519").unwrap()),
@@ -590,6 +596,8 @@ mod tests {
                 .unwrap(),
             source_id: station.clone(),
             destination_id: station.clone(),
+            // Account/Agent claims retain the fixed Station, without Realm authority fields.
+            claim_authority_ref: None,
             request: claim_request,
             claimed_at: at,
             expires_at: at + chrono::TimeDelta::hours(1),
@@ -601,6 +609,7 @@ mod tests {
             &peer_keypackage_claim_receipt_signing_bytes(&receipt).unwrap(),
         )
         .unwrap();
+        arkret_models_crypto::validate_target_claim_evidence(&record, &receipt).unwrap();
         let outcome = PeerKeyPackagesClaimOutcome {
             claim_request_id: receipt.claim_request_id.clone(),
             claims: vec![record],
@@ -635,6 +644,7 @@ mod tests {
             )
             .unwrap(),
             claim_receipt: receipt,
+            claim_authority_ref: None,
             attested_at: at,
             signature: placeholder(),
         };
@@ -672,6 +682,7 @@ mod tests {
                     sender_actor_id: actor,
                     proposal_wire_b64u: Base64UrlString::new("AQ").unwrap(),
                     attestation,
+                    claim_issuer_resolution: None,
                     attestor_resolution: resolution,
                 },
             ],

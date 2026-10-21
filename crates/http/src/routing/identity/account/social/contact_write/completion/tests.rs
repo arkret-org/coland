@@ -117,11 +117,13 @@ fn confirmed_contact_receipt_uses_historical_key_after_rotation_and_keystore_reo
     };
     let receipt = RequestAcceptanceReceipt::sign_with(
         arkret_models_collaboration::contact_operations::RequestAcceptanceReceiptCore {
+            trust_domain_id: arkret_wire::TrustDomainId::new("ak:trust_domain:contact.test")
+                .unwrap(),
             holder,
             peer,
-            slot_version: 1,
-            slot_predecessor: None,
-            previous_terminal_contact_round_id: None,
+            version: 1,
+            predecessor_event_ref: None,
+            initial_contact_round_id: None,
             request_event_ref: EventId::from_digest(
                 arkret_canonical::DigestSuite::Sha256,
                 [3_u8; 32],

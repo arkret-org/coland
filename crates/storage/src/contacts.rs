@@ -3,7 +3,6 @@ mod completion_plan;
 use arkret_models_collaboration::contact_operations::RequestAcceptanceReceipt;
 use arkret_wire::ActorId;
 use coland_domain::identity::ContactRecord;
-pub use coland_domain::identity::contact_event_prefix;
 
 use super::{PersistenceResult, Utc, Value, async_trait};
 
@@ -52,8 +51,8 @@ pub struct ContactCompletionDraft {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContactCompletionAction {
     Request {
-        slot_version: u64,
-        slot_predecessor: Option<arkret_wire::Hash>,
+        version: u64,
+        predecessor_event_ref: Option<arkret_wire::EventId>,
     },
     Response {
         request_receipt: Box<RequestAcceptanceReceipt>,
@@ -253,6 +252,24 @@ pub struct CommittedContactCompletionIntent {
 /// Trait for contact storage operations.
 #[async_trait]
 pub trait ContactStore: Send + Sync {
+    async fn scope_intervals(
+        &self,
+        domain: &arkret_wire::TrustDomainId,
+        holder: &arkret_models_collaboration::contact_operations::ContactPeer,
+        peer: &arkret_models_collaboration::contact_operations::ContactPeer,
+        grants: &[arkret_wire::EventId],
+    ) -> PersistenceResult<
+        Vec<arkret_models_collaboration::contact_operations::ContactHistoricalScopeInterval>,
+    >;
+    async fn known_round_closure(
+        &self,
+        domain: &arkret_wire::TrustDomainId,
+        holder: &arkret_models_collaboration::contact_operations::ContactPeer,
+        peer: &arkret_models_collaboration::contact_operations::ContactPeer,
+        round: &arkret_wire::Hash,
+    ) -> PersistenceResult<
+        Option<arkret_models_collaboration::contact_operations::ContactRoundClosure>,
+    >;
     async fn completion_for_request(
         &self,
         actor: &ActorId,
@@ -300,7 +317,7 @@ pub trait ContactStore: Send + Sync {
         expected_updated_at: chrono::DateTime<chrono::Utc>,
         record: &ContactRecord,
     ) -> PersistenceResult<bool>;
-    /// Accept a checkpoint and its immutable response in one transaction.
+    /// Freeze a Contact current projection and its exact control response atomically.
     async fn put_if_updated_at_with_result(
         &self,
         expected_updated_at: chrono::DateTime<chrono::Utc>,

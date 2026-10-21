@@ -1,7 +1,6 @@
 use arkret_identifiers::{DidCoreId, EventId, Hash};
 use arkret_models_collaboration::contact_operations::{
-    ContactRoundEvidenceBundle, PeerContactMirrorReceipt, PeerContactSubmitOutcome,
-    RequestAcceptanceReceipt,
+    ContactRoundEvidenceBundle, PeerContactMirrorReceipt, RequestAcceptanceReceipt,
 };
 use arkret_wire::ActorId;
 use chrono::{DateTime, Utc};
@@ -11,33 +10,28 @@ use chrono::{DateTime, Utc};
 pub struct ContactRequestSlotState {
     pub owner_id: ActorId,
     pub peer_id: ActorId,
-    pub accepted_sequence: u64,
-    pub head_digest: Hash,
-    /// The slot's accepted Contact Event prefix: every committed Event this
-    /// slot's CAS sequence accepted (the owner's requests, the peer requests it
-    /// consumed and the owner's responses), strictly ascending by EventId
-    /// UTF-8 bytes. It is the exact `cas_revision` / glare
-    /// `observed_commit_event_ids` observation of the next CAS
-    /// (contact-and-direct-conversation.md section 2), frozen in the same
-    /// transaction as the accepting Commit.
-    pub accepted_event_refs: Vec<EventId>,
+    pub version: u64,
+    pub head_event_ref: EventId,
+    pub operation_digest: Option<Hash>,
+    pub request_choice: Option<ContactRequestChoice>,
 }
 
-impl ContactRequestSlotState {
-    /// The slot's accepted prefix extended by `observed`, strictly ascending
-    /// and duplicate-free.
-    #[must_use]
-    pub fn prefix_with(&self, observed: &[EventId]) -> Vec<EventId> {
-        contact_event_prefix(self.accepted_event_refs.iter().chain(observed))
-    }
-}
-
-/// One Contact Event prefix, strictly ascending by EventId UTF-8 bytes.
-pub fn contact_event_prefix<'a>(refs: impl IntoIterator<Item = &'a EventId>) -> Vec<EventId> {
-    let mut prefix: Vec<EventId> = refs.into_iter().cloned().collect();
-    prefix.sort_by(|left, right| left.as_str().as_bytes().cmp(right.as_str().as_bytes()));
-    prefix.dedup();
-    prefix
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "choice", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ContactRequestChoice {
+    Open {
+        request_event_ref: EventId,
+    },
+    Normal {
+        request_event_ref: EventId,
+    },
+    Rejected {
+        request_event_ref: EventId,
+    },
+    Glare {
+        request_event_ref: EventId,
+        counterpart_event_ref: EventId,
+    },
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -59,8 +53,8 @@ pub struct ContactRecord {
     pub request_receipts: Vec<RequestAcceptanceReceipt>,
     pub request_mirror_receipts: Vec<PeerContactMirrorReceipt>,
     pub contact_round_evidence: Option<ContactRoundEvidenceBundle>,
-    pub contact_round_evidence_history: Vec<ContactRoundEvidenceBundle>,
-    pub control_outcomes: Vec<PeerContactSubmitOutcome>,
+    pub current_state: arkret_models_collaboration::contact_operations::ContactPrivateState,
+
     pub response_event_ref: Option<EventId>,
     pub tombstone_event_ref: Option<EventId>,
     pub message: Option<String>,
@@ -71,4 +65,31 @@ pub struct ContactRecord {
     pub peer_service_resolution: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl ContactRecord {
+    pub fn conflicting_contact_request_choice(&self, owner: &ActorId, incoming: &EventId) -> bool {
+        let Some(slot) = self
+            .request_slot_states
+            .iter()
+            .find(|s| &s.owner_id == owner)
+        else {
+            return false;
+        };
+        match &slot.request_choice {
+            Some(ContactRequestChoice::Open { request_event_ref }) => {
+                (&self.requester_id == owner
+                    && self.request_event_ref.as_ref() == Some(request_event_ref))
+                    || self.request_receipts.iter().any(|r| {
+                        r.core.holder.contact_actor_id() == *owner
+                            && &r.core.request_event_ref == request_event_ref
+                    })
+            }
+            Some(ContactRequestChoice::Glare {
+                request_event_ref,
+                counterpart_event_ref,
+            }) => request_event_ref == incoming || counterpart_event_ref == incoming,
+            _ => false,
+        }
+    }
 }

@@ -20,11 +20,10 @@ use arkret_models_collaboration::agent_operations::AgentLifecycleState;
 // resolves at the crate root, but the invite-addressing strong type lives under `model`;
 // import it via the `model` path to avoid binding the wrong same-named re-export.
 use arkret_models_collaboration::contact_operations::{
-    ContactAcceptRequestBody, ContactAgentProjection, ContactContinuityCheckpointOutcome,
-    ContactContinuityCheckpointRequestBody, ContactList, ContactListRow, ContactNextPrepareInput,
-    ContactOperationOutcome, ContactOperationRequestBody, ContactPeer, ContactRejectRequestBody,
-    ContactScopeUpdateRequestBody, ContactState, ContactTombstoneRequestBody,
-    DirectConversationSummary, DirectConversationSummaryState,
+    ContactAcceptRequestBody, ContactAgentProjection, ContactList, ContactListRow,
+    ContactNextPrepareInput, ContactOperationOutcome, ContactOperationRequestBody, ContactPeer,
+    ContactRejectRequestBody, ContactScopeUpdateRequestBody, ContactState,
+    ContactTombstoneRequestBody, DirectConversationSummary, DirectConversationSummaryState,
 };
 use arkret_models_collaboration::direct_conversation::{
     DirectConversationCoordinates, DirectConversationFoundingInput,
@@ -66,9 +65,6 @@ use salvo::oapi::extract::{JsonBody, PathParam};
 use salvo::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-
-pub(crate) mod contact_checkpoint;
-use contact_checkpoint::contact_continuity_checkpoint;
 
 use self::social::direct::direct_founder_for_pair;
 use super::auth::{
@@ -153,9 +149,10 @@ pub(crate) use social::direct_binding_matches_projection;
 use social::*;
 pub(crate) use social::{
     accepted_contact_for_pair, canonical_contact_digest, contact_assertion_signer,
-    contact_detached_jws, direction_version, local_direction_current,
+    contact_delivery_address, contact_detached_jws, local_direction_current,
     local_requester_current_proof, materialize_contact_completions,
     validate_request_receipt_cryptography, verify_contact_service_signature_bytes,
+    verify_contact_service_signature_bytes_at,
 };
 pub(crate) mod lifecycle;
 // Re-export the lifecycle surface used by sibling routing modules.
@@ -214,7 +211,6 @@ fn contact_routes() -> Router {
         .push(Router::with_path("request").post(contact_request))
         .push(Router::with_path("respond").post(contact_respond))
         .push(Router::with_path("reject").post(contact_reject))
-        .push(Router::with_path("continuity-checkpoint").post(contact_continuity_checkpoint))
         .push(Router::with_path("scope-update").post(contact_scope_update))
         .push(Router::with_path("tombstone").post(contact_tombstone))
 }
@@ -1765,23 +1761,26 @@ async fn direct_conversation_resolve(
             send_blockers.push(DirectConversationSendBlocker::PolicyStale);
         }
         if let Some(contact) = contact.as_ref() {
-            let current_contact_evidence =
-                social::direct::fresh_direct_contact_evidence(state, contact)
-                    .await?
-                    .is_some_and(|bundle| {
-                        bundle.current_proofs.len() == 2
-                            && bundle.current_proofs.iter().all(|proof| {
-                                proof.contact_round_id.as_str()
-                                    == contact
-                                        .contact_round_id
-                                        .as_ref()
-                                        .map(|value| value.as_str())
-                                        .unwrap_or_default()
-                                    && !proof.terminal
-                                    && proof.complete_through > 0
-                                    && proof.fresh_until > now()
-                            })
-                    });
+            let current_contact_evidence=contact.status=="accepted" && contact.current_state.initial_identity.is_some() && contact.current_state.round_basis.as_ref().is_some_and(|r|Some(&r.contact_round_id)==contact.contact_round_id.as_ref()) && contact.current_state.directions.len()==2 && contact.current_state.directions.iter().all(|d|d.scope_instances.iter().any(|i|i.contact_scope==arkret_models_collaboration::contact_operations::ContactScope::DirectMessage) && d.closed_round.as_ref().is_none_or(|c|Some(&c.contact_round_id)!=contact.contact_round_id.as_ref()));
+            let known_closed = if let (Some(round), Some(direction)) = (
+                contact.contact_round_id.as_ref(),
+                contact.current_state.directions.first(),
+            ) {
+                state
+                    .contacts()
+                    .known_round_closure(
+                        &state.config().trust_domain,
+                        direction.head_operation.holder(),
+                        direction.head_operation.peer(),
+                        round,
+                    )
+                    .await
+                    .map_err(|e| AppError::internal(e.to_string()))?
+                    .is_some()
+            } else {
+                true
+            };
+            let current_contact_evidence = current_contact_evidence && !known_closed;
             if !current_contact_evidence {
                 send_blockers.push(DirectConversationSendBlocker::ContactScopeStale);
             }
@@ -1923,9 +1922,6 @@ async fn direct_conversation_resolve(
                     founding_authority_evidence:
                         DirectConversationFoundingAuthorityEvidence::Human {
                             contact_round_evidence,
-                            contact_round_continuity_chains: contact
-                                .contact_round_evidence_history
-                                .clone(),
                         },
                 },
             })

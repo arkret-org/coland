@@ -391,6 +391,36 @@ impl crate::identity::MimiConsentCorrelationPort for PersistenceMimiConsentCorre
 
 #[async_trait::async_trait]
 impl crate::identity::ContactPort for PersistenceContacts {
+    async fn scope_intervals(
+        &self,
+        domain: &arkret_wire::TrustDomainId,
+        holder: &arkret_models_collaboration::contact_operations::ContactPeer,
+        peer: &arkret_models_collaboration::contact_operations::ContactPeer,
+        grants: &[arkret_wire::EventId],
+    ) -> crate::ServiceResult<
+        Vec<arkret_models_collaboration::contact_operations::ContactHistoricalScopeInterval>,
+    > {
+        Ok(self
+            .0
+            .contacts()
+            .scope_intervals(domain, holder, peer, grants)
+            .await?)
+    }
+    async fn known_round_closure(
+        &self,
+        domain: &arkret_wire::TrustDomainId,
+        holder: &arkret_models_collaboration::contact_operations::ContactPeer,
+        peer: &arkret_models_collaboration::contact_operations::ContactPeer,
+        round: &arkret_wire::Hash,
+    ) -> crate::ServiceResult<
+        Option<arkret_models_collaboration::contact_operations::ContactRoundClosure>,
+    > {
+        Ok(self
+            .0
+            .contacts()
+            .known_round_closure(domain, holder, peer, round)
+            .await?)
+    }
     async fn save_contact_with_result(
         &self,
         expected_updated_at: chrono::DateTime<chrono::Utc>,

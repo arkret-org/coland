@@ -544,6 +544,17 @@ async fn verify_contact_round_founding_authority(
             "the pair's current Contact does not grant direct_message both ways",
         ));
     }
+    if !crate::direct_conversation_admission::contact_grants_direct_message(
+        conn,
+        Some(&contact),
+        &facts.trust_domain_id,
+    )
+    .await?
+    {
+        return Err(stale(
+            "Contact original scope instance or exact historical close refuses founding",
+        ));
+    }
     let evidence = contact
         .contact_round_evidence
         .clone()
@@ -558,99 +569,25 @@ async fn verify_contact_round_founding_authority(
     if evidence.current_proofs.len() != 2 {
         return Err(stale("both directional current heads are required"));
     }
-    let glare_requests = match &evidence.contact_round {
-        ContactRound::Glare { requests, .. } => {
-            if !requests.iter().any(|request| {
-                contact.request_event_ref.as_ref() == Some(&request.request_event_ref)
-            }) {
-                return Err(stale(
-                    "the local Contact request is outside the glare round",
-                ));
-            }
-            Some(requests)
-        }
-        ContactRound::Normal { .. } => None,
-    };
+    evidence
+        .validate_shape()
+        .map_err(|e| stale(&e.to_string()))?;
     for proof in &evidence.current_proofs {
-        let peer = proof.peer.contact_actor_id();
-        let head = if let Some(requests) = glare_requests {
-            let matching = evidence
-                .request_receipts
-                .iter()
-                .filter(|receipt| {
-                    receipt.core.peer.contact_actor_id() == peer
-                        && requests.iter().any(|request| {
-                            request.request_event_ref == receipt.core.request_event_ref
-                        })
-                })
-                .collect::<Vec<_>>();
-            if matching.len() != 1 {
-                return Err(stale("a glare direction has no unique accepted request"));
-            }
-            Some(&matching[0].core.request_event_ref)
-        } else if peer == contact.target_id {
-            contact.request_event_ref.as_ref()
-        } else if peer == contact.requester_id {
-            contact.response_event_ref.as_ref()
-        } else {
-            None
-        };
-        if proof.terminal
-            || proof.contact_round_id != evidence.contact_round_id
-            || head != Some(&proof.head_event_ref)
-            || (&proof.issuer_id != local_station && proof.fresh_until <= at)
-        {
-            return Err(stale(
-                "a directional current head is terminal, stale or not the accepted head",
-            ));
-        }
+        let actual = contact
+            .current_state
+            .direction(&proof.holder)
+            .ok_or_else(|| stale("current direction missing"))?;
+        if proof.contact_round_id.as_ref()!=Some(&evidence.contact_round_id) || proof.closed_round.as_ref().is_some_and(|c|c.contact_round_id==evidence.contact_round_id) || actual.head_operation.event().event_id!=proof.head_event_ref || actual.head_operation.version()!=proof.version || actual.scope_instances!=proof.scope_instances || !proof.scope_instances.iter().any(|i|i.contact_scope==arkret_models_collaboration::contact_operations::ContactScope::DirectMessage) || (&proof.issuer_id!=local_station && proof.fresh_until<=at) {return Err(stale("Contact current original head, exact scope instance, closure or freshness mismatch"));}
+    }
+    if contact.current_state.initial_identity.as_ref() != Some(&evidence.initial_identity) {
+        return Err(stale("Contact immutable first identity mismatch"));
     }
     let founding = DirectConversationFoundingAuthorityEvidence::Human {
-        contact_round_evidence: evidence,
-        contact_round_continuity_chains: contact.contact_round_evidence_history.clone(),
+        contact_round_evidence: evidence.clone(),
     };
-    let (participants, founder) = founding.participants_and_founder().map_err(|error| {
-        stale(&format!(
-            "the Contact round evidence does not derive a founder: {error}"
-        ))
-    })?;
-    let DirectConversationFoundingAuthorityEvidence::Human {
-        contact_round_evidence,
-        contact_round_continuity_chains,
-    } = &founding
-    else {
-        unreachable!("constructed as the human branch above")
-    };
-    let root = contact_round_evidence
-        .continuity_checkpoint
-        .is_none()
-        .then(|| {
-            contact_round_continuity_chains
-                .last()
-                .unwrap_or(contact_round_evidence)
-        });
-    if let Some(root) = root
-        && let ContactRound::Glare { requests, .. } = &root.contact_round
-    {
-        let attestations = root
-            .glare_concurrency_attestations
-            .as_ref()
-            .ok_or_else(|| stale("a glare root round needs both concurrency attestations"))?;
-        if root.request_receipts.len() != 2
-            || attestations.iter().any(|attestation| {
-                attestation.complete_through == 0
-                    || requests.iter().any(|request| {
-                        !attestation
-                            .observed_commit_event_ids
-                            .contains(&request.request_event_ref)
-                    })
-            })
-        {
-            return Err(stale(
-                "the glare root round attestations do not cover both requests",
-            ));
-        }
-    }
+    let (participants, founder) = founding
+        .participants_and_founder()
+        .map_err(|e| stale(&e.to_string()))?;
     if participants.iter().collect::<BTreeSet<_>>()
         != [&facts.founder_id, &facts.peer_id]
             .into_iter()
@@ -666,7 +603,7 @@ async fn verify_contact_round_founding_authority(
             "only the founder derived from the pair's root Contact round may found it",
         ));
     }
-    let mut heads = contact_round_evidence
+    let mut heads = evidence
         .current_proofs
         .iter()
         .map(|proof| proof.head_event_ref.clone())
@@ -953,10 +890,18 @@ pub(crate) async fn admit_self_direct_conversation_founding_unit(
 }
 
 fn sort_distinct_glare_attestations(attestations: &mut [GlareConcurrencyAttestation; 2]) -> bool {
-    if attestations[0].issuer_id == attestations[1].issuer_id {
+    if attestations[0].subject_id == attestations[1].subject_id
+        || attestations[0].peer_id != attestations[1].subject_id
+        || attestations[1].peer_id != attestations[0].subject_id
+        || attestations.iter().any(|a| {
+            a.subject_id
+                .as_account_id()
+                .is_none_or(|account| account.station_id != a.issuer_id)
+        })
+    {
         return false;
     }
-    attestations.sort_by(|left, right| left.issuer_id.as_str().cmp(right.issuer_id.as_str()));
+    attestations.sort_by_key(|a| a.subject_id.clone());
     true
 }
 
@@ -972,7 +917,7 @@ fn same_distinct_glare_attestations(
 /// The two Stations can store their own attestation first. The Contact round's
 /// request array has a mandatory wire order; the two independently signed
 /// attestations have no prescribed order. Keep every signed byte and all
-/// other founding material exact while comparing this pair by unique issuer.
+/// other founding material exact while comparing this pair by unique full subject.
 fn same_peer_founding_evidence(
     local: &DirectConversationFoundingAuthorityEvidence,
     source: &DirectConversationFoundingAuthorityEvidence,
@@ -1157,28 +1102,35 @@ mod tests {
     ) -> GlareConcurrencyAttestation {
         let observed_at = chrono::Utc::now();
         let hash = Hash::new(format!("sha256:{}", "a".repeat(64))).unwrap();
-        GlareConcurrencyAttestation {
-            subject_id: subject,
-            issuer_id: issuer,
-            peer_id: peer,
-            request_receipt_digests: [hash.clone(), hash.clone()],
-            observed_commit_event_ids: vec![EventId::from_digest(
-                arkret_canonical::DigestSuite::Sha256,
-                [3; 32],
-            )],
-            complete_through: 1,
-            unconsumed_slot_checkpoint: hash,
+        GlareConcurrencyAttestation::sign_with(
+            arkret_wire::TrustDomainId::new("ak:trust_domain:contact.test").unwrap(),
+            None,
+            hash.clone(),
+            1,
+            EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [3; 32]),
+            subject,
+            issuer,
+            peer,
+            [
+                hash,
+                Hash::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+            ],
             observed_at,
-            signature: ProtocolSignature {
-                verification_method: DidUrl::new("did:web:station.example#key".to_owned()).unwrap(),
-                created_at: observed_at,
-                jws: "signed-exact-attestation".to_owned(),
+            |_| {
+                Ok(ProtocolSignature {
+                    verification_method: DidUrl::new("did:web:station.example#key").unwrap(),
+                    created_at: observed_at,
+                    jws: arkret_wire::test_support::structural_only_detached_jws(
+                        &Hash::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+                    ),
+                })
             },
-        }
+        )
+        .unwrap()
     }
 
     #[test]
-    fn glare_attestations_match_by_unique_issuer_without_ignoring_signed_bytes() {
+    fn glare_attestations_match_by_full_subject_without_ignoring_signed_bytes() {
         let first_station: DidCoreId = "ak:did_core:web:first.example".parse().unwrap();
         let second_station: DidCoreId = "ak:did_core:web:second.example".parse().unwrap();
         let first = ActorId::account(AccountId::new(
@@ -1208,6 +1160,24 @@ mod tests {
         assert!(!same_distinct_glare_attestations(
             &mut [first_attestation.clone(), first_attestation],
             &mut duplicate_issuer,
+        ));
+    }
+    #[test]
+    fn glare_keeps_two_accounts_at_the_same_station_distinct() {
+        let station: DidCoreId = "ak:did_core:web:station.example".parse().unwrap();
+        let a = ActorId::account(AccountId::new(
+            "ak:did_core:web:a.example".parse().unwrap(),
+            station.clone(),
+        ));
+        let b = ActorId::account(AccountId::new(
+            "ak:did_core:web:b.example".parse().unwrap(),
+            station.clone(),
+        ));
+        let first = attestation(station.clone(), a.clone(), b.clone());
+        let second = attestation(station, b, a);
+        assert!(same_distinct_glare_attestations(
+            &mut [first.clone(), second.clone()],
+            &mut [second, first]
         ));
     }
 }

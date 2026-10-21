@@ -617,6 +617,11 @@ pub(super) async fn delivery_guard(
 pub(super) fn claim_error(error: coland_services::ServiceError) -> AppError {
     tracing::debug!(%error, "native KeyPackage admission refused");
     match error {
+        coland_services::ServiceError::Conflict(ref detail)
+            if detail.starts_with("duplicate_conflict:") =>
+        {
+            crate::app_error!(DuplicateConflict, "claim request bytes differ")
+        }
         coland_services::ServiceError::Conflict(_)
         | coland_services::ServiceError::NotFound(_)
         | coland_services::ServiceError::SchemaViolation(_) => peer_claim_failed(),

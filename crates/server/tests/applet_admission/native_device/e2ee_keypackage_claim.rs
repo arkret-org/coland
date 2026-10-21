@@ -32,11 +32,11 @@ async fn exercise(ghost: bool) {
             native_phase(|| fixture.ghost_commit(&install, &body, "claim-device"))
                 .await
                 .0,
-            StatusCode::CREATED
+            StatusCode::OK
         );
-        body["managed_actor_bundle"].clone()
+        body["event"].clone()
     } else {
-        install.bot_body["managed_actor_bundle"].clone()
+        install.bot_body["event"].clone()
     };
     let key = SigningKey::from_bytes(&[177; 32]);
     let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
@@ -52,13 +52,7 @@ async fn exercise(ghost: bool) {
         )
     })
     .await;
-    let event = join_event(
-        &fixture,
-        &install,
-        &authority,
-        &key,
-        &install.bot_outcome.authorization_ref,
-    );
+    let event = join_event(&fixture, &install, &authority, &key, &install.join_grant());
     let (status, outcome) = native_phase(|| post(&fixture, &authority, &key, &event, vec![])).await;
     assert_eq!(status, StatusCode::OK, "real native membership: {outcome}");
     let _read_parent = native_phase(|| {
@@ -71,8 +65,8 @@ async fn exercise(ghost: bool) {
         )
     })
     .await;
-    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
-        ActorId::account(authority.account_id.clone()),
+    let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
+        authority.actor_id.clone(),
         device,
         arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
     )
@@ -125,10 +119,7 @@ async fn exercise(ghost: bool) {
     let outcome: arkret_models_crypto::KeyPackagesClaimOutcome =
         serde_json::from_value(outcome).unwrap();
     assert_eq!(outcome.claims.len(), 1);
-    assert_eq!(
-        outcome.claims[0].actor_id,
-        ActorId::account(authority.account_id.clone())
-    );
+    assert_eq!(outcome.claims[0].actor_id, authority.actor_id.clone());
     assert_eq!(
         outcome.claims[0].device_id.as_ref(),
         Some(&authority.device_id)
@@ -153,7 +144,7 @@ async fn exercise(ghost: bool) {
     );
     assert_eq!(before, native_phase(|| snapshot(&fixture)).await);
     let mut changed = body.clone();
-    changed.timeout_ms = Some(1);
+    changed.timeout_ms = Some(30000);
     resign(&mut changed, &key);
     let (status, error) =
         native_phase(|| claim(&fixture, &authority, &key, &scope, &changed)).await;
@@ -193,8 +184,10 @@ pub(in crate::native_device::e2ee) fn request(
             random,
         ))
         .unwrap(),
-        target_account_id: Some(authority.account_id.clone()),
-        requester_account_id: Some(authority.account_id.clone()),
+        target_account_id: None,
+        target_actor_id: Some(authority.actor_id.clone()),
+        requester_account_id: None,
+        requester_actor_id: Some(authority.actor_id.clone()),
         intended_realm_id: scope.realm_id().clone(),
         mls_group_id: scope.canonical_mls_group_id().unwrap(),
         claim_purpose: arkret_models_crypto::PeerKeyPackageClaimPurpose::RealmMembership,
@@ -210,14 +203,14 @@ pub(in crate::native_device::e2ee) fn request(
         pair_key: None,
         last_resort_allowed: None,
         service_binding: arkret_models_crypto::KeyPackagesClaimServiceBinding {
-            source_id: authority.account_id.station_id.clone(),
-            destination_id: authority.account_id.station_id.clone(),
+            source_id: authority.governance_service_id.clone(),
+            destination_id: authority.governance_service_id.clone(),
         },
         requester_authorization:
-            arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device {
+            arkret_models_crypto::PeerKeyPackageRequesterAuthorization::RealmDevice {
                 verification_method: arkret_wire::DidUrl::new(method.clone()).unwrap(),
                 requester_device_id: authority.device_id.clone(),
-                device_authorize_event_id: authority.selector.authorization_ref.event_id.clone(),
+                device_authorize_event_id: authority.authorization_ref.event_id.clone(),
                 signed_at,
                 signature: arkret_signatures::keypackages::keypackage_signature_from_bytes(
                     &method, &[0; 64],
@@ -230,12 +223,37 @@ pub(in crate::native_device::e2ee) fn request(
     body
 }
 
+pub(in crate::native_device::e2ee) fn account_requester(
+    fixture: &Fixture,
+    body: &mut arkret_models_crypto::KeyPackagesClaimRequestBody,
+) {
+    let method = fixture.pcr.history.device_verification_method.clone();
+    body.requester_actor_id = None;
+    body.requester_account_id = Some(fixture.pcr.history.account.clone());
+    body.requester_authorization =
+        arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device {
+            verification_method: method.clone(),
+            requester_device_id: fixture.pcr.history.founding_device_id.clone(),
+            device_authorize_event_id: fixture.pcr.history.events[1].event_id.clone(),
+            signed_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
+            signature: arkret_signatures::keypackages::keypackage_signature_from_bytes(
+                method.as_str(),
+                &[0; 64],
+            )
+            .unwrap(),
+        };
+}
+
 pub(in crate::native_device::e2ee) fn resign(
     body: &mut arkret_models_crypto::KeyPackagesClaimRequestBody,
     key: &SigningKey,
 ) {
     let method = match &body.requester_authorization {
         arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device {
+            verification_method,
+            ..
+        }
+        | arkret_models_crypto::PeerKeyPackageRequesterAuthorization::RealmDevice {
             verification_method,
             ..
         } => verification_method.to_string(),
@@ -247,8 +265,10 @@ pub(in crate::native_device::e2ee) fn resign(
         &body.requester_authorization,
     )
     .unwrap();
-    let arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device { signature, .. } =
-        &mut body.requester_authorization
+    let (arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device { signature, .. }
+    | arkret_models_crypto::PeerKeyPackageRequesterAuthorization::RealmDevice {
+        signature, ..
+    }) = &mut body.requester_authorization
     else {
         unreachable!()
     };
@@ -399,33 +419,9 @@ async fn mixed(
     assert_eq!(outcome["accepted"], 1);
     let human_key = SigningKey::from_bytes(&fixture.pcr.history.founding_device_signing_seed);
     let mut body = request(authority, key, scope, &upload.keypackages[0].keypackage_ref);
+    body.requester_actor_id = None;
     body.requester_account_id = Some(fixture.pcr.history.account.clone());
-    let authorize = fixture
-        .pcr
-        .unit
-        .transactions
-        .iter()
-        .find(|tx| tx.event.kind == EventKind::DeviceAuthorize)
-        .unwrap()
-        .event
-        .event_id
-        .clone();
-    let authorization = &mut body.requester_authorization;
-    if let arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device {
-        verification_method,
-        requester_device_id,
-        device_authorize_event_id,
-        signature,
-        ..
-    } = authorization
-    {
-        *verification_method = fixture.pcr.history.device_verification_method.clone();
-        *requester_device_id = fixture.pcr.history.founding_device_id.clone();
-        *device_authorize_event_id = authorize;
-        signature.kid = arkret_wire::NonEmptyString::new(verification_method.to_string()).unwrap();
-    } else {
-        unreachable!()
-    }
+    account_requester(&fixture, &mut body);
     resign(&mut body, &human_key);
     let value = serde_json::to_value(&body).unwrap();
     let before = native_phase(|| snapshot(fixture)).await;
@@ -466,7 +462,7 @@ async fn mixed(
     );
     assert_eq!(
         outcome["claims"][0]["actor_id"],
-        serde_json::to_value(ActorId::account(authority.account_id.clone())).unwrap()
+        serde_json::to_value(authority.actor_id.clone()).unwrap()
     );
 
     let human = arkret_mls::ArkretMlsIdentity::new_human_device(
@@ -498,6 +494,7 @@ async fn mixed(
     );
     assert_eq!(outcome["accepted"], 1);
     let mut body = request(authority, key, scope, &upload.keypackages[0].keypackage_ref);
+    body.target_actor_id = None;
     body.target_account_id = Some(fixture.pcr.history.account.clone());
     body.target_device_ids = vec![fixture.pcr.history.founding_device_id.clone()];
     resign(&mut body, key);
@@ -525,18 +522,18 @@ async fn claim_consent_expiry_blocks_already_prepared_key_material_at_handoff() 
         let deadline=arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()+chrono::Duration::seconds(15));
         let mut temporal=GrantConstraint::new(GrantConstraintKind::Temporal,GrantConstraintEffect::Allow);
         temporal.expires_at=Some(deadline);
-        let extras=["ak.message.create","ak.applet.bot.provision","ak.applet.ghost.provision"].into_iter().map(|action|(action.to_owned(),vec![temporal.clone()])).collect();
+        let extras=["ak.applet.join","ak.applet.publish","ak.message.create","ak.applet.bot.provision","ak.applet.ghost.provision"].into_iter().map(|action|(action.to_owned(),vec![temporal.clone()])).collect();
         let (package,outcome,body,install_key)=native_phase(||fixture.install_service_with_constraints(true,native.package.clone(),scope.clone(),extras)).await;
-        let (bot_outcome,bot_body)=native_phase(||fixture.provision_bot_in_scope(&package,&namespace,outcome.registration_event_ref.clone(),scope.clone())).await;
-        let install=Installed { package, outcome, bot_outcome, bot_body, body, key:install_key };
+        let (bot_outcome, bot_body)=native_phase(||fixture.provision_bot_in_scope(&package,&namespace,outcome.registration_event_ref.clone(),scope.clone())).await;
+        let install=Installed { package, outcome, bot: bot_outcome, join_grant: installation_grant(&body,"ak.applet.join"), bot_body, body, key:install_key };
         let key=SigningKey::from_bytes(&[176;32]);
         let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
-        let authority=native_phase(||authorize(&fixture,&install,&install.bot_body["managed_actor_bundle"],&namespace,&key,device,true)).await;
-        let event=join_event(&fixture,&install,&authority,&key,&install.bot_outcome.authorization_ref);
+        let authority=native_phase(||authorize(&fixture,&install,&install.bot_body["event"],&namespace,&key,device,true)).await;
+        let event=join_event(&fixture,&install,&authority,&key,&install.join_grant());
         let (status,outcome)=native_phase(||post(&fixture,&authority,&key,&event,vec![])).await;
         assert_eq!(status,StatusCode::OK,"original finite consent is initially live: {outcome}");
         let _read_parent=native_phase(||native_business_parent(&fixture,&install,vec![],vec!["ak.event.read".into()],None)).await;
-        let identity=arkret_mls::ArkretMlsIdentity::new_human_device(ActorId::account(authority.account_id.clone()),authority.device_id.clone(),arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone())).unwrap();
+        let identity=arkret_mls::ArkretMlsIdentity::new_realm_device(authority.actor_id.clone(),authority.device_id.clone(),arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone())).unwrap();
         let fingerprint=arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes());
         let upload=fresh_upload(&identity,&format!("did:key:{fingerprint}#{fingerprint}"),&key,&scope);
         assert_eq!(native_phase(||upload_in_scope(&fixture,&authority,&key,&upload,&scope)).await.0,StatusCode::OK);
@@ -578,24 +575,18 @@ async fn circle(ghost: bool) {
             native_phase(|| fixture.ghost_commit(&install, &body, "circle-claim-device"))
                 .await
                 .0,
-            StatusCode::CREATED
+            StatusCode::OK
         );
-        body["managed_actor_bundle"].clone()
+        body["event"].clone()
     } else {
-        install.bot_body["managed_actor_bundle"].clone()
+        install.bot_body["event"].clone()
     };
     let key = SigningKey::from_bytes(&[179; 32]);
     let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
     let original =
         native_phase(|| authorize(&fixture, &install, &bundle, &namespace, &key, device, true))
             .await;
-    let event = join_event(
-        &fixture,
-        &install,
-        &original,
-        &key,
-        &install.bot_outcome.authorization_ref,
-    );
+    let event = join_event(&fixture, &install, &original, &key, &install.join_grant());
     assert_eq!(
         native_phase(|| post(&fixture, &original, &key, &event, vec![]))
             .await
@@ -627,8 +618,8 @@ async fn circle(ghost: bool) {
         )
     })
     .await;
-    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
-        ActorId::account(authority.account_id.clone()),
+    let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
+        authority.actor_id.clone(),
         authority.device_id.clone(),
         arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
     )
@@ -664,12 +655,12 @@ async fn circle(ghost: bool) {
     );
     assert_eq!(before, native_phase(|| snapshot(&fixture)).await);
     let mut bad = body.clone();
-    if let arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device {
+    if let arkret_models_crypto::PeerKeyPackageRequesterAuthorization::RealmDevice {
         device_authorize_event_id,
         ..
     } = &mut bad.requester_authorization
     {
-        *device_authorize_event_id = original.selector.authorization_ref.event_id.clone();
+        *device_authorize_event_id = original.authorization_ref.event_id.clone();
     } else {
         unreachable!()
     }
@@ -751,8 +742,8 @@ async fn native_claim_holds_real_human_counterpart_pcr_until_body_handoff() {
         let install=native_phase(||fixture.install_package(true,native.package.clone(),&namespace)).await;
         let key=SigningKey::from_bytes(&[180;32]);
         let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
-        let authority=native_phase(||authorize(&fixture,&install,&install.bot_body["managed_actor_bundle"],&namespace,&key,device,true)).await;
-        let event=join_event(&fixture,&install,&authority,&key,&install.bot_outcome.authorization_ref);
+        let authority=native_phase(||authorize(&fixture,&install,&install.bot_body["event"],&namespace,&key,device,true)).await;
+        let event=join_event(&fixture,&install,&authority,&key,&install.join_grant());
         assert_eq!(native_phase(||post(&fixture,&authority,&key,&event,vec![])).await.0,StatusCode::OK);
         let _read=native_phase(||native_business_parent(&fixture,&install,vec![],vec!["ak.event.read".into()],None)).await;
         let human_key=SigningKey::from_bytes(&fixture.pcr.history.founding_device_signing_seed);
@@ -762,7 +753,8 @@ async fn native_claim_holds_real_human_counterpart_pcr_until_body_handoff() {
         let (status,outcome)=native_phase(||fixture.admin_post("/_arkret/self/keys/keypackages/upload",ServiceOperationId::SelfKeysKeypackagesUploadCreateV1.as_str(),&value,Some(&upload.keypackages[0].keypackage_id))).await;
         assert_eq!(status,StatusCode::OK,"{outcome}");assert_eq!(outcome["accepted"],1);
         let mut body=request(&authority,&key,&scope,&upload.keypackages[0].keypackage_ref);
-        body.target_account_id=Some(fixture.pcr.history.account.clone());body.target_device_ids=vec![fixture.pcr.history.founding_device_id.clone()];resign(&mut body,&key);
+        body.target_actor_id = None;
+    body.target_account_id = Some(fixture.pcr.history.account.clone());body.target_device_ids=vec![fixture.pcr.history.founding_device_id.clone()];resign(&mut body,&key);
         let mut metadata=managed_device_metadata(&authority);metadata.effective_scope=scope.clone();
         let mut response=native_phase(||async {managed_device_http_request_with_idempotency_at(&fixture.state,&authority,&metadata,ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,&key,Some(arkret_canonical::canonical_json_bytes(&body).unwrap()),None,body.claim_request_id.as_str()).add_header("content-type","application/json",true).send(&service(fixture.state.clone())).await}).await;
         assert_eq!(response.status_code,Some(StatusCode::OK));
@@ -814,11 +806,11 @@ async fn exercise_worker_budget(ghost: bool) {
             native_phase(|| fixture.ghost_commit(&install, &body, "claim-device"))
                 .await
                 .0,
-            StatusCode::CREATED
+            StatusCode::OK
         );
-        body["managed_actor_bundle"].clone()
+        body["event"].clone()
     } else {
-        install.bot_body["managed_actor_bundle"].clone()
+        install.bot_body["event"].clone()
     };
     let key = SigningKey::from_bytes(&[177; 32]);
     let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
@@ -834,13 +826,7 @@ async fn exercise_worker_budget(ghost: bool) {
         )
     })
     .await;
-    let event = join_event(
-        &fixture,
-        &install,
-        &authority,
-        &key,
-        &install.bot_outcome.authorization_ref,
-    );
+    let event = join_event(&fixture, &install, &authority, &key, &install.join_grant());
     let (status, outcome) = native_phase(|| post(&fixture, &authority, &key, &event, vec![])).await;
     assert_eq!(status, StatusCode::OK, "real native membership: {outcome}");
     let _read_parent = native_phase(|| {
@@ -853,8 +839,8 @@ async fn exercise_worker_budget(ghost: bool) {
         )
     })
     .await;
-    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
-        ActorId::account(authority.account_id.clone()),
+    let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
+        authority.actor_id.clone(),
         device,
         arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
     )
@@ -982,11 +968,11 @@ async fn exercise_fresh_publication(ghost: bool) {
             native_phase(|| fixture.ghost_commit(&install, &body, "claim-device"))
                 .await
                 .0,
-            StatusCode::CREATED
+            StatusCode::OK
         );
-        body["managed_actor_bundle"].clone()
+        body["event"].clone()
     } else {
-        install.bot_body["managed_actor_bundle"].clone()
+        install.bot_body["event"].clone()
     };
     let key = SigningKey::from_bytes(&[177; 32]);
     let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
@@ -1002,13 +988,7 @@ async fn exercise_fresh_publication(ghost: bool) {
         )
     })
     .await;
-    let event = join_event(
-        &fixture,
-        &install,
-        &authority,
-        &key,
-        &install.bot_outcome.authorization_ref,
-    );
+    let event = join_event(&fixture, &install, &authority, &key, &install.join_grant());
     let (status, outcome) = native_phase(|| post(&fixture, &authority, &key, &event, vec![])).await;
     assert_eq!(status, StatusCode::OK, "real native membership: {outcome}");
     let _read_parent = native_phase(|| {
@@ -1021,8 +1001,8 @@ async fn exercise_fresh_publication(ghost: bool) {
         )
     })
     .await;
-    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
-        ActorId::account(authority.account_id.clone()),
+    let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
+        authority.actor_id.clone(),
         device,
         arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
     )
@@ -1115,10 +1095,32 @@ async fn fresh_unqualified_claim(
     // Selection isolation is checked on the real published row. These reads
     // do not assert that the altered target has accepted any authority.
     let mut wrong = body.clone();
-    wrong.target_account_id.as_mut().unwrap().station_id =
-        arkret_wire::DidCoreId::new("ak:did_core:web:other-station.example").unwrap();
+    let target = wrong
+        .target_actor_id
+        .as_ref()
+        .unwrap()
+        .as_realm_actor_id()
+        .unwrap();
+    wrong.target_actor_id = Some(ActorId::realm(arkret_wire::RealmActorId {
+        realm_id: RealmId::from_event_id(&fixture.pcr.unit.transactions[1].event.event_id),
+        principal_id: target.principal_id.clone(),
+    }));
     resign(&mut wrong, key);
     let peer = arkret_models_crypto::PeerKeyPackagesClaimRequestBody::from(&wrong);
+    assert!(peer.validate_shape().is_err());
+    assert!(
+        native_phase(|| store.peer_claim_candidates(&peer))
+            .await
+            .is_err()
+    );
+    // A well-formed, distinct Realm principal still cannot select this row.
+    wrong.target_actor_id = Some(ActorId::realm(arkret_wire::RealmActorId {
+        realm_id: authority.realm_id.clone(),
+        principal_id: fixture.state.service_core_id(),
+    }));
+    resign(&mut wrong, key);
+    let peer = arkret_models_crypto::PeerKeyPackagesClaimRequestBody::from(&wrong);
+    peer.validate_shape().unwrap();
     assert!(
         native_phase(|| store.peer_claim_candidates(&peer))
             .await
@@ -1190,11 +1192,11 @@ async fn own_claim_read(ghost: bool) {
             native_phase(|| fixture.ghost_commit(&install, &body, "claim-device"))
                 .await
                 .0,
-            StatusCode::CREATED
+            StatusCode::OK
         );
-        body["managed_actor_bundle"].clone()
+        body["event"].clone()
     } else {
-        install.bot_body["managed_actor_bundle"].clone()
+        install.bot_body["event"].clone()
     };
     let key = SigningKey::from_bytes(&[177; 32]);
     let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
@@ -1210,13 +1212,7 @@ async fn own_claim_read(ghost: bool) {
         )
     })
     .await;
-    let event = join_event(
-        &fixture,
-        &install,
-        &authority,
-        &key,
-        &install.bot_outcome.authorization_ref,
-    );
+    let event = join_event(&fixture, &install, &authority, &key, &install.join_grant());
     let (status, outcome) = native_phase(|| post(&fixture, &authority, &key, &event, vec![])).await;
     assert_eq!(status, StatusCode::OK, "real native membership: {outcome}");
     let _read_parent = native_phase(|| {
@@ -1229,8 +1225,8 @@ async fn own_claim_read(ghost: bool) {
         )
     })
     .await;
-    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
-        ActorId::account(authority.account_id.clone()),
+    let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
+        authority.actor_id.clone(),
         device,
         arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
     )
@@ -1412,18 +1408,18 @@ async fn query_consent_expiry_blocks_already_prepared_original_outcome_at_handof
         let deadline=arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()+chrono::Duration::seconds(15));
         let mut temporal=GrantConstraint::new(GrantConstraintKind::Temporal,GrantConstraintEffect::Allow);
         temporal.expires_at=Some(deadline);
-        let extras=["ak.message.create","ak.applet.bot.provision","ak.applet.ghost.provision"].into_iter().map(|action|(action.to_owned(),vec![temporal.clone()])).collect();
+        let extras=["ak.applet.join","ak.applet.publish","ak.message.create","ak.applet.bot.provision","ak.applet.ghost.provision"].into_iter().map(|action|(action.to_owned(),vec![temporal.clone()])).collect();
         let (package,outcome,body,install_key)=native_phase(||fixture.install_service_with_constraints(true,native.package.clone(),scope.clone(),extras)).await;
-        let (bot_outcome,bot_body)=native_phase(||fixture.provision_bot_in_scope(&package,&namespace,outcome.registration_event_ref.clone(),scope.clone())).await;
-        let install=Installed { package, outcome, bot_outcome, bot_body, body, key:install_key };
+        let (bot_outcome, bot_body)=native_phase(||fixture.provision_bot_in_scope(&package,&namespace,outcome.registration_event_ref.clone(),scope.clone())).await;
+        let install=Installed { package, outcome, bot: bot_outcome, join_grant: installation_grant(&body,"ak.applet.join"), bot_body, body, key:install_key };
         let key=SigningKey::from_bytes(&[176;32]);
         let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
-        let authority=native_phase(||authorize(&fixture,&install,&install.bot_body["managed_actor_bundle"],&namespace,&key,device,true)).await;
-        let event=join_event(&fixture,&install,&authority,&key,&install.bot_outcome.authorization_ref);
+        let authority=native_phase(||authorize(&fixture,&install,&install.bot_body["event"],&namespace,&key,device,true)).await;
+        let event=join_event(&fixture,&install,&authority,&key,&install.join_grant());
         let (status,outcome)=native_phase(||post(&fixture,&authority,&key,&event,vec![])).await;
         assert_eq!(status,StatusCode::OK,"original finite consent is initially live: {outcome}");
         let _read_parent=native_phase(||native_business_parent(&fixture,&install,vec![],vec!["ak.event.read".into()],None)).await;
-        let identity=arkret_mls::ArkretMlsIdentity::new_human_device(ActorId::account(authority.account_id.clone()),authority.device_id.clone(),arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone())).unwrap();
+        let identity=arkret_mls::ArkretMlsIdentity::new_realm_device(authority.actor_id.clone(),authority.device_id.clone(),arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone())).unwrap();
         let fingerprint=arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes());
         let upload=fresh_upload(&identity,&format!("did:key:{fingerprint}#{fingerprint}"),&key,&scope);
         assert_eq!(native_phase(||upload_in_scope(&fixture,&authority,&key,&upload,&scope)).await.0,StatusCode::OK);
@@ -1581,7 +1577,8 @@ async fn query_claim_deadline_blocks_original_outcome_before_background_cleanup(
         let install = Installed {
             package,
             outcome,
-            bot_outcome,
+            bot: bot_outcome,
+            join_grant: installation_grant(&body, "ak.applet.join"),
             bot_body,
             body,
             key: install_key,
@@ -1592,7 +1589,7 @@ async fn query_claim_deadline_blocks_original_outcome_before_background_cleanup(
             authorize(
                 &fixture,
                 &install,
-                &install.bot_body["managed_actor_bundle"],
+                &install.bot_body["event"],
                 &namespace,
                 &key,
                 device,
@@ -1600,13 +1597,7 @@ async fn query_claim_deadline_blocks_original_outcome_before_background_cleanup(
             )
         })
         .await;
-        let event = join_event(
-            &fixture,
-            &install,
-            &authority,
-            &key,
-            &install.bot_outcome.authorization_ref,
-        );
+        let event = join_event(&fixture, &install, &authority, &key, &install.join_grant());
         let (status, outcome) =
             native_phase(|| post(&fixture, &authority, &key, &event, vec![])).await;
         assert_eq!(
@@ -1624,8 +1615,8 @@ async fn query_claim_deadline_blocks_original_outcome_before_background_cleanup(
             )
         })
         .await;
-        let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
-            ActorId::account(authority.account_id.clone()),
+        let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
+            authority.actor_id.clone(),
             authority.device_id.clone(),
             arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
         )
@@ -1786,7 +1777,7 @@ async fn stored_recovery_delivery(
         };
         let station = fixture.state.service_core_id();
         let guard = native_phase(|| {
-            store.acquire_committed_content_delivery(&authority.account_id, &station, &input)
+            store.acquire_realm_actor_content_delivery(&authority.actor_id, &station, &input)
         })
         .await
         .unwrap()

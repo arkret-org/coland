@@ -338,12 +338,38 @@ pub(crate) async fn read_scoped_applet_management_policies_in_connection(
     realm: &arkret_wire::RealmId,
     circle: Option<&arkret_wire::CircleId>,
 ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
+    read_scoped_applet_management_policies_at_cut(conn, realm, circle, true).await
+}
+
+/// Preserve a delivery's shared authority barrier without upgrading it to a
+/// writer lock. Policy writers must acquire the exclusive Realm barrier.
+pub(crate) async fn read_scoped_applet_management_policies_for_delivery(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    circle: Option<&arkret_wire::CircleId>,
+) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
+    sql_query("SELECT true AS present FROM realm_authorities WHERE realm_id=$1 FOR SHARE")
+        .bind::<Text, _>(realm.as_str())
+        .get_result::<Present>(&mut *conn)
+        .await
+        .optional()
+        .map_err(PersistenceError::database)?
+        .ok_or_else(|| refused("the Realm has no current governance authority"))?;
+    read_scoped_applet_management_policies_at_cut(conn, realm, circle, false).await
+}
+
+async fn read_scoped_applet_management_policies_at_cut(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    circle: Option<&arkret_wire::CircleId>,
+    lock: bool,
+) -> PersistenceResult<Vec<arkret_models_collaboration::governance::operation_wire::Policy>> {
     Ok(
         read_management_policy_domains_at_cut(
             conn,
             realm,
             circle,
-            true,
+            lock,
             false,
             &PolicyKind::Applet,
         )

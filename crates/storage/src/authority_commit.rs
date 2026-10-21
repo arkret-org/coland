@@ -393,6 +393,7 @@ pub enum RealmActorMaterialCaller {
         service_id: arkret_wire::DidCoreId,
         verification_method: arkret_wire::DidUrl,
         public_key: [u8; 32],
+        authenticated_document: arkret_identity::DidDocument,
         expires_at: DateTime<Utc>,
     },
     Device {

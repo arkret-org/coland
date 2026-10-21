@@ -67,8 +67,10 @@ pub(crate) async fn read(
     }
     let actor = request.actor_id();
     let subject = actor.as_realm_actor_id().ok_or_else(hidden)?;
+    // This read signs one stable cut without excluding other authorized reads.
+    // Control and governance writers retain their exclusive authority lock.
     let authority = sql_query(
-        "SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1 FOR UPDATE",
+        "SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1 FOR SHARE",
     )
     .bind::<Text, _>(subject.realm_id.as_str())
     .get_result::<Row>(&mut *conn)
@@ -119,16 +121,18 @@ pub(crate) async fn read(
             service_id,
             verification_method,
             public_key,
+            authenticated_document: document,
             expires_at,
         } => {
             let did = arkret_identity::verification_method_did(verification_method.as_str())
                 .map_err(|_| hidden())?;
-            if arkret_wire::project_did_to_core_id(&did).map_err(|_| hidden())? != *service_id {
+            if document.id != did
+                || arkret_wire::project_did_to_core_id(&did).map_err(|_| hidden())? != *service_id
+            {
                 return Err(hidden());
             }
-            let row = sql_query("SELECT did_document AS value FROM webvh_documents WHERE id=$1 AND expires_at>$2 FOR SHARE")
-                .bind::<Text,_>(did.as_str()).bind::<Timestamptz,_>(at).get_result::<Row>(&mut *conn).await.map_err(PersistenceError::database)?;
-            let document: arkret_identity::DidDocument = decode(row.value)?;
+            // Preserve the current native identity authenticated for this request.
+            // An installation-time SQL cache cannot override a verified rotation.
             arkret_identity::validate_verification_method_relationship(
                 &document,
                 verification_method,

@@ -102,6 +102,7 @@ async fn deliver_one(
         service_id: completion.destination_id.clone(),
         verification_method,
         public_key,
+        authenticated_document: document,
         expires_at: now + chrono::Duration::seconds(60),
     };
     let method = state.service_verification_method("notary-key")?;

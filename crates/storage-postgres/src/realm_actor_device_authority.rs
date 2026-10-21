@@ -291,7 +291,9 @@ pub(crate) async fn consume_nonce(
         .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_,PgTransactionError,_>(async |conn| {
-  let locked=sql_query("SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1 FOR UPDATE")
+  // Nonce uniqueness is serialized by its primary key. Holding the shared
+  // authority cut excludes revocation/handoff without excluding other readers.
+  let locked=sql_query("SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1 FOR SHARE")
    .bind::<Text,_>(expected.realm_id.as_str()).get_result::<JsonRow>(&mut *conn).await.optional()?;
   if locked.is_none() {return Err(denied("Realm authority unavailable"));}
   let now=chrono::Utc::now();

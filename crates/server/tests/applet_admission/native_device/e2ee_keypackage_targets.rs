@@ -20,12 +20,9 @@ async fn scoped_publication_before_genesis_accepts_real_signed_targets() {
                 .ghost_commit(&install, &ghost, "target-publication")
                 .await
                 .0,
-            StatusCode::CREATED
+            StatusCode::OK
         );
-        for bundle in [
-            &install.bot_body["managed_actor_bundle"],
-            &ghost["managed_actor_bundle"],
-        ] {
+        for bundle in [&install.bot_body["event"], &ghost["event"]] {
             let key = SigningKey::from_bytes(&[171; 32]);
             let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
             let authority = native_phase(|| {
@@ -40,13 +37,7 @@ async fn scoped_publication_before_genesis_accepts_real_signed_targets() {
                 )
             })
             .await;
-            let join = join_event(
-                &fixture,
-                &install,
-                &authority,
-                &key,
-                &install.bot_outcome.authorization_ref,
-            );
+            let join = join_event(&fixture, &install, &authority, &key, &install.join_grant());
             let (status, outcome) =
                 native_phase(|| post(&fixture, &authority, &key, &join, vec![])).await;
             assert_eq!(
@@ -54,8 +45,8 @@ async fn scoped_publication_before_genesis_accepts_real_signed_targets() {
                 StatusCode::OK,
                 "actual membership before publication: {outcome}"
             );
-            let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
-                ActorId::account(authority.account_id.clone()),
+            let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
+                authority.actor_id.clone(),
                 device,
                 arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
             )
@@ -175,11 +166,11 @@ async fn published(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(record.owner_actor_id, authority.account_id);
+    assert_eq!(record.owner_actor_id, authority.actor_id);
     assert_eq!(record.effective_scope.as_ref(), Some(scope));
     assert_eq!(
         record.device_authorize_event_id.as_deref(),
-        Some(authority.selector.authorization_ref.event_id.as_str())
+        Some(authority.authorization_ref.event_id.as_str())
     );
 }
 

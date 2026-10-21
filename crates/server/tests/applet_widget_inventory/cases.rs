@@ -9,11 +9,11 @@ use super::*;
 impl Fixture {
     async fn install_widget(&self) -> Installed {
         let ghost = false;
-        let endpoint = None;
         let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
         let id = format!("ak:applet:{}", uuid::Uuid::now_v7());
-        let mut package =
-            signed_applet_package(&id, &namespace, &self.state.service_core_id(), endpoint);
+        let native = NativeAppletService::new(&id, &namespace, &self.state.service_core_id());
+        let mut package = native.package.clone();
+        self.native_services.lock().unwrap().push(native);
         package
             .claimed_profiles
             .push("ak.profile.applet_widget.v1".into());
@@ -149,7 +149,8 @@ impl Fixture {
         Installed {
             package,
             outcome,
-            bot_outcome,
+            bot: bot_outcome,
+            join_grant: installation_grant(&body, "ak.applet.join"),
             bot_body,
             body,
             key,

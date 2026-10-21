@@ -184,8 +184,8 @@ pub(crate) async fn prepare_source(
             || prior.payload["body"] != body
             || prior.payload["realm"].as_str() != Some(source.authority.realm_id.as_str())
         {
-            return Err(denied(
-                "outbound claim original conflicts with its imported ledger",
+            return Err(PersistenceError::Conflict(
+                "duplicate_conflict: outbound claim original differs".into(),
             ));
         }
         crate::realm_management_history::require_issuer(

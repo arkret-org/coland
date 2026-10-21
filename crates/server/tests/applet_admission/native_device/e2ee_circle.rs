@@ -115,7 +115,7 @@ async fn circle_actor(
         )
     })
     .await;
-    let actor = ActorId::account(authority.account_id.clone());
+    let actor = authority.actor_id.clone();
     let parent = native_business_parent_in_scope(
         fixture,
         install,
@@ -151,13 +151,7 @@ async fn circle_actor(
     })
     .await;
 
-    let realm_join = join_event(
-        fixture,
-        install,
-        &authority,
-        &key,
-        &install.bot_outcome.authorization_ref,
-    );
+    let realm_join = join_event(fixture, install, &authority, &key, &install.join_grant());
     let (status, outcome) =
         native_phase(|| post(fixture, &authority, &key, &realm_join, vec![])).await;
     assert_eq!(status, StatusCode::OK, "real parent Realm join: {outcome}");
@@ -339,7 +333,7 @@ async fn bot_and_ghost_encrypted_circle_require_exact_consent_pairs_parent_and_p
                 .ghost_commit(&install, &ghost, "encrypted-circle-ghost")
                 .await
                 .0,
-            StatusCode::CREATED
+            StatusCode::OK
         );
         let scope = native_phase(|| fixture.new_circle_scope()).await;
         let founder_parent = native_phase(|| join_founder(&fixture, &scope)).await;
@@ -368,12 +362,12 @@ async fn bot_and_ghost_encrypted_circle_require_exact_consent_pairs_parent_and_p
         );
         for (bundle, policy_scope) in [
             (
-                &install.bot_body["managed_actor_bundle"],
+                &install.bot_body["event"],
                 ScopeRef::Realm {
                     realm_id: fixture.realm.clone(),
                 },
             ),
-            (&ghost["managed_actor_bundle"], scope.clone()),
+            (&ghost["event"], scope.clone()),
         ] {
             native_phase(|| {
                 circle_actor(

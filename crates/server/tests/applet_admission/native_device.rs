@@ -1,17 +1,60 @@
 //! Real native Device join through the mounted self/events route and private ledger.
 #[path = "native_device/e2ee.rs"]
 mod e2ee;
-#[path = "native_device/forward_governor.rs"]
-mod forward_governor;
-#[path = "native_device/forward_source.rs"]
-mod forward_source;
-#[path = "native_device/managed_forward_source.rs"]
-mod managed_forward_source;
+#[path = "native_device/realm_routing.rs"]
+mod realm_routing;
 use arkret_models_integration::management_review::*;
 use arkret_wire::{DeviceId, ManagementOperation, ServiceOperationId};
 use coland_storage::DeviceRevocationStore as _;
 
 use super::*;
+
+async fn realm_device_fact(
+    fixture: &Fixture,
+    event: &Event,
+) -> arkret_models_collaboration::authority_commit::RealmDeviceHistoricalSignerFact {
+    let store = fixture.state.test_persistence();
+    let record = store
+        .authority_commits()
+        .committed_event(&event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::RealmDevice(
+        fact,
+    ) = store
+        .authority_commits()
+        .producer_signer_fact(event, &record.commit)
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("native Realm Device requires its own historical signer branch")
+    };
+    let suite = event.realm_id.digest_suite_code().digest_suite();
+    fact.validate_commit_binding(
+        &arkret_wire::CommittedEventFullView {
+            event: event.clone(),
+            commit: record.commit,
+        },
+        suite,
+    )
+    .unwrap();
+    let input = arkret_signatures::EventProofBuilder::new()
+        .envelope_bytes(event)
+        .unwrap();
+    arkret_signatures::verify_ed25519_detached_jws_proof_with_digest_suite(
+        event.producer_proof.as_ref().unwrap(),
+        &input,
+        &event.actor_id,
+        &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+            bytes: arkret_canonical::base64url_decode(fact.public_key_b64u.as_str()).unwrap(),
+        },
+        suite,
+    )
+    .unwrap();
+    fact
+}
 
 async fn authorize(
     fixture: &Fixture,
@@ -68,86 +111,37 @@ async fn authorize_scopes_until(
     scopes: Value,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> coland_storage::AppletManagedDeviceAuthority {
-    use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
-    use ed25519_dalek::Signer as _;
-    let provision = &bundle["managed_actor_provision_event"]["payload"];
-    let actor: ActorId = serde_json::from_value(provision["actor_id"].clone()).unwrap();
-    let did = provision["initial_resolution"]["did"].as_str().unwrap();
-    let local = did.rsplit(':').next().unwrap();
-    let seed = deterministic_managed_actor_seed(&format!(
-        "{}:{local}:controller:{}",
-        safe_did_token(namespace),
-        install.package.service_id
-    ));
-    let controller = SigningKey::from_bytes(&seed);
-    let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let mut payload:DeviceAuthorizePayload=serde_json::from_value(json!({
-        "device_id":device_id,"device_public_key_did":format!("did:key:{}",arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes())),
-        "hpke_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(&[119;32]),"algorithms":["Ed25519"],"device_key_algorithm":"Ed25519",
-        "authorized_by":actor.signing_principal_id(),"scopes":scopes,
-        "not_before":arkret_canonical::format_timestamp_canonical(now-chrono::Duration::seconds(1)),"expires_at":arkret_canonical::format_timestamp_canonical(expires_at.unwrap_or(now+chrono::Duration::hours(1))),"authorization_binding_kind":"applet_managed_delegation","authorized_generation_ref":1,"device_signature":"AA","applet_id":install.package.applet_id
-    })).unwrap();
-    payload.device_signature = serde_json::from_value(json!(arkret_canonical::base64url_encode(
-        key.sign(
-            &payload
-                .device_possession_signature_input(actor.as_account_id().unwrap())
-                .unwrap()
-        )
-        .to_bytes()
-    )))
-    .unwrap();
-    let realm = RealmId::from_event_id(
-        &serde_json::from_value(bundle["pcr_genesis_event"]["event_id"].clone()).unwrap(),
-    );
-    let mut event = arkret_wire::test_support::raw_event_for_actor_at(
-        EventKind::DeviceAuthorize.as_str(),
-        ScopeRef::Realm { realm_id: realm },
-        actor.clone(),
-        json!(payload),
-        now,
+    let creation: Event = serde_json::from_value(bundle.clone()).unwrap();
+    let candidate: RealmActorCreatePayload =
+        serde_json::from_value(json!(creation.payload)).unwrap();
+    let (event, metadata, controller) = super::control::device_event(
+        fixture,
+        &creation,
+        namespace,
+        key,
+        device_id.clone(),
+        scopes,
+        expires_at,
     )
-    .unwrap();
-    event.producer_proof = None;
-    let mut authored = arkret_wire::AuthoredEvent::finalize_with_digest_suite(
-        event,
-        arkret_canonical::DigestSuite::Sha256,
+    .await;
+    let (status, outcome) = super::control::post(
+        fixture,
+        &metadata,
+        &candidate.control_method_kid,
+        &controller,
+        &event,
     )
-    .unwrap();
-    let signer = Ed25519PayloadSigner::new(
-        controller,
-        Did::new(did).unwrap(),
-        arkret_wire::DidUrl::new(format!("{did}#managed-controller")).unwrap(),
-    );
-    arkret_signatures::sign_event(
-        &mut authored,
-        &signer,
-        arkret_signatures::SignEventOptions::new(),
-    )
-    .unwrap();
-    let body = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
-        arkret_wire::EventAdmissionSubmission::new(authored.into_event()),
-    );
-    let (status, outcome) = fixture
-        .service_post(
-            &install.package,
-            "/_arkret/self/events",
-            ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-            &json!(body),
-            &format!("native-device-{}", uuid::Uuid::now_v7()),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "authorize: {outcome}");
-    coland_storage_postgres::PgDeviceRevocationStore {
-        pool: fixture.pool.clone(),
-    }
-    .applet_managed_device_authority(
-        actor.as_account_id().unwrap(),
-        &device_id,
-        chrono::Utc::now(),
-    )
-    .await
-    .unwrap()
-    .unwrap()
+    .await;
+    assert_eq!(status, StatusCode::OK, "authorize Realm Device: {outcome}");
+    assert_eq!(event.applet_id.as_ref(), Some(&install.package.applet_id));
+    fixture
+        .state
+        .test_persistence()
+        .device_revocations()
+        .applet_managed_device_authority(&candidate.actor_id, &device_id, chrono::Utc::now())
+        .await
+        .unwrap()
+        .unwrap()
 }
 
 fn join_event(
@@ -158,7 +152,7 @@ fn join_event(
     grant: &arkret_wire::GrantId,
 ) -> Event {
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let actor = ActorId::account(authority.account_id.clone());
+    let actor = authority.actor_id.clone();
     let mut draft = arkret_wire::test_support::raw_event_for_actor_at(
         EventKind::MemberState.as_str(),
         ScopeRef::Realm {
@@ -220,62 +214,174 @@ fn business(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bot_and_ghost_join_use_real_native_device_installation_source_and_exact_replay() {
     tokio::spawn(Box::pin(async {
-        let fixture=Box::pin(Fixture::new()).await;
-        let namespace=format!("bridge.{}",uuid::Uuid::now_v7().simple());
-        let native=NativeAppletService::new(&format!("ak:applet:{}",uuid::Uuid::now_v7()),&namespace,&fixture.state.service_core_id());
-        let install=Box::pin(fixture.install_package(true,native.package.clone(),&namespace)).await;
-        let ghost=fixture.ghost_body(&install,&namespace,"native-join").await;
-        assert_eq!(fixture.ghost_commit(&install,&ghost,"native-ghost").await.0,StatusCode::CREATED);
-        let mut originals=Vec::new();
-        let unrelated=managed_actor_action_grant(&fixture,&install,&ActorId::service(install.package.service_id.clone()),vec!["ak.message.create".into()]).await;
-        for bundle in [install.bot_body["managed_actor_bundle"].clone(),ghost["managed_actor_bundle"].clone()] {
-            let actor:ActorId=serde_json::from_value(bundle["managed_actor_provision_event"]["payload"]["actor_id"].clone()).unwrap();
-            let installation_grant=install.bot_outcome.authorization_ref.clone();
-            let key=SigningKey::from_bytes(&[121;32]);
-            let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
-            let narrow=authorize(&fixture,&install,&bundle,&namespace,&key,device.clone(),false).await;
-            let event=join_event(&fixture,&install,&narrow,&key,&installation_grant);
-            let before=business(&fixture).await;
-            let (status,error)=post(&fixture,&narrow,&key,&event,vec![]).await;
-            assert!(!status.is_success(),"scope/action ceiling: {error}");assert_eq!(before,business(&fixture).await);
-            let authority=authorize(&fixture,&install,&bundle,&namespace,&key,device.clone(),true).await;
-            let event=join_event(&fixture,&install,&authority,&key,&installation_grant);
-            let unrelated_ref=join_event(&fixture,&install,&authority,&key,&unrelated);
-            let mut other_subject=event.clone();other_subject.payload.insert("member_id".into(),json!(ActorId::account(fixture.pcr.history.account.clone())));
-            let other_subject=sign_managed_device_event(other_subject,&authority,&key,event.created_at);
-            for wrong in [unrelated_ref,other_subject] {
-                let before=business(&fixture).await;let (status,error)=post(&fixture,&authority,&key,&wrong,vec![]).await;
-                assert!(!status.is_success(),"wrong installation or subject: {error}");assert_eq!(before,business(&fixture).await);
+        let fixture = Box::pin(Fixture::new()).await;
+        let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
+        let native = NativeAppletService::new(
+            &format!("ak:applet:{}", uuid::Uuid::now_v7()),
+            &namespace,
+            &fixture.state.service_core_id(),
+        );
+        let install =
+            Box::pin(fixture.install_package(true, native.package.clone(), &namespace)).await;
+        let ghost = fixture
+            .ghost_body(&install, &namespace, "native-join")
+            .await;
+        assert_eq!(
+            fixture
+                .ghost_commit(&install, &ghost, "native-ghost")
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let mut originals = Vec::new();
+        let unrelated = managed_actor_action_grant(
+            &fixture,
+            &install,
+            &ActorId::service(install.package.service_id.clone()),
+            vec!["ak.message.create".into()],
+        )
+        .await;
+        for bundle in [install.bot_body["event"].clone(), ghost["event"].clone()] {
+            let actor: ActorId =
+                serde_json::from_value(bundle["payload"]["actor_id"].clone()).unwrap();
+            let installation_grant = install.join_grant().clone();
+            let key = SigningKey::from_bytes(&[121; 32]);
+            let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
+            let narrow = authorize(
+                &fixture,
+                &install,
+                &bundle,
+                &namespace,
+                &key,
+                device.clone(),
+                false,
+            )
+            .await;
+            let event = join_event(&fixture, &install, &narrow, &key, &installation_grant);
+            let before = business(&fixture).await;
+            let (status, error) = post(&fixture, &narrow, &key, &event, vec![]).await;
+            assert!(!status.is_success(), "scope/action ceiling: {error}");
+            assert_eq!(before, business(&fixture).await);
+            let authority = authorize(
+                &fixture,
+                &install,
+                &bundle,
+                &namespace,
+                &key,
+                device.clone(),
+                true,
+            )
+            .await;
+            let event = join_event(&fixture, &install, &authority, &key, &installation_grant);
+            let unrelated_ref = join_event(&fixture, &install, &authority, &key, &unrelated);
+            let mut other_subject = event.clone();
+            other_subject.payload.insert(
+                "member_id".into(),
+                json!(ActorId::account(fixture.pcr.history.account.clone())),
+            );
+            let other_subject =
+                sign_managed_device_event(other_subject, &authority, &key, event.created_at);
+            for wrong in [unrelated_ref, other_subject] {
+                let before = business(&fixture).await;
+                let (status, error) = post(&fixture, &authority, &key, &wrong, vec![]).await;
+                assert!(
+                    !status.is_success(),
+                    "wrong installation or subject: {error}"
+                );
+                assert_eq!(before, business(&fixture).await);
             }
-            let service_key=applet_service_signing_key(&install.package.webhook_auth.key_ref);
-            let wrong=sign_managed_device_event(event.clone(),&authority,&service_key,event.created_at);
-            let before=business(&fixture).await;
-            assert!(!post(&fixture,&authority,&key,&wrong,vec![]).await.0.is_success());assert_eq!(before,business(&fixture).await);
-            let (status,accepted)=post(&fixture,&authority,&key,&event,vec![]).await;
-            assert_eq!(status,StatusCode::OK,"native join: {accepted}");
-            assert_accepted_event(&fixture,&event).await;
-            assert!(fixture.state.test_persistence().authority_commits().local_current_member_joined(&fixture.realm,&actor,&fixture.state.service_core_id()).await.unwrap());
-            let record=fixture.state.test_persistence().authority_commits().committed_event(&event.event_id).await.unwrap().unwrap();
-            let fact=fixture.state.test_persistence().authority_commits().account_device_signer_fact(&event,&record.commit).await.unwrap().unwrap();
-            assert_eq!(fact.actor,actor);assert_eq!(fact.key.authorization_ref,authority.selector.authorization_ref);
-            arkret_identity::account_device_signer_evidence::verify_historical_account_device_event_signature(&event,&fact,fixture.realm.digest_suite_code().digest_suite()).unwrap();
-            let before=business(&fixture).await;
-            let (status,replay)=post(&fixture,&authority,&key,&event,vec![]).await;assert_eq!(status,StatusCode::OK,"{replay}");assert_eq!(before,business(&fixture).await);
-            let replacement_key=SigningKey::from_bytes(&[122;32]);
-            let replacement=authorize(&fixture,&install,&bundle,&namespace,&replacement_key,device,true).await;
-            let before=business(&fixture).await;
-            let (status,replay)=post(&fixture,&replacement,&replacement_key,&event,vec![]).await;assert_eq!(status,StatusCode::OK,"replacement replay: {replay}");assert_eq!(before,business(&fixture).await);
-            let fact_after=fixture.state.test_persistence().authority_commits().account_device_signer_fact(&event,&record.commit).await.unwrap().unwrap();assert_eq!(fact,fact_after);
-            originals.push((event,replacement,replacement_key));
+            let service_key = applet_service_signing_key(&install.package.webhook_auth.key_ref);
+            let wrong = sign_managed_device_event(
+                event.clone(),
+                &authority,
+                &service_key,
+                event.created_at,
+            );
+            let before = business(&fixture).await;
+            assert!(
+                !post(&fixture, &authority, &key, &wrong, vec![])
+                    .await
+                    .0
+                    .is_success()
+            );
+            assert_eq!(before, business(&fixture).await);
+            let (status, accepted) = post(&fixture, &authority, &key, &event, vec![]).await;
+            assert_eq!(status, StatusCode::OK, "native join: {accepted}");
+            assert_accepted_event(&fixture, &event).await;
+            assert!(
+                fixture
+                    .state
+                    .test_persistence()
+                    .authority_commits()
+                    .local_current_member_joined(
+                        &fixture.realm,
+                        &actor,
+                        &fixture.state.service_core_id()
+                    )
+                    .await
+                    .unwrap()
+            );
+            let record = fixture
+                .state
+                .test_persistence()
+                .authority_commits()
+                .committed_event(&event.event_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let fact = realm_device_fact(&fixture, &event).await;
+            assert_eq!(fact.actor_id, actor);
+            assert_eq!(
+                fact.authorization_event_id,
+                authority.authorization_ref.event_id
+            );
+
+            let before = business(&fixture).await;
+            let (status, replay) = post(&fixture, &authority, &key, &event, vec![]).await;
+            assert_eq!(status, StatusCode::OK, "{replay}");
+            assert_eq!(before, business(&fixture).await);
+            let replacement_key = SigningKey::from_bytes(&[122; 32]);
+            let replacement = authorize(
+                &fixture,
+                &install,
+                &bundle,
+                &namespace,
+                &replacement_key,
+                DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap(),
+                true,
+            )
+            .await;
+            let before = business(&fixture).await;
+            let (status, replay) =
+                post(&fixture, &replacement, &replacement_key, &event, vec![]).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "another Device cannot carry the original Device signature: {replay}"
+            );
+            assert_eq!(before, business(&fixture).await);
+            let fact_after = realm_device_fact(&fixture, &event).await;
+            assert_eq!(fact, fact_after);
+            originals.push((event, authority, key));
         }
         fixture.revoke(&install).await;
-        for (original,authority,key) in originals {
-            let before=business(&fixture).await;
-            let fresh=join_event(&fixture,&install,&authority,&key,&install.bot_outcome.authorization_ref);
-            let (status,error)=post(&fixture,&authority,&key,&fresh,vec![]).await;assert!(!status.is_success(),"revoked install new join: {error}");assert_eq!(before,business(&fixture).await);
-            let (status,replay)=post(&fixture,&authority,&key,&original,vec![]).await;assert_eq!(status,StatusCode::OK,"accepted original after revoke: {replay}");assert_eq!(before,business(&fixture).await);
+        for (original, authority, key) in originals {
+            let before = business(&fixture).await;
+            let fresh = join_event(&fixture, &install, &authority, &key, &install.join_grant());
+            let (status, error) = post(&fixture, &authority, &key, &fresh, vec![]).await;
+            assert!(!status.is_success(), "revoked install new join: {error}");
+            assert_eq!(before, business(&fixture).await);
+            let (status, replay) = post(&fixture, &authority, &key, &original, vec![]).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "accepted original after revoke: {replay}"
+            );
+            assert_eq!(before, business(&fixture).await);
         }
-    })).await.unwrap();
+    }))
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -285,10 +391,10 @@ async fn native_join_review_binds_service_requester_device_original_and_atomic_c
         let namespace=format!("bridge.{}",uuid::Uuid::now_v7().simple());
         let native=NativeAppletService::new(&format!("ak:applet:{}",uuid::Uuid::now_v7()),&namespace,&fixture.state.service_core_id());
         let install=Box::pin(fixture.install_package(true,native.package.clone(),&namespace)).await;
-        let actor=install.bot_outcome.bot_actor_id.clone();
-        let installation_grant=install.bot_outcome.authorization_ref.clone();
+        let actor=install.bot.actor_id.clone();
+        let installation_grant=install.join_grant().clone();
         let key=SigningKey::from_bytes(&[123;32]);let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
-        let authority=authorize(&fixture,&install,&install.bot_body["managed_actor_bundle"],&namespace,&key,device,true).await;
+        let authority=authorize(&fixture,&install,&install.bot_body["event"],&namespace,&key,device,true).await;
         let event=join_event(&fixture,&install,&authority,&key,&installation_grant);
         let admin=ActorId::account(fixture.pcr.history.account.clone());let policy_id=format!("ak:policy:{}",uuid::Uuid::now_v7());
         let policy=fixture.admin_event(EventKind::PolicySet,event.scope_ref.clone(),json!({"policy_id":policy_id,"expected_revision":null,"value":{"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":fixture.realm,"policy_kind":"applet","default_effect":"allow","created_by":admin,"created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),"rules":[{"rule_id":"native_join","kind":"applet","effect":"require_review","applet_target":{"kind":"installation","applet_id":install.package.applet_id,"effective_scope":event.scope_ref},"applet_operations":["join"],"review_requirement":{"approver_actor_ids":[admin],"threshold":1,"max_age_seconds":3600}}]}}));
@@ -312,9 +418,9 @@ async fn native_join_review_binds_service_requester_device_original_and_atomic_c
         let (status,replay)=post(&fixture,&authority,&key,&event,vec![vote]).await;assert_eq!(status,StatusCode::OK,"{replay}");assert_eq!(after,business(&fixture).await);
 
         let ghost=fixture.ghost_body(&install,&namespace,"native-review-grant-current").await;
-        assert_eq!(fixture.ghost_commit(&install,&ghost,"native-pending-ghost").await.0,StatusCode::CREATED);
+        assert_eq!(fixture.ghost_commit(&install,&ghost,"native-pending-ghost").await.0,StatusCode::OK);
         let ghost_key=SigningKey::from_bytes(&[124;32]);let ghost_device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
-        let ghost_authority=authorize(&fixture,&install,&ghost["managed_actor_bundle"],&namespace,&ghost_key,ghost_device,true).await;
+        let ghost_authority=authorize(&fixture,&install,&ghost["event"],&namespace,&ghost_key,ghost_device,true).await;
         let ghost_event=join_event(&fixture,&install,&ghost_authority,&ghost_key,&installation_grant);
         let pending_request=ManagementReviewRequestBody { configuration_ref: None,request_id:format!("native-revoked-source-{}",uuid::Uuid::now_v7()),effective_scope:ghost_event.scope_ref.clone(),management_operation:ManagementOperation::Join,requester_actor_id:request.requester_actor_id.clone(),target:ManagementReviewTarget::Event {event:Box::new(ghost_event)}};
         let (status,pending)=fixture.service_post(&install.package,"/_arkret/self/management-reviews/requests",ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,&json!(pending_request),"native-pending-source").await;assert_eq!(status,StatusCode::OK,"{pending}");assert_eq!(pending["status"],"pending");
@@ -337,44 +443,6 @@ async fn native_join_review_binds_service_requester_device_original_and_atomic_c
     })).await.unwrap();
 }
 
-fn profile_create(
-    fixture: &Fixture,
-    install: &Installed,
-    bundle: &Value,
-    authority: &coland_storage::AppletManagedDeviceAuthority,
-    key: &SigningKey,
-    mode: &str,
-) -> Event {
-    let mut object = bundle["profile_event"]["payload"]["object"].clone();
-    object["profile_fields"]["applet_interaction"] =
-        json!({"effective_scope":{"kind":"realm","realm_id":fixture.realm},"mode":mode});
-    let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let mut event = arkret_wire::test_support::raw_event_for_actor_at(
-        EventKind::ProfileCreate.as_str(),
-        ScopeRef::Realm {
-            realm_id: fixture.realm.clone(),
-        },
-        ActorId::account(authority.account_id.clone()),
-        json!({"object":object}),
-        now,
-    )
-    .unwrap();
-    event.applet_id = Some(install.package.applet_id.clone());
-    event.authorization_ref = Some(install.bot_outcome.authorization_ref.clone().into());
-    sign_managed_device_event(event, authority, key, now)
-}
-fn profile_update(
-    original: &Event,
-    authority: &coland_storage::AppletManagedDeviceAuthority,
-    key: &SigningKey,
-    patch: Value,
-) -> Event {
-    let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let mut event=arkret_wire::test_support::raw_event_for_actor_at(EventKind::ProfileUpdate.as_str(),original.scope_ref.clone(),original.actor_id.clone(),json!({"target_ref":arkret_wire::ActorProfileId::from_event_id(&original.event_id),"patch":patch}),now).unwrap();
-    event.applet_id = original.applet_id.clone();
-    event.authorization_ref = original.authorization_ref.clone();
-    sign_managed_device_event(event, authority, key, now)
-}
 async fn publish_policy(fixture: &Fixture, install: &Installed, effect: &str) -> Event {
     let id = format!("ak:policy:{}", uuid::Uuid::now_v7());
     let admin = ActorId::account(fixture.pcr.history.account.clone());
@@ -395,7 +463,9 @@ async fn approved_profile(
     let request = ManagementReviewRequestBody {
         configuration_ref: None,
         request_id: format!("publish-{}", uuid::Uuid::now_v7()),
-        effective_scope: event.scope_ref.clone(),
+        effective_scope: ScopeRef::Realm {
+            realm_id: fixture.realm.clone(),
+        },
         management_operation: ManagementOperation::Publish,
         requester_actor_id: ActorId::service(install.package.service_id.clone()),
         target: ManagementReviewTarget::Event {
@@ -420,93 +490,8 @@ async fn approved_profile(
     (request, vote)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_profiles_keep_full_subject_scope_and_reserved_identity() {
-    tokio::spawn(Box::pin(async {
-        let fixture=Box::pin(Fixture::new()).await;
-        let namespace=format!("bridge.{}",uuid::Uuid::now_v7().simple());
-        let native=NativeAppletService::new(&format!("ak:applet:{}",uuid::Uuid::now_v7()),&namespace,&fixture.state.service_core_id());
-        let install=Box::pin(fixture.install_package(true,native.package.clone(),&namespace)).await;
-        let ghost=fixture.ghost_body(&install,&namespace,"scope-profile").await;assert_eq!(fixture.ghost_commit(&install,&ghost,"scope-profile-ghost").await.0,StatusCode::CREATED);
-        let mut profiles=Vec::new();
-        for bundle in [install.bot_body["managed_actor_bundle"].clone(),ghost["managed_actor_bundle"].clone()] {
-            let key=SigningKey::from_bytes(&[125;32]);let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
-            let narrow=authorize(&fixture,&install,&bundle,&namespace,&key,device.clone(),true).await;
-            let join=join_event(&fixture,&install,&narrow,&key,&install.bot_outcome.authorization_ref);
-            let (status,out)=post(&fixture,&narrow,&key,&join,vec![]).await;assert_eq!(status,StatusCode::OK,"{out}");
-            let denied=profile_create(&fixture,&install,&bundle,&narrow,&key,"public");let before=business(&fixture).await;
-            assert!(!post(&fixture,&narrow,&key,&denied,vec![]).await.0.is_success());assert_eq!(before,business(&fixture).await);
-            let authority=authorize_scopes(&fixture,&install,&bundle,&namespace,&key,device,json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.applet.publish","ak.event.read"]}])).await;
-            let original=profile_create(&fixture,&install,&bundle,&authority,&key,"public");
-            for (field,value) in [("managed_by_applet",json!("ak:applet:00000000-0000-4000-8000-000000000999")),("applet_interaction",json!({"effective_scope":{"kind":"realm","realm_id":authority.pcr_realm_id},"mode":"public"}))] {
-                let mut wrong=original.clone();wrong.payload.get_mut("object").unwrap()["profile_fields"][field]=value;
-                let wrong=sign_managed_device_event(wrong,&authority,&key,original.created_at);let before=business(&fixture).await;
-                assert!(!post(&fixture,&authority,&key,&wrong,vec![]).await.0.is_success());assert_eq!(before,business(&fixture).await);
-            }
-            let (status,out)=post(&fixture,&authority,&key,&original,vec![]).await;assert_eq!(status,StatusCode::OK,"scope create: {out}");assert_accepted_event(&fixture,&original).await;
-            let update=profile_update(&original,&authority,&key,json!({"display_name":"Native scope profile"}));
-            let (status,out)=post(&fixture,&authority,&key,&update,vec![]).await;assert_eq!(status,StatusCode::OK,"scope update: {out}");
-            let before=business(&fixture).await;assert_eq!(post(&fixture,&authority,&key,&original,vec![]).await.0,StatusCode::OK);assert_eq!(before,business(&fixture).await);
-            for patch in [json!({"accountable_principal_ids":[]}),json!({"profile_fields.managed_by_applet":null})] {
-                let wrong=profile_update(&original,&authority,&key,patch);let before=business(&fixture).await;
-                assert!(!post(&fixture,&authority,&key,&wrong,vec![]).await.0.is_success());assert_eq!(before,business(&fixture).await);
-            }
-            profiles.push((original,authority,key));
-        }
-        let material=fixture.state.test_persistence().authority_commits().realm_state_snapshot_material_for_account(&fixture.realm,&fixture.pcr.history.account).await.unwrap().unwrap();
-        let rows=material.current_state_entries.iter().filter_map(|row|{let arkret_wire::TypedCurrentRow::Value{selector:arkret_wire::CurrentSelector::ActorProfile{actor_profile_id},value,..}=row else{return None};Some((actor_profile_id,value))}).collect::<Vec<_>>();assert_eq!(rows.len(),2);
-        for (original,authority,key) in &profiles {
-            let id=arkret_wire::ActorProfileId::from_event_id(&original.event_id);let row=rows.iter().find(|(found,_)|**found==id).unwrap();assert_eq!(row.1["principal_id"],json!(authority.account_id.principal_id));assert!(row.1.get("resolution").is_none());
-            let before=business(&fixture).await;
-            let missing=before["profiles"].as_array().unwrap().iter().find(|p|p["actor_profile_id"]==id.as_str()).unwrap().clone();
-            {let mut conn=fixture.pool.get().await.unwrap();diesel::sql_query("DELETE FROM actor_profile_current_results WHERE actor_profile_id=$1").bind::<diesel::sql_types::Text,_>(id.as_str()).execute(&mut conn).await.unwrap();}
-            let incomplete=business(&fixture).await;let next=profile_update(original,authority,key,json!({"display_name":"Unavailable current"}));let (status,error)=post(&fixture,authority,key,&next,vec![]).await;assert_eq!(status,StatusCode::CONFLICT,"{error}");assert!(error.to_string().contains("revision_unavailable"),"{error}");assert_eq!(incomplete,business(&fixture).await);
-            {let mut conn=fixture.pool.get().await.unwrap();diesel::sql_query("INSERT INTO actor_profile_current_results SELECT r.* FROM jsonb_populate_recordset(NULL::actor_profile_current_results,$1) r").bind::<diesel::sql_types::Jsonb,_>(json!([missing])).execute(&mut conn).await.unwrap();}assert_eq!(before,business(&fixture).await);
-        }
-        publish_policy(&fixture,&install,"deny").await;
-        for (original,authority,key) in &profiles {
-            let public=profile_update(original,authority,key,json!({"display_name":"Still public"}));let before=business(&fixture).await;assert!(!post(&fixture,authority,key,&public,vec![]).await.0.is_success());assert_eq!(before,business(&fixture).await);
-            let private=profile_update(original,authority,key,json!({"profile_fields.applet_interaction.mode":"private"}));let (status,out)=post(&fixture,authority,key,&private,vec![]).await;assert_eq!(status,StatusCode::OK,"private transition: {out}");
-            let reopen=profile_update(original,authority,key,json!({"profile_fields.applet_interaction.mode":"public"}));let before=business(&fixture).await;assert!(!post(&fixture,authority,key,&reopen,vec![]).await.0.is_success());assert_eq!(before,business(&fixture).await);
-        }
-    })).await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_public_profile_review_consumes_exact_postimage_and_rolls_back() {
-    tokio::spawn(Box::pin(async {
-        let fixture=Box::pin(Fixture::new()).await;fixture.enable_management_authority();
-        let namespace=format!("bridge.{}",uuid::Uuid::now_v7().simple());let native=NativeAppletService::new(&format!("ak:applet:{}",uuid::Uuid::now_v7()),&namespace,&fixture.state.service_core_id());
-        let install=Box::pin(fixture.install_package(true,native.package.clone(),&namespace)).await;
-        let key=SigningKey::from_bytes(&[126;32]);let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
-        let authority=authorize_scopes(&fixture,&install,&install.bot_body["managed_actor_bundle"],&namespace,&key,device,json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.applet.publish","ak.event.read"]}])).await;
-        let join=join_event(&fixture,&install,&authority,&key,&install.bot_outcome.authorization_ref);let (status,out)=post(&fixture,&authority,&key,&join,vec![]).await;assert_eq!(status,StatusCode::OK,"{out}");
-        publish_policy(&fixture,&install,"require_review").await;
-        let original=profile_create(&fixture,&install,&install.bot_body["managed_actor_bundle"],&authority,&key,"public");
-        let before=business(&fixture).await;let (status,error)=post(&fixture,&authority,&key,&original,vec![]).await;assert!(!status.is_success(),"{error}");assert!(error.to_string().contains("approval_required"),"{error}");assert_eq!(before,business(&fixture).await);
-        let (request,vote)=approved_profile(&fixture,&install,&original).await;
-        let before=business(&fixture).await;
-        {let mut conn=fixture.pool.get().await.unwrap();diesel::sql_query("CREATE FUNCTION fail_native_profile() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'native profile fault'; END $$").execute(&mut conn).await.unwrap();diesel::sql_query("CREATE TRIGGER fail_native_profile BEFORE INSERT ON actor_profile_current_results FOR EACH ROW EXECUTE FUNCTION fail_native_profile()").execute(&mut conn).await.unwrap();}
-        let (status,error)=post(&fixture,&authority,&key,&original,vec![vote.clone()]).await;
-        {let mut conn=fixture.pool.get().await.unwrap();diesel::sql_query("DROP TRIGGER fail_native_profile ON actor_profile_current_results").execute(&mut conn).await.unwrap();diesel::sql_query("DROP FUNCTION fail_native_profile()").execute(&mut conn).await.unwrap();}
-        assert!(status.is_server_error(),"{error}");assert_eq!(before,business(&fixture).await);
-        {let mut conn=fixture.pool.get().await.unwrap();diesel::sql_query("CREATE FUNCTION fail_native_profile_source() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'native profile retained source fault'; END $$").execute(&mut conn).await.unwrap();diesel::sql_query("CREATE TRIGGER fail_native_profile_source BEFORE INSERT ON agent_producer_signer_keys FOR EACH ROW EXECUTE FUNCTION fail_native_profile_source()").execute(&mut conn).await.unwrap();}
-        let (status,error)=post(&fixture,&authority,&key,&original,vec![vote.clone()]).await;
-        {let mut conn=fixture.pool.get().await.unwrap();diesel::sql_query("DROP TRIGGER fail_native_profile_source ON agent_producer_signer_keys").execute(&mut conn).await.unwrap();diesel::sql_query("DROP FUNCTION fail_native_profile_source()").execute(&mut conn).await.unwrap();}
-        assert!(status.is_server_error(),"failure after ledger and nonce consumption: {error}");assert_eq!(before,business(&fixture).await);
-        let (status,out)=post(&fixture,&authority,&key,&original,vec![vote.clone()]).await;assert_eq!(status,StatusCode::OK,"reviewed profile: {out}");let after=business(&fixture).await;assert_eq!(after["reviews"].as_array().unwrap().iter().find(|r|r["request_id"]==request.request_id).unwrap()["status"],"consumed");
-        assert_eq!(post(&fixture,&authority,&key,&original,vec![vote]).await.0,StatusCode::OK);assert_eq!(after,business(&fixture).await);
-        // Any patch whose materialized postimage stays public needs a new review.
-        for patch in [json!({"display_name":"Reviewed display"}),json!({"profile_fields.applet_interaction":{"effective_scope":original.scope_ref,"mode":"public"}}),json!({"profile_fields.applet_interaction.mode":"public"})] {
-            let next=profile_update(&original,&authority,&key,patch);let before=business(&fixture).await;let (status,error)=post(&fixture,&authority,&key,&next,vec![]).await;assert!(!status.is_success(),"{error}");assert!(error.to_string().contains("approval_required"),"{error}");assert_eq!(before,business(&fixture).await);
-        }
-        let pending=profile_update(&original,&authority,&key,json!({"display_name":"Stale postimage"}));let (stale,vote)=approved_profile(&fixture,&install,&pending).await;
-        let private=profile_update(&original,&authority,&key,json!({"profile_fields.applet_interaction.mode":"private"}));assert_eq!(post(&fixture,&authority,&key,&private,vec![]).await.0,StatusCode::OK);
-        let before=business(&fixture).await;let (status,error)=post(&fixture,&authority,&key,&pending,vec![vote]).await;assert!(!status.is_success(),"stale Profile revision: {error}");assert_eq!(business_without_reviews(before),business_without_reviews(business(&fixture).await));
-        let (status,out)=fixture.service_post(&install.package,"/_arkret/self/management-reviews/status",ServiceOperationId::SELF_MANAGEMENT_REVIEW_READ_STATUS_V1,&json!({"request_id":stale.request_id}),"stale-publish-status").await;assert_eq!(status,StatusCode::OK,"{out}");assert_eq!(out["status"],"superseded");
-        let reopening=profile_update(&original,&authority,&key,json!({"profile_fields.applet_interaction.mode":"public"}));let (_,vote)=approved_profile(&fixture,&install,&reopening).await;let (status,out)=post(&fixture,&authority,&key,&reopening,vec![vote]).await;assert_eq!(status,StatusCode::OK,"reviewed reopen: {out}");
-    })).await.unwrap();
-}
+#[path = "realm_profiles.rs"]
+mod realm_profiles;
 
 #[inline(never)]
 fn native_business_parent<'a>(
@@ -759,7 +744,7 @@ fn native_message(
     body: &str,
 ) -> Event {
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let mut event=arkret_wire::test_support::raw_event_for_actor_at(EventKind::MessageCreate.as_str(),ScopeRef::Realm{realm_id:fixture.realm.clone()},ActorId::account(authority.account_id.clone()),json!({"strand_id":strand,"track_name":"discussion","content":{"kind":"ak.content.text","format":"plain","body":body}}),now).unwrap();
+    let mut event=arkret_wire::test_support::raw_event_for_actor_at(EventKind::MessageCreate.as_str(),ScopeRef::Realm{realm_id:fixture.realm.clone()},authority.actor_id.clone(),json!({"strand_id":strand,"track_name":"discussion","content":{"kind":"ak.content.text","format":"plain","body":body}}),now).unwrap();
     event.applet_id = Some(install.package.applet_id.clone());
     event.authorization_ref = Some(grant.clone().into());
     sign_managed_device_event(event, authority, key, now)
@@ -775,22 +760,22 @@ async fn native_strand(fixture: &Fixture) -> arkret_wire::StrandId {
 async fn native_messages_use_actual_device_and_share_service_parent_quota_atomically() {
     tokio::spawn(Box::pin(async {
         let fixture=Box::pin(Fixture::new()).await;let namespace=format!("bridge.{}",uuid::Uuid::now_v7().simple());let native=NativeAppletService::new(&format!("ak:applet:{}",uuid::Uuid::now_v7()),&namespace,&fixture.state.service_core_id());
-        let install=Box::pin(fixture.install_package(true,native.package.clone(),&namespace)).await;let ghost=fixture.ghost_body(&install,&namespace,"native-message").await;assert_eq!(fixture.ghost_commit(&install,&ghost,"native-message-ghost").await.0,StatusCode::CREATED);
+        let install=Box::pin(fixture.install_package(true,native.package.clone(),&namespace)).await;let ghost=fixture.ghost_body(&install,&namespace,"native-message").await;assert_eq!(fixture.ghost_commit(&install,&ghost,"native-message-ghost").await.0,StatusCode::OK);
         let strand=native_strand(&fixture).await;
         let quota:GrantConstraint=serde_json::from_value(json!({"constraint_kind":"quota","constraint_subkind":"rate","effect":"allow","max_operations":1,"period":"P1D","constraint_scope":"per_realm"})).unwrap();
         let parent=native_message_parent(&fixture,&install,vec![quota]).await;
         let mut actors=Vec::new();
-        for bundle in [install.bot_body["managed_actor_bundle"].clone(),ghost["managed_actor_bundle"].clone()] {
-            let actor:ActorId=serde_json::from_value(bundle["managed_actor_provision_event"]["payload"]["actor_id"].clone()).unwrap();let before=business(&fixture).await;
+        for bundle in [install.bot_body["event"].clone(),ghost["event"].clone()] {
+            let actor:ActorId=serde_json::from_value(bundle["payload"]["actor_id"].clone()).unwrap();let before=business(&fixture).await;
             let child=native_message_child(&fixture,&install,&actor,&parent).await;let after=business(&fixture).await;
             for table in ["quota_counters","quota_buckets","quota_consumptions"] {assert_eq!(before[table],after[table],"issuing a terminal child cannot spend business quota");}
             let key=SigningKey::from_bytes(&[127;32]);let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
             let authority=authorize_scopes(&fixture,&install,&bundle,&namespace,&key,device,json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read","ak.message.create"]}])).await;
             let unjoined=native_message(&fixture,&install,&authority,&key,&child,&strand,"not yet joined");let before=business(&fixture).await;let (status,error)=post(&fixture,&authority,&key,&unjoined,vec![]).await;assert!(!status.is_success(),"{error}");assert_eq!(before,business(&fixture).await);
-            let join=join_event(&fixture,&install,&authority,&key,&install.bot_outcome.authorization_ref);let (status,out)=post(&fixture,&authority,&key,&join,vec![]).await;assert_eq!(status,StatusCode::OK,"{out}");actors.push((authority,key,child));
+            let join=join_event(&fixture,&install,&authority,&key,&install.join_grant());let (status,out)=post(&fixture,&authority,&key,&join,vec![]).await;assert_eq!(status,StatusCode::OK,"{out}");actors.push((authority,key,child));
         }
         let (authority,key,child)=&actors[0];
-        for grant in [&parent,&actors[1].2,&install.bot_outcome.authorization_ref] {
+        for grant in [&parent,&actors[1].2,&install.join_grant()] {
             let wrong=native_message(&fixture,&install,authority,key,grant,&strand,"wrong authority source");let before=business(&fixture).await;let (status,error)=post(&fixture,authority,key,&wrong,vec![]).await;assert!(!status.is_success(),"{error}");assert_eq!(before,business(&fixture).await);
         }
         let unknown=arkret_wire::StrandId::from_event_id(&arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[0x78;32]));let wrong=native_message(&fixture,&install,authority,key,child,&unknown,"missing actual Strand");let before=business(&fixture).await;assert!(!post(&fixture,authority,key,&wrong,vec![]).await.0.is_success());assert_eq!(before,business(&fixture).await);
@@ -801,7 +786,7 @@ async fn native_messages_use_actual_device_and_share_service_parent_quota_atomic
         assert!(status.is_server_error(),"{error}");assert_eq!(before,business(&fixture).await);
         let (status,out)=post(&fixture,authority,key,&event,vec![]).await;assert_eq!(status,StatusCode::OK,"native Message: {out}");assert_accepted_event(&fixture,&event).await;
         let after=business(&fixture).await;let source=after["quota_counters"].as_array().unwrap().iter().find(|r|r["grant_id"]==parent.as_str()).unwrap();assert_eq!(source["consumed"],1);assert_eq!(after["domain_current"]["messages"].as_array().unwrap().len(),1);
-        let record=fixture.state.test_persistence().authority_commits().committed_event(&event.event_id).await.unwrap().unwrap();let fact=fixture.state.test_persistence().authority_commits().account_device_signer_fact(&event,&record.commit).await.unwrap().unwrap();assert_eq!(fact.actor,ActorId::account(authority.account_id.clone()));arkret_identity::account_device_signer_evidence::verify_historical_account_device_event_signature(&event,&fact,fixture.realm.digest_suite_code().digest_suite()).unwrap();
+        let record=fixture.state.test_persistence().authority_commits().committed_event(&event.event_id).await.unwrap().unwrap();let fact=realm_device_fact(&fixture,&event).await;assert_eq!(fact.actor_id,authority.actor_id.clone());
         let (status,out)=post(&fixture,authority,key,&event,vec![]).await;assert_eq!(status,StatusCode::OK,"{out}");assert_eq!(after,business(&fixture).await);
         let (ghost_authority,ghost_key,ghost_child)=&actors[1];let second=native_message(&fixture,&install,ghost_authority,ghost_key,ghost_child,&strand,"same parent shared quota");let (status,error)=post(&fixture,ghost_authority,ghost_key,&second,vec![]).await;assert_eq!(status,StatusCode::TOO_MANY_REQUESTS,"{error}");assert!(error.to_string().contains("rate_limited"),"{error}");assert_eq!(after,business(&fixture).await);
         let rows=fixture.state.test_persistence().capability_grant_current_results().snapshot_for_realm(&fixture.realm).await.unwrap();let current=rows.iter().find(|r|r.grant_id==parent).unwrap();let revoke=fixture.admin_event(EventKind::CapabilityRevoke,event.scope_ref.clone(),json!({"grant_id":parent,"expected_revision":current.revision,"reason":"native source closed"}));accepted_admin_domain_event(&fixture,revoke).await;
@@ -818,9 +803,9 @@ async fn native_message_service_and_terminal_grant_reviews_remain_independent() 
         let permission=fixture.admin_event(EventKind::CapabilityGrant,ScopeRef::Realm{realm_id:fixture.realm.clone()},json!(CapabilityGrantPayload{grant:CapabilityGrantCreateBody{schema:arkret_wire::SchemaId::CAPABILITY_V1.to_owned(),realm_id:Some(fixture.realm.clone()),issuer_id:voter.clone(),subject:CapabilitySubject::Actor(voter),actions:vec!["ak.message.create".into()],resources:vec![arkret_wire::WireResourceSelector::realm(fixture.realm.clone())],constraints:vec![],issuer_authority_refs:vec![IssuerAuthorityRef::RealmRoot{realm_id:fixture.realm.clone(),authority_event_ref:fixture.authority_event_ref.clone().unwrap(),authority_generation:0}],issued_at:chrono::Utc::now()}}));
         accepted_admin_domain_event(&fixture,permission).await;
         let required:GrantConstraint=serde_json::from_value(json!({"constraint_kind":"claim_based","constraint_subkind":"approval","effect":"require_review","approval_required":true,"approval_mode":"before_commit","approval_actor_ids":[fixture.pcr.history.account.principal_id],"approval_threshold":1,"timeout":"PT5M"})).unwrap();
-        let parent=native_message_parent(&fixture,&install,vec![required]).await;let child=native_message_child(&fixture,&install,&install.bot_outcome.bot_actor_id,&parent).await;
-        let key=SigningKey::from_bytes(&[128;32]);let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();let authority=authorize_scopes(&fixture,&install,&install.bot_body["managed_actor_bundle"],&namespace,&key,device,json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read","ak.message.create"]}])).await;
-        let join=join_event(&fixture,&install,&authority,&key,&install.bot_outcome.authorization_ref);let (status,out)=post(&fixture,&authority,&key,&join,vec![]).await;assert_eq!(status,StatusCode::OK,"{out}");
+        let parent=native_message_parent(&fixture,&install,vec![required]).await;let child=native_message_child(&fixture,&install,&install.bot.actor_id,&parent).await;
+        let key=SigningKey::from_bytes(&[128;32]);let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();let authority=authorize_scopes(&fixture,&install,&install.bot_body["event"],&namespace,&key,device,json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read","ak.message.create"]}])).await;
+        let join=join_event(&fixture,&install,&authority,&key,&install.join_grant());let (status,out)=post(&fixture,&authority,&key,&join,vec![]).await;assert_eq!(status,StatusCode::OK,"{out}");
         let event=native_message(&fixture,&install,&authority,&key,&child,&strand,"two real grant reviews");let target=ManagementReviewTarget::Event{event:Box::new(event.clone())};
         let parent_vote=creation_operation_vote(&fixture,&target,arkret_wire::ApprovalContext::Grant{grant_id:parent});let child_vote=creation_operation_vote(&fixture,&target,arkret_wire::ApprovalContext::Grant{grant_id:child});
         for votes in [vec![],vec![parent_vote.clone()],vec![child_vote.clone()]] {
@@ -902,7 +887,7 @@ async fn native_sources_setup_at_with_e2ee(
         native_phase(|| fixture.ghost_commit(&install, &ghost, "multi-parent-ghost"))
             .await
             .0,
-        StatusCode::CREATED
+        StatusCode::OK
     );
     let strand = native_phase(|| native_strand(&fixture)).await;
     let quota:GrantConstraint=serde_json::from_value(json!({"constraint_kind":"quota","constraint_subkind":"rate","effect":"allow","max_operations":2,"period":"P1D","constraint_scope":"per_actor"})).unwrap();
@@ -974,25 +959,16 @@ async fn native_sources_setup_at_with_e2ee(
         )
     })
     .await;
-    let ghost_actor: ActorId = serde_json::from_value(
-        ghost["managed_actor_bundle"]["managed_actor_provision_event"]["payload"]["actor_id"]
-            .clone(),
-    )
-    .unwrap();
+    let ghost_actor: ActorId =
+        serde_json::from_value(ghost["event"]["payload"]["actor_id"].clone()).unwrap();
     let before = business(&fixture).await;
     let ghost_parents = [messages.clone(), reading.clone()];
     let ghost_child =
         native_phase(|| native_business_child(&fixture, &install, &ghost_actor, &ghost_parents))
             .await;
-    let bot_child = native_phase(|| {
-        native_message_child(
-            &fixture,
-            &install,
-            &install.bot_outcome.bot_actor_id,
-            &sibling,
-        )
-    })
-    .await;
+    let bot_child =
+        native_phase(|| native_message_child(&fixture, &install, &install.bot.actor_id, &sibling))
+            .await;
     let after = business(&fixture).await;
     for table in ["quota_counters", "quota_buckets", "quota_consumptions"] {
         assert_eq!(
@@ -1002,19 +978,13 @@ async fn native_sources_setup_at_with_e2ee(
     }
     let mut actors = Vec::new();
     for (bundle, child, seed) in [
-        (&ghost["managed_actor_bundle"], ghost_child, 131),
-        (&install.bot_body["managed_actor_bundle"], bot_child, 132),
+        (&ghost["event"], ghost_child, 131),
+        (&install.bot_body["event"], bot_child, 132),
     ] {
         let key = SigningKey::from_bytes(&[seed; 32]);
         let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
         let authority=native_phase(||authorize_scopes(&fixture,&install,bundle,&namespace,&key,device,json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read","ak.message.create"]}]))).await;
-        let join = join_event(
-            &fixture,
-            &install,
-            &authority,
-            &key,
-            &install.bot_outcome.authorization_ref,
-        );
+        let join = join_event(&fixture, &install, &authority, &key, &install.join_grant());
         let (status, out) = native_phase(|| post(&fixture, &authority, &key, &join, vec![])).await;
         assert_eq!(status, StatusCode::OK, "{out}");
         actors.push((authority, key, child));
@@ -1023,7 +993,7 @@ async fn native_sources_setup_at_with_e2ee(
     Box::new(NativeSourcesContext {
         native,
         namespace,
-        ghost_bundle: ghost["managed_actor_bundle"].clone(),
+        ghost_bundle: ghost["event"].clone(),
         fixture,
         install,
         ghost_actor,
@@ -1166,16 +1136,9 @@ async fn native_sources_commits(context: &NativeSourcesContext, first: &Event) -
         .await
         .unwrap()
         .unwrap();
-    let fact = fixture
-        .state
-        .test_persistence()
-        .authority_commits()
-        .account_device_signer_fact(&first, &record.commit)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(fact.actor, ghost_actor);
-    arkret_identity::account_device_signer_evidence::verify_historical_account_device_event_signature(&first,&fact,fixture.realm.digest_suite_code().digest_suite()).unwrap();
+    let fact = realm_device_fact(&fixture, &first).await;
+    assert_eq!(fact.actor_id, ghost_actor);
+
     let accepted = business(&fixture).await;
     assert_eq!(
         post(&fixture, authority, key, &first, vec![]).await.0,
@@ -1311,7 +1274,8 @@ async fn native_signer_query(
         request_id: arkret_wire::RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7()))
             .unwrap(),
         realm_id: fixture.realm.clone(),
-        recipient_account_id: authority.account_id.clone(),
+        recipient_account_id: None,
+        recipient_actor_id: Some(authority.actor_id.clone()),
         queries: selectors.to_vec(),
     };
     managed_device_http_request_body(
@@ -1349,6 +1313,17 @@ async fn native_historical_selector(
         stream_position: record.commit.stream_position,
     };
     let sender = match fact {
+        arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::RealmDevice(fact) => {
+            return arkret_models_identity::SignerKeyQuerySelector::HistoricalRealmDevice {
+                sender_kind: arkret_models_identity::RealmDeviceSignerKind::RealmDevice,
+                actor_id: fact.actor_id, device_id: fact.device_id,
+                verification_method: fact.verification_method, committed_event_ref,
+            };
+        }
+        arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::RealmControl(_)
+        | arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::RealmRecoveryService(_) => {
+            panic!("private control facts cannot become public signer selectors");
+        }
         arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::AccountDevice(fact) =>
             arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice {
                 actor: fact.actor, device_id: fact.device_id, verification_method: fact.verification_method, committed_event_ref,
@@ -1402,7 +1377,7 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
         assert_eq!(status, StatusCode::OK, "{outcome}");
         historical_events.push(event);
     }
-    let service_subject = ActorId::account(actors[0].0.account_id.clone());
+    let service_subject = actors[0].0.actor_id.clone();
     let service_child =
         native_phase(|| native_message_child(&fixture, &install, &service_subject, &messages))
             .await;
@@ -1491,7 +1466,8 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
         let mut response =
             native_phase(|| native_signer_query(&fixture, authority, key, &selectors)).await;
         assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
-        let _: Value = response.take_json().await.unwrap();
+        let problem: Value = response.take_json().await.unwrap();
+        assert!(problem.get("results").is_none());
     }
     assert_eq!(before, business(&fixture).await);
     for (index, (authority, key, _)) in actors.iter_mut().enumerate() {
@@ -1499,7 +1475,7 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
         let bundle = if index == 0 {
             &ghost_bundle
         } else {
-            &install.bot_body["managed_actor_bundle"]
+            &install.bot_body["event"]
         };
         *authority=native_phase(||authorize_scopes(&fixture,&install,bundle,&namespace,key,old.device_id.clone(),json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read","ak.message.create","ak.object.read_content"]}]))).await;
         let before = business(&fixture).await;
@@ -1528,7 +1504,7 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
         let row: arkret_wire::CommittedEventView = response.take_json().await.unwrap();
         assert_eq!(row.reducer_input().unwrap(), &event);
         let unknown = EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0xfa; 32]);
-        let private = authority.selector.authorization_ref.event_id.clone();
+        let private = authority.authorization_ref.event_id.clone();
         let mut hidden = Vec::new();
         for id in [unknown, private] {
             let mut response = native_phase(|| native_get(&fixture, authority, key, &id)).await;
@@ -1556,7 +1532,7 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
             .zip(&result.results)
         {
             assert_eq!(answer.selector(), selector);
-            assert!(answer.key().is_some() || answer.service_key().is_some());
+            assert!(answer.key().is_some() || answer.service_key().is_some() || matches!(answer, arkret_models_identity::SignerKeyQueryOutcome::HistoricalRealmDeviceResolved { .. }));
             let record = fixture
                 .state
                 .test_persistence()
@@ -1577,14 +1553,12 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
                 original, &fact, fixture.realm.digest_suite_code().digest_suite(),
             ).unwrap();
         }
-        let arkret_models_identity::SignerKeyQuerySelector::HistoricalEvent {
-            sender:
-                arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice {
-                    actor,
-                    device_id,
-                    verification_method,
-                    committed_event_ref,
-                },
+        let arkret_models_identity::SignerKeyQuerySelector::HistoricalRealmDevice {
+            actor_id,
+            device_id,
+            verification_method,
+            committed_event_ref,
+            ..
         } = &selectors[0]
         else {
             unreachable!()
@@ -1592,20 +1566,18 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
         let mut wrong = committed_event_ref.clone();
         wrong.stream_position += 1;
         let probes = vec![
-            arkret_models_identity::SignerKeyQuerySelector::HistoricalEvent {
-                sender: arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice {
-                    actor: actor.clone(),
-                    device_id: device_id.clone(),
-                    verification_method: verification_method.clone(),
-                    committed_event_ref: wrong,
-                },
+            arkret_models_identity::SignerKeyQuerySelector::HistoricalRealmDevice {
+                sender_kind: arkret_models_identity::RealmDeviceSignerKind::RealmDevice,
+                actor_id: actor_id.clone(),
+                device_id: device_id.clone(),
+                verification_method: verification_method.clone(),
+                committed_event_ref: wrong,
             },
-            arkret_models_identity::SignerKeyQuerySelector::CurrentAdmission {
-                sender: arkret_models_identity::CurrentSignerKeyQuerySender::AccountDevice {
-                    actor: actor.clone(),
-                    device_id: device_id.clone(),
-                    verification_method: verification_method.clone(),
-                },
+            arkret_models_identity::SignerKeyQuerySelector::CurrentRealmDevice {
+                sender_kind: arkret_models_identity::RealmDeviceSignerKind::RealmDevice,
+                actor_id: actor_id.clone(),
+                device_id: device_id.clone(),
+                verification_method: verification_method.clone(),
             },
         ];
         let mut response =
@@ -1622,20 +1594,20 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
         let private_body = arkret_models_identity::SignerKeysQueryRequestBody {
             request_id: arkret_wire::RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7()))
                 .unwrap(),
-            realm_id: authority.pcr_realm_id.clone(),
-            recipient_account_id: authority.account_id.clone(),
+            realm_id: authority.realm_id.clone(),
+            recipient_account_id: None,
+            recipient_actor_id: Some(authority.actor_id.clone()),
             queries: vec![
-                arkret_models_identity::SignerKeyQuerySelector::HistoricalEvent {
-                    sender: arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice {
-                        actor: ActorId::account(authority.account_id.clone()),
-                        device_id: authority.device_id.clone(),
-                        verification_method: arkret_wire::DidUrl::new(format!(
-                            "{}#{}",
-                            authority.native_did, authority.device_id
-                        ))
-                        .unwrap(),
-                        committed_event_ref: authority.selector.authorization_ref.clone(),
-                    },
+                arkret_models_identity::SignerKeyQuerySelector::HistoricalRealmDevice {
+                    sender_kind: arkret_models_identity::RealmDeviceSignerKind::RealmDevice,
+                    actor_id: authority.actor_id.clone(),
+                    device_id: authority.device_id.clone(),
+                    verification_method: arkret_wire::DidUrl::new(format!(
+                        "{}#{}",
+                        authority.native_did, authority.device_id
+                    ))
+                    .unwrap(),
+                    committed_event_ref: authority.authorization_ref.clone(),
                 },
             ],
         };
@@ -1651,8 +1623,13 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
         .add_header("content-type", "application/json", true)
         .send(&service(fixture.state.clone()))
         .await;
-        assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND));
-        let _: Value = response.take_json().await.unwrap();
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let unavailable: arkret_models_identity::SignerKeysQueryOutcome =
+            response.take_json().await.unwrap();
+        assert!(unavailable.results.iter().all(|answer| matches!(
+            answer,
+            arkret_models_identity::SignerKeyQueryOutcome::Unavailable { .. }
+        )));
     }
     assert_eq!(before, business(&fixture).await);
     let (authority, key, _) = &actors[0];
@@ -1703,9 +1680,8 @@ async fn native_read_exercise(context: Box<NativeSourcesContext>) {
         "expired source cannot hand off prepared bytes"
     );
     assert_eq!(before, business(&fixture).await);
-    // Each response is independently prepared while its source is active.
-    // A retained delivery cut must not be followed by an awaited request
-    // requiring the same PCR nonce writer before the first body is drained.
+    // Each response is independently prepared against its active source before
+    // that source expires; neither expired source may hand off prepared bytes.
     let mut temporal =
         GrantConstraint::new(GrantConstraintKind::Temporal, GrantConstraintEffect::Allow);
     temporal.expires_at = Some(arkret_canonical::normalize_timestamp_canonical(
@@ -1933,7 +1909,7 @@ async fn native_scan_exercise(context: Box<NativeSourcesContext>) {
         let bundle = if index == 0 {
             &ghost_bundle
         } else {
-            &install.bot_body["managed_actor_bundle"]
+            &install.bot_body["event"]
         };
         *authority=native_phase(||authorize_scopes(&fixture,&install,bundle,&namespace,key,authority.device_id.clone(),json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read","ak.message.create","ak.object.read_content"]}]))).await;
         let before = business(&fixture).await;
@@ -2139,9 +2115,11 @@ async fn native_scan_exercise(context: Box<NativeSourcesContext>) {
         );
         let probes = [
             arkret_wire::StreamScanRequest {
-                realm_id: authority.pcr_realm_id.clone(),
+                realm_id: RealmId::from_event_id(&fixture.pcr.unit.transactions[1].event.event_id),
                 stream_ref: arkret_wire::CommitStreamRef::Realm {
-                    realm_id: authority.pcr_realm_id.clone(),
+                    realm_id: RealmId::from_event_id(
+                        &fixture.pcr.unit.transactions[1].event.event_id,
+                    ),
                 },
                 ..request.clone()
             },
@@ -2241,7 +2219,7 @@ fn native_circle_event(
     expected: Value,
 ) -> Event {
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let actor = ActorId::account(authority.account_id.clone());
+    let actor = authority.actor_id.clone();
     let mut payload = json!({"circle_id":scope.circle_id().unwrap(),"member_id":actor,"membership":membership,"expected_membership":expected});
     if let Some(parent) = parent {
         payload["parent_membership_revision"] = parent;
@@ -2462,10 +2440,10 @@ async fn native_circle_exercise(context: Box<NativeSourcesContext>) {
         let bundle = if index == 0 {
             &ghost_bundle
         } else {
-            &install.bot_body["managed_actor_bundle"]
+            &install.bot_body["event"]
         };
         *realm_device = native_phase(|| authorize_scopes(&fixture,&install,bundle,&namespace,realm_key,realm_device.device_id.clone(),json!([{"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read","ak.message.create","ak.object.read_content"]}]))).await;
-        let actor = ActorId::account(realm_device.account_id.clone());
+        let actor = realm_device.actor_id.clone();
         let parent = native_business_parent_in_scope(
             &fixture,
             &install,
@@ -2574,7 +2552,7 @@ async fn native_circle_exercise(context: Box<NativeSourcesContext>) {
             &authority,
             &key,
             &scope,
-            &install.bot_outcome.authorization_ref,
+            &install.join_grant(),
             "join",
             Some(parent_revision.clone()),
             Value::Null,

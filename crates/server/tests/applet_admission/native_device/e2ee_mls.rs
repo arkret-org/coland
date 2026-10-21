@@ -68,7 +68,7 @@ fn original_event(
     let mut event = arkret_wire::test_support::raw_event_for_actor_at(
         kind.as_str(),
         scope.clone(),
-        ActorId::account(authority.account_id.clone()),
+        authority.actor_id.clone(),
         payload,
         at,
     )
@@ -200,10 +200,10 @@ async fn originate(ghost: bool, case: Case, circle: bool) {
         let body = native_phase(|| fixture.ghost_body(&install, &namespace, "mls-author")).await;
         let (status, outcome) =
             native_phase(|| fixture.ghost_commit(&install, &body, "mls-author")).await;
-        assert_eq!(status, StatusCode::CREATED, "{outcome}");
-        body["managed_actor_bundle"].clone()
+        assert_eq!(status, StatusCode::OK, "{outcome}");
+        body["event"].clone()
     } else {
-        install.bot_body["managed_actor_bundle"].clone()
+        install.bot_body["event"].clone()
     };
     let key = SigningKey::from_bytes(&[199; 32]);
     let realm_scope = ScopeRef::Realm {
@@ -276,7 +276,7 @@ async fn originate(ghost: bool, case: Case, circle: bool) {
         )
     })
     .await;
-    let actor = ActorId::account(authority.account_id.clone());
+    let actor = authority.actor_id.clone();
     let source_expiry = (case == Case::SourceExpiry).then(|| {
         arkret_canonical::normalize_timestamp_canonical(
             chrono::Utc::now() + chrono::Duration::seconds(4),
@@ -314,13 +314,7 @@ async fn originate(ghost: bool, case: Case, circle: bool) {
     .await;
     let parents = [parent.clone()];
     let child = native_phase(|| native_business_child(&fixture, &install, &actor, &parents)).await;
-    let join = join_event(
-        &fixture,
-        &install,
-        &authority,
-        &key,
-        &install.bot_outcome.authorization_ref,
-    );
+    let join = join_event(&fixture, &install, &authority, &key, &install.join_grant());
     let (status, outcome) = native_phase(|| post(&fixture, &authority, &key, &join, vec![])).await;
     assert_eq!(
         status,
@@ -364,7 +358,7 @@ async fn originate(ghost: bool, case: Case, circle: bool) {
         .await;
         return;
     }
-    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
+    let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
         actor.clone(),
         authority.device_id.clone(),
         arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
@@ -395,7 +389,7 @@ async fn originate(ghost: bool, case: Case, circle: bool) {
             endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device {
                 device_id: authority.device_id.clone(),
             },
-            authorization_event_ref: authority.selector.authorization_ref.event_id.clone(),
+            authorization_event_ref: authority.authorization_ref.event_id.clone(),
         },
         governance_binding: binding,
         created_at: at,
@@ -422,7 +416,7 @@ async fn originate(ghost: bool, case: Case, circle: bool) {
     group
         .install_local_creator_binding(
             actor.clone(),
-            Some(authority.selector.authorization_ref.event_id.clone()),
+            Some(authority.authorization_ref.event_id.clone()),
         )
         .unwrap();
     let groups = coland_storage_postgres::PgMlsGroupCurrentStore {
@@ -613,28 +607,12 @@ async fn originate(ghost: bool, case: Case, circle: bool) {
     assert_eq!(before, native_phase(|| snapshot(&fixture)).await);
     let persistence = fixture.state.test_persistence();
     for event in [&genesis, &commit] {
-        let accepted = native_phase(|| {
-            persistence
-                .authority_commits()
-                .committed_event(&event.event_id)
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        let fact = native_phase(|| {
-            persistence
-                .authority_commits()
-                .account_device_signer_fact(event, &accepted.commit)
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(fact.actor, actor);
+        let fact = native_phase(|| realm_device_fact(&fixture, event)).await;
+        assert_eq!(fact.actor_id, actor);
         assert_eq!(
-            fact.key.authorization_ref,
-            authority.selector.authorization_ref
+            fact.authorization_event_id,
+            authority.authorization_ref.event_id
         );
-        arkret_identity::account_device_signer_evidence::verify_historical_account_device_event_signature(event, &fact, fixture.realm.digest_suite_code().digest_suite()).unwrap();
     }
     let accepted = native_phase(|| {
         persistence

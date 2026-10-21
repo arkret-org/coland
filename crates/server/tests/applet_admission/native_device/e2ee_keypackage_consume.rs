@@ -62,11 +62,11 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
             native_phase(|| fixture.ghost_commit(&install, &body, "claim-device"))
                 .await
                 .0,
-            StatusCode::CREATED
+            StatusCode::OK
         );
-        body["managed_actor_bundle"].clone()
+        body["event"].clone()
     } else {
-        install.bot_body["managed_actor_bundle"].clone()
+        install.bot_body["event"].clone()
     };
     let key = SigningKey::from_bytes(&[177; 32]);
     let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
@@ -82,13 +82,7 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
         )
     })
     .await;
-    let event = join_event(
-        &fixture,
-        &install,
-        &authority,
-        &key,
-        &install.bot_outcome.authorization_ref,
-    );
+    let event = join_event(&fixture, &install, &authority, &key, &install.join_grant());
     let (status, outcome) = native_phase(|| post(&fixture, &authority, &key, &event, vec![])).await;
     assert_eq!(status, StatusCode::OK, "real native membership: {outcome}");
     let mut sibling_scope = None;
@@ -126,8 +120,8 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
         )
     })
     .await;
-    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
-        ActorId::account(authority.account_id.clone()),
+    let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
+        authority.actor_id.clone(),
         device,
         arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
     )
@@ -187,22 +181,9 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
         &scope,
         &upload.keypackages[0].keypackage_ref,
     );
+    command.requester_actor_id = None;
     command.requester_account_id = Some(fixture.pcr.history.account.clone());
-    if let arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device {
-        verification_method,
-        requester_device_id,
-        device_authorize_event_id,
-        signature,
-        ..
-    } = &mut command.requester_authorization
-    {
-        *verification_method = fixture.pcr.history.device_verification_method.clone();
-        *requester_device_id = fixture.pcr.history.founding_device_id.clone();
-        *device_authorize_event_id = fixture.pcr.history.events[1].event_id.clone();
-        signature.kid = arkret_wire::NonEmptyString::new(verification_method.to_string()).unwrap();
-    } else {
-        unreachable!()
-    }
+    account_requester(&fixture, &mut command);
     if matches!(
         refusal,
         Some(AddRefusal::ClaimExpiry | AddRefusal::ClaimExpiryWhileQueued)
@@ -312,16 +293,7 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
         )
     })
     .await;
-    let selector = coland_storage::RecipientQueueSelector::HumanDevice {
-        recipient: authority.account_id.principal_id.to_string(),
-        device_id: authority.device_id.to_string(),
-    };
-    let queue = coland_storage_postgres::PgDeviceMessageStore {
-        pool: fixture.pool.clone(),
-    };
-    let deliveries = native_phase(|| queue.list_recipient_deliveries(&selector, 0, 20))
-        .await
-        .unwrap();
+    let deliveries = native_phase(|| durable_realm_welcomes(&fixture, &authority)).await;
     let queued = deliveries
         .iter()
         .find_map(|item| match &item.delivery {
@@ -330,7 +302,7 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
             } if mls_welcome.welcome_id == welcome.welcome_id => Some(mls_welcome.clone()),
             _ => None,
         })
-        .expect("actual Add atomically queued its Welcome for the real Account Device");
+        .expect("actual Add atomically queued its Welcome for the complete Realm Device");
     assert_eq!(queued, welcome);
     if let Some(other) = &sibling {
         let position_of = |delivery: &arkret_wire::MlsWelcomeDelivery| {
@@ -353,20 +325,13 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
         .await;
         return;
     }
-    let native_page = if matches!(
-        case,
-        GroupCase::QueueList | GroupCase::QueueScopes | GroupCase::QueuePages
-    ) {
-        Some(if let Some(prior) = &prior {
-            native_phase(|| queue::pages::next(&fixture, &authority, &key, &scope, prior, &queued))
-                .await
-        } else {
-            native_phase(|| queue::assert_initial_list(&fixture, &authority, &key, &scope, &queued))
-                .await
-        })
+    let native_page = Some(if let Some(prior) = &prior {
+        native_phase(|| queue::pages::next(&fixture, &authority, &key, &scope, prior, &queued))
+            .await
     } else {
-        None
-    };
+        native_phase(|| queue::assert_initial_list(&fixture, &authority, &key, &scope, &queued))
+            .await
+    });
     if let (Some(other), Some(page)) = (&sibling_scope, &native_page) {
         native_phase(|| queue::assert_other_scope_refused(&fixture, &authority, &key, other, page))
             .await;
@@ -393,29 +358,7 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
         })
         .await;
     }
-    let position=deliveries.iter().find(|item|matches!(&item.delivery,arkret_models_collaboration::device_messages::RecipientDelivery::MlsWelcome{mls_welcome} if mls_welcome==&queued)).unwrap().position;
-    let ack = if let Some(page) = &native_page {
-        page.ack_token.clone().unwrap()
-    } else {
-        native_phase(|| queue.issue_recipient_ack_token(&selector, position))
-            .await
-            .unwrap()
-            .unwrap()
-    };
-    if ghost && native_page.is_none() {
-        assert_eq!(
-            native_phase(|| queue.ack_recipient_with_token(&selector, &ack))
-                .await
-                .unwrap(),
-            Some(1)
-        );
-        assert!(
-            native_phase(|| queue.list_recipient_deliveries(&selector, 0, 20))
-                .await
-                .unwrap()
-                .is_empty()
-        );
-    }
+    let ack = native_page.as_ref().unwrap().ack_token.clone().unwrap();
 
     let query = arkret_models_crypto::KeyPackagesClaimQueryRequestBody {
         claim_id: welcome.keypackage_claim_ref.clone(),
@@ -439,16 +382,20 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
     .unwrap();
     let endpoint = garth::mls::LocalMlsEndpoint::device(
         scope.realm_id().clone(),
-        ActorId::account(authority.account_id.clone()),
+        authority.actor_id.clone(),
         authority.device_id.clone(),
     );
+    let realm_authority = native_phase(|| verified_realm_authority(&fixture)).await;
     let verified = garth::mls::verify_welcome_claim(
         &queued,
         &endpoint,
         &accepted.event,
         &read,
-        &fixture.state.service_core_id(),
-        &authority.selector.authorization_ref.event_id,
+        garth::mls::WelcomeClaimAuthority::Realm {
+            current_station: realm_authority.current_service_id(),
+            authority: &realm_authority,
+        },
+        &authority.authorization_ref.event_id,
     )
     .unwrap();
     let mut joined = arkret_mls::ArkretMlsGroup::join_from_verified_welcome_delivery(
@@ -519,8 +466,8 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
     let body = garth::mls::signed_welcome_consume(
         &queued,
         &read,
-        arkret_models_crypto::RecipientMlsDurableSigner::Device {
-            recipient_account_id: authority.account_id.clone(),
+        arkret_models_crypto::RecipientMlsDurableSigner::RealmDevice {
+            recipient_actor_id: authority.actor_id.clone(),
             recipient_device_id: authority.device_id.clone(),
             device_verification_method: arkret_wire::DidUrl::new(method.clone()).unwrap(),
         },
@@ -766,20 +713,6 @@ async fn exercise_consume(ghost: bool, fenced: bool, refusal: Option<AddRefusal>
         .await;
         native_phase(|| queue::assert_ack(&fixture, &authority, &key, &scope, &ack, 0)).await;
     }
-    if !ghost && native_page.is_none() {
-        assert_eq!(
-            native_phase(|| queue.ack_recipient_with_token(&selector, &ack))
-                .await
-                .unwrap(),
-            Some(1)
-        );
-        assert!(
-            native_phase(|| queue.list_recipient_deliveries(&selector, 0, 20))
-                .await
-                .unwrap()
-                .is_empty()
-        );
-    }
     if let Some(prior) = &prior {
         native_phase(|| {
             queue::assert_ack(
@@ -850,7 +783,7 @@ async fn prepare_add(
     )
     .unwrap();
     let package = arkret_mls::mls_key_package_record_from_claim(claim).unwrap();
-    let actor = ActorId::account(authority.account_id.clone());
+    let actor = authority.actor_id.clone();
     let added = if genesis
         .group
         .member_endpoint_replacement_actor(&package.endpoint, &actor)
@@ -930,7 +863,7 @@ async fn prepare_add(
         realm_id: scope.realm_id().clone(),
         effective_scope: scope.clone(),
         commit_event_ref: event.event_id.clone(),
-        recipient_actor_id: ActorId::account(authority.account_id.clone()),
+        recipient_actor_id: authority.actor_id.clone(),
         recipient_endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device {
             device_id: authority.device_id.clone(),
         },
@@ -1248,4 +1181,75 @@ async fn native_add_rolls_back_when_claim_expires_while_its_queue_writer_waits()
         .await
         .unwrap();
     }
+}
+
+// Inspect persisted delivery evidence without using the ordinary Account queue.
+async fn durable_realm_welcomes(
+    fixture: &Fixture,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+) -> Vec<coland_storage::RecipientDeliveryRecord> {
+    #[derive(diesel::QueryableByName)]
+    struct Row {
+        #[diesel(sql_type=diesel::sql_types::BigInt)]
+        position: i64,
+        #[diesel(sql_type=diesel::sql_types::Jsonb)]
+        delivery_json: Value,
+    }
+    let subject =
+        String::from_utf8(arkret_canonical::canonical_json_bytes(&authority.actor_id).unwrap())
+            .unwrap();
+    let mut conn = fixture.pool.get().await.unwrap();
+    diesel::sql_query("SELECT position, delivery_json FROM mls_welcome_deliveries WHERE recipient=$1 AND recipient_endpoint_kind='device' AND recipient_device_id=$2 AND state='queued' ORDER BY position")
+        .bind::<diesel::sql_types::Text,_>(subject)
+        .bind::<diesel::sql_types::Text,_>(authority.device_id.as_str())
+        .load::<Row>(&mut *conn).await.unwrap().into_iter().map(|row| {
+            let welcome: arkret_wire::MlsWelcomeDelivery = serde_json::from_value(row.delivery_json).unwrap();
+            welcome.validate_shape().unwrap();
+            assert_eq!(welcome.recipient_actor_id, authority.actor_id);
+            coland_storage::RecipientDeliveryRecord {
+                position: row.position,
+                delivery: arkret_models_collaboration::device_messages::RecipientDelivery::MlsWelcome { mls_welcome: welcome },
+            }
+        }).collect()
+}
+
+async fn verified_realm_authority(fixture: &Fixture) -> arkret_identity::VerifiedRealmAuthority {
+    let base: url::Url = fixture.state.config().public_base_url.parse().unwrap();
+    let http = reqwest::Client::builder()
+        .tls_backend_rustls()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .tls_certs_only([reqwest::Certificate::from_pem(include_bytes!(
+            "../../fixtures/outbox-test-ca.pem"
+        ))
+        .unwrap()])
+        .build()
+        .unwrap();
+    let client = arkret_http_client::Client::builder(base.clone())
+        .http_client(http)
+        .loopback_service_discovery("127.0.0.1", base.port().unwrap())
+        .unwrap()
+        .build()
+        .unwrap();
+    let mut nonce = [0u8; 32];
+    getrandom::fill(&mut nonce).unwrap();
+    let request = arkret::AuthorityBundleRequest {
+        realm_id: fixture.realm.clone(),
+        nonce: arkret::Base64UrlString::new(arkret_canonical::base64url_encode(nonce)).unwrap(),
+    };
+    let bundle = garth::AuthorityClient::new(client.clone())
+        .resolve_authority(&request)
+        .await
+        .unwrap();
+    let keys = garth::historical_station_keys::fetch_historical_station_key_directory(
+        &client, &bundle, None, None,
+    )
+    .await
+    .unwrap();
+    arkret_identity::verify_realm_authority_bundle(
+        &bundle,
+        &arkret_identity::RealmAuthorityFreshness::new(chrono::Utc::now(), request.nonce),
+        &keys,
+    )
+    .unwrap()
 }

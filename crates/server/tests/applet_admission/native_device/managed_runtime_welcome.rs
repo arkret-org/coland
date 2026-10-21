@@ -78,10 +78,7 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
         let (account, original, _) = &context.accepted[usize::from(ghost)];
         let operation = format!(
             "initial-device/{}",
-            original
-                .authoring_context
-                .principal_control_commit
-                .event_ref
+            crate::managed_runtime::completion_event(original).event_id
         );
         let store = FileAuthoringStore::shared(context.store_path.clone()).unwrap();
         let edge = crate::managed_runtime::host_with_retry(
@@ -105,14 +102,14 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
         let rows = native_phase(|| packages.snapshot_all()).await.unwrap();
         let package = rows
             .iter()
-            .find(|row| row.owner_actor_id == device.account_id)
+            .find(|row| row.owner_actor_id == device.actor_id)
             .unwrap();
         let device_store = coland_storage_postgres::PgDeviceRevocationStore {
             pool: context.fixture.pool.clone(),
         };
         let authority = native_phase(|| {
             device_store.applet_managed_device_authority(
-                &device.account_id,
+                &device.actor_id,
                 &device.device_id,
                 chrono::Utc::now(),
             )
@@ -123,25 +120,9 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
         let human_key =
             SigningKey::from_bytes(&context.fixture.pcr.history.founding_device_signing_seed);
         let mut command = request(&authority, &human_key, &scope, &package.keypackage_ref);
+        command.requester_actor_id = None;
         command.requester_account_id = Some(context.fixture.pcr.history.account.clone());
-        if let arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device {
-            verification_method,
-            requester_device_id,
-            device_authorize_event_id,
-            ..
-        } = &mut command.requester_authorization
-        {
-            *verification_method = context
-                .fixture
-                .pcr
-                .history
-                .device_verification_method
-                .clone();
-            *requester_device_id = context.fixture.pcr.history.founding_device_id.clone();
-            *device_authorize_event_id = context.fixture.pcr.history.events[1].event_id.clone();
-        } else {
-            unreachable!();
-        }
+        account_requester(&context.fixture, &mut command);
         resign(&mut command, &human_key);
         let body = serde_json::to_value(&command).unwrap();
         let (status, value) = native_phase(|| {
@@ -301,7 +282,7 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
             "each fresh join must obtain its actual historical stream source"
         );
         for (metadata, scan) in scans {
-            assert_eq!(metadata.account_id, device.account_id);
+            assert_eq!(metadata.actor_id, device.actor_id);
             assert_eq!(metadata.device_id, device.device_id);
             assert_eq!(metadata.effective_scope, scope);
             assert_eq!(scan.realm_id, accepted.commit.realm_id);
@@ -367,6 +348,7 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
             .await
             .unwrap();
         assert!(page.rows().unwrap().is_empty());
+        eprintln!("native runtime Welcome: durable join and cold ACK verified");
         native_phase(|| {
             exercise_stream(
                 &context,
@@ -416,12 +398,78 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
             "expiry requires a fresh current-authorized read"
         );
         for (metadata, _) in &reads {
-            assert_eq!(metadata.account_id, device.account_id);
+            assert_eq!(metadata.actor_id, device.actor_id);
             assert_eq!(metadata.device_id, device.device_id);
             assert_eq!(metadata.effective_scope, scope);
         }
         assert_ne!(reads[0].0.nonce, reads[1].0.nonce);
         assert_eq!(runtime.installed_mls_epoch(&device).await.unwrap(), Some(2));
+        // A separate authorized reader must not exclude native request nonce
+        // consumption or private material reads for the same Realm.
+        native_phase(|| async {
+            use diesel_async::SimpleAsyncConnection as _;
+            let mut concurrent_reader = context.fixture.pool.get().await.unwrap();
+            concurrent_reader.batch_execute("BEGIN").await.unwrap();
+            diesel::sql_query("SELECT 1 FROM realm_authorities WHERE realm_id=$1 FOR SHARE")
+                .bind::<diesel::sql_types::Text, _>(scope.realm_id().as_str())
+                .execute(&mut concurrent_reader)
+                .await
+                .unwrap();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                runtime.poll_welcome_queue(&device, &reader),
+            )
+            .await;
+            if result.is_err() {
+                #[derive(diesel::QueryableByName)]
+                struct LockDiagnostics {
+                    #[diesel(sql_type = diesel::sql_types::Jsonb)]
+                    payload: Value,
+                }
+                let diagnostic = diesel::sql_query("SELECT COALESCE(jsonb_agg(jsonb_build_object('query',query,'wait',wait_event,'blocking',pg_blocking_pids(pid))),'[]'::jsonb) AS payload FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'")
+                    .get_result::<LockDiagnostics>(&mut concurrent_reader).await.unwrap();
+                eprintln!("native concurrent queue locks: {}", diagnostic.payload);
+                let responses = context.lost.responses.lock().unwrap();
+                let recent: Vec<_> = responses.iter().rev().take(8)
+                    .map(|(_, path, status)| (path, status)).collect();
+                eprintln!("native concurrent queue recent responses: {recent:?}");
+            }
+            let mut nonce = [0u8; 32];
+            getrandom::fill(&mut nonce).unwrap();
+            let request = RealmActorMaterialRequest::Current {
+                actor_id: device.actor_id.clone(),
+                request_nonce: arkret_canonical::base64url_encode(nonce),
+                selectors: vec![
+                    serde_json::from_value(json!({
+                        "kind":"realm_actor_manager", "actor_id":device.actor_id
+                    }))
+                    .unwrap(),
+                ],
+            };
+            let material = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                context.fixture.service_post(
+                    &context.native.package,
+                    "/_arkret/self/realm-actors/material",
+                    ServiceOperationId::SELF_REALM_ACTOR_READ_MATERIAL_V1,
+                    &json!(request),
+                    "shared-material-cut",
+                ),
+            )
+            .await;
+            concurrent_reader.batch_execute("ROLLBACK").await.unwrap();
+            let (status, body) =
+                material.expect("private material must coexist with a Realm reader");
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "concurrent private material: {body}"
+            );
+            result
+                .expect("native queue reads must coexist with another Realm reader")
+                .expect("concurrent native queue read must remain authorized");
+        })
+        .await;
         // The actual persistent worker entry used by both production hosts
         // performs a real native queue read; its shutdown retires and joins
         // every per-Device task before the test removes private custody.
@@ -454,7 +502,7 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
                     .unwrap()
                     .iter()
                     .any(|(metadata, path, status)| {
-                        metadata.account_id == device.account_id
+                        metadata.actor_id == device.actor_id
                             && metadata.device_id == device.device_id
                             && path == "/_arkret/self/device_messages"
                             && *status == Some(StatusCode::OK)
@@ -646,20 +694,42 @@ async fn exercise_stream(
         .value()
         .unwrap()
         .clone();
+    eprintln!("native runtime stream: preparing remote update");
     let update =
         native_phase(|| remote_update(&context.fixture, &scope, genesis, accepted_add)).await;
+    eprintln!("native runtime stream: remote update accepted");
     assert!(update.commit.stream_position > accepted_add.commit.stream_position);
     // Both originals predate the first stream checkpoint. A snapshot-head
     // seed would silently skip the next epoch and the following state row.
-    native_phase(|| {
+    native_phase(|| async {
         let event = context.fixture.admin_event(
             EventKind::RealmJoinRule,
             scope.clone(),
             json!({"value":"invite"}),
         );
-        accepted_admin_domain_event(&context.fixture, event)
+        let id = event.event_id.clone();
+        let request =
+            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+                arkret_wire::EventAdmissionSubmission::new(event),
+            );
+        let body = serde_json::to_value(request).unwrap();
+        let (status, outcome) = context
+            .fixture
+            .admin_post(
+                "/_arkret/self/events",
+                ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                &body,
+                Some(id.as_str()),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "following real state Event: {outcome}"
+        );
     })
     .await;
+    eprintln!("native runtime stream: following state accepted");
     let expected_head = reader
         .client()
         .snapshot_head(scope.realm_id())
@@ -681,11 +751,12 @@ async fn exercise_stream(
     );
     let candidate = ManagedDeviceRuntime::new(edge).unwrap();
     let mut candidate_device = candidate
-        .recover_initial_device(&device.account_id, operation, &scope)
+        .recover_initial_device(&device.actor_id, operation, &scope)
         .await
         .unwrap()
         .unwrap();
     let candidate_reader = candidate.open_reader(&candidate_device).await.unwrap();
+    eprintln!("native runtime stream: independent reader opened");
     let before = store.entries_with_prefix("managed-device/v1/").unwrap();
     let original_device = candidate_device.device_id.clone();
     candidate_device.device_id =
@@ -705,6 +776,7 @@ async fn exercise_stream(
         "reader confusion must fail before HTTP"
     );
     candidate_device.device_id = original_device;
+    eprintln!("native runtime stream: injecting checkpoint failure");
     failed.fail_next.store(true, Ordering::SeqCst);
     let error = candidate
         .poll_content_stream(&candidate_device, &candidate_reader)
@@ -734,10 +806,16 @@ async fn exercise_stream(
     drop(candidate_device);
     drop(candidate);
     let progress = runtime.poll_content_stream(device, reader).await.unwrap();
-    assert!(progress.durable_events > 0);
+    assert!(
+        progress.durable_events >= 2,
+        "the MLS update and following state row are both downloaded"
+    );
     assert_eq!(progress.epoch, Some(2));
     assert_eq!(progress.last_position, Some(expected_head.stream_position));
-    assert_eq!(progress.pending_events, 1);
+    assert_eq!(
+        progress.pending_events, 0,
+        "verified state rows require no application delivery ACK"
+    );
     assert_eq!(runtime.installed_mls_epoch(device).await.unwrap(), Some(2));
     let before = store.entries_with_prefix("managed-device/v1/").unwrap();
     *context.lost.snapshot_once.lock().unwrap() = Some(old_current);
@@ -759,7 +837,7 @@ async fn exercise_stream(
     );
     let cold = ManagedDeviceRuntime::new(cold_edge).unwrap();
     let cold_device = cold
-        .recover_initial_device(&device.account_id, operation, &scope)
+        .recover_initial_device(&device.actor_id, operation, &scope)
         .await
         .unwrap()
         .unwrap();
@@ -770,7 +848,10 @@ async fn exercise_stream(
         .await
         .unwrap();
     assert_eq!(progress.durable_events, 0);
-    assert_eq!(progress.pending_events, 1);
+    assert_eq!(
+        progress.pending_events, 0,
+        "verified state rows require no application delivery ACK"
+    );
     assert_eq!(progress.last_position, head);
     assert_eq!(progress.epoch, Some(2));
     assert_eq!(

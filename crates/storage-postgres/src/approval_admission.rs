@@ -372,13 +372,13 @@ fn rejects_managed_self_join_context(event: Option<&Event>, facts: &OperationFac
             .is_none_or(|actor| actor.realm_id != event.realm_id)
             || event.executed_by.is_some()
             || event.applet_id.is_none()
+            // Realm producers legitimately return no AccountDevice projection;
+            // same-cut facts already require their accepted Realm Device.
             || event
                 .verify_producer_proof_self_consistency(
                     event.realm_id.digest_suite_code().digest_suite(),
                 )
-                .ok()
-                .flatten()
-                .is_none()
+                .is_err()
             || facts.applet_id.as_deref() != event.applet_id.as_ref().map(|id| id.as_str())
             || facts.executed_by.as_ref() != Some(&event.actor_id)
             || facts.registration_epoch.is_none()
@@ -517,7 +517,11 @@ async fn qualify_principal_or_actor(
         {
             continue;
         }
-        let checks = arkret_schema::capability_action_descriptor(action).required_evaluator_checks;
+        let approval_action =
+            arkret_schema::capability_action_descriptor(action).approver_capability_action;
+        let qualification_action = approval_action.unwrap_or(action);
+        let checks = arkret_schema::capability_action_descriptor(qualification_action)
+            .required_evaluator_checks;
         if checks.iter().any(|check| match *check {
             "applet_managed_self_join" => rejects_managed_self_join_context(event, facts),
             "actor_eq_target_author" => facts.target_owner.as_ref() != Some(&actor),
@@ -535,8 +539,9 @@ async fn qualify_principal_or_actor(
         let authorization =
             crate::boxed_future(|| cut.enforcing_actor_authorization_in_connection(conn, at))
                 .await?;
-        let actions = [action.as_str()];
+        let actions = [qualification_action.as_str()];
         let owner_covers = allow_owner
+            && approval_action.is_none()
             && authorization.agent_ceiling.is_none()
             && cut.actor_is_root_controller()
             && arkret_schema::capability_action_descriptor(action)
@@ -570,7 +575,7 @@ async fn qualify_principal_or_actor(
                 .collect::<Vec<_>>();
             let basis = serde_json::json!({"actor_id":actor,"membership":"join","membership_revision":member.membership_revision,
                 "evaluated_at":arkret_canonical::format_timestamp_canonical(at),
-                "action":action,"target":target,"effective_grants":grants,"owner_aggregate":owner_covers,"realm_authority_root":root_basis.value});
+                "action":action,"qualification_action":qualification_action,"target":target,"effective_grants":grants,"owner_aggregate":owner_covers,"realm_authority_root":root_basis.value});
             return Ok(Some(basis));
         }
     }
@@ -759,6 +764,20 @@ pub(crate) async fn require_governance(
         match &vote.input.approval_context {
             arkret_wire::ApprovalContext::RealmGovernance {} => {}
             arkret_wire::ApprovalContext::Grant { grant_id } if dependencies.contains(grant_id) => {
+                let row = sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 AND grant_id=$2")
+                    .bind::<Text, _>(event.realm_id.as_str())
+                    .bind::<Text, _>(grant_id.as_str())
+                    .get_result::<crate::capability_grant_current_results::CapabilityGrantCurrentResultReadRow>(&mut *conn)
+                    .await.map_err(PersistenceError::database)?;
+                let grant = crate::capability_grant_current_results::decode_row(row)?;
+                if !crate::grant_approval_admission::grant_vote_is_current(
+                    &grant.value,
+                    action,
+                    vote,
+                    commit.committed_at,
+                ) {
+                    continue;
+                }
             }
             _ => continue,
         }

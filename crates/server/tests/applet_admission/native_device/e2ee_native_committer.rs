@@ -124,6 +124,7 @@ pub(super) async fn exercise(
     assert_eq!(value["accepted"], 1);
     let mut command =
         keypackage::claim::request(authority, key, scope, &upload.keypackages[0].keypackage_ref);
+    command.target_actor_id = None;
     command.target_account_id = Some(human.clone());
     command.target_device_ids = vec![fixture.pcr.history.founding_device_id.clone()];
     keypackage::claim::resign(&mut command, key);

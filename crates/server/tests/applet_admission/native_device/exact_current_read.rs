@@ -125,7 +125,7 @@ pub(super) async fn exercise(
     };
     let station = fixture.state.service_core_id();
     let direct = native_phase(|| {
-        store.exact_current_result_for_account(&request, &authority.account_id, &station)
+        store.exact_current_result_for_actor(&request, &authority.actor_id, &station)
     })
     .await
     .expect("actual native current snapshot must read without writer locks");

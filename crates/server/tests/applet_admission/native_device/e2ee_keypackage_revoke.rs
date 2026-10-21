@@ -27,11 +27,11 @@ async fn exercise(ghost: bool) {
             native_phase(|| fixture.ghost_commit(&install, &body, "revoke-device"))
                 .await
                 .0,
-            StatusCode::CREATED
+            StatusCode::OK
         );
-        body["managed_actor_bundle"].clone()
+        body["event"].clone()
     } else {
-        install.bot_body["managed_actor_bundle"].clone()
+        install.bot_body["event"].clone()
     };
     let key = SigningKey::from_bytes(&[173; 32]);
     let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
@@ -47,17 +47,11 @@ async fn exercise(ghost: bool) {
         )
     })
     .await;
-    let join = join_event(
-        &fixture,
-        &install,
-        &authority,
-        &key,
-        &install.bot_outcome.authorization_ref,
-    );
+    let join = join_event(&fixture, &install, &authority, &key, &install.join_grant());
     let (status, outcome) = native_phase(|| post(&fixture, &authority, &key, &join, vec![])).await;
     assert_eq!(status, StatusCode::OK, "real Device membership: {outcome}");
-    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
-        ActorId::account(authority.account_id.clone()),
+    let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
+        authority.actor_id.clone(),
         device,
         arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
     )
@@ -156,7 +150,7 @@ async fn exercise(ghost: bool) {
         assert_eq!(row.claimed_by_mls_group_id.as_deref(), Some("revoked"));
         assert_eq!(
             row.device_authorize_event_id.as_deref(),
-            Some(authority.selector.authorization_ref.event_id.as_str())
+            Some(authority.authorization_ref.event_id.as_str())
         );
     }
     let before = native_phase(|| snapshot(&fixture)).await;

@@ -6,16 +6,13 @@ use super::*;
 fn operation(original: &AppletAuthoringTransactionRequestBody) -> String {
     format!(
         "initial-device/{}",
-        original
-            .authoring_context
-            .principal_control_commit
-            .event_ref
+        crate::managed_runtime::completion_event(original).event_id
     )
 }
 
 async fn packages(
     context: &RuntimeContext,
-    account: &arkret::AccountId,
+    account: &arkret::ActorId,
 ) -> Vec<coland_storage::MlsKeyPackageRow> {
     let store = coland_storage_postgres::PgMlsKeyPackageStore {
         pool: context.fixture.pool.clone(),
@@ -278,7 +275,7 @@ fn publish(
                         .usable_single_use_count(chrono::Utc::now()),
                     4
                 );
-                assert_eq!(packages(&context, &device.account_id).await.len(), 4);
+                assert_eq!(packages(&context, &device.actor_id).await.len(), 4);
             }
             *context.native.managed_author.lock().unwrap() = None;
         }

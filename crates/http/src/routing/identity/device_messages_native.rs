@@ -3,6 +3,7 @@ use super::*;
 use crate::routing::identity::applet_managed_device::{self, VerifiedAppletManagedDevice};
 
 fn unavailable(error: coland_services::ServiceError) -> AppError {
+    tracing::debug!(%error, "native recipient queue admission unavailable");
     match error {
         coland_services::ServiceError::Conflict(detail)
             if detail.starts_with("cursor_expired:") =>

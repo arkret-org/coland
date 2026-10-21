@@ -850,6 +850,7 @@ async fn prepare_configuration_completion(
         .await
         .unwrap();
     let caller = coland_storage::RealmActorMaterialCaller::Service {
+        authenticated_document: applet_service_id_document(&completion.recipient_package),
         service_id: completion.destination_id.clone(),
         verification_method: registration.webhook_auth.key_ref,
         public_key: SigningKey::from_bytes(&[42; 32]).verifying_key().to_bytes(),

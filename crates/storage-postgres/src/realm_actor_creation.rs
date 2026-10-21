@@ -31,7 +31,10 @@ pub(crate) async fn replay(
         return Ok(None);
     };
     if original.event != *event {
-        return Err(invalid("duplicate_conflict: creation original differs"));
+        return Err(PersistenceError::Conflict(
+            "duplicate_conflict: creation original differs".to_owned(),
+        )
+        .into());
     }
     if crate::agent_producer_signer_keys::producer_source_for_commit_in_connection(
         conn,
@@ -181,7 +184,12 @@ pub(crate) async fn inventory(
         #[diesel(sql_type=Jsonb)]
         value: serde_json::Value,
     }
-    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm).await?;
+    // Inventory shares a stable authority cut with other reads. Governance and
+    // control writers still take the exclusive lock before changing this cut.
+    sql_query("SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1 FOR SHARE")
+        .bind::<Text, _>(realm.as_str())
+        .get_result::<Row>(&mut *conn)
+        .await?;
     let rows = sql_query("SELECT jsonb_build_object('event',e.envelope,'commit',c.commit_json) AS value FROM realm_actor_creations r JOIN realm_commits c ON c.commit_id=r.commit_id AND c.realm_id=r.realm_id JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE r.realm_id=$1 AND r.applet_id=$2 ORDER BY c.stream_position")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(applet.as_str()).load::<Row>(&mut *conn).await?;
     let mut result = Vec::with_capacity(rows.len());

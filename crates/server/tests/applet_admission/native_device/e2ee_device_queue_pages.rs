@@ -15,8 +15,8 @@ pub(in super::super) async fn first(
     genesis: &mut MlsGenesisRuntime,
     ack_first: bool,
 ) -> Prior {
-    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
-        ActorId::account(authority.account_id.clone()),
+    let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
+        authority.actor_id.clone(),
         authority.device_id.clone(),
         arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
     )
@@ -30,22 +30,9 @@ pub(in super::super) async fn first(
     );
     let human_key = SigningKey::from_bytes(&fixture.pcr.history.founding_device_signing_seed);
     let mut command = request(authority, key, scope, &upload.keypackages[0].keypackage_ref);
+    command.requester_actor_id = None;
     command.requester_account_id = Some(fixture.pcr.history.account.clone());
-    if let arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device {
-        verification_method,
-        requester_device_id,
-        device_authorize_event_id,
-        signature,
-        ..
-    } = &mut command.requester_authorization
-    {
-        *verification_method = fixture.pcr.history.device_verification_method.clone();
-        *requester_device_id = fixture.pcr.history.founding_device_id.clone();
-        *device_authorize_event_id = fixture.pcr.history.events[1].event_id.clone();
-        signature.kid = arkret_wire::NonEmptyString::new(verification_method.to_string()).unwrap();
-    } else {
-        unreachable!()
-    }
+    account_requester(&fixture, &mut command);
     resign(&mut command, &human_key);
     let body = serde_json::to_value(&command).unwrap();
     let (status, value) = native_phase(|| {
@@ -106,16 +93,20 @@ pub(in super::super) async fn first(
     .unwrap();
     let endpoint = garth::mls::LocalMlsEndpoint::device(
         scope.realm_id().clone(),
-        ActorId::account(authority.account_id.clone()),
+        authority.actor_id.clone(),
         authority.device_id.clone(),
     );
+    let realm_authority = native_phase(|| verified_realm_authority(fixture)).await;
     let verified = garth::mls::verify_welcome_claim(
         &welcome,
         &endpoint,
         &accepted.event,
         &read,
-        &fixture.state.service_core_id(),
-        &authority.selector.authorization_ref.event_id,
+        garth::mls::WelcomeClaimAuthority::Realm {
+            current_station: realm_authority.current_service_id(),
+            authority: &realm_authority,
+        },
+        &authority.authorization_ref.event_id,
     )
     .unwrap();
     let mut joined = arkret_mls::ArkretMlsGroup::join_from_verified_welcome_delivery(
@@ -182,8 +173,8 @@ pub(in super::super) async fn first(
     let consume = garth::mls::signed_welcome_consume(
         &welcome,
         &read,
-        arkret_models_crypto::RecipientMlsDurableSigner::Device {
-            recipient_account_id: authority.account_id.clone(),
+        arkret_models_crypto::RecipientMlsDurableSigner::RealmDevice {
+            recipient_actor_id: authority.actor_id.clone(),
             recipient_device_id: authority.device_id.clone(),
             device_verification_method: arkret_wire::DidUrl::new(method.to_owned()).unwrap(),
         },

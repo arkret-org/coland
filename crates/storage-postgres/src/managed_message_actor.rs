@@ -461,6 +461,22 @@ async fn require_applet_producer_inner(
                 )
                 .await?,
             );
+            // Creation is private, but its actual creation scope still consumes
+            // the independent Realm governance quorum at this accepting cut.
+            accepted.extend(
+                crate::approval_admission::require_governance(
+                    conn,
+                    event,
+                    commit,
+                    prepared,
+                    arkret_wire::CapabilityActionId::from_wire(action)
+                        .ok_or_else(|| denied("creation action is unregistered"))?,
+                    &resource,
+                    &facts,
+                    std::slice::from_ref(&grant_id),
+                )
+                .await?,
+            );
         }
     }
     let delegated_audit = !native_service

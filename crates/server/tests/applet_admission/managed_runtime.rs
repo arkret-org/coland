@@ -15,6 +15,62 @@ use super::*;
 #[path = "managed_runtime_mls.rs"]
 mod mls;
 
+pub(crate) fn completion_event(original: &AppletAuthoringTransactionRequestBody) -> &Event {
+    let RealmActorMaterialResult::Event { event, .. } = &original.authoring_context.material.result
+    else {
+        panic!("creation completion must retain the original Event");
+    };
+    event
+}
+
+async fn prepared_completion(
+    fixture: &Fixture,
+    completion: &coland_storage::AppletAuthoringCompletion,
+) -> AppletAuthoringTransactionRequestBody {
+    let registration = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .applet_registration_for_realm(&completion.realm_id, &completion.applet_id)
+        .await
+        .unwrap();
+    let caller = coland_storage::RealmActorMaterialCaller::Service {
+        authenticated_document: applet_service_id_document(&completion.recipient_package),
+        service_id: completion.destination_id.clone(),
+        public_key: applet_service_signing_key(&registration.webhook_auth.key_ref)
+            .verifying_key()
+            .to_bytes(),
+        verification_method: registration.webhook_auth.key_ref,
+        expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+    };
+    let sign = |body: &RealmActorMaterialUnsigned| {
+        let signature = arkret_signatures::detached_object::sign_detached_object(
+            body,
+            arkret_wire::DetachedSignatureContext::RealmActorMaterial,
+            fixture
+                .state
+                .service_verification_method("notary-key")
+                .unwrap(),
+            body.issued_at,
+            fixture.state.notary_signing_key().as_ref(),
+        )
+        .map_err(coland_storage::PersistenceError::database)?;
+        Ok(body.clone().into_signed(signature))
+    };
+    let delivery = fixture
+        .state
+        .test_persistence()
+        .applets()
+        .prepare_authoring_delivery(completion, &fixture.state.service_core_id(), &caller, &sign)
+        .await
+        .unwrap();
+    AppletAuthoringTransactionRequestBody {
+        applet_id: completion.applet_id.clone(),
+        source_id: delivery.source_id,
+        authoring_context: delivery.context,
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct LostNativeReply {
     pub(crate) armed: std::sync::atomic::AtomicBool,
@@ -179,6 +235,14 @@ pub(crate) fn host_with_retry(
     let client = arkret_http_client::Client::builder(config.arkret.server_url.parse().unwrap())
         .http_client(http)
         .retry(retry)
+        .loopback_service_discovery(
+            "127.0.0.1",
+            url::Url::parse(&config.arkret.server_url)
+                .unwrap()
+                .port()
+                .unwrap(),
+        )
+        .unwrap()
         .build()
         .unwrap();
     let signer = Ed25519PayloadSigner::from_did_key_seed(
@@ -208,8 +272,9 @@ pub(crate) struct RuntimeContext {
     pub(crate) server: tokio::task::JoinHandle<()>,
     pub(crate) server_handle: salvo::server::ServerHandle,
     pub(crate) lost: Arc<LostNativeReply>,
+    pub(crate) prepared: Vec<(AppletManagedActorAuthoringRequest, Event)>,
     pub(crate) accepted: Vec<(
-        arkret::AccountId,
+        arkret::ActorId,
         AppletAuthoringTransactionRequestBody,
         arkret::GrantId,
     )>,
@@ -373,7 +438,7 @@ pub(crate) fn setup_with_mls(
         let edge = host(config.clone(), store);
         let author = Arc::new(ManagedActorAuthoringService::new(edge.clone()).unwrap());
         *native.managed_author.lock().unwrap() = Some(author.clone());
-        let (package, ..) = Box::pin(fixture.install_service_with_constraints(
+        let (package, _, installation, _) = Box::pin(fixture.install_service_with_constraints(
             true,
             native.package.clone(),
             ScopeRef::Realm {
@@ -383,6 +448,7 @@ pub(crate) fn setup_with_mls(
         ))
         .await;
         let mut accepted = Vec::new();
+        let mut prepared = Vec::new();
         for ghost in [false, true] {
             let (preview_path, preview_operation, path, operation, preview_body) = if ghost {
                 (
@@ -391,11 +457,8 @@ pub(crate) fn setup_with_mls(
                         package.applet_id
                     ),
                     ServiceOperationId::SELF_APPLET_GHOST_COMMAND_PREVIEW_V1,
-                    format!(
-                        "/_arkret/self/applets/{}/ghosts/provision",
-                        package.applet_id
-                    ),
-                    ServiceOperationId::SELF_APPLET_GHOST_COMMAND_PROVISION_V1,
+                    "/_arkret/self/events".to_owned(),
+                    ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
                     serde_json::to_value(GhostPreviewRequestBody {
                         effective_scope: ScopeRef::Realm {
                             realm_id: fixture.realm.clone(),
@@ -416,13 +479,13 @@ pub(crate) fn setup_with_mls(
                         package.applet_id
                     ),
                     ServiceOperationId::SELF_APPLET_BOT_COMMAND_PREVIEW_V1,
-                    format!("/_arkret/self/applets/{}/bots/provision", package.applet_id),
-                    ServiceOperationId::SELF_APPLET_BOT_COMMAND_PROVISION_V1,
+                    "/_arkret/self/events".to_owned(),
+                    ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
                     serde_json::to_value(AppletBotPreviewRequestBody {
                         effective_scope: ScopeRef::Realm {
                             realm_id: fixture.realm.clone(),
                         },
-                        request_id: "independent-bot".into(),
+                        request_id: "independent-bot-creation-request".into(),
                         display_name: Some("Independent Bot".into()),
                     })
                     .unwrap(),
@@ -440,26 +503,11 @@ pub(crate) fn setup_with_mls(
             assert_eq!(status, StatusCode::OK, "{preview}");
             let request: AppletManagedActorAuthoringRequest =
                 serde_json::from_value(preview["authoring_request"].clone()).unwrap();
-            let bundle = Box::pin(author.author(&request)).await.unwrap();
-            let body = if ghost {
-                serde_json::to_value(GhostActorProvisionRequestBody {
-                    authoring_request: request,
-                    managed_actor_bundle: Some(bundle),
-                    existing_managed_actor: None,
-                    approval_signatures: vec![],
-                })
-                .unwrap()
-            } else {
-                serde_json::to_value(AppletBotProvisionRequestBody {
-                    authoring_request: request,
-                    managed_actor_bundle: bundle,
-                    approval_signatures: vec![],
-                })
-                .unwrap()
-            };
+            let event = Box::pin(author.author(&request)).await.unwrap();
+            prepared.push((request, event.clone()));
+            let body = creation_submission(event);
             if !ghost {
-                let did = body["managed_actor_bundle"]["managed_actor_provision_event"]["payload"]
-                    ["initial_resolution"]["did"]
+                let did = body["event"]["payload"]["initial_resolution"]["did"]
                     .as_str()
                     .unwrap();
                 assert!(
@@ -489,9 +537,9 @@ pub(crate) fn setup_with_mls(
                 );
                 let trigger = format!("{function}_trigger");
                 let mut connection = fixture.pool.get().await.unwrap();
-                diesel::sql_query(format!("CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id=TG_ARGV[0] THEN RAISE EXCEPTION 'injected native ingestion failure'; END IF; RETURN NEW; END $$"))
+                diesel::sql_query(format!("CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.selector->>'kind'='realm_actor_identity' THEN RAISE EXCEPTION 'injected native ingestion failure'; END IF; RETURN NEW; END $$"))
                     .execute(&mut *connection).await.unwrap();
-                diesel::sql_query(format!("CREATE TRIGGER {trigger} BEFORE INSERT OR UPDATE ON webvh_documents FOR EACH ROW EXECUTE FUNCTION {function}('{did}')"))
+                diesel::sql_query(format!("CREATE TRIGGER {trigger} BEFORE INSERT OR UPDATE ON realm_actor_current_results FOR EACH ROW EXECUTE FUNCTION {function}('{did}')"))
                     .execute(&mut *connection).await.unwrap();
                 drop(connection);
                 let (failed, error) = fixture
@@ -505,10 +553,12 @@ pub(crate) fn setup_with_mls(
                     .await;
                 // Remove fault DDL before assertions because database slots are reused.
                 let mut connection = fixture.pool.get().await.unwrap();
-                diesel::sql_query(format!("DROP TRIGGER {trigger} ON webvh_documents"))
-                    .execute(&mut *connection)
-                    .await
-                    .unwrap();
+                diesel::sql_query(format!(
+                    "DROP TRIGGER {trigger} ON realm_actor_current_results"
+                ))
+                .execute(&mut *connection)
+                .await
+                .unwrap();
                 diesel::sql_query(format!("DROP FUNCTION {function}()"))
                     .execute(&mut *connection)
                     .await
@@ -547,95 +597,81 @@ pub(crate) fn setup_with_mls(
                     &format!("runtime-create-{ghost}"),
                 )
                 .await;
-            assert_eq!(status, StatusCode::CREATED, "{outcome}");
-            let did=body["managed_actor_bundle"]["managed_actor_provision_event"]["payload"]["initial_resolution"]["did"].as_str().unwrap();
-            let stored = fixture
-                .state
-                .test_persistence()
-                .webvh()
-                .get_document(did)
-                .await
-                .unwrap()
+            assert_eq!(status, StatusCode::OK, "{outcome}");
+            let did = body["event"]["payload"]["initial_resolution"]["did"]
+                .as_str()
                 .unwrap();
-            let original = (
-                stored.did_document.clone(),
-                stored.key_log_head.clone(),
-                stored.seq,
-                stored.fetched_at,
-                stored.expires_at,
-                stored.method_evidence.clone(),
-            );
-            assert_eq!(
+            assert!(
                 fixture
                     .state
                     .test_persistence()
                     .webvh()
-                    .ingest_verified_history(None, stored)
+                    .get_document(did)
                     .await
-                    .unwrap(),
-                coland_storage::WebvhLogCommitOutcome::Conflict,
-                "stale expected head must not overwrite accepted native ingestion"
+                    .unwrap()
+                    .is_none(),
+                "Realm custody must not populate the Account directory"
             );
-            let after = fixture
-                .state
-                .test_persistence()
-                .webvh()
-                .get_document(did)
+            let candidate: RealmActorCreatePayload =
+                serde_json::from_value(body["event"]["payload"].clone()).unwrap();
+            let (source, resolution) = control::current(
+                &fixture,
+                &candidate.actor_id,
+                json!({"kind":"realm_actor_control","actor_id":candidate.actor_id}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(json!(source.event_id), body["event"]["event_id"]);
+            arkret_identity::verify_realm_actor_initial_resolution(
+                &candidate,
+                serde_json::from_value(outcome["commit"]["committed_at"].clone()).unwrap(),
+            )
+            .unwrap();
+            let (retry_status, retry) = fixture
+                .service_post(
+                    &package,
+                    &path,
+                    operation,
+                    &body,
+                    &format!("runtime-create-retry-{ghost}"),
+                )
+                .await;
+            assert_eq!(retry_status, StatusCode::OK, "{retry}");
+            assert_eq!(retry["commit"], outcome["commit"]);
+            assert_eq!(
+                (source, resolution),
+                control::current(
+                    &fixture,
+                    &candidate.actor_id,
+                    json!({"kind":"realm_actor_control","actor_id":candidate.actor_id})
+                )
                 .await
                 .unwrap()
-                .unwrap();
-            assert_eq!(
-                original,
-                (
-                    after.did_document,
-                    after.key_log_head,
-                    after.seq,
-                    after.fetched_at,
-                    after.expires_at,
-                    after.method_evidence
-                )
             );
-            let pending = fixture
-                .state
-                .test_persistence()
-                .applets()
-                .pending_authoring_completions(16)
+            let created = CreatedActor::accepted(&body, outcome);
+            let snapshot = authority_snapshot(&fixture.pool).await;
+            let row = snapshot["completions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["creation_ref"]["event_id"] == json!(created.event.event_id))
+                .expect("durable original completion remains available after transport delivery");
+            let completion = coland_storage::AppletAuthoringCompletion {
+                applet_id: serde_json::from_value(row["applet_id"].clone()).unwrap(),
+                request_digest: serde_json::from_value(row["request_digest"].clone()).unwrap(),
+                realm_id: serde_json::from_value(row["realm_id"].clone()).unwrap(),
+                actor_id: serde_json::from_value(row["actor_id"].clone()).unwrap(),
+                creation_ref: serde_json::from_value(row["creation_ref"].clone()).unwrap(),
+                destination_id: serde_json::from_value(row["destination_id"].clone()).unwrap(),
+                recipient_package: serde_json::from_value(row["recipient_package"].clone())
+                    .unwrap(),
+            };
+            let original = prepared_completion(&fixture, &completion).await;
+            edge.install_managed_authoring_completion(&original)
                 .await
                 .unwrap();
-            let completion = pending
-                .iter()
-                .find(|c| serde_json::to_value(&c.context.committed_request).unwrap() == body)
-                .expect("real committed original completion");
-            let original = AppletAuthoringTransactionRequestBody {
-                applet_id: completion.applet_id.clone(),
-                source_id: completion.source_id.clone(),
-                authoring_context: completion.context.clone(),
-            };
-            edge.install_managed_authoring_completion(
-                &original,
-                &station_method,
-                &PublicKeyMaterial::Ed25519Raw {
-                    bytes: fixture
-                        .state
-                        .notary_signing_key()
-                        .verifying_key()
-                        .to_bytes()
-                        .to_vec(),
-                },
-            )
-            .unwrap();
-            let actor: ActorId = serde_json::from_value(
-                outcome[if ghost {
-                    "ghost_actor_id"
-                } else {
-                    "bot_actor_id"
-                }]
-                .clone(),
-            )
-            .unwrap();
-            let grant: arkret::GrantId =
-                serde_json::from_value(outcome["authorization_ref"].clone()).unwrap();
-            accepted.push((actor.as_account_id().unwrap().clone(), original, grant));
+            let grant = installation_action_grant(&installation, "ak.applet.join");
+            accepted.push((created.actor_id, original, grant));
         }
         *native.managed_author.lock().unwrap() = None;
         drop(author);
@@ -649,6 +685,7 @@ pub(crate) fn setup_with_mls(
             server_handle,
             lost,
             accepted,
+            prepared,
         }
     })
 }
@@ -672,16 +709,10 @@ pub(crate) fn recover(
             *context.native.managed_author.lock().unwrap() = Some(author.clone());
             let runtime = ManagedDeviceRuntime::new(edge.clone()).unwrap();
             let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-            let operation = format!(
-                "initial-device/{}",
-                original
-                    .authoring_context
-                    .principal_control_commit
-                    .event_ref
-            );
+            let operation = format!("initial-device/{}", completion_event(original).event_id);
             let plan = InitialManagedDevicePlan {
                 operation_id: operation.clone(),
-                account_id: account.clone(),
+                actor_id: account.clone(),
                 scopes: serde_json::from_value(
                     json!([{"effective_scope":scope,"actions":["ak.applet.join","ak.event.read"]}]),
                 )
@@ -743,7 +774,7 @@ pub(crate) fn recover(
             .unwrap()
             .unwrap();
             assert_eq!(
-                authority.selector.authorization_ref.event_id,
+                authority.authorization_ref.event_id,
                 device.authorization_event_id
             );
             assert_eq!(
@@ -767,11 +798,7 @@ pub(crate) fn recover(
                 .unwrap();
             let target = roots
                 .iter()
-                .find(|(key, _)| {
-                    key.ends_with(
-                        &serde_json::to_string(&ActorId::account(account.clone())).unwrap(),
-                    )
-                })
+                .find(|(key, _)| key.ends_with(&serde_json::to_string(&account.clone()).unwrap()))
                 .unwrap()
                 .clone();
             assert!(
@@ -782,11 +809,22 @@ pub(crate) fn recover(
                     )
                     .unwrap()
             );
-            assert!(
-                runtime
-                    .recover_initial_device(account, &operation, &scope)
-                    .await
-                    .is_err()
+            // Accepted Device custody carries its original authorization and
+            // Commit. Recovering it no longer needs the creation root's key.
+            let recovered = ManagedDeviceRuntime::new(edge.clone())
+                .unwrap()
+                .recover_initial_device(account, &operation, &scope)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(recovered.device_id, device.device_id);
+            assert_eq!(
+                recovered.authorization_event_id,
+                device.authorization_event_id
+            );
+            assert_eq!(
+                recovered.signer().verifying_key(),
+                device.signer().verifying_key()
             );
             assert_eq!(before, authority_snapshot(&context.fixture.pool).await);
             assert!(
@@ -797,20 +835,19 @@ pub(crate) fn recover(
                     )
                     .unwrap()
             );
-            let mut join =
-                arkret_event_draft::TypedEventDraft::<arkret_wire::event_spec::MemberState>::new(
-                    scope.clone(),
-                    ActorId::account(account.clone()),
-                    serde_json::from_value(
-                        json!({"member_id":ActorId::account(account.clone()),"membership":"join"}),
-                    )
+            let mut join = arkret_event_draft::TypedEventDraft::<
+                arkret_wire::event_spec::MemberState,
+            >::new(
+                scope.clone(),
+                account.clone(),
+                serde_json::from_value(json!({"member_id":account.clone(),"membership":"join"}))
                     .unwrap(),
-                )
-                .unwrap()
-                .with_applet_id(context.native.package.applet_id.clone())
-                .with_authorization_ref(grant.clone().into())
-                .author_with_digest_suite(now, arkret_canonical::DigestSuite::Sha256)
-                .unwrap();
+            )
+            .unwrap()
+            .with_applet_id(context.native.package.applet_id.clone())
+            .with_authorization_ref(grant.clone().into())
+            .author_with_digest_suite(now, arkret_canonical::DigestSuite::Sha256)
+            .unwrap();
             arkret_signatures::sign_event(
                 &mut join,
                 device.signer(),
@@ -821,7 +858,7 @@ pub(crate) fn recover(
                 arkret_wire::EventAdmissionSubmission::new(join.event().clone()),
             );
             let producer_context = arkret::ProducerVerificationContext {
-                actor: ActorId::account(device.account_id.clone()),
+                actor: device.actor_id.clone(),
                 verification_method: arkret::DidUrl::new(
                     device.signer().verification_method().to_owned(),
                 )
@@ -892,7 +929,35 @@ pub(crate) fn retained(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {
         let before = authority_snapshot(&context.fixture.pool).await;
+        let old_package = context.native.package.clone();
         let _rotated_package = context.native.rotate();
+        let subject = context.accepted[0].0.clone();
+        let mut nonce = [0u8; 32];
+        getrandom::fill(&mut nonce).unwrap();
+        let request = RealmActorMaterialRequest::Current {
+            actor_id: subject.clone(),
+            request_nonce: arkret_canonical::base64url_encode(nonce),
+            selectors: vec![
+                serde_json::from_value(json!({"kind":"realm_actor_manager","actor_id":subject}))
+                    .unwrap(),
+            ],
+        };
+        let (status, error) = context
+            .fixture
+            .service_post(
+                &old_package,
+                "/_arkret/self/realm-actors/material",
+                ServiceOperationId::SELF_REALM_ACTOR_READ_MATERIAL_V1,
+                &json!(request),
+                "retired-service-method-material",
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "retired Service method: {error}"
+        );
+        assert_eq!(before, authority_snapshot(&context.fixture.pool).await);
         let mut config = context.config.clone();
         config.arkret.signing_key_seed_hex = "2c".repeat(32);
         config.arkret.verification_method_fragment = "#applet-native-key-new".into();
@@ -909,26 +974,13 @@ pub(crate) fn retained(
         let store = FileAuthoringStore::shared(context.store_path.clone()).unwrap();
         let edge = host(config.clone(), store.clone());
         let author = Arc::new(ManagedActorAuthoringService::new(edge.clone()).unwrap());
-        for (_, original, _) in &context.accepted {
-            let station_key = &context.config.arkret.trusted_verification_methods[0];
-            edge.install_managed_authoring_completion(
-                original,
-                &station_key.verification_method,
-                &station_key.public_key,
-            )
-            .unwrap();
-            let (request, bundle) = match &original.authoring_context.committed_request {
-                AppletManagedActorCommittedRequest::Bot(bot) => {
-                    (&bot.authoring_request, &bot.managed_actor_bundle)
-                }
-                AppletManagedActorCommittedRequest::Ghost(ghost) => (
-                    &ghost.authoring_request,
-                    ghost.managed_actor_bundle.as_ref().unwrap(),
-                ),
-            };
+        for ((_, original, _), (request, event)) in context.accepted.iter().zip(&context.prepared) {
+            edge.install_managed_authoring_completion(original)
+                .await
+                .unwrap();
             let recovered = author.author(request).await.unwrap();
             assert_eq!(
-                arkret_canonical::canonical_json_bytes(bundle).unwrap(),
+                arkret_canonical::canonical_json_bytes(event).unwrap(),
                 arkret_canonical::canonical_json_bytes(&recovered).unwrap()
             );
         }
@@ -942,7 +994,7 @@ pub(crate) fn retained(
                 pool: context.fixture.pool.clone(),
             }
             .applet_managed_device_authority(
-                &device.account_id,
+                &device.actor_id,
                 &device.device_id,
                 chrono::Utc::now(),
             )

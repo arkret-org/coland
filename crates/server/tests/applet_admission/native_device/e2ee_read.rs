@@ -20,7 +20,7 @@ async fn bot_and_ghost_read_accepted_encrypted_scope_events_without_session() {
             native_phase(|| fixture.ghost_commit(&install, &ghost, "encrypted-read"))
                 .await
                 .0,
-            StatusCode::CREATED
+            StatusCode::OK
         );
         let _read_parent = native_phase(|| {
             native_business_parent(
@@ -33,23 +33,14 @@ async fn bot_and_ghost_read_accepted_encrypted_scope_events_without_session() {
         })
         .await;
         let mut actors = Vec::new();
-        for bundle in [
-            &install.bot_body["managed_actor_bundle"],
-            &ghost["managed_actor_bundle"],
-        ] {
+        for bundle in [&install.bot_body["event"], &ghost["event"]] {
             let key = SigningKey::from_bytes(&[175; 32]);
             let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
             let authority = native_phase(|| {
                 authorize(&fixture, &install, bundle, &namespace, &key, device, true)
             })
             .await;
-            let event = join_event(
-                &fixture,
-                &install,
-                &authority,
-                &key,
-                &install.bot_outcome.authorization_ref,
-            );
+            let event = join_event(&fixture, &install, &authority, &key, &install.join_grant());
             let (status, outcome) =
                 native_phase(|| post(&fixture, &authority, &key, &event, vec![])).await;
             assert_eq!(
@@ -148,7 +139,8 @@ async fn signer(
         request_id: arkret_wire::RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7()))
             .unwrap(),
         realm_id: fixture.realm.clone(),
-        recipient_account_id: authority.account_id.clone(),
+        recipient_account_id: None,
+        recipient_actor_id: Some(authority.actor_id.clone()),
         queries: vec![native_historical_selector(fixture, event).await],
     };
     managed_device_http_request_body(
@@ -237,7 +229,10 @@ async fn reads_ok(
     let result: arkret_models_identity::SignerKeysQueryOutcome =
         serde_json::from_value(raw).unwrap();
     assert_eq!(result.results.len(), 1);
-    assert!(result.results[0].key().is_some());
+    assert!(matches!(
+        result.results[0],
+        arkret_models_identity::SignerKeyQueryOutcome::HistoricalRealmDeviceResolved { .. }
+    ));
     let request = scan_request(scope);
     let mut response = native_phase(|| scan(fixture, authority, key, scope, &request)).await;
     let status = response.status_code;
@@ -291,7 +286,7 @@ async fn circle_join(
     }
     let mut conn = fixture.pool.get().await.unwrap();
     let row=diesel::sql_query("SELECT e.envelope FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.circle.member.state' AND e.envelope->'scope_ref'=$1 AND e.envelope#>'{payload,member_id}'=$2 AND e.envelope#>>'{payload,membership}'='join' ORDER BY c.stream_position DESC LIMIT 1")
-        .bind::<diesel::sql_types::Jsonb,_>(json!(scope)).bind::<diesel::sql_types::Jsonb,_>(json!(ActorId::account(authority.account_id.clone())))
+        .bind::<diesel::sql_types::Jsonb,_>(json!(scope)).bind::<diesel::sql_types::Jsonb,_>(json!(authority.actor_id.clone()))
         .get_result::<Original>(&mut conn).await.unwrap();
     serde_json::from_value(row.envelope).unwrap()
 }
@@ -308,14 +303,14 @@ async fn encrypted_consent_expiry_blocks_already_prepared_bytes_at_handoff() {
         let deadline=arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()+chrono::Duration::seconds(15));
         let mut temporal=GrantConstraint::new(GrantConstraintKind::Temporal,GrantConstraintEffect::Allow);
         temporal.expires_at=Some(deadline);
-        let extras=["ak.message.create","ak.applet.bot.provision","ak.applet.ghost.provision"].into_iter().map(|action|(action.to_owned(),vec![temporal.clone()])).collect();
+        let extras=["ak.applet.join","ak.applet.publish","ak.message.create","ak.applet.bot.provision","ak.applet.ghost.provision"].into_iter().map(|action|(action.to_owned(),vec![temporal.clone()])).collect();
         let (package,outcome,body,install_key)=native_phase(||fixture.install_service_with_constraints(true,native.package.clone(),scope.clone(),extras)).await;
-        let (bot_outcome,bot_body)=native_phase(||fixture.provision_bot_in_scope(&package,&namespace,outcome.registration_event_ref.clone(),scope.clone())).await;
-        let install=Installed { package, outcome, bot_outcome, bot_body, body, key:install_key };
+        let (bot_outcome, bot_body)=native_phase(||fixture.provision_bot_in_scope(&package,&namespace,outcome.registration_event_ref.clone(),scope.clone())).await;
+        let install=Installed { package, outcome, bot: bot_outcome, join_grant: installation_grant(&body,"ak.applet.join"), bot_body, body, key:install_key };
         let key=SigningKey::from_bytes(&[176;32]);
         let device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
-        let authority=native_phase(||authorize(&fixture,&install,&install.bot_body["managed_actor_bundle"],&namespace,&key,device,true)).await;
-        let event=join_event(&fixture,&install,&authority,&key,&install.bot_outcome.authorization_ref);
+        let authority=native_phase(||authorize(&fixture,&install,&install.bot_body["event"],&namespace,&key,device,true)).await;
+        let event=join_event(&fixture,&install,&authority,&key,&install.join_grant());
         let (status,outcome)=native_phase(||post(&fixture,&authority,&key,&event,vec![])).await;
         assert_eq!(status,StatusCode::OK,"original finite consent is initially live: {outcome}");
         let _read_parent=native_phase(||native_business_parent(&fixture,&install,vec![],vec!["ak.event.read".into()],None)).await;

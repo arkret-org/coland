@@ -90,7 +90,7 @@ pub(super) async fn exercise(
         mls_group_id: scope.canonical_mls_group_id().unwrap(),
         epoch: Default::default(),
         group_state_event_id: genesis.event_id.clone(),
-        caller_actor_id: ActorId::account(authority.account_id.clone()),
+        caller_actor_id: authority.actor_id.clone(),
         target_commit_event_ref: genesis.event_id.clone(),
         target_epoch: 0,
         group_info_ref: payload.group_info_ref,
@@ -258,7 +258,9 @@ pub(super) async fn exercise(
                 "target_epoch" => json!(1),
                 "mls_group_id" => json!(
                     ScopeRef::Realm {
-                        realm_id: authority.pcr_realm_id.clone()
+                        realm_id: RealmId::from_event_id(
+                            &fixture.pcr.unit.transactions[1].event.event_id
+                        )
                     }
                     .canonical_mls_group_id()
                     .unwrap()

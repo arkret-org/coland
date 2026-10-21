@@ -248,7 +248,7 @@ async fn encrypted_join_rechecks_current_policy_after_explicit_consent() {
         let authority = Box::pin(authorize(
             &fixture,
             &install,
-            &install.bot_body["managed_actor_bundle"],
+            &install.bot_body["event"],
             &namespace,
             &key,
             DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap(),
@@ -256,13 +256,7 @@ async fn encrypted_join_rechecks_current_policy_after_explicit_consent() {
         ))
         .await;
         Box::pin(install_policy(&fixture, &install.package.applet_id, "join")).await;
-        let event = join_event(
-            &fixture,
-            &install,
-            &authority,
-            &key,
-            &install.bot_outcome.authorization_ref,
-        );
+        let event = join_event(&fixture, &install, &authority, &key, &install.join_grant());
         let before = business(&fixture).await;
         let (status, error) = Box::pin(post(&fixture, &authority, &key, &event, vec![])).await;
         assert!(!status.is_success(), "current join policy: {error}");
@@ -288,14 +282,14 @@ async fn bot_and_ghost_encrypted_join_reconstruct_exact_accepted_consent() {
         let install = Box::pin(fixture.install_package(true, package, &namespace)).await;
         let body: AppletInstallRequestBody = serde_json::from_value(install.body.clone()).unwrap();
         assert_eq!(install.outcome.e2ee_authorization_refs, body.e2ee_join_authorization_refs().unwrap());
-        assert_eq!(install.outcome.e2ee_authorization_refs.len(), 4);
+        assert_eq!(install.outcome.e2ee_authorization_refs.len(), 6);
         let ghost = Box::pin(fixture.ghost_body(&install, &namespace, "encrypted-join")).await;
-        assert_eq!(fixture.ghost_commit(&install, &ghost, "encrypted-ghost").await.0, StatusCode::CREATED);
-        for bundle in [install.bot_body["managed_actor_bundle"].clone(), ghost["managed_actor_bundle"].clone()] {
+        assert_eq!(fixture.ghost_commit(&install, &ghost, "encrypted-ghost").await.0, StatusCode::OK);
+        for bundle in [install.bot_body["event"].clone(), ghost["event"].clone()] {
             let key = SigningKey::from_bytes(&[156; 32]);
             let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
             let authority = Box::pin(authorize(&fixture, &install, &bundle, &namespace, &key, device, true)).await;
-            let event = join_event(&fixture, &install, &authority, &key, &install.bot_outcome.authorization_ref);
+            let event = join_event(&fixture, &install, &authority, &key, &install.join_grant());
             // A retained install mirror must not bypass the immutable request.
             // Corrupt only this fixture's private audit row, then restore it.
             let digest = arkret_canonical::canonical_sha256(&install.body).unwrap();
@@ -326,8 +320,8 @@ async fn bot_and_ghost_encrypted_join_reconstruct_exact_accepted_consent() {
         let native = NativeAppletService::new(&format!("ak:applet:{}", uuid::Uuid::now_v7()), &ordinary_namespace, &fixture.state.service_core_id());
         let ordinary = Box::pin(fixture.install_package(false, native.package.clone(), &ordinary_namespace)).await;
         let key = SigningKey::from_bytes(&[157; 32]);
-        let authority = Box::pin(authorize(&fixture, &ordinary, &ordinary.bot_body["managed_actor_bundle"], &ordinary_namespace, &key, DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap(), true)).await;
-        let event = join_event(&fixture, &ordinary, &authority, &key, &ordinary.bot_outcome.authorization_ref);
+        let authority = Box::pin(authorize(&fixture, &ordinary, &ordinary.bot_body["event"], &ordinary_namespace, &key, DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap(), true)).await;
+        let event = join_event(&fixture, &ordinary, &authority, &key, &ordinary.join_grant());
         let before = business(&fixture).await;
         let (status, error) = Box::pin(post(&fixture, &authority, &key, &event, vec![])).await;
         assert!(!status.is_success(), "no consent: {error}");
@@ -346,11 +340,11 @@ async fn closing_creation_grants_keeps_existing_accounts_independent_e2ee_join_c
         let native = mls_service(&fixture, &namespace);
         let install = Box::pin(fixture.install_package(true, native.package.clone(), &namespace)).await;
         let ghost = Box::pin(fixture.ghost_body(&install, &namespace, "existing-after-create-close")).await;
-        assert_eq!(fixture.ghost_commit(&install, &ghost, "existing-before-create-close").await.0, StatusCode::CREATED);
+        assert_eq!(fixture.ghost_commit(&install, &ghost, "existing-before-create-close").await.0, StatusCode::OK);
         let remaining = Box::pin(fixture.ghost_body(&install, &namespace, "existing-before-all-close")).await;
-        assert_eq!(fixture.ghost_commit(&install, &remaining, "remaining-before-create-close").await.0, StatusCode::CREATED);
+        assert_eq!(fixture.ghost_commit(&install, &remaining, "remaining-before-create-close").await.0, StatusCode::OK);
         let mut devices = Vec::new();
-        for bundle in [install.bot_body["managed_actor_bundle"].clone(), ghost["managed_actor_bundle"].clone(), remaining["managed_actor_bundle"].clone()] {
+        for bundle in [install.bot_body["event"].clone(), ghost["event"].clone(), remaining["event"].clone()] {
             let key = SigningKey::from_bytes(&[159;32]);
             let authority = Box::pin(authorize(&fixture, &install, &bundle, &namespace, &key, DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap(), true)).await;
             devices.push((authority,key));
@@ -364,7 +358,7 @@ async fn closing_creation_grants_keeps_existing_accounts_independent_e2ee_join_c
                 binding = Some(id);
                 continue;
             }
-            assert!(payload.grant.actions.iter().all(|a| matches!(a.as_str(), "ak.applet.bot.provision" | "ak.applet.ghost.provision")));
+            if !payload.grant.actions.iter().all(|a| matches!(a.as_str(), "ak.applet.bot.provision" | "ak.applet.ghost.provision")) { continue; }
             let rows = fixture.state.test_persistence().capability_grant_current_results().snapshot_for_realm(&fixture.realm).await.unwrap();
             let current = rows.iter().find(|r| r.grant_id == id).unwrap();
             let revoke = fixture.admin_event(EventKind::CapabilityRevoke, scope.clone(), json!({"grant_id":id,"expected_revision":current.revision,"reason":"stop new identity creation only"}));
@@ -375,8 +369,8 @@ async fn closing_creation_grants_keeps_existing_accounts_independent_e2ee_join_c
         assert_eq!(rows.iter().find(|r| r.grant_id == binding).unwrap().value.status, arkret_models_collaboration::governance::grant_constraint::CapabilityGrantStatus::Active);
         let (remaining_authority,remaining_key) = devices.pop().unwrap();
         for (authority,key) in devices {
-            assert!(fixture.state.test_persistence().device_revocations().applet_managed_device_authority(&authority.account_id,&authority.device_id,chrono::Utc::now()).await.unwrap().is_some());
-            let event = join_event(&fixture,&install,&authority,&key,&binding);
+            assert!(fixture.state.test_persistence().device_revocations().applet_managed_device_authority(&authority.actor_id,&authority.device_id,chrono::Utc::now()).await.unwrap().is_some());
+            let event = join_event(&fixture,&install,&authority,&key,&install.join_grant());
             let before = business(&fixture).await;
             let (status,outcome) = Box::pin(post(&fixture,&authority,&key,&event,vec![])).await;
             if !status.is_success() { assert_eq!(before,business(&fixture).await,"failed join must have no business effects"); }
@@ -396,7 +390,7 @@ async fn closing_creation_grants_keeps_existing_accounts_independent_e2ee_join_c
             .bind::<diesel::sql_types::Text,_>(fixture.realm.as_str()).bind::<diesel::sql_types::Text,_>(binding.as_str())
             .execute(&mut conn).await.unwrap(),1);
         drop(conn);
-        let event = join_event(&fixture,&install,&remaining_authority,&remaining_key,&binding);
+        let event = join_event(&fixture,&install,&remaining_authority,&remaining_key,&install.join_grant());
         let before = business(&fixture).await;
         let (status,error) = Box::pin(post(&fixture,&remaining_authority,&remaining_key,&event,vec![])).await;
         let after = business(&fixture).await;
@@ -411,7 +405,16 @@ async fn closing_creation_grants_keeps_existing_accounts_independent_e2ee_join_c
         let current = rows.iter().find(|r| r.grant_id == binding).unwrap();
         let revoke = fixture.admin_event(EventKind::CapabilityRevoke,scope,json!({"grant_id":binding,"expected_revision":current.revision,"reason":"close last installation binding"}));
         Box::pin(accepted_admin_domain_event(&fixture,revoke)).await;
-        let event = join_event(&fixture,&install,&remaining_authority,&remaining_key,&binding);
+        // Close every accepted business binding, including join and publish.
+        let rows = fixture.state.test_persistence().capability_grant_current_results().snapshot_for_realm(&fixture.realm).await.unwrap();
+        for original in &body.authoring_request_basis.capability_grant_events {
+            let id = arkret_wire::GrantId::from_event_id(&original.event_id);
+            let current = rows.iter().find(|row| row.grant_id == id).unwrap();
+            if current.value.status != arkret_models_collaboration::governance::grant_constraint::CapabilityGrantStatus::Active { continue; }
+            let revoke = fixture.admin_event(EventKind::CapabilityRevoke, ScopeRef::Realm { realm_id: fixture.realm.clone() }, json!({"grant_id":id,"expected_revision":current.revision,"reason":"close remaining installation binding"}));
+            Box::pin(accepted_admin_domain_event(&fixture,revoke)).await;
+        }
+        let event = join_event(&fixture,&install,&remaining_authority,&remaining_key,&install.join_grant());
         let before = business(&fixture).await;
         let (status,error) = Box::pin(post(&fixture,&remaining_authority,&remaining_key,&event,vec![])).await;
         assert_eq!(status,StatusCode::FORBIDDEN,"all original bindings withdrawn: {error}");

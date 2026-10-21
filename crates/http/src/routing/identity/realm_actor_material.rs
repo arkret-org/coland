@@ -81,6 +81,7 @@ async fn read_material(
             service_id: service.service_id,
             verification_method: service.verification_method,
             public_key: service.public_key,
+            authenticated_document: service.authenticated_document,
             expires_at: service.expires_at,
         }
     } else {

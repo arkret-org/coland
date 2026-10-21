@@ -34,13 +34,10 @@ async fn bot_and_ghost_upload_scope_bound_keypackages_without_session() {
                 .ghost_commit(&install, &ghost, "native-keypackage-ghost")
                 .await
                 .0,
-            StatusCode::CREATED
+            StatusCode::OK
         );
         let mut last = None;
-        for bundle in [
-            &install.bot_body["managed_actor_bundle"],
-            &ghost["managed_actor_bundle"],
-        ] {
+        for bundle in [&install.bot_body["event"], &ghost["event"]] {
             let key = SigningKey::from_bytes(&[162; 32]);
             let device = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
             let authority = native_phase(|| {
@@ -55,13 +52,7 @@ async fn bot_and_ghost_upload_scope_bound_keypackages_without_session() {
                 )
             })
             .await;
-            let join = join_event(
-                &fixture,
-                &install,
-                &authority,
-                &key,
-                &install.bot_outcome.authorization_ref,
-            );
+            let join = join_event(&fixture, &install, &authority, &key, &install.join_grant());
             let (status, outcome) =
                 native_phase(|| post(&fixture, &authority, &key, &join, vec![])).await;
             assert_eq!(
@@ -69,11 +60,11 @@ async fn bot_and_ghost_upload_scope_bound_keypackages_without_session() {
                 StatusCode::OK,
                 "membership before KeyPackage publication: {outcome}"
             );
-            let actor = ActorId::account(authority.account_id.clone());
+            let actor = authority.actor_id.clone();
             // The SDK's existing Device representation encodes the real full
             // Account; accepted Station provenance, not this local constructor,
             // distinguishes Human and Applet-managed authorization sources.
-            let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
+            let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
                 actor.clone(),
                 device,
                 arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(key.clone()),
@@ -119,16 +110,19 @@ async fn bot_and_ghost_upload_scope_bound_keypackages_without_session() {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(stored.owner_actor_id, authority.account_id);
+            assert_eq!(stored.owner_actor_id, authority.actor_id);
             assert_eq!(stored.effective_scope.as_ref(), Some(&scope));
-            assert_eq!(stored.actor_id, authority.account_id.principal_id.as_str());
+            assert_eq!(
+                stored.actor_id,
+                authority.actor_id.signing_principal_id().as_str()
+            );
             assert_eq!(
                 stored.device_id.as_deref(),
                 Some(authority.device_id.as_str())
             );
             assert_eq!(
                 stored.device_authorize_event_id.as_deref(),
-                Some(authority.selector.authorization_ref.event_id.as_str())
+                Some(authority.authorization_ref.event_id.as_str())
             );
             assert_eq!(
                 stored.key_package_bytes,
@@ -326,8 +320,8 @@ async fn publication_guards(
     );
     assert_eq!(before, native_phase(|| snapshot(fixture)).await);
 
-    let foreign = arkret_mls::ArkretMlsIdentity::new_human_device(
-        ActorId::account(authority.account_id.clone()),
+    let foreign = arkret_mls::ArkretMlsIdentity::new_realm_device(
+        authority.actor_id.clone(),
         authority.device_id.clone(),
         arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(SigningKey::from_bytes(&[163; 32])),
     )
@@ -430,8 +424,8 @@ async fn publication_guards(
     let count = diesel::sql_query(
         "SELECT COUNT(*) AS value FROM accounts WHERE principal_id=$1 AND station_id=$2",
     )
-    .bind::<diesel::sql_types::Text, _>(authority.account_id.principal_id.as_str())
-    .bind::<diesel::sql_types::Text, _>(authority.account_id.station_id.as_str())
+    .bind::<diesel::sql_types::Text, _>(authority.actor_id.signing_principal_id().as_str())
+    .bind::<diesel::sql_types::Text, _>(authority.governance_service_id.as_str())
     .get_result::<Count>(&mut conn)
     .await
     .unwrap()
@@ -480,11 +474,11 @@ async fn circle_publication(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.owner_actor_id, authority.account_id);
+    assert_eq!(stored.owner_actor_id, authority.actor_id);
     assert_eq!(stored.effective_scope.as_ref(), Some(&scope));
     assert_eq!(
         stored.device_authorize_event_id.as_deref(),
-        Some(authority.selector.authorization_ref.event_id.as_str())
+        Some(authority.authorization_ref.event_id.as_str())
     );
     authority
 }
@@ -516,7 +510,7 @@ pub(super) async fn circle_membership(
         {"effective_scope":scope,"actions":["ak.applet.join","ak.circle.member.add","ak.event.read"]},
         {"effective_scope":{"kind":"realm","realm_id":fixture.realm},"actions":["ak.applet.join","ak.event.read"]}
     ]))).await;
-    let actor = ActorId::account(authority.account_id.clone());
+    let actor = authority.actor_id.clone();
     let parent = native_business_parent_in_scope(
         fixture,
         install,

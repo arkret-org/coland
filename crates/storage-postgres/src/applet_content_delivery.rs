@@ -741,7 +741,7 @@ async fn operation_context(
     .await?;
     cut.require_open_content_read()?;
     let policies =
-        crate::policy_current_results::read_scoped_applet_management_policies_in_connection(
+        crate::policy_current_results::read_scoped_applet_management_policies_for_delivery(
             conn,
             scope.realm_id(),
             scope.circle_id(),

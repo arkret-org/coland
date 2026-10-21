@@ -171,7 +171,7 @@ async fn release_after_cancellation(
         let available = diesel::sql_query(
             "SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE NOWAIT",
         )
-        .bind::<diesel::sql_types::Text, _>(authority.pcr_realm_id.as_str())
+        .bind::<diesel::sql_types::Text, _>(authority.realm_id.as_str())
         .execute(&mut *connection)
         .await
         .is_ok();
@@ -260,7 +260,7 @@ async fn assert_list_failures(
     .execute(&mut *writer)
     .await
     .unwrap();
-    for realm in [&authority.pcr_realm_id, scope.realm_id()] {
+    for realm in [&authority.realm_id, scope.realm_id()] {
         diesel::sql_query("SELECT pg_temp.assert_native_queue_writer_locked($1)")
             .bind::<diesel::sql_types::Text, _>(realm.as_str())
             .execute(&mut *writer)
@@ -335,7 +335,7 @@ pub(super) async fn assert_native_token_cannot_use_legacy_ack(
     };
     assert_eq!(
         native_phase(|| old.ack_with_token(
-            authority.account_id.principal_id.as_str(),
+            authority.actor_id.signing_principal_id().as_str(),
             authority.device_id.as_str(),
             token
         ))
@@ -392,22 +392,9 @@ pub(super) async fn accepted_sibling(
     );
     let human_key = SigningKey::from_bytes(&fixture.pcr.history.founding_device_signing_seed);
     let mut command = request(authority, key, scope, &upload.keypackages[0].keypackage_ref);
+    command.requester_actor_id = None;
     command.requester_account_id = Some(fixture.pcr.history.account.clone());
-    if let arkret_models_crypto::PeerKeyPackageRequesterAuthorization::Device {
-        verification_method,
-        requester_device_id,
-        device_authorize_event_id,
-        signature,
-        ..
-    } = &mut command.requester_authorization
-    {
-        *verification_method = fixture.pcr.history.device_verification_method.clone();
-        *requester_device_id = fixture.pcr.history.founding_device_id.clone();
-        *device_authorize_event_id = fixture.pcr.history.events[1].event_id.clone();
-        signature.kid = arkret_wire::NonEmptyString::new(verification_method.to_string()).unwrap();
-    } else {
-        unreachable!()
-    }
+    account_requester(&fixture, &mut command);
     resign(&mut command, &human_key);
     let body = serde_json::to_value(&command).unwrap();
     let (status, value) = native_phase(|| {
@@ -511,16 +498,7 @@ pub(super) async fn assert_sibling_preserved(
     key: &SigningKey,
     sibling: &arkret_wire::MlsWelcomeDelivery,
 ) {
-    let selector = coland_storage::RecipientQueueSelector::HumanDevice {
-        recipient: authority.account_id.principal_id.to_string(),
-        device_id: authority.device_id.to_string(),
-    };
-    let cold = coland_storage_postgres::PgDeviceMessageStore {
-        pool: fixture.pool.clone(),
-    };
-    let rows = native_phase(|| cold.list_recipient_deliveries(&selector, 0, 20))
-        .await
-        .unwrap();
+    let rows = native_phase(|| durable_realm_welcomes(fixture, authority)).await;
     assert_eq!(
         rows.len(),
         1,
@@ -538,9 +516,8 @@ pub(super) async fn assert_sibling_preserved(
         "the other actual scope remains deliverable after the Realm ACK and optional Realm install fence"
     );
     assert_eq!(
-        native_phase(|| cold.list_recipient_deliveries(&selector, 0, 20))
+        native_phase(|| durable_realm_welcomes(fixture, authority))
             .await
-            .unwrap()
             .len(),
         1,
         "list and cursor do not acknowledge the unread Circle Welcome"

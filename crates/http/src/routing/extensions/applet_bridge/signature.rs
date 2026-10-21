@@ -80,6 +80,7 @@ pub(crate) struct VerifiedAppletService {
     pub service_id: arkret_wire::DidCoreId,
     pub verification_method: arkret_wire::DidUrl,
     pub public_key: [u8; 32],
+    pub authenticated_document: arkret_identity::DidDocument,
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -169,7 +170,8 @@ async fn verify_self_service(
         &conditional,
     )
     .map_err(|e| applet_verification_error(HttpMessageVerificationError::Policy(e)))?;
-    let key = authority_material_current_service_key(state, source.as_str(), &input.key_id).await?;
+    let (key, authenticated_document) =
+        authority_material_current_service_identity(state, source.as_str(), &input.key_id).await?;
     let verified = if read {
         http_signature::verify_signed_http_request(
             req,
@@ -195,6 +197,7 @@ async fn verify_self_service(
         verification_method: arkret_wire::DidUrl::new(input.key_id)
             .map_err(|e| applet_signature_error_invalid(e.to_string()))?,
         public_key: key.to_bytes(),
+        authenticated_document,
         expires_at: chrono::DateTime::from_timestamp(verified.signature_input.expires, 0)
             .ok_or_else(|| applet_signature_error_invalid("invalid signature expiry"))?,
     })
@@ -205,39 +208,64 @@ async fn authority_material_current_service_key(
     source: &str,
     verification_method: &str,
 ) -> Result<ed25519_dalek::VerifyingKey, AppError> {
-    if source != state.service_id() {
-        return crate::routing::federation::verifying_key_for_service_id(
-            state,
-            source,
-            verification_method,
-            false,
-        )
-        .await;
+    authority_material_current_service_identity(state, source, verification_method)
+        .await
+        .map(|(key, _)| key)
+}
+
+async fn authority_material_current_service_identity(
+    state: &AppState,
+    source: &str,
+    verification_method: &str,
+) -> Result<(ed25519_dalek::VerifyingKey, arkret_identity::DidDocument), AppError> {
+    let did = arkret_identity::verification_method_did(verification_method)
+        .map_err(|e| applet_signature_error_invalid(e.to_string()))?;
+    if arkret_wire::project_did_to_core_id(&did)
+        .map_err(|e| applet_signature_error_invalid(e.to_string()))?
+        .as_str()
+        != source
+    {
+        return Err(applet_signature_error_invalid("Service identity differs"));
     }
     // A local Service must prove its published native history as well. The
     // federation transport's fixed notary-key shortcut is not an assertion
     // relationship and must not authorize an Applet material read.
-    let authenticated =
+    let document: arkret_identity::DidDocument =
+        if source == state.service_id() {
+            let authenticated =
         crate::routing::system::service_resolution::current_authenticated_service_resolution(state)
             .await?;
-    let document: arkret_identity::DidDocument = serde_json::from_value(
-        serde_json::to_value(authenticated.normalized_did_document)
-            .map_err(|e| applet_signature_error_invalid(e.to_string()))?,
-    )
-    .map_err(|e| applet_signature_error_invalid(e.to_string()))?;
-    let did = arkret_identity::verification_method_did(verification_method)
-        .map_err(|e| applet_signature_error_invalid(e.to_string()))?;
+            serde_json::from_value(
+                serde_json::to_value(authenticated.normalized_did_document)
+                    .map_err(|e| applet_signature_error_invalid(e.to_string()))?,
+            )
+            .map_err(|e| applet_signature_error_invalid(e.to_string()))?
+        } else {
+            match state.dids().resolve_current_service_did(&did).await {
+                Ok(current) => current.document,
+                Err(error) => {
+                    state.discard_federation_peer_verification_keys(source, verification_method);
+                    return Err(applet_signature_error_invalid(error.to_string()));
+                }
+            }
+        };
     let method = arkret_wire::DidUrl::new(verification_method.to_owned())
         .map_err(|e| applet_signature_error_invalid(e.to_string()))?;
-    arkret_identity::validate_verification_method_relationship(
-        &document,
-        &method,
-        &did,
-        arkret_identity::DidVerificationRelationship::AssertionMethod,
-    )
-    .map_err(|e| applet_signature_error_invalid(e.to_string()))?;
-    arkret_identity::jws::resolve_ed25519_pubkey_from_document(&document, verification_method)
-        .map_err(|e| applet_signature_error_invalid(e.to_string()))
+    let key = (|| {
+        arkret_identity::validate_verification_method_relationship(
+            &document,
+            &method,
+            &did,
+            arkret_identity::DidVerificationRelationship::AssertionMethod,
+        )
+        .map_err(|e| applet_signature_error_invalid(e.to_string()))?;
+        arkret_identity::jws::resolve_ed25519_pubkey_from_document(&document, verification_method)
+            .map_err(|e| applet_signature_error_invalid(e.to_string()))
+    })()
+    .inspect_err(|_| {
+        state.discard_federation_peer_verification_keys(source, verification_method);
+    })?;
+    Ok((key, document))
 }
 
 #[handler]

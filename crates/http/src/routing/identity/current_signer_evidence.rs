@@ -57,8 +57,11 @@ async fn self_query(
     let session = aa.authenticated_session(state, req).await?;
     body.validate().map_err(self_request_error)?;
     let actor = super::session_actor::validated_session_actor(state, &session).await?;
-    if actor.as_account_id() != Some(&body.recipient_account_id)
-        || body.recipient_account_id.station_id != state.service_core_id()
+    if actor.as_account_id() != body.recipient_account_id.as_ref()
+        || body
+            .recipient_account_id
+            .as_ref()
+            .is_none_or(|account| account.station_id != state.service_core_id())
     {
         return Err(AppError::not_found("signer key unavailable"));
     }
@@ -77,13 +80,13 @@ async fn native_self_query(
 ) -> GuardedJsonResult<SignerKeysQueryOutcome> {
     body.validate().map_err(self_request_error)?;
     if device.operation != arkret_wire::ServiceOperationId::SelfSignerKeysReadResolveV1
-        || body.recipient_account_id != device.authority.account_id
-        || body.recipient_account_id.station_id != state.service_core_id()
+        || body.recipient_actor_id.as_ref() != Some(&device.authority.actor_id)
+        || device.authority.governance_service_id != state.service_core_id()
         || body.realm_id != *device.metadata.effective_scope.realm_id()
     {
         return Err(AppError::not_found("signer key unavailable"));
     }
-    let actor = arkret_wire::ActorId::account(body.recipient_account_id.clone());
+    let actor = device.authority.actor_id.clone();
     let mut results = Vec::with_capacity(body.queries.len());
     let mut views = Vec::new();
     for selector in &body.queries {
@@ -155,6 +158,7 @@ async fn native_self_query(
         request_id: body.request_id.clone(),
         realm_id: body.realm_id.clone(),
         recipient_account_id: body.recipient_account_id.clone(),
+        recipient_actor_id: body.recipient_actor_id.clone(),
         results,
     };
     outcome
@@ -191,7 +195,11 @@ pub(crate) async fn resolve_self_signer_keys(
     body: &SignerKeysQueryRequestBody,
 ) -> Result<SignerKeysQueryOutcome, AppError> {
     body.validate().map_err(self_request_error)?;
-    let requester = arkret_wire::ActorId::account(body.recipient_account_id.clone());
+    let recipient = body
+        .recipient_account_id
+        .as_ref()
+        .ok_or_else(|| AppError::not_found("signer key unavailable"))?;
+    let requester = arkret_wire::ActorId::account(recipient.clone());
     // Read the accepted typed state, including verified replica anchors below
     // the reader's since_join floor; legacy projection caches are not authority.
     let requester_is_member = observed_signer_lookup(
@@ -213,8 +221,8 @@ pub(crate) async fn resolve_self_signer_keys(
     let self_recipient = super::session_actor::validated_session_actor(state, session)
         .await
         .ok()
-        .is_some_and(|actor| actor.as_account_id() == Some(&body.recipient_account_id))
-        && body.recipient_account_id.station_id == state.service_core_id();
+        .is_some_and(|actor| actor.as_account_id() == Some(recipient))
+        && recipient.station_id == state.service_core_id();
     let mut results = Vec::with_capacity(body.queries.len());
     for selector in &body.queries {
         let category = match selector {
@@ -223,7 +231,7 @@ pub(crate) async fn resolve_self_signer_keys(
                     arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice {
                         actor, ..
                     },
-            } if actor.route_service_id() == &state.service_core_id() => "local_human",
+            } if actor.fixed_route_service_id() == Some(&state.service_core_id()) => "local_human",
             SignerKeyQuerySelector::HistoricalEvent {
                 sender: arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice { .. },
             } => "foreign_human",
@@ -233,6 +241,8 @@ pub(crate) async fn resolve_self_signer_keys(
             SignerKeyQuerySelector::HistoricalEvent {
                 sender: arkret_models_identity::HistoricalSignerKeyQuerySender::Service { .. },
             } => "service",
+            SignerKeyQuerySelector::CurrentRealmDevice { .. } => "current_realm_device",
+            SignerKeyQuerySelector::HistoricalRealmDevice { .. } => "historical_realm_device",
             SignerKeyQuerySelector::CurrentAdmission { .. } => "current_selector",
         };
         signer_query_diagnostic("selector_classification", category);
@@ -256,6 +266,15 @@ pub(crate) async fn resolve_self_signer_keys(
                 SignerKeyQuerySelector::CurrentAdmission {
                     sender: CurrentSignerKeyQuerySender::Agent { .. },
                 } => current_agent_key(state, &body.realm_id, selector).await,
+                SignerKeyQuerySelector::CurrentRealmDevice { .. } => {
+                    current_realm_device_key(state, selector).await
+                }
+                SignerKeyQuerySelector::HistoricalRealmDevice { .. } => state
+                    .authority_commits()
+                    .historical_producer_signer_key(&body.realm_id, selector)
+                    .await
+                    .ok()
+                    .flatten(),
                 SignerKeyQuerySelector::HistoricalEvent {
                     sender:
                         arkret_models_identity::HistoricalSignerKeyQuerySender::Agent { .. }
@@ -275,18 +294,12 @@ pub(crate) async fn resolve_self_signer_keys(
                     found.flatten()
                 }
             }
-        } else if !ordinary
-            && self_recipient
-            && selector.actor().as_account_id() == Some(&body.recipient_account_id)
+        } else if !ordinary && self_recipient && selector.actor().as_account_id() == Some(recipient)
         {
             let found = observed_signer_lookup(
                 state
                     .authority_commits()
-                    .historical_self_pcr_producer_signer_key(
-                        &body.realm_id,
-                        selector,
-                        &body.recipient_account_id,
-                    )
+                    .historical_self_pcr_producer_signer_key(&body.realm_id, selector, recipient)
                     .await,
                 "restricted_self_pcr_historical",
             );
@@ -321,6 +334,7 @@ pub(crate) async fn resolve_self_signer_keys(
         request_id: body.request_id.clone(),
         realm_id: body.realm_id.clone(),
         recipient_account_id: body.recipient_account_id.clone(),
+        recipient_actor_id: body.recipient_actor_id.clone(),
         results,
     };
     outcome
@@ -338,7 +352,7 @@ async fn current_device_key(
     let device = selector.device_id()?;
     let projection = super::keys::current_device_projection_for_signer(
         state,
-        &body.recipient_account_id,
+        body.recipient_account_id.as_ref()?,
         &body.realm_id,
         account,
         device,
@@ -691,4 +705,38 @@ pub(super) fn verify_current_device_projection(
         now,
     )
     .map_err(|error| error.to_string())
+}
+
+async fn current_realm_device_key(
+    state: &AppState,
+    selector: &SignerKeyQuerySelector,
+) -> Option<SignerKeyQueryOutcome> {
+    let SignerKeyQuerySelector::CurrentRealmDevice {
+        actor_id,
+        device_id,
+        verification_method,
+        ..
+    } = selector
+    else {
+        return None;
+    };
+    let authority = state
+        .persistence()
+        .applet_managed_device_authority(actor_id, device_id, chrono::Utc::now())
+        .await
+        .ok()??;
+    if authority.governance_service_id != state.service_core_id()
+        || verification_method.as_str() != format!("{}#{}", authority.native_did, device_id)
+    {
+        return None;
+    }
+    Some(SignerKeyQueryOutcome::CurrentDeviceResolved {
+        selector: selector.clone(),
+        key: CurrentDeviceSigningKey {
+            public_key_b64u: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
+                authority.public_key,
+            ))
+            .ok()?,
+        },
+    })
 }

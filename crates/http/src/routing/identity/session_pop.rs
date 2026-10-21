@@ -50,6 +50,16 @@ pub async fn verify_session_pop(
         .get_typed::<AppState>()
         .expect("state injected")
         .clone();
+    if req.headers().contains_key("arkret-realm-actor-control") {
+        match super::realm_actor_control::verify(&state, req).await {
+            Ok(verified) => {
+                depot.insert_typed(verified);
+                ctrl.call_next(req, depot, res).await;
+            }
+            Err(error) => error.write(req, depot, res).await,
+        }
+        return;
+    }
     if req.headers().contains_key("arkret-managed-device") {
         match super::applet_managed_device::verify(&state, req).await {
             Ok(verified) => {
@@ -112,6 +122,8 @@ async fn enforce_session_pop(state: &AppState, req: &mut Request) -> Result<(), 
     if req.headers().contains_key("source-service-id")
         && [
             arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1,
+            arkret_wire::ServiceOperationId::SelfRealmActorReadMaterialV1,
+            arkret_wire::ServiceOperationId::SelfAuthzGrantsReadEffectiveV1,
             arkret_wire::ServiceOperationId::SelfAgentResourceGetV1,
             arkret_wire::ServiceOperationId::SelfManagementReviewCommandRequestV1,
             arkret_wire::ServiceOperationId::SelfManagementReviewReadStatusV1,
@@ -393,7 +405,7 @@ mod tests {
     const RFC8037_THUMBPRINT: &str = "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k";
 
     #[tokio::test]
-    async fn agent_authority_projection_reaches_its_service_authenticator_without_a_session() {
+    async fn agent_authority_projection_rejects_an_unverified_service_without_a_session() {
         let state = AppState::new(
             crate::config::AppConfig::test_default(),
             coland_storage_postgres::Db { pool: None },
@@ -405,9 +417,9 @@ mod tests {
         request
             .headers_mut()
             .insert("source-service-id", "unverified-service".parse().unwrap());
-        // This only dispatches to the handler; its mandatory service verifier
-        // still rejects missing, partial, or unauthorized signatures.
-        assert!(enforce_session_pop(&state, &mut request).await.is_ok());
+        // The projection's mandatory service verifier precedes the generic
+        // dispatch exemption; an unsigned header is not authentication.
+        assert!(enforce_session_pop(&state, &mut request).await.is_err());
     }
 
     #[tokio::test]

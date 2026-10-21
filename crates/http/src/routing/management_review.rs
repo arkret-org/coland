@@ -79,11 +79,14 @@ async fn request_review(
     }
     // This verifies the original producer. It neither authors nor queues the Event.
     let outcome = async {
+        if let Some(account) = state.event_queries().configuration_review_account(&body).await? {
+            accounts.insert(account);
+        }
         let mut current =
             crate::approval_admission::observe_management_accounts(state, accounts).await?;
-        current.applet_candidate = prepare_candidate(state, &body.target).await?;
         current.applet_event = super::extensions::applet_bridge::prepare_event_current(state,&body.target).await?;
         let producer = match (&body.target, &session) {
+            (ManagementReviewTarget::Event { event }, None) if event.kind == arkret_wire::EventKind::RealmActorCreate || (matches!(event.kind, arkret_wire::EventKind::ProfileCreate | arkret_wire::EventKind::ProfileUpdate) && matches!(event.scope_ref, arkret_wire::ScopeRef::RealmControl { .. })) => None,
             (ManagementReviewTarget::Event { event }, None) if event.applet_id.is_some() => {
                 let authority=state.persistence().applet_managed_event_producer(event,chrono::Utc::now()).await?
                     .ok_or_else(||coland_services::ServiceError::Conflict("capability_denied: management target has no native Device producer".into()))?;
@@ -98,11 +101,6 @@ async fn request_review(
             (ManagementReviewTarget::Event { event }, Some(session)) => {
                 Some(crate::state::verify_self_event_producer(state, session, event).await?)
             }
-            (
-                ManagementReviewTarget::BotCreation { .. }
-                | ManagementReviewTarget::GhostCreation { .. },
-                None,
-            ) => None,
             _ => {
                 return Err(coland_services::ServiceError::protocol(
                     arkret_wire::ErrorCode::CapabilityDenied,
@@ -164,7 +162,6 @@ async fn review_status(
             ManagementReviewStatus::Pending | ManagementReviewStatus::Approved
         ) && chrono::Utc::now() < material.outcome.expires_at
         {
-            current.applet_candidate = prepare_candidate(state, &material.request.target).await?;
             current.applet_event = super::extensions::applet_bridge::prepare_event_current(
                 state,
                 &material.request.target,
@@ -226,8 +223,6 @@ async fn decide_review(
             ManagementReviewStatus::Pending | ManagementReviewStatus::Approved
         ) && chrono::Utc::now() < material.outcome.expires_at
         {
-            current_accounts.applet_candidate =
-                prepare_candidate(state, &material.request.target).await?;
             current_accounts.applet_event =
                 super::extensions::applet_bridge::prepare_event_current(
                     state,
@@ -265,21 +260,6 @@ async fn decide_review(
     }
     .await;
     Ok(ManagementReviewResponse::from(outcome))
-}
-
-async fn prepare_candidate(
-    state: &AppState,
-    target: &ManagementReviewTarget,
-) -> coland_services::ServiceResult<Option<Box<coland_storage::AppletAuthoringCandidate>>> {
-    crate::routing::extensions::applet_bridge::prepare_management_candidate(state, target)
-        .await
-        .map_err(|error| {
-            coland_services::ServiceError::protocol(
-                arkret_wire::ErrorCode::from_wire(error.wire_code())
-                    .unwrap_or(arkret_wire::ErrorCode::FailedPrecondition),
-                error.to_string(),
-            )
-        })
 }
 
 async fn review_caller(

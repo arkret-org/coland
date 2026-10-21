@@ -18,18 +18,31 @@ pub(crate) async fn prepare_event_approvals_with_management_current(
     at: chrono::DateTime<chrono::Utc>,
     prepared_current: Option<&coland_storage::ManagementReviewCurrent>,
 ) -> ServiceResult<Option<EventApprovalCommit>> {
-    let Some(signatures) = &submission.approval_signatures else {
-        return Ok(None);
+    let configuration_account = if submission.event.kind == arkret_wire::EventKind::RealmActorCreate
+    {
+        state
+            .event_queries()
+            .configuration_candidate_account(&submission.event)
+            .await?
+    } else {
+        None
     };
+    if submission.approval_signatures.is_none() && configuration_account.is_none() {
+        return Ok(None);
+    }
     submission
         .validate()
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
-    let methods = prepare_approval_methods(state, signatures, at).await?;
-    let management_ids = signatures
+    let methods = if let Some(signatures) = &submission.approval_signatures {
+        prepare_approval_methods(state, signatures, at).await?
+    } else {
+        Vec::new()
+    };
+    let management_ids = methods
         .iter()
-        .filter_map(|signature| {
+        .filter_map(|method| {
             if let arkret_wire::ApprovalContext::Management { request_id, .. } =
-                &signature.input.approval_context
+                &method.signature.input.approval_context
             {
                 Some(request_id.clone())
             } else {
@@ -37,15 +50,27 @@ pub(crate) async fn prepare_event_approvals_with_management_current(
             }
         })
         .collect::<std::collections::BTreeSet<_>>();
-    let management_current = if management_ids.is_empty() {
+    let management_current = if management_ids.is_empty() && configuration_account.is_none() {
         None
-    } else if let Some(current) = prepared_current {
-        Some(current.clone())
+    } else if configuration_account.is_none() && prepared_current.is_some() {
+        prepared_current.cloned()
     } else {
-        let mut accounts = std::collections::BTreeSet::new();
-        for id in management_ids {
-            let material =
-                if submission.event.applet_id.is_some() && submission.event.executed_by.is_none() {
+        let mut accounts = configuration_account
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if let Some(current) = prepared_current {
+            accounts.extend(
+                current
+                    .observations
+                    .iter()
+                    .map(|observation| observation.record().account_id.clone()),
+            );
+        }
+        if let Some(signatures) = &submission.approval_signatures {
+            for id in management_ids {
+                let material = if submission.event.applet_id.is_some()
+                    && submission.event.executed_by.is_none()
+                {
                     state
                         .persistence()
                         .management_review_event_material(&submission.event, &id, signatures)
@@ -57,7 +82,8 @@ pub(crate) async fn prepare_event_approvals_with_management_current(
                         .await
                 }
                 .map_err(ServiceError::from)?;
-            accounts.extend(material.accounts);
+                accounts.extend(material.accounts);
+            }
         }
         let mut current = observe_management_accounts(state, accounts).await?;
         if submission.event.applet_id.is_some() && submission.event.executed_by.is_none() {

@@ -29,6 +29,18 @@ pub fn spawn(state: AppState) -> Arc<tokio::task::JoinHandle<()>> {
         loop {
             ticker.tick().await;
             crate::routing::identity::recovery::sweep_rotation_worker(&state).await;
+            if let Err(error) = sweep_realm_device_revocations(&state).await {
+                tracing::warn!(%error, "Realm Device revoke worker deferred");
+            }
         }
     }))
+}
+
+pub async fn sweep_realm_device_revocations(
+    state: &AppState,
+) -> coland_services::ServiceResult<usize> {
+    state
+        .authority_commits()
+        .sweep_realm_actor_device_revocations(&state.service_core_id())
+        .await
 }

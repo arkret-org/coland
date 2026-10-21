@@ -362,6 +362,71 @@ impl crate::events::MessagePort for PersistenceEventReader {
 
 #[async_trait::async_trait]
 impl crate::events::AppletPort for PersistenceEventReader {
+    async fn configuration_review_account(
+        &self,
+        request: &arkret_models_integration::ManagementReviewRequestBody,
+    ) -> crate::ServiceResult<Option<arkret_wire::AccountId>> {
+        Ok(self
+            .0
+            .applets()
+            .configuration_review_account(request)
+            .await?)
+    }
+
+    async fn configuration_candidate_account(
+        &self,
+        event: &arkret_wire::Event,
+    ) -> crate::ServiceResult<Option<arkret_wire::AccountId>> {
+        Ok(self
+            .0
+            .applets()
+            .configuration_candidate_account(event)
+            .await?)
+    }
+
+    async fn configuration_intent(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        applet: &arkret_wire::AppletId,
+        actor: &arkret_wire::ActorId,
+        intent: &arkret_models_integration::AppletConfigurationIntent,
+        current: &coland_storage::ManagementReviewCurrent,
+    ) -> crate::ServiceResult<Option<arkret_models_integration::AppletConfigurationExecutionIntent>>
+    {
+        Ok(self
+            .0
+            .applets()
+            .configuration_intent(governor, applet, actor, intent, current)
+            .await?)
+    }
+    async fn configuration(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
+        command: arkret_models_integration::AppletConfigurationCommand,
+        current: &coland_storage::ManagementReviewCurrent,
+        ingress: &coland_storage::AppletConfigurationIngress,
+    ) -> crate::ServiceResult<arkret_models_integration::AppletConfigurationOutcome> {
+        Ok(self
+            .0
+            .applets()
+            .configuration(governor, intent, command, current, ingress)
+            .await?)
+    }
+    async fn retain_configuration_source(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
+        source: &arkret_models_integration::AppletConfigurationExecutionOutcome,
+        producer: &coland_storage::AppletEventProducerGuard,
+        current: &coland_storage::ManagementReviewCurrent,
+    ) -> crate::ServiceResult<arkret_models_integration::AppletConfigurationOutcome> {
+        Ok(self
+            .0
+            .applets()
+            .retain_configuration_source(governor, intent, source, producer, current)
+            .await?)
+    }
     async fn issue_widget_token(
         &self,
         record: coland_storage::AppletWidgetTokenRecord,
@@ -758,6 +823,64 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
             .get_peer_claim(source_id, claim_request_id)
             .await?)
     }
+    async fn realm_claim_source(
+        &self,
+        source_id: &str,
+        claim_request_id: &str,
+    ) -> crate::ServiceResult<Option<coland_storage::RealmKeyPackageClaimSource>> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .realm_claim_source(source_id, claim_request_id)
+            .await?)
+    }
+    async fn retain_realm_claim_source_result(
+        &self,
+        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome,
+        histories: &[arkret_models_identity::AuthenticatedServiceResolution],
+        governor: &arkret_wire::DidCoreId,
+    ) -> crate::ServiceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .retain_realm_claim_source_result(request, result, histories, governor)
+            .await?)
+    }
+    async fn prepare_realm_claim_source(
+        &self,
+        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        source: &coland_storage::AppletManagedDeviceScopeGuard,
+        transport_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::ServiceResult<bool> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .prepare_realm_claim_source(request, source, transport_expires_at)
+            .await?)
+    }
+    async fn peer_claim_original(
+        &self,
+        claim_request_id: &str,
+        request_digest: &str,
+    ) -> crate::ServiceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .peer_claim_original(claim_request_id, request_digest)
+            .await?)
+    }
+    async fn realm_claim_issuer_resolution(
+        &self,
+        source_id: &str,
+        claim_request_id: &str,
+    ) -> crate::ServiceResult<Option<arkret_models_identity::AuthenticatedServiceResolution>> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .realm_claim_issuer_resolution(source_id, claim_request_id)
+            .await?)
+    }
     async fn peer_claim_by_claim_id(
         &self,
         claim_id: &str,
@@ -931,7 +1054,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
         let rows = self.0.mls_key_packages().snapshot_all().await?;
         let mut retired = 0;
         for row in rows.into_iter().filter(|row| {
-            row.owner_account_id == owner_account_id
+            row.owner_actor_id == arkret_wire::ActorId::account(owner_account_id.clone())
                 && row.claimed_by_mls_group_id.is_none()
                 && row.consumed_at.is_none()
         }) {

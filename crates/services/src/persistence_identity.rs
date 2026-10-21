@@ -1621,11 +1621,12 @@ impl crate::identity::DidDocumentPort for PersistenceDidDocuments {
     async fn embedded_document(
         &self,
         local_id: &str,
+        expected_log_url: &str,
     ) -> crate::ServiceResult<Option<crate::identity::DidDocumentState>> {
         Ok(self
             .0
             .webvh()
-            .get_embedded_webvh_document_by_local_id(local_id)
+            .get_embedded_webvh_document_by_local_id(local_id, expected_log_url)
             .await?)
     }
 

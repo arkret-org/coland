@@ -41,7 +41,8 @@ struct WithheldRow {
 /// existing PolicyRef author-only boundary and the controller's private
 /// confirmation nonce out of ordinary member disclosure and peer fanout.
 pub(crate) fn author_private_source(event: &arkret_wire::Event) -> bool {
-    event.kind == arkret_wire::EventKind::AgentActionApprove
+    matches!(event.scope_ref, arkret_wire::ScopeRef::RealmControl { .. })
+        || event.kind == arkret_wire::EventKind::AgentActionApprove
         || (event.kind == arkret_wire::EventKind::PolicyAction
             && event.payload.contains_key("policy_id"))
 }
@@ -90,6 +91,12 @@ pub(crate) async fn full_event_for_member_in_connection(
     caller: &arkret_wire::ActorId,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<bool> {
+    if matches!(
+        row.commit.stream_ref,
+        arkret_wire::CommitStreamRef::RealmControl { .. }
+    ) {
+        return Ok(false);
+    }
     if ordinary_agent_read_ceiling(
         crate::account_stream_scan::realm_purpose(conn, &row.event.realm_id).await?,
     ) && let Some(controller) =
@@ -172,7 +179,6 @@ pub(crate) fn ordinary_agent_read_ceiling(
             RealmPurpose::DirectConversation
                 | RealmPurpose::PrincipalControl
                 | RealmPurpose::AgentControl
-                | RealmPurpose::AppletManagedControl
         )
     )
 }
@@ -419,7 +425,6 @@ mod tests {
             RealmPurpose::DirectConversation,
             RealmPurpose::PrincipalControl,
             RealmPurpose::AgentControl,
-            RealmPurpose::AppletManagedControl,
         ] {
             assert!(!ordinary_agent_read_ceiling(Some(purpose)));
         }

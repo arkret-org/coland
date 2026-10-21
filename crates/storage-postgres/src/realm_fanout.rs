@@ -119,7 +119,26 @@ pub(crate) async fn freeze_welcomes_in_connection(
             arkret_canonical::canonical_json_bytes(welcome).map_err(PersistenceError::database)?;
         let digest =
             arkret_canonical::canonical_sha256(welcome).map_err(PersistenceError::database)?;
-        let station = welcome.recipient_actor_id.route_service_id();
+        let realm_station;
+        let station = if let Some(station) = welcome.recipient_actor_id.fixed_route_service_id() {
+            station
+        } else {
+            let actor = welcome
+                .recipient_actor_id
+                .as_realm_actor_id()
+                .ok_or_else(|| internal("Welcome recipient has no route"))?;
+            if actor.realm_id != event.realm_id {
+                return Err(internal("Realm Welcome recipient belongs to another Realm").into());
+            }
+            realm_station = arkret_wire::project_did_to_core_id(
+                &arkret_identity::verification_method_did(
+                    commit.signature.verification_method.as_str(),
+                )
+                .map_err(internal)?,
+            )
+            .map_err(internal)?;
+            &realm_station
+        };
         sql_query(
             "INSERT INTO mls_welcome_provenance \
              (welcome_id,realm_id,scope_key,commit_event_ref,recipient_station_id,claim_id, \
@@ -347,7 +366,9 @@ async fn departing_member_target(
         return Ok(None);
     }
     let member = payload.member_id;
-    let station = member.route_service_id().clone();
+    let Some(station) = member.fixed_route_service_id().cloned() else {
+        return Ok(None);
+    };
     if &station == authority_station {
         return Ok(None);
     }
@@ -615,7 +636,9 @@ async fn membership_targets(
     for row in rows {
         let member: arkret_wire::ActorId = serde_json::from_str(&row.member_id)
             .map_err(|error| internal(format!("joined member identity is malformed: {error}")))?;
-        let station = member.route_service_id().clone();
+        let Some(station) = member.fixed_route_service_id().cloned() else {
+            continue;
+        };
         if &station == authority_station {
             continue;
         }
@@ -709,7 +732,10 @@ async fn departing_circle_member_target(
             .ok_or_else(|| internal("Circle departure has no member"))?,
     )
     .map_err(internal)?;
-    if member.route_service_id() == authority_station {
+    let Some(station) = member.fixed_route_service_id().cloned() else {
+        return Ok(None);
+    };
+    if &station == authority_station {
         return Ok(None);
     }
     let Some(parent) = sql_query("SELECT e.envelope->>'event_id' AS event_id FROM member_state_current_results m JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join' AND e.state='committed' AND c.stream_ref->>'kind'='realm'")
@@ -725,7 +751,7 @@ async fn departing_circle_member_target(
         return Ok(None);
     }
     Ok(Some((
-        member.route_service_id().clone(),
+        station,
         RealmFanoutAuthorityWitness {
             member_id: member,
             membership_event_ref: parent.event_id,
@@ -816,7 +842,12 @@ pub(crate) async fn plan_realm_fanout_in_connection(
     let mut replicated_welcomes: BTreeMap<_, Vec<arkret_wire::MlsWelcomeDelivery>> =
         BTreeMap::new();
     for welcome in welcomes {
-        let service = welcome.recipient_actor_id.route_service_id();
+        let Some(service) = welcome.recipient_actor_id.fixed_route_service_id() else {
+            return Err(PersistenceError::Conflict(
+                "Realm actor Welcome cannot enter peer replication".into(),
+            )
+            .into());
+        };
         if !targets.contains_key(service) {
             return Err(PersistenceError::Conflict(format!(
                 "{}: the remote Welcome recipient's Station is not a replication target",

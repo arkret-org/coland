@@ -1066,7 +1066,7 @@ mod tests {
         );
         diesel::sql_query("UPDATE member_state_current_results SET current_commit_id=$1,current_stream_position=0 WHERE member_id=$2").bind::<Text,_>(RealmCommitId::from_digest([1;32]).as_str()).bind::<Text,_>(fixture.caller.to_string()).execute(&mut conn).await.unwrap();
         diesel::sql_query("UPDATE realm_authorities SET service_id=$1")
-            .bind::<Text, _>(fixture.caller.route_service_id().as_str())
+            .bind::<Text, _>(fixture.caller.as_account_id().unwrap().station_id.as_str())
             .execute(&mut conn)
             .await
             .unwrap();

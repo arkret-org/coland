@@ -50,6 +50,26 @@ struct MemberRow {
     membership: String,
 }
 
+pub(crate) async fn scan_stream_for_actor(
+    pool: &PgPool,
+    request: &StreamScanRequest,
+    actor: &ActorId,
+    issuer: &DidCoreId,
+) -> PersistenceResult<AccountStreamScan> {
+    request
+        .validate()
+        .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+    let mut conn = pg_conn(pool).await?;
+    conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+        sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *conn)
+            .await?;
+        scan_stream_for_actor_in_connection(conn, request, actor, issuer).await
+    })
+    .await
+    .map_err(PgTransactionError::into_persistence)
+}
+
 pub(crate) async fn scan_stream_for_account(
     pool: &PgPool,
     request: &StreamScanRequest,
@@ -76,10 +96,20 @@ pub(crate) async fn scan_stream_for_account_in_connection(
     account: &AccountId,
     issuer: &DidCoreId,
 ) -> Result<AccountStreamScan, PgTransactionError> {
+    scan_stream_for_actor_in_connection(conn, request, &ActorId::account(account.clone()), issuer)
+        .await
+}
+
+pub(crate) async fn scan_stream_for_actor_in_connection(
+    conn: &mut AsyncPgConnection,
+    request: &StreamScanRequest,
+    actor: &ActorId,
+    issuer: &DidCoreId,
+) -> Result<AccountStreamScan, PgTransactionError> {
     request
         .validate()
         .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
-    let caller = ActorId::account(account.clone()).to_string();
+    let caller = actor.clone().to_string();
     let Some(tenure) = sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
         .bind::<Text, _>(request.realm_id.as_str())
         .get_result::<TenureRow>(&mut *conn)
@@ -88,6 +118,11 @@ pub(crate) async fn scan_stream_for_account_in_connection(
     else {
         return Ok(AccountStreamScan::NotAuthorized);
     };
+    if actor.as_realm_actor_id().is_some_and(|subject| {
+        subject.realm_id != request.realm_id || tenure.service_id != issuer.as_str()
+    }) {
+        return Ok(AccountStreamScan::NotAuthorized);
+    }
     let members = sql_query(
         "SELECT member_id, membership FROM member_state_current_results \
          WHERE realm_id=$1 ORDER BY member_id",
@@ -101,8 +136,9 @@ pub(crate) async fn scan_stream_for_account_in_connection(
     {
         return Ok(AccountStreamScan::NotAuthorized);
     }
-    let caller_actor = ActorId::account(account.clone());
+    let caller_actor = actor.clone();
     let floor = match (&request.stream_ref, tenure.service_id == issuer.as_str()) {
+        (CommitStreamRef::RealmControl { .. }, _) => return Ok(AccountStreamScan::NotAuthorized),
         (CommitStreamRef::Realm { .. }, true) => {
             caller_realm_floor_in_connection(conn, &request.realm_id, &caller_actor).await?
         }
@@ -1083,7 +1119,7 @@ async fn peer_intervals(
         let member: ActorId = serde_json::from_str(&row.member_id).map_err(|error| {
             PersistenceError::Internal(format!("stored member ActorId is invalid: {error}"))
         })?;
-        if member.route_service_id() == peer {
+        if member.fixed_route_service_id() == Some(peer) {
             hosted.push((member, row));
         }
     }
@@ -1180,7 +1216,7 @@ async fn peer_circle_intervals(
     for row in rows {
         let member: ActorId =
             serde_json::from_str(&row.member_id).map_err(PersistenceError::database)?;
-        if member.route_service_id() != peer
+        if member.fixed_route_service_id() != Some(peer)
             || !crate::authority_commit::accepted_current_member_joined_in_connection(
                 conn, realm_id, &member,
             )
@@ -1241,6 +1277,7 @@ async fn peer_stream_intervals(
     peer: &DidCoreId,
 ) -> PersistenceResult<(Vec<PeerInterval>, Vec<ActorId>)> {
     match stream {
+        CommitStreamRef::RealmControl { .. } => Ok((Vec::new(), Vec::new())),
         CommitStreamRef::Realm { realm_id } => peer_intervals(conn, realm_id, peer).await,
         CommitStreamRef::Circle {
             realm_id,
@@ -1334,7 +1371,7 @@ async fn peer_holds_full_event(
     {
         let member: ActorId =
             serde_json::from_value(target.clone()).map_err(PersistenceError::database)?;
-        if member.route_service_id() == peer {
+        if member.fixed_route_service_id() == Some(peer) {
             return Ok(true);
         }
     }
@@ -1517,6 +1554,9 @@ pub(crate) async fn committed_event_for_member_in_connection(
     } else {
         return Ok(Read::NotVisible);
     };
+    if matches!(commit.stream_ref, CommitStreamRef::RealmControl { .. }) {
+        return Ok(Read::NotVisible);
+    }
     let realm_id = commit.realm_id.clone();
     let anchor = sql_query(
         "SELECT anchor_commit_id FROM replica_stream_anchors WHERE realm_id=$1 AND stream_key=$2",
@@ -1621,11 +1661,7 @@ pub(crate) async fn committed_event_for_member_in_connection(
     // ordinary membership. Its read path applies principal/controller gates.
     if matches!(
         realm_purpose(conn, &realm_id).await?,
-        Some(
-            RealmPurpose::PrincipalControl
-                | RealmPurpose::AgentControl
-                | RealmPurpose::AppletManagedControl
-        )
+        Some(RealmPurpose::PrincipalControl | RealmPurpose::AgentControl)
     ) {
         return Ok(Read::OutsideOrdinaryRealmStream);
     }

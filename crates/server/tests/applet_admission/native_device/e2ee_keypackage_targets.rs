@@ -175,7 +175,7 @@ async fn published(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(record.owner_account_id, authority.account_id);
+    assert_eq!(record.owner_actor_id, authority.account_id);
     assert_eq!(record.effective_scope.as_ref(), Some(scope));
     assert_eq!(
         record.device_authorize_event_id.as_deref(),

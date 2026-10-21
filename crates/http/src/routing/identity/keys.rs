@@ -607,7 +607,8 @@ async fn keys_query(
                     uuid::Uuid::now_v7()
                 ))
                 .map_err(|error| AppError::internal(error.to_string()))?,
-                requester_account_id: requester_account.clone(),
+                requester_account_id: Some(requester_account.clone()),
+                requester_actor_id: None,
                 purpose: arkret_models_crypto::PeerKeysQueryPurpose::E2eeMessageEncryption,
                 relationship_basis,
                 device_keys: selectors.clone(),
@@ -731,6 +732,9 @@ async fn proxy_peer_keys_query(
     request: &arkret_models_crypto::PeerKeysQueryRequestBody,
     destination: &arkret_wire::DidCoreId,
 ) -> Result<arkret_models_crypto::PeerKeysQueryOutcome, AppError> {
+    request
+        .validate()
+        .map_err(|error| AppError::param_invalid(error.to_string()))?;
     let route = crate::routing::federation::resolved_peer_target(
         state,
         destination.as_str(),
@@ -809,6 +813,67 @@ async fn proxy_peer_keys_query(
     Ok(outcome)
 }
 
+pub(crate) async fn realm_mls_device_projection(
+    state: &AppState,
+    requester: &arkret_wire::ActorId,
+    account: &arkret_wire::AccountId,
+    device: &arkret_wire::DeviceId,
+) -> Result<
+    (
+        QueryDeviceRecord,
+        coland_storage::MlsClaimRemoteDeviceEvidence,
+    ),
+    AppError,
+> {
+    let realm = requester
+        .as_realm_actor_id()
+        .ok_or_else(|| AppError::param_invalid("MLS requester must be a Realm actor"))?;
+    let request = arkret_models_crypto::PeerKeysQueryRequestBody {
+        request_id: arkret_wire::RequestId::new_v7_at(chrono::Utc::now().timestamp_millis() as u64),
+        requester_account_id: None,
+        requester_actor_id: Some(requester.clone()),
+        purpose: arkret_models_crypto::PeerKeysQueryPurpose::MlsGroupAdmission,
+        relationship_basis: arkret_models_crypto::PeerKeysRelationshipBasis::RealmMembership {
+            realm_id: realm.realm_id.clone(),
+        },
+        device_keys: vec![arkret_models_crypto::QueryAccountDeviceSelector {
+            account_id: account.clone(),
+            device_ids: vec![device.clone()],
+        }],
+    };
+    let outcome = proxy_peer_keys_query(state, &request, &account.station_id).await?;
+    let unavailable =
+        || crate::app_error!(TemporarilyUnavailable, "MLS device authority unavailable");
+    let generation = outcome
+        .device_generations
+        .iter()
+        .find(|entry| entry.account_id == *account)
+        .ok_or_else(unavailable)?;
+    let record = outcome
+        .device_keys
+        .iter()
+        .find(|entry| entry.account_id == *account)
+        .and_then(|entry| entry.device_keys.get(device))
+        .ok_or_else(unavailable)?;
+    let projection = verified_remote_device_projection(state, account, device, record, generation)
+        .await
+        .ok_or_else(unavailable)?;
+    let issuer_resolution =
+        super::agents::evidence::fetch_service_resolution(state, &account.station_id, None)
+            .await
+            .map_err(|_| unavailable())?;
+    Ok((
+        projection,
+        coland_storage::MlsClaimRemoteDeviceEvidence {
+            account_id: account.clone(),
+            device_id: device.clone(),
+            generation: generation.clone(),
+            record: record.clone(),
+            issuer_resolution,
+        },
+    ))
+}
+
 /// Reuse the exact-device directory gate for the query-local signer surface.
 pub(crate) async fn current_device_projection_for_signer(
     state: &AppState,
@@ -846,7 +911,8 @@ pub(crate) async fn current_device_projection_for_signer(
     }
     let request = arkret_models_crypto::PeerKeysQueryRequestBody {
         request_id: arkret_wire::RequestId::new_v7_at(chrono::Utc::now().timestamp_millis() as u64),
-        requester_account_id: recipient.clone(),
+        requester_account_id: Some(recipient.clone()),
+        requester_actor_id: None,
         purpose: arkret_models_crypto::PeerKeysQueryPurpose::E2eeMessageEncryption,
         relationship_basis: arkret_models_crypto::PeerKeysRelationshipBasis::RealmMembership {
             realm_id: realm.clone(),
@@ -898,14 +964,54 @@ async fn peer_keys_query(
     let destination = body
         .destination_station_id()
         .map_err(|error| AppError::param_invalid(error.to_string()))?;
-    if body.requester_account_id.station_id.as_str() != source_service_id
-        || destination != &state.service_core_id()
-    {
+    let requester = body
+        .requester()
+        .map_err(|error| AppError::param_invalid(error.to_string()))?;
+    let mut rate_keys = vec![
+        arkret_canonical::canonical_sha256(&("requester", &source_service_id, &requester))
+            .map_err(|error| AppError::internal(error.to_string()))?,
+    ];
+    for selector in &body.device_keys {
+        rate_keys.push(
+            arkret_canonical::canonical_sha256(&(
+                "target",
+                &source_service_id,
+                &selector.account_id,
+            ))
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        );
+    }
+    if state.peer_device_lookup_rate_limited(&rate_keys) {
+        return Err(crate::app_error!(
+            RateLimited,
+            "peer device lookup rate limited"
+        ));
+    }
+    if destination != &state.service_core_id() {
         return Err(AppError::unauthenticated(
             "peer keys query service binding is invalid",
         ));
     }
-    let requester = arkret_wire::ActorId::account(body.requester_account_id.clone());
+    match &requester {
+        arkret_wire::ActorId::Account { account_id }
+            if account_id.station_id.as_str() == source_service_id => {}
+        arkret_wire::ActorId::Realm { realm_actor_id } => {
+            let source = arkret_wire::DidCoreId::new(source_service_id.clone())
+                .map_err(|_| AppError::unauthenticated("invalid peer keys source"))?;
+            crate::routing::realm_join::resolve_verified_authority_of_service(
+                state,
+                &realm_actor_id.realm_id,
+                &source,
+            )
+            .await
+            .map_err(|_| AppError::unauthenticated("peer keys source is not current authority"))?;
+        }
+        _ => {
+            return Err(AppError::unauthenticated(
+                "peer keys query service binding is invalid",
+            ));
+        }
+    }
     let mut device_keys = Vec::new();
     let mut device_generations = Vec::new();
     for selector in &body.device_keys {
@@ -975,6 +1081,7 @@ async fn peer_keys_query(
     let outcome = arkret_models_crypto::PeerKeysQueryOutcome {
         request_id: body.request_id.clone(),
         requester_account_id: body.requester_account_id.clone(),
+        requester_actor_id: body.requester_actor_id.clone(),
         device_keys,
         device_generations,
         failures: Vec::new(),

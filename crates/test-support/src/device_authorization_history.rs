@@ -95,6 +95,8 @@ pub fn possession_with(
             == DeviceAuthorizationBindingKind::AcceptedDevice)
             .then(|| hash("pairing")),
         applet_id: spec.applet_id,
+        expected_control_revision: None,
+        expected_device_revision: None,
     };
     let bytes = payload.device_possession_signature_input(account).unwrap();
     payload.device_signature = SignatureMaterial::NonEmptyString(

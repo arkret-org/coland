@@ -277,7 +277,6 @@ pub async fn test_fresh_producer_forward_request(
             event_submission: arkret_wire::EventAdmissionSubmission::new(event.clone()),
             mls_genesis_material: None,
             producer_device_evidence: None,
-            producer_managed_provenance: None,
             producer_agent_evidence: None,
         });
     crate::state::fresh_device_request(state, destination, &mut request).await?;

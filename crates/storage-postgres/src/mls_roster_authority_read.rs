@@ -74,7 +74,15 @@ pub(crate) async fn member_selector_in_connection(
     use coland_storage::MlsMemberRosterSelectorRead as Selected;
 
     use crate::mls_group_state_material_read::MemberMlsTargetSelector;
-    if request.caller_actor_id.route_service_id() != issuer {
+    if request
+        .caller_actor_id
+        .as_realm_actor_id()
+        .is_some_and(|actor| actor.realm_id != request.realm_id)
+        || request
+            .caller_actor_id
+            .fixed_route_service_id()
+            .is_some_and(|station| station != issuer)
+    {
         return Ok(Selected::NotFound);
     }
     let selector = MemberMlsTargetSelector {
@@ -196,6 +204,8 @@ struct InstalledRow {
     request_json: serde_json::Value,
     #[diesel(sql_type = Binary)]
     attestor_resolution_canonical_json: Vec<u8>,
+    #[diesel(sql_type = Binary)]
+    claim_issuer_resolution_canonical_json: Vec<u8>,
 }
 
 #[derive(QueryableByName)]
@@ -433,7 +443,7 @@ async fn read_in_connection(
             return Ok(unavailable());
         }
         let Some(installed) = sql_query(
-            "SELECT attestation_digest,request_json,attestor_resolution_canonical_json FROM mls_add_authority_attestations \
+            "SELECT attestation_digest,request_json,attestor_resolution_canonical_json,claim_issuer_resolution_canonical_json FROM mls_add_authority_attestations \
              WHERE scope_key=$1 AND commit_event_ref=$2 AND consumed_proposal_ordinal=$3",
         )
         .bind::<Text, _>(&key)
@@ -468,6 +478,26 @@ async fn read_in_connection(
             != Some(installed.attestor_resolution_canonical_json.as_slice())
             || attestor_resolution.service_id != attestation.attestor_station_id
             || attestor_resolution.service_kind != "station"
+        {
+            return Ok(unavailable());
+        }
+        let Ok(claim_issuer_resolution) =
+            serde_json::from_slice::<arkret_models_identity::AuthenticatedServiceResolution>(
+                &installed.claim_issuer_resolution_canonical_json,
+            )
+        else {
+            return Ok(unavailable());
+        };
+        if arkret_canonical::canonical_json_bytes(&claim_issuer_resolution)
+            .ok()
+            .as_deref()
+            != Some(installed.claim_issuer_resolution_canonical_json.as_slice())
+            || arkret::verify_mls_attest_add_request(
+                &proof,
+                &claim_issuer_resolution,
+                &attestor_resolution,
+            )
+            .is_err()
         {
             return Ok(unavailable());
         }
@@ -532,7 +562,13 @@ async fn read_in_connection(
             || delivery.recipient_endpoint != attestation.endpoint
             || delivery.keypackage_claim_ref != attestation.claim_id
             || delivery.commit_event_ref != commit_ref
-            || delivery.recipient_actor_id.route_service_id() != &attestation.attestor_station_id
+            || !crate::realm_actor_mls_route::accepted_add_matches(
+                conn,
+                &delivery.recipient_actor_id,
+                &attestation.attestor_station_id,
+                &commit_ref,
+            )
+            .await?
         {
             return Ok(unavailable());
         }
@@ -547,6 +583,10 @@ async fn read_in_connection(
                 .map_err(PersistenceError::database)?,
             sender_actor_id: sender_actor,
             proposal_wire_b64u,
+            claim_issuer_resolution: attestation
+                .actor_id
+                .as_realm_actor_id()
+                .map(|_| claim_issuer_resolution),
             attestation,
             attestor_resolution,
         });

@@ -195,6 +195,12 @@ pub(crate) async fn read_in_connection(
     else {
         return Ok(Read::NotFound);
     };
+    if caller
+        .as_realm_actor_id()
+        .is_some_and(|actor| &actor.realm_id != realm_id || tenure.service_id != issuer.as_str())
+    {
+        return Ok(Read::NotFound);
+    }
     if tenure.service_id != issuer.as_str() {
         // The Account Station may hold a verified anchored replica. A
         // governing peer read must run on the exact current authority.

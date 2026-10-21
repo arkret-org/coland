@@ -733,7 +733,7 @@ async fn verify_mimi_consent_requester_proof(
 ) -> Result<(), AppError> {
     // This operation has no authorized remote PCR disclosure carrier. Check
     // the exact Station before any local principal or private PCR lookup.
-    if actor.route_service_id() != &state.service_core_id() {
+    if crate::routing::actor_delivery_station(state, &actor).await? != state.service_core_id() {
         return Err(mimi_consent_proof_invalid());
     }
     let agent = crate::routing::identity::agent_pcr::agent_record_for_actor(state, actor)

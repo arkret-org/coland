@@ -115,7 +115,10 @@ async fn validate_sidecar_mention_subjects(
         return Ok(());
     };
     let subjects = match operation.payload.get("content") {
-        Some(content) => mention_subject_account_ids(content)?,
+        Some(content) => {
+            arkret_models_collaboration::events_payloads::collect_mention_subject_actor_ids(content)
+                .map_err(|error| error.message())?
+        }
         None => Vec::new(),
     };
     if subjects.is_empty() {
@@ -140,7 +143,10 @@ async fn validate_sidecar_mention_subjects(
         .iter()
         .filter_map(|agent_id| arkret_wire::DidCoreId::new(agent_id.clone()).ok())
         .map(|principal_id| {
-            arkret_wire::AccountId::new(principal_id, controller_account.station_id.clone())
+            arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+                principal_id,
+                controller_account.station_id.clone(),
+            ))
         })
         .collect::<std::collections::BTreeSet<_>>();
     if subjects.iter().any(|subject| !eligible.contains(subject)) {

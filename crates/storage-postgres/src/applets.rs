@@ -84,35 +84,86 @@ pub struct PgAppletStore {
 }
 #[async_trait]
 impl AppletStore for PgAppletStore {
-    async fn managed_pcr_creation_context(
+    async fn configuration_review_account(
         &self,
-        genesis: &arkret_wire::EventId,
-    ) -> PersistenceResult<Option<arkret_models_integration::AppletManagedActorAuthoringContext>>
+        request: &arkret_models_integration::ManagementReviewRequestBody,
+    ) -> PersistenceResult<Option<arkret_wire::AccountId>> {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        crate::applet_configuration::review_account(&mut conn, request).await
+    }
+
+    async fn configuration_candidate_account(
+        &self,
+        event: &arkret_wire::Event,
+    ) -> PersistenceResult<Option<arkret_wire::AccountId>> {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        crate::applet_configuration::candidate_account(&mut conn, event).await
+    }
+
+    async fn configuration_intent(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        applet: &arkret_wire::AppletId,
+        actor: &arkret_wire::ActorId,
+        intent: &arkret_models_integration::AppletConfigurationIntent,
+        current: &coland_storage::ManagementReviewCurrent,
+    ) -> PersistenceResult<Option<arkret_models_integration::AppletConfigurationExecutionIntent>>
     {
-        let mut conn = pg_conn(&self.pool).await?;
-        let rows = sql_query(
-            "SELECT context AS record FROM applet_authoring_completions \
-             WHERE context#>>'{committed_request,managed_actor_bundle,pcr_genesis_event,event_id}'=$1 \
-             LIMIT 2",
-        )
-        .bind::<Text, _>(genesis.as_str())
-        .load::<AppletRegistrationRow>(&mut *conn)
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            Ok(crate::applet_configuration::original_intent(
+                conn, governor, applet, actor, intent, current,
+            )
+            .await?)
+        })
         .await
-        .map_err(PersistenceError::database)?;
-        if rows.len() > 1 {
-            return Err(PersistenceError::SchemaViolation(
-                "managed PCR creation evidence is ambiguous".into(),
-            ));
-        }
-        rows.into_iter()
-            .next()
-            .map(|row| {
-                let context: arkret_models_integration::AppletManagedActorAuthoringContext =
-                    serde_json::from_value(row.record).map_err(PersistenceError::database)?;
-                context.validate().map_err(PersistenceError::database)?;
-                Ok(context)
-            })
-            .transpose()
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn configuration(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
+        command: arkret_models_integration::AppletConfigurationCommand,
+        current: &coland_storage::ManagementReviewCurrent,
+        ingress: &coland_storage::AppletConfigurationIngress,
+    ) -> PersistenceResult<arkret_models_integration::AppletConfigurationOutcome> {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            Ok(crate::applet_configuration::command(
+                conn, governor, intent, command, current, ingress,
+            )
+            .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn retain_configuration_source(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+        intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
+        source: &arkret_models_integration::AppletConfigurationExecutionOutcome,
+        producer: &coland_storage::AppletEventProducerGuard,
+        current: &coland_storage::ManagementReviewCurrent,
+    ) -> PersistenceResult<arkret_models_integration::AppletConfigurationOutcome> {
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            Ok(crate::applet_configuration::source(
+                conn, governor, intent, source, producer, current,
+            )
+            .await?)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
     }
     async fn authority_material(
         &self,
@@ -288,23 +339,6 @@ impl AppletStore for PgAppletStore {
         .await
         .map_err(|error| {
             PersistenceError::Internal(format!("Applet admission task failed: {error}"))
-        })?
-    }
-
-    async fn creation_approval_accounts(
-        &self,
-        candidate: &coland_storage::AppletAuthoringCandidate,
-    ) -> PersistenceResult<Vec<arkret_wire::AccountId>> {
-        let pool = self.pool.clone();
-        let candidate = Box::new(candidate.clone());
-        tokio::spawn(async move {
-            crate::applet_action_approval::prepare_accounts(&pool, &candidate).await
-        })
-        .await
-        .map_err(|error| {
-            PersistenceError::Internal(format!(
-                "creation approval preparation task failed: {error}"
-            ))
         })?
     }
 

@@ -1,8 +1,6 @@
 //! Shared forward-only source from independently verified native Device roots.
 
-use arkret_models_collaboration::events_payloads::{
-    DeviceAuthorizationBindingKind, DeviceAuthorizePayload,
-};
+use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
 use arkret_models_crypto::{
     AccountDeviceEventAuthorization, DeviceAuthorizationWindow, DeviceStatus,
     ForwardDeviceProjectionAttestationCore,
@@ -26,7 +24,6 @@ pub(super) struct PreparedForwardDeviceSource {
     pub fact: arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
     pub attested_at: chrono::DateTime<chrono::Utc>,
     pub expires_at: chrono::DateTime<chrono::Utc>,
-    pub managed: Option<coland_storage::AppletManagedDeviceAuthority>,
 }
 
 pub(crate) async fn current_cut(
@@ -85,45 +82,6 @@ pub(super) async fn prepare_context_in_connection(
     {
         return Err(denied("forward source differs from its exact native revision").into());
     }
-    let managed = if payload.authorization_binding_kind
-        == DeviceAuthorizationBindingKind::AppletManagedDelegation
-    {
-        let authority = crate::pcr_applet_device_authority::for_event_in_connection(
-            conn,
-            event,
-            chrono::Utc::now(),
-        )
-        .await?
-        .ok_or_else(|| denied("forward managed provenance is unavailable"))?;
-        if event.kind == arkret_wire::EventKind::MessageCreate {
-            let message: arkret_models_collaboration::events_payloads::message::MessageCreatePayload =
-                serde_json::from_value(serde_json::to_value(&event.payload)
-                    .map_err(PersistenceError::database)?)
-                    .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
-            let actual = crate::strand_current_results::locked_active_strand_scope(
-                conn,
-                &event.realm_id,
-                &message.strand_id,
-            )
-            .await?;
-            if actual != event.scope_ref {
-                return Err(
-                    denied("forward Message differs from its accepted Strand scope").into(),
-                );
-            }
-        }
-        let actions = crate::applet_device_admission::device_actions(event)?;
-        if event.applet_id.as_ref() != Some(&authority.applet_id)
-            || !authority.scopes.permits(&event.scope_ref, &actions)
-        {
-            return Err(
-                denied("forward Event exceeds its original managed scope/action pair").into(),
-            );
-        }
-        Some(authority)
-    } else {
-        None
-    };
     let expires_at = (attested_at + chrono::Duration::minutes(5)).min(
         payload
             .expires_at
@@ -141,7 +99,6 @@ pub(super) async fn prepare_context_in_connection(
         fact,
         attested_at,
         expires_at,
-        managed,
     }))
 }
 

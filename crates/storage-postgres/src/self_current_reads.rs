@@ -383,6 +383,21 @@ async fn list_streams_in_connection(
     Ok(AccountRealmStreamList::Listed(visible))
 }
 
+pub(crate) async fn exact_current_result_for_actor(
+    pool: &PgPool,
+    request: &ExactCurrentResultsReadRequestBody,
+    actor: &ActorId,
+    issuer: &DidCoreId,
+) -> PersistenceResult<SelfExactCurrentRead<ExactCurrentResultsReadOutcome>> {
+    let mut conn = pg_conn(pool).await?;
+    conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+        begin_read_cut(conn).await?;
+        exact_current_result_for_actor_in_connection(conn, request, actor, issuer).await
+    })
+    .await
+    .map_err(PgTransactionError::into_persistence)
+}
+
 pub(crate) async fn exact_current_result_for_account(
     pool: &PgPool,
     request: &ExactCurrentResultsReadRequestBody,
@@ -404,11 +419,29 @@ pub(crate) async fn exact_current_result_in_connection(
     account: &AccountId,
     issuer: &DidCoreId,
 ) -> Result<SelfExactCurrentRead<ExactCurrentResultsReadOutcome>, PgTransactionError> {
+    exact_current_result_for_actor_in_connection(
+        conn,
+        request,
+        &ActorId::account(account.clone()),
+        issuer,
+    )
+    .await
+}
+
+pub(crate) async fn exact_current_result_for_actor_in_connection(
+    conn: &mut AsyncPgConnection,
+    request: &ExactCurrentResultsReadRequestBody,
+    actor: &ActorId,
+    issuer: &DidCoreId,
+) -> Result<SelfExactCurrentRead<ExactCurrentResultsReadOutcome>, PgTransactionError> {
     request
         .validate()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    let caller = ActorId::account(account.clone());
+    let caller = actor.clone();
     if let ExactCurrentResultSelector::CapabilityGrant(selector) = &request.selector {
+        let Some(account) = actor.as_account_id() else {
+            return Ok(SelfExactCurrentRead::NotFound);
+        };
         return owned_agent_grant_read(conn, request, selector, account, issuer).await;
     }
     let (generation, head) = match member_cut(conn, &request.realm_id, &caller, issuer).await? {

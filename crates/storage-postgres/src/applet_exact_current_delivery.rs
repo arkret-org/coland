@@ -55,10 +55,10 @@ pub(super) async fn prepare(
         return Err(refused("native exact current has another Realm"));
     }
     let fresh = crate::boxed_future(|| {
-        crate::self_current_reads::exact_current_result_in_connection(
+        crate::self_current_reads::exact_current_result_for_actor_in_connection(
             conn,
             request,
-            &endpoint.authority.account_id,
+            &endpoint.authority.actor_id,
             station,
         )
     })

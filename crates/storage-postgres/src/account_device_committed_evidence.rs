@@ -30,8 +30,6 @@ struct Archived {
     authorization_commit_id: String,
     #[diesel(sql_type=Jsonb)]
     evidence_json: Value,
-    #[diesel(sql_type=Jsonb)]
-    producer_source_fact: Value,
 }
 
 pub(crate) async fn prepare_core(
@@ -189,14 +187,27 @@ pub(crate) async fn read(
     event: &Event,
     commit: &RealmCommit,
 ) -> PersistenceResult<Option<AccountDeviceSignerEvidence>> {
-    let row = sql_query("SELECT e.evidence_ref,e.authorization_commit_id,e.evidence_json,k.producer_source_fact FROM account_device_committed_evidence a JOIN account_device_signer_evidence e ON e.evidence_ref=a.evidence_ref JOIN agent_producer_signer_keys k ON k.commit_id=a.commit_id WHERE a.commit_id=$1")
+    let row = sql_query("SELECT e.evidence_ref,e.authorization_commit_id,e.evidence_json FROM account_device_committed_evidence a JOIN account_device_signer_evidence e ON e.evidence_ref=a.evidence_ref WHERE a.commit_id=$1")
         .bind::<Text,_>(commit.commit_id.as_str()).get_result::<Archived>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let row = if row.is_some() {
+        row
+    } else {
+        sql_query("SELECT evidence_ref,authorization_commit_id,evidence_json FROM realm_account_device_evidence WHERE commit_id=$1")
+            .bind::<Text,_>(commit.commit_id.as_str()).get_result::<Archived>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+    };
     match row {
         Some(row) => {
             let evidence: AccountDeviceSignerEvidence =
                 serde_json::from_value(row.evidence_json).map_err(rejected)?;
-            let fact: AccountDeviceHistoricalSignerFact =
-                serde_json::from_value(row.producer_source_fact).map_err(rejected)?;
+            let source =
+                crate::agent_producer_signer_keys::producer_source_for_commit_in_connection(
+                    conn, event, commit,
+                )
+                .await?;
+            let fact = source
+                .as_ref()
+                .and_then(|source| source.as_account_device())
+                .ok_or_else(|| rejected("original Account Device signer fact absent"))?;
             if evidence.signer_evidence_ref().map_err(rejected)?.as_ref() != row.evidence_ref
                 || fact.key.authorization_ref.commit_id.as_str() != row.authorization_commit_id
             {
@@ -204,7 +215,7 @@ pub(crate) async fn read(
                     "immutable root or original authorization address differs",
                 ));
             }
-            validate(event, commit, Some(&fact), Some(&evidence))?;
+            validate(event, commit, Some(fact), Some(&evidence))?;
             Ok(Some(evidence))
         }
         None => {

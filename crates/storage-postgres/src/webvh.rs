@@ -108,19 +108,45 @@ impl WebvhStore for PgWebvhStore {
     async fn get_embedded_webvh_document_by_local_id(
         &self,
         local_id: &str,
+        expected_log_url: &str,
     ) -> PersistenceResult<Option<WebvhDocumentRecord>> {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
+        #[derive(QueryableByName)]
+        struct Candidate {
+            #[diesel(sql_type=Text)]
+            did: String,
+        }
+        let expected = url::Url::parse(expected_log_url).map_err(PersistenceError::database)?;
+        // The resolution cache also contains foreign DIDs with this local name.
+        // Select by the native hosting URL, never by the latest cache write.
+        // Load only identifiers until the unique hosted identity is established.
+        let candidates = sql_query("SELECT id AS did FROM webvh_documents WHERE right(id, char_length($1) + 7) = ':webvh:' || $1")
+            .bind::<Text,_>(local_id).load::<Candidate>(&mut *conn).await.map_err(PersistenceError::database)?;
+        let mut hosted = None;
+        for candidate in candidates {
+            let matches = arkret_wire::Did::new(candidate.did.clone())
+                .ok()
+                .and_then(|did| arkret_identity::DidWebvhResolver::log_url(&did).ok())
+                .and_then(|url| url::Url::parse(&url).ok())
+                .is_some_and(|url| url == expected);
+            if matches && hosted.replace(candidate.did).is_some() {
+                return Err(PersistenceError::Conflict(
+                    "ambiguous local DID hosting".into(),
+                ));
+            }
+        }
+        let Some(hosted) = hosted else {
+            return Ok(None);
+        };
         sql_query(
             "SELECT id AS did, did_document, key_log_head, seq, method_evidence, \
              fetched_at, expires_at, updated_at \
              FROM webvh_documents \
-             WHERE right(id, char_length($1) + 7) = ':webvh:' || $1 \
-             ORDER BY updated_at DESC \
-             LIMIT 1",
+             WHERE id=$1",
         )
-        .bind::<Text, _>(local_id)
+        .bind::<Text, _>(hosted)
         .get_result::<WebvhDocumentRow>(&mut *conn)
         .await
         .optional()

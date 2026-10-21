@@ -228,10 +228,10 @@ pub struct ManagementReviewCurrent {
     pub applet_event: Option<Box<AppletEventReviewCurrent>>,
 }
 
-/// Receiver-derived resolver material and PCR lock plan, never permission.
+/// Receiver-derived Service resolver material and Realm lock plan, never permission.
 #[derive(Clone)]
 pub struct AppletEventReviewCurrent {
-    pub pcr_realm_id: arkret_wire::RealmId,
+    pub realm_id: arkret_wire::RealmId,
     pub service_did_document: arkret_identity::DidDocument,
 }
 

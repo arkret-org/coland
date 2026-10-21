@@ -467,6 +467,15 @@ async fn applet_registration_requires_realm_admin() {
     let outsider = "ak:did_core:web:mallory.example";
     let now = chrono::Utc::now();
     state
+        .test_persistence()
+        .capability_grant_current_results()
+        .seed_test_realm_root(
+            &arkret_identifiers::RealmId::new(realm_id).unwrap(),
+            &projected_fixture_actor("ak:did_core:web:root-controller.example"),
+        )
+        .await
+        .unwrap();
+    state
         .realms()
         .store_realm_metadata(
             realm_id,

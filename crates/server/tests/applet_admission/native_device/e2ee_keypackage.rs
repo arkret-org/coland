@@ -119,7 +119,7 @@ async fn bot_and_ghost_upload_scope_bound_keypackages_without_session() {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(stored.owner_account_id, authority.account_id);
+            assert_eq!(stored.owner_actor_id, authority.account_id);
             assert_eq!(stored.effective_scope.as_ref(), Some(&scope));
             assert_eq!(stored.actor_id, authority.account_id.principal_id.as_str());
             assert_eq!(
@@ -480,7 +480,7 @@ async fn circle_publication(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.owner_account_id, authority.account_id);
+    assert_eq!(stored.owner_actor_id, authority.account_id);
     assert_eq!(stored.effective_scope.as_ref(), Some(&scope));
     assert_eq!(
         stored.device_authorize_event_id.as_deref(),

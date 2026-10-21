@@ -455,6 +455,28 @@ pub(crate) async fn signed_peer_request(
         &peer_target.trust_domain,
         &target,
         body,
+        None,
+        max_response_bytes,
+    )
+    .await
+}
+
+pub(crate) async fn signed_peer_command(
+    state: &AppState,
+    peer_id: &str,
+    path: &str,
+    body: &[u8],
+    idempotency_key: &str,
+    max_response_bytes: usize,
+) -> Result<PeerSubmitResponse, String> {
+    let peer_target = super::resolved_peer_target(state, peer_id, "station", false).await?;
+    signed_peer_request_to_target(
+        state,
+        peer_id,
+        &peer_target.trust_domain,
+        &format!("{}{path}", peer_target.base_url),
+        body,
+        Some(idempotency_key),
         max_response_bytes,
     )
     .await
@@ -497,6 +519,7 @@ pub(crate) async fn signed_deployment_account_status_resolve(
         authority_trust_domain.as_str(),
         &target,
         body,
+        None,
         2 * 1024 * 1024,
     )
     .await
@@ -508,6 +531,7 @@ async fn signed_peer_request_to_target(
     trust_domain: &str,
     target: &str,
     body: &[u8],
+    idempotency_key: Option<&str>,
     max_response_bytes: usize,
 ) -> Result<PeerSubmitResponse, String> {
     let (parsed_url, client) = crate::security::validate_http_url_for_egress_with_pinned_client(
@@ -534,6 +558,12 @@ async fn signed_peer_request_to_target(
         state.config().trust_domain.as_str(),
     );
     insert_header_if_valid(&mut headers, "destination-trust-domain", trust_domain);
+    if let Some(key) = idempotency_key {
+        headers.insert(
+            "idempotency-key",
+            reqwest::header::HeaderValue::from_str(key).map_err(|error| error.to_string())?,
+        );
+    }
     let headers = rfc9421_sign(state, headers, "POST", target);
     let mut response = client
         .post(parsed_url)

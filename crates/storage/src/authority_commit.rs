@@ -160,7 +160,6 @@ pub struct ForwardAttemptRecord {
 #[derive(Clone, Copy)]
 pub enum ManagedMlsRefusalSource<'a> {
     Local(&'a crate::AppletManagedDeviceScopeGuard),
-    Forwarded(&'a crate::ForwardedManagedActorSource),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -367,14 +366,48 @@ pub struct AuthorityCommitTransaction {
     pub recipient_queue_capacity: usize,
 }
 
-/// Actual RFC 9421 carrier key authenticated by the HTTP boundary. It is
-/// transport identity material, never Principal or Device signing authority.
+/// Actual current subject-control method authenticated at the HTTP boundary.
+/// Event signatures and command permissions remain independently verified.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppletControlCarrier {
-    pub service_id: arkret_wire::DidCoreId,
+    pub actor_id: arkret_wire::ActorId,
+    pub control_ref: arkret_wire::CommittedEventRef,
     pub verification_method: arkret_wire::DidUrl,
     pub public_key: [u8; 32],
+    pub governance_service_id: arkret_wire::DidCoreId,
+    pub governance_generation: u64,
 }
+
+/// Authenticated transport material; the private reader repeats current checks.
+#[derive(Clone)]
+pub enum RealmActorMaterialCaller {
+    Account {
+        account_id: arkret_wire::AccountId,
+        expires_at: DateTime<Utc>,
+    },
+    Control {
+        authority: AppletControlCarrier,
+        expires_at: DateTime<Utc>,
+    },
+    Service {
+        service_id: arkret_wire::DidCoreId,
+        verification_method: arkret_wire::DidUrl,
+        public_key: [u8; 32],
+        expires_at: DateTime<Utc>,
+    },
+    Device {
+        guard: Box<crate::AppletManagedDeviceScopeGuard>,
+        expires_at: DateTime<Utc>,
+    },
+}
+
+pub type RealmActorMaterialSigner<'a> = &'a (
+        dyn Fn(
+    &arkret_models_integration::RealmActorMaterialUnsigned,
+) -> PersistenceResult<arkret_models_integration::RealmActorMaterialOutcome>
+            + Send
+            + Sync
+    );
 
 /// Current producer authorization pinned by the self submit preflight and
 /// rechecked inside the same transaction that commits the Event. This is an
@@ -973,6 +1006,7 @@ pub struct VerifiedMlsRecipientRosterWitness {
     /// Present for a same-Station recipient. Remote recipients resolve and
     /// freeze this closure when their signed proof reaches governance.
     pub local_attestor_resolution: Option<arkret_models_identity::AuthenticatedServiceResolution>,
+    pub claim_issuer_resolution: Option<arkret_models_identity::AuthenticatedServiceResolution>,
 }
 
 /// Peer-authenticated Add authority proof after the serving layer has verified
@@ -986,6 +1020,7 @@ pub struct VerifiedMlsAddAuthorityAttestation {
     /// Exact method-native Station resolution used to verify both historical
     /// signatures at ingress. Governance freezes this with the Add proof.
     pub attestor_resolution: arkret_models_identity::AuthenticatedServiceResolution,
+    pub claim_issuer_resolution: arkret_models_identity::AuthenticatedServiceResolution,
 }
 
 /// Historical facts selected and cross-checked at one governing read cut.
@@ -1508,6 +1543,8 @@ impl AccountStatusCurrentObservation {
 /// This is not a wire object or a reusable authorization assertion.
 #[derive(Clone, Debug, Default)]
 pub struct AccountContentDeliveryInput {
+    /// New Blob bytes at an exact Realm upload boundary; never a read grant.
+    pub native_blob_upload: Option<arkret_wire::RealmId>,
     pub realms: Vec<arkret_wire::RealmId>,
     pub committed_events: Vec<arkret_wire::CommittedEventView>,
     /// Exact immutable claim response and the real native endpoints whose
@@ -1574,6 +1611,12 @@ pub struct AccountContentDeliveryInput {
         CurrentRealmAuthority,
     )>,
     pub watch_delivery_device: Option<crate::DeviceRevocationGateSelector>,
+    /// Authenticated exact private material, verified before entering delivery.
+    pub realm_actor_material: Option<Box<(
+        arkret_models_integration::RealmActorMaterialRequest,
+        arkret_models_integration::RealmActorMaterialOutcome,
+        CurrentRealmAuthority,
+    )>>,
     /// Local bearer sessions retain their exact stored Account through handoff.
     /// Request-scoped signed grants are freshly introspected at the HTTP cut.
     pub watch_local_session: Option<(String, crate::AccountPk)>,
@@ -1658,6 +1701,19 @@ impl AccountContentDeliveryInput {
 /// serialized, signed, cached or accepted as a reusable authorization token.
 #[async_trait]
 pub trait AccountContentDeliveryGuard: Send {
+    /// Publish native Blob metadata in the same transaction as its held
+    /// authorization cut. Ordinary read guards cannot perform this write.
+    async fn commit_native_blob_upload(
+        self: Box<Self>,
+        _reference: &arkret_wire::BlobRef,
+        _record: &crate::BlobRecord,
+        _max_actor_bytes: u64,
+        _max_realm_bytes: u64,
+    ) -> PersistenceResult<crate::BlobRecord> {
+        Err(crate::PersistenceError::Conflict(
+            "native Blob upload admission is unavailable".into(),
+        ))
+    }
     /// Recheck clock-dependent facts from the held cut immediately before the
     /// transport accepts bytes. Locks cannot prevent an expiry or time window.
     fn permits_handoff(&self) -> bool {
@@ -1741,6 +1797,17 @@ pub trait AuthorityCommitStore: Send + Sync {
         ))
     }
 
+    async fn acquire_realm_actor_content_delivery(
+        &self,
+        _actor: &arkret_wire::ActorId,
+        _station: &arkret_wire::DidCoreId,
+        _input: &AccountContentDeliveryInput,
+    ) -> PersistenceResult<Option<Box<dyn AccountContentDeliveryGuard>>> {
+        Err(crate::PersistenceError::Conflict(
+            "revision_unavailable: current content delivery barrier is unavailable".into(),
+        ))
+    }
+
     /// Hold a governing cut for fixed native MessageCreate reply preparation.
     /// Only trusted in-process callers supply original session/custody evidence.
     /// This creates neither a signed Event nor a quota operation identity.
@@ -1816,6 +1883,18 @@ pub trait AuthorityCommitStore: Send + Sync {
         Option<arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact>,
     >;
     /// Read an immutable source-only candidate. Admission repeats this at the locked cut.
+    async fn prepare_realm_device_signer_fact(
+        &self,
+        _event: &arkret_wire::Event,
+        _at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<
+        arkret_models_collaboration::authority_commit::RealmDeviceHistoricalSignerFact,
+    > {
+        Err(PersistenceError::Internal(
+            "Realm Device signer source is unavailable".into(),
+        ))
+    }
+
     async fn prepare_account_device_signer_fact(
         &self,
         event: &Event,
@@ -1836,13 +1915,86 @@ pub trait AuthorityCommitStore: Send + Sync {
             .await?
             .map(Into::into))
     }
+    async fn realm_actor_control_replay(
+        &self,
+        event: &Event,
+        carrier: &AppletControlCarrier,
+        request_digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<Option<RealmCommit>> {
+        let _ = (event, carrier, request_digest);
+        Err(PersistenceError::Conflict(
+            "dependency_missing: private control replay unavailable".into(),
+        ))
+    }
+
+    async fn read_realm_actor_material(
+        &self,
+        request: &arkret_models_integration::RealmActorMaterialRequest,
+        caller: &RealmActorMaterialCaller,
+        governor: &arkret_wire::DidCoreId,
+        sign: RealmActorMaterialSigner<'_>,
+    ) -> PersistenceResult<arkret_models_integration::RealmActorMaterialOutcome> {
+        let _ = (request, caller, governor, sign);
+        Err(PersistenceError::Conflict(
+            "dependency_missing: private Realm material reader unavailable".into(),
+        ))
+    }
+
+    async fn applet_registration_for_realm(
+        &self,
+        realm: &arkret_wire::RealmId,
+        applet: &arkret_wire::AppletId,
+    ) -> PersistenceResult<arkret_models_integration::AppletRegistrationPayload> {
+        let _ = (realm, applet);
+        Err(PersistenceError::Conflict(
+            "dependency_missing: accepted Applet registration unavailable".into(),
+        ))
+    }
+
+    async fn realm_actor_control_carrier(
+        &self,
+        metadata: &arkret_models_integration::RealmActorControlHttpMetadata,
+        governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<AppletControlCarrier> {
+        let _ = (metadata, governor);
+        Err(crate::PersistenceError::Conflict(
+            "dependency_missing: Realm control authentication unavailable".into(),
+        ))
+    }
+
+    async fn consume_realm_actor_control_nonce(
+        &self,
+        expected: &AppletControlCarrier,
+        metadata: &arkret_models_integration::RealmActorControlHttpMetadata,
+        retain_until: DateTime<Utc>,
+    ) -> PersistenceResult<()> {
+        let _ = (expected, metadata, retain_until);
+        Err(crate::PersistenceError::Conflict(
+            "dependency_missing: Realm control nonce store unavailable".into(),
+        ))
+    }
+
+    async fn prepare_realm_actor_control_signer_fact(
+        &self,
+        event: &Event,
+        at: DateTime<Utc>,
+    ) -> PersistenceResult<
+        arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact,
+    > {
+        let _ = (event, at);
+        Err(crate::PersistenceError::Conflict(
+            "dependency_missing: Realm control signer source unavailable".into(),
+        ))
+    }
+
     async fn prepare_service_signer_fact(
         &self,
         event: &Event,
         guard: &crate::AppletEventProducerGuard,
         at: DateTime<Utc>,
-    ) -> PersistenceResult<arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact>
-    {
+    ) -> PersistenceResult<
+        arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact,
+    > {
         let _ = (event, guard, at);
         Err(crate::PersistenceError::Conflict(
             "dependency_missing: Service historical source preparation is unavailable".into(),
@@ -2546,12 +2698,121 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// One ordinary managed PCR successor, relayed by its exact Service.
     /// Rechecks accepted provenance, resolution, generation, scope installs,
     /// possession and producer proof under the PCR and installation locks.
+    async fn applet_realm_actor_creations(
+        &self,
+        realm: &arkret_wire::RealmId,
+        applet: &arkret_wire::AppletId,
+    ) -> PersistenceResult<Vec<arkret_wire::CommittedEventFullView>> {
+        let _ = (realm, applet);
+        Err(PersistenceError::Conflict(
+            "dependency_missing: Realm actor creation inventory unavailable".into(),
+        ))
+    }
+    async fn realm_actor_creation_replay(
+        &self,
+        event: &arkret_wire::Event,
+        digest: &arkret_wire::Hash,
+        governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<arkret_wire::RealmCommit>> {
+        let _ = (event, digest, governor);
+        Err(PersistenceError::Conflict(
+            "dependency_missing: creation replay unavailable".into(),
+        ))
+    }
+    async fn admit_realm_actor_creation(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+        producer: &crate::AppletEventProducerGuard,
+        prepared: Option<&crate::EventApprovalCommit>,
+        digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+        let _ = (transaction, producer, prepared, digest);
+        Err(PersistenceError::Conflict(
+            "dependency_missing: creation unit unavailable".into(),
+        ))
+    }
+
+    async fn realm_actor_recovery_replay(
+        &self,
+        event: &arkret_wire::Event,
+        digest: &arkret_wire::Hash,
+        governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<arkret_wire::RealmCommit>> {
+        let _ = (event, digest, governor);
+        Err(PersistenceError::Conflict(
+            "dependency_missing: recovery replay unavailable".into(),
+        ))
+    }
+    async fn admit_realm_actor_recovery(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+        producer: &crate::AppletEventProducerGuard,
+        publication: Option<&arkret_models_identity::ResolutionCommitment>,
+        digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+        let _ = (transaction, producer, publication, digest);
+        Err(PersistenceError::Conflict(
+            "dependency_missing: recovery unit unavailable".into(),
+        ))
+    }
+
+    async fn admit_realm_actor_owner_control(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+        carrier: &AppletControlCarrier,
+        publication: Option<&arkret_models_identity::ResolutionCommitment>,
+        manager: Option<&crate::AppletEventProducerGuard>,
+        prepared: Option<&crate::EventApprovalCommit>,
+        digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+        let _ = (transaction, carrier, publication, manager, prepared, digest);
+        Err(PersistenceError::Conflict(
+            "dependency_missing: owner control admission unavailable".into(),
+        ))
+    }
+
+    async fn sweep_realm_actor_device_revocations(
+        &self,
+        governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<usize> {
+        let _ = governor;
+        Err(PersistenceError::Conflict(
+            "dependency_missing: Realm revoke worker unavailable".into(),
+        ))
+    }
+
+    async fn finish_realm_actor_device_revocation(
+        &self,
+        actor: &arkret_wire::ActorId,
+        authority: &CurrentRealmAuthority,
+        terminal: &arkret_models_integration::RealmActorOperationOutcome,
+    ) -> PersistenceResult<()> {
+        let _ = (actor, authority, terminal);
+        Err(PersistenceError::Conflict(
+            "dependency_missing: Realm revoke terminal unavailable".into(),
+        ))
+    }
+
+    async fn admit_realm_actor_profile(
+        &self,
+        transaction: &AuthorityCommitTransaction,
+        carrier: &AppletControlCarrier,
+        prepared: Option<&crate::EventApprovalCommit>,
+        request_digest: &arkret_wire::Hash,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+        let _ = (transaction, carrier, prepared, request_digest);
+        Err(PersistenceError::Conflict(
+            "dependency_missing: Realm Profile control admission unavailable".into(),
+        ))
+    }
+
     async fn admit_applet_managed_device_authorization(
         &self,
         transaction: &AuthorityCommitTransaction,
         carrier: &AppletControlCarrier,
+        request_digest: &arkret_wire::Hash,
     ) -> PersistenceResult<AcceptedDeviceAuthorizationOutcome> {
-        let _ = (transaction, carrier);
+        let _ = (transaction, carrier, request_digest);
         Err(PersistenceError::Conflict(
             "temporarily_unavailable: managed device admission unavailable".into(),
         ))
@@ -2939,6 +3200,18 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// Account and recheck, at one read cut, that every disclosed row, head,
     /// and floor is still disclosable to it. `None` means the exact object
     /// was never issued to this Account for this Realm.
+    async fn issued_realm_state_snapshot_for_actor(
+        &self,
+        _realm_id: &arkret_wire::RealmId,
+        _actor: &arkret_wire::ActorId,
+        _snapshot_id: &arkret_wire::RealmSnapshotId,
+        _issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Option<RealmStateSnapshot>> {
+        Err(PersistenceError::Internal(
+            "Actor read port is not configured".into(),
+        ))
+    }
+
     async fn issued_realm_state_snapshot(
         &self,
         realm_id: &arkret_wire::RealmId,
@@ -2997,6 +3270,17 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// Only intervals this Station can prove are served; every other shape
     /// fails closed as [`AccountStreamScan::Unproved`], never as a physical
     /// page that could disclose rows outside the caller's permission.
+    async fn scan_stream_for_actor(
+        &self,
+        _request: &arkret_wire::StreamScanRequest,
+        _actor: &arkret_wire::ActorId,
+        _issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<AccountStreamScan> {
+        Err(PersistenceError::Internal(
+            "Actor scan port is not configured".into(),
+        ))
+    }
+
     async fn scan_stream_for_account(
         &self,
         request: &arkret_wire::StreamScanRequest,
@@ -3074,6 +3358,21 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// `ak.self.current_results.read.exact.v1` for one authenticated Account:
     /// membership, governance generation, effective stream head and the
     /// selector's durable current row from one read cut.
+    async fn exact_current_result_for_actor(
+        &self,
+        _request: &arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadRequestBody,
+        _actor: &arkret_wire::ActorId,
+        _issuer: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<
+        SelfExactCurrentRead<
+            arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome,
+        >,
+    > {
+        Err(PersistenceError::Internal(
+            "Actor read port is not configured".into(),
+        ))
+    }
+
     async fn exact_current_result_for_account(
         &self,
         request: &arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadRequestBody,
@@ -3124,15 +3423,12 @@ pub trait AuthorityCommitStore: Send + Sync {
         final_stream_heads: &[CommitStreamHead],
         snapshot: &RealmStateSnapshot,
         manifest: Option<&arkret_models_collaboration::authority_commit::PcrPrivateHandoffManifest>,
+        management: &arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManifest,
     ) -> PersistenceResult<()> {
-        if manifest.is_some() || handoff.pcr_private_state_digest.is_some() {
-            return Err(PersistenceError::Conflict(
-                "temporarily_unavailable: durable PCR private import verification is unavailable"
-                    .into(),
-            ));
-        }
-        self.install_handoff(handoff, final_stream_heads, snapshot)
-            .await
+        let _ = (handoff, final_stream_heads, snapshot, manifest, management);
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: durable private import verification is unavailable".into(),
+        ))
     }
 
     async fn install_handoff(

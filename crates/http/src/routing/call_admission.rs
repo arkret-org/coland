@@ -593,7 +593,9 @@ pub(crate) async fn validate_relation(
         request
             .invitation
             .inviter_actor_id
-            .route_service_id()
+            .as_account_id()
+            .ok_or_else(|| invalid("call invitation requires an Account sender"))?
+            .station_id
             .as_str(),
         &request.envelope,
     )
@@ -722,7 +724,13 @@ async fn peer_relay(depot: &mut Depot, req: &mut Request) -> JsonResult<CallInvi
     let state = depot.get_typed::<AppState>().expect("state injected");
     let peer = super::events::peer::authenticated_peer_context(state, req, true).await?;
     let request: CallInvitationSendRequestBody = req.parse_json().await.map_err(invalid)?;
-    if request.invitation.inviter_actor_id.route_service_id() != &peer.source_service_id {
+    if request
+        .invitation
+        .inviter_actor_id
+        .as_account_id()
+        .map(|account| &account.station_id)
+        != Some(&peer.source_service_id)
+    {
         return Err(AppError::capability_denied(
             "invitation relay caller is not actual producer Station",
         ));

@@ -37,25 +37,6 @@ pub struct PersistenceHandle {
 }
 
 impl PersistenceHandle {
-    pub async fn applet_creation_approval_accounts(
-        &self,
-        candidate: &coland_storage::AppletAuthoringCandidate,
-    ) -> PersistenceResult<Vec<arkret_wire::AccountId>> {
-        self.persistence
-            .applets()
-            .creation_approval_accounts(candidate)
-            .await
-    }
-    pub async fn managed_pcr_creation_context(
-        &self,
-        genesis: &arkret_wire::EventId,
-    ) -> PersistenceResult<Option<arkret_models_integration::AppletManagedActorAuthoringContext>>
-    {
-        self.persistence
-            .applets()
-            .managed_pcr_creation_context(genesis)
-            .await
-    }
     pub async fn management_review_request(
         &self,
         caller: &arkret_wire::ActorId,
@@ -390,20 +371,6 @@ impl PersistenceHandle {
             .read_cut(holder, peer, scope, device)
             .await
     }
-    pub async fn get_managed_forward(
-        &self,
-        account: &arkret_wire::AccountId,
-        device: &arkret_wire::DeviceId,
-        reference: &arkret_wire::SignerEvidenceRef,
-    ) -> PersistenceResult<
-        Option<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest>,
-    > {
-        self.persistence
-            .account_device_signer_evidence()
-            .get_managed_forward(account, device, reference)
-            .await
-    }
-
     pub async fn prepare_non_managed_forward_current_signer_evidence(
         &self,
         event: &arkret_wire::Event,
@@ -1026,7 +993,7 @@ impl PersistenceHandle {
 
     pub async fn applet_managed_device_authority(
         &self,
-        account: &arkret_wire::AccountId,
+        account: &arkret_wire::ActorId,
         device_id: &arkret_wire::DeviceId,
         now: chrono::DateTime<chrono::Utc>,
     ) -> crate::ServiceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {
@@ -1839,7 +1806,7 @@ impl coland_storage::DeviceRevocationStore for PersistenceHandle {
 
     async fn applet_managed_device_authority(
         &self,
-        account: &arkret_wire::AccountId,
+        account: &arkret_wire::ActorId,
         device_id: &arkret_wire::DeviceId,
         now: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {

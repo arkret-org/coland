@@ -16,15 +16,15 @@ pub(crate) async fn lock_cuts(
     let mut realms = Vec::new();
     for endpoint in endpoints {
         realms.push((
-            endpoint.authority.pcr_realm_id.clone(),
-            endpoint.authority.account_id.station_id.clone(),
+            endpoint.authority.realm_id.clone(),
+            endpoint.authority.governance_service_id.clone(),
         ));
         realms.push((
             endpoint.effective_scope.realm_id().clone(),
-            endpoint.authority.account_id.station_id.clone(),
+            endpoint.authority.governance_service_id.clone(),
         ));
     }
-    let station = &endpoints[0].authority.account_id.station_id;
+    let station = &endpoints[0].authority.governance_service_id;
     realms.extend(
         counterparts
             .iter()
@@ -34,6 +34,7 @@ pub(crate) async fn lock_cuts(
     realms.dedup();
     for (realm, station) in realms {
         crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &realm).await?;
+        crate::realm_management_archive::require_unfrozen(conn, &realm).await?;
         let owner = sql_query(
             "SELECT to_jsonb(service_id) AS payload FROM realm_authorities WHERE realm_id=$1",
         )
@@ -97,6 +98,129 @@ async fn member(
     Ok(())
 }
 
+/// Persist only the original command, not an invented remote result. The
+/// caller can query or retry these exact bytes after a lost response.
+pub(crate) async fn prepare_source(
+    conn: &mut AsyncPgConnection,
+    request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    source: &AppletManagedDeviceScopeGuard,
+    deadline: chrono::DateTime<Utc>,
+) -> PersistenceResult<bool> {
+    request.validate_shape().map_err(denied)?;
+    matches_scope(request, &source.effective_scope)?;
+    lock_cuts(conn, &[source], &[]).await?;
+    let PeerKeyPackageRequesterAuthorization::RealmDevice {
+        verification_method,
+        requester_device_id,
+        device_authorize_event_id,
+        signed_at,
+        signature,
+    } = &request.requester_authorization
+    else {
+        return Err(denied(
+            "outbound Realm claim needs its native Device signature",
+        ));
+    };
+    if request.requester_actor_id.as_ref() != Some(&source.authority.actor_id)
+        || requester_device_id != &source.authority.device_id
+        || device_authorize_event_id != &source.authority.authorization_ref.event_id
+        || verification_method.as_str()
+            != format!(
+                "{}#{}",
+                source.authority.native_did, source.authority.device_id
+            )
+    {
+        return Err(denied(
+            "outbound claim differs from its current native Device",
+        ));
+    }
+    let input = arkret_models_crypto::keypackage_claim_authorization_signing_bytes(
+        &request.unsigned_request(),
+        &request.service_binding,
+        &request.requester_authorization,
+    )
+    .map_err(denied)?;
+    arkret_signatures::keypackages::verify_keypackage_signing_input(
+        &source.authority.public_key,
+        verification_method.as_str(),
+        &input,
+        signature,
+    )
+    .map_err(denied)?;
+    crate::boxed_future(|| {
+        crate::applet_content_delivery::require_mls_scope_read(
+            conn,
+            source,
+            deadline,
+            request.strand_id.as_ref(),
+        )
+    })
+    .await?;
+    crate::mls_keypackage_publication::require_existing_group(conn, &source.effective_scope)
+        .await?;
+    member(conn, &source.effective_scope, &source.authority.actor_id).await?;
+    let target = match (
+        &request.target_actor_id,
+        &request.target_account_id,
+        &request.target_agent_id,
+    ) {
+        (Some(actor), None, None) => actor.clone(),
+        (None, Some(account), None) => ActorId::account(account.clone()),
+        (None, None, Some(agent)) => ActorId::account(arkret_wire::AccountId::new(
+            agent.clone(),
+            request.service_binding.destination_id.clone(),
+        )),
+        _ => return Err(denied("outbound claim target is incomplete")),
+    };
+    member(conn, &source.effective_scope, &target).await?;
+    let source_id = request.service_binding.source_id.as_str();
+    let digest = arkret_canonical::canonical_sha256(request).map_err(denied)?;
+    let body = serde_json::to_value(request).map_err(denied)?;
+    let prior = sql_query("SELECT jsonb_build_object('digest',request_digest,'body',request_body,'realm',governing_realm_id) AS payload FROM realm_keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2")
+        .bind::<Text,_>(source_id).bind::<Text,_>(request.claim_request_id.as_str())
+        .get_result::<JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    if let Some(prior) = prior {
+        if prior.payload["digest"].as_str() != Some(&digest)
+            || prior.payload["body"] != body
+            || prior.payload["realm"].as_str() != Some(source.authority.realm_id.as_str())
+        {
+            return Err(denied(
+                "outbound claim original conflicts with its imported ledger",
+            ));
+        }
+        crate::realm_management_history::require_issuer(
+            conn,
+            &source.authority.realm_id,
+            &request.service_binding.source_id,
+            None,
+            *signed_at,
+        )
+        .await?;
+        if Utc::now() >= deadline {
+            return Err(denied("outbound recovery credential expired"));
+        }
+        return Ok(false);
+    }
+    let at = Utc::now();
+    if request.service_binding.source_id != source.authority.governance_service_id
+        || at >= deadline
+        || at >= request.expires_at
+        || *signed_at > at + chrono::Duration::seconds(60)
+        || request.expires_at <= *signed_at
+        || request.expires_at - *signed_at > chrono::Duration::minutes(5)
+    {
+        return Err(denied(
+            "fresh outbound claim has no current issuing tenure and time window",
+        ));
+    }
+    sql_query("INSERT INTO realm_keypackage_claim_sources(source_id,claim_request_id,request_digest,request_body,governing_realm_id) VALUES($1,$2,$3,$4,$5)")
+        .bind::<Text,_>(source_id).bind::<Text,_>(request.claim_request_id.as_str())
+        .bind::<Text,_>(digest).bind::<Jsonb,_>(body)
+        .bind::<Text,_>(source.authority.realm_id.as_str())
+        .execute(conn).await.map_err(PersistenceError::database)?;
+    Ok(true)
+}
+
 /// Checks local native requester facts, while remote participant key facts
 /// remain the authenticated origin Station's responsibility under section9.2.
 pub(crate) async fn require_admission(
@@ -145,7 +269,8 @@ pub(crate) async fn require_admission(
             conn,
             &outcome,
             Some(request),
-            &endpoints[0].authority.account_id.station_id,
+            &endpoints[0].authority.governance_service_id,
+            &[],
         )
     })
     .await?;
@@ -164,7 +289,7 @@ pub(crate) async fn require_admission(
         return Err(denied("new claim command expired"));
     }
     if let Some((source, deadline)) = &admission.requester {
-        let PeerKeyPackageRequesterAuthorization::Device {
+        let PeerKeyPackageRequesterAuthorization::RealmDevice {
             verification_method,
             requester_device_id,
             device_authorize_event_id,
@@ -174,10 +299,10 @@ pub(crate) async fn require_admission(
         else {
             return Err(denied("native requester must use its true Device branch"));
         };
-        if request.requester_account_id.as_ref() != Some(&source.authority.account_id)
-            || request.service_binding.source_id != source.authority.account_id.station_id
+        if request.requester_actor_id.as_ref() != Some(&source.authority.actor_id)
+            || request.service_binding.source_id != source.authority.governance_service_id
             || requester_device_id != &source.authority.device_id
-            || device_authorize_event_id != &source.authority.selector.authorization_ref.event_id
+            || device_authorize_event_id != &source.authority.authorization_ref.event_id
             || verification_method.as_str()
                 != format!(
                     "{}#{}",
@@ -217,8 +342,8 @@ pub(crate) async fn require_admission(
         .await?;
     }
     if let Some(target) = &attempt.applet_device_scope_guard {
-        if request.target_account_id.as_ref() != Some(&target.authority.account_id)
-            || request.service_binding.destination_id != target.authority.account_id.station_id
+        if request.target_actor_id.as_ref() != Some(&target.authority.actor_id)
+            || request.service_binding.destination_id != target.authority.governance_service_id
             || (!request.target_device_ids.is_empty()
                 && !request
                     .target_device_ids
@@ -254,14 +379,23 @@ pub(crate) async fn require_admission(
             requester_agent_id.clone(),
             request.service_binding.source_id.clone(),
         )),
+        (None, PeerKeyPackageRequesterAuthorization::RealmDevice { .. }) => request
+            .requester_actor_id
+            .clone()
+            .ok_or_else(|| denied("Realm requester is absent"))?,
         _ => return Err(denied("claim requester routing branch is incomplete")),
     };
-    let target = match (&request.target_account_id, &request.target_agent_id) {
-        (Some(account), None) => ActorId::account(account.clone()),
-        (None, Some(agent)) => ActorId::account(arkret_wire::AccountId::new(
+    let target = match (
+        &request.target_account_id,
+        &request.target_agent_id,
+        &request.target_actor_id,
+    ) {
+        (Some(account), None, None) => ActorId::account(account.clone()),
+        (None, Some(agent), None) => ActorId::account(arkret_wire::AccountId::new(
             agent.clone(),
             request.service_binding.destination_id.clone(),
         )),
+        (None, None, Some(actor)) => actor.clone(),
         _ => return Err(denied("claim target routing branch is incomplete")),
     };
     // Managed Device scopes are actual existing Realm/Circle scopes. Direct
@@ -296,11 +430,11 @@ pub(crate) async fn require_target(
     deadline: chrono::DateTime<Utc>,
 ) -> PersistenceResult<()> {
     if row.effective_scope.as_ref() != Some(&guard.effective_scope)
-        || row.owner_account_id != guard.authority.account_id
-        || row.actor_id != guard.authority.account_id.principal_id.as_str()
+        || row.owner_actor_id != guard.authority.actor_id
+        || row.actor_id != guard.authority.actor_id.signing_principal_id().as_str()
         || row.device_id.as_deref() != Some(guard.authority.device_id.as_str())
         || row.device_authorize_event_id.as_deref()
-            != Some(guard.authority.selector.authorization_ref.event_id.as_str())
+            != Some(guard.authority.authorization_ref.event_id.as_str())
         || row.agent_key_authorize_event_id.is_some()
         || row.endpoint_verification_method.is_some()
     {
@@ -316,7 +450,7 @@ pub(crate) async fn require_target(
     crate::mls_keypackage_publication::require_existing_group(conn, &guard.effective_scope).await?;
     let leaf = arkret_mls::author_leaf_from_key_package_bytes(&row.key_package_bytes, 0)
         .map_err(denied)?;
-    let actor = ActorId::account(row.owner_account_id.clone());
+    let actor = row.owner_actor_id.clone();
     let credential = arkret_models_crypto::mls_basic_credential_identity(&actor).map_err(denied)?;
     if !matches!(leaf.credential,arkret_mls::AuthorLeafCredential::Basic{identity} if identity==credential)
         || leaf.signature_key.as_slice() != guard.authority.public_key.as_slice()
@@ -352,7 +486,7 @@ fn outcome_matches_row(
     };
     if claim.keypackage_ref != row.keypackage_ref
         || claim.principal_id.as_str() != row.actor_id
-        || claim.actor_id.route_service_id() != &row.owner_account_id.station_id
+        || claim.actor_id != row.owner_actor_id
         || claim.device_id.as_ref().map(|id| id.as_str()) != row.device_id.as_deref()
         || claim
             .device_authorize_event_id
@@ -383,7 +517,7 @@ fn outcome_matches_row(
             "claim response differs from its actual durable publication",
         ));
     }
-    if row.device_id.is_some() && claim.actor_id.as_account_id() != Some(&row.owner_account_id) {
+    if row.device_id.is_some() && claim.actor_id != row.owner_actor_id {
         return Err(denied("claim response has another full owner Account"));
     }
     Ok(())
@@ -425,6 +559,7 @@ pub(crate) async fn require_stored_outcome(
     operation: arkret_wire::ServiceOperationId,
     outcome: &arkret_models_crypto::PeerKeyPackagesClaimOutcome,
     endpoints: &[AppletManagedDeviceScopeGuard],
+    remote_devices: &[coland_storage::MlsClaimRemoteDeviceEvidence],
 ) -> PersistenceResult<chrono::DateTime<Utc>> {
     use arkret_wire::ServiceOperationId;
     // Peer command/query recover the original signed result and its closed
@@ -449,11 +584,61 @@ pub(crate) async fn require_stored_outcome(
         #[diesel(sql_type=Nullable<BigInt>)]
         claim_expires_at_unix_ms: Option<i64>,
     }
-    let ledger=sql_query("SELECT outcome AS payload,state,expires_at,claim_expires_at_unix_ms FROM peer_keypackage_claims WHERE source_id=$1 AND claim_request_id=$2 AND request_digest=$3 FOR SHARE NOWAIT")
+    let source = (operation == ServiceOperationId::SelfKeysKeypackagesCommandClaimV1)
+        .then(|| {
+            endpoints.iter().find(|endpoint| {
+                outcome.claim_receipt.request.requester_actor_id.as_ref()
+                    == Some(&endpoint.authority.actor_id)
+            })
+        })
+        .flatten();
+    let ledger = if let Some(source) = source {
+        use arkret_models_crypto::PeerKeyPackagesClaimQueryState;
+        let locked = sql_query("SELECT request_body AS payload FROM realm_keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2 AND request_digest=$3 FOR SHARE NOWAIT")
+            .bind::<Text,_>(outcome.claim_receipt.source_id.as_str())
+            .bind::<Text,_>(outcome.claim_request_id.as_str())
+            .bind::<Text,_>(outcome.claim_receipt.request_digest.as_str())
+            .get_result::<JsonPayloadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+        let stored = crate::realm_claim_source::read(
+            conn,
+            outcome.claim_receipt.source_id.as_str(),
+            outcome.claim_request_id.as_str(),
+        )
+        .await?
+        .ok_or_else(|| denied("Realm source ledger absent"))?;
+        if arkret_canonical::canonical_json_bytes(&stored.request).map_err(denied)?
+            != arkret_canonical::canonical_json_bytes(&locked.payload).map_err(denied)?
+        {
+            return Err(denied("Realm source ledger changed"));
+        }
+        let query = stored
+            .result
+            .ok_or_else(|| denied("Realm source has no original result"))?;
+        let state = match query.state {
+            PeerKeyPackagesClaimQueryState::Claimed => "claimed",
+            PeerKeyPackagesClaimQueryState::Consumed => "consumed",
+            _ => return Err(denied("Realm source material is terminally unavailable")),
+        };
+        let original = query
+            .claim_outcome
+            .ok_or_else(|| denied("Realm source claim absent"))?;
+        member(conn, &source.effective_scope, &source.authority.actor_id).await?;
+        for claim in &outcome.claims {
+            member(conn, &source.effective_scope, &claim.actor_id).await?;
+        }
+        DeliveryLedger {
+            payload: serde_json::to_value(&original).map_err(denied)?,
+            state: state.into(),
+            expires_at: (stored.request.expires_at + chrono::Duration::minutes(10)).timestamp(),
+            claim_expires_at_unix_ms: Some(original.claim_receipt.expires_at.timestamp_millis()),
+        }
+    } else {
+        sql_query("SELECT outcome AS payload,state,expires_at,claim_expires_at_unix_ms FROM peer_keypackage_claims WHERE source_id=$1 AND claim_request_id=$2 AND request_digest=$3 FOR SHARE NOWAIT")
         .bind::<Text,_>(outcome.claim_receipt.source_id.as_str())
         .bind::<Text,_>(outcome.claim_request_id.as_str())
         .bind::<Text,_>(outcome.claim_receipt.request_digest.as_str())
-        .get_result::<DeliveryLedger>(&mut *conn).await.map_err(PersistenceError::database)?;
+        .get_result::<DeliveryLedger>(&mut *conn).await.map_err(PersistenceError::database)?
+    };
     if arkret_canonical::canonical_json_bytes(&ledger.payload).map_err(denied)?
         != arkret_canonical::canonical_json_bytes(outcome).map_err(denied)?
     {
@@ -479,6 +664,15 @@ pub(crate) async fn require_stored_outcome(
         }
     }
     for claim in &outcome.claims {
+        if source.is_some_and(|source| {
+            claim
+                .actor_id
+                .fixed_route_service_id()
+                .is_some_and(|station| station != &source.authority.governance_service_id)
+        }) {
+            crate::mls_keypackage_claim_endpoints::remote_device_window(claim, remote_devices)?;
+            continue;
+        }
         let row = crate::mls::key_package_for_delivery(conn, &claim.keypackage_ref)
             .await?
             .ok_or_else(|| denied("original claim package is unavailable"))?;
@@ -507,13 +701,13 @@ pub(crate) async fn require_stored_outcome(
             let guard = endpoints
                 .iter()
                 .find(|endpoint| {
-                    claim.actor_id.as_account_id() == Some(&endpoint.authority.account_id)
+                    claim.actor_id == endpoint.authority.actor_id
                         && claim.device_id.as_ref() == Some(&endpoint.authority.device_id)
                 })
                 .ok_or_else(|| denied("claim omits its true native target proof"))?;
             if &guard.effective_scope != scope
                 || claim.device_authorize_event_id.as_ref()
-                    != Some(&guard.authority.selector.authorization_ref.event_id)
+                    != Some(&guard.authority.authorization_ref.event_id)
             {
                 return Err(denied(
                     "claim target authorization instance or scope changed",
@@ -522,9 +716,9 @@ pub(crate) async fn require_stored_outcome(
         }
     }
     for endpoint in endpoints {
-        let actor = ActorId::account(endpoint.authority.account_id.clone());
+        let actor = endpoint.authority.actor_id.clone();
         let request = &outcome.claim_receipt.request;
-        if request.requester_account_id.as_ref() != Some(&endpoint.authority.account_id)
+        if request.requester_actor_id.as_ref() != Some(&endpoint.authority.actor_id)
             && !outcome.claims.iter().any(|claim| {
                 claim.actor_id == actor
                     && claim.device_id.as_ref() == Some(&endpoint.authority.device_id)

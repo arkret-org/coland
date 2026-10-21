@@ -156,39 +156,6 @@ async fn write_generation(
     Ok(())
 }
 
-/// The admitted managed PCR create is its generation writer. This is called
-/// only by the closed Applet creation unit, with its position-zero Commit;
-/// it does not create a device or authorize a later Event.
-pub(crate) async fn initialize_managed_pcr_generation_in_connection(
-    conn: &mut AsyncPgConnection,
-    event: &Event,
-    commit: &RealmCommit,
-) -> PersistenceResult<()> {
-    let payload: arkret_models_collaboration::events_payloads::RealmCreatePayload =
-        serde_json::from_value(
-            serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
-        )
-        .map_err(|error| invalid(format!("managed PCR genesis is invalid: {error}")))?;
-    if event.kind != EventKind::RealmCreate
-        || payload.object.purpose
-            != arkret_models_collaboration::events_payloads::RealmPurpose::AppletManagedControl
-        || payload.object.founding_device_descriptor.is_some()
-        || commit.event_ref != event.event_id
-        || commit.realm_id != event.realm_id
-        || commit.stream_ref
-            != (CommitStreamRef::Realm {
-                realm_id: event.realm_id.clone(),
-            })
-        || commit.stream_position != 0
-        || commit.previous_commit_ref.is_some()
-    {
-        return Err(invalid(
-            "managed PCR generation requires its admitted genesis",
-        ));
-    }
-    write_generation(conn, commit, None, 1).await
-}
-
 /// Materialize a device Event only after its producer proof and PCR admission
 /// have been verified by a registered atomic UoW. Generic Event admission
 /// must not call this function without a typed authorization guard.
@@ -367,82 +334,27 @@ mod tests {
     async fn device_cut_reads_authorization_generation_and_proposals_at_one_head() {
         let database = crate::test_database::TestDatabase::lease().await;
         let pool = database.pool();
-        let account = arkret_wire::AccountId::new(
-            arkret_wire::DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
-            arkret_wire::DidCoreId::new("ak:did_core:web:station.example").unwrap(),
+        let fixture = crate::pcr_genesis::PcrGenesisFixture::new(
+            arkret_wire::Did::new("did:web:station.example").unwrap(),
         );
-        let realm_id = arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(
-            arkret_canonical::DigestSuite::Sha256,
-            [32; 32],
-        ));
-        let genesis = arkret_wire::test_support::raw_event(
-            EventKind::RealmCreate.as_str(),
-            arkret_wire::ScopeRef::Realm {
-                realm_id: realm_id.clone(),
-            },
-            account.principal_id.clone(),
-            account.station_id.clone(),
-            json!({"genesis":true}),
-        )
-        .unwrap();
-        let genesis_commit = self::commit(&genesis);
+        {
+            let mut conn = pg_conn(&pool).await.unwrap();
+            sql_query("INSERT INTO device_inventory_station(singleton,station_id) VALUES(TRUE,$1)")
+                .bind::<Text, _>(fixture.history.account.station_id.as_str())
+                .execute(&mut conn)
+                .await
+                .unwrap();
+        }
+        fixture
+            .admit_into(&crate::PgPersistenceStore::new(pool.clone()))
+            .await
+            .unwrap();
+        let account = fixture.history.account.clone();
+        let realm_id = fixture.unit.submission.pcr_realm_id.clone();
+        let device_id = fixture.history.founding_device_id.clone();
+        let authorize = &fixture.unit.transactions[1].event;
+        let authorize_commit = &fixture.unit.transactions[1].commit;
         let mut conn = pg_conn(&pool).await.unwrap();
-        sql_query("INSERT INTO realm_authorities(realm_id,generation,service_id,authority_ref) VALUES($1,0,$2,$3)")
-            .bind::<Text,_>(realm_id.as_str())
-            .bind::<Text,_>(account.station_id.as_str())
-            .bind::<Jsonb,_>(serde_json::to_value(&genesis_commit.authority_ref).unwrap())
-            .execute(&mut conn).await.unwrap();
-        insert_accepted(&mut conn, &genesis, &genesis_commit).await;
-        sql_query("INSERT INTO principal_resolutions \
-            (principal_id,station_id,pcr_realm_id,genesis_event_id,current_event_id,projection,updated_at) \
-            VALUES($1,$2,$3,$4,$4,'{}'::jsonb,now())")
-            .bind::<Text,_>(account.principal_id.as_str())
-            .bind::<Text,_>(account.station_id.as_str())
-            .bind::<Text,_>(realm_id.as_str())
-            .bind::<Text,_>(genesis.event_id.as_str())
-            .execute(&mut conn).await.unwrap();
-        let device_id =
-            arkret_wire::DeviceId::new("ak:device:01964137-0000-7000-8000-000000000001").unwrap();
-        let authorize = arkret_wire::test_support::raw_event(
-            EventKind::DeviceAuthorize.as_str(),
-            arkret_wire::ScopeRef::Realm {
-                realm_id: realm_id.clone(),
-            },
-            account.principal_id.clone(),
-            account.station_id.clone(),
-            json!({
-                "device_id":device_id,
-                "device_public_key_did":"did:key:z6Mki3devicepublickey",
-                "hpke_key":"z6LSdevicehpke",
-                "algorithms":["Ed25519","HPKE-X25519-HKDF-SHA256-AES128GCM"],
-                "device_key_algorithm":"Ed25519",
-                "authorized_by":account.principal_id,
-                "not_before":"2026-09-16T00:00:00.000Z",
-                "authorization_binding_kind":"registration_anchor",
-                "authorized_generation_ref":1,
-                "device_signature":"c2lnbmF0dXJl"
-            }),
-        )
-        .unwrap();
-        let mut authorize_commit = self::commit(&authorize);
-        authorize_commit.commit_id = arkret_wire::RealmCommitId::from_digest([81; 32]);
-        authorize_commit.stream_position = 1;
-        authorize_commit.previous_commit_ref = Some(genesis_commit.commit_id.clone());
-        authorize_commit.authority_ref = genesis_commit.authority_ref.clone();
-        conn.transaction::<(), PgTransactionError, _>(async |conn| {
-            insert_accepted(conn, &authorize, &authorize_commit).await;
-            project_pcr_device_current_in_connection(
-                conn,
-                &authorize,
-                &authorize_commit,
-                Some(&account),
-            )
-            .await?;
-            Ok(())
-        })
-        .await
-        .map_err(PgTransactionError::into_persistence)
-        .unwrap();
         let cut = crate::pcr_device_revocation_proposals::confirmed_pcr_device_cut(
             &pool, &account, &device_id,
         )
@@ -621,20 +533,26 @@ mod tests {
             .await
             .unwrap();
 
-        let account = arkret_wire::AccountId::new(
-            arkret_wire::DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
-            arkret_wire::DidCoreId::new("ak:did_core:web:station.example").unwrap(),
+        // Use an admitted Human PCR for the independent revoke-proposal cut.
+        let fixture = crate::pcr_genesis::PcrGenesisFixture::new(
+            arkret_wire::Did::new("did:web:station.example").unwrap(),
         );
-        sql_query("INSERT INTO principal_resolutions \
-            (principal_id,station_id,pcr_realm_id,genesis_event_id,current_event_id,projection,updated_at) \
-            VALUES($1,$2,$3,$4,$4,'{}'::jsonb,now())")
-            .bind::<Text,_>(account.principal_id.as_str())
-            .bind::<Text,_>(account.station_id.as_str())
-            .bind::<Text,_>(realm_id.as_str())
-            .bind::<Text,_>(event.event_id.as_str())
-            .execute(&mut conn).await.unwrap();
-        let device_id =
-            arkret_wire::DeviceId::new("ak:device:01964137-0000-7000-8000-000000000001").unwrap();
+        {
+            let mut conn = pg_conn(&pool).await.unwrap();
+            sql_query("INSERT INTO device_inventory_station(singleton,station_id) VALUES(TRUE,$1)")
+                .bind::<Text, _>(fixture.history.account.station_id.as_str())
+                .execute(&mut conn)
+                .await
+                .unwrap();
+        }
+        fixture
+            .admit_into(&crate::PgPersistenceStore::new(pool.clone()))
+            .await
+            .unwrap();
+        let account = fixture.history.account.clone();
+        let realm_id = fixture.unit.submission.pcr_realm_id.clone();
+        let device_id = fixture.history.founding_device_id.clone();
+        let commit = &fixture.unit.transactions[1].commit;
         let proposal = arkret_wire::test_support::raw_event(
             EventKind::DeviceRevoke.as_str(),
             arkret_wire::ScopeRef::Realm {
@@ -648,7 +566,7 @@ mod tests {
         .unwrap();
         let mut proposal_commit = self::commit(&proposal);
         proposal_commit.commit_id = arkret_wire::RealmCommitId::from_digest([78; 32]);
-        proposal_commit.stream_position = 1;
+        proposal_commit.stream_position = commit.stream_position + 1;
         proposal_commit.previous_commit_ref = Some(commit.commit_id.clone());
         proposal_commit.authority_ref = commit.authority_ref.clone();
         let before = crate::pcr_device_revocation_proposals::confirmed_revocation_proposals(
@@ -727,7 +645,7 @@ mod tests {
         .unwrap();
         let mut later_commit = self::commit(&later);
         later_commit.commit_id = arkret_wire::RealmCommitId::from_digest([79; 32]);
-        later_commit.stream_position = 2;
+        later_commit.stream_position = proposal_commit.stream_position + 1;
         later_commit.previous_commit_ref = Some(proposal_commit.commit_id.clone());
         later_commit.authority_ref = commit.authority_ref.clone();
         insert_accepted(&mut conn, &later, &later_commit).await;

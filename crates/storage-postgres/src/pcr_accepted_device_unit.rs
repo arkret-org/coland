@@ -244,7 +244,7 @@ pub(crate) async fn admit_accepted_device_unit_in_connection(
         )
     })?;
     if approver_authorization.payload.authorization_binding_kind
-        == DeviceAuthorizationBindingKind::AppletManagedDelegation
+        == DeviceAuthorizationBindingKind::RealmManagedDelegation
     {
         return Err(rejected(
             ConflictCode::DeviceUnauthorized,

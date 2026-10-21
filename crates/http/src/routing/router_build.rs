@@ -631,15 +631,6 @@ mod tests {
             .any(|(method, path)| operation.matches_http_request(method, path))
     }
 
-    /// Advertised JSON bundle members this Station does not mount. Each is a
-    /// false claim: `service-surface.md` §3 allows advertising only bundles
-    /// the deployment really implements. This existing implementation backlog
-    /// must shrink as the remaining current-v1 operations are mounted.
-    const KNOWN_ADVERTISED_UNMOUNTED: &[(&str, arkret_wire::ServiceOperationId)] = &[(
-        "ak.operation_bundle.station.applet.v1",
-        arkret_wire::ServiceOperationId::EdgeAppletManagedActorCommandAuthorV1,
-    )];
-
     /// Advertised Station members served by the Account Authority of the
     /// same Station TCB: the deployment gateway routes pairing and issuer-
     /// ledger revocation to Coauth, while exact hard logout stays on Coland.
@@ -677,15 +668,9 @@ mod tests {
             }
         }
         unmounted.sort_by_key(|(bundle, operation)| (*bundle, operation.as_str()));
-        assert_eq!(
-            unmounted, KNOWN_ADVERTISED_UNMOUNTED,
-            "advertised but unmounted bundle members changed"
-        );
         assert!(
-            !unmounted.iter().any(|(_, operation)| {
-                *operation == arkret_wire::ServiceOperationId::PeerCommittedEventReadScanV1
-            }),
-            "the peer stream scan is mounted"
+            unmounted.is_empty(),
+            "advertised but unmounted bundle members: {unmounted:?}"
         );
 
         // Registered operations mounted here but selectable by no advertised

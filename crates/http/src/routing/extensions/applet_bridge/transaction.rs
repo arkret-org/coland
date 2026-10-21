@@ -279,7 +279,10 @@ fn validate_transaction_event_binding(
     {
         return Ok(());
     }
-    let matched = event.actor_id.route_service_id() == &install.target_station_id
+    let matched = event
+        .actor_id
+        .as_account_id()
+        .is_some_and(|account| account.station_id == install.target_station_id)
         && install.package.namespaces.actors.iter().any(|entry| {
             !namespace_pattern_is_wildcard(&entry.pattern)
                 && namespace_pattern_matches(

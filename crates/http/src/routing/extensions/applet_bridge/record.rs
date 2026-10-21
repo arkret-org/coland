@@ -99,7 +99,9 @@ pub(crate) async fn applet_record(
             AppError::internal("failed to read applet identity winner")
         })?
         .ok_or_else(|| AppError::internal("Applet installation has no identity winner"))?;
-    decode_applet_record(identity, value).map(Some)
+    let mut record = decode_applet_record(identity, value)?;
+    load_realm_actors(state, &mut record).await?;
+    Ok(Some(record))
 }
 
 pub(crate) async fn applet_records(state: &AppState) -> Result<Vec<AppletRecord>, AppError> {
@@ -128,7 +130,9 @@ pub(crate) async fn applet_records(state: &AppState) -> Result<Vec<AppletRecord>
                 AppError::internal("failed to read applet identity winner")
             })?
             .ok_or_else(|| AppError::internal("Applet installation has no identity winner"))?;
-        records.push(decode_applet_record(identity, installation)?);
+        let mut record = decode_applet_record(identity, installation)?;
+        load_realm_actors(state, &mut record).await?;
+        records.push(record);
     }
     Ok(records)
 }
@@ -228,4 +232,49 @@ pub(super) fn idempotency_key(req: &Request) -> Option<String> {
 pub(super) fn applet_id_param(req: &Request) -> Result<String, AppError> {
     req.param::<String>("applet_id")
         .ok_or_else(|| AppError::param_missing("applet_id path segment required"))
+}
+
+async fn load_realm_actors(state: &AppState, record: &mut AppletRecord) -> Result<(), AppError> {
+    let originals = state
+        .authority_commits()
+        .applet_realm_actor_creations(record.effective_scope.realm_id(), &record.applet_id)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?;
+    for full in originals {
+        let candidate: arkret_models_integration::RealmActorCreatePayload =
+            serde_json::from_value(serde_json::json!(full.event.payload))
+                .map_err(|e| AppError::internal(e.to_string()))?;
+        let creation_ref = arkret_wire::CommittedEventRef {
+            event_id: full.event.event_id,
+            commit_id: full.commit.commit_id,
+            stream_ref: full.commit.stream_ref,
+            stream_position: full.commit.stream_position,
+        };
+        match candidate.actor_role {
+            arkret_models_integration::RealmActorCreatePayloadActorRole::Bot => {
+                record.bots.push(super::types::BotActorRecord {
+                    bot_actor_id: candidate.actor_id,
+                    creation_ref,
+                })
+            }
+            arkret_models_integration::RealmActorCreatePayloadActorRole::Ghost => {
+                record.ghosts.push(super::types::GhostActorRecord {
+                    ghost_actor_id: candidate.actor_id,
+                    external_ref: {
+                        let external = candidate.external_ref.ok_or_else(|| {
+                            AppError::internal("accepted Ghost omits external tuple")
+                        })?;
+                        arkret_models_integration::GhostExternalTuple {
+                            protocol: external.protocol,
+                            instance_id: external.instance_id,
+                            external_id: external.external_id,
+                        }
+                    },
+                    display_name: None,
+                    creation_ref,
+                })
+            }
+        }
+    }
+    Ok(())
 }

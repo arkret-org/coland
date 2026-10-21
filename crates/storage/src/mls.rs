@@ -1,4 +1,4 @@
-use arkret_wire::{AccountId, MlsGroupId, RealmId, ScopeRef};
+use arkret_wire::{MlsGroupId, RealmId, ScopeRef};
 
 use super::{DeviceRevocationGateSelector, PersistenceResult, Value, async_trait};
 /// G3.S1 — durable KeyPackage row.
@@ -12,8 +12,8 @@ pub struct MlsKeyPackageRow {
     pub id: String,
     pub keypackage_ref: String,
     pub keypackage_digest: String,
-    /// Complete Account owner; Agent endpoints retain their real controller.
-    pub owner_account_id: AccountId,
+    /// Complete owner identity; Agent endpoints retain their real controller.
+    pub owner_actor_id: arkret_wire::ActorId,
     /// Immutable target binding for scope-restricted Device publication.
     pub effective_scope: Option<ScopeRef>,
     pub actor_id: String,
@@ -303,6 +303,15 @@ pub struct PeerKeyPackageClaimLedgerRecord {
     pub updated_at: i64,
 }
 
+/// Requester-side recovery material, independently owned by its Realm. The
+/// recipient's allocation/consume ledger stays at the recipient authority.
+#[derive(Clone, Debug)]
+pub struct RealmKeyPackageClaimSource {
+    pub request: arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    pub result: Option<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome>,
+    pub issuer_histories: Vec<arkret_models_identity::AuthenticatedServiceResolution>,
+}
+
 /// The one Welcome a claim destination queued for one claim, recorded on
 /// that claim's ledger row in the queueing transaction (device-lifecycle.md
 /// §9.2.3, decision 0121). Consume is checked against it alone.
@@ -321,6 +330,8 @@ pub struct MlsWelcomeClaimBinding {
 /// acceptance inputs only; the target still has its own independent guard.
 #[derive(Clone)]
 pub struct MlsKeyPackageClaimAdmission {
+    /// Exact verified issuing Station history frozen with a Realm target claim.
+    pub claim_issuer_resolution: Option<arkret_models_identity::AuthenticatedServiceResolution>,
     pub request: arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
     pub requester: Option<(
         crate::AppletManagedDeviceScopeGuard,
@@ -338,6 +349,18 @@ pub struct MlsKeyPackageClaimDelivery {
     pub outcome: arkret_models_crypto::PeerKeyPackagesClaimOutcome,
     pub endpoints: Vec<crate::AppletManagedDeviceScopeGuard>,
     pub command: Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>,
+    pub remote_devices: Vec<MlsClaimRemoteDeviceEvidence>,
+}
+
+/// Original peer evidence retained through the final local delivery cut.
+/// Storage revalidates its signature, binding, lifetime and actual MLS leaf.
+#[derive(Clone, Debug)]
+pub struct MlsClaimRemoteDeviceEvidence {
+    pub account_id: arkret_wire::AccountId,
+    pub device_id: arkret_wire::DeviceId,
+    pub generation: arkret_models_crypto::AccountDeviceGenerationEntry,
+    pub record: arkret_models_crypto::PeerQueryDeviceRecord,
+    pub issuer_resolution: arkret_models_identity::AuthenticatedServiceResolution,
 }
 
 /// Private attempt accounting, never a claim receipt or business authority.
@@ -456,10 +479,10 @@ pub fn apply_key_package_claim(
     if !terminal_without_claim && let Some(scope) = &row.effective_scope {
         let guard = claim.applet_device_scope_guard.as_ref()?;
         if guard.effective_scope != *scope
-            || guard.authority.account_id != row.owner_account_id
+            || guard.authority.actor_id != row.owner_actor_id
             || row.device_id.as_deref() != Some(guard.authority.device_id.as_str())
             || row.device_authorize_event_id.as_deref()
-                != Some(guard.authority.selector.authorization_ref.event_id.as_str())
+                != Some(guard.authority.authorization_ref.event_id.as_str())
             || claim.device_authorize_event_id != row.device_authorize_event_id.as_deref()
         {
             return None;
@@ -558,7 +581,7 @@ mod key_package_claim_transition_tests {
         claimed.claim_expires_at_unix_ms = Some(20_000);
         assert!(claimed.same_publication(&original));
         let mut changed = original.clone();
-        changed.owner_account_id.station_id =
+        changed.owner_actor_id.station_id =
             arkret_wire::DidCoreId::new("ak:did_core:web:another-station.example").unwrap();
         assert!(!claimed.same_publication(&changed));
         changed = original.clone();
@@ -839,8 +862,42 @@ pub trait MlsKeyPackageStore: Send + Sync {
         source_id: &str,
         claim_request_id: &str,
     ) -> PersistenceResult<Option<PeerKeyPackageClaimLedgerRecord>>;
+    /// Exact retained original for authenticated governance succession.
+    /// A match is not permission to disclose the result.
+    async fn peer_claim_original(
+        &self,
+        claim_request_id: &str,
+        request_digest: &str,
+    ) -> PersistenceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>>;
+    /// Register an outbound Realm Device command under its current authority
+    /// cut before network I/O. False means an exact durable original exists.
+    async fn prepare_realm_claim_source(
+        &self,
+        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        source: &crate::AppletManagedDeviceScopeGuard,
+        transport_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<bool>;
+    async fn realm_claim_source(
+        &self,
+        source_id: &str,
+        claim_request_id: &str,
+    ) -> PersistenceResult<Option<RealmKeyPackageClaimSource>>;
+    /// Retain an independently verified destination result under the current
+    /// requester Realm lock. Exact retry returns the first durable bytes.
+    async fn retain_realm_claim_source_result(
+        &self,
+        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome,
+        histories: &[arkret_models_identity::AuthenticatedServiceResolution],
+        governor: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome>;
     /// Resolve the ledger row whose stored success outcome issued the exact
     /// `KeypackageClaimId` a Welcome names (`keypackage_claim_ref`).
+    async fn realm_claim_issuer_resolution(
+        &self,
+        source_id: &str,
+        claim_request_id: &str,
+    ) -> PersistenceResult<Option<arkret_models_identity::AuthenticatedServiceResolution>>;
     async fn get_peer_claim_by_claim_id(
         &self,
         claim_id: &str,

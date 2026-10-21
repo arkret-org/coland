@@ -160,7 +160,6 @@ async fn foreign_request(
         branch: arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
         event_submission: EventAdmissionSubmission::new(request.authority_commit.event.clone()),
         producer_device_evidence: None,
-        producer_managed_provenance: None,
         producer_agent_evidence: None,
         mls_genesis_material: None,
     };
@@ -175,7 +174,6 @@ async fn foreign_request(
     let PeerAuthoritySubmitRequest::AuthorityForwardEvent(forward) = forward else {
         unreachable!("constructed an Event forward");
     };
-    assert!(forward.producer_managed_provenance.is_none());
     let evidence = forward.producer_device_evidence.unwrap();
     let core = &evidence.device_projection_attestation.attestation;
     let fact = arkret_identity::account_device_signer_evidence::verify_forwarded_account_device_signer_fact(

@@ -1,18 +1,13 @@
 use serde_json::json;
 
 #[tokio::test]
-async fn bot_and_ghost_routes_refuse_unsigned_and_bearer_only_requests() {
+async fn bot_and_ghost_previews_refuse_unsigned_and_bearer_only_requests() {
     use salvo::test::ResponseExt as _;
 
     // No state is injected: authentication must reject before any storage access.
     let service = salvo::Service::new(super::protocol_router());
     let applet = "ak:applet:01904100-0000-7000-8000-000000000001";
-    for operation in [
-        "bots/provision/preview",
-        "bots/provision",
-        "ghosts/provision/preview",
-        "ghosts/provision",
-    ] {
+    for operation in ["bots/provision/preview", "ghosts/provision/preview"] {
         for bearer in [false, true] {
             let request = salvo::test::TestClient::post(format!(
                 "http://server/self/applets/{applet}/{operation}"

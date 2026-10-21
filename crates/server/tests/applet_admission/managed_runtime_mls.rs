@@ -25,7 +25,7 @@ async fn packages(
         .await
         .unwrap()
         .into_iter()
-        .filter(|row| &row.owner_account_id == account)
+        .filter(|row| &row.owner_actor_id == account)
         .collect();
     rows.sort_by(|a, b| a.id.cmp(&b.id));
     rows

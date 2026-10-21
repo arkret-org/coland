@@ -52,7 +52,9 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         EventKind::IdentityAccountabilityGrant => Ok(SelfEventRoute::AccountabilityGrant),
         EventKind::ConsentGrant | EventKind::ConsentRevoke => Ok(SelfEventRoute::Consent),
         EventKind::MlsGenesis | EventKind::MlsCommit => Ok(SelfEventRoute::Mls),
-        EventKind::CircleCreate
+        EventKind::RealmActorStatusSet
+        | EventKind::RealmActorRecoverySet
+        | EventKind::CircleCreate
         | EventKind::AppletBridgeError
         | EventKind::SidecarCreate
         | EventKind::SidecarContextAttach
@@ -205,10 +207,20 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
         )));
     }
     if !matches!(event.scope_ref, arkret_wire::ScopeRef::Realm { .. })
+        && !(matches!(event.scope_ref, arkret_wire::ScopeRef::RealmControl { .. })
+            && event.actor_id.as_account_id().is_some()
+            && event.executed_by.is_none()
+            && matches!(
+                event.kind,
+                arkret_wire::EventKind::RealmActorStatusSet
+                    | arkret_wire::EventKind::RealmActorRecoverySet
+            ))
         && !(matches!(event.scope_ref, arkret_wire::ScopeRef::Circle { .. })
             && matches!(
                 event.kind,
                 arkret_wire::EventKind::CircleMemberState
+                    | arkret_wire::EventKind::CapabilityGrant
+                    | arkret_wire::EventKind::CapabilityRevoke
                     | arkret_wire::EventKind::ScopeReadReceiptPolicy
                     | arkret_wire::EventKind::CallCreate
                     | arkret_wire::EventKind::CallState
@@ -217,6 +229,7 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
                     | arkret_wire::EventKind::StrandCreate
                     | arkret_wire::EventKind::AppletBridgeError
                     | arkret_wire::EventKind::MessageCreate
+                    | arkret_wire::EventKind::MessageRedact
                     | arkret_wire::EventKind::ModerationDecision
                     | arkret_wire::EventKind::ModerationDecisionLift
                     | arkret_wire::EventKind::RelationCreate
@@ -998,6 +1011,11 @@ mod tests {
     #[test]
     fn every_other_active_kind_is_unsupported_event_kind_not_internal() {
         let routed = [
+            EventKind::CallState,
+            EventKind::RealmMediaService,
+            EventKind::AgentActionApprove,
+            EventKind::RealmActorStatusSet,
+            EventKind::RealmActorRecoverySet,
             EventKind::AppletBridgeError,
             EventKind::ConsentGrant,
             EventKind::ConsentRevoke,

@@ -183,7 +183,6 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
     prepared: Option<&coland_storage::EventApprovalCommit>,
-    forwarded: Option<&coland_storage::ForwardedManagedActorSource>,
 ) -> PersistenceResult<()> {
     let event = &transaction.event;
     if !matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit) {
@@ -223,7 +222,7 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
     };
     if !controller_reconciliation {
         crate::realm_authorization_cut::authorize_capability_gated_event_with_source(
-            conn, event, commit, prepared, forwarded,
+            conn, event, commit, prepared,
         )
         .await?;
     }
@@ -365,6 +364,9 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
     .await?;
     if event.kind == EventKind::MlsCommit {
         freeze_consumed_proposals(conn, transaction, installation, &key).await?;
+        crate::realm_actor_recovery::complete_mls_cleanup(conn, transaction, installation)
+            .await
+            .map_err(crate::PgTransactionError::into_persistence)?;
     }
     store_public_blobs(conn, event, &installation.public_blobs, commit).await?;
     crate::direct_conversation_admission::record_group_state_in_connection(
@@ -466,8 +468,15 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
         .map_err(crate::PgTransactionError::into_persistence)?;
         let verified = coland_storage::VerifiedMlsAddAuthorityAttestation {
             source_station_id: transaction.expected_authority.service_id.clone(),
-            request,
+            request: request.clone(),
             attestor_resolution: resolution.clone(),
+            claim_issuer_resolution: if request.attestation.actor_id.as_realm_actor_id().is_some() {
+                witness.claim_issuer_resolution.clone().ok_or_else(|| {
+                    failed_precondition("Realm Add lacks its original claim issuer resolution")
+                })?
+            } else {
+                resolution.clone()
+            },
         };
         crate::mls_roster_attest_add::install_in_connection(
             conn,
@@ -688,7 +697,11 @@ async fn store_recipient_roster_outbox(
         || attestation.claim_id != delivery.keypackage_claim_ref
         || attestation.actor_id != delivery.recipient_actor_id
         || attestation.endpoint != delivery.recipient_endpoint
-        || attestation.attestor_station_id != *delivery.recipient_actor_id.route_service_id()
+        || !crate::realm_actor_mls_route::matches_accepted_add(
+            &delivery.recipient_actor_id,
+            &attestation.attestor_station_id,
+            commit,
+        )
     {
         return Err(PersistenceError::SchemaViolation(
             "MLS Add attestation differs from accepted Commit and Welcome".to_owned(),
@@ -1002,7 +1015,7 @@ async fn require_joined_recipient(
 /// same request and a live claim (device-lifecycle.md, claim ledger rules).
 /// A historical claim cannot authorize a new native Welcome after a scope
 /// fence. Discover the immutable package from the original ledger, then check
-/// its exact original Account/Device and all current sources at the held cut.
+/// its exact original Actor/Device and all current sources at the held cut.
 pub(crate) async fn require_native_welcome_target(
     conn: &mut AsyncPgConnection,
     welcome: &coland_storage::VerifiedMlsWelcome,
@@ -1020,17 +1033,24 @@ pub(crate) async fn require_native_welcome_target(
         #[diesel(sql_type=Nullable<BigInt>)]
         claim_expires_at_unix_ms: Option<i64>,
     }
-    // Preserve the existing non-native verified ledger path. Native identity
-    // is independent of a caller-supplied guard and survives Device revocation
-    // and removal of unused material.
-    let account = welcome
-        .delivery
-        .recipient_actor_id
-        .as_account_id()
-        .ok_or_else(|| failed_precondition("Welcome has no Account"))?;
-    let native=sql_query("SELECT g.envelope AS value FROM principal_resolutions p JOIN canonical_events g ON g.envelope->>'event_id'=p.genesis_event_id WHERE p.principal_id=$1 AND p.station_id=$2 AND g.state='committed' AND g.envelope #>> '{payload,object,purpose}'='applet_managed_control'")
-        .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
-        .get_result::<HistoryAccessRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.is_some();
+    // Native identity is the complete Realm Actor, never an Account/PCR
+    // inference. It remains native after revocation or package removal.
+    let native = match &welcome.delivery.recipient_actor_id {
+        actor if actor.as_realm_actor_id().is_some() => {
+            if actor.as_realm_actor_id().unwrap().realm_id != welcome.delivery.realm_id {
+                return Err(binding_mismatch(
+                    "Realm Welcome recipient belongs to another Realm",
+                ));
+            }
+            true
+        }
+        actor if actor.as_account_id().is_some() => false,
+        _ => {
+            return Err(failed_precondition(
+                "Welcome recipient is not an Account or Realm Actor",
+            ));
+        }
+    };
     let package=sql_query("SELECT p.keypackage_ref,p.effective_scope,l.claim_expires_at_unix_ms FROM peer_keypackage_claims l JOIN mls_key_packages p ON p.id=l.keypackage_id WHERE l.source_id=$1 AND l.claim_request_id=$2 AND l.request_digest=$3")
         .bind::<Text,_>(&claim.source_id).bind::<Text,_>(&claim.claim_request_id).bind::<Text,_>(&claim.request_digest)
         .get_result::<Package>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
@@ -1054,28 +1074,29 @@ pub(crate) async fn require_native_welcome_target(
     if serde_json::to_value(&guard.effective_scope).map_err(PersistenceError::database)?
         != package.effective_scope.unwrap()
         || welcome.delivery.effective_scope != guard.effective_scope
-        || welcome.delivery.recipient_actor_id
-            != arkret_wire::ActorId::account(guard.authority.account_id.clone())
+        || welcome.delivery.recipient_actor_id != guard.authority.actor_id.clone()
         || !matches!(&welcome.delivery.recipient_endpoint,arkret_wire::MlsWelcomeRecipientEndpoint::Device{device_id} if device_id==&guard.authority.device_id)
     {
         return Err(binding_mismatch(
             "Welcome differs from its native recipient proof",
         ));
     }
-    // Local UOWs planned this PCR in their ordered current cut. A replica may
+    // Local UOWs planned this control Realm in their ordered current cut. A replica may
     // already hold its business cut: avoid an inverse-order wait and drop this
-    // delivery at its savepoint if another transaction owns the PCR.
+    // delivery at its savepoint if another transaction owns the control cut.
     sql_query(
         "SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1 FOR UPDATE NOWAIT",
     )
-    .bind::<Text, _>(guard.authority.pcr_realm_id.as_str())
+    .bind::<Text, _>(guard.authority.realm_id.as_str())
     .get_result::<HistoryAccessRow>(&mut *conn)
     .await
     .map_err(|error| match error {
         diesel::result::Error::DatabaseError(_, ref info)
             if info.message().contains("could not obtain lock") =>
         {
-            PersistenceError::Conflict("temporarily_unavailable: native Welcome PCR is busy".into())
+            PersistenceError::Conflict(
+                "temporarily_unavailable: native Welcome control cut is busy".into(),
+            )
         }
         other => PersistenceError::database(other),
     })?;

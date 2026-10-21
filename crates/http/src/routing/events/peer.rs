@@ -448,12 +448,13 @@ async fn refresh_current_account_status_inner(
     account: &arkret_wire::AccountId,
 ) -> Result<coland_storage::AccountStatusCurrentObservation, AppError> {
     use arkret_models_collaboration::account_lifecycle::AccountStatusInitialPublication;
-    let (authority, endpoint) = trusted_account_authority_binding(state).await?;
-    if account.station_id != authority {
-        return Err(AppError::capability_denied(
-            "Account Authority deployment binding is unavailable",
-        ));
-    }
+    let authority = account.station_id.clone();
+    let local = authority == state.service_core_id();
+    let endpoint = if local {
+        Some(trusted_account_authority_binding(state).await?.1)
+    } else {
+        None
+    };
     let mut expected = state
         .persistence()
         .current_account_status_record(authority.as_str(), account)
@@ -478,12 +479,22 @@ async fn refresh_current_account_status_inner(
             .map_err(|_| AppError::internal("Account lifecycle resolve bounds invalid"))?;
         let body = arkret_canonical::canonical_json_bytes(&request)
             .map_err(|_| AppError::internal("Account lifecycle request encoding failed"))?;
-        let response =
+        let response = if let Some(endpoint) = &endpoint {
             crate::routing::federation::outbox::signed_deployment_account_status_resolve(
-                state, &authority, &endpoint, &body,
+                state, &authority, endpoint, &body,
             )
             .await
-            .map_err(|_| AppError::internal("Account Authority current resolve unavailable"))?;
+        } else {
+            crate::routing::federation::outbox::signed_peer_request(
+                state,
+                authority.as_str(),
+                "/_arkret/peer/account-status/resolve",
+                &body,
+                2 * 1024 * 1024,
+            )
+            .await
+        }
+        .map_err(|_| AppError::internal("Account Authority current resolve unavailable"))?;
         if response.status != StatusCode::OK.as_u16() {
             return Err(AppError::capability_denied(
                 "Account Authority current resolve refused",
@@ -513,7 +524,40 @@ async fn refresh_current_account_status_inner(
                     record: record.clone(),
                 }),
             };
-            validate_account_status_publication(state, authority.as_str(), &publication).await?;
+            if local {
+                validate_account_status_publication(state, authority.as_str(), &publication)
+                    .await?;
+            } else {
+                // The complete Account selects its own Station identity. The
+                // signed AA record attests the private PCR binding; foreign
+                // governance never imports that Account's private PCR history.
+                record
+                    .validate_shape()
+                    .map_err(|error| schema_violation(error.to_string()))?;
+                if record.account_id != *account || record.account_authority_id != authority {
+                    return Err(AppError::capability_denied(
+                        "foreign Account Authority binding differs",
+                    ));
+                }
+                let key = historical_account_status_service_key(
+                    state,
+                    &authority,
+                    None,
+                    record.proof.verification_method.as_str(),
+                    record.proof.created_at,
+                    "foreign Account Authority",
+                )
+                .await?;
+                arkret_signatures::account_status::verify_account_status_record(
+                    record,
+                    &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                        bytes: key.to_bytes().to_vec(),
+                    },
+                )
+                .map_err(|_| {
+                    AppError::capability_denied("foreign Account Authority proof is invalid")
+                })?;
+            }
             let (receipt, accepted) = match append_validated_account_status_record(state, record)
                 .await?
             {
@@ -597,6 +641,18 @@ async fn peer_account_status_resolve(
         return Err(account_status_resolve_not_found());
     }
 
+    if state
+        .persistence()
+        .principal_resolution_by_account_id(&request.account_id)
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?
+        .is_none()
+    {
+        return Err(account_status_resolve_not_found());
+    }
+    // This public Station endpoint may front a split local AA. A freshness
+    // read must finish that authoritative resolve before exposing its replica.
+    refresh_current_account_status(state, &request.account_id).await?;
     let current_exists = state
         .persistence()
         .current_account_status_record(request.account_authority_id.as_str(), &request.account_id)
@@ -1328,7 +1384,10 @@ impl PeerReadAuthz {
             .unwrap_or_default();
         match membership {
             "join" | "active" => {
-                if actor_id.route_service_id().as_str() != self.source_id {
+                if actor_id
+                    .fixed_route_service_id()
+                    .is_none_or(|station| station.as_str() != self.source_id)
+                {
                     self.remove_realm_member(&realm_id, &actor);
                     return;
                 }

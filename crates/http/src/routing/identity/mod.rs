@@ -6,6 +6,9 @@ pub(crate) mod account_data;
 pub(crate) mod agents;
 pub(crate) mod applet_managed_device;
 pub(crate) mod auth;
+pub(crate) mod realm_actor_account_material;
+pub(crate) mod realm_actor_control;
+pub(crate) mod realm_actor_material;
 // api-conventions.md §3.3 — `/_arkret/self/*` inbound credential: a
 // `ak.session.grant` presented directly with a DPoP (RFC 9449) holder proof,
 // validated against a TTL-cached coauth introspection. The default ② session
@@ -102,6 +105,7 @@ pub fn protocol_router() -> Router {
                 .push(account::protocol_router())
                 // Spec `account_data` group (`ak.self.account_data.*`).
                 .push(account_data::router())
+                .push(realm_actor_material::router())
                 // Spec `consent` group (`ak.self.consent.*`).
                 .push(consent::router())
                 .push(current_signer_evidence::self_router())

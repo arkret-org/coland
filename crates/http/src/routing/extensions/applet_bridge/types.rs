@@ -3,20 +3,15 @@
 use std::collections::BTreeSet;
 use std::ops::Deref;
 
-use arkret_models_collaboration::governance::accountability::{
-    AccountabilityGrantPayload, AccountabilityGrantStatus, AccountabilityScope,
-    AccountabilityScopeKind,
-};
 use arkret_models_collaboration::governance::grant_constraint::{
     CapabilitySubject, GrantConstraint, GrantConstraintSubkind, IssuerAuthorityRef,
 };
 use arkret_models_integration::{
-    AppletInstallEffectiveStatus, AppletInstallOutcome, AppletManagedActorProvisionPayload,
-    AppletManagedActorRole, AppletPackage, GhostExternalTuple,
+    AppletInstallEffectiveStatus, AppletInstallOutcome, AppletPackage,
 };
 use arkret_wire::{
-    ActorId, ActorKind, AppletId, DidCoreId, Event, EventId, GrantId, Hash, RealmId,
-    ResourceMatchScope, ScopeRef, WireResourceSelector,
+    ActorId, AppletId, DidCoreId, Event, GrantId, Hash, RealmId, ResourceMatchScope, ScopeRef,
+    WireResourceSelector,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -101,8 +96,6 @@ pub(super) struct AppletInstallationRecord {
     pub install_execution: Value,
     #[serde(default)]
     pub revoke_execution: Option<Value>,
-    pub bots: Vec<BotActorRecord>,
-    pub ghosts: Vec<GhostActorRecord>,
 }
 
 impl AppletRecord {
@@ -130,8 +123,8 @@ impl AppletRecord {
             capability_grant_events: installation.capability_grant_events,
             install_execution: installation.install_execution,
             revoke_execution: installation.revoke_execution,
-            bots: installation.bots,
-            ghosts: installation.ghosts,
+            bots: Vec::new(),
+            ghosts: Vec::new(),
         }
     }
 
@@ -156,8 +149,6 @@ impl AppletRecord {
             capability_grant_events: self.capability_grant_events.clone(),
             install_execution: self.install_execution.clone(),
             revoke_execution: self.revoke_execution.clone(),
-            bots: self.bots.clone(),
-            ghosts: self.ghosts.clone(),
         }
     }
 }
@@ -186,47 +177,17 @@ pub(crate) fn registration_epoch_evidence_from_event(
         .map_err(|error| format!("registration Event epoch evidence is invalid: {error}"))
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct BotActorRecord {
     pub bot_actor_id: ActorId,
-    pub request_id: String,
-    pub request_digest: Hash,
-    pub managed_actor_provision_event: Event,
-    pub pcr_genesis_event: Event,
-    pub accountability_grant_event: Event,
-    pub profile_event: Event,
-    #[serde(with = "arkret_canonical::serde_helpers::canonical_timestamp")]
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub creation_ref: arkret_wire::CommittedEventRef,
 }
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct GhostActorRecord {
     pub ghost_actor_id: ActorId,
     pub external_ref: arkret_models_integration::GhostExternalTuple,
-    #[serde(default)]
     pub display_name: Option<String>,
-    pub request_digest: Hash,
-    pub managed_actor_provision_event: Event,
-    pub pcr_genesis_event: Event,
-    pub accountability_grant_event: Event,
-    pub profile_event: Event,
-    #[serde(with = "arkret_canonical::serde_helpers::canonical_timestamp")]
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl GhostActorRecord {
-    pub(crate) fn provision_payload(
-        &self,
-    ) -> Result<arkret_models_integration::AppletManagedActorProvisionPayload, String> {
-        serde_json::from_value(event_payload_value(&self.managed_actor_provision_event))
-            .map_err(|error| format!("stored Ghost provision payload is invalid: {error}"))
-    }
-
-    pub(crate) fn principal_control_realm_id(&self) -> RealmId {
-        RealmId::from_event_id(&self.pcr_genesis_event.event_id)
-    }
+    pub creation_ref: arkret_wire::CommittedEventRef,
 }
 
 fn validate_stored_event(event: &Event, label: &str) -> Result<(), String> {
@@ -244,212 +205,6 @@ fn validate_stored_event(event: &Event, label: &str) -> Result<(), String> {
     event
         .validate_proof_bindings_with_digest_suite(digest_suite)
         .map_err(|error| format!("stored {label} Event proof binding is invalid: {error}"))
-}
-
-fn validate_registration_epoch_proof_method(
-    event: &Event,
-    verification_method: &str,
-    label: &str,
-) -> Result<(), String> {
-    if event
-        .producer_proof
-        .as_ref()
-        .is_some_and(|proof| proof.verification_method != verification_method)
-    {
-        return Err(format!(
-            "stored {label} Event proof is outside the Applet registration epoch"
-        ));
-    }
-    Ok(())
-}
-
-fn exact_role_ref(event: &Event, role: &str, event_id: &EventId) -> bool {
-    event
-        .semantic_refs
-        .iter()
-        .filter(|reference| reference.role == role)
-        .collect::<Vec<_>>()
-        .as_slice()
-        .first()
-        .is_some_and(|reference| {
-            event
-                .semantic_refs
-                .iter()
-                .filter(|item| item.role == role)
-                .count()
-                == 1
-                && reference.critical
-                && reference.id == event_id.as_str()
-        })
-}
-
-fn validate_managed_actor_unit(
-    record: &AppletRecord,
-    role: AppletManagedActorRole,
-    actor_id: &ActorId,
-    station_id: &DidCoreId,
-    external_ref: Option<&GhostExternalTuple>,
-    provision_event: &Event,
-    pcr_event: &Event,
-    accountability_event: &Event,
-    profile_event: &Event,
-) -> Result<AppletManagedActorProvisionPayload, String> {
-    let label = match role {
-        AppletManagedActorRole::Bot => "Bot",
-        AppletManagedActorRole::Ghost => "Ghost",
-    };
-    let authority_package = &record.package;
-    let authority_scope = &provision_event.scope_ref;
-    let authority_realm_id = authority_scope.realm_id();
-    let service_actor_id = arkret_wire::ActorId::service(authority_package.service_id.clone());
-    validate_stored_event(provision_event, "managed provision")?;
-    validate_stored_event(pcr_event, "managed PCR genesis")?;
-    validate_stored_event(accountability_event, "managed accountability")?;
-    validate_stored_event(profile_event, "managed profile")?;
-
-    let provision: AppletManagedActorProvisionPayload =
-        serde_json::from_value(event_payload_value(provision_event))
-            .map_err(|error| format!("stored {label} provision payload is invalid: {error}"))?;
-    provision
-        .validate()
-        .map_err(|error| format!("stored {label} provision payload is invalid: {error}"))?;
-    if provision.actor_role != role
-        || provision.applet_id != record.applet_id
-        || provision.service_id != authority_package.service_id
-        || &provision.actor_id != actor_id
-        || !matches!(&provision.actor_id, ActorId::Account { .. })
-        || provision.actor_id.route_service_id() != station_id
-        || provision.external_ref.as_ref() != external_ref
-        || provision_event.kind.as_str()
-            != arkret_wire::event_kind_str::APPLET_MANAGED_ACTOR_PROVISION
-        || provision_event.actor_id != service_actor_id
-        || &provision_event.realm_id != authority_realm_id
-        || &provision_event.scope_ref != authority_scope
-        || provision_event.applet_id.as_ref() != Some(&record.applet_id)
-        || provision_event.authorization_ref.as_deref()
-            != Some(provision.applet_authority_ref.as_str())
-    {
-        return Err(format!(
-            "stored {label} provision anchor drifts from the accepted Applet authority"
-        ));
-    }
-
-    let pcr_realm_id = RealmId::from_event_id(&pcr_event.event_id);
-    let genesis: arkret_models_collaboration::events_payloads::RealmGenesis =
-        serde_json::from_value(
-            pcr_event
-                .payload
-                .get("object")
-                .cloned()
-                .ok_or_else(|| format!("stored {label} PCR genesis object is missing"))?,
-        )
-        .map_err(|error| format!("stored {label} PCR genesis object is invalid: {error}"))?;
-    if pcr_event.kind != arkret_wire::EventKind::RealmCreate
-        || &pcr_event.actor_id != actor_id
-        || pcr_event.executed_by.as_ref() != Some(&service_actor_id)
-        || pcr_event.actor_id.route_service_id() != station_id
-        || pcr_event.applet_id.as_ref() != Some(&record.applet_id)
-        || pcr_event.authorization_ref.as_deref() != Some(provision.applet_authority_ref.as_str())
-        || pcr_event.realm_id != pcr_realm_id
-        || pcr_event.scope_ref != ScopeRef::RealmGenesis
-        || !exact_role_ref(
-            pcr_event,
-            "applet_managed_actor_provision",
-            &provision_event.event_id,
-        )
-        || genesis.purpose
-            != arkret_models_collaboration::events_payloads::RealmPurpose::AppletManagedControl
-        || genesis.initial_resolution.as_ref() != Some(&provision.initial_resolution)
-    {
-        return Err(format!(
-            "stored {label} PCR genesis drifts from its immutable provision"
-        ));
-    }
-
-    let registration_method = provision_event
-        .producer_proof
-        .as_ref()
-        .ok_or_else(|| "managed provenance has no producer proof".to_owned())?
-        .verification_method
-        .as_str();
-    for event in [accountability_event, profile_event] {
-        validate_registration_epoch_proof_method(event, registration_method, label)?;
-    }
-    let accountability: AccountabilityGrantPayload =
-        serde_json::from_value(event_payload_value(accountability_event)).map_err(|error| {
-            format!("stored {label} accountability payload is invalid: {error}")
-        })?;
-    accountability
-        .canonical_proof_binding_bytes()
-        .map_err(|error| format!("stored {label} accountability proof is invalid: {error}"))?;
-    if accountability_event.kind != arkret_wire::EventKind::IdentityAccountabilityGrant
-        || accountability_event.actor_id != service_actor_id
-        || accountability_event.executed_by.is_some()
-        || &accountability_event.realm_id != authority_realm_id
-        || &accountability_event.scope_ref != authority_scope
-        || accountability_event.applet_id.as_ref() != Some(&record.applet_id)
-        || accountability_event.authorization_ref.as_deref()
-            != Some(provision.applet_authority_ref.as_str())
-        || accountability.schema != AccountabilityGrantPayload::SCHEMA
-        || accountability.issuer_id != authority_package.service_id
-        || &accountability.subject_id != actor_id.signing_principal_id()
-        || accountability.accountability_scope
-            != AccountabilityScope::Single(AccountabilityScopeKind::ContractedService)
-        || accountability.grant_status != AccountabilityGrantStatus::Active
-        || accountability.proof.verification_method != registration_method
-        || accountability
-            .expires_at
-            .is_some_and(|expires_at| expires_at <= accountability.not_before)
-    {
-        return Err(format!(
-            "stored {label} accountability grant is not the accepted contracted-service authority"
-        ));
-    }
-
-    let profile: arkret_models_collaboration::events_payloads::ActorProfileCreatePayload =
-        serde_json::from_value(event_payload_value(profile_event))
-            .map_err(|error| format!("stored {label} profile payload is invalid: {error}"))?;
-    let profile = profile.object;
-    let expected_external_ref = external_ref
-        .map(serde_json::to_value)
-        .transpose()
-        .map_err(|error| format!("stored {label} external_ref cannot be encoded: {error}"))?;
-    let expected_actor_kind = match role {
-        AppletManagedActorRole::Bot => ActorKind::Bot,
-        AppletManagedActorRole::Ghost => ActorKind::Integration,
-    };
-    if profile_event.kind != arkret_wire::EventKind::ProfileCreate
-        || &profile_event.actor_id != actor_id
-        || profile_event.executed_by.as_ref() != Some(&service_actor_id)
-        || profile_event.actor_id.route_service_id() != station_id
-        || profile_event.realm_id != pcr_realm_id
-        || profile_event.scope_ref
-            != (ScopeRef::Realm {
-                realm_id: pcr_realm_id.clone(),
-            })
-        || profile_event.applet_id.as_ref() != Some(&record.applet_id)
-        || profile_event.authorization_ref.as_deref()
-            != Some(provision.applet_authority_ref.as_str())
-        || !exact_role_ref(
-            profile_event,
-            "accountability",
-            &accountability_event.event_id,
-        )
-        || profile.principal_id != *actor_id.signing_principal_id()
-        || profile.actor_kind != expected_actor_kind
-        || profile.accountable_principal_ids.as_slice() != [authority_package.service_id.clone()]
-        || profile
-            .profile_fields
-            .get("managed_by_applet")
-            .and_then(Value::as_str)
-            != Some(record.applet_id.as_str())
-        || profile.profile_fields.get("external_ref") != expected_external_ref.as_ref()
-    {
-        return Err(format!(
-            "stored {label} profile is not the exact managed-actor projection"
-        ));
-    }
-    Ok(provision)
 }
 
 impl AppletRecord {
@@ -643,76 +398,6 @@ impl AppletRecord {
                 return Err("stored Applet Event set reuses an Event id".to_owned());
             }
         }
-        let mut managed_actor_ids = BTreeSet::new();
-        let mut bot_requests = BTreeSet::new();
-        for bot in &self.bots {
-            if !managed_actor_ids.insert(bot.bot_actor_id.clone())
-                || !bot_requests.insert(&bot.request_id)
-            {
-                return Err("stored Bot identity or request id is duplicated".to_owned());
-            }
-            validate_managed_actor_unit(
-                self,
-                AppletManagedActorRole::Bot,
-                &bot.bot_actor_id,
-                &self.target_station_id,
-                None,
-                &bot.managed_actor_provision_event,
-                &bot.pcr_genesis_event,
-                &bot.accountability_grant_event,
-                &bot.profile_event,
-            )?;
-            for event in [
-                &bot.managed_actor_provision_event,
-                &bot.pcr_genesis_event,
-                &bot.accountability_grant_event,
-                &bot.profile_event,
-            ] {
-                if !all_event_ids.insert(event.event_id.clone()) {
-                    return Err("stored Bot fixed Event set reuses an Event id".to_owned());
-                }
-            }
-        }
-        let mut external_refs = BTreeSet::new();
-        for ghost in &self.ghosts {
-            if ghost.ghost_actor_id.route_service_id() != &self.target_station_id
-                || ghost.ghost_actor_id.signing_principal_id() == &self.package.service_id
-                || ghost.ghost_actor_id.signing_principal_id()
-                    == &self.package.controller_principal_id
-                || !managed_actor_ids.insert(ghost.ghost_actor_id.clone())
-                || !external_refs.insert((
-                    ghost.external_ref.protocol.clone(),
-                    ghost.external_ref.instance_id.clone(),
-                    ghost.external_ref.external_id.clone(),
-                ))
-            {
-                return Err(
-                    "stored Ghost authority pair is invalid or reuses an existing Applet authority"
-                        .to_owned(),
-                );
-            }
-            validate_managed_actor_unit(
-                self,
-                AppletManagedActorRole::Ghost,
-                &ghost.ghost_actor_id,
-                ghost.ghost_actor_id.route_service_id(),
-                Some(&ghost.external_ref),
-                &ghost.managed_actor_provision_event,
-                &ghost.pcr_genesis_event,
-                &ghost.accountability_grant_event,
-                &ghost.profile_event,
-            )?;
-            for event in [
-                &ghost.managed_actor_provision_event,
-                &ghost.pcr_genesis_event,
-                &ghost.accountability_grant_event,
-                &ghost.profile_event,
-            ] {
-                if !all_event_ids.insert(event.event_id.clone()) {
-                    return Err("stored Ghost fixed Event set reuses an Event id".to_owned());
-                }
-            }
-        }
         Ok(())
     }
 }
@@ -741,7 +426,7 @@ pub struct AppletRevokeRecordOutcome {
 
 #[cfg(test)]
 mod tests {
-    use arkret_wire::{DidUrl, ProducerEventProof};
+    use arkret_wire::{DidUrl, EventId, ProducerEventProof};
     use serde_json::json;
 
     use super::*;
@@ -794,23 +479,6 @@ mod tests {
         let error = validate_stored_event(&tampered, "fixture")
             .expect_err("stored canonical Event content must be immutable");
         assert!(error.contains("identity") || error.contains("proof binding"));
-    }
-
-    #[test]
-    fn stored_fixed_role_ref_rejects_extra_or_noncritical_refs() {
-        let mut event = structural_only_fixture_event();
-        let target = EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0x52; 32]);
-        event.semantic_refs = vec![arkret_wire::SemanticRef::new(
-            target.as_str(),
-            "accountability",
-        )];
-        assert!(exact_role_ref(&event, "accountability", &target));
-
-        event.semantic_refs.push(arkret_wire::SemanticRef::new(
-            EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0x53; 32]).as_str(),
-            "accountability",
-        ));
-        assert!(!exact_role_ref(&event, "accountability", &target));
     }
 
     #[test]

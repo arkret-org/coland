@@ -2569,7 +2569,11 @@ pub enum ServiceRegistrationCommitResult {
 #[async_trait]
 pub trait DidDocumentPort: Send + Sync {
     async fn document(&self, did: &str) -> ServiceResult<Option<DidDocumentState>>;
-    async fn embedded_document(&self, local_id: &str) -> ServiceResult<Option<DidDocumentState>>;
+    async fn embedded_document(
+        &self,
+        local_id: &str,
+        expected_log_url: &str,
+    ) -> ServiceResult<Option<DidDocumentState>>;
     async fn log_events(&self, did: &str) -> ServiceResult<Vec<DidLogEvent>>;
     async fn store_document(&self, document: DidDocumentState) -> ServiceResult<()>;
     async fn append_log_event(&self, event: DidLogEvent) -> ServiceResult<()>;
@@ -3012,8 +3016,11 @@ impl DidService {
     pub async fn embedded_document(
         &self,
         local_id: &str,
+        expected_log_url: &str,
     ) -> ServiceResult<Option<DidDocumentState>> {
-        self.documents.embedded_document(local_id).await
+        self.documents
+            .embedded_document(local_id, expected_log_url)
+            .await
     }
 
     pub async fn log_events(&self, did: &str) -> ServiceResult<Vec<DidLogEvent>> {
@@ -3637,6 +3644,7 @@ mod tests {
         async fn embedded_document(
             &self,
             _local_id: &str,
+            _expected_log_url: &str,
         ) -> ServiceResult<Option<DidDocumentState>> {
             Ok(None)
         }

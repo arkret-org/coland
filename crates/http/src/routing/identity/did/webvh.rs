@@ -95,7 +95,15 @@ pub(super) async fn embedded_webvh_record_for_request(
         );
         return None;
     };
-    match state.dids().embedded_document(&local_id).await {
+    let expected_log_url = format!(
+        "{}/webvh/{local_id}/did.jsonl",
+        state.config().public_base_url.trim_end_matches('/')
+    );
+    match state
+        .dids()
+        .embedded_document(&local_id, &expected_log_url)
+        .await
+    {
         Ok(Some(record)) => Some(record),
         Ok(None) => {
             render_error(

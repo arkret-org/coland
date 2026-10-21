@@ -11,9 +11,7 @@ fn require_subject(
     caller: &ActorId,
     scope: &ScopeRef,
 ) -> PersistenceResult<()> {
-    if caller != &ActorId::account(endpoint.authority.account_id.clone())
-        || scope != &endpoint.effective_scope
-    {
+    if caller != &endpoint.authority.actor_id.clone() || scope != &endpoint.effective_scope {
         return Err(refused("native MLS material has another caller or scope"));
     }
     Ok(())

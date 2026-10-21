@@ -165,7 +165,13 @@ async fn verified_replicated_welcomes(
                 "replicated MLS Welcome refused by its claim destination"
             );
         };
-        if welcome.recipient_actor_id.route_service_id() != &state.service_core_id() {
+        if crate::routing::actor_delivery_station(state, &welcome.recipient_actor_id)
+            .await
+            .map_err(|error| {
+                coland_services::ServiceError::Conflict(format!("temporarily_unavailable: {error}"))
+            })?
+            != state.service_core_id()
+        {
             refused(&"the recipient is not hosted here");
             continue;
         }

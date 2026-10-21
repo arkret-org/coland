@@ -186,8 +186,8 @@ pub(super) async fn resolve_self_mls_roster_authority(
         crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice,
     >() {
         if device.operation != arkret_wire::ServiceOperationId::SelfMlsReadRosterAuthorityV1
-            || member_request.caller_actor_id != arkret_wire::ActorId::account(device.authority.account_id.clone())
-            || member_request.caller_actor_id.route_service_id() != &state.service_core_id()
+            || member_request.caller_actor_id != device.authority.actor_id.clone()
+            || device.authority.governance_service_id != state.service_core_id()
             || member_request.effective_scope != device.metadata.effective_scope
             || member_request.effective_scope.realm_id() != &member_request.realm_id
         {
@@ -206,7 +206,7 @@ pub(super) async fn resolve_self_mls_roster_authority(
         let session = aa.authenticated_session(state, req).await?;
         let caller = crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
         if member_request.caller_actor_id != caller
-            || caller.route_service_id() != &state.service_core_id()
+            || caller.as_account_id().map(|account| &account.station_id) != Some(&state.service_core_id())
         {
             return Err(not_found());
         }
@@ -330,7 +330,9 @@ pub(super) async fn resolve_peer_mls_roster_authority(
         .await
         .map_err(|_| crate::app_error!(SchemaViolation, "invalid MLS roster request"))?;
     validate_request(&request)?;
-    if request.caller_actor_id.route_service_id() != &peer.source_service_id {
+    if crate::routing::actor_delivery_station(state, &request.caller_actor_id).await?
+        != peer.source_service_id
+    {
         return Err(not_found());
     }
     json_page(governance_page(state, &request, Some(&peer.source_service_id)).await?)

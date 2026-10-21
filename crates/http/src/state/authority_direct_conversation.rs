@@ -314,10 +314,15 @@ pub(super) async fn submit_peer_direct_conversation_founding(
         ))
     })?;
     if facts.governance_station_id != peer.source_service_id
-        || facts.founder_id.route_service_id() != &peer.source_service_id
-        || facts.peer_id.route_service_id() != &state.service_core_id()
+        || facts.founder_id.as_account_id().map(|a| &a.station_id) != Some(&peer.source_service_id)
+        || facts.peer_id.as_account_id().map(|a| &a.station_id) != Some(&state.service_core_id())
         || unit.transactions.iter().any(|transaction| {
-            transaction.event.actor_id.route_service_id() != &peer.source_service_id
+            transaction
+                .event
+                .actor_id
+                .as_account_id()
+                .map(|a| &a.station_id)
+                != Some(&peer.source_service_id)
                 || transaction.event.executed_by.is_some()
         })
     {

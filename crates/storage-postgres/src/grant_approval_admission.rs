@@ -120,65 +120,22 @@ pub(crate) async fn require_grant_approvals(
     require_with_source(conn, &source, methods, grant, action, target, facts).await
 }
 
-pub(crate) async fn require_creation_grant_approvals(
-    conn: &mut AsyncPgConnection,
-    creation: &crate::applet_action_approval::CreationAuthority<'_>,
-    methods: &[coland_storage::ApprovalHistoricalMethod],
-    grant: &CapabilityGrant,
-    current: &coland_storage::ManagementReviewCurrent,
-) -> PersistenceResult<Vec<SatisfiedGrantApproval>> {
-    if grant.constraints.iter().any(|constraint| {
-        is_approval_constraint(constraint)
-            && (constraint.approval_required == Some(true)
-                || constraint.guardian_approval_required == Some(true)
-                || constraint.controller_approval_required == Some(true))
-            && (constraint.applies_to_actions.is_empty()
-                || constraint
-                    .applies_to_actions
-                    .iter()
-                    .any(|action| action.as_str() == creation.action.as_str()))
-    }) && !methods.iter().any(|method| {
-        matches!(
-            &method.signature.input.approval_context,
-            ApprovalContext::Grant { grant_id } if grant_id == &grant.id
-        )
-    }) {
-        return Err(missing(creation.action, 1, 0));
-    }
-    require_with_source(
-        conn,
-        &GrantApprovalSource::Creation(creation, current),
-        methods,
-        grant,
-        creation.action,
-        &creation.target,
-        &creation.facts,
-    )
-    .await
-}
-
 enum GrantApprovalSource<'a> {
     Event {
         event: &'a Event,
         at: chrono::DateTime<chrono::Utc>,
         registered_pair: bool,
     },
-    Creation(
-        &'a crate::applet_action_approval::CreationAuthority<'a>,
-        &'a coland_storage::ManagementReviewCurrent,
-    ),
 }
 impl GrantApprovalSource<'_> {
     fn at(&self) -> chrono::DateTime<chrono::Utc> {
         match self {
             Self::Event { at, .. } => *at,
-            Self::Creation(creation, _) => creation.input.accepted_at,
         }
     }
     fn initiator(&self) -> &arkret_wire::ActorId {
         match self {
             Self::Event { event, .. } => &event.actor_id,
-            Self::Creation(creation, _) => &creation.input.admin_actor_id,
         }
     }
     async fn qualify(
@@ -205,12 +162,6 @@ impl GrantApprovalSource<'_> {
                     *at,
                     false,
                     *registered_pair,
-                )
-                .await
-            }
-            Self::Creation(creation, current) => {
-                crate::approval_admission::qualify_creation_principal(
-                    conn, creation, principal, current,
                 )
                 .await
             }

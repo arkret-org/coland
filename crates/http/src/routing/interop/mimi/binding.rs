@@ -156,7 +156,7 @@ pub(super) async fn enforce_mimi_submit_binding(
         epoch,
     )?;
 
-    let sender_route = body.sender_actor_id.route_service_id();
+    let sender_route = crate::routing::actor_delivery_station(state, &body.sender_actor_id).await?;
     if sender_route.as_str() != source_provider {
         return Err(AppError::capability_denied(
             "MIMI source provider does not attest the sender's current route",

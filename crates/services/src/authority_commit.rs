@@ -488,6 +488,18 @@ impl AuthorityCommitApplication {
             .acquire_committed_content_delivery(account, station, input)
             .await?)
     }
+
+    pub async fn acquire_realm_actor_content_delivery(
+        &self,
+        actor: &arkret_wire::ActorId,
+        station: &arkret_wire::DidCoreId,
+        input: &coland_storage::AccountContentDeliveryInput,
+    ) -> ServiceResult<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>> {
+        Ok(self
+            .store()
+            .acquire_realm_actor_content_delivery(actor, station, input)
+            .await?)
+    }
     /// Native fixed reply preparation, separate from the final Event UOW.
     pub async fn acquire_native_message_reply_preparation(
         &self,
@@ -544,6 +556,18 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    pub async fn prepare_realm_device_signer_fact(
+        &self,
+        event: &arkret_wire::Event,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> ServiceResult<arkret_models_collaboration::authority_commit::RealmDeviceHistoricalSignerFact>
+    {
+        Ok(self
+            .store()
+            .prepare_realm_device_signer_fact(event, at)
+            .await?)
+    }
+
     pub async fn prepare_account_device_signer_fact(
         &self,
         event: &Event,
@@ -567,7 +591,7 @@ impl AuthorityCommitApplication {
         event: &Event,
         guard: &coland_storage::AppletEventProducerGuard,
         at: DateTime<Utc>,
-    ) -> ServiceResult<arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact>
+    ) -> ServiceResult<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>
     {
         Ok(self
             .store()
@@ -1575,6 +1599,291 @@ impl AuthorityCommitApplication {
     /// An exact retry of an accepted Event returns its stored Commit before
     /// any authority read; the unit itself rechecks the approving device,
     /// generation, target history and every signature at the locked PCR cut.
+    pub async fn realm_actor_control_replay(
+        &self,
+        event: &Event,
+        carrier: &coland_storage::AppletControlCarrier,
+        request_digest: &arkret_wire::Hash,
+    ) -> ServiceResult<Option<RealmCommit>> {
+        Ok(self
+            .store()
+            .realm_actor_control_replay(event, carrier, request_digest)
+            .await?)
+    }
+
+    pub async fn read_realm_actor_material(
+        &self,
+        request: &arkret_models_integration::RealmActorMaterialRequest,
+        caller: &coland_storage::RealmActorMaterialCaller,
+        governor: &DidCoreId,
+        verification_method: &DidUrl,
+        signing_key: &SigningKey,
+    ) -> ServiceResult<arkret_models_integration::RealmActorMaterialOutcome> {
+        let sign = |body: &arkret_models_integration::RealmActorMaterialUnsigned| {
+            let signature = arkret_signatures::detached_object::sign_detached_object(
+                body,
+                DetachedSignatureContext::RealmActorMaterial,
+                verification_method.clone(),
+                body.issued_at,
+                signing_key,
+            )
+            .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))?;
+            Ok(body.clone().into_signed(signature))
+        };
+        Ok(self
+            .store()
+            .read_realm_actor_material(request, caller, governor, &sign)
+            .await?)
+    }
+
+    pub async fn applet_registration_for_realm(
+        &self,
+        realm: &arkret_wire::RealmId,
+        applet: &arkret_wire::AppletId,
+    ) -> ServiceResult<arkret_models_integration::AppletRegistrationPayload> {
+        Ok(self
+            .store()
+            .applet_registration_for_realm(realm, applet)
+            .await?)
+    }
+
+    pub async fn realm_actor_control_carrier(
+        &self,
+        metadata: &arkret_models_integration::RealmActorControlHttpMetadata,
+        governor: &DidCoreId,
+    ) -> ServiceResult<coland_storage::AppletControlCarrier> {
+        Ok(self
+            .store()
+            .realm_actor_control_carrier(metadata, governor)
+            .await?)
+    }
+
+    pub async fn consume_realm_actor_control_nonce(
+        &self,
+        expected: &coland_storage::AppletControlCarrier,
+        metadata: &arkret_models_integration::RealmActorControlHttpMetadata,
+        retain_until: DateTime<Utc>,
+    ) -> ServiceResult<()> {
+        Ok(self
+            .store()
+            .consume_realm_actor_control_nonce(expected, metadata, retain_until)
+            .await?)
+    }
+
+    pub async fn applet_realm_actor_creations(
+        &self,
+        realm: &arkret_wire::RealmId,
+        applet: &arkret_wire::AppletId,
+    ) -> ServiceResult<Vec<arkret_wire::CommittedEventFullView>> {
+        Ok(self
+            .store()
+            .applet_realm_actor_creations(realm, applet)
+            .await?)
+    }
+    pub async fn realm_actor_creation_replay(
+        &self,
+        event: &Event,
+        digest: &arkret_wire::Hash,
+        governor: &arkret_wire::DidCoreId,
+    ) -> ServiceResult<Option<arkret_wire::RealmCommit>> {
+        Ok(self
+            .store()
+            .realm_actor_creation_replay(event, digest, governor)
+            .await?)
+    }
+    pub async fn admit_realm_actor_creation(
+        &self,
+        event: &Event,
+        producer: &coland_storage::AppletEventProducerGuard,
+        local_service_id: &DidCoreId,
+        verification_method: DidUrl,
+        signing_key: &SigningKey,
+        at: DateTime<Utc>,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
+        digest: &arkret_wire::Hash,
+    ) -> ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
+        event
+            .validate_for_submit_structural()
+            .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+        if let Some(commit) = self
+            .store()
+            .realm_actor_creation_replay(event, digest, local_service_id)
+            .await?
+        {
+            return Ok(arkret_wire::AuthoritySubmitOutcome::Accepted {
+                status: arkret_wire::AuthorityCommitStatus::Duplicate,
+                commit,
+            });
+        }
+        let fact = self
+            .store()
+            .prepare_service_signer_fact(event, producer, at)
+            .await?;
+        let transaction = self
+            .prepare_self_event_transaction_with_signer_fact(
+                event,
+                local_service_id,
+                verification_method,
+                signing_key,
+                at,
+                Some(&fact),
+            )
+            .await?;
+        Ok(self
+            .store()
+            .admit_realm_actor_creation(&transaction, producer, prepared, digest)
+            .await?)
+    }
+
+    pub async fn realm_actor_recovery_replay(
+        &self,
+        event: &Event,
+        digest: &arkret_wire::Hash,
+        governor: &arkret_wire::DidCoreId,
+    ) -> ServiceResult<Option<arkret_wire::RealmCommit>> {
+        Ok(self
+            .store()
+            .realm_actor_recovery_replay(event, digest, governor)
+            .await?)
+    }
+    pub async fn admit_realm_actor_recovery(
+        &self,
+        event: &Event,
+        producer: &coland_storage::AppletEventProducerGuard,
+        publication: Option<&arkret_models_identity::ResolutionCommitment>,
+        local_service_id: &DidCoreId,
+        verification_method: DidUrl,
+        signing_key: &SigningKey,
+        at: DateTime<Utc>,
+        digest: &arkret_wire::Hash,
+    ) -> ServiceResult<AuthoritySubmitOutcome> {
+        event
+            .validate_for_submit_structural()
+            .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+        if let Some(commit) = self
+            .store()
+            .realm_actor_recovery_replay(event, digest, local_service_id)
+            .await?
+        {
+            return Ok(AuthoritySubmitOutcome::Accepted {
+                status: arkret_wire::AuthorityCommitStatus::Duplicate,
+                commit,
+            });
+        }
+        let fact = self
+            .store()
+            .prepare_service_signer_fact(event, producer, at)
+            .await?;
+        let transaction = self
+            .prepare_self_event_transaction_with_signer_fact(
+                event,
+                local_service_id,
+                verification_method,
+                signing_key,
+                at,
+                Some(&fact),
+            )
+            .await?;
+        Ok(self
+            .store()
+            .admit_realm_actor_recovery(&transaction, producer, publication, digest)
+            .await?)
+    }
+
+    pub async fn sweep_realm_actor_device_revocations(
+        &self,
+        governor: &DidCoreId,
+    ) -> ServiceResult<usize> {
+        Ok(self
+            .store()
+            .sweep_realm_actor_device_revocations(governor)
+            .await?)
+    }
+
+    pub async fn admit_realm_actor_owner_control(
+        &self,
+        event: &Event,
+        carrier: &coland_storage::AppletControlCarrier,
+        publication: Option<&arkret_models_identity::ResolutionCommitment>,
+        manager: Option<&coland_storage::AppletEventProducerGuard>,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
+        local_service_id: &DidCoreId,
+        verification_method: DidUrl,
+        signing_key: &SigningKey,
+        at: DateTime<Utc>,
+        digest: &arkret_wire::Hash,
+    ) -> ServiceResult<AuthoritySubmitOutcome> {
+        event
+            .validate_for_submit_structural()
+            .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
+        if let Some(commit) = self
+            .store()
+            .realm_actor_control_replay(event, carrier, digest)
+            .await?
+        {
+            return Ok(AuthoritySubmitOutcome::Accepted {
+                status: arkret_wire::AuthorityCommitStatus::Duplicate,
+                commit,
+            });
+        }
+        let fact = self
+            .store()
+            .prepare_realm_actor_control_signer_fact(event, at)
+            .await?;
+        let transaction = self
+            .prepare_self_event_transaction_with_signer_fact(
+                event,
+                local_service_id,
+                verification_method,
+                signing_key,
+                at,
+                Some(&fact),
+            )
+            .await?;
+        Ok(self
+            .store()
+            .admit_realm_actor_owner_control(
+                &transaction,
+                carrier,
+                publication,
+                manager,
+                prepared,
+                digest,
+            )
+            .await?)
+    }
+
+    pub async fn admit_realm_actor_profile(
+        &self,
+        event: &Event,
+        carrier: &coland_storage::AppletControlCarrier,
+        local_service_id: &DidCoreId,
+        verification_method: DidUrl,
+        signing_key: &SigningKey,
+        at: DateTime<Utc>,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
+        request_digest: &arkret_wire::Hash,
+    ) -> ServiceResult<AuthoritySubmitOutcome> {
+        let fact = self
+            .store()
+            .prepare_realm_actor_control_signer_fact(event, at)
+            .await?;
+        let transaction = self
+            .prepare_self_event_transaction_with_signer_fact(
+                event,
+                local_service_id,
+                verification_method,
+                signing_key,
+                at,
+                Some(&fact),
+            )
+            .await?;
+        Ok(self
+            .store()
+            .admit_realm_actor_profile(&transaction, carrier, prepared, request_digest)
+            .await?)
+    }
+
     pub async fn admit_applet_managed_device_authorization(
         &self,
         event: &Event,
@@ -1582,25 +1891,30 @@ impl AuthorityCommitApplication {
         local_service_id: &DidCoreId,
         verification_method: DidUrl,
         signing_key: &SigningKey,
+        request_digest: &arkret_wire::Hash,
     ) -> ServiceResult<AuthorityEventAdmissionOutcome> {
         event
             .validate_for_submit_structural()
             .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
-        // Prepare does not consult a Device for this Principal-signed branch.
-        // The accepting unit proves the original Service even on replay.
+        let at = arkret_canonical::normalize_timestamp_canonical(Utc::now());
+        let fact = self
+            .store()
+            .prepare_realm_actor_control_signer_fact(event, at)
+            .await?;
         let transaction = self
-            .prepare_self_event_transaction(
+            .prepare_self_event_transaction_with_signer_fact(
                 event,
                 local_service_id,
                 verification_method,
                 signing_key,
-                Utc::now(),
+                at,
+                Some(&fact),
             )
             .await?;
         Ok(
             match self
                 .store()
-                .admit_applet_managed_device_authorization(&transaction, carrier)
+                .admit_applet_managed_device_authorization(&transaction, carrier, request_digest)
                 .await?
             {
                 coland_storage::AcceptedDeviceAuthorizationOutcome::Committed(commit) => {
@@ -2261,6 +2575,19 @@ impl AuthorityCommitApplication {
     /// Return the exact original object issued to `account`, after the store
     /// re-proves its disclosure at the read cut. A current head is never a
     /// substitute for a missing or no-longer-disclosable reference.
+    pub async fn issued_realm_state_snapshot_for_actor(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        actor: &arkret_wire::ActorId,
+        snapshot_id: &arkret_wire::RealmSnapshotId,
+        issuer: &DidCoreId,
+    ) -> ServiceResult<Option<RealmStateSnapshot>> {
+        Ok(self
+            .store()
+            .issued_realm_state_snapshot_for_actor(realm_id, actor, snapshot_id, issuer)
+            .await?)
+    }
+
     pub async fn issued_realm_state_snapshot(
         &self,
         realm_id: &arkret_wire::RealmId,
@@ -2341,6 +2668,27 @@ impl AuthorityCommitApplication {
     /// `ak.self.committed_event.read.scan.v1`: authorization, readable
     /// interval, and page at one governing read cut. See
     /// [`coland_storage::AuthorityCommitStore::scan_stream_for_account`].
+    pub async fn scan_stream_for_actor(
+        &self,
+        request: &StreamScanRequest,
+        actor: &arkret_wire::ActorId,
+        issuer: &DidCoreId,
+    ) -> ServiceResult<coland_storage::AccountStreamScan> {
+        request.validate().map_err(|error| {
+            crate::ServiceError::SchemaViolation(format!("invalid stream scan request: {error}"))
+        })?;
+        let scan = self
+            .store()
+            .scan_stream_for_actor(request, actor, issuer)
+            .await?;
+        if let coland_storage::AccountStreamScan::Page(outcome) = &scan {
+            outcome.validate_for_request(request).map_err(|error| {
+                crate::ServiceError::Internal(format!("invalid stream scan outcome: {error}"))
+            })?;
+        }
+        Ok(scan)
+    }
+
     pub async fn scan_stream_for_account(
         &self,
         request: &StreamScanRequest,
@@ -2530,6 +2878,43 @@ impl AuthorityCommitApplication {
     /// `ak.self.current_results.read.exact.v1` at one governing read cut. The
     /// answer is checked against the exact request and the cut's generation
     /// before it can leave the Station.
+    pub async fn exact_current_result_for_actor(
+        &self,
+        request: &ExactCurrentResultsReadRequestBody,
+        actor: &arkret_wire::ActorId,
+        issuer: &DidCoreId,
+    ) -> ServiceResult<coland_storage::SelfExactCurrentRead<ExactCurrentResultsReadOutcome>> {
+        request.validate().map_err(|error| {
+            crate::ServiceError::SchemaViolation(format!(
+                "invalid exact current-result request: {error}"
+            ))
+        })?;
+        let read = self
+            .store()
+            .exact_current_result_for_actor(request, actor, issuer)
+            .await?;
+        if let coland_storage::SelfExactCurrentRead::Answer(outcome) = &read {
+            let generation = match outcome {
+                ExactCurrentResultsReadOutcome::Present {
+                    governance_generation,
+                    ..
+                }
+                | ExactCurrentResultsReadOutcome::NeverWritten {
+                    governance_generation,
+                    ..
+                } => *governance_generation,
+            };
+            outcome
+                .validate_for_request(request, generation)
+                .map_err(|error| {
+                    crate::ServiceError::Internal(format!(
+                        "invalid exact current-result outcome: {error}"
+                    ))
+                })?;
+        }
+        Ok(read)
+    }
+
     pub async fn exact_current_result_for_account(
         &self,
         request: &ExactCurrentResultsReadRequestBody,
@@ -2715,6 +3100,11 @@ impl AuthorityCommitApplication {
                 &request.final_stream_heads,
                 &request.snapshot,
                 request.pcr_private_state.as_ref(),
+                request.management_private_state.as_ref().ok_or_else(|| {
+                    crate::ServiceError::SchemaViolation(
+                        "management private handoff manifest is required".into(),
+                    )
+                })?,
             )
             .await?;
         Ok(())

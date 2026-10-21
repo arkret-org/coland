@@ -99,6 +99,35 @@ pub(crate) async fn enqueue_mls_welcome_in_connection(
 
     let (endpoint_kind, device_id, verification_method, authorization_event_ref, device_gate) =
         match &welcome.recipient_endpoint {
+            MlsWelcomeRecipientEndpoint::Device { device_id }
+                if welcome.recipient_actor_id.as_realm_actor_id().is_some() =>
+            {
+                let authority = crate::realm_actor_device_authority::current_in_connection(
+                    conn,
+                    &welcome.recipient_actor_id,
+                    device_id,
+                    Utc::now(),
+                )
+                .await?
+                .ok_or_else(|| {
+                    PersistenceError::Conflict(
+                        "Realm Welcome recipient has no current Device authorization".into(),
+                    )
+                })?;
+                if !authority.scopes.contains_scope(&welcome.effective_scope) {
+                    return Err(PersistenceError::Conflict(
+                        "Realm Welcome scope is not authorized".into(),
+                    )
+                    .into());
+                }
+                (
+                    "device",
+                    Some(device_id.to_string()),
+                    None,
+                    authority.authorization_ref.event_id.to_string(),
+                    Some(realm_device_binding(&authority)?),
+                )
+            }
             MlsWelcomeRecipientEndpoint::Device { device_id } => {
                 let account = welcome.recipient_actor_id.as_account_id().ok_or_else(|| {
                     PersistenceError::SchemaViolation(
@@ -232,12 +261,7 @@ pub(crate) async fn enqueue_mls_welcome_in_connection(
                  AND recipient_device_id=$2 AND recipient_authorization_event_ref=$3 \
                  AND recipient_device_authorization=$4 AND state='queued')) AS count",
             )
-            .bind::<Text, _>(
-                welcome
-                    .recipient_actor_id
-                    .signing_principal_id()
-                    .to_string(),
-            )
+            .bind::<Text, _>(queue_subject(&welcome.recipient_actor_id)?)
             .bind::<Text, _>(device_id.as_deref().unwrap_or_default())
             .bind::<Text, _>(&authorization_event_ref)
             .bind::<Jsonb, _>(device_gate.as_ref().expect("device branch has gate"))
@@ -251,12 +275,7 @@ pub(crate) async fn enqueue_mls_welcome_in_connection(
                AND recipient_verification_method=$2 AND recipient_authorization_event_ref=$3 \
                AND state='queued'",
             )
-            .bind::<Text, _>(
-                welcome
-                    .recipient_actor_id
-                    .signing_principal_id()
-                    .to_string(),
-            )
+            .bind::<Text, _>(queue_subject(&welcome.recipient_actor_id)?)
             .bind::<Text, _>(verification_method.as_deref().unwrap_or_default())
             .bind::<Text, _>(&authorization_event_ref)
             .get_result::<OutstandingCountRow>(&mut *conn)
@@ -303,18 +322,13 @@ async fn insert_mls_welcome(
         "INSERT INTO mls_welcome_deliveries \
          (welcome_id, realm_id, commit_event_pk, recipient, recipient_endpoint_kind, \
           recipient_device_id, recipient_verification_method, recipient_authorization_event_ref, \
-          recipient_device_authorization, keypackage_claim_ref, delivery_json, state, queued_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'queued',$12)",
+          recipient_device_authorization, keypackage_claim_ref, delivery_json, state, queued_at, position) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'queued',$12, GREATEST(nextval('public.recipient_delivery_position_seq'), COALESCE((SELECT MAX(position)+1 FROM mls_welcome_deliveries WHERE recipient=$4),1)))",
     )
     .bind::<Text, _>(welcome.welcome_id.as_str())
     .bind::<Text, _>(welcome.realm_id.as_str())
     .bind::<BigInt, _>(commit_event_pk)
-    .bind::<Text, _>(
-        welcome
-            .recipient_actor_id
-            .signing_principal_id()
-            .to_string(),
-    )
+    .bind::<Text, _>(queue_subject(&welcome.recipient_actor_id)?)
     .bind::<Text, _>(endpoint_kind)
     .bind::<Nullable<Text>, _>(device_id)
     .bind::<Nullable<Text>, _>(verification_method)
@@ -829,4 +843,28 @@ mod tests {
         };
         assert!(decode_delivery(row, &selector).is_err());
     }
+}
+
+/// Realm queue identity never depends on its current governing Station.
+pub(super) fn queue_subject(actor: &arkret_wire::ActorId) -> PersistenceResult<String> {
+    if actor.as_realm_actor_id().is_some() {
+        String::from_utf8(
+            arkret_canonical::canonical_json_bytes(actor).map_err(PersistenceError::database)?,
+        )
+        .map_err(PersistenceError::database)
+    } else {
+        Ok(actor.signing_principal_id().to_string())
+    }
+}
+
+/// Original recipient authorization; rotating governance does not relabel it.
+pub(super) fn realm_device_binding(
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+) -> PersistenceResult<Value> {
+    Ok(serde_json::json!({
+        "actor_id": authority.actor_id,
+        "device_id": authority.device_id,
+        "authorization_ref": authority.authorization_ref,
+        "device_generation": authority.current_device_generation_ref,
+    }))
 }

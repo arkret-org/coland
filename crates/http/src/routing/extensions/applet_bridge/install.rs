@@ -10,16 +10,16 @@ use arkret_models_collaboration::governance::grant_constraint::{
 };
 use arkret_models_integration::{
     AppletGhostActorMode, AppletInstallAuthoringRequestBasis, AppletInstallEffectiveStatus,
-    AppletInstallOutcome, AppletInstallPlan, AppletInstallRequestBody,
-    AppletManagedActorProvisionPayload, AppletPackage, AppletRegistrationEpochEvidence,
-    AppletScopeRejection, AppletWireNamespaces, CapabilityConstraint, DeniedScope, E2eeEffect,
-    EventSubmission, NamespaceConflict, ScopeGrant, WidgetEffect,
+    AppletInstallOutcome, AppletInstallPlan, AppletInstallRequestBody, AppletPackage,
+    AppletRegistrationEpochEvidence, AppletScopeRejection, AppletWireNamespaces,
+    CapabilityConstraint, DeniedScope, E2eeEffect, EventSubmission, NamespaceConflict, ScopeGrant,
+    WidgetEffect,
 };
 use arkret_wire::{
     ActorId, CapabilityActionId, Event, ResourceMatchScope, ScopeRef, WireResourceSelector,
 };
 use coland_http::error::AppError;
-use coland_services::identity::{PinnedDidVersionStatus, SessionIdentityState as SessionRecord};
+use coland_services::identity::SessionIdentityState as SessionRecord;
 use salvo::http::StatusCode;
 use salvo::prelude::*;
 use serde_json::{Value, json};
@@ -82,32 +82,6 @@ pub(super) fn approved_scope_grants(
     }])
 }
 
-#[cfg(test)]
-fn validate_bot_actor_station(
-    actor: &ActorId,
-    station: &arkret_wire::DidCoreId,
-) -> Result<(), AppError> {
-    if actor.route_service_id() != station {
-        return Err(AppError::param_invalid(
-            "Applet bot actor is not bound to the target Station",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn validate_hosted_applet_pcr_governance_station(
-    actual: &arkret_wire::DidCoreId,
-    expected: &arkret_wire::DidCoreId,
-) -> Result<(), AppError> {
-    if actual != expected {
-        return Err(AppError::param_invalid(
-            "Applet-managed PCR genesis governance Station must equal the exact hosting Station",
-        )
-        .with_reason_code("applet_managed_pcr_genesis_invalid"));
-    }
-    Ok(())
-}
-
 fn validate_formal_install_events(
     _state: &AppState,
     commit: &AppletInstallRequestBody,
@@ -134,7 +108,8 @@ pub(super) fn validate_admin_install_events(
     if &basis.install_actor_id != install_actor
         || registration.kind != arkret_wire::EventKind::AppletRegistration
         || &registration.actor_id != install_actor
-        || registration.actor_id.route_service_id() != &basis.target_station_id
+        || registration.actor_id.as_account_id().map(|a| &a.station_id)
+            != Some(&basis.target_station_id)
         || &registration.realm_id != realm_id
         || registration.scope_ref != basis.effective_scope
         || registration.producer_proof.is_none()
@@ -194,7 +169,8 @@ pub(super) fn validate_admin_install_events(
     for event in &basis.capability_grant_events {
         if event.kind != arkret_wire::EventKind::CapabilityGrant
             || &event.actor_id != install_actor
-            || event.actor_id.route_service_id() != &basis.target_station_id
+            || event.actor_id.as_account_id().map(|a| &a.station_id)
+                != Some(&basis.target_station_id)
             || &event.realm_id != realm_id
             || event.scope_ref != basis.effective_scope
             || event.producer_proof.is_none()
@@ -267,169 +243,6 @@ pub(super) fn validate_admin_install_events(
         approved_actions: approved_actions.into_iter().collect(),
         grant_ids,
     })
-}
-
-pub(super) fn validate_managed_actor_method_evidence(
-    provision: &AppletManagedActorProvisionPayload,
-) -> Result<(), AppError> {
-    let (_, log_entries, witness_records) = provision.method_history_evidence.webvh_material();
-    let mut log_bytes = Vec::new();
-    for entry in log_entries {
-        log_bytes.extend(
-            arkret_canonical::canonical_json_bytes(entry).map_err(|error| {
-                AppError::param_invalid(format!("WebVH log entry is not canonicalizable: {error}"))
-            })?,
-        );
-        log_bytes.push(b'\n');
-    }
-    let witness_bytes = serde_json::to_vec(witness_records)
-        .map_err(|error| AppError::param_invalid(format!("witness evidence invalid: {error}")))?;
-    let verified = arkret_identity::verify_did_webvh_v1_chain_and_witness_bytes(
-        &provision.initial_resolution.did,
-        &log_bytes,
-        Some(&witness_bytes),
-    )
-    .map_err(|error| {
-        AppError::param_invalid(format!("Applet-managed DID evidence invalid: {error}"))
-            .with_rejection_code(error.reason_code())
-    })?;
-    let terminal = verified
-        .log
-        .raw_entries
-        .last()
-        .ok_or_else(|| AppError::param_invalid("Applet-managed DID log is empty"))?;
-    let terminal_head = arkret_canonical::canonical_sha256(terminal)
-        .map_err(|error| AppError::param_invalid(format!("DID terminal invalid: {error}")))?;
-    if provision.initial_resolution.did.method() != "webvh"
-        || verified.log.head_version_id != provision.initial_resolution.version_id
-        || terminal_head != provision.initial_resolution.method_history_head
-    {
-        return Err(AppError::param_invalid(
-            "Applet-managed WebVH evidence terminal differs from initial_resolution",
-        )
-        .with_reason_code("identity_method_evidence_invalid"));
-    }
-    Ok(())
-}
-
-pub(super) async fn validate_managed_actor_current_method_evidence(
-    state: &AppState,
-    provision: &AppletManagedActorProvisionPayload,
-) -> Result<(), AppError> {
-    let did = &provision.initial_resolution.did;
-    let ingested = state.dids().document(did.as_str()).await.map_err(|error| {
-        AppError::internal(format!("managed DID current lookup failed: {error}"))
-    })?;
-    if ingested.is_some() {
-        crate::jws_verify::enforce_high_risk_did_freshness(state, did)
-            .await
-            .map_err(|error| {
-                AppError::param_invalid(
-                    "Applet-managed WebVH evidence lacks a fresh trusted current resolution",
-                )
-                .with_reason_code("identity_method_evidence_invalid")
-                .with_reason_detail(error)
-            })?;
-    }
-    let history_head = Hash::new(provision.initial_resolution.method_history_head.clone())
-        .map_err(|error| {
-            AppError::param_invalid(format!(
-                "Applet-managed WebVH history head is invalid: {error}"
-            ))
-            .with_reason_code("identity_method_evidence_invalid")
-        })?;
-    let pinned = if ingested.is_some() {
-        state.dids().resolve_current_webvh_state(did).await
-    } else {
-        state.dids().resolve_current_external_webvh_state(did).await
-    }
-    .map_err(|error| {
-        AppError::param_invalid(format!(
-            "Applet-managed WebVH evidence is not an accepted trusted history state: {error}"
-        ))
-        .with_reason_code("identity_method_evidence_invalid")
-    })?;
-    if !managed_actor_pinned_resolution_is_current(
-        &pinned,
-        did,
-        &provision.initial_resolution.version_id,
-        &history_head,
-    ) {
-        return Err(AppError::param_invalid(
-            "Applet-managed WebVH evidence is a historical prefix rather than the current trusted head",
-        )
-        .with_reason_code("identity_method_evidence_invalid"));
-    }
-    if ingested.is_none() {
-        let (_, logs, _) = provision.method_history_evidence.webvh_material();
-        let now = chrono::Utc::now();
-        let document = coland_services::identity::DidDocumentState {
-            did: did.to_string(),
-            did_document: pinned.document,
-            key_log_head: Some(history_head.to_string()),
-            seq: logs.len() as u64,
-            method_evidence: serde_json::to_value(&provision.method_history_evidence)
-                .map_err(|e| AppError::internal(e.to_string()))?,
-            fetched_at: now,
-            expires_at: now + chrono::Duration::minutes(15),
-            updated_at: now,
-        };
-        let result = state
-            .dids()
-            .ingest_verified_history(None, document)
-            .await
-            .map_err(|error| {
-                AppError::internal(format!("managed native history ingestion failed: {error}"))
-            })?;
-        if result == coland_services::identity::DidLogCommitResult::Conflict {
-            return Err(
-                AppError::conflict("managed native history changed before ingestion")
-                    .with_wire_code("failed_precondition"),
-            );
-        }
-        // Re-read durable ingestion before publishing a resolver cache entry.
-        // The aggregate admission still locks and rechecks this original row.
-        crate::jws_verify::enforce_high_risk_did_freshness(state, did)
-            .await
-            .map_err(|error| {
-                AppError::internal(format!(
-                    "managed native history ingestion is unavailable: {error}"
-                ))
-            })?;
-    }
-    Ok(())
-}
-
-pub(super) async fn managed_creation_service_resolution(
-    state: &AppState,
-    epoch: &AppletRegistrationEpochEvidence,
-) -> Result<arkret_models_identity::AuthenticatedServiceResolution, AppError> {
-    state
-        .dids()
-        .retained_service_resolution(
-            &epoch.did,
-            arkret_wire::ServiceKind::AppletService,
-            chrono::Utc::now(),
-        )
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, service_did=%epoch.did, "Applet Service history unavailable");
-            AppError::conflict("Applet Service identity evidence is unavailable")
-                .with_wire_code("temporarily_unavailable")
-        })
-}
-
-fn managed_actor_pinned_resolution_is_current(
-    pinned: &coland_services::identity::PinnedDidDocumentState,
-    expected_did: &arkret_identifiers::Did,
-    expected_version_id: &str,
-    expected_history_head: &Hash,
-) -> bool {
-    pinned.status == PinnedDidVersionStatus::Current
-        && pinned.current_version_id == expected_version_id
-        && pinned.version_id == expected_version_id
-        && &pinned.log_head_digest == expected_history_head
-        && &pinned.did == expected_did
 }
 
 pub(super) async fn register_package_install(
@@ -1321,30 +1134,6 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn bot_install_rejects_the_same_principal_at_another_station() {
-        let principal_id = DidCoreId::new("ak:did_core:web:bot.example").unwrap();
-        let target_station_id = DidCoreId::new("ak:did_core:web:station.example").unwrap();
-        let foreign_station_id = DidCoreId::new("ak:did_core:web:other-station.example").unwrap();
-        let local_actor = ActorId::account(arkret_wire::AccountId::new(
-            principal_id.clone(),
-            target_station_id.clone(),
-        ));
-        let foreign_actor = ActorId::account(arkret_wire::AccountId::new(
-            principal_id,
-            foreign_station_id,
-        ));
-
-        validate_bot_actor_station(&local_actor, &target_station_id).unwrap();
-        assert_eq!(
-            local_actor.signing_principal_id(),
-            foreign_actor.signing_principal_id()
-        );
-        let error = validate_bot_actor_station(&foreign_actor, &target_station_id)
-            .expect_err("the same bot principal cannot borrow another Station's install");
-        assert_eq!(error.wire_code(), "param_invalid");
-    }
-
     /// Minimal production-mode (`development_mode == false`) AppState for
     /// exercising the controller-proof verifier against the built-in
     /// `did:key` resolver. Mirrors `routing/events/operations/policy_tests.rs`
@@ -1359,17 +1148,6 @@ mod tests {
             ..crate::config::AppConfig::test_default()
         };
         AppState::new(config, coland_storage_postgres::Db { pool: None })
-    }
-
-    #[test]
-    fn hosted_applet_pcr_governance_station_rejects_other_station() {
-        let state = production_test_state();
-        let expected = state.service_core_id();
-        validate_hosted_applet_pcr_governance_station(&expected, &expected).unwrap();
-
-        let actor_did = Did::new("did:web:actor.example".to_owned()).unwrap();
-        let actor_id = arkret_wire::project_did_to_core_id(&actor_did).unwrap();
-        assert!(validate_hosted_applet_pcr_governance_station(&actor_id, &expected).is_err());
     }
 
     /// Derive a `did:key` DID + its `#`-fragment verification method for an
@@ -1862,30 +1640,5 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn managed_actor_rejects_a_self_consistent_historical_webvh_prefix() {
-        let did = Did::new(
-            "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:actor.example".to_owned(),
-        )
-        .unwrap();
-        let historical_head = Hash::new(format!("sha256:{}", "11".repeat(32))).unwrap();
-        let pinned = coland_services::identity::PinnedDidDocumentState {
-            did: did.clone(),
-            version_id: "1-historical".to_owned(),
-            log_head_digest: historical_head.clone(),
-            document: json!({"id": did}),
-            update_keys: Vec::new(),
-            current_version_id: "2-current".to_owned(),
-            status: PinnedDidVersionStatus::Rotated,
-        };
-
-        assert!(!managed_actor_pinned_resolution_is_current(
-            &pinned,
-            &did,
-            "1-historical",
-            &historical_head,
-        ));
     }
 }

@@ -54,16 +54,20 @@ coland-storage = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 tokio-postgres = { workspace = true }
 tracing = { workspace = true }
+url.workspace = true
 uuid = { workspace = true }
 
 [dev-dependencies]
+arkret-bridge-runtime = { path = "../../../bridges-realm-actors/crates/runtime", default-features = false, features = ["full", "postgres"] }
+arkret = { workspace = true, features = ["mls"] }
+reqwest = { workspace = true, features = ["json", "rustls"] }
+tracing-subscriber.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 rustls.workspace = true
 tokio-tungstenite.workspace = true
 arkret-test-kit.workspace = true
 salvo = { workspace = true, features = ["test"] }
-url.workspace = true
 coland-test-support.workspace = true
 coland-http = { workspace = true, features = ["test-support"] }
 arkret-schema-conformance.workspace = true

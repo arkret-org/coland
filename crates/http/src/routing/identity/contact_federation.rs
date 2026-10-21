@@ -134,7 +134,11 @@ fn verify_exact_contact_event_producer(
         ))
     })?;
     if holder.delivery_station_id().as_str() != source_id
-        || event.actor_id.route_service_id().as_str() != source_id
+        || event
+            .actor_id
+            .as_account_id()
+            .map(|a| a.station_id.as_str())
+            != Some(source_id)
     {
         return Err(super::super::events::peer::schema_violation(
             "Contact producer holder is hosted by another Station",

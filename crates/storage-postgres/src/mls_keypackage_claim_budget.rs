@@ -1,6 +1,6 @@
 use arkret_models_crypto::{PeerKeyPackageRequesterAuthorization, PeerKeyPackagesClaimRequestBody};
 use coland_storage::{PeerKeyPackageClaimRateDecision, PersistenceError, PersistenceResult};
-use diesel::sql_types::{BigInt, Nullable, Text, Timestamptz};
+use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 
@@ -51,6 +51,17 @@ pub(crate) async fn record_attempt(
         ) => {
             format!("agent:{requester_agent_id}")
         }
+        (None, PeerKeyPackageRequesterAuthorization::RealmDevice { .. }) => {
+            let actor = body
+                .requester_actor_id
+                .as_ref()
+                .ok_or_else(|| PersistenceError::Conflict("Realm requester absent".into()))?;
+            format!(
+                "realm:{}",
+                arkret_canonical::canonical_json_string(actor)
+                    .map_err(PersistenceError::database)?
+            )
+        }
         _ => {
             return Err(PersistenceError::Conflict(
                 "claim budget requester branch".into(),
@@ -65,6 +76,13 @@ pub(crate) async fn record_attempt(
                 .map_err(PersistenceError::database)?
         ),
         (None, Some(agent)) => format!("agent:{agent}"),
+        (None, None) if body.target_actor_id.is_some() => {
+            format!(
+                "realm:{}",
+                arkret_canonical::canonical_json_string(body.target_actor_id.as_ref().unwrap())
+                    .map_err(PersistenceError::database)?
+            )
+        }
         _ => {
             return Err(PersistenceError::Conflict(
                 "claim budget target branch".into(),
@@ -76,7 +94,8 @@ pub(crate) async fn record_attempt(
     let target = arkret_canonical::canonical_sha256(&target).map_err(PersistenceError::database)?;
     let signed_at = match &body.requester_authorization {
         PeerKeyPackageRequesterAuthorization::Device { signed_at, .. }
-        | PeerKeyPackageRequesterAuthorization::Agent { signed_at, .. } => *signed_at,
+        | PeerKeyPackageRequesterAuthorization::Agent { signed_at, .. }
+        | PeerKeyPackageRequesterAuthorization::RealmDevice { signed_at, .. } => *signed_at,
     };
     let source = body.service_binding.source_id.as_str();
     let identity = body.claim_request_id.as_str();
@@ -94,6 +113,10 @@ pub(crate) async fn record_attempt(
     locks.sort();
     let mut conn = pg_conn(pool).await.map_err(PersistenceError::database)?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+        if let Some(target) = body.target_actor_id.as_ref().and_then(|actor| actor.as_realm_actor_id()) {
+            crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &target.realm_id).await?;
+            crate::realm_management_archive::require_unfrozen(conn, &target.realm_id).await?;
+        }
         for key in locks {
             sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
                 .bind::<Text,_>(key).execute(&mut *conn).await.map_err(PersistenceError::database)?;
@@ -105,7 +128,17 @@ pub(crate) async fn record_attempt(
             || body.expires_at <= signed_at || body.expires_at - signed_at > chrono::Duration::seconds(300) {
             return Ok(PeerKeyPackageClaimRateDecision::Unavailable);
         }
-        sql_query("DELETE FROM keypackage_claim_attempts WHERE expires_at<=$1")
+        if body.target_actor_id.is_some() || body.requester_actor_id.is_some() {
+        sql_query("INSERT INTO keypackage_claim_sources(source_id,claim_request_id,request_digest,request_body,governing_realm_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING")
+            .bind::<Text,_>(source).bind::<Text,_>(identity).bind::<Text,_>(&digest)
+            .bind::<Jsonb,_>(serde_json::to_value(body).map_err(PersistenceError::database)?)
+            .bind::<Nullable<Text>,_>(body.target_actor_id.as_ref().and_then(|actor|actor.as_realm_actor_id()).map(|actor|actor.realm_id.as_str()))
+            .execute(&mut *conn).await?;
+        let original=sql_query("SELECT request_digest,NULL::text AS rejection_reason FROM keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2")
+            .bind::<Text,_>(source).bind::<Text,_>(identity).get_result::<Attempt>(&mut *conn).await?;
+        if original.request_digest != digest { return Ok(PeerKeyPackageClaimRateDecision::DuplicateConflict); }
+        }
+        sql_query("DELETE FROM keypackage_claim_attempts t WHERE expires_at<=$1 AND NOT EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.source_id=t.source_id AND s.claim_request_id=t.claim_request_id)")
             .bind::<Timestamptz,_>(now).execute(&mut *conn).await.map_err(PersistenceError::database)?;
         if let Some(existing) = sql_query("SELECT request_digest,rejection_reason FROM keypackage_claim_attempts WHERE source_id=$1 AND claim_request_id=$2")
             .bind::<Text,_>(source).bind::<Text,_>(identity).get_result::<Attempt>(&mut *conn).await.optional().map_err(PersistenceError::database)? {
@@ -131,7 +164,7 @@ pub(crate) async fn record_attempt(
 
 pub(crate) async fn prune(pool: &PgPool) -> PersistenceResult<usize> {
     let mut conn = pg_conn(pool).await.map_err(PersistenceError::database)?;
-    sql_query("DELETE FROM keypackage_claim_attempts WHERE expires_at<=clock_timestamp()")
+    sql_query("DELETE FROM keypackage_claim_attempts t WHERE expires_at<=clock_timestamp() AND NOT EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.source_id=t.source_id AND s.claim_request_id=t.claim_request_id)")
         .execute(&mut *conn)
         .await
         .map_err(PersistenceError::database)

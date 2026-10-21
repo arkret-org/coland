@@ -458,7 +458,13 @@ async fn call_current_handoff_scenario() {
     let snapshot = sign_old(&material).unwrap();
     let facts = inventory(&store, &realm).await;
     let heads = material.visible_stream_heads.clone();
+    let (management, private_bytes) = store.export_management_private_state(&realm).await.unwrap();
+    store
+        .import_management_private_state(&management, &private_bytes)
+        .await
+        .unwrap();
     let mut handoff = arkret_wire::RealmAuthorityHandoff {
+        management_private_state_digest: Some(management.digest().unwrap()),
         pcr_private_state_digest: None,
         handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest([41; 32]),
         realm_id: realm.clone(),
@@ -507,7 +513,7 @@ async fn call_current_handoff_scenario() {
         Some(historical_signer_facts_digest(&facts[1..]).unwrap());
     assert!(
         store
-            .install_handoff(&missing, &heads, &snapshot)
+            .install_handoff_with_private_state(&missing, &heads, &snapshot, None, &management)
             .await
             .is_err()
     );
@@ -518,7 +524,13 @@ async fn call_current_handoff_scenario() {
     partial_handoff.snapshot_ref = partial_snapshot.snapshot_id.clone();
     assert!(
         store
-            .install_handoff(&partial_handoff, &heads, &partial_snapshot)
+            .install_handoff_with_private_state(
+                &partial_handoff,
+                &heads,
+                &partial_snapshot,
+                None,
+                &management
+            )
             .await
             .is_err()
     );
@@ -527,12 +539,12 @@ async fn call_current_handoff_scenario() {
         Some(tail.expected_authority.clone())
     );
     store
-        .install_handoff(&handoff, &heads, &snapshot)
+        .install_handoff_with_private_state(&handoff, &heads, &snapshot, None, &management)
         .await
         .unwrap();
     eprintln!("[2133-handoff] activated complete handoff");
     store
-        .install_handoff(&handoff, &heads, &snapshot)
+        .install_handoff_with_private_state(&handoff, &heads, &snapshot, None, &management)
         .await
         .unwrap();
     eprintln!("[2133-handoff] replayed complete handoff");
@@ -658,7 +670,7 @@ async fn call_current_handoff_scenario() {
         arkret_wire::Base64UrlString::new("YmFk").unwrap();
     assert!(
         store
-            .install_handoff(&replay, &heads, &snapshot)
+            .install_handoff_with_private_state(&replay, &heads, &snapshot, None, &management)
             .await
             .is_err()
     );
@@ -744,7 +756,7 @@ async fn call_current_handoff_scenario() {
         Some(change.authority_commit.commit.commit_id)
     );
     store
-        .install_handoff(&handoff, &heads, &snapshot)
+        .install_handoff_with_private_state(&handoff, &heads, &snapshot, None, &management)
         .await
         .unwrap();
     let application = coland_services::authority_commit::AuthorityCommitApplication::new(

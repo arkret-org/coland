@@ -271,9 +271,16 @@ async fn effective_grants(
     req: &mut Request,
 ) -> coland_http::result::JsonResult<GrantList> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
-    let session_actor =
-        crate::routing::identity::session_actor::session_actor_from_credential(state, &session)?;
+    let service_read = req.headers().contains_key("source-service-id");
+    let session_actor = if service_read {
+        let service =
+            crate::routing::extensions::applet_bridge::verify_self_service_grant_read(state, req)
+                .await?;
+        ActorId::service(service.service_id)
+    } else {
+        let session = aa.authenticated_session(state, req).await?;
+        crate::routing::identity::session_actor::session_actor_from_credential(state, &session)?
+    };
     let unaccepted_subject_present = ["subject", "subject_station_id", "subject_account_id"]
         .iter()
         .any(|key| query_param(req, key).is_some());
@@ -298,7 +305,7 @@ async fn effective_grants(
     let caller_can_query_subject = effective_grants_subject_allowed(
         &subject_actor,
         &session_actor,
-        session_owns_realm(state, &session_actor, &realm_id).await?,
+        !service_read && session_owns_realm(state, &session_actor, &realm_id).await?,
     );
     if !caller_can_query_subject {
         return Err(AppError::capability_denied(

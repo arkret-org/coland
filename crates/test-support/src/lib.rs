@@ -246,11 +246,34 @@ pub async fn app_state_with_persistence(
         .expect("fixture service WebVH history lookup")
         .is_empty()
     {
-        persistence
-            .webvh()
-            .append_log_event(fixture_service_webvh_log(&config, signing_seed))
-            .await
-            .expect("fixture service WebVH history seed");
+        let log = fixture_service_webvh_log(&config, signing_seed);
+        if config.embedded_webvh_provider_enabled {
+            let now = chrono::Utc::now();
+            let document = coland_storage::WebvhDocumentRecord {
+                did: log.did.clone(),
+                did_document: log.operation["state"].clone(),
+                key_log_head: Some(log.event_digest.clone()),
+                seq: log.seq,
+                method_evidence: serde_json::json!({"version_id":log.operation["versionId"]}),
+                fetched_at: now,
+                expires_at: now,
+                updated_at: now,
+            };
+            assert_eq!(
+                persistence
+                    .webvh()
+                    .commit_log_operation(None, document, log, None)
+                    .await
+                    .expect("fixture service WebVH inception"),
+                coland_storage::WebvhLogCommitOutcome::Accepted
+            );
+        } else {
+            persistence
+                .webvh()
+                .append_log_event(log)
+                .await
+                .expect("fixture service WebVH history seed");
+        }
     }
     if config.seed_demo_data
         && persistence

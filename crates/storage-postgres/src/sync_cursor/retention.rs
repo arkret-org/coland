@@ -202,11 +202,15 @@ pub(super) async fn prune(pool: &PgPool, now_ms: i64) -> PersistenceResult<usize
 async fn prune_batch(pool: &PgPool, now_ms: i64) -> PersistenceResult<(usize, bool)> {
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_,PgTransactionError,_>(async |conn| {
+        let candidates=sql_query("SELECT COALESCE(jsonb_agg(DISTINCT target#>>'{endpoint,0,realm_actor_id,realm_id}') FILTER (WHERE target#>>'{endpoint,0,realm_actor_id,realm_id}' IS NOT NULL),'[]'::jsonb) AS payload FROM sync_cursor_handles WHERE expires_at_ms<=$1")
+            .bind::<BigInt,_>(now_ms).get_result::<crate::JsonPayloadRow>(&mut *conn).await?;
+        let realms:Vec<String>=serde_json::from_value(candidates.payload).map_err(PersistenceError::database)?;
+        let mutable=crate::realm_management_archive::mutable_realms(conn,&realms).await?;
         lock(conn,true).await?;
         let batch = PRUNE_BATCH_ROWS as i64;
         let mut saturated = false;
-        let pruned = sql_query("DELETE FROM sync_cursor_handles WHERE id IN (SELECT id FROM sync_cursor_handles WHERE expires_at_ms<=$1 ORDER BY expires_at_ms LIMIT $2)")
-            .bind::<BigInt,_>(now_ms).bind::<BigInt,_>(batch).execute(&mut *conn).await?;
+        let pruned = sql_query("DELETE FROM sync_cursor_handles WHERE id IN (SELECT id FROM sync_cursor_handles WHERE expires_at_ms<=$1 AND (target#>>'{endpoint,0,realm_actor_id,realm_id}' IS NULL OR target#>>'{endpoint,0,realm_actor_id,realm_id}'=ANY($3)) ORDER BY expires_at_ms LIMIT $2)")
+            .bind::<BigInt,_>(now_ms).bind::<BigInt,_>(batch).bind::<diesel::sql_types::Array<Text>,_>(&mutable).execute(&mut *conn).await?;
         saturated |= pruned == PRUNE_BATCH_ROWS;
         saturated |= sql_query("DELETE FROM account_sync_snapshot_reservations WHERE bucket IN (SELECT bucket FROM account_sync_snapshot_reservations WHERE expires_at_ms<=$1 ORDER BY bucket LIMIT $2)")
             .bind::<BigInt,_>(now_ms).bind::<BigInt,_>(batch).execute(&mut *conn).await? == PRUNE_BATCH_ROWS;

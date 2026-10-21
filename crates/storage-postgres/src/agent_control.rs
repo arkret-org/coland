@@ -551,7 +551,8 @@ async fn admit_agent_control_in_connection(
         if profile.actor_kind != arkret_wire::ActorKind::Agent
             || !profile
                 .accountable_principal_ids
-                .contains(&controller.principal_id)
+                .as_ref()
+                .is_some_and(|principals| principals.contains(&controller.principal_id))
         {
             return Err(precondition(
                 "the Agent profile retains its kind and accountable controller",

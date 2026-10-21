@@ -190,10 +190,11 @@ impl WebvhStore for FaultWebvhStore {
     async fn get_embedded_webvh_document_by_local_id(
         &self,
         local_id: &str,
+        expected_log_url: &str,
     ) -> PersistenceResult<Option<WebvhDocumentRecord>> {
         self.inner
             .webvh()
-            .get_embedded_webvh_document_by_local_id(local_id)
+            .get_embedded_webvh_document_by_local_id(local_id, expected_log_url)
             .await
     }
     async fn put_document(&self, record: WebvhDocumentRecord) -> PersistenceResult<()> {

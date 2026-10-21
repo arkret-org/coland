@@ -324,6 +324,8 @@ fn signed_device_authorize_payload(
         recovery_session_id: None,
         pairing_challenge_transcript_digest: None,
         applet_id: None,
+        expected_control_revision: None,
+        expected_device_revision: None,
     };
     let input = payload
         .device_possession_signature_input(&account_id)
@@ -1315,6 +1317,12 @@ async fn circle_member_manage_rejects_without_grant() {
     )
     .unwrap();
     install_collaboration_realm(&state, &realm_id);
+    state
+        .test_persistence()
+        .capability_grant_current_results()
+        .seed_test_realm_root(&realm_id, &fixture_actor("ak:did_core:web:owner.example"))
+        .await
+        .unwrap();
     insert_joined_realm_member(&state, &realm_id, BOB_CORE_ID);
     let member_add = op(
         realm_id,
@@ -1379,6 +1387,12 @@ async fn circle_lifecycle_requires_circle_manage_grant() {
     )
     .unwrap();
     install_collaboration_realm(&state, &realm_id);
+    state
+        .test_persistence()
+        .capability_grant_current_results()
+        .seed_test_realm_root(&realm_id, &fixture_actor("ak:did_core:web:owner.example"))
+        .await
+        .unwrap();
     let circle_id = "ak:circle:AT2LoQ65P6bU2ZDxq9XbubTSMDrqzlK8EFJNmM_pxt62";
     let tombstone = op(
         realm_id.clone(),

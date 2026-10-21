@@ -1,41 +1,34 @@
-//! Subject-original Applet interaction profiles, distinct from private PCR identity.
+//! One private Profile per Realm actor, signed by its accepted control method.
+use arkret_models_collaboration::events_payloads::{
+    ActorProfileCreatePayload, ActorProfileUpdatePayload,
+};
 use arkret_models_identity::{ActorProfile, AppletInteractionIntent, AppletInteractionMode};
-use arkret_wire::{ActorId, Event, EventKind, RealmCommit, ScopeRef};
+use arkret_wire::{CurrentRevision, Event, EventKind, RealmCommit, ScopeRef};
 use coland_storage::{AppletManagedDeviceScopeGuard, PersistenceError, PersistenceResult};
-use diesel::sql_types::{Jsonb, Text};
+use diesel::sql_types::{Array, Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};
 
-#[derive(QueryableByName)]
-struct JsonRow {
-    #[diesel(sql_type=Jsonb)]
-    value: Value,
+fn denied(detail: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError::Conflict(format!("failed_precondition: {detail}"))
 }
-fn denied(detail: &str) -> PersistenceError {
-    PersistenceError::Conflict(format!("capability_denied: {detail}"))
-}
-fn invalid(error: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError::SchemaViolation(error.to_string())
-}
-
-/// Constructed only after real current state is read under the owning UoW's
-/// ordered PCR and business Realm locks. It cannot authorize another original.
 pub(crate) struct Admission {
     original_digest: String,
-    profile: ActorProfile,
+    pub(crate) profile: ActorProfile,
     previous: Option<Value>,
-    public: bool,
+    pub(crate) publish_scope: Option<ScopeRef>,
+    pub(crate) fact: arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact,
 }
 impl Admission {
     pub(crate) fn applies_to(&self, event: &Event) -> bool {
         arkret_canonical::canonical_sha256(event).ok().as_ref() == Some(&self.original_digest)
     }
     pub(crate) fn is_public(&self) -> bool {
-        self.public
+        self.publish_scope.is_some()
     }
     pub(crate) fn pins(&self) -> Value {
-        json!({"previous":self.previous,"postimage":self.profile})
+        json!({"previous":self.previous,"postimage":self.profile,"publish_scope":self.publish_scope})
     }
     pub(crate) async fn write(
         &self,
@@ -44,438 +37,551 @@ impl Admission {
         commit: &RealmCommit,
     ) -> Result<(), crate::PgTransactionError> {
         if !self.applies_to(event) {
-            return Err(denied("scope Profile admission belongs to another original").into());
+            return Err(denied("Profile admission names another original").into());
         }
-        crate::actor_profiles::write_profile_current_in_connection(
+        crate::realm_actor_control::write_current(
+            conn,
+            &event.actor_id,
+            json!({"kind":"realm_actor_profile","actor_id":event.actor_id}),
+            json!({"profile_id":self.profile.id,"profile":self.profile}),
+            commit,
+        )
+        .await?;
+        Ok(())
+    }
+}
+pub(crate) fn is_profile(event: &Event) -> bool {
+    event.actor_id.as_realm_actor_id().is_some()
+        && matches!(
+            event.kind,
+            EventKind::ProfileCreate | EventKind::ProfileUpdate
+        )
+}
+fn intent(profile: &ActorProfile) -> PersistenceResult<Option<AppletInteractionIntent>> {
+    profile
+        .profile_fields
+        .get("applet_interaction")
+        .map(|value| serde_json::from_value(value.clone()).map_err(denied))
+        .transpose()
+}
+fn publish_transition(
+    previous: Option<&ActorProfile>,
+    profile: &ActorProfile,
+) -> PersistenceResult<Option<ScopeRef>> {
+    let next = intent(profile)?;
+    let old = previous.map(intent).transpose()?.flatten();
+    Ok(next
+        .filter(|next| {
+            next.mode == AppletInteractionMode::Public
+                && old.as_ref().is_none_or(|old| {
+                    old.mode != AppletInteractionMode::Public
+                        || old.effective_scope != next.effective_scope
+                })
+        })
+        .map(|next| next.effective_scope))
+}
+
+#[derive(QueryableByName)]
+struct JsonRow {
+    #[diesel(sql_type=Jsonb)]
+    value: Value,
+}
+
+pub(crate) async fn publish_basis(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    admission: &Admission,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<(
+    Value,
+    arkret_policy::applet_management::AppletManagementDecision,
+)> {
+    use arkret_models_collaboration::governance::operation_wire::{
+        AppletPolicyOperation, PolicyResourceKind, PolicyResourceSelector,
+    };
+    let scope = admission
+        .publish_scope
+        .as_ref()
+        .ok_or_else(|| denied("Profile does not open public intent"))?;
+    let applet = event
+        .applet_id
+        .as_ref()
+        .ok_or_else(|| denied("Profile has no Applet"))?;
+    let registration =
+        crate::managed_message_actor::registration_for_scope(conn, &event.realm_id, applet).await?;
+    let document = sql_query(
+        "SELECT did_document AS value FROM webvh_documents WHERE id=$1 AND expires_at>$2 FOR SHARE",
+    )
+    .bind::<Text, _>(
+        registration
+            .manifest
+            .registration_epoch_evidence
+            .did
+            .as_str(),
+    )
+    .bind::<Timestamptz, _>(at)
+    .get_result::<JsonRow>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    let document: arkret_identity::DidDocument =
+        serde_json::from_value(document.value).map_err(denied)?;
+    let (_, installation) = crate::applet_device_admission::installation_identity(
+        conn,
+        &event.actor_id,
+        applet,
+        &registration.service_id,
+        scope,
+        &document,
+        at,
+        true,
+    )
+    .await?;
+    let policies =
+        crate::policy_current_results::read_scoped_applet_management_policies_in_connection(
+            conn,
+            &event.realm_id,
+            scope.circle_id(),
+        )
+        .await?;
+    let mut resources = vec![PolicyResourceSelector {
+        kind: PolicyResourceKind::Realm,
+        realm_id: Some(event.realm_id.clone()),
+        resource_ref: Some(event.realm_id.to_string()),
+    }];
+    if let Some(circle) = scope.circle_id() {
+        resources.push(PolicyResourceSelector {
+            kind: PolicyResourceKind::Object,
+            realm_id: Some(event.realm_id.clone()),
+            resource_ref: Some(circle.to_string()),
+        });
+    }
+    let service = arkret_wire::ActorId::service(registration.service_id.clone());
+    let decision = arkret_policy::applet_management::select_applet_management(
+        Some(&policies),
+        &arkret_policy::applet_management::AppletManagementContext {
+            device_control: None,
+            realm_id: &event.realm_id,
+            requester_actor_id: &service,
+            applet_id: applet,
+            effective_scope: scope,
+            managed_actor_id: Some(&event.actor_id),
+            operation: AppletPolicyOperation::Publish,
+            content_action: None,
+            resources: Some(&resources),
+            at,
+        },
+    )
+    .map_err(denied)?;
+    if matches!(
+        decision.effect,
+        arkret_wire::PolicyEffect::Deny | arkret_wire::PolicyEffect::Quarantine
+    ) {
+        return Err(denied("current management Policy refuses public intent"));
+    }
+    let ids = policies
+        .iter()
+        .map(|policy| policy.id.to_string())
+        .collect::<Vec<_>>();
+    let revisions = sql_query("SELECT to_jsonb(p) AS value FROM policy_current_results p WHERE policy_id=ANY($1) ORDER BY policy_id FOR SHARE")
+        .bind::<Array<Text>,_>(ids).load::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let actor_currents = sql_query("SELECT to_jsonb(r) AS value FROM realm_actor_current_results r WHERE realm_id=$1 AND selector->'actor_id'=$2 AND selector->>'kind' IN ('realm_actor_control','realm_actor_manager','realm_actor_status','realm_actor_profile','realm_actor_recovery') ORDER BY selector::text FOR SHARE")
+        .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(json!(event.actor_id)).load::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let root = sql_query("SELECT to_jsonb(r) AS value FROM realm_authority_root_current_results r WHERE realm_id=$1 FOR SHARE")
+        .bind::<Text,_>(event.realm_id.as_str()).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let bundle = sql_query("SELECT to_jsonb(p) AS value FROM realm_policy_bundle_current_results p WHERE realm_id=$1 FOR SHARE")
+        .bind::<Text,_>(event.realm_id.as_str()).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let mut fact = json!(admission.fact);
+    fact.as_object_mut()
+        .ok_or_else(|| denied("invalid control fact"))?
+        .remove("accepted_at");
+    Ok((
+        json!({"producer":fact,"profile":admission.pins(),"requester":service,
+        "registration":registration,"installation_status":installation["status"],"installation_registration":installation["registration_event"],"package":installation["package"],
+        "actor_currents":actor_currents.into_iter().map(|row| row.value).collect::<Vec<_>>(),
+        "authority_root":root.value,"policy_bundle":bundle.map(|row| row.value),
+        "policy_revisions":revisions.into_iter().map(|row| row.value).collect::<Vec<_>>() }),
+        decision,
+    ))
+}
+pub(crate) async fn prepare_control(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<Admission> {
+    event.validate_for_submit_structural().map_err(denied)?;
+    if !is_profile(event)
+        || event.scope_ref
+            != (ScopeRef::RealmControl {
+                realm_id: event.realm_id.clone(),
+            })
+        || event.executed_by.is_some()
+        || event.authorization_ref.is_some()
+    {
+        return Err(denied(
+            "Realm Profile requires its own private control branch",
+        ));
+    }
+    let creation = crate::realm_actor_control::creation_source(conn, &event.actor_id).await?;
+    if event.applet_id.as_ref() != Some(&creation.applet_id) {
+        return Err(denied("Profile Applet differs from identity"));
+    }
+    for gate in ["owner", "governance"] {
+        let (status, _) = crate::realm_actor_control::current_source(
+            conn,
+            &event.actor_id,
+            json!({"kind":"realm_actor_status","actor_id":event.actor_id,"gate":gate}),
+        )
+        .await?;
+        if status == "retired" {
+            return Err(denied("retired Realm actor cannot maintain Profile"));
+        }
+    }
+    let cut =
+        crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event).await?;
+    cut.require_open_lifecycle(event)?;
+    let fact = crate::realm_actor_control_source::signer_fact(conn, event, at).await?;
+    let previous = crate::realm_actor_control::optional_current_source(
+        conn,
+        &event.actor_id,
+        json!({"kind":"realm_actor_profile","actor_id":event.actor_id}),
+    )
+    .await?;
+    let previous_profile: Option<ActorProfile> = previous
+        .as_ref()
+        .map(|(value, _)| serde_json::from_value(value["profile"].clone()).map_err(denied))
+        .transpose()?;
+    let profile = match event.kind {
+        EventKind::ProfileCreate => {
+            if previous.is_some() {
+                return Err(denied("Realm actor Profile is create-once"));
+            }
+            let payload: ActorProfileCreatePayload =
+                serde_json::from_value(json!(event.payload)).map_err(denied)?;
+            payload.materialize(event).map_err(denied)?
+        }
+        EventKind::ProfileUpdate => {
+            let payload: ActorProfileUpdatePayload =
+                serde_json::from_value(json!(event.payload)).map_err(denied)?;
+            let (value, source) = previous
+                .as_ref()
+                .ok_or_else(|| denied("Profile has never been created"))?;
+            if payload.expected_revision.as_ref()
+                != Some(&CurrentRevision {
+                    commit_id: source.commit_id.clone(),
+                    stream_position: source.stream_position,
+                })
+                || value["profile_id"] != json!(payload.target_ref)
+            {
+                return Err(denied("Profile CAS or target differs"));
+            }
+            payload
+                .apply(
+                    event,
+                    previous_profile
+                        .as_ref()
+                        .ok_or_else(|| denied("Profile original missing"))?,
+                )
+                .map_err(denied)?
+        }
+        _ => return Err(denied("unsupported Profile writer")),
+    };
+    profile.validate_display_members().map_err(denied)?;
+    let kind = match creation.actor_role {
+        arkret_models_integration::RealmActorCreatePayloadActorRole::Bot => {
+            arkret_wire::ActorKind::Bot
+        }
+        arkret_models_integration::RealmActorCreatePayloadActorRole::Ghost => {
+            arkret_wire::ActorKind::Integration
+        }
+    };
+    if profile.actor_id.as_ref() != Some(&event.actor_id)
+        || profile.principal_id.is_some()
+        || profile.actor_kind != kind
+        || profile.realm_id.as_ref() != Some(&event.realm_id)
+        || profile.accountable_principal_ids.is_some()
+        || profile.resolution.is_some()
+        || profile.handle.is_some()
+        || profile.agent_slug.is_some()
+    {
+        return Err(denied(
+            "Realm Profile changes identity or includes Account-only fields",
+        ));
+    }
+    if let Some(intent) = intent(&profile)? {
+        if intent.effective_scope.realm_id() != &event.realm_id
+            || !matches!(
+                intent.effective_scope,
+                ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
+            )
+        {
+            return Err(denied(
+                "Profile intent must select a business scope of its own Realm",
+            ));
+        }
+    }
+    let publish_scope = publish_transition(previous_profile.as_ref(), &profile)?;
+    Ok(Admission {
+        original_digest: arkret_canonical::canonical_sha256(event).map_err(denied)?,
+        profile,
+        previous: previous.map(|(value, source)| json!({"value":value,"source":source})),
+        publish_scope,
+        fact,
+    })
+}
+
+pub(crate) async fn admit_control(
+    conn: &mut AsyncPgConnection,
+    transaction: &coland_storage::AuthorityCommitTransaction,
+    carrier: &coland_storage::AppletControlCarrier,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+) -> Result<arkret_wire::AuthoritySubmitOutcome, crate::PgTransactionError> {
+    let event = &transaction.event;
+    let commit = &transaction.commit;
+    if !is_profile(event)
+        || event.actor_id != carrier.actor_id
+        || carrier.governance_service_id != transaction.expected_authority.service_id
+        || carrier.governance_generation != transaction.expected_authority.generation
+    {
+        return Err(denied("Profile transport or governance identity differs").into());
+    }
+    crate::agent_management_review::lock_candidate_current_realms_in_connection(
+        conn,
+        event,
+        prepared,
+        None,
+        &[],
+    )
+    .await?;
+    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;
+    let actual = crate::realm_actor_control_transport::current_carrier(
+        conn,
+        &carrier.actor_id,
+        &carrier.governance_service_id,
+        commit.committed_at,
+    )
+    .await?;
+    if &actual != carrier {
+        return Err(denied("Profile control method changed before acceptance").into());
+    }
+    if let Some(original) =
+        crate::committed_disclosure::accepted_full_event_in_connection(conn, &event.event_id)
+            .await?
+    {
+        if original.event != *event {
+            return Err(denied("duplicate_conflict: Profile original differs").into());
+        }
+        return Ok(arkret_wire::AuthoritySubmitOutcome::Accepted {
+            status: arkret_wire::AuthorityCommitStatus::Duplicate,
+            commit: original.commit,
+        });
+    }
+    let admission = prepare_control(conn, event, commit.committed_at).await?;
+    crate::agent_producer_signer_keys::validate_producer_fact_binding(
+        event,
+        commit,
+        Some(&admission.fact),
+    )?;
+    let mut management = Vec::new();
+    let mut governance = Vec::new();
+    let has_management = prepared.is_some_and(|prepared| {
+        prepared.methods.iter().any(|method| {
+            matches!(
+                method.signature.input.approval_context,
+                arkret_wire::ApprovalContext::Management { .. }
+            )
+        })
+    });
+    if let Some(scope) = &admission.publish_scope {
+        let (_, decision) = publish_basis(conn, event, &admission, commit.committed_at).await?;
+        if !decision.review_requirements.is_empty() || has_management {
+            management = crate::agent_management_review::require_approved_in_connection(
+                conn,
+                event,
+                prepared,
+                commit.committed_at,
+            )
+            .await?;
+        }
+        let target = match scope {
+            ScopeRef::Realm { realm_id } => {
+                arkret_wire::WireResourceSelector::realm(realm_id.clone())
+            }
+            ScopeRef::Circle {
+                realm_id,
+                circle_id,
+            } => arkret_wire::WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
+            _ => return Err(denied("invalid public Profile scope").into()),
+        };
+        let registration = crate::managed_message_actor::registration(conn, event).await?;
+        let facts = coland_storage::OperationFacts {
+            applet_id: event.applet_id.as_ref().map(ToString::to_string),
+            registration_epoch: Some(registration.registration_epoch.to_string()),
+            executed_by: Some(event.actor_id.clone()),
+            circle_id: scope.circle_id().map(ToString::to_string),
+            ..Default::default()
+        };
+        governance = crate::approval_admission::require_governance(
             conn,
             event,
             commit,
-            &self.profile,
+            prepared,
+            arkret_wire::CapabilityActionId::AppletPublish,
+            &target,
+            &facts,
+            &[],
         )
-        .await
+        .await?;
+    } else if has_management {
+        return Err(denied("unchanged or private intent cannot consume a publish decision").into());
     }
-}
-
-pub(crate) fn is_profile(event: &Event) -> bool {
-    matches!(
-        event.kind,
-        EventKind::ProfileCreate | EventKind::ProfileUpdate
+    crate::authority_commit::queue_event_in_connection(conn, event, commit.committed_at).await?;
+    let result = crate::authority_commit::commit_managed_scope_profile_in_connection(
+        conn,
+        transaction,
+        prepared,
+        &admission,
     )
-}
-
-pub(crate) async fn prepare(
-    conn: &mut AsyncPgConnection,
-    event: &Event,
-    guard: &AppletManagedDeviceScopeGuard,
-    at: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<Admission> {
-    prepare_source(
+    .await?;
+    if !matches!(
+        result,
+        coland_storage::AuthorityCommitWriteOutcome::Committed
+    ) {
+        return Err(denied("Profile control head or governance changed").into());
+    }
+    crate::agent_producer_signer_keys::retain_prepared_applet_in_connection(
         conn,
         event,
-        crate::managed_forward_admission::Source::Local(guard),
-        at,
+        commit,
+        &admission.fact,
     )
-    .await
-}
-
-pub(crate) async fn prepare_source(
-    conn: &mut AsyncPgConnection,
-    event: &Event,
-    source: crate::managed_forward_admission::Source<'_>,
-    at: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<Admission> {
-    use arkret_models_collaboration::events_payloads::realm::RealmPurpose;
-    source.ensure_event(event, at)?;
-    let pcr = match source {
-        crate::managed_forward_admission::Source::Local(guard) => &guard.authority.pcr_realm_id,
-        crate::managed_forward_admission::Source::Forwarded(source) => {
-            &source
-                .verified()
-                .original()
-                .creation
-                .pcr_genesis
-                .event
-                .realm_id
-        }
-    };
-    if !is_profile(event)
-        || event.actor_id != ActorId::account(source.account().clone())
-        || event.executed_by.is_some()
-        || event.applet_id.as_ref() != Some(source.applet())
-        || event.scope_ref.realm_id() != &event.realm_id
-        || &event.realm_id == pcr
-        || !matches!(
-            crate::account_stream_scan::realm_purpose(conn, &event.realm_id).await?,
-            Some(RealmPurpose::Collaboration)
-        )
-    {
-        return Err(denied(
-            "scope Profile requires its real native subject and collaboration scope",
-        ));
-    }
-    let cut = crate::boxed_future(|| {
-        crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
-    })
     .await?;
-    let cut = cut.with_forwarded_managed(source.forwarded());
-    cut.require_open_lifecycle(event)?;
-    cut.require_governed_member(&event.kind)?;
-    match &event.scope_ref {
-        ScopeRef::Realm { realm_id } if realm_id == &event.realm_id => {}
-        ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } if realm_id == &event.realm_id => {
-            let active=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM circle_current_results c JOIN realm_commits k ON k.commit_id=c.current_commit_id WHERE c.realm_id=$1 AND c.circle_id=$2 AND c.value->>'state'='active' AND k.realm_id=c.realm_id AND k.stream_ref=c.source_stream_ref AND k.stream_position=c.current_stream_position)) AS value")
-                .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-            if active.value.as_bool() != Some(true)
-                || !crate::circle_current_results::effective_member_in_connection(
-                    conn,
-                    realm_id,
-                    circle_id,
-                    &event.actor_id,
-                )
-                .await?
-            {
-                return Err(denied(
-                    "scope Profile requires an active Circle and effective member",
-                ));
-            }
-        }
-        _ => {
-            return Err(denied(
-                "Applet Profile scope is not an ordinary Realm or Circle",
-            ));
-        }
-    }
-    let identity = if let Some(source) = source.forwarded() {
-        source
-            .verified()
-            .original()
-            .current
-            .profile
-            .result
-            .value
-            .clone()
-    } else {
-        let identity=sql_query("SELECT value FROM actor_profile_current_results WHERE realm_id=$1 AND actor_id=$2 AND scope_ref=$3 FOR SHARE")
-        .bind::<Text,_>(pcr.as_str()).bind::<Jsonb,_>(json!(event.actor_id))
-        .bind::<Jsonb,_>(json!(ScopeRef::Realm{realm_id:pcr.clone()}))
-        .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
-        .ok_or_else(||denied("native PCR identity Profile is unavailable"))?;
-        let identity: ActorProfile = serde_json::from_value(identity.value).map_err(invalid)?;
-        identity
-    };
-    let previous=sql_query("SELECT to_jsonb(p) AS value FROM actor_profile_current_results p WHERE realm_id=$1 AND actor_id=$2 AND scope_ref=$3 FOR UPDATE")
-        .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(json!(event.actor_id)).bind::<Jsonb,_>(json!(event.scope_ref))
-        .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.map(|r|r.value);
-    let profile = crate::boxed_future(|| {
-        crate::actor_profiles::materialize_profile_at_with_source(
-            conn,
-            event,
-            at,
-            source.account(),
-            source.forwarded(),
-        )
-    })
-    .await
-    .map_err(crate::PgTransactionError::into_persistence)?;
-    if profile.principal_id != identity.principal_id
-        || profile.actor_kind != identity.actor_kind
-        || profile.accountable_principal_ids != identity.accountable_principal_ids
-        || profile.realm_id.as_ref() != Some(&event.realm_id)
-        || profile.resolution.is_some()
-        || profile.agent_slug.is_some()
-        || profile.profile_fields.get("managed_by_applet")
-            != identity.profile_fields.get("managed_by_applet")
-        || profile.profile_fields.get("external_ref") != identity.profile_fields.get("external_ref")
-    {
-        return Err(denied(
-            "scope Profile changes accepted managed identity or private resolution",
-        ));
-    }
-    let public = match profile.profile_fields.get("applet_interaction") {
-        None => false,
-        Some(value) => {
-            let intent: AppletInteractionIntent =
-                serde_json::from_value(value.clone()).map_err(invalid)?;
-            if intent.effective_scope != event.scope_ref {
-                return Err(denied(
-                    "Applet interaction intent differs from the Profile's exact scope",
-                ));
-            }
-            intent.mode == AppletInteractionMode::Public
-        }
-    };
-    Ok(Admission {
-        original_digest: arkret_canonical::canonical_sha256(event).map_err(invalid)?,
-        profile,
-        previous,
-        public,
-    })
-}
-
-/// Shared snapshot evidence is never installed as private PCR identity current.
-pub(crate) fn validate_disclosed(
-    profile_id: &arkret_wire::ActorProfileId,
-    stream: &arkret_wire::CommitStreamRef,
-    value: &Value,
-) -> PersistenceResult<ActorProfile> {
-    let profile: ActorProfile = serde_json::from_value(value.clone()).map_err(invalid)?;
-    profile.validate_display_members().map_err(invalid)?;
-    if profile.id.as_ref() != Some(profile_id)
-        || profile.realm_id.as_ref() != Some(stream.realm_id())
-        || profile.resolution.is_some()
-        || !matches!(
-            profile.actor_kind,
-            arkret_wire::ActorKind::Bot | arkret_wire::ActorKind::Integration
-        )
-        || !matches!(
-            stream,
-            arkret_wire::CommitStreamRef::Realm { .. }
-                | arkret_wire::CommitStreamRef::Circle { .. }
-        )
-    {
-        return Err(invalid(
-            "shared Applet Profile differs from its source or contains private identity",
-        ));
-    }
-    if let Some(intent) = profile.profile_fields.get("applet_interaction") {
-        let intent: AppletInteractionIntent =
-            serde_json::from_value(intent.clone()).map_err(invalid)?;
-        if arkret_wire::CommitStreamRef::from_scope(&intent.effective_scope, None)
-            .map_err(invalid)?
-            != *stream
-        {
-            return Err(invalid(
-                "shared Applet Profile intent differs from its source",
-            ));
-        }
-    }
-    Ok(profile)
-}
-
-/// Pure projection of an already recipient-verified ordinary Event. No local
-/// installation, authority, private identity or capability is manufactured.
-pub(crate) async fn project_replica(
-    conn: &mut AsyncPgConnection,
-    event: &Event,
-    commit: &RealmCommit,
-) -> PersistenceResult<()> {
-    use arkret_models_collaboration::events_payloads::{
-        ActorProfileCreatePayload, ActorProfileUpdatePayload,
-    };
-    use arkret_wire::{ActorProfileId, CurrentRevision, CurrentSelector, TypedCurrentRow};
-    if event.applet_id.is_none()
-        || event.executed_by.is_some()
-        || commit.event_ref != event.event_id
-        || commit.stream_ref
-            != arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, None).map_err(invalid)?
-    {
-        return Err(denied(
-            "shared Profile requires its original native subject and exact source",
-        ));
-    }
-    let profile = match event.kind {
-        EventKind::ProfileCreate => {
-            let body: ActorProfileCreatePayload =
-                serde_json::from_value(json!(event.payload)).map_err(invalid)?;
-            body.materialize(event).map_err(invalid)?
-        }
-        EventKind::ProfileUpdate => {
-            let body: ActorProfileUpdatePayload =
-                serde_json::from_value(json!(event.payload)).map_err(invalid)?;
-            let selector = json!(CurrentSelector::ActorProfile {
-                actor_profile_id: body.target_ref.clone()
-            });
-            let previous=sql_query("SELECT value FROM replica_authorization_rows WHERE realm_id=$1 AND selector=$2 AND source_stream_ref=$3 FOR UPDATE")
-                .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(selector).bind::<Jsonb,_>(json!(commit.stream_ref)).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
-                .ok_or_else(||PersistenceError::Conflict("revision_unavailable: shared Profile postimage needs its verified current".into()))?;
-            let current =
-                validate_disclosed(&body.target_ref, &commit.stream_ref, &previous.value)?;
-            body.apply(event, &current).map_err(invalid)?
-        }
-        _ => return Err(invalid("not a shared Profile Event")),
-    };
-    if event.actor_id.as_account_id().map(|a| &a.principal_id) != Some(&profile.principal_id) {
-        return Err(denied("shared Profile differs from its original subject"));
-    }
-    let id = profile
-        .id
-        .clone()
-        .ok_or_else(|| invalid("shared Profile has no id"))?;
-    if event.kind == EventKind::ProfileCreate
-        && id != ActorProfileId::from_event_id(&event.event_id)
-    {
-        return Err(invalid("shared Profile create id differs"));
-    }
-    let value = json!(profile);
-    validate_disclosed(&id, &commit.stream_ref, &value)?;
-    crate::replica_authorization::save_row(
+    crate::agent_management_review::consume_in_connection(conn, event, commit, &management).await?;
+    crate::approval_admission::consume_and_audit(
         conn,
-        &event.realm_id,
-        &TypedCurrentRow::Value {
-            selector: CurrentSelector::ActorProfile {
-                actor_profile_id: id,
-            },
-            source_stream_ref: commit.stream_ref.clone(),
-            revision: CurrentRevision {
-                commit_id: commit.commit_id.clone(),
-                stream_position: commit.stream_position,
-            },
-            value,
-        },
-        commit.committed_at,
+        event,
+        commit,
+        &governance,
+        &json!({"realm_profile_publish":admission.publish_scope}),
     )
-    .await
+    .await?;
+    Ok(arkret_wire::AuthoritySubmitOutcome::Accepted {
+        status: arkret_wire::AuthorityCommitStatus::Committed,
+        commit: commit.clone(),
+    })
+}
+/// Device-authenticated business admission cannot impersonate a control method.
+pub(crate) async fn prepare(
+    _conn: &mut AsyncPgConnection,
+    _event: &Event,
+    _guard: &AppletManagedDeviceScopeGuard,
+    _at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<Admission> {
+    Err(denied(
+        "Realm Profile requires authenticated subject control, not Device admission",
+    ))
+}
+pub(crate) async fn prepare_source(
+    _conn: &mut AsyncPgConnection,
+    _event: &Event,
+    _source: crate::managed_forward_admission::Source<'_>,
+    _at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<Admission> {
+    Err(denied(
+        "Realm Profile is not a managed business Device Event",
+    ))
+}
+/// Realm control Profiles never enter ordinary member snapshots or replica reducers.
+pub(crate) fn validate_disclosed(
+    _id: &arkret_wire::ActorProfileId,
+    _stream: &arkret_wire::CommitStreamRef,
+    _value: &Value,
+) -> PersistenceResult<ActorProfile> {
+    Err(denied(
+        "private Realm Profile cannot be disclosed as shared state",
+    ))
+}
+pub(crate) async fn project_replica(
+    _conn: &mut AsyncPgConnection,
+    _event: &Event,
+    _commit: &RealmCommit,
+) -> PersistenceResult<()> {
+    Err(denied(
+        "private Realm Profile cannot be installed from member replication",
+    ))
 }
 
 #[cfg(test)]
-mod replica_tests {
-    use arkret_wire::*;
-
+mod tests {
     use super::*;
 
-    /// Projection component fixture: caller verification is outside this unit.
-    /// This test creates no managed provision, accepted identity or private PCR row.
-    #[tokio::test]
-    async fn scoped_profile_snapshot_and_tail_keep_public_evidence_without_private_identity() {
-        let database = crate::test_database::TestDatabase::lease().await;
-        let pool = database.pool();
-        let mut conn = pool.get().await.unwrap();
-        let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-        let realm = RealmId::from_event_id(&EventId::from_digest(
+    #[test]
+    fn publish_gate_tracks_public_transitions_not_display_maintenance() {
+        let realm = arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(
             arkret_canonical::DigestSuite::Sha256,
-            [0x72; 32],
-        ));
-        let actor = ActorId::account(AccountId::new(
-            "ak:did_core:web:managed-profile.example".parse().unwrap(),
-            "ak:did_core:web:profile-origin.example".parse().unwrap(),
-        ));
-        let id = ActorProfileId::from_event_id(&EventId::from_digest(
-            arkret_canonical::DigestSuite::Sha256,
-            [0x73; 32],
+            [131; 32],
         ));
         let scope = ScopeRef::Realm {
             realm_id: realm.clone(),
         };
-        let stream = CommitStreamRef::Realm {
-            realm_id: realm.clone(),
-        };
-        let value = json!({"id":id,"schema":ActorProfile::SCHEMA,"realm_id":realm,"principal_id":actor.signing_principal_id(),"actor_kind":"bot","display_name":"Scoped Bot","accountable_principal_ids":["ak:did_core:web:profile-service.example"],"profile_fields":{"managed_by_applet":"ak:applet:0198ff00-0000-7000-8000-000000000075","applet_interaction":{"effective_scope":scope,"mode":"public"}},"created_at":at});
-        let head = CommitStreamHead {
-            stream_ref: stream.clone(),
-            stream_position: 7,
-            commit_id: RealmCommitId::from_digest([7; 32]),
-        };
-        let entry = TypedCurrentRow::Value {
-            selector: CurrentSelector::ActorProfile {
-                actor_profile_id: id.clone(),
-            },
-            source_stream_ref: stream.clone(),
-            revision: CurrentRevision {
-                commit_id: head.commit_id.clone(),
-                stream_position: 7,
-            },
-            value: value.clone(),
-        };
-        crate::replica_current::install_snapshot_in_connection(
-            &mut conn,
-            &realm,
-            &head,
-            &[entry.clone()],
-            at,
-        )
-        .await
-        .unwrap();
-        let read = "SELECT jsonb_build_object('rows',(SELECT jsonb_agg(to_jsonb(r)) FROM replica_authorization_rows r WHERE realm_id=$1),'private_profiles',(SELECT count(*) FROM actor_profile_current_results WHERE realm_id=$1)) AS value";
-        let before = sql_query(read)
-            .bind::<Text, _>(realm.as_str())
-            .get_result::<JsonRow>(&mut conn)
-            .await
-            .unwrap()
-            .value;
-        assert_eq!(before["private_profiles"], 0);
-        assert_eq!(before["rows"][0]["value"], value);
-        for private in [json!("resolution"), json!("scope")] {
-            let mut malformed = entry.clone();
-            let TypedCurrentRow::Value { value, .. } = &mut malformed;
-            if private == "resolution" {
-                value["resolution"] = json!({});
-            } else {
-                value["profile_fields"]["applet_interaction"]["effective_scope"] = json!({"kind":"circle","realm_id":realm,"circle_id":CircleId::from_event_id(&EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[0x74;32]))});
-            }
-            sql_query("BEGIN").execute(&mut conn).await.unwrap();
-            assert!(
-                crate::replica_current::install_snapshot_in_connection(
-                    &mut conn,
-                    &realm,
-                    &head,
-                    &[malformed],
-                    at
-                )
-                .await
-                .is_err()
-            );
-            sql_query("ROLLBACK").execute(&mut conn).await.unwrap();
-            assert_eq!(
-                before,
-                sql_query(read)
-                    .bind::<Text, _>(realm.as_str())
-                    .get_result::<JsonRow>(&mut conn)
-                    .await
-                    .unwrap()
-                    .value
-            );
-        }
-        let mut event=arkret_wire::test_support::raw_event_for_actor_at(EventKind::ProfileUpdate.as_str(),scope,actor,json!({"target_ref":id,"patch":{"profile_fields.applet_interaction.mode":"private","display_name":"Updated scoped Bot"}}),at).unwrap();
-        event.applet_id = Some(
-            "ak:applet:0198ff00-0000-7000-8000-000000000075"
-                .parse()
-                .unwrap(),
+        let mut private: ActorProfile = serde_json::from_value(json!({
+            "schema":ActorProfile::SCHEMA,"realm_id":realm,"actor_kind":"bot","display_name":"Bridge",
+            "created_at":"2026-10-20T00:00:00.000Z","profile_fields":{}
+        })).unwrap();
+        assert!(publish_transition(None, &private).unwrap().is_none());
+        private.profile_fields.insert(
+            "applet_interaction".into(),
+            json!({"effective_scope":scope,"mode":"private"}),
         );
-        let commit = RealmCommit {
-            producer_signer_fact_digest: None,
-            commit_id: RealmCommitId::from_digest([8; 32]),
-            realm_id: realm.clone(),
-            stream_ref: stream,
-            stream_position: 8,
-            previous_commit_ref: Some(head.commit_id.clone()),
-            event_ref: event.event_id.clone(),
-            governance_generation: 0,
-            authority_ref: RealmCommitAuthorityRef::GenesisOrChangeEvent(event.event_id.clone()),
-            committed_at: at,
-            signature: DetachedObjectSignature {
-                context: DetachedSignatureContext::RealmCommit,
-                signature_algorithm: DetachedSignatureAlgorithm::Ed25519,
-                verification_method: DidUrl::new("did:web:profile-origin.example#authority")
-                    .unwrap(),
-                signed_digest: Hash::new(format!("sha256:{}", "aa".repeat(32))).unwrap(),
-                created_at: at,
-                sig: Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
-            },
-        };
-        crate::replica_current::advance_in_connection(&mut conn, &event, &commit)
-            .await
-            .unwrap();
-        let after = sql_query(read)
-            .bind::<Text, _>(realm.as_str())
-            .get_result::<JsonRow>(&mut conn)
-            .await
-            .unwrap()
-            .value;
-        assert_eq!(after["private_profiles"], 0);
-        assert_eq!(
-            after["rows"][0]["value"]["display_name"],
-            "Updated scoped Bot"
+        let mut public = private.clone();
+        public.profile_fields.insert(
+            "applet_interaction".into(),
+            json!({"effective_scope":scope,"mode":"public"}),
         );
         assert_eq!(
-            after["rows"][0]["value"]["profile_fields"]["applet_interaction"]["mode"],
-            "private"
+            publish_transition(None, &public).unwrap(),
+            Some(scope.clone())
         );
         assert_eq!(
-            after["rows"][0]["current_commit_id"],
-            json!(commit.commit_id)
+            publish_transition(Some(&private), &public).unwrap(),
+            Some(scope.clone())
         );
+        assert!(
+            publish_transition(Some(&public), &private)
+                .unwrap()
+                .is_none()
+        );
+        let mut renamed = public.clone();
+        renamed.display_name = "New name".into();
+        assert!(
+            publish_transition(Some(&public), &renamed)
+                .unwrap()
+                .is_none()
+        );
+        let other = ScopeRef::Circle {
+            realm_id: realm,
+            circle_id: arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [132; 32],
+            )),
+        };
+        renamed.profile_fields.insert(
+            "applet_interaction".into(),
+            json!({"effective_scope":other,"mode":"public"}),
+        );
+        assert_eq!(
+            publish_transition(Some(&public), &renamed).unwrap(),
+            Some(other)
+        );
+        renamed.profile_fields.clear();
+        assert!(
+            publish_transition(Some(&public), &renamed)
+                .unwrap()
+                .is_none()
+        );
+        renamed.profile_fields.insert(
+            "applet_interaction".into(),
+            json!({"effective_scope":scope,"mode":"public","extra":true}),
+        );
+        assert!(publish_transition(Some(&public), &renamed).is_err());
     }
 }

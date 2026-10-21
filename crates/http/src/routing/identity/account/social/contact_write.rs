@@ -298,7 +298,7 @@ async fn verify_stored_request_receipt(
     let peer = receipt.core.peer.contact_actor_id();
     if !((holder == record.requester_id && peer == record.target_id)
         || (holder == record.target_id && peer == record.requester_id))
-        || receipt.core.issuer_id != *holder.route_service_id()
+        || Some(&receipt.core.issuer_id) != holder.as_account_id().map(|a| &a.station_id)
     {
         return Err(crate::app_error!(
             FailedPrecondition,
@@ -350,7 +350,7 @@ async fn verify_stored_contact_round(
         let peer = receipt.core.peer.contact_actor_id();
         if !((holder == record.requester_id && peer == record.target_id)
             || (holder == record.target_id && peer == record.requester_id))
-            || receipt.core.issuer_id != *holder.route_service_id()
+            || Some(&receipt.core.issuer_id) != holder.as_account_id().map(|a| &a.station_id)
         {
             return Err(crate::app_error!(
                 FailedPrecondition,
@@ -360,13 +360,14 @@ async fn verify_stored_contact_round(
         validate_request_receipt_cryptography(state, receipt, "stored_contact.round_request")?;
     }
     if let Some(response) = &bundle.normal_response_receipt {
-        if response.issuer_id
-            != *response
+        if Some(&response.issuer_id)
+            != response
                 .request_receipt
                 .core
                 .peer
                 .contact_actor_id()
-                .route_service_id()
+                .as_account_id()
+                .map(|a| &a.station_id)
             || !bundle.request_receipts.contains(&response.request_receipt)
         {
             return Err(crate::app_error!(
@@ -399,7 +400,7 @@ async fn verify_stored_contact_round(
                 "stored Contact proof has wrong peer"
             ));
         };
-        if proof.issuer_id != *source.route_service_id() {
+        if Some(&proof.issuer_id) != source.as_account_id().map(|a| &a.station_id) {
             return Err(crate::app_error!(
                 FailedPrecondition,
                 "stored Contact proof has wrong source Station"
@@ -424,7 +425,11 @@ async fn verify_stored_contact_round(
                 && attestation.peer_id == record.target_id)
                 || (attestation.subject_id == record.target_id
                     && attestation.peer_id == record.requester_id))
-                || attestation.issuer_id != *attestation.subject_id.route_service_id()
+                || Some(&attestation.issuer_id)
+                    != attestation
+                        .subject_id
+                        .as_account_id()
+                        .map(|a| &a.station_id)
             {
                 return Err(crate::app_error!(
                     FailedPrecondition,

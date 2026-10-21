@@ -278,10 +278,8 @@ async fn commit_strand_create_current_result_with_authority_in_connection(
     if matches!(event.scope_ref, arkret_wire::ScopeRef::Circle { .. }) {
         crate::circle_current_results::require_active_author_in_connection(conn, event, commit)
             .await?;
-        // A newly activated Circle requires an encrypted object carrier with
-        // its own epoch proof. This bounded Strand-create writer admits only
-        // the pre-Genesis plaintext Circle branch, and cannot leak authored
-        // metadata into an MLS-backed scope.
+        // Metadata-only portals use the shared exact-epoch MLS send gate.
+        // Other object/track content still needs its own admitted carrier.
         let scope_key = String::from_utf8(
             arkret_canonical::canonical_json_bytes(&event.scope_ref)
                 .map_err(PersistenceError::database)?,
@@ -295,11 +293,25 @@ async fn commit_strand_create_current_result_with_authority_in_connection(
         .await
         .map_err(PersistenceError::database)?;
         if activated.present {
-            return Err(reject(
-                "Circle Strand create needs an admitted MLS object carrier",
-            ));
-        }
-        if value
+            let has_content = |object: &Value| {
+                ["content", "encrypted_content"]
+                    .iter()
+                    .any(|key| object.get(*key).is_some_and(|value| !value.is_null()))
+            };
+            if has_content(&value)
+                || value
+                    .get("tracks")
+                    .and_then(Value::as_object)
+                    .is_some_and(|tracks| tracks.values().any(has_content))
+                || value.get("encrypted_metadata").is_none_or(Value::is_null)
+            {
+                return Err(reject(
+                    "Circle Strand create needs an admitted MLS object carrier",
+                ));
+            }
+            crate::mls_group_current_results::require_mls_send_gate_in_connection(conn, event)
+                .await?;
+        } else if value
             .get("encrypted_content")
             .is_some_and(|value| !value.is_null())
             || value

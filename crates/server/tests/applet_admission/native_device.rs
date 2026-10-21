@@ -294,7 +294,7 @@ async fn native_join_review_binds_service_requester_device_original_and_atomic_c
         let policy=fixture.admin_event(EventKind::PolicySet,event.scope_ref.clone(),json!({"policy_id":policy_id,"expected_revision":null,"value":{"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":fixture.realm,"policy_kind":"applet","default_effect":"allow","created_by":admin,"created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),"rules":[{"rule_id":"native_join","kind":"applet","effect":"require_review","applet_target":{"kind":"installation","applet_id":install.package.applet_id,"effective_scope":event.scope_ref},"applet_operations":["join"],"review_requirement":{"approver_actor_ids":[admin],"threshold":1,"max_age_seconds":3600}}]}}));
         accepted_admin_domain_event(&fixture,policy).await;
         let before=business(&fixture).await;let (status,error)=post(&fixture,&authority,&key,&event,vec![]).await;assert!(!status.is_success(),"{error}");assert!(error.to_string().contains("approval_required"),"{error}");assert_eq!(before,business(&fixture).await);
-        let request=ManagementReviewRequestBody {request_id:format!("native-review-{}",uuid::Uuid::now_v7()),effective_scope:event.scope_ref.clone(),management_operation:ManagementOperation::Join,requester_actor_id:ActorId::service(install.package.service_id.clone()),target:ManagementReviewTarget::Event {event:Box::new(event.clone())}};
+        let request=ManagementReviewRequestBody { configuration_ref: None,request_id:format!("native-review-{}",uuid::Uuid::now_v7()),effective_scope:event.scope_ref.clone(),management_operation:ManagementOperation::Join,requester_actor_id:ActorId::service(install.package.service_id.clone()),target:ManagementReviewTarget::Event {event:Box::new(event.clone())}};
         let (status,pending)=fixture.service_post(&install.package,"/_arkret/self/management-reviews/requests",ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,&json!(request),"native-review-request").await;assert_eq!(status,StatusCode::OK,"pending native: {pending}");assert_eq!(pending["status"],"pending");
         let vote=creation_review_vote(&fixture,&request);
         let decision=json!({"request_id":request.request_id,"expected_status":"pending","decision":"approve","approval_signatures":[vote]});
@@ -316,7 +316,7 @@ async fn native_join_review_binds_service_requester_device_original_and_atomic_c
         let ghost_key=SigningKey::from_bytes(&[124;32]);let ghost_device=DeviceId::new(format!("ak:device:{}",uuid::Uuid::now_v7())).unwrap();
         let ghost_authority=authorize(&fixture,&install,&ghost["managed_actor_bundle"],&namespace,&ghost_key,ghost_device,true).await;
         let ghost_event=join_event(&fixture,&install,&ghost_authority,&ghost_key,&installation_grant);
-        let pending_request=ManagementReviewRequestBody {request_id:format!("native-revoked-source-{}",uuid::Uuid::now_v7()),effective_scope:ghost_event.scope_ref.clone(),management_operation:ManagementOperation::Join,requester_actor_id:request.requester_actor_id.clone(),target:ManagementReviewTarget::Event {event:Box::new(ghost_event)}};
+        let pending_request=ManagementReviewRequestBody { configuration_ref: None,request_id:format!("native-revoked-source-{}",uuid::Uuid::now_v7()),effective_scope:ghost_event.scope_ref.clone(),management_operation:ManagementOperation::Join,requester_actor_id:request.requester_actor_id.clone(),target:ManagementReviewTarget::Event {event:Box::new(ghost_event)}};
         let (status,pending)=fixture.service_post(&install.package,"/_arkret/self/management-reviews/requests",ServiceOperationId::SELF_MANAGEMENT_REVIEW_COMMAND_REQUEST_V1,&json!(pending_request),"native-pending-source").await;assert_eq!(status,StatusCode::OK,"{pending}");assert_eq!(pending["status"],"pending");
         let complete=business(&fixture).await;
         let original_projection=complete["grants"].as_array().unwrap().iter().find(|row|row["grant_id"]==installation_grant.as_str()).unwrap().clone();
@@ -393,6 +393,7 @@ async fn approved_profile(
     event: &Event,
 ) -> (ManagementReviewRequestBody, arkret_wire::ApprovalSignature) {
     let request = ManagementReviewRequestBody {
+        configuration_ref: None,
         request_id: format!("publish-{}", uuid::Uuid::now_v7()),
         effective_scope: event.scope_ref.clone(),
         management_operation: ManagementOperation::Publish,
@@ -2293,6 +2294,7 @@ async fn native_circle_approve(
     event: &Event,
 ) -> (ManagementReviewRequestBody, arkret_wire::ApprovalSignature) {
     let request = ManagementReviewRequestBody {
+        configuration_ref: None,
         request_id: format!("native-circle-{}", uuid::Uuid::now_v7()),
         effective_scope: event.scope_ref.clone(),
         management_operation: ManagementOperation::Join,
@@ -2551,6 +2553,7 @@ async fn native_circle_exercise(context: Box<NativeSourcesContext>) {
         assert!(!status.is_success(), "stale parent must not join: {error}");
         assert_eq!(before, native_circle_snapshot(&fixture).await);
         let stale_request = ManagementReviewRequestBody {
+            configuration_ref: None,
             request_id: format!("stale-circle-{}", uuid::Uuid::now_v7()),
             effective_scope: scope.clone(),
             management_operation: ManagementOperation::Join,
@@ -2807,6 +2810,7 @@ async fn native_circle_exercise(context: Box<NativeSourcesContext>) {
             Value::Null,
         );
         let pending = ManagementReviewRequestBody {
+            configuration_ref: None,
             request_id: format!("missing-circle-{}", uuid::Uuid::now_v7()),
             effective_scope: scope.clone(),
             management_operation: ManagementOperation::Join,

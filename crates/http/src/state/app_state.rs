@@ -1809,6 +1809,16 @@ impl AppState {
             .realm_join_bootstrap_rate_limited(realm_id, applicant_account_id)
     }
 
+    pub fn peer_device_lookup_rate_limited(&self, keys: &[String]) -> bool {
+        let policy = &self.config().rate_limiter;
+        self.runtime_guards.peer_device_lookup_rate_limited(
+            keys,
+            policy.max_requests,
+            chrono::Duration::from_std(policy.window)
+                .unwrap_or_else(|_| chrono::Duration::seconds(60)),
+        )
+    }
+
     /// Spec `identity/key-management.md` §7.8 — record a full-ciphertext
     /// key-backup download for `principal_id` and report whether the rolling
     /// 24h quota ([`KEY_BACKUP_DOWNLOAD_WINDOW`]) is exhausted. Once

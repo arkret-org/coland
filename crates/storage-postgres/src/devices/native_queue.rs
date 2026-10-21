@@ -1,7 +1,7 @@
 //! Scope-bound native recipient pages and exact, post-delivery acknowledgements.
 use arkret_models_collaboration::device_messages::{DeviceMessagesGetOutcome, RecipientDelivery};
 use arkret_models_crypto::{MlsCommitPayload, PeerKeyPackagesClaimOutcome};
-use arkret_wire::{ActorId, ScopeRef};
+use arkret_wire::ScopeRef;
 use coland_storage::{
     AccountContentDeliveryGuard, AppletDeviceQueueAck, AppletDeviceQueuePage,
     AppletDeviceQueueRead, AppletManagedDeviceAuthority, AppletManagedDeviceScopeGuard,
@@ -101,11 +101,11 @@ impl AccountContentDeliveryGuard for PendingPage {
     }
 }
 fn endpoint_binding(endpoint: &AppletManagedDeviceScopeGuard) -> PersistenceResult<Value> {
-    // This is an opaque private cursor binding, not another wire endpoint
-    // DTO. The existing selector retains full Account/Station/Device and the
-    // original authorization; the other typed values pin generation/scope.
+    // Bind the complete identity and original authorization across governance changes.
     serde_json::to_value((
-        &endpoint.authority.selector,
+        &endpoint.authority.actor_id,
+        &endpoint.authority.device_id,
+        &endpoint.authority.authorization_ref,
         &endpoint.authority.current_device_generation_ref,
         &endpoint.effective_scope,
     ))
@@ -113,7 +113,7 @@ fn endpoint_binding(endpoint: &AppletManagedDeviceScopeGuard) -> PersistenceResu
 }
 fn subject(authority: &AppletManagedDeviceAuthority) -> PersistenceResult<String> {
     String::from_utf8(
-        arkret_canonical::canonical_json_bytes(&authority.account_id)
+        arkret_canonical::canonical_json_bytes(&authority.actor_id)
             .map_err(PersistenceError::database)?,
     )
     .map_err(PersistenceError::database)
@@ -183,10 +183,23 @@ async fn continuation(
             .and_then(|v| v.get("endpoint"))
             .cloned(),
     )?;
+    crate::realm_management_history::require_issuer(
+        conn,
+        &endpoint.authority.realm_id,
+        &stored.service_id,
+        None,
+        chrono::DateTime::from_timestamp_millis(stored.issued_at_ms).ok_or_else(|| {
+            cursor_error(
+                "cursor_integrity_invalid",
+                "cursor issuance time is invalid",
+            )
+        })?,
+    )
+    .await?;
     let expected = cursor_context(
         &subject(&endpoint.authority)?,
         Some(endpoint.authority.device_id.to_string()),
-        endpoint.authority.account_id.station_id.clone(),
+        stored.service_id.clone(),
         operation,
         None,
         Some(endpoint_binding(endpoint)?),
@@ -236,9 +249,9 @@ async fn require_device(
 ) -> PersistenceResult<()> {
     let at = Utc::now();
     let current = crate::boxed_future(|| {
-        crate::pcr_applet_device_authority::current_in_connection(
+        crate::realm_actor_device_authority::current_in_connection(
             conn,
-            &authority.account_id,
+            &authority.actor_id,
             &authority.device_id,
             at,
         )
@@ -264,7 +277,7 @@ async fn material_deadline(
     welcome: &arkret_wire::MlsWelcomeDelivery,
 ) -> PersistenceResult<chrono::DateTime<Utc>> {
     let authority = &endpoint.authority;
-    if welcome.recipient_actor_id != ActorId::account(authority.account_id.clone())
+    if welcome.recipient_actor_id != authority.actor_id.clone()
         || welcome.effective_scope != endpoint.effective_scope
         || !matches!(&welcome.recipient_endpoint,arkret_wire::MlsWelcomeRecipientEndpoint::Device{device_id} if device_id==&authority.device_id)
     {
@@ -291,11 +304,23 @@ async fn material_deadline(
     let package = crate::mls::key_package_for_delivery(conn, &claim.keypackage_ref)
         .await?
         .ok_or_else(|| denied("queued Welcome package is unavailable"))?;
+    let original_authority = outcome
+        .claim_receipt
+        .claim_authority_ref
+        .as_ref()
+        .ok_or_else(|| denied("Realm claim has no original authority reference"))?;
+    crate::realm_management_history::require_issuer(
+        conn,
+        &authority.realm_id,
+        &outcome.claim_receipt.destination_id,
+        Some(original_authority),
+        outcome.claim_receipt.claimed_at,
+    )
+    .await?;
     let request = &outcome.claim_receipt.request;
     if row.source_id != outcome.claim_receipt.source_id.as_str()
         || row.claim_request_id != outcome.claim_request_id.as_str()
         || row.request_digest != outcome.claim_receipt.request_digest.as_str()
-        || outcome.claim_receipt.destination_id != authority.account_id.station_id
         || row.welcome_id != welcome.welcome_id.as_str()
         || row.welcome_digest
             != welcome
@@ -304,22 +329,21 @@ async fn material_deadline(
                 .as_str()
         || row.commit_event_ref != welcome.commit_event_ref.as_str()
         || row.keypackage_id.as_deref() != Some(package.id.as_str())
-        || package.owner_account_id != authority.account_id
+        || package.owner_actor_id != authority.actor_id
         || package.effective_scope.as_ref() != Some(&endpoint.effective_scope)
         || package.device_id.as_deref() != Some(authority.device_id.as_str())
         || package.device_authorize_event_id.as_deref()
-            != Some(authority.selector.authorization_ref.event_id.as_str())
-        || claim.actor_id.as_account_id() != Some(&authority.account_id)
+            != Some(authority.authorization_ref.event_id.as_str())
+        || claim.actor_id != authority.actor_id
         || claim.device_id.as_ref() != Some(&authority.device_id)
-        || claim.device_authorize_event_id.as_ref()
-            != Some(&authority.selector.authorization_ref.event_id)
+        || claim.device_authorize_event_id.as_ref() != Some(&authority.authorization_ref.event_id)
         || claim.agent_id.is_some()
         || claim.agent_verification_method.is_some()
         || claim.agent_key_authorize_event_id.is_some()
         || claim.keypackage != arkret_canonical::base64url_encode(&package.key_package_bytes)
         || claim.capabilities != package.capabilities
         || claim.last_resort.unwrap_or(false) != package.last_resort
-        || request.target_account_id.as_ref() != Some(&authority.account_id)
+        || request.target_actor_id.as_ref() != Some(&authority.actor_id)
         || request.intended_realm_id != welcome.realm_id
         || request.mls_group_id
             != endpoint
@@ -417,7 +441,7 @@ pub(super) async fn read(
     }
     let mut held = crate::account_content_delivery::DeliveryGuard::begin(pool).await?;
     let mut realms = vec![
-        authority.pcr_realm_id.clone(),
+        authority.realm_id.clone(),
         endpoint.effective_scope.realm_id().clone(),
     ];
     realms.sort();
@@ -425,7 +449,7 @@ pub(super) async fn read(
     for realm in realms {
         let row=sql_query("SELECT to_jsonb(service_id) AS payload FROM realm_authorities WHERE realm_id=$1 FOR SHARE NOWAIT")
             .bind::<Text,_>(realm.as_str()).get_result::<JsonPayloadRow>(held.connection()).await.map_err(PersistenceError::database)?;
-        if row.payload.as_str() != Some(authority.account_id.station_id.as_str()) {
+        if row.payload.as_str() != Some(authority.governance_service_id.as_str()) {
             return Err(denied("native queue has no local current barrier"));
         }
     }
@@ -456,18 +480,12 @@ pub(super) async fn read(
         )
     })
     .await?;
-    let binding = super::queue_authority::current_binding(
-        held.connection(),
-        authority.account_id.principal_id.as_str(),
-        authority.device_id.as_str(),
-    )
-    .await?
-    .ok_or_else(|| denied("native queue original endpoint binding is absent"))?;
+    let binding = super::queue_authority::realm_device_binding(authority)?;
     let scope =
         serde_json::to_value(&endpoint.effective_scope).map_err(PersistenceError::database)?;
     let rows=sql_query("SELECT position,delivery_json FROM mls_welcome_deliveries WHERE recipient=$1 AND recipient_endpoint_kind='device' AND recipient_device_id=$2 AND recipient_device_authorization=$3 AND recipient_authorization_event_ref=$4 AND delivery_json->'effective_scope'=$5 AND state='queued' AND position>$6 ORDER BY position LIMIT $7 FOR SHARE")
-        .bind::<Text,_>(authority.account_id.principal_id.as_str()).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(&binding)
-        .bind::<Text,_>(authority.selector.authorization_ref.event_id.as_str()).bind::<Jsonb,_>(&scope).bind::<BigInt,_>(after).bind::<BigInt,_>((input.limit+1) as i64)
+        .bind::<Text,_>(subject(authority)?).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(&binding)
+        .bind::<Text,_>(authority.authorization_ref.event_id.as_str()).bind::<Jsonb,_>(&scope).bind::<BigInt,_>(after).bind::<BigInt,_>((input.limit+1) as i64)
         .load::<QueueRow>(held.connection()).await.map_err(PersistenceError::database)?;
     let has_more = rows.len() > input.limit;
     let mut deliveries = Vec::new();
@@ -530,14 +548,14 @@ pub(super) async fn read(
                 position: i64,
             }
             sql_query("SELECT position FROM mls_welcome_deliveries WHERE recipient=$1 AND recipient_endpoint_kind='device' AND recipient_device_id=$2 AND recipient_device_authorization=$3 AND delivery_json->'effective_scope'=$4 AND position=ANY($5) AND state='queued' ORDER BY position FOR SHARE NOWAIT")
-                .bind::<Text,_>(authority.account_id.principal_id.as_str()).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(&binding).bind::<Jsonb,_>(&scope).bind::<Array<BigInt>,_>(&prior)
+                .bind::<Text,_>(subject(authority)?).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(&binding).bind::<Jsonb,_>(&scope).bind::<Array<BigInt>,_>(&prior)
                 .load::<Position>(held.connection()).await.map_err(PersistenceError::database)?.into_iter().map(|row|row.position).collect()
         } else {
             Vec::new()
         };
         cumulative.extend_from_slice(&positions);
         sql_query("INSERT INTO device_message_ack_tokens(ack_token,recipient,device_id,recipient_device_authorization,effective_scope,delivered_positions,queue_position,issued_at,expires_at,consumed_at) VALUES($1,$2,$3,$4,$5,$6,$7,NOW(),$8,NULL)")
-            .bind::<Text,_>(&token).bind::<Text,_>(authority.account_id.principal_id.as_str()).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(&binding)
+            .bind::<Text,_>(&token).bind::<Text,_>(subject(authority)?).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(&binding)
             .bind::<Jsonb,_>(&scope).bind::<Array<BigInt>,_>(&cumulative).bind::<BigInt,_>(position).bind::<Timestamptz,_>(Utc::now()+chrono::Duration::hours(24))
             .execute(held.connection()).await.map_err(PersistenceError::database)?;
         let cursor = arkret::hlc::Cursor::new_at(Utc::now(), 3_600_000)
@@ -547,7 +565,7 @@ pub(super) async fn read(
             binding_subject: Some(subject(authority)?),
             device_id: Some(authority.device_id.to_string()),
             session_id: None,
-            service_id: authority.account_id.station_id.clone(),
+            service_id: authority.governance_service_id.clone(),
             filter_digest: None,
             purpose: arkret_wire::ServiceOperationId::SELF_DEVICE_MESSAGES_READ_LIST_V1.to_owned(),
             positions: None,
@@ -600,20 +618,20 @@ pub(super) async fn ack(
     }
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_,PgTransactionError,_>(async |conn|{
-        crate::realm_authorization_cut::lock_realm_authorization_cut(conn,&authority.pcr_realm_id).await?;
+        crate::realm_authorization_cut::lock_realm_authorization_cut(conn,&authority.realm_id).await?;
         require_device(conn,authority,scope,input.transport_expires_at).await?;
-        let Some(binding)=super::queue_authority::current_binding(conn,authority.account_id.principal_id.as_str(),authority.device_id.as_str()).await? else{return Ok(None)};
+        let binding=super::queue_authority::realm_device_binding(authority)?;
         let stored=sql_query("SELECT recipient,device_id,recipient_device_authorization,effective_scope,delivered_positions,expires_at,consumed_at FROM device_message_ack_tokens WHERE ack_token=$1 AND effective_scope IS NOT NULL FOR UPDATE")
             .bind::<Text,_>(token).get_result::<AckRow>(&mut *conn).await.optional()?;
         let Some(stored)=stored else{return Ok(None)};
         let scope=serde_json::to_value(scope).map_err(PersistenceError::database)?;
-        if stored.recipient!=authority.account_id.principal_id.as_str() || stored.device_id!=authority.device_id.as_str()
+        if stored.recipient!=subject(authority)? || stored.device_id!=authority.device_id.as_str()
             || stored.recipient_device_authorization!=binding || stored.effective_scope!=scope || Utc::now()>=stored.expires_at
             || stored.delivered_positions.is_empty() || stored.delivered_positions[0]<=0 || !stored.delivered_positions.windows(2).all(|pair|pair[0]<pair[1]) {return Ok(None);}
         require_device(conn,authority,input.effective_scope,input.transport_expires_at).await?;
         if stored.consumed_at.is_some(){return Ok(Some(0));}
         let count=sql_query("UPDATE mls_welcome_deliveries SET state='delivered',delivered_at=NOW() WHERE recipient=$1 AND recipient_endpoint_kind='device' AND recipient_device_id=$2 AND recipient_device_authorization=$3 AND position=ANY($4) AND delivery_json->'effective_scope'=$5 AND state='queued'")
-            .bind::<Text,_>(authority.account_id.principal_id.as_str()).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(binding).bind::<Array<BigInt>,_>(&stored.delivered_positions).bind::<Jsonb,_>(scope)
+            .bind::<Text,_>(subject(authority)?).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(binding).bind::<Array<BigInt>,_>(&stored.delivered_positions).bind::<Jsonb,_>(scope)
             .execute(&mut *conn).await?;
         sql_query("UPDATE device_message_ack_tokens SET consumed_at=NOW() WHERE ack_token=$1 AND consumed_at IS NULL").bind::<Text,_>(token).execute(&mut *conn).await?;
         require_device(conn,authority,input.effective_scope,input.transport_expires_at).await?;

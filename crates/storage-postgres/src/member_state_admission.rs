@@ -82,7 +82,7 @@ async fn require_agent_membership_keypackage(
 ) -> PersistenceResult<()> {
     let candidate = sql_query(
         "SELECT e.envelope,c.commit_json,kp.endpoint_verification_method AS verification_method \
-         FROM mls_key_packages kp JOIN accounts a ON a.principal_id=kp.owner_account_id->>'principal_id' AND a.station_id=kp.owner_account_id->>'station_id' \
+         FROM mls_key_packages kp JOIN accounts a ON a.principal_id=kp.owner_actor_id->>'principal_id' AND a.station_id=kp.owner_actor_id->>'station_id' \
          JOIN canonical_events e ON e.id=kp.agent_key_authorize_event_id AND e.state='committed' \
            AND e.kind='ak.agent.key.authorize' \
          JOIN realm_commits c ON c.event_pk=e.pk AND c.realm_id=$1 \
@@ -784,7 +784,6 @@ pub(crate) async fn admit_member_state_in_connection(
     commit: &arkret_wire::RealmCommit,
     review: Option<&crate::agent_management_review::ReviewAdmission>,
     prepared: Option<&coland_storage::EventApprovalCommit>,
-    forwarded: Option<&coland_storage::ForwardedManagedActorSource>,
 ) -> PersistenceResult<()> {
     if event.kind != arkret_wire::EventKind::MemberState {
         return Ok(());
@@ -792,16 +791,14 @@ pub(crate) async fn admit_member_state_in_connection(
     require_realm_stream_carrier(event, commit)?;
     lock_realm_authorization_cut(conn, &event.realm_id).await?;
     if event.applet_id.is_some() {
-        crate::managed_message_actor::require_managed_actor_with_source(
+        crate::managed_message_actor::require_managed_actor_in_connection(
             conn,
             event,
             commit.committed_at,
-            forwarded,
         )
         .await?;
         RealmAuthorizationCut::read(conn, &event.realm_id, &event.actor_id)
             .await?
-            .with_forwarded_managed(forwarded)
             .require_managed_self_action_in_connection(conn, event, commit, prepared)
             .await?;
     }

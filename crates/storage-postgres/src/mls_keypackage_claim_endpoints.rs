@@ -1,4 +1,7 @@
 //! Current local claim endpoints, derived from their accepted SDK originals.
+#[cfg(test)]
+#[path = "mls_keypackage_claim_endpoints_tests.rs"]
+mod tests;
 use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
 use arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload;
 use arkret_models_crypto::{
@@ -27,6 +30,10 @@ impl EndpointWindow {
     }
 }
 enum Endpoint {
+    RemoteDevice,
+    RealmDevice {
+        authority: coland_storage::AppletManagedDeviceAuthority,
+    },
     Device {
         account: AccountId,
         device: DeviceId,
@@ -59,6 +66,22 @@ impl ClaimEndpoint {
             return Err(denied("claim endpoint authorization window ended"));
         }
         match &self.endpoint {
+            // The origin-signed evidence was checked in prepare; only its
+            // unchanged bounded window can be held across this local cut.
+            Endpoint::RemoteDevice => {}
+            Endpoint::RealmDevice { authority } => {
+                let current = crate::realm_actor_device_authority::current_in_connection(
+                    conn,
+                    &authority.actor_id,
+                    &authority.device_id,
+                    at,
+                )
+                .await
+                .map_err(crate::PgTransactionError::into_persistence)?;
+                if current.as_ref() != Some(authority) {
+                    return Err(denied("Realm claim Device authorization instance changed"));
+                }
+            }
             Endpoint::Device {
                 account,
                 device,
@@ -177,6 +200,67 @@ async fn device(
         },
     })
 }
+async fn realm_device(
+    conn: &mut AsyncPgConnection,
+    actor: &ActorId,
+    id: &DeviceId,
+    event: &EventId,
+    station: &DidCoreId,
+    scope: &arkret_wire::ScopeRef,
+) -> PersistenceResult<ClaimEndpoint> {
+    let authority =
+        crate::realm_actor_device_authority::current_in_connection(conn, actor, id, Utc::now())
+            .await
+            .map_err(crate::PgTransactionError::into_persistence)?
+            .ok_or_else(|| denied("Realm claim Device authority is unavailable"))?;
+    if authority.authorization_ref.event_id != *event
+        || authority.governance_service_id != *station
+        || !authority.scopes.contains_scope(scope)
+        || &authority.realm_id != scope.realm_id()
+    {
+        return Err(denied(
+            "Realm claim Device scope, governor or original changed",
+        ));
+    }
+    Ok(ClaimEndpoint {
+        realm: authority.realm_id.clone(),
+        window: EndpointWindow {
+            not_before: Some(authority.not_before),
+            expires_at: Some(authority.expires_at),
+        },
+        endpoint: Endpoint::RealmDevice { authority },
+    })
+}
+
+async fn group_scope(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    group: &arkret_wire::MlsGroupId,
+) -> PersistenceResult<arkret_wire::ScopeRef> {
+    #[derive(QueryableByName)]
+    struct Row {
+        #[diesel(sql_type = Jsonb)]
+        value: serde_json::Value,
+    }
+    let row = sql_query("SELECT value FROM mls_group_current_results WHERE realm_id=$1 AND mls_group_id=$2 FOR SHARE")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(group.as_str())
+        .get_result::<Row>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+        .ok_or_else(|| denied("accepted MLS group scope unavailable"))?;
+    let current: arkret_wire::MlsGroupCurrent =
+        serde_json::from_value(row.value).map_err(denied)?;
+    let scope = current.effective_scope;
+    if scope.realm_id() != realm
+        || !matches!(
+            scope,
+            arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
+        )
+        || scope.canonical_mls_group_id().map_err(denied)? != *group
+    {
+        return Err(denied("accepted MLS group scope differs from claim"));
+    }
+    Ok(scope)
+}
+
 async fn agent(
     conn: &mut AsyncPgConnection,
     id: &DidCoreId,
@@ -216,6 +300,7 @@ pub(crate) async fn prepare(
     outcome: &PeerKeyPackagesClaimOutcome,
     command: Option<&PeerKeyPackagesClaimRequestBody>,
     station: &DidCoreId,
+    remote_devices: &[coland_storage::MlsClaimRemoteDeviceEvidence],
 ) -> PersistenceResult<Vec<ClaimEndpoint>> {
     outcome.validate_shape().map_err(denied)?;
     let mut result = Vec::new();
@@ -249,6 +334,29 @@ pub(crate) async fn prepare(
                         .await?,
                     );
                 }
+                PeerKeyPackageRequesterAuthorization::RealmDevice {
+                    requester_device_id,
+                    device_authorize_event_id,
+                    ..
+                } => {
+                    let scope =
+                        group_scope(conn, &command.intended_realm_id, &command.mls_group_id)
+                            .await?;
+                    result.push(
+                        realm_device(
+                            conn,
+                            command
+                                .requester_actor_id
+                                .as_ref()
+                                .ok_or_else(|| denied("Realm requester Actor absent"))?,
+                            requester_device_id,
+                            device_authorize_event_id,
+                            station,
+                            &scope,
+                        )
+                        .await?,
+                    );
+                }
                 PeerKeyPackageRequesterAuthorization::Agent {
                     requester_agent_id,
                     verification_method,
@@ -267,8 +375,49 @@ pub(crate) async fn prepare(
         }
     }
     for claim in &outcome.claims {
-        if claim.actor_id.route_service_id() != station {
-            return Err(denied("claim target has no local original barrier"));
+        if claim.actor_id.as_realm_actor_id().is_some() {
+            let request = &outcome.claim_receipt.request;
+            let scope =
+                group_scope(conn, &request.intended_realm_id, &request.mls_group_id).await?;
+            result.push(
+                realm_device(
+                    conn,
+                    &claim.actor_id,
+                    claim
+                        .device_id
+                        .as_ref()
+                        .ok_or_else(|| denied("Realm claim Device absent"))?,
+                    claim
+                        .device_authorize_event_id
+                        .as_ref()
+                        .ok_or_else(|| denied("Realm claim authorization absent"))?,
+                    station,
+                    &scope,
+                )
+                .await?,
+            );
+            continue;
+        }
+        if claim.actor_id.fixed_route_service_id() != Some(station) {
+            let request = &outcome.claim_receipt.request;
+            if request
+                .requester_actor_id
+                .as_ref()
+                .and_then(ActorId::as_realm_actor_id)
+                .is_none_or(|actor| actor.realm_id != request.intended_realm_id)
+                || command.is_none()
+            {
+                return Err(denied(
+                    "remote target requires its original Realm source command",
+                ));
+            }
+            let window = remote_device_window(claim, remote_devices)?;
+            result.push(ClaimEndpoint {
+                realm: request.intended_realm_id.clone(),
+                endpoint: Endpoint::RemoteDevice,
+                window,
+            });
+            continue;
         }
         match (
             &claim.device_id,
@@ -291,4 +440,105 @@ pub(crate) async fn prepare(
         }
     }
     Ok(result)
+}
+
+pub(crate) fn remote_device_window(
+    claim: &arkret_models_crypto::KeyPackageClaimRecord,
+    evidence: &[coland_storage::MlsClaimRemoteDeviceEvidence],
+) -> PersistenceResult<EndpointWindow> {
+    let account = claim
+        .actor_id
+        .as_account_id()
+        .ok_or_else(|| denied("remote claim must target an ordinary Account Device"))?;
+    let device = claim
+        .device_id
+        .as_ref()
+        .ok_or_else(|| denied("remote claim Device is absent"))?;
+    let mut matches = evidence
+        .iter()
+        .filter(|e| &e.account_id == account && &e.device_id == device);
+    let evidence = matches
+        .next()
+        .ok_or_else(|| denied("remote claim evidence absent"))?;
+    if matches.next().is_some() {
+        return Err(denied("remote claim evidence is ambiguous"));
+    }
+    evidence
+        .record
+        .validate_attestation_binding(account, device)
+        .map_err(denied)?;
+    let attestation = &evidence.record.device_projection_attestation;
+    let core = &attestation.attestation;
+    if &evidence.generation.account_id != account
+        || evidence
+            .generation
+            .generation_state
+            .current_device_generation_ref
+            != core.authorized_generation_ref
+        || claim.device_authorize_event_id.as_ref() != Some(&core.device_authorize_event_id)
+        || evidence.issuer_resolution.service_kind != "station"
+    {
+        return Err(denied(
+            "remote claim generation or exact authorization differs",
+        ));
+    }
+    let document = arkret_identity::authenticated_service_document_at(
+        &evidence.issuer_resolution,
+        &account.station_id,
+        core.attested_at,
+    )
+    .map_err(denied)?;
+    arkret_identity::validate_verification_method_relationship(
+        &document,
+        &attestation.proof.verification_method,
+        &document.id,
+        arkret_identity::DidVerificationRelationship::AssertionMethod,
+    )
+    .map_err(denied)?;
+    let key = arkret_identity::jws::resolve_ed25519_pubkey_from_document(
+        &document,
+        attestation.proof.verification_method.as_str(),
+    )
+    .map_err(denied)?;
+    arkret_signatures::device_projection::verify_device_projection_attestation(
+        attestation,
+        &key,
+        Utc::now(),
+    )
+    .map_err(denied)?;
+    let device_key = arkret_canonical::decode_ed25519_multibase(
+        core.device_signing_key_did
+            .as_str()
+            .strip_prefix("did:key:")
+            .ok_or_else(|| denied("remote Device key is not did:key"))?,
+    )
+    .map_err(denied)?;
+    let bytes = arkret_canonical::base64url_decode(&claim.keypackage).map_err(denied)?;
+    let leaf = arkret_mls::author_leaf_from_key_package_bytes(&bytes, 0).map_err(denied)?;
+    let credential =
+        arkret_models_crypto::mls_basic_credential_identity(&claim.actor_id).map_err(denied)?;
+    if !matches!(leaf.credential, arkret_mls::AuthorLeafCredential::Basic { identity } if identity == credential)
+        || leaf.signature_key.as_slice() != device_key.as_slice()
+        || arkret_canonical::sha256_digest(&bytes) != claim.keypackage_ref
+    {
+        return Err(denied(
+            "remote claim leaf differs from original device evidence",
+        ));
+    }
+    arkret_mls::validate_keypackage_capability_binding(&bytes, &claim.capabilities)
+        .map_err(denied)?;
+    let window = EndpointWindow {
+        not_before: Some(core.authorization_window.not_before.max(core.attested_at)),
+        expires_at: Some(
+            core.expires_at.min(
+                core.authorization_window
+                    .expires_at
+                    .unwrap_or(core.expires_at),
+            ),
+        ),
+    };
+    if !window.permits_at(Utc::now()) {
+        return Err(denied("remote claim device window ended"));
+    }
+    Ok(window)
 }

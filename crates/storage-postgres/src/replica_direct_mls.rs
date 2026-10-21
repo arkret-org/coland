@@ -86,7 +86,7 @@ async fn cut_in_connection(
         serde_json::from_value(authority.member_account_id).map_err(invalid)?;
     let service_id = authority.service_id.parse().map_err(invalid)?;
     if service_id == hosted.station_id
-        || caller.is_some_and(|actor| actor.route_service_id() != &hosted.station_id)
+        || caller.is_some_and(|actor| actor.fixed_route_service_id() != Some(&hosted.station_id))
     {
         return Ok(None);
     }

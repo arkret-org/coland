@@ -1770,7 +1770,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
     );
     assert_eq!(
         reply.1["type"],
-        "https://arkret.org/problems/capability_denied"
+        "https://arkret.org/problems/device_unauthorized"
     );
     assert_eq!(
         reply.1["detail"], "native consume current Device is unavailable",

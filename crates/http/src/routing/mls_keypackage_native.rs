@@ -681,12 +681,29 @@ pub(super) async fn consume(
             issue_receipt: &issuer,
         })
         .await
-        .map_err(|error| match error {
-            coland_services::ServiceError::Conflict(detail)
-                if detail.starts_with("capability_denied:") =>
-            {
-                AppError::capability_denied("native consume current Device is unavailable")
-            }
+        .map_err(consume_error)?;
+    if let Some(at) = consumed.record.consumed_at {
+        state
+            .projections()
+            .mark_key_package_consumed(&consumed.record.id, at);
+    }
+    json_ok(consumed.outcome)
+}
+
+/// Preserve current Device authorization refusal separately from a changed
+/// original durable delivery. Diagnostic text never decides a wire status.
+fn consume_error(error: coland_services::ServiceError) -> AppError {
+    match error.conflict_code() {
+        Some(coland_storage::ConflictCode::DeviceUnauthorized) => {
+            crate::app_error!(
+                DeviceUnauthorized,
+                "native consume current Device is unavailable"
+            )
+        }
+        Some(coland_storage::ConflictCode::CapabilityDenied) => {
+            AppError::capability_denied("native consume current Device is unavailable")
+        }
+        _ => match error {
             coland_services::ServiceError::Conflict(_)
             | coland_services::ServiceError::NotFound(_) => {
                 AppError::conflict("native consume differs from its original durable delivery")
@@ -698,11 +715,52 @@ pub(super) async fn consume(
                 TemporarilyUnavailable,
                 "native consume persistence is unavailable"
             ),
-        })?;
-    if let Some(at) = consumed.record.consumed_at {
-        state
-            .projections()
-            .mark_key_package_consumed(&consumed.record.id, at);
+        },
     }
-    json_ok(consumed.outcome)
+}
+
+#[cfg(test)]
+mod consume_error_tests {
+    use salvo::http::StatusCode;
+
+    use super::*;
+
+    #[test]
+    fn current_device_refusal_preserves_its_registered_consume_code() {
+        let original = coland_storage::PersistenceError::Conflict(
+            "device_unauthorized: Realm Device is outside its original authorization window".into(),
+        );
+        let error = consume_error(original.into());
+        assert_eq!(error.code, arkret_wire::ErrorCode::DeviceUnauthorized);
+        assert_eq!(error.http_status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.message.as_ref(),
+            "native consume current Device is unavailable"
+        );
+        assert!(
+            arkret_wire::ServiceOperationId::SelfKeysKeypackagesCommandConsumeV1
+                .operation_specific_errors()
+                .contains(&arkret_wire::OperationSpecificError::Code(error.code))
+        );
+        let capability = consume_error(coland_services::ServiceError::protocol(
+            arkret_wire::ErrorCode::CapabilityDenied,
+            "the current Device lacks permission for this consume scope",
+        ));
+        assert_eq!(capability.code, arkret_wire::ErrorCode::CapabilityDenied);
+        assert_eq!(capability.http_status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn durable_delivery_conflict_is_not_reclassified_by_device_diagnostic_text() {
+        let original = coland_storage::PersistenceError::Conflict(
+            "conflict: original binding changed; diagnostic mentions device_unauthorized".into(),
+        );
+        let error = consume_error(original.into());
+        assert_eq!(error.code, arkret_wire::ErrorCode::Conflict);
+        assert_eq!(error.http_status(), StatusCode::CONFLICT);
+        assert_eq!(
+            error.message.as_ref(),
+            "native consume differs from its original durable delivery"
+        );
+    }
 }

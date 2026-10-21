@@ -5895,6 +5895,7 @@ mod realm_native_fixture {
     pub(super) enum RecoveryScenario {
         Continue,
         CancelBeforePublish,
+        ReplaceBeforePublish,
     }
 
     pub(super) async fn run_bridge(
@@ -6081,6 +6082,7 @@ mod realm_native_fixture {
             let author = ManagedActorAuthoringService::new(edge.clone()).unwrap();
             let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
             let cancelled = matches!(scenario, RecoveryScenario::CancelBeforePublish);
+            let replaced = matches!(scenario, RecoveryScenario::ReplaceBeforePublish);
             if cancelled {
                 eprintln!("independent runtime recovery: cancel pending before publication");
                 async fn policy(
@@ -6142,13 +6144,91 @@ mod realm_native_fixture {
             }
             let completed_operation = if cancelled {
                 "after-cancelled-recovery"
+            } else if replaced {
+                "explicit-replacement-recovery"
             } else {
                 "lost-daily-key"
             };
             eprintln!("independent runtime recovery: reopen host and finish original");
-            let completed = boxed_step(|| devices.recover_control(&actor, completed_operation))
+            let completed = if replaced {
+                let prior: CommittedEventRef = serde_json::from_value(
+                    fenced["realm_actor_recovery"]["pending"]["begin_ref"].clone(),
+                )
+                .unwrap();
+                assert!(
+                    boxed_step(|| devices.recover_control(&actor, completed_operation))
+                        .await
+                        .is_err(),
+                    "a new operation must not implicitly replace pending recovery"
+                );
+                let mut wrong = prior.clone();
+                wrong.commit_id = creation.commit_id.clone();
+                assert!(
+                    boxed_step(|| devices.replace_control_recovery(
+                        &actor,
+                        completed_operation,
+                        &wrong
+                    ))
+                    .await
+                    .is_err(),
+                    "replacement requires every original coordinate"
+                );
+                assert_eq!(snapshot(fixture, &actor).await, fenced);
+                let result = boxed_step(|| {
+                    devices.replace_control_recovery(&actor, completed_operation, &prior)
+                })
                 .await
                 .unwrap();
+                assert!(
+                    boxed_step(|| devices.recover_control(&actor, "lost-daily-key"))
+                        .await
+                        .is_err(),
+                    "the superseded local intent cannot publish or reset"
+                );
+                assert_eq!(
+                    boxed_step(|| devices.replace_control_recovery(
+                        &actor,
+                        completed_operation,
+                        &prior
+                    ))
+                    .await
+                    .unwrap(),
+                    result
+                );
+                let old = fixture
+                    .state
+                    .test_persistence()
+                    .authority_commits()
+                    .committed_event(&prior.event_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+                    arkret_wire::EventAdmissionSubmission::new(old.event));
+                let material = RealmActorMaterialRequest::Outcome {
+                    actor_id: actor.clone(),
+                    request_nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
+                    target_request_digest: Hash::new(canonical_sha256(&request).unwrap()).unwrap(),
+                };
+                let material_body = json!(material);
+                let (status, response) = boxed_step(|| {
+                    fixture.service_post(
+                        &native.package,
+                        "/_arkret/self/realm-actors/material",
+                        arkret_wire::ServiceOperationId::SelfRealmActorReadMaterialV1.as_str(),
+                        &material_body,
+                        "superseded-recovery-outcome",
+                    )
+                })
+                .await;
+                assert_eq!(status, StatusCode::OK, "{response}");
+                assert_eq!(response["result"]["outcome"]["state"], "superseded");
+                result
+            } else {
+                boxed_step(|| devices.recover_control(&actor, completed_operation))
+                    .await
+                    .unwrap()
+            };
             assert_eq!(completed.stream_ref, creation.stream_ref);
             let after = snapshot(fixture, &actor).await;
             assert_eq!(
@@ -6158,7 +6238,7 @@ mod realm_native_fixture {
             assert_eq!(after["realm_actor_statusgovernance"], "active");
             assert_eq!(
                 after["realm_actor_device_generation"]["current_device_generation_ref"],
-                if cancelled { 3 } else { 2 }
+                if cancelled || replaced { 3 } else { 2 }
             );
             assert_eq!(
                 after["realm_actor_control"]["resolution"]["did"],
@@ -7486,6 +7566,17 @@ pub async fn realm_runtime_cancelled_recovery(pool: PgPool) {
         false,
         false,
         Some(realm_native_fixture::RecoveryScenario::CancelBeforePublish),
+    )
+    .await;
+}
+
+pub async fn realm_runtime_replaced_recovery(pool: PgPool) {
+    realm_native_fixture::run_bridge(
+        pool,
+        false,
+        false,
+        false,
+        Some(realm_native_fixture::RecoveryScenario::ReplaceBeforePublish),
     )
     .await;
 }

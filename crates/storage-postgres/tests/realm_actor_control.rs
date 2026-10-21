@@ -113,3 +113,12 @@ async fn bridge_recovery_cancelled_before_publication_requires_a_new_intent() {
     ))
     .await;
 }
+
+#[tokio::test]
+async fn bridge_recovery_replacement_requires_the_exact_pending_original() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_runtime_replaced_recovery(
+        database.pool(),
+    ))
+    .await;
+}

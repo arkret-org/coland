@@ -916,8 +916,12 @@ pub(super) struct TextOnlySink;
 impl arkret_bridge_runtime::managed_device::NativeContentSink for TextOnlySink {
     async fn deliver(
         &self,
+        recipient: &arkret_bridge_runtime::managed_device::NativeContentRecipient,
         content: &arkret_bridge_runtime::managed_device::NativeContent,
     ) -> arkret_bridge_runtime::Result<()> {
+        assert_eq!(recipient.scope(), &content.original().event.scope_ref);
+        assert!(recipient.actor_id().as_realm_actor_id().is_some());
+        recipient.validate_current().await?;
         let message = content.message().unwrap();
         assert!(!message.blob_refs.is_empty());
         for reference in &message.blob_refs {
@@ -936,8 +940,12 @@ impl arkret_bridge_runtime::managed_device::NativeContentSink for ContentSink {
     }
     async fn deliver(
         &self,
+        recipient: &arkret_bridge_runtime::managed_device::NativeContentRecipient,
         content: &arkret_bridge_runtime::managed_device::NativeContent,
     ) -> arkret_bridge_runtime::Result<()> {
+        assert_eq!(recipient.scope(), &content.original().event.scope_ref);
+        assert!(recipient.actor_id().as_realm_actor_id().is_some());
+        recipient.validate_current().await?;
         assert_eq!(content.original().event, self.event);
         assert_eq!(
             serde_json::to_value(content.message()).unwrap(),

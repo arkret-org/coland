@@ -38,6 +38,41 @@ use diesel::sql_types::{BigInt, Text};
 use diesel_async::RunQueryDsl;
 use hydration::BootstrapHydrationAdapter;
 
+async fn assert_history_original(
+    store: &PgAuthorityCommitStore,
+    realm: &arkret_wire::RealmId,
+    account: &arkret_wire::AccountId,
+    issuer: &arkret_wire::DidCoreId,
+    basis: &arkret_models_collaboration::sync_frames::account_sync::StreamWindowStartBasis,
+    full: &arkret_wire::RealmStateSnapshot,
+) {
+    let original = store
+        .issued_realm_state_snapshot(realm, account, &basis.snapshot_ref, issuer)
+        .await
+        .unwrap()
+        .unwrap();
+    original.validate_purpose().unwrap();
+    assert_eq!(
+        original.purpose,
+        arkret_wire::RealmSnapshotPurpose::StreamHistory
+    );
+    assert_ne!(original.snapshot_id, full.snapshot_id);
+    assert_eq!(original.visible_stream_heads, full.visible_stream_heads);
+    assert_eq!(original.current_state_entries, full.current_state_entries);
+    assert_eq!(
+        original.retention_and_history_floor,
+        full.retention_and_history_floor
+    );
+    let signed = original.history_basis.unwrap();
+    assert_eq!(signed.account_id, *account);
+    assert_eq!(signed.anchor_position, basis.anchor_position);
+    assert_eq!(signed.anchor_commit_ref, basis.anchor_commit_ref);
+    assert_eq!(
+        signed.accepted_dependency_refs,
+        basis.accepted_dependency_refs.clone().unwrap_or_default()
+    );
+}
+
 fn snapshot_signer_for_issuer(
     unit: &OrdinaryRealmBootstrapCommitUnit,
     issuer: &arkret_wire::DidCoreId,
@@ -2486,7 +2521,7 @@ async fn account_window_basis_reserves_exact_issued_snapshot_or_is_preview_only(
         basis.anchor_commit_ref,
         unit.transactions[6].commit.commit_id
     );
-    assert_eq!(basis.snapshot_ref, at_six.snapshot_id);
+    assert_history_original(&store, &realm_id, &creator, &issuer, &basis, &at_six).await;
     assert_eq!(basis.governance_generation, 0);
     assert!(basis.accepted_dependency_refs.is_none());
     assert_eq!(reservation_count(&pool).await, 1);
@@ -2584,6 +2619,12 @@ async fn account_window_basis_reserves_exact_issued_snapshot_or_is_preview_only(
     .await
     .unwrap();
 
+    let reserved_history = store
+        .issued_realm_state_snapshot(&realm_id, &creator, &basis.snapshot_ref, &issuer)
+        .await
+        .unwrap()
+        .unwrap();
+
     // Age the reserved issuance past the unreserved retention and add an
     // unreserved, equally old one at head 8.
     let at_eight = store
@@ -2600,7 +2641,7 @@ async fn account_window_basis_reserves_exact_issued_snapshot_or_is_preview_only(
     // RESTRICT: nothing may delete a reserved issuance, even outside GC.
     assert!(
         diesel::sql_query("DELETE FROM realm_state_snapshot_issuances WHERE snapshot_id=$1")
-            .bind::<Text, _>(at_six.snapshot_id.as_str())
+            .bind::<Text, _>(basis.snapshot_ref.as_str())
             .execute(&mut conn)
             .await
             .is_err()
@@ -2620,9 +2661,10 @@ async fn account_window_basis_reserves_exact_issued_snapshot_or_is_preview_only(
     // old unreserved issuance goes, the never-issued anchor is untouched.
     cursors.prune_expired(now_ms).await.unwrap();
     assert_eq!(
-        by_ref(at_six.snapshot_id.clone()).await,
-        Some(at_six.clone())
+        by_ref(basis.snapshot_ref.clone()).await,
+        Some(reserved_history)
     );
+    assert_eq!(by_ref(at_six.snapshot_id.clone()).await, None);
     assert_eq!(by_ref(at_eight.snapshot_id.clone()).await, None);
     assert_eq!(issuance_count(&pool, &realm_id).await, 1);
     assert_eq!(
@@ -2643,7 +2685,7 @@ async fn account_window_basis_reserves_exact_issued_snapshot_or_is_preview_only(
     // reclaimed together; the by-ref read and the basis are gone.
     cursors.prune_expired(now_ms + window_ttl).await.unwrap();
     assert_eq!(reservation_count(&pool).await, 0);
-    assert_eq!(by_ref(at_six.snapshot_id.clone()).await, None);
+    assert_eq!(by_ref(basis.snapshot_ref.clone()).await, None);
     assert_eq!(
         reread(backed_request.window_cursor.clone(), now_ms).await,
         None
@@ -2956,7 +2998,7 @@ async fn account_window_carries_same_cut_current_and_reservation_deadline() {
         .unwrap()
         .unwrap();
     let basis = backed.window.window_start_basis.clone().unwrap();
-    assert_eq!(basis.snapshot_ref, at_six.snapshot_id);
+    assert_history_original(&store, &realm_id, &creator, &issuer, &basis, &at_six).await;
     assert_eq!(backed.window.next_position, 9);
     assert_eq!(
         backed.current_state_entries,
@@ -3186,7 +3228,7 @@ async fn message_tail_window_beyond_twenty_commits_names_the_issued_anchor() {
         .unwrap()
         .unwrap();
     let basis = backed.window.window_start_basis.clone().unwrap();
-    assert_eq!(basis.snapshot_ref, at_nine.snapshot_id);
+    assert_history_original(&store, &realm_id, &creator, &issuer, &basis, &at_nine).await;
     assert_eq!(basis.anchor_position, 9);
     assert_eq!(backed.window.preview_only, None);
     assert_eq!(backed.window.next_position, 31);
@@ -3425,7 +3467,7 @@ async fn issued_snapshots_and_window_reservations_stay_within_their_caps() {
             .unwrap();
         assert!(!whole.window.limited);
     }
-    assert_eq!(account_issuance_count(&pool, &realm_id).await, 1);
+    assert_eq!(account_issuance_count(&pool, &realm_id).await, 2);
     assert_eq!(reservation_count(&pool).await, 0);
 
     // Twelve distinct heads, each read once through `/head`, keep only the
@@ -3437,14 +3479,29 @@ async fn issued_snapshots_and_window_reservations_stay_within_their_caps() {
     let mut previous = set_default_strand_request(&strand, &strand_id, None);
     uow.commit_event(previous.clone()).await.unwrap();
     let mut issued = Vec::new();
+    let mut issued_history = Vec::new();
     for index in 0..12 {
         let message = message_create_request(&previous, &strand_id, &format!("head {index}"));
         uow.commit_event(message.clone()).await.unwrap();
         previous = message;
         issued.push(head().await);
+        issued_history.push(
+            store
+                .issue_stream_history_snapshot_for_account(
+                    &realm_id,
+                    &creator,
+                    &issuer,
+                    &stream_ref,
+                    None,
+                    &sign,
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+        );
     }
-    let cap = coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_REALM;
-    assert_eq!(account_issuance_count(&pool, &realm_id).await, cap);
+    let cap = coland_storage::MAX_UNRESERVED_ISSUED_SNAPSHOTS_PER_ACCOUNT_COVERAGE;
+    assert_eq!(account_issuance_count(&pool, &realm_id).await, 2 * cap);
     assert_eq!(by_ref(first.snapshot_id.clone()).await, None);
     for (index, snapshot) in issued.iter().enumerate() {
         let expected = (index >= issued.len() - cap as usize).then(|| snapshot.clone());
@@ -3456,6 +3513,7 @@ async fn issued_snapshots_and_window_reservations_stay_within_their_caps() {
     // reservations reach their cap; then the window is preview only, and no
     // retry issues another object.
     let latest = issued.last().unwrap().clone();
+    let latest_history = issued_history.last().unwrap().clone();
     let delivered = latest.visible_stream_heads[0].clone();
     let message = message_create_request(&previous, &strand_id, "live");
     uow.commit_event(message.clone()).await.unwrap();
@@ -3471,7 +3529,7 @@ async fn issued_snapshots_and_window_reservations_stay_within_their_caps() {
             .unwrap();
         assert_eq!(window.window.preview_only, None);
         let basis = window.window.window_start_basis.clone().unwrap();
-        assert_eq!(basis.snapshot_ref, latest.snapshot_id);
+        assert_eq!(basis.snapshot_ref, latest_history.snapshot_id);
         let rows = serde_json::to_value(&window.committed_events).unwrap();
         assert_eq!(rows.as_array().unwrap().len(), 1);
         assert_eq!(*reference.get_or_insert_with(|| rows.clone()), rows);
@@ -3492,7 +3550,7 @@ async fn issued_snapshots_and_window_reservations_stay_within_their_caps() {
     assert_eq!(reservation_count(&pool).await, reservation_cap);
     // The first freeze issued the new head once; the reserved anchor is
     // outside the unreserved cap.
-    assert_eq!(account_issuance_count(&pool, &realm_id).await, cap + 1);
+    assert_eq!(account_issuance_count(&pool, &realm_id).await, 2 * cap + 1);
 
     // The basis is bound to the Account that froze the window.
     let creator_cursor = creator_cursor.unwrap();
@@ -3529,7 +3587,7 @@ async fn issued_snapshots_and_window_reservations_stay_within_their_caps() {
         .unwrap();
     assert_eq!(
         renewed.window.window_start_basis.unwrap().snapshot_ref,
-        latest.snapshot_id
+        latest_history.snapshot_id
     );
 }
 
@@ -7581,7 +7639,7 @@ fn assert_invite_racing_revocation<'a>(
 
 /// Real PostgreSQL: `ak.invite.revoke` and `ak.invite.cancel` move the
 /// lifecycle only by exact `previous_state` CAS, release the live-target slot
-/// on leaving the live set (and never on `send_failed`), and a released slot
+/// on a confirmed terminal transition, and a released slot
 /// accepts a fresh directed create for the same account.
 #[tokio::test]
 async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
@@ -7658,18 +7716,9 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
     )
     .await;
 
-    // send_failed keeps the Invite live: the slot is not released.
-    let send_failed = revoke(
-        &create,
-        serde_json::json!({
-            "invite_id": first, "previous_state": "pending", "target_state": "send_failed",
-            "reason_code": "delivery_target_unreachable"
-        }),
-    );
-    let send_failed = source_if_human(&pool, send_failed).await;
-    uow.commit_event(send_failed.clone()).await.unwrap();
+    // Delivery observations do not author a shared lifecycle transition.
     let families = invite_families(&pool, &realm_id).await;
-    assert_eq!(lifecycle_of(&families, &first), "send_failed");
+    assert_eq!(lifecycle_of(&families, &first), "pending");
     assert_eq!(
         slot_value(&families),
         (
@@ -7677,31 +7726,15 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
             create.authority_commit.commit.commit_id.to_string()
         )
     );
-
-    // The register moved: the old declared pre-state is now stale.
-    assert_refused_with_zero_writes(
-        &uow,
-        &store,
-        &pool,
-        &revoke(
-            &send_failed,
-            serde_json::json!({
-                "invite_id": first, "previous_state": "pending",
-                "invitee_account_id": bob, "target_state": "revoked"
-            }),
-        ),
-        coland_storage::ConflictCode::FailedPrecondition,
-    )
-    .await;
     // A directed Invite cannot keep its slot by omitting its invitee.
     assert_refused_with_zero_writes(
         &uow,
         &store,
         &pool,
         &revoke(
-            &send_failed,
+            &create,
             serde_json::json!({
-                "invite_id": first, "previous_state": "send_failed", "target_state": "revoked"
+                "invite_id": first, "previous_state": "pending", "target_state": "revoked"
             }),
         ),
         coland_storage::ConflictCode::InviteDirectedInviteeMismatch,
@@ -7709,9 +7742,9 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
     .await;
 
     let revoked = revoke(
-        &send_failed,
+        &create,
         serde_json::json!({
-            "invite_id": first, "previous_state": "send_failed",
+            "invite_id": first, "previous_state": "pending",
             "invitee_account_id": bob, "target_state": "revoked"
         }),
     );

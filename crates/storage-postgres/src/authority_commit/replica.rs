@@ -1794,6 +1794,10 @@ pub(super) async fn install_replica_anchor_in_connection(
     conn: &mut AsyncPgConnection,
     install: &ReplicaAnchorInstall,
 ) -> Result<(), PgTransactionError> {
+    install
+        .verified_snapshot
+        .require_full_recovery()
+        .map_err(invalid)?;
     crate::sync_cursor::retention::lock(conn, false).await?;
     let realm_stream = install.snapshot_head.stream_ref.clone();
     let key = stream_key(&realm_stream)?;
@@ -1970,6 +1974,8 @@ pub(super) async fn install_replica_anchor_in_connection(
         conn,
         member_account_id,
         &coland_storage::RealmStateSnapshotMaterial {
+            purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+            history_basis: None,
             realm_id: snapshot.realm_id.clone(),
             governance_generation: snapshot.governance_generation,
             visible_stream_heads: snapshot.visible_stream_heads.clone(),

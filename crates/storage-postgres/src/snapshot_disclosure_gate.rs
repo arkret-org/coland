@@ -2846,6 +2846,8 @@ mod tests {
             realm_id: realm_id(),
         };
         let material = coland_storage::RealmStateSnapshotMaterial {
+            purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+            history_basis: None,
             realm_id: realm_id(),
             governance_generation: 0,
             visible_stream_heads: vec![CommitStreamHead {

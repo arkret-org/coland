@@ -84,6 +84,9 @@ struct RealmCommitUnsignedBody<'a> {
 struct RealmSnapshotIdentityBody<'a> {
     realm_id: &'a arkret_wire::RealmId,
     governance_generation: u64,
+    purpose: arkret_wire::RealmSnapshotPurpose,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_basis: Option<&'a arkret_wire::RealmSnapshotHistoryBasis>,
     visible_stream_heads: &'a [CommitStreamHead],
     current_state_entries: &'a [arkret_wire::TypedCurrentRow],
     retention_and_history_floor: &'a arkret_wire::RetentionAndHistoryFloor,
@@ -96,6 +99,9 @@ struct RealmSnapshotUnsignedBody<'a> {
     snapshot_id: &'a arkret_wire::RealmSnapshotId,
     realm_id: &'a arkret_wire::RealmId,
     governance_generation: u64,
+    purpose: arkret_wire::RealmSnapshotPurpose,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_basis: Option<&'a arkret_wire::RealmSnapshotHistoryBasis>,
     visible_stream_heads: &'a [CommitStreamHead],
     current_state_entries: &'a [arkret_wire::TypedCurrentRow],
     retention_and_history_floor: &'a arkret_wire::RetentionAndHistoryFloor,
@@ -135,6 +141,8 @@ pub fn build_signed_realm_state_snapshot(
     let identity = RealmSnapshotIdentityBody {
         realm_id: &material.realm_id,
         governance_generation: material.governance_generation,
+        purpose: material.purpose,
+        history_basis: material.history_basis.as_ref(),
         visible_stream_heads: &material.visible_stream_heads,
         current_state_entries: &material.current_state_entries,
         retention_and_history_floor: &material.retention_and_history_floor,
@@ -148,6 +156,8 @@ pub fn build_signed_realm_state_snapshot(
         snapshot_id: &snapshot_id,
         realm_id: &material.realm_id,
         governance_generation: material.governance_generation,
+        purpose: material.purpose,
+        history_basis: material.history_basis.as_ref(),
         visible_stream_heads: &material.visible_stream_heads,
         current_state_entries: &material.current_state_entries,
         retention_and_history_floor: &material.retention_and_history_floor,
@@ -165,6 +175,8 @@ pub fn build_signed_realm_state_snapshot(
         snapshot_id,
         realm_id: material.realm_id.clone(),
         governance_generation: material.governance_generation,
+        purpose: material.purpose,
+        history_basis: material.history_basis.clone(),
         visible_stream_heads: material.visible_stream_heads.clone(),
         current_state_entries: material.current_state_entries.clone(),
         retention_and_history_floor: material.retention_and_history_floor.clone(),
@@ -2553,6 +2565,39 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    pub async fn issue_stream_history_snapshot_for_account(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+        account: &arkret_wire::AccountId,
+        issuer: &DidCoreId,
+        stream: &CommitStreamRef,
+        expected_membership: Option<&arkret_wire::RealmCommitId>,
+        verification_method: &DidUrl,
+        signing_key: &SigningKey,
+        created_at: DateTime<Utc>,
+    ) -> ServiceResult<Option<RealmStateSnapshot>> {
+        let sign = |material: &coland_storage::RealmStateSnapshotMaterial| {
+            build_signed_realm_state_snapshot(
+                material,
+                verification_method.clone(),
+                signing_key,
+                created_at,
+            )
+            .map_err(|e| coland_storage::PersistenceError::Internal(e.to_string()))
+        };
+        Ok(self
+            .store()
+            .issue_stream_history_snapshot_for_account(
+                realm_id,
+                account,
+                issuer,
+                stream,
+                expected_membership,
+                &sign,
+            )
+            .await?)
+    }
+
     /// Sign only the complete exact-scope material proved for this Device by
     /// the owning store's current PCR/business transaction.
     pub async fn issue_realm_state_snapshot_for_applet_device(
@@ -3756,6 +3801,8 @@ mod tests {
             realm_id: realm_id.clone(),
         };
         let material = coland_storage::RealmStateSnapshotMaterial {
+            purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+            history_basis: None,
             realm_id: realm_id.clone(),
             governance_generation: 4,
             visible_stream_heads: vec![arkret_wire::CommitStreamHead {

@@ -1017,7 +1017,7 @@ mod tests {
             },
         );
         for operation in [
-            arkret_wire::ServiceOperationId::SelfMessagesCommandPrepareV1,
+            arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1,
             arkret_wire::ServiceOperationId::SelfRealmJoinCommandPrepareV1,
             arkret_wire::ServiceOperationId::PeerRealmJoinReadBootstrapV1,
             arkret_wire::ServiceOperationId::SelfRealmStateSnapshotReadManifestHeadV1,
@@ -1272,6 +1272,14 @@ mod tests {
         assert_eq!(
             value["limits"]["scalability_constraints"]["daily_principal_download_limit"],
             json!(coland_services::runtime_guards::KEY_BACKUP_DAILY_DOWNLOAD_LIMIT_DEFAULT)
+        );
+    }
+
+    #[test]
+    fn retired_message_prepare_operation_is_rejected() {
+        let retired_message_prepare_operation = "ak.self.messages.command.prepare.v1";
+        assert!(
+            arkret_wire::ServiceOperationId::from_wire(retired_message_prepare_operation).is_none()
         );
     }
 }

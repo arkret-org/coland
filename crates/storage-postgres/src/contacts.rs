@@ -635,24 +635,32 @@ struct MimiConsentCorrelationRow {
     strand_id: Option<String>,
     #[diesel(sql_type = Nullable<Text>)]
     source_id: Option<String>,
+    #[diesel(sql_type = Text)]
+    source_class: String,
     #[diesel(sql_type = Timestamptz)]
     created_at: chrono::DateTime<chrono::Utc>,
     #[diesel(sql_type = Nullable<Timestamptz>)]
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-impl From<MimiConsentCorrelationRow> for MimiConsentCorrelationRecord {
-    fn from(row: MimiConsentCorrelationRow) -> Self {
-        Self {
+impl TryFrom<MimiConsentCorrelationRow> for MimiConsentCorrelationRecord {
+    type Error = PersistenceError;
+
+    fn try_from(row: MimiConsentCorrelationRow) -> PersistenceResult<Self> {
+        Ok(Self {
             consent_id: row.consent_id,
             requester_actor_id: row.requester_actor_id,
             holder_account_id: row.holder_account_id,
             purpose: row.purpose,
             strand_id: row.strand_id,
             source_id: row.source_id,
+            source_class: coland_storage::MimiConsentSourceClass::from_storage(&row.source_class)
+                .ok_or_else(|| {
+                PersistenceError::SchemaViolation("invalid MIMI source class".into())
+            })?,
             created_at: row.created_at,
             expires_at: row.expires_at,
-        }
+        })
     }
 }
 
@@ -665,17 +673,56 @@ impl MimiConsentCorrelationStore for PgMimiConsentCorrelationStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        sql_query(
+        let row = sql_query(
             "SELECT consent_id, requester_actor_id, holder_account_id, purpose, strand_id, \
-             source_id, created_at, expires_at \
+              source_id, source_class, created_at, expires_at \
              FROM mimi_consent_correlations WHERE consent_id = $1",
         )
         .bind::<Text, _>(consent_id)
         .get_result::<MimiConsentCorrelationRow>(&mut *conn)
         .await
         .optional()
-        .map(|row| row.map(MimiConsentCorrelationRecord::from))
-        .map_err(PersistenceError::database)
+        .map_err(PersistenceError::database)?;
+        row.map(MimiConsentCorrelationRecord::try_from).transpose()
+    }
+
+    async fn bind_decision(
+        &self,
+        consent_id: &str,
+        decision: &str,
+        submission: &arkret_wire::EventAdmissionSubmission,
+        allow_new: bool,
+    ) -> PersistenceResult<bool> {
+        #[derive(QueryableByName)]
+        struct Attempt {
+            #[diesel(sql_type=Text)]
+            decision: String,
+            #[diesel(sql_type=Jsonb)]
+            submission: Value,
+        }
+        let mut conn = pg_conn(&self.pool)
+            .await
+            .map_err(PersistenceError::database)?;
+        let original = serde_json::to_value(submission).map_err(PersistenceError::database)?;
+        if allow_new {
+            sql_query("INSERT INTO mimi_consent_decision_attempts(consent_id,decision,event_id,submission) VALUES($1,$2,$3,$4) ON CONFLICT(consent_id) DO NOTHING")
+                .bind::<Text,_>(consent_id).bind::<Text,_>(decision).bind::<Text,_>(submission.event.event_id.as_str()).bind::<Jsonb,_>(&original).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+        }
+        let old = sql_query(
+            "SELECT decision,submission FROM mimi_consent_decision_attempts WHERE consent_id=$1",
+        )
+        .bind::<Text, _>(consent_id)
+        .get_result::<Attempt>(&mut *conn)
+        .await
+        .optional()
+        .map_err(PersistenceError::database)?;
+        match old {
+            None => Ok(false),
+            Some(old) if old.decision == decision && old.submission == original => Ok(true),
+            Some(_) => Err(PersistenceError::Conflict(
+                "duplicate_conflict: correlation already binds another decision Event".into(),
+            )),
+        }
     }
 
     async fn put(&self, record: &MimiConsentCorrelationRecord) -> PersistenceResult<()> {
@@ -685,8 +732,8 @@ impl MimiConsentCorrelationStore for PgMimiConsentCorrelationStore {
         sql_query(
             "INSERT INTO mimi_consent_correlations \
              (consent_id, requester_actor_id, holder_account_id, purpose, strand_id, \
-              source_id, created_at, expires_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+              source_id, source_class, created_at, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
              ON CONFLICT (consent_id) DO NOTHING",
         )
         .bind::<Text, _>(&record.consent_id)
@@ -695,6 +742,7 @@ impl MimiConsentCorrelationStore for PgMimiConsentCorrelationStore {
         .bind::<Text, _>(&record.purpose)
         .bind::<Nullable<Text>, _>(record.strand_id.as_deref())
         .bind::<Nullable<Text>, _>(record.source_id.as_deref())
+        .bind::<Text, _>(record.source_class.as_str())
         .bind::<Timestamptz, _>(record.created_at)
         .bind::<Nullable<Timestamptz>, _>(record.expires_at)
         .execute(&mut *conn)

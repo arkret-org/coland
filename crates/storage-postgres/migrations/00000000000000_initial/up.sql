@@ -1275,21 +1275,25 @@ CREATE INDEX event_collision_variants_event_pk_idx
 
 CREATE TABLE public.consent_current_results (
     holder_account_id jsonb NOT NULL,
-    consent_id text NOT NULL,
+    peer_id jsonb NOT NULL,
     realm_id text NOT NULL REFERENCES public.realm_authorities(realm_id),
     current_commit_id text NOT NULL REFERENCES public.realm_commits(commit_id),
     current_stream_position bigint NOT NULL CHECK (current_stream_position >= 0),
     value jsonb NOT NULL,
     updated_at timestamptz NOT NULL,
-    PRIMARY KEY(holder_account_id,consent_id),
-    CHECK (value->>'consent_id'=consent_id),
-    CHECK (value->>'status' IN ('active','revoked'))
+    PRIMARY KEY(holder_account_id,peer_id),
+    CHECK (jsonb_typeof(peer_id)='object'),
+    CHECK (value ? 'permissions'),
+    CHECK ((value - 'permissions')='{}'::jsonb),
+    CHECK (jsonb_typeof(value->'permissions')='array')
 );
 CREATE TABLE public.consent_result_versions (
     commit_id text PRIMARY KEY REFERENCES public.realm_commits(commit_id),
-    consent_id text NOT NULL,
+    peer_id jsonb NOT NULL,
     value jsonb NOT NULL,
-    CHECK (value->>'consent_id'=consent_id)
+    CHECK (value ? 'permissions'),
+    CHECK ((value - 'permissions')='{}'::jsonb),
+    CHECK (jsonb_typeof(value->'permissions')='array')
 );
 
 -- Private service-local MIMI request correlation. These rows are not accepted
@@ -1309,9 +1313,17 @@ CREATE TABLE public.mimi_consent_correlations (
     purpose text NOT NULL,
     strand_id text,
     source_id text,
+    source_class text NOT NULL CHECK (source_class IN ('service','session')),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone
 );
+CREATE TABLE public.mimi_consent_decision_attempts (
+    consent_id text PRIMARY KEY REFERENCES public.mimi_consent_correlations(consent_id),
+    decision text NOT NULL CHECK (decision IN ('accept','deny','revoke')),
+    event_id text NOT NULL UNIQUE,
+    submission jsonb NOT NULL
+);
+
 
 CREATE INDEX mimi_consent_correlations_expiry_idx
     ON public.mimi_consent_correlations USING btree (expires_at)
@@ -3302,23 +3314,19 @@ CREATE TABLE public.direct_conversation_group_states (
     CONSTRAINT direct_conversation_group_states_initial_check CHECK (NOT current_exact_pair OR initial_exact_pair_group_state_ref IS NOT NULL)
 );
 
--- `direct_conversation_binding` typed current (contact-and-direct-conversation.md
--- 8.3): the add-only set of accepted endorsements of the Realm's one binding,
--- each tagged by its accepting Event's `<event_id>:0` dot with the complete
--- payload. binding_digest is the receiver-derived semantic digest every
--- endorsement carries; it is an index, never a wire value.
+-- Immutable original Direct Conversation binding and its covering Commit.
 CREATE TABLE public.direct_conversation_binding_current_results (
     realm_id text PRIMARY KEY,
     pair_key text NOT NULL UNIQUE,
-    binding_digest text NOT NULL,
     current_commit_id text NOT NULL,
     current_stream_position bigint NOT NULL CHECK (current_stream_position BETWEEN 0 AND 9007199254740991),
     value jsonb NOT NULL,
     updated_at timestamptz NOT NULL,
     CHECK (jsonb_typeof(value) = 'object'),
-    CHECK ((value - 'endorsements') = '{}'::jsonb),
-    CHECK (jsonb_typeof(value->'endorsements') = 'array'),
-    CHECK (jsonb_array_length(value->'endorsements') > 0)
+    CHECK (value ?& ARRAY['binding_event_ref','binding']),
+    CHECK ((value - ARRAY['binding_event_ref','binding']) = '{}'::jsonb),
+    CHECK (jsonb_typeof(value->'binding_event_ref') = 'string'),
+    CHECK (jsonb_typeof(value->'binding') = 'object')
 );
 
 -- Durable Realm metadata projection: owner, lifecycle, visibility and the

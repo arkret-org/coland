@@ -22,37 +22,24 @@ fn wire_operation(kind: arkret_wire::EventKind, payload: Value) -> Operation {
     )
 }
 
-const TEST_CONSENT: &str = "ak:consent:01904100-0000-7000-8000-000000000001";
-
-fn consent_revision() -> Value {
-    json!({
-        "commit_id": "ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4",
-        "stream_position": 3
-    })
-}
-
 #[test]
-fn consent_revoke_accepts_the_exact_current_revision() {
-    validate_consent_revoke_payload(&json!({
-        "consent_id": TEST_CONSENT,
-        "expected_revision": consent_revision(),
-    }))
-    .unwrap();
-}
-
-#[test]
-fn consent_revoke_rejects_missing_revision_untyped_id_and_retired_dots() {
-    for payload in [
-        json!({"consent_id": TEST_CONSENT}),
-        json!({"consent_id": "cid", "expected_revision": consent_revision()}),
-        json!({
-            "consent_id": TEST_CONSENT,
-            "expected_revision": consent_revision(),
-            "observed_dot_ids": ["ak:event:ASeIBHNVQyeIcU4aBIt2t2BF_ikuVMH0kNru_HgO_gG1:1"],
-        }),
+fn consent_replace_accepts_full_set_and_empty_with_exact_expected_current() {
+    for permissions in [
+        json!([]),
+        json!([{"consent_scope":"invite"},{"consent_scope":"presence"}]),
     ] {
-        let err = validate_consent_revoke_payload(&payload).unwrap_err();
-        assert_eq!(err.0, arkret_wire::ErrorCode::SCHEMA_VIOLATION, "{payload}");
+        let operation = wire_operation(
+            arkret_wire::EventKind::ConsentReplace,
+            json!({
+                "peer":{"kind":"actor","actor_id":{"kind":"account","account_id":{"principal_id":TEST_SUBJECT,"station_id":TEST_STATION}}},
+                "expected_current":{"state":"never_written"},"permissions":permissions
+            }),
+        );
+        assert!(
+            operation
+                .typed_payload::<arkret_wire::event_spec::ConsentReplace>()
+                .is_ok()
+        );
     }
 }
 

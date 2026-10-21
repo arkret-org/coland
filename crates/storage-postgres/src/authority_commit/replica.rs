@@ -30,6 +30,28 @@ use super::{
     stream_key, to_i64,
 };
 
+/// A valid source signature does not authorize a forbidden governance change.
+/// Resolve fixed governance from accepted originals or the verified since-join
+/// genesis, before a receipt hit, Full upgrade or remote-authority write.
+async fn require_replica_governance_eligibility(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+) -> Result<(), PgTransactionError> {
+    if event.kind == arkret_wire::EventKind::RealmGovernanceStationChange {
+        if locked_authority(conn, &event.realm_id).await?.is_none() {
+            return Err(crate::pcr_private_authority::refused(
+                "replicated governance change has no accepted inception authority",
+            )
+            .into());
+        }
+        crate::pcr_private_authority::validate_installed_governance(conn, &event.realm_id)
+            .await?
+            .require_transferable()
+            .map_err(crate::pcr_private_authority::refused)?;
+    }
+    Ok(())
+}
+
 #[derive(QueryableByName)]
 struct HeldRow {
     #[diesel(sql_type = Jsonb)]
@@ -1148,6 +1170,7 @@ pub(super) async fn install_committed_peer_replica_in_connection(
             "peer receipt belongs to another current origin",
         ));
     }
+    require_replica_governance_eligibility(conn, &replica.event).await?;
     record_remote_authority_in_connection(conn, &replica.authority, &replica.local_service_id)
         .await?;
     require_current_replica_authority(
@@ -1257,6 +1280,7 @@ pub(super) async fn queue_welcomes_of_held_replica_in_connection(
     welcomes: &[coland_storage::VerifiedMlsWelcome],
     at: chrono::DateTime<chrono::Utc>,
 ) -> Result<CommittedReplicaOutcome, PgTransactionError> {
+    require_replica_governance_eligibility(conn, event).await?;
     if held_duplicate(conn, commit, Some(event)).await? != Some(CommittedReplicaOutcome::Duplicate)
     {
         return Err(conflict(
@@ -1368,6 +1392,7 @@ async fn install_replica_commit_in_connection(
         );
     }
     require_realm_stream(commit)?;
+    require_replica_governance_eligibility(conn, event).await?;
     record_remote_authority_in_connection(conn, &replica.authority, &replica.local_service_id)
         .await?;
     if let Some(outcome) = held_duplicate(conn, commit, Some(event)).await? {

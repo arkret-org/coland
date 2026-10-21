@@ -53,6 +53,11 @@ pub(crate) async fn require_issuer(
     .get_result::<Authority>(&mut *conn)
     .await
     .map_err(PersistenceError::database)?;
+    let governance =
+        crate::pcr_private_authority::validate_installed_governance(conn, realm).await?;
+    governance
+        .validate_current(issuer, 0)
+        .map_err(crate::pcr_private_authority::refused)?;
     let expected_ref = original_ref
         .map(serde_json::to_value)
         .transpose()

@@ -40,7 +40,6 @@ const MEMBER_STATION_FAMILIES: &[&str] = &[
     "strand_position_current_results",
     "strand_watch_current_results",
     "agent_interaction_current_results",
-    "direct_conversation_binding_current_results",
     "rsvp_current_results",
     "realm_set_default_strand_current_results",
     "message_revision_current_results",
@@ -1403,7 +1402,7 @@ pub(crate) async fn advance_in_connection(
             )
             .await?
             .ok_or_else(|| malformed("accepted binding has no projected current"))?;
-            let pair_key = value.endorsements[0].value.pair_key.clone();
+            let pair_key = value.binding.pair_key.clone();
             crate::replica_authorization::save_row(
                 conn,
                 &event.realm_id,
@@ -2217,12 +2216,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn binding_snapshot_and_successor_fold_keep_native_current_and_reject_forks() {
+    async fn binding_snapshot_keeps_original_current_and_rejects_successors_and_forks() {
         use arkret_models_collaboration::events_payloads::direct_conversation::{
-            DirectConversationBindingCurrentValue, DirectConversationBindingEndorsementEntry,
-            DirectConversationBoundPayload,
+            DirectConversationBindingCurrentValue, DirectConversationBoundPayload,
         };
-        use arkret_models_collaboration::exact_current_results::CanonicalEventDot;
         let database = TestDatabase::lease().await;
         let pool = database.pool();
         let mut conn = pool.get().await.unwrap();
@@ -2247,10 +2244,8 @@ mod tests {
         }))
         .unwrap();
         let initial = DirectConversationBindingCurrentValue {
-            endorsements: vec![DirectConversationBindingEndorsementEntry {
-                tag_id: CanonicalEventDot::new(id(5), 0).unwrap(),
-                value: payload.clone(),
-            }],
+            binding_event_ref: id(5),
+            binding: payload.clone(),
         };
         let source = arkret_wire::CommitStreamRef::Realm {
             realm_id: realm.clone(),
@@ -2313,33 +2308,27 @@ mod tests {
                 sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
             },
         };
-        advance_in_connection(&mut conn, &event, &commit)
+        assert!(
+            crate::direct_conversation_admission::commit_binding_current_result_in_connection(
+                &mut conn, &event, &commit
+            )
             .await
-            .unwrap();
-        advance_in_connection(&mut conn, &event, &commit)
-            .await
-            .unwrap();
-        drop(conn);
-        let mut conn = pool.get().await.unwrap();
+            .is_err()
+        );
         let current =
             crate::direct_conversation_admission::binding_current_in_connection(&mut conn, &realm)
                 .await
                 .unwrap()
                 .unwrap();
-        assert_eq!(current.endorsements.len(), 2);
-        assert!(current.endorsed_by(&event.event_id));
-        assert_eq!(
-            current.binding_digest().unwrap(),
-            initial.binding_digest().unwrap()
-        );
+        assert_eq!(current, initial);
         let complete = arkret_wire::TypedCurrentRow::Value {
             selector: arkret_wire::CurrentSelector::DirectConversationBinding {
                 pair_key: payload.pair_key.clone(),
             },
             source_stream_ref: source.clone(),
             revision: arkret_wire::CurrentRevision {
-                commit_id: commit.commit_id.clone(),
-                stream_position: 8,
+                commit_id: head.commit_id.clone(),
+                stream_position: 7,
             },
             value: serde_json::to_value(current).unwrap(),
         };
@@ -2352,7 +2341,7 @@ mod tests {
                 source_stream_ref,
             } = &mut bad;
             match mutation {
-                0 => revision.stream_position = 7,
+                0 => revision.stream_position = 6,
                 1 => revision.commit_id = arkret_wire::RealmCommitId::from_digest([9; 32]),
                 2 => {
                     revision.stream_position = 9;
@@ -2394,9 +2383,8 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap()
-                .endorsements
-                .len(),
-            2
+                .binding_event_ref,
+            initial.binding_event_ref
         );
     }
 

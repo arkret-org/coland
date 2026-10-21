@@ -822,6 +822,9 @@ pub(crate) async fn recheck_actor_disclosure_in_connection(
             .optional()
             .map_err(PersistenceError::database)?
             .ok_or_else(|| undisclosable("the Realm has no governing authority"))?;
+    let governance =
+        crate::pcr_private_authority::validate_installed_governance(conn, &snapshot.realm_id)
+            .await?;
     let snapshot_generation =
         i64::try_from(snapshot.governance_generation).map_err(PersistenceError::database)?;
     if snapshot_generation > tenure.generation {
@@ -839,6 +842,13 @@ pub(crate) async fn recheck_actor_disclosure_in_connection(
             .ok_or_else(|| undisclosable("the historical Snapshot tenure is not in the installed handoff chain"))?
             .service_id
     };
+    governance
+        .validate_current(
+            &arkret_wire::DidCoreId::new(snapshot_service.clone())
+                .map_err(crate::pcr_private_authority::refused)?,
+            snapshot.governance_generation,
+        )
+        .map_err(crate::pcr_private_authority::refused)?;
     // Recompute the Account's complete disclosure at this read cut. A signed
     // historical object is still readable only while every one of its streams
     // and rows remains disclosed to this Account. New visible streams may have

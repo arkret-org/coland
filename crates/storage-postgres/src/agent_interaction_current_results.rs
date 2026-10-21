@@ -1224,8 +1224,8 @@ pub(crate) async fn require_shared_producer_in_connection(
             .bind::<Text,_>(event.realm_id.as_str()).get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
         if let Some(direct) = direct {
             let value: arkret_models_collaboration::events_payloads::direct_conversation::DirectConversationBindingCurrentValue = serde_json::from_value(direct.value).map_err(invalid)?;
-            value.binding_digest().map_err(invalid)?;
-            if value.endorsements.as_slice().first().is_some_and(|entry| entry.value.unordered_participant_ids.iter().any(|a| a.as_account_id() == Some(agent)) && entry.value.authorization_basis.kind == arkret_models_collaboration::objects::direct_conversation::DirectConversationAuthorizationKind::AgentController) { continue; }
+            value.binding.validate_shape().map_err(invalid)?;
+            if value.binding.unordered_participant_ids.iter().any(|a| a.as_account_id() == Some(agent)) && value.binding.authorization_basis.kind == arkret_models_collaboration::objects::direct_conversation::DirectConversationAuthorizationKind::AgentController { continue; }
         }
         let Some(controller) =
             controller_in_connection(conn, &event.realm_id, agent, commit.committed_at).await?
@@ -1256,13 +1256,13 @@ pub(crate) async fn owner_direct_in_connection(
         return Ok(false);
     };
     let value: arkret_models_collaboration::events_payloads::direct_conversation::DirectConversationBindingCurrentValue = serde_json::from_value(row.value).map_err(invalid)?;
-    value.binding_digest().map_err(invalid)?;
-    Ok(value.endorsements.as_slice().first().is_some_and(|entry| {
-        entry.value.authorization_basis.kind == arkret_models_collaboration::objects::direct_conversation::DirectConversationAuthorizationKind::AgentController
-        && entry.value.unordered_participant_ids.len() == 2
-        && entry.value.unordered_participant_ids.contains(&ActorId::account(agent.clone()))
-        && entry.value.unordered_participant_ids.contains(&ActorId::account(controller.clone()))
-    }))
+    value.binding.validate_shape().map_err(invalid)?;
+    Ok({
+        value.binding.authorization_basis.kind == arkret_models_collaboration::objects::direct_conversation::DirectConversationAuthorizationKind::AgentController
+        && value.binding.unordered_participant_ids.len() == 2
+        && value.binding.unordered_participant_ids.contains(&ActorId::account(agent.clone()))
+        && value.binding.unordered_participant_ids.contains(&ActorId::account(controller.clone()))
+    })
 }
 
 #[cfg(test)]

@@ -388,8 +388,33 @@ pub struct MimiConsentCorrelationRecord {
     pub purpose: String,
     pub strand_id: Option<String>,
     pub source_id: Option<String>,
+    pub source_class: MimiConsentSourceClass,
     pub created_at: chrono::DateTime<Utc>,
     pub expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+/// Authentication entrance retained by a private MIMI correlation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MimiConsentSourceClass {
+    Service,
+    Session,
+}
+
+impl MimiConsentSourceClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Service => "service",
+            Self::Session => "session",
+        }
+    }
+
+    pub fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "service" => Some(Self::Service),
+            "session" => Some(Self::Session),
+            _ => None,
+        }
+    }
 }
 
 #[async_trait]
@@ -399,6 +424,14 @@ pub trait MimiConsentCorrelationStore: Send + Sync {
         consent_id: &str,
     ) -> PersistenceResult<Option<MimiConsentCorrelationRecord>>;
     async fn put(&self, record: &MimiConsentCorrelationRecord) -> PersistenceResult<()>;
+    /// Freeze the exact decision and original submission before forwarding.
+    async fn bind_decision(
+        &self,
+        consent_id: &str,
+        decision: &str,
+        submission: &arkret_wire::EventAdmissionSubmission,
+        allow_new: bool,
+    ) -> PersistenceResult<bool>;
 }
 #[doc(hidden)]
 pub type ContactKey = (ActorId, ActorId);

@@ -3211,6 +3211,103 @@ async fn replica_bootstrap_waits_for_authority_without_holding_anchor_case() {
     );
 }
 
+/// Collaboration remains transferable with an authenticated since-join
+/// genesis current; a receiver need not invent the unavailable position 0.
+#[tokio::test]
+async fn collaboration_governance_change_replica_uses_verified_since_join_genesis() {
+    heap_future(|| collaboration_governance_change_replica_case()).await;
+}
+
+async fn collaboration_governance_change_replica_case() {
+    let governor_db = TestDatabase::lease().await;
+    let member_db = TestDatabase::lease().await;
+    let pool = governor_db.pool();
+    let member_pool = member_db.pool();
+    let governor = PgAuthorityCommitStore { pool: pool.clone() };
+    let member = PgAuthorityCommitStore {
+        pool: member_pool.clone(),
+    };
+    let unit = heap_future(|| admit(&pool, "collaboration-change-replica", "public")).await;
+    let realm = unit.transactions[0].event.realm_id.clone();
+    assert_eq!(
+        arkret_wire::GenesisGovernance::from_genesis(&unit.transactions[0].event).unwrap(),
+        arkret_wire::GenesisGovernance::Collaboration,
+    );
+    let reader = remote_member("governance-change-reader");
+    let join = membership_request(
+        unit.transactions.last().unwrap(),
+        reader.clone(),
+        &reader,
+        "join",
+    );
+    let join = heap_future(|| ordinary_realm::source_request(&pool, join)).await;
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    heap_future(|| uow.commit_event(join.clone()))
+        .await
+        .unwrap();
+    member
+        .install_committed_replica(&replica(&unit, &join, true))
+        .await
+        .unwrap();
+    let material = governor
+        .member_station_bootstrap_material(
+            &realm,
+            reader.as_account_id().unwrap(),
+            &join.authority_commit.commit.commit_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot = snapshot_signer()(&material).unwrap();
+    member
+        .install_replica_anchor(&ReplicaAnchorInstall {
+            realm_id: realm.clone(),
+            join_commit_id: join.authority_commit.commit.commit_id.clone(),
+            governance_generation: snapshot.governance_generation,
+            snapshot_head: snapshot.visible_stream_heads[0].clone(),
+            visible_stream_heads: snapshot.visible_stream_heads.clone(),
+            current_state_entries: snapshot.current_state_entries.clone(),
+            verified_snapshot: snapshot,
+        })
+        .await
+        .unwrap();
+    let mut conn = member_pool.get().await.unwrap();
+    assert_eq!(diesel::sql_query("SELECT COUNT(*)::bigint AS count FROM realm_commits WHERE realm_id=$1 AND stream_ref->>'kind'='realm' AND stream_position=0")
+        .bind::<Text,_>(realm.as_str()).get_result::<CountRow>(&mut *conn).await.unwrap().count, 0);
+    drop(conn);
+    let mut change = sourced(next_request_for_actor(
+        &join.authority_commit,
+        arkret_wire::EventKind::RealmGovernanceStationChange,
+        founder_actor(),
+        serde_json::json!({"expected_governance_generation":0,
+            "expected_realm_stream_commit_id":join.authority_commit.commit.commit_id,
+            "new_governance_station_id":"ak:did_core:web:collaboration-successor.example"}),
+        join.authority_commit.commit.committed_at,
+    ));
+    change.authority_commit.event.authorization_ref =
+        Some(unit.transactions[0].event.event_id.to_string());
+    let change = heap_future(|| ordinary_realm::source_request(&pool, change)).await;
+    heap_future(|| uow.commit_event(change.clone()))
+        .await
+        .unwrap();
+    let replica = replica(&unit, &change, false);
+    assert_eq!(
+        member.install_committed_replica(&replica).await.unwrap(),
+        CommittedReplicaOutcome::Stored
+    );
+    assert_eq!(
+        member.install_committed_replica(&replica).await.unwrap(),
+        CommittedReplicaOutcome::Duplicate
+    );
+    let held = member
+        .committed_event(&replica.event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.event, replica.event);
+    assert_eq!(held.commit, replica.commit);
+}
+
 /// Two real Stations preserve the original governance signature while the
 /// member serves an exact hosted Account cut and its reserved window basis.
 #[tokio::test]
@@ -3275,6 +3372,20 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
     let never_sign = |_: &coland_storage::RealmStateSnapshotMaterial| -> coland_storage::PersistenceResult<arkret_wire::RealmStateSnapshot> {
         panic!("a member Station must never sign a Realm Snapshot")
     };
+    let mut conn = member_pool.get().await.unwrap();
+    let inception_count = diesel::sql_query(
+        "SELECT COUNT(*)::bigint AS count FROM realm_commits \
+         WHERE realm_id=$1 AND stream_ref->>'kind'='realm' AND stream_position=0",
+    )
+    .bind::<Text, _>(realm.as_str())
+    .get_result::<CountRow>(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        inception_count.count, 0,
+        "a since-join replica must serve the verified genesis current without inventing its original Event"
+    );
+    drop(conn);
     let issuer = member_station();
     let issued = member
         .issue_realm_state_snapshot_for_account(&realm, account, &issuer, &never_sign)
@@ -3291,6 +3402,62 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
             .await
             .unwrap(),
         Some(snapshot.clone())
+    );
+    // Losing the verified bootstrap anchor must not promote the retained
+    // genesis current into independent inception authority or sign a new cut.
+    #[derive(diesel::QueryableByName)]
+    struct AnchorOriginal {
+        #[diesel(sql_type = Jsonb)]
+        value: serde_json::Value,
+    }
+    let mut conn = member_pool.get().await.unwrap();
+    let anchor = diesel::sql_query(
+        "DELETE FROM replica_stream_anchors WHERE realm_id=$1 \
+         AND stream_key=$2 RETURNING to_jsonb(replica_stream_anchors) AS value",
+    )
+    .bind::<Text, _>(realm.as_str())
+    .bind::<Text, _>(
+        String::from_utf8(
+            arkret_canonical::canonical_json_bytes(&arkret_wire::CommitStreamRef::Realm {
+                realm_id: realm.clone(),
+            })
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .get_result::<AnchorOriginal>(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    assert!(
+        member
+            .issue_realm_state_snapshot_for_account(&realm, account, &issuer, &never_sign)
+            .await
+            .is_err()
+    );
+    assert!(
+        member
+            .issued_realm_state_snapshot(&realm, account, &snapshot.snapshot_id, &issuer)
+            .await
+            .is_err()
+    );
+    let mut conn = member_pool.get().await.unwrap();
+    diesel::sql_query(
+        "INSERT INTO replica_stream_anchors \
+         SELECT * FROM jsonb_populate_record(NULL::replica_stream_anchors,$1)",
+    )
+    .bind::<Jsonb, _>(&anchor.value)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    assert_eq!(
+        member
+            .issue_realm_state_snapshot_for_account(&realm, account, &issuer, &never_sign)
+            .await
+            .unwrap(),
+        Some(snapshot.clone()),
+        "restoring the original verified anchor must restore the same signed cut"
     );
     let now_ms = chrono::Utc::now().timestamp_millis();
     let window = member
@@ -4810,6 +4977,7 @@ fn recipient_roster_witness(
         .unwrap(),
         source_id: STATION.parse().unwrap(),
         destination_id: member_station(),
+        claim_authority_ref: None,
         request,
         claimed_at: at,
         expires_at: at + chrono::Duration::hours(1),
@@ -4849,6 +5017,7 @@ fn recipient_roster_witness(
         )
         .unwrap(),
         claim_receipt: receipt,
+        claim_authority_ref: None,
         attested_at: at,
         signature: placeholder(),
     };
@@ -4872,6 +5041,7 @@ fn recipient_roster_witness(
             )
             .unwrap(),
             local_attestor_resolution: None,
+            claim_issuer_resolution: None,
         },
         json,
     )

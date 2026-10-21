@@ -223,9 +223,9 @@ async fn apply_command(
                 #[diesel(sql_type=Jsonb)]
                 commit_json: Value,
             }
-            let row=sql_query("SELECT v.value,c.commit_json FROM consent_result_versions v JOIN realm_commits c ON c.commit_id=v.commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE v.commit_id=$1 AND c.realm_id=$2 AND e.envelope->'actor_id'=$3 AND v.value->>'consent_id'=$4")
+            let row=sql_query("SELECT v.value,c.commit_json FROM consent_result_versions v JOIN realm_commits c ON c.commit_id=v.commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE v.commit_id=$1 AND c.realm_id=$2 AND e.envelope->'actor_id'=$3 AND v.peer_id=$4 AND e.envelope->>'event_id'=$5")
                 .bind::<Text,_>(command.body.commit_id.as_str()).bind::<Text,_>(realm.as_str())
-                .bind::<Jsonb,_>(serde_json::to_value(ActorId::account(holder.clone())).map_err(invalid)?).bind::<Text,_>(command.body.consent_id.as_str())
+                .bind::<Jsonb,_>(serde_json::to_value(ActorId::account(holder.clone())).map_err(invalid)?).bind::<Jsonb,_>(serde_json::to_value(match &command.body.peer { arkret_models_collaboration::events_payloads::consent::ConsentPeer::Actor {actor_id} => actor_id }).map_err(invalid)?).bind::<Text,_>(command.body.event_id.as_str())
                 .get_result::<Original>(&mut *conn).await.optional()?.ok_or_else(||unavailable("exact original Consent version is missing"))?;
             let value: arkret_models_collaboration::consent_operations::ConsentValue =
                 serde_json::from_value(row.value).map_err(invalid)?;
@@ -234,11 +234,8 @@ async fn apply_command(
             ConsentPrivateCommandOutcome::Version(ConsentPrivateVersionOutcome {
                 kind: ConsentPrivateVersionOutcomeKind::Version,
                 body: arkret_models_collaboration::consent_operations::ConsentView {
-                    consent_id: value.consent_id,
-                    peer: value.peer,
-                    consent_scope: value.consent_scope,
-                    state: value.status,
-                    expires_at: value.expires_at,
+                    peer: command.body.peer.clone(),
+                    permission_scopes: value.permissions.iter().map(|p| p.consent_scope).collect(),
                     updated_at: commit.committed_at,
                     revision: arkret_wire::CurrentRevision {
                         commit_id: commit.commit_id,

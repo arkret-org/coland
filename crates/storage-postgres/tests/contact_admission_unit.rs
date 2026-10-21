@@ -617,7 +617,7 @@ async fn current_contact_cas_and_frozen_response_rollback_together_on_conflictin
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let result = coland_storage::IdempotencyRecord {
         authenticated_actor: original.requester_id.clone(),
-        operation_id: "ak.peer.contact.submit.v1".into(),
+        operation_id: "ak.peer.contacts.command.submit.v1".into(),
         idempotency_key: "current-result-atomicity".into(),
         request_hash: format!("sha256:{}", "a".repeat(64)),
         response_status: 200,

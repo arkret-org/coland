@@ -377,11 +377,16 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             arkret_canonical::DigestSuite::Sha256,
         )
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
-        Box::pin(refresh_direct_conversation_peer_claim(
-            state,
-            &event.realm_id,
-        ))
-        .await?;
+        // A governance change never consumes MLS claims. In particular, a
+        // Direct Conversation must reach its immutable-Genesis refusal before
+        // any peer read or durable consume-receipt refresh.
+        if event.kind != arkret_wire::EventKind::RealmGovernanceStationChange {
+            Box::pin(refresh_direct_conversation_peer_claim(
+                state,
+                &event.realm_id,
+            ))
+            .await?;
+        }
         // contact-and-direct-conversation.md section 8.4: a Direct Conversation
         // Realm's profile table precedes every other authority, so its Events
         // skip the reducer preflight; the accepting transaction evaluates the

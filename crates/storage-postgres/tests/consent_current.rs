@@ -13,7 +13,6 @@ mod device_authorization_history;
 )]
 mod pcr_genesis;
 
-use arkret_models_collaboration::consent_operations::ConsentState;
 use arkret_wire::{
     ActorId, DetachedSignatureContext, Did, DidUrl, EventKind, RealmCommit, RealmCommitId,
 };
@@ -112,8 +111,12 @@ fn write(
     }
 }
 
-fn grant(id: &str, peer: &ActorId, scope: &str) -> serde_json::Value {
-    serde_json::json!({"consent_id":id,"peer":{"kind":"actor","actor_id":peer},"consent_scope":scope})
+fn replacement(
+    peer: &ActorId,
+    revision: Option<arkret_wire::CurrentRevision>,
+    scopes: &[&str],
+) -> serde_json::Value {
+    serde_json::json!({"peer":{"kind":"actor","actor_id":peer},"expected_current": revision.map_or(serde_json::json!({"state":"never_written"}), |revision| serde_json::json!({"state":"present","revision":revision})),"permissions":scopes.iter().map(|scope|serde_json::json!({"consent_scope":scope})).collect::<Vec<_>>()})
 }
 
 #[derive(diesel::QueryableByName, Debug, PartialEq)]
@@ -123,55 +126,133 @@ struct Footprint {
 }
 async fn footprint(pool: &PgPool) -> Footprint {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT jsonb_build_array((SELECT count(*) FROM canonical_events),(SELECT count(*) FROM realm_commits),(SELECT jsonb_agg(to_jsonb(r) ORDER BY consent_id) FROM consent_current_results r),(SELECT count(*) FROM consent_result_versions),(SELECT count(*) FROM account_data_changes)) AS footprint").get_result(&mut conn).await.unwrap()
+    diesel::sql_query("SELECT jsonb_build_array((SELECT count(*) FROM canonical_events),(SELECT count(*) FROM realm_commits),(SELECT jsonb_agg(to_jsonb(r) ORDER BY peer_id) FROM consent_current_results r),(SELECT count(*) FROM consent_result_versions),(SELECT count(*) FROM account_data_changes)) AS footprint").get_result(&mut conn).await.unwrap()
 }
 
 #[tokio::test]
-async fn consent_current_is_create_once_exact_cas_and_replay_preserves_original_view() {
+async fn consent_current_rejects_duplicate_unknown_and_any_scopes_without_writes() {
     let db = TestDatabase::lease().await;
     let pool = db.pool();
     let f = fixture(&pool).await;
     let store = PgConsentCurrentStore { pool: pool.clone() };
     let peer = ActorId::account(f.history.account.clone());
-    let id = "ak:consent:01964137-0000-7000-8000-000000000021";
+    let all = ["invite", "voice_call", "video_call", "presence"];
+    let accepted = write(
+        &f,
+        &f.unit.transactions[1].commit,
+        EventKind::ConsentReplace,
+        replacement(&peer, None, &all),
+    );
+    let ConsentAdmissionOutcome::Committed(original) = store.admit(accepted).await.unwrap() else {
+        panic!("explicit full permission set")
+    };
+    assert_eq!(original.value.permissions.len(), 4);
+    for scope in arkret_wire::ConsentScope::ALL {
+        assert!(original.permits(&peer, *scope, chrono::Utc::now()));
+    }
+    let before = footprint(&pool).await;
+    // Malformed wire strings remain JSON; no future/any protocol enum or
+    // fallback permission is introduced into the implementation.
+    for scopes in [
+        vec!["voice_call", "voice_call"],
+        vec!["future_scope"],
+        vec!["any"],
+    ] {
+        let candidate = write(
+            &f,
+            &original.commit,
+            EventKind::ConsentReplace,
+            replacement(&peer, Some(original.view().revision), &scopes),
+        );
+        assert!(
+            store.admit(candidate).await.is_err(),
+            "invalid permission scopes {scopes:?}"
+        );
+        assert_eq!(footprint(&pool).await, before);
+        let current = store.list(&f.history.account).await.unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].value, original.value);
+        assert_eq!(current[0].event, original.event);
+        assert_eq!(current[0].commit, original.commit);
+    }
+}
+
+#[tokio::test]
+async fn consent_current_full_replacement_empty_and_exact_replay_preserve_original_sources() {
+    let db = TestDatabase::lease().await;
+    let pool = db.pool();
+    let f = fixture(&pool).await;
+    let store = PgConsentCurrentStore { pool: pool.clone() };
+    let peer = ActorId::account(f.history.account.clone());
     let original = write(
         &f,
         &f.unit.transactions[1].commit,
-        EventKind::ConsentGrant,
-        grant(id, &peer, "invite"),
+        EventKind::ConsentReplace,
+        replacement(&peer, None, &["invite", "voice_call"]),
     );
     let ConsentAdmissionOutcome::Committed(record) = store.admit(original.clone()).await.unwrap()
     else {
-        panic!("new grant")
+        panic!("initial replacement")
     };
-    assert_eq!(record.value.status, ConsentState::Active);
+    assert_eq!(record.value.permissions.len(), 2);
     let before = footprint(&pool).await;
-    let ConsentAdmissionOutcome::Duplicate(replayed) = store.admit(original.clone()).await.unwrap()
+    let ConsentAdmissionOutcome::Duplicate(replay) = store.admit(original.clone()).await.unwrap()
     else {
         panic!("exact replay")
     };
-    assert_eq!(replayed.view(), record.view());
+    assert_eq!(replay.view(), record.view());
     assert_eq!(footprint(&pool).await, before);
-    let rebind = write(
+    let overwrite = write(
         &f,
         &record.commit,
-        EventKind::ConsentGrant,
-        grant(id, &peer, "presence"),
+        EventKind::ConsentReplace,
+        replacement(&peer, None, &["presence"]),
     );
     assert!(
         store
-            .admit(rebind)
+            .admit(overwrite)
             .await
             .unwrap_err()
             .to_string()
             .contains("failed_precondition")
     );
     assert_eq!(footprint(&pool).await, before);
-    let stale = write(
+    let empty = write(
         &f,
         &record.commit,
-        EventKind::ConsentRevoke,
-        serde_json::json!({"consent_id":id,"expected_revision":{"commit_id":f.unit.transactions[1].commit.commit_id,"stream_position":1}}),
+        EventKind::ConsentReplace,
+        replacement(&peer, Some(record.view().revision), &[]),
+    );
+    let ConsentAdmissionOutcome::Committed(closed) = store.admit(empty.clone()).await.unwrap()
+    else {
+        panic!("empty is a current")
+    };
+    assert!(closed.value.permissions.is_empty());
+    let ConsentAdmissionOutcome::Duplicate(replay) = store.admit(original).await.unwrap() else {
+        panic!("historical replay")
+    };
+    assert_eq!(replay.view(), record.view());
+    assert!(
+        store.list(&f.history.account).await.unwrap()[0]
+            .value
+            .permissions
+            .is_empty()
+    );
+    for current in [&record, &closed] {
+        let recovered = store
+            .historical_basis(&f.history.account, &peer, &current.view().revision)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.event, current.event);
+        assert_eq!(recovered.commit, current.commit);
+    }
+    let before = footprint(&pool).await;
+    let stale = write(
+        &f,
+        &closed.commit,
+        EventKind::ConsentReplace,
+        replacement(&peer, Some(record.view().revision), &["presence"]),
     );
     assert!(
         store
@@ -179,86 +260,34 @@ async fn consent_current_is_create_once_exact_cas_and_replay_preserves_original_
             .await
             .unwrap_err()
             .to_string()
-            .contains("cas_conflict")
+            .contains("failed_precondition")
     );
     assert_eq!(footprint(&pool).await, before);
-    let revoke = write(
+    let never_again = write(
         &f,
-        &record.commit,
-        EventKind::ConsentRevoke,
-        serde_json::json!({"consent_id":id,"expected_revision":record.view().revision,"reason":"holder_request"}),
-    );
-    let ConsentAdmissionOutcome::Committed(revoked) = store.admit(revoke.clone()).await.unwrap()
-    else {
-        panic!("revoke")
-    };
-    assert_eq!(revoked.value.status, ConsentState::Revoked);
-    assert_eq!(
-        revoked.value.revoked_at,
-        Some(revoke.transaction.event.created_at)
-    );
-    let ConsentAdmissionOutcome::Duplicate(old_grant) = store.admit(original).await.unwrap() else {
-        panic!("grant replay")
-    };
-    assert_eq!(old_grant.value.status, ConsentState::Active);
-    assert_eq!(
-        store.list(&f.history.account).await.unwrap()[0]
-            .value
-            .status,
-        ConsentState::Revoked
-    );
-    let historical = store
-        .historical_basis(
-            &f.history.account,
-            &record.value.consent_id,
-            &record.view().revision,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(historical.event, record.event);
-    assert_eq!(historical.commit, record.commit);
-    assert!(
-        store
-            .historical_basis(
-                &f.history.account,
-                &record.value.consent_id,
-                &revoked.view().revision
-            )
-            .await
-            .unwrap()
-            .is_none()
-    );
-    let mut wrong = record.view().revision;
-    wrong.stream_position -= 1;
-    assert!(
-        store
-            .historical_basis(&f.history.account, &record.value.consent_id, &wrong)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    let before = footprint(&pool).await;
-    let repeated = write(
-        &f,
-        &revoked.commit,
-        EventKind::ConsentRevoke,
-        serde_json::json!({"consent_id":id,"expected_revision":revoked.view().revision}),
+        &closed.commit,
+        EventKind::ConsentReplace,
+        replacement(&peer, None, &["presence"]),
     );
     assert!(
         store
-            .admit(repeated)
+            .admit(never_again)
             .await
             .unwrap_err()
             .to_string()
             .contains("failed_precondition")
     );
     assert_eq!(footprint(&pool).await, before);
-    let rebuilt = PgConsentCurrentStore { pool: pool.clone() };
-    assert_eq!(
-        rebuilt.list(&f.history.account).await.unwrap()[0].view(),
-        revoked.view()
+    let reopened = write(
+        &f,
+        &closed.commit,
+        EventKind::ConsentReplace,
+        replacement(&peer, Some(closed.view().revision), &["presence"]),
     );
+    assert!(matches!(
+        store.admit(reopened).await.unwrap(),
+        ConsentAdmissionOutcome::Committed(_)
+    ));
 }
 
 #[tokio::test]
@@ -271,22 +300,14 @@ async fn consent_current_rejects_wrong_root_and_concurrent_head_loser_without_wr
     let a = write(
         &f,
         &f.unit.transactions[1].commit,
-        EventKind::ConsentGrant,
-        grant(
-            "ak:consent:01964137-0000-7000-8000-000000000022",
-            &peer,
-            "any",
-        ),
+        EventKind::ConsentReplace,
+        replacement(&peer, None, &["presence"]),
     );
     let b = write(
         &f,
         &f.unit.transactions[1].commit,
-        EventKind::ConsentGrant,
-        grant(
-            "ak:consent:01964137-0000-7000-8000-000000000023",
-            &peer,
-            "invite",
-        ),
+        EventKind::ConsentReplace,
+        replacement(&peer, None, &["invite"]),
     );
     let before = footprint(&pool).await;
     let mut bad_signature = a.clone();
@@ -335,6 +356,22 @@ async fn consent_current_rejects_wrong_root_and_concurrent_head_loser_without_wr
     assert_eq!(footprint(&pool).await, before);
     let (left, right) = tokio::join!(store.admit(a), store.admit(b));
     assert_ne!(left.is_ok(), right.is_ok());
+    let loser = if left.is_err() { left } else { right };
+    assert!(
+        loser
+            .unwrap_err()
+            .to_string()
+            .contains("failed_precondition")
+    );
+    let after = footprint(&pool).await;
+    for index in [0, 1, 3] {
+        assert_eq!(
+            after.footprint[index].as_u64().unwrap(),
+            before.footprint[index].as_u64().unwrap() + 1,
+            "only the winning replacement writes its Event, Commit and version"
+        );
+    }
+    assert_eq!(after.footprint[4], before.footprint[4]);
     assert_eq!(store.list(&f.history.account).await.unwrap().len(), 1);
     let head = PgAuthorityCommitStore { pool: pool.clone() }
         .held_stream_head_commit(&f.unit.transactions[1].commit.stream_ref)
@@ -348,9 +385,10 @@ async fn consent_current_rejects_wrong_root_and_concurrent_head_loser_without_wr
 }
 
 #[tokio::test]
-async fn consent_any_revoke_preserves_concrete_grant_and_invalidates_quarantine_in_same_cut() {
+async fn consent_replacement_preserves_quarantine_until_invite_closes_for_exact_peer() {
     use arkret_models_collaboration::governance::holder_quarantine::{
-        HolderQuarantine, HolderQuarantineEntry, HolderQuarantineSurface,
+        HolderQuarantine, HolderQuarantineEntry, HolderQuarantineIntroductionKind,
+        HolderQuarantineInviteScope, HolderQuarantineSurface, InviteTrustTier,
     };
     use arkret_wire::{
         AccountDataKey, AccountId, ConsentRequestScope, ConsentScope, DidCoreId, Hash,
@@ -365,41 +403,58 @@ async fn consent_any_revoke_preserves_concrete_grant_and_invalidates_quarantine_
         f.history.account.station_id.clone(),
     );
     let peer = ActorId::account(peer_account.clone());
-    let any_id = "ak:consent:01964137-0000-7000-8000-000000000024";
-    let concrete_id = "ak:consent:01964137-0000-7000-8000-000000000025";
-    let any = write(
+    let initial = write(
         &f,
         &f.unit.transactions[1].commit,
-        EventKind::ConsentGrant,
-        grant(any_id, &peer, "any"),
+        EventKind::ConsentReplace,
+        replacement(&peer, None, &["voice_call"]),
     );
-    let ConsentAdmissionOutcome::Committed(any) = store.admit(any).await.unwrap() else {
-        panic!("any grant")
+    let ConsentAdmissionOutcome::Committed(active) = store.admit(initial).await.unwrap() else {
+        panic!("replacement")
     };
-    assert!(any.permits(&peer, ConsentScope::VoiceCall, any.commit.committed_at));
-    let concrete = write(
-        &f,
-        &any.commit,
-        EventKind::ConsentGrant,
-        grant(concrete_id, &peer, "voice_call"),
-    );
-    let ConsentAdmissionOutcome::Committed(concrete) = store.admit(concrete).await.unwrap() else {
-        panic!("concrete grant")
-    };
-    let actor = ActorId::account(f.history.account.clone()).to_string();
-    let mut cell = HolderQuarantine::new(concrete.commit.committed_at);
-    let entry = HolderQuarantineEntry {
-        entry_digest: Hash::new(arkret_canonical::sha256_digest(b"pending consent peer")).unwrap(),
+    let other = ActorId::account(AccountId::new(
+        peer_account.principal_id.clone(),
+        "ak:did_core:web:other-station.example".parse().unwrap(),
+    ));
+    let mut cell = HolderQuarantine::new(active.commit.committed_at);
+    for (index, actor) in [peer.clone(), other.clone()].into_iter().enumerate() {
+        cell.quarantine_entries.push(HolderQuarantineEntry {
+            entry_digest: Hash::new(arkret_canonical::sha256_digest([index as u8])).unwrap(),
+            account_id: f.history.account.clone(),
+            source_peer_principal_id: peer_account.principal_id.clone(),
+            source_peer_actor_id: actor,
+            source_id: peer_account.station_id.clone(),
+            surface: HolderQuarantineSurface::InviteDelivery {
+                consent_scope: HolderQuarantineInviteScope::Invite,
+                introduction_kind: HolderQuarantineIntroductionKind::ExplicitAddress,
+                effective_kind: HolderQuarantineIntroductionKind::ExplicitAddress,
+                trust_tier: InviteTrustTier::Low,
+                invite_event_id: f.unit.transactions[0].event.event_id.clone(),
+                request_digest: Hash::new(arkret_canonical::sha256_digest([index as u8, 1]))
+                    .unwrap(),
+                idempotency_key_digest: Hash::new(arkret_canonical::sha256_digest([
+                    index as u8,
+                    2,
+                ]))
+                .unwrap(),
+            },
+            received_at: active.commit.committed_at,
+            expires_at: active.commit.committed_at + chrono::TimeDelta::days(1),
+        });
+    }
+    cell.quarantine_entries.push(HolderQuarantineEntry {
+        entry_digest: Hash::new(arkret_canonical::sha256_digest([2])).unwrap(),
         account_id: f.history.account.clone(),
         source_peer_principal_id: peer_account.principal_id.clone(),
+        source_peer_actor_id: peer.clone(),
         source_id: peer_account.station_id.clone(),
         surface: HolderQuarantineSurface::ConsentRequest {
             consent_scope: ConsentRequestScope::VideoCall,
         },
-        received_at: concrete.commit.committed_at,
-        expires_at: concrete.commit.committed_at + chrono::TimeDelta::days(1),
-    };
-    cell.quarantine_entries.push(entry);
+        received_at: active.commit.committed_at,
+        expires_at: active.commit.committed_at + chrono::TimeDelta::days(1),
+    });
+    let actor = ActorId::account(f.history.account.clone()).to_string();
     let accounts = coland_storage_postgres::PgAccountDataStore { pool: pool.clone() };
     accounts
         .compare_and_set(
@@ -415,53 +470,55 @@ async fn consent_any_revoke_preserves_concrete_grant_and_invalidates_quarantine_
         )
         .await
         .unwrap();
-    let revoke = write(
+    let opening = write(
         &f,
-        &concrete.commit,
-        EventKind::ConsentRevoke,
-        serde_json::json!({"consent_id":any_id,"expected_revision":any.view().revision}),
+        &active.commit,
+        EventKind::ConsentReplace,
+        replacement(
+            &peer,
+            Some(active.view().revision),
+            &["invite", "voice_call"],
+        ),
     );
-    let ConsentAdmissionOutcome::Committed(revoked) = store.admit(revoke.clone()).await.unwrap()
-    else {
-        panic!("revoke any")
+    let ConsentAdmissionOutcome::Committed(opened) = store.admit(opening).await.unwrap() else {
+        panic!("open invite")
     };
-    assert!(!revoked.permits(&peer, ConsentScope::VideoCall, revoked.commit.committed_at));
-    assert_eq!(revoked.quarantine_update.as_ref().unwrap().revision, 2);
-    let row = accounts
+    assert!(opened.quarantine_update.is_none());
+    let unchanged = accounts
         .get(&actor, AccountDataKey::ACCOUNT_HOLDER_QUARANTINE)
         .await
         .unwrap()
         .unwrap();
-    let cell: HolderQuarantine = serde_json::from_value(row.payload).unwrap();
-    assert!(cell.quarantine_entries.is_empty());
-    assert_eq!(cell.last_invalidation.unwrap().removed_entries, 1);
-    let list = store.list(&f.history.account).await.unwrap();
-    let concrete = list
-        .iter()
-        .find(|r| r.value.consent_id.as_str() == concrete_id)
-        .unwrap();
-    assert!(concrete.permits(&peer, ConsentScope::VoiceCall, revoked.commit.committed_at));
-    assert_eq!(concrete.value.status, ConsentState::Active);
-    let mut cross_station = peer_account.clone();
-    cross_station.station_id = DidCoreId::new("ak:did_core:web:other-station.example").unwrap();
-    assert!(!concrete.permits(
-        &ActorId::account(cross_station),
-        ConsentScope::VoiceCall,
-        revoked.commit.committed_at
-    ));
-    let ConsentAdmissionOutcome::Duplicate(replay) = store.admit(revoke).await.unwrap() else {
-        panic!("replay revoke")
-    };
-    assert!(replay.quarantine_update.is_none());
-    assert_eq!(
-        accounts
-            .get(&actor, AccountDataKey::ACCOUNT_HOLDER_QUARANTINE)
-            .await
-            .unwrap()
-            .unwrap()
-            .revision,
-        2
+    assert_eq!(unchanged.revision, 1);
+    assert_eq!(unchanged.payload, serde_json::to_value(&cell).unwrap());
+    let closing = write(
+        &f,
+        &opened.commit,
+        EventKind::ConsentReplace,
+        replacement(&peer, Some(opened.view().revision), &["voice_call"]),
     );
+    let ConsentAdmissionOutcome::Committed(closed) = store.admit(closing).await.unwrap() else {
+        panic!("close invite")
+    };
+    assert!(!closed.permits(&peer, ConsentScope::Invite, closed.commit.committed_at));
+    assert!(closed.permits(&peer, ConsentScope::VoiceCall, closed.commit.committed_at));
+    let update = closed
+        .quarantine_update
+        .as_ref()
+        .expect("atomic invalidation");
+    let cell: HolderQuarantine = serde_json::from_value(update.payload.clone()).unwrap();
+    assert_eq!(update.revision, 2);
+    assert_eq!(cell.quarantine_entries.len(), 2);
+    assert_eq!(cell.quarantine_entries[0].source_peer_actor_id, other);
+    assert_eq!(cell.quarantine_entries[1].source_peer_actor_id, peer);
+    assert_eq!(
+        cell.quarantine_entries[1].consent_scope(),
+        ConsentScope::VideoCall
+    );
+    let invalidation = cell.last_invalidation.unwrap();
+    assert_eq!(invalidation.peer_actor_id, peer);
+    assert_eq!(invalidation.removed_entries, 1);
+    assert_eq!(store.list(&f.history.account).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -473,12 +530,11 @@ async fn consent_current_guards_invite_delivery_cas_and_rejects_a_pre_revoke_pro
     let f = fixture(&pool).await;
     let store = PgConsentCurrentStore { pool: pool.clone() };
     let peer = ActorId::account(f.history.account.clone());
-    let id = "ak:consent:01964137-0000-7000-8000-000000000026";
     let grant = write(
         &f,
         &f.unit.transactions[1].commit,
-        EventKind::ConsentGrant,
-        grant(id, &peer, "invite"),
+        EventKind::ConsentReplace,
+        replacement(&peer, None, &["invite", "voice_call"]),
     );
     let ConsentAdmissionOutcome::Committed(active) = store.admit(grant).await.unwrap() else {
         panic!("grant")
@@ -489,7 +545,6 @@ async fn consent_current_guards_invite_delivery_cas_and_rejects_a_pre_revoke_pro
         acceptor_service_id: f.history.account.station_id.clone(),
         peer: peer.clone(),
         consent_grant_ref: active.event.event_id.clone(),
-        consent_id: Some(active.value.consent_id.clone()),
         record: AccountDataRecord {
             actor: ActorId::account(f.history.account.clone()).to_string(),
             account_data_key: arkret_wire::AccountDataKey::ACCOUNT_INVITE_DELIVERY.to_owned(),
@@ -527,10 +582,26 @@ async fn consent_current_guards_invite_delivery_cas_and_rejects_a_pre_revoke_pro
     let revoke = write(
         &f,
         &active.commit,
-        EventKind::ConsentRevoke,
-        serde_json::json!({"consent_id":id,"expected_revision":active.view().revision}),
+        EventKind::ConsentReplace,
+        replacement(&peer, Some(active.view().revision), &["voice_call"]),
     );
     store.admit(revoke).await.unwrap();
+    assert!(
+        store
+            .historical_basis(&f.history.account, &peer, &active.view().revision)
+            .await
+            .unwrap()
+            .is_some(),
+        "the prior accepted invite grant still exists as immutable history"
+    );
+    let current = store.list(&f.history.account).await.unwrap();
+    assert_eq!(current.len(), 1);
+    assert!(current[0].permits(
+        &peer,
+        arkret_wire::ConsentScope::VoiceCall,
+        chrono::Utc::now()
+    ));
+    assert!(!current[0].permits(&peer, arkret_wire::ConsentScope::Invite, chrono::Utc::now()));
     // The caller already read active and prepared its write before Revoke.
     // Admission must recheck under the shared PCR lock before private CAS.
     let mut in_flight = delivery;
@@ -790,8 +861,29 @@ async fn human_pcr_rejects_change_export_proxy_import_and_activation_without_any
     )
     .unwrap();
     let heads = material.visible_stream_heads.clone();
+    // This is an unaccepted hostile handoff candidate. The Human governance
+    // gate must refuse it before any private inventory can be imported.
+    let management_bytes = arkret_canonical::canonical_json_bytes(&serde_json::json!({
+        "format":"realm-management-postgres-v1","realm_id":tail.realm_id,"tables":{}
+    }))
+    .unwrap();
+    let management =
+        arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManifest {
+            realm_id: tail.realm_id.clone(),
+            governance_generation: 0,
+            final_stream_heads_digest: arkret_wire::Hash::new(
+                arkret_canonical::canonical_sha256(&heads).unwrap(),
+            )
+            .unwrap(),
+            nonce: arkret_canonical::base64url_encode([8u8; 32]),
+            state_digest: arkret_wire::Hash::new(arkret_canonical::sha256_digest(
+                &management_bytes,
+            ))
+            .unwrap(),
+        };
     let new_key = SigningKey::from_bytes(&[0xb2; 32]);
     let mut handoff = arkret_wire::RealmAuthorityHandoff {
+        management_private_state_digest: Some(management.digest().unwrap()),
         pcr_private_state_digest: Some(manifest.digest().unwrap()),
         handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest([0x43; 32]),
         realm_id: tail.realm_id.clone(),
@@ -837,7 +929,13 @@ async fn human_pcr_rejects_change_export_proxy_import_and_activation_without_any
         .unwrap();
     handoff.validate_shape().unwrap();
     let refused = store
-        .install_handoff_with_private_state(&handoff, &heads, &snapshot, Some(&manifest))
+        .install_handoff_with_private_state(
+            &handoff,
+            &heads,
+            &snapshot,
+            Some(&manifest),
+            &management,
+        )
         .await
         .unwrap_err();
     assert!(refused.to_string().contains("Human PCR"), "{refused}");

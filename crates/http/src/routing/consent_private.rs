@@ -270,14 +270,17 @@ pub(crate) async fn submit_consent(
     let arkret_wire::AuthoritySubmitOutcome::Accepted { commit, .. } = outcome else {
         return Err(unavailable("Consent original was not accepted"));
     };
-    let id = submission
-        .event
-        .payload
-        .get("consent_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| invalid("Consent stable id is missing"))?;
+    let payload: arkret_models_collaboration::events_payloads::consent::ConsentReplacePayload =
+        serde_json::from_value(serde_json::to_value(&submission.event.payload).map_err(invalid)?)
+            .map_err(invalid)?;
+    let arkret_models_collaboration::events_payloads::consent::ConsentPeer::Actor {
+        actor_id: peer_id,
+    } = payload.peer;
     let body = ConsentPrivateVersionBody {
-        consent_id: arkret_wire::ConsentId::new(id.to_owned()).map_err(invalid)?,
+        peer: arkret_models_collaboration::events_payloads::consent::ConsentPeer::Actor {
+            actor_id: peer_id,
+        },
+        event_id: submission.event.event_id.clone(),
         commit_id: commit.commit_id,
     };
     match holder_command(

@@ -88,7 +88,7 @@ pub(crate) fn validate_reaction_target_kind(
 
 /// Spec B1.13 / B1.14 / B1.15 — typed payload validators dispatched on the
 /// canonical event kind. Hooks the SDK typed payload shapes
-/// (SpaceStateTransition / SpaceObjectTombstone / ConsentRevoke) into the
+/// (SpaceStateTransition / SpaceObjectTombstone / ConsentReplace) into the
 /// coland operation admission pipeline.
 ///
 /// For the space lifecycle events the SDK's typed payload requires
@@ -141,9 +141,9 @@ fn validate_typed_payload_shapes(
     operation: &Operation,
 ) -> Result<(), &'static str> {
     match kind {
-        arkret_wire::EventKind::ConsentGrant => {
+        arkret_wire::EventKind::ConsentReplace => {
             operation
-                .typed_payload::<arkret_wire::event_spec::ConsentGrant>()
+                .typed_payload::<arkret_wire::event_spec::ConsentReplace>()
                 .map_err(|_| arkret_wire::ErrorCode::SCHEMA_VIOLATION)?;
             Ok(())
         }
@@ -172,13 +172,6 @@ fn validate_typed_payload_shapes(
                 );
             }
             Ok(())
-        }
-        // The complete canonical typed shape is required; validating only
-        // observed_dot_ids would allow malformed identifiers.
-        arkret_wire::EventKind::ConsentRevoke => {
-            validate_consent_revoke_payload(&operation.payload)
-                .map(|_| ())
-                .map_err(|_| "ak.consent.revoke payload violates its canonical typed shape")
         }
         // ak.audit.accessed — when `access_kind=e2ee_late_recovery`
         // the payload MUST carry `late_recovery_original_event_id`.
@@ -277,7 +270,6 @@ fn operation_extra_validator_for_kind(kind: &arkret_wire::EventKind) -> Option<O
         | arkret_wire::EventKind::RelationTombstone => Some(validate_relation_operation_payload),
         arkret_wire::EventKind::ReadCursorAdvance => Some(validate_read_marker_payload),
         arkret_wire::EventKind::AccountDataSet => Some(validate_account_data_set_payload),
-        arkret_wire::EventKind::ConsentRevoke => Some(validate_observed_dots_payload),
         arkret_wire::EventKind::InviteCreate => Some(validate_invite_create_payload),
         arkret_wire::EventKind::InviteThirdParty => Some(validate_invite_third_party_payload),
         arkret_wire::EventKind::InviteClaim => Some(validate_invite_claim_payload),
@@ -300,26 +292,6 @@ fn operation_extra_validator_for_kind(kind: &arkret_wire::EventKind) -> Option<O
         arkret_wire::EventKind::DeviceAuthorize => Some(validate_device_authorize_payload),
         _ => None,
     }
-}
-
-/// Spec B1.14 — validate a `ak.consent.revoke` payload. Empty or missing
-/// `observed_dot_ids[]` is `schema_violation` — implicit cascade revoke is
-/// forbidden.
-pub fn validate_consent_revoke_payload(payload: &Value) -> Result<(), (&'static str, String)> {
-    let parsed: arkret_models_collaboration::governance_payloads::ConsentRevokePayload =
-        serde_json::from_value(payload.clone()).map_err(|err| {
-            (
-                arkret_wire::ErrorCode::SCHEMA_VIOLATION,
-                format!("ak.consent.revoke payload shape is invalid: {err}"),
-            )
-        })?;
-    parsed.validate_minimal().map_err(|err| {
-        (
-            arkret_wire::ErrorCode::SCHEMA_VIOLATION,
-            format!("ak.consent.revoke payload invariant violation: {err}"),
-        )
-    })?;
-    Ok(())
 }
 
 #[cfg(test)]

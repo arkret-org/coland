@@ -1,6 +1,7 @@
 //! Exact Service-owned Applet authority material at one read-only MVCC cut.
 use arkret_models_collaboration::applet_installation_authority::{
     AppletAuthorityMaterialOutcome, AppletAuthorityMaterialRequestBody, AppletCommittedEvent,
+    AppletInstallationCurrentBinding,
 };
 use arkret_models_collaboration::events_payloads::CapabilityGrantPayload;
 use arkret_models_collaboration::exact_current_results::{
@@ -50,6 +51,86 @@ struct TenureRow {
     generation: i64,
     #[diesel(sql_type=Text)]
     service_id: String,
+}
+
+async fn current_installation_binding(
+    conn: &mut AsyncPgConnection,
+    applet: &AppletId,
+    request: &AppletAuthorityMaterialRequestBody,
+    installation: &Value,
+) -> PersistenceResult<AppletInstallationCurrentBinding> {
+    if !matches!(
+        installation["status"].as_str(),
+        Some("installed" | "partially_installed")
+    ) || installation
+        .get("revoked_at")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Ok(AppletInstallationCurrentBinding::Inactive);
+    }
+    #[derive(QueryableByName)]
+    struct Current {
+        #[diesel(sql_type=Text)]
+        current_commit_id: String,
+        #[diesel(sql_type=BigInt)]
+        current_stream_position: i64,
+        #[diesel(sql_type=Text)]
+        instance_event_ref: String,
+        #[diesel(sql_type=Jsonb)]
+        value: Value,
+    }
+    let current = sql_query("SELECT current_commit_id,current_stream_position,instance_event_ref,value FROM applet_registration_current_results WHERE realm_id=$1 AND applet_id=$2")
+        .bind::<Text,_>(request.effective_scope.realm_id().as_str()).bind::<Text,_>(applet.as_str())
+        .get_result::<Current>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let Some(current) = current else {
+        return Ok(AppletInstallationCurrentBinding::Inactive);
+    };
+    let row = sql_query("SELECT e.envelope,c.commit_json FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.commit_id=$1 AND e.state='committed'")
+        .bind::<Text,_>(&current.current_commit_id).get_result::<AcceptedRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unavailable)?;
+    let event: arkret_wire::Event = decode(row.envelope)?;
+    let full = accepted(conn, &event.event_id).await?;
+    let payload: AppletRegistrationPayload = decode(current.value.clone())?;
+    if full.event.kind != EventKind::AppletRegistration
+        || full.event.scope_ref != request.effective_scope
+        || payload.applet_id != *applet
+        || serde_json::to_value(&full.event.payload).map_err(PersistenceError::database)?
+            != current.value
+        || full.commit.commit_id.as_str() != current.current_commit_id
+        || i64::try_from(full.commit.stream_position).ok() != Some(current.current_stream_position)
+    {
+        return Err(unavailable());
+    }
+    let registration_event_id: EventId = decode(
+        installation
+            .pointer("/registration_event/event_id")
+            .cloned()
+            .ok_or_else(unavailable)?,
+    )?;
+    let instance = sql_query("SELECT to_jsonb(instance_event_ref) AS value FROM applet_registration_instances WHERE realm_id=$1 AND applet_id=$2 AND registration_event_ref=$3")
+        .bind::<Text,_>(request.effective_scope.realm_id().as_str()).bind::<Text,_>(applet.as_str()).bind::<Text,_>(registration_event_id.as_str())
+        .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unavailable)?;
+    if instance.value.as_str() != Some(current.instance_event_ref.as_str())
+        || installation
+            .pointer("/package/registration_epoch")
+            .and_then(Value::as_str)
+            != Some(payload.registration_epoch.as_str())
+        || installation
+            .pointer("/package/service_id")
+            .and_then(Value::as_str)
+            != Some(payload.service_id.as_str())
+    {
+        return Ok(AppletInstallationCurrentBinding::Inactive);
+    }
+    Ok(AppletInstallationCurrentBinding::Active {
+        registration_ref: arkret_wire::CommittedEventRef {
+            event_id: full.event.event_id,
+            commit_id: full.commit.commit_id,
+            stream_ref: full.commit.stream_ref,
+            stream_position: full.commit.stream_position,
+        },
+        registration_epoch: payload.registration_epoch,
+        service_id: payload.service_id,
+    })
 }
 
 async fn accepted(
@@ -136,6 +217,8 @@ pub(crate) async fn read(
     {
         return Err(unavailable());
     }
+    let current_binding =
+        current_installation_binding(conn, applet, request, &install.value).await?;
     // Audit provenance follows the original accepted parent, never the latest
     // mutable installation. A replaced installation may remain a read boundary
     // for this Service while its old grants carry only historical authority.
@@ -317,6 +400,7 @@ pub(crate) async fn read(
         registration,
         grant_events,
         current_results,
+        current_binding,
     };
     outcome
         .validate_structural()

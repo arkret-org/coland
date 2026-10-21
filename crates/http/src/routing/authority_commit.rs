@@ -1427,13 +1427,9 @@ async fn peer_handoff(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     else {
         return;
     };
-    if let Err(error) = request.validate_new_handoff() {
-        return crate::error::render_error_code(
-            ErrorCode::SchemaViolation,
-            res,
-            &validation_error(error),
-        );
-    }
+    // The application checks fixed-governance eligibility from the original
+    // genesis before validating a successor bundle. Its typed precondition
+    // refusal must retain the same error code at the HTTP boundary.
     let result = app_state
         .authority()
         .install_authority_handoff(&peer, request)
@@ -1517,6 +1513,24 @@ mod tests {
     use salvo::test::{ResponseExt as _, TestClient};
 
     use super::*;
+
+    #[tokio::test]
+    async fn direct_handoff_eligibility_refusal_retains_failed_precondition() {
+        let mut res = Response::new();
+        render_service_error(
+            &mut res,
+            ServiceError::Conflict(
+                "failed_precondition: Direct Conversation governance cannot transfer".to_owned(),
+            ),
+        );
+        assert_eq!(res.status_code, Some(StatusCode::CONFLICT));
+        let body: serde_json::Value = res.take_json().await.unwrap();
+        assert_eq!(
+            body["type"],
+            "https://arkret.org/problems/failed_precondition"
+        );
+        assert_eq!(body["status"], 409);
+    }
 
     #[test]
     fn mounted_authority_routes_are_the_registered_canonical_paths() {

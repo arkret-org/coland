@@ -1985,6 +1985,17 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
         archived_before
     );
 
+    boxed_source(|| {
+        assert_direct_replica_governance_fixed(
+            &pair,
+            &peer_pool,
+            &peer_station,
+            unit.transactions.last().unwrap(),
+            &unit.transactions[0].event.event_id,
+        )
+    })
+    .await;
+
     // A retained founding slot cannot invent a missing physical Genesis.
     // The anchored foreign reader keeps its exact held join interval instead.
     let mut conn = peer_pool.get().await.unwrap();
@@ -2030,6 +2041,18 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
             .unwrap(),
         coland_storage::MemberCommittedEventRead::NotVisible
     ));
+    // The same refusal must use the verified anchored genesis when the
+    // member no longer retains position 0; a profile tag is not provenance.
+    boxed_source(|| {
+        assert_direct_replica_governance_fixed(
+            &pair,
+            &peer_pool,
+            &peer_station,
+            unit.transactions.last().unwrap(),
+            &unit.transactions[0].event.event_id,
+        )
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -3027,6 +3050,7 @@ const REPAIR_SOURCE: &str = "ak.authority.direct_conversation_repair.v1";
 /// The authority source and critical ref one Direct Conversation Event cites.
 enum Cites<'a> {
     Nothing,
+    Root(&'a arkret_wire::EventId),
     Bootstrap(&'a arkret_wire::EventId),
     Participant(&'a arkret_wire::EventId),
     Repair(&'a arkret_wire::EventId),
@@ -3052,6 +3076,12 @@ fn cited(
     );
     ordinary_realm::bind_structural_human_device(&mut event);
     let (source, role, reference) = match cites {
+        Cites::Root(reference) => {
+            event.authorization_ref =
+                Some(arkret_wire::AuthorizationRef::new(reference.to_string()).unwrap());
+            ordinary_realm::reseal(&mut event);
+            return ordinary_realm::request_for_event(previous, event, at);
+        }
         Cites::Nothing => {
             if let Some(fact) = previous
                 .producer_signer_fact
@@ -3442,8 +3472,7 @@ async fn dc_footprint(pool: &PgPool, realm_id: &RealmId) -> [i64; 8] {
         .await,
         count(
             pool,
-            "SELECT COALESCE(SUM(jsonb_array_length(value->'endorsements')),0)::bigint AS count \
-             FROM direct_conversation_binding_current_results WHERE realm_id=$1",
+            "SELECT COUNT(*) AS count FROM direct_conversation_binding_current_results WHERE realm_id=$1",
             realm_id,
         )
         .await,
@@ -3478,6 +3507,539 @@ async fn group_state(pool: &PgPool, realm_id: &RealmId) -> (bool, Option<String>
         row.current_exact_pair,
         row.initial_exact_pair_group_state_ref,
     )
+}
+
+// Capture every durable table in this leased database. This includes queues,
+// import ledgers and current/version rows outside the Realm's ordinary stream.
+async fn governance_footprint(pool: &PgPool) -> serde_json::Value {
+    #[derive(diesel::QueryableByName)]
+    struct Table {
+        #[diesel(sql_type=Text)]
+        name: String,
+    }
+    #[derive(diesel::QueryableByName)]
+    struct Rows {
+        #[diesel(sql_type=diesel::sql_types::Jsonb)]
+        value: serde_json::Value,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let tables = diesel::sql_query(
+        "SELECT tablename AS name FROM pg_tables WHERE schemaname='public' ORDER BY tablename",
+    )
+    .load::<Table>(&mut conn)
+    .await
+    .unwrap();
+    let mut result = serde_json::Map::new();
+    for table in tables {
+        let quoted = table.name.replace('"', "\"\"");
+        let sql = format!(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) AS value FROM public.\"{quoted}\" t"
+        );
+        let rows = diesel::sql_query(sql)
+            .get_result::<Rows>(&mut conn)
+            .await
+            .unwrap();
+        result.insert(table.name, rows.value);
+    }
+    serde_json::Value::Object(result)
+}
+
+fn direct_transfer_refused(error: &PersistenceError) {
+    let PersistenceError::Conflict(detail) = error else {
+        panic!("wrong Direct transfer error: {error}")
+    };
+    assert!(detail.starts_with("failed_precondition:"), "{error}");
+    assert!(detail.contains("Direct Conversation"), "{error}");
+}
+
+async fn assert_direct_replica_governance_fixed(
+    pair: &Pair,
+    member_pool: &PgPool,
+    member_station: &DidCoreId,
+    head: &AuthorityCommitTransaction,
+    genesis: &arkret_wire::EventId,
+) {
+    let source = pair.store();
+    let realm = &head.event.realm_id;
+    let origin = source.committed_event(genesis).await.unwrap().unwrap();
+    let authority = source.current_authority(realm).await.unwrap().unwrap();
+    assert_eq!(authority.generation, 0);
+    arkret_wire::GenesisGovernance::from_genesis(&origin.event)
+        .unwrap()
+        .validate_current(&authority.service_id, authority.generation)
+        .unwrap();
+    let change = boxed_source(|| {
+        sourced_cited(
+            pair,
+            head,
+            EventKind::RealmGovernanceStationChange,
+            pair.founder_actor(),
+            serde_json::json!({"expected_governance_generation":0,
+        "expected_realm_stream_commit_id":head.commit.commit_id,
+        "new_governance_station_id":"ak:did_core:web:direct-replica-successor.example"}),
+            Cites::Root(genesis),
+        )
+    })
+    .await;
+    let transaction = &change.authority_commit;
+    // Prove the real gen0 governor and original Device signatures first.
+    // This is a forbidden candidate, never an SQL-invented accepted change.
+    let station_key = ed25519_dalek::SigningKey::from_bytes(&[83; 32]);
+    let public = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+        bytes: station_key.verifying_key().to_bytes().to_vec(),
+    };
+    for commit in [&origin.commit, &transaction.commit] {
+        assert_eq!(commit.governance_generation, 0);
+        assert_eq!(
+            commit.signature.verification_method.as_str(),
+            format!("{}#authority", pair.station_did)
+        );
+        commit.verify_commit_id_matches_content().unwrap();
+        arkret_signatures::detached_object::verify_detached_object_signature(
+            &commit.signature,
+            &arkret_canonical::unsigned_value(commit, &["signature"]).unwrap(),
+            arkret_wire::DetachedSignatureContext::RealmCommit,
+            &public,
+        )
+        .unwrap();
+    }
+    arkret_identity::account_device_signer_evidence::verify_historical_account_device_event_signature(
+        &transaction.event,
+        transaction.producer_signer_fact.as_ref().unwrap().as_account_device().unwrap(),
+        realm.digest_suite_code().digest_suite(),
+    ).unwrap();
+    let replica = coland_storage::CommittedReplica {
+        local_service_id: member_station.clone(),
+        authority,
+        historical_commit: None,
+        event: transaction.event.clone(),
+        commit: transaction.commit.clone(),
+        producer_signer_fact: transaction.producer_signer_fact.clone(),
+        genesis_event_ref: Some(genesis.clone()),
+        role: coland_storage::CommittedReplicaRole::HeldStream,
+        received_at: transaction.commit.committed_at,
+        welcomes: Vec::new(),
+    };
+    let receipt = coland_storage::IdempotencyRecord {
+        authenticated_actor: ActorId::service(pair.station.clone()),
+        operation_id: arkret_wire::OperationId::PEER_EVENTS_COMMAND_SUBMIT_V1.into(),
+        idempotency_key: format!("direct-change-refused:{}", transaction.event.event_id),
+        request_hash: fixture_hash('d').to_string(),
+        response_status: 200,
+        response_body: serde_json::json!({
+            "signature_digest":fixture_hash('e'),"key_state_digest":fixture_hash('f')}),
+        created_at: transaction.commit.committed_at,
+        expires_at: transaction.commit.committed_at + chrono::Duration::minutes(1),
+    };
+    let member = PgAuthorityCommitStore {
+        pool: member_pool.clone(),
+    };
+    let before = governance_footprint(member_pool).await;
+    for _ in 0..2 {
+        let error = member
+            .install_committed_replica(&replica)
+            .await
+            .unwrap_err();
+        direct_transfer_refused(&error);
+        assert_eq!(governance_footprint(member_pool).await, before);
+        let error = member
+            .install_committed_peer_replica(&replica, &receipt)
+            .await
+            .unwrap_err();
+        direct_transfer_refused(&error);
+        assert_eq!(governance_footprint(member_pool).await, before);
+        let error = member
+            .queue_replicated_welcomes(
+                &replica.event,
+                &replica.commit,
+                replica.genesis_event_ref.as_ref(),
+                &[],
+                replica.received_at,
+            )
+            .await
+            .unwrap_err();
+        direct_transfer_refused(&error);
+        assert_eq!(governance_footprint(member_pool).await, before);
+    }
+    // No authority/origin at all must be a registered refusal, with no
+    // speculative remote authority row or internal database-not-found error.
+    let (_unknown_db, unknown_pool) = contract_pool().await;
+    let unknown = PgAuthorityCommitStore {
+        pool: unknown_pool.clone(),
+    };
+    let absent_before = governance_footprint(&unknown_pool).await;
+    let error = unknown
+        .install_committed_replica(&replica)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, PersistenceError::Conflict(ref detail) if detail.starts_with("failed_precondition:")),
+        "{error}"
+    );
+    assert_eq!(governance_footprint(&unknown_pool).await, absent_before);
+    assert_eq!(
+        source.committed_event(genesis).await.unwrap().unwrap(),
+        origin
+    );
+}
+
+async fn assert_direct_governance_fixed(
+    pair: &Pair,
+    head: &AuthorityCommitTransaction,
+    genesis: &arkret_wire::EventId,
+    activation: bool,
+) {
+    use arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManifest;
+    use arkret_wire::DetachedSignatureContext as Context;
+    let store = pair.store();
+    let realm = &head.event.realm_id;
+    let authority = store.current_authority(realm).await.unwrap().unwrap();
+    assert_eq!(authority.generation, 0);
+    assert_eq!(authority.service_id, pair.station);
+    assert_eq!(authority.last_handoff_ref, None);
+    assert!(store.authority_handoffs(realm).await.unwrap().is_empty());
+    // This is an actual original read; Direct is neither a Human PCR nor a
+    // missing private control Realm, and its founding current remains readable.
+    let origin = store.committed_event(genesis).await.unwrap().unwrap();
+    let governance = arkret_wire::GenesisGovernance::from_genesis(&origin.event).unwrap();
+    assert!(matches!(
+        governance,
+        arkret_wire::GenesisGovernance::DirectConversation(_)
+    ));
+    assert!(!governance.is_human());
+    assert!(!governance.is_principal_control());
+    governance.validate_current(&pair.station, 0).unwrap();
+    let material = store
+        .realm_state_snapshot_material(realm)
+        .await
+        .unwrap()
+        .unwrap();
+    let before = governance_footprint(&pair.pool).await;
+    let next_station = DidCoreId::new("ak:did_core:web:direct-successor.example").unwrap();
+    let change = boxed_source(|| sourced_cited(pair, head, EventKind::RealmGovernanceStationChange,
+        pair.founder_actor(), serde_json::json!({"expected_governance_generation":0,
+        "expected_realm_stream_commit_id":head.commit.commit_id,"new_governance_station_id":next_station}), Cites::Root(genesis))).await;
+    assert_eq!(
+        change.authority_commit.event.authorization_ref.as_deref(),
+        Some(genesis.as_str())
+    );
+    change
+        .authority_commit
+        .event
+        .verify_producer_proof_self_consistency(realm.digest_suite_code().digest_suite())
+        .unwrap();
+    let error = commit_participant_request(&pair.pool, change.clone())
+        .await
+        .unwrap_err();
+    direct_transfer_refused(&error);
+    assert_eq!(governance_footprint(&pair.pool).await, before);
+    let error = store
+        .admit_pcr_governance_change(&change.authority_commit)
+        .await
+        .unwrap_err();
+    direct_transfer_refused(&error);
+    assert_eq!(governance_footprint(&pair.pool).await, before);
+    if activation {
+        let error = store
+            .export_management_private_state(realm)
+            .await
+            .unwrap_err();
+        direct_transfer_refused(&error);
+        let mut tables = serde_json::Map::new();
+        for table in [
+            "canonical_events",
+            "realm_commits",
+            "agent_producer_signer_keys",
+            "realm_account_device_evidence",
+            "forwarded_producer_device_evidence",
+            "applet_managed_creation_service_sources",
+            "realm_actor_creations",
+            "applet_configurations",
+            "realm_actor_current_results",
+            "realm_actor_private_signer_facts",
+            "management_private_handoff_imports",
+            "realm_actor_recovery_intents",
+            "realm_actor_mls_cleanup",
+            "realm_actor_operation_outcomes",
+            "realm_actor_device_revoke_results",
+            "realm_actor_device_revoke_cleanup",
+            "realm_actor_blob_uploads",
+            "realm_actor_control_nonces",
+            "applet_managed_device_nonces",
+            "applet_registration_instances",
+            "applet_registration_current_results",
+            "applet_managed_identities",
+            "applet_namespace_claims",
+            "applet_installations",
+            "applet_widget_tokens",
+            "applet_authoring_previews",
+            "applet_authoring_completions",
+            "applet_authoring_units",
+            "management_review_requests",
+            "event_approval_private_audit",
+            "capability_quota_counters",
+            "capability_quota_buckets",
+            "capability_quota_consumptions",
+            "mls_key_packages",
+            "keypackage_claim_sources",
+            "realm_keypackage_claim_sources",
+            "keypackage_claim_attempts",
+            "peer_keypackage_claims",
+            "keypackage_claim_welcome_bindings",
+            "realm_claim_issuer_histories",
+            "mls_add_authority_attestations",
+            "mls_add_authority_attestation_outbox",
+            "mls_welcome_deliveries",
+            "sync_cursor_handles",
+            "device_message_ack_tokens",
+        ] {
+            tables.insert(table.into(), serde_json::json!([]));
+        }
+        // A closed, canonical candidate inventory, never represented as an
+        // accepted or exported Direct migration. The immutable gate runs first.
+        let bytes = arkret_canonical::canonical_json_bytes(&serde_json::json!({
+            "format":"realm-management-postgres-v1","realm_id":realm,"tables":tables}))
+        .unwrap();
+        let heads = material.visible_stream_heads.clone();
+        let manifest = ManagementPrivateHandoffManifest {
+            realm_id: realm.clone(),
+            governance_generation: 0,
+            final_stream_heads_digest: Hash::new(
+                arkret_canonical::canonical_sha256(&heads).unwrap(),
+            )
+            .unwrap(),
+            nonce: arkret_canonical::base64url_encode([0xc7; 32]),
+            state_digest: Hash::new(arkret_canonical::sha256_digest(&bytes)).unwrap(),
+        };
+        manifest.validate().unwrap();
+        let error = store
+            .import_management_private_state(&manifest, &bytes)
+            .await
+            .unwrap_err();
+        direct_transfer_refused(&error);
+        assert_eq!(governance_footprint(&pair.pool).await, before);
+        let at = head.commit.committed_at;
+        let old_key = ed25519_dalek::SigningKey::from_bytes(&[83; 32]);
+        let new_key = ed25519_dalek::SigningKey::from_bytes(&[0xb2; 32]);
+        let old_public = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+            bytes: old_key.verifying_key().to_bytes().to_vec(),
+        };
+        let new_public = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+            bytes: new_key.verifying_key().to_bytes().to_vec(),
+        };
+        let old_method = DidUrl::new(format!("{}#authority", pair.station_did)).unwrap();
+        let snapshot = coland_services::authority_commit::build_signed_realm_state_snapshot(
+            &material,
+            old_method.clone(),
+            &old_key,
+            at,
+        )
+        .unwrap();
+        arkret_signatures::detached_object::verify_detached_object_signature(
+            &snapshot.signature,
+            &arkret_canonical::unsigned_value(&snapshot, &["signature"]).unwrap(),
+            Context::RealmSnapshot,
+            &old_public,
+        )
+        .unwrap();
+        let mut handoff = arkret_wire::RealmAuthorityHandoff {
+            management_private_state_digest: Some(manifest.digest().unwrap()),
+            pcr_private_state_digest: None,
+            handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest([0xc8; 32]),
+            realm_id: realm.clone(),
+            from_generation: 0,
+            to_generation: 1,
+            from_service_id: pair.station.clone(),
+            to_service_id: next_station,
+            change_event_ref: change.authority_commit.event.event_id.clone(),
+            change_commit_id: change.authority_commit.commit.commit_id.clone(),
+            final_stream_heads_digest: manifest.final_stream_heads_digest.clone(),
+            historical_signer_facts_digest: None,
+            snapshot_ref: snapshot.snapshot_id.clone(),
+            old_authority_signature: snapshot.signature.clone(),
+            new_authority_acceptance_signature: snapshot.signature.clone(),
+        };
+        let unsigned = arkret_canonical::unsigned_value(
+            &handoff,
+            &[
+                "old_authority_signature",
+                "new_authority_acceptance_signature",
+            ],
+        )
+        .unwrap();
+        handoff.old_authority_signature = arkret_signatures::detached_object::sign_detached_object(
+            &unsigned,
+            Context::RealmAuthorityHandoffOld,
+            old_method,
+            at,
+            &old_key,
+        )
+        .unwrap();
+        handoff.new_authority_acceptance_signature =
+            arkret_signatures::detached_object::sign_detached_object(
+                &unsigned,
+                Context::RealmAuthorityHandoffNewAcceptance,
+                DidUrl::new("did:web:direct-successor.example#authority").unwrap(),
+                at,
+                &new_key,
+            )
+            .unwrap();
+        handoff.validate_shape().unwrap();
+        // Both real signatures must verify before testing the governance gate;
+        // malformed cryptography cannot stand in for the no-migration rule.
+        arkret_signatures::detached_object::verify_detached_object_signature(
+            &handoff.old_authority_signature,
+            &unsigned,
+            Context::RealmAuthorityHandoffOld,
+            &old_public,
+        )
+        .unwrap();
+        arkret_signatures::detached_object::verify_detached_object_signature(
+            &handoff.new_authority_acceptance_signature,
+            &unsigned,
+            Context::RealmAuthorityHandoffNewAcceptance,
+            &new_public,
+        )
+        .unwrap();
+        manifest.validate_handoff(&handoff).unwrap();
+        let error = store
+            .install_handoff_with_private_state(&handoff, &heads, &snapshot, None, &manifest)
+            .await
+            .unwrap_err();
+        direct_transfer_refused(&error);
+        assert_eq!(governance_footprint(&pair.pool).await, before);
+        assert!(
+            coland_storage_postgres::account_snapshot_material(&pair.pool, realm, &pair.founder)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        // Corrupt only the editable authority projection, never an accepted
+        // change/handoff. Actual disclosed reads must still obey the immutable
+        // founding governor, then recover after the exact projection restore.
+        for (generation, service) in [
+            (1_i64, pair.station.as_str()),
+            (0_i64, "ak:did_core:web:direct-successor.example"),
+        ] {
+            // Keep the projection's SQL shape valid without inserting any
+            // accepted handoff or history. The domain guard must reject it.
+            let projected_handoff = (generation > 0).then_some(handoff.handoff_id.as_str());
+            let projected_ref = if generation > 0 {
+                arkret_wire::RealmCommitAuthorityRef::Handoff(handoff.handoff_id.clone())
+            } else {
+                authority.authority_ref.clone()
+            };
+            let mut conn = pair.pool.get().await.unwrap();
+            assert_eq!(
+                diesel::sql_query(
+                    "UPDATE realm_authorities SET generation=$2,service_id=$3,last_handoff_ref=$4,authority_ref=$5 WHERE realm_id=$1"
+                )
+                .bind::<Text, _>(realm.as_str())
+                .bind::<BigInt, _>(generation)
+                .bind::<Text, _>(service)
+                .bind::<diesel::sql_types::Nullable<Text>, _>(projected_handoff)
+                .bind::<diesel::sql_types::Jsonb, _>(serde_json::to_value(projected_ref).unwrap())
+                .execute(&mut conn)
+                .await
+                .unwrap(),
+                1
+            );
+            drop(conn);
+            let error = coland_storage_postgres::account_snapshot_material(
+                &pair.pool,
+                realm,
+                &pair.founder,
+            )
+            .await
+            .unwrap_err();
+            direct_transfer_refused(&error);
+            let mut conn = pair.pool.get().await.unwrap();
+            assert_eq!(
+                diesel::sql_query(
+                    "UPDATE realm_authorities SET generation=0,service_id=$2,last_handoff_ref=NULL,authority_ref=$3 WHERE realm_id=$1"
+                )
+                .bind::<Text, _>(realm.as_str())
+                .bind::<Text, _>(pair.station.as_str())
+                .bind::<diesel::sql_types::Jsonb, _>(serde_json::to_value(&authority.authority_ref).unwrap())
+                .execute(&mut conn)
+                .await
+                .unwrap(),
+                1
+            );
+            drop(conn);
+            assert!(
+                coland_storage_postgres::account_snapshot_material(
+                    &pair.pool,
+                    realm,
+                    &pair.founder
+                )
+                .await
+                .unwrap()
+                .is_some()
+            );
+            assert_eq!(governance_footprint(&pair.pool).await, before);
+        }
+    }
+    assert_eq!(
+        store.current_authority(realm).await.unwrap().unwrap(),
+        authority
+    );
+    assert_eq!(
+        store
+            .realm_state_snapshot_material(realm)
+            .await
+            .unwrap()
+            .unwrap(),
+        material
+    );
+    assert_eq!(
+        store.committed_event(genesis).await.unwrap().unwrap(),
+        origin
+    );
+}
+
+#[tokio::test]
+async fn direct_governance_rejects_change_export_import_and_dual_signed_activation_before_binding()
+{
+    let (_database, pool) = contract_pool().await;
+    let pair = pair(&pool).await;
+    let unit = founding_unit(&pair, &UnitShape::exact(&pair), key(), now()).await;
+    pair.store()
+        .admit_self_direct_conversation_founding_unit(&unit, &pair.guards(), now())
+        .await
+        .unwrap();
+    boxed_source(|| {
+        assert_direct_governance_fixed(
+            &pair,
+            unit.transactions.last().unwrap(),
+            &unit.transactions[0].event.event_id,
+            true,
+        )
+    })
+    .await;
+}
+
+/// Read the same complete typed binding row supplied to snapshot/handoff.
+/// Its revision, selector, source stream, original Event ref and full payload
+/// must survive later membership and projection transitions unchanged.
+async fn binding_current_row(pool: &PgPool, realm_id: &RealmId) -> arkret_wire::TypedCurrentRow {
+    PgAuthorityCommitStore { pool: pool.clone() }
+        .realm_state_snapshot_material(realm_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .current_state_entries
+        .into_iter()
+        .find(|entry| {
+            matches!(
+                entry,
+                arkret_wire::TypedCurrentRow::Value {
+                    selector: arkret_wire::CurrentSelector::DirectConversationBinding { .. },
+                    ..
+                }
+            )
+        })
+        .expect("the original binding remains in the authoritative current cut")
 }
 
 /// `contact-and-direct-conversation.md` Â§7.2, Â§8.3 and Â§8.4 at the accepting
@@ -3528,6 +4090,11 @@ async fn participant_authority_scenario() {
         assert_eq!(dc_footprint(&pool, &realm_id).await, before);
         code
     };
+
+    boxed_source(|| {
+        assert_direct_governance_fixed(&pair, unit.transactions.last().unwrap(), &create_ref, false)
+    })
+    .await;
 
     let (genesis_ref, add, add_ref, mut encryption_group, scope) = boxed_source(|| async {
         // realm-and-space.md Â§2.5 row 5: the founding create fixed history.
@@ -3640,6 +4207,10 @@ async fn participant_authority_scenario() {
         material.public_blobs = vec![public_blob(&group_info), public_blob(&ratchet_tree)];
         uow.commit_event(genesis.clone()).await.unwrap();
         let genesis_ref = genesis.authority_commit.event.event_id.clone();
+        boxed_source(|| {
+            assert_direct_governance_fixed(&pair, &genesis.authority_commit, &create_ref, false)
+        })
+        .await;
         assert_eq!(group_state(&pool, &realm_id).await, (false, None));
 
         // Provisional: the founder alone sends under the bootstrap source.
@@ -3762,6 +4333,10 @@ async fn participant_authority_scenario() {
         material.public_state = tracker.export_state().unwrap();
         material.public_blobs = vec![public_blob(&tracker.ratchet_tree_bytes().unwrap())];
         uow.commit_event(add.clone()).await.unwrap();
+        boxed_source(|| {
+            assert_direct_governance_fixed(&pair, &add.authority_commit, &create_ref, false)
+        })
+        .await;
         encryption_group
             .install_accepted_commit(
                 &arkret_wire::CommittedEventFullView {
@@ -3897,12 +4472,13 @@ async fn participant_authority_scenario() {
         (stale_provisional, later_provisional)
     })
     .await;
-    let (head, binding_ref, founder_endorsement) = boxed_source(|| async {
+    let (head, binding_ref, rejected_confirmation) = boxed_source(|| async {
         // Completion: once the peer consumed its Welcome, only an endorsement is
         // admitted. The provisional Message authored at the older cut is re-decided
         // at this one and refused.
         consume_peer_welcome(&pool, &pair.station, &add, &peer).await;
         let head = later_provisional.authority_commit.clone();
+        boxed_source(|| assert_direct_governance_fixed(&pair, &head, &create_ref, false)).await;
         let replayed = ordinary_realm::request_for_event(
             &head,
             stale_provisional.authority_commit.event.clone(),
@@ -3959,28 +4535,89 @@ async fn participant_authority_scenario() {
             )
         })
         .await;
-        uow.commit_event(peer_endorsement.clone()).await.unwrap();
-        let binding_ref = peer_endorsement.authority_commit.event.event_id.clone();
-
-        // Found: a compatible endorsement by the other participant accumulates;
-        // the bootstrap source no longer carries a Message.
         let founder_endorsement = boxed_source(|| {
             sourced_cited(
                 &pair,
-                &peer_endorsement.authority_commit,
+                &head,
                 EventKind::DirectConversationBound,
                 founder.clone(),
-                endorsement(&add_ref, 2),
+                endorsement(&add_ref, 1),
                 Cites::Bootstrap(&create_ref),
             )
         })
         .await;
-        uow.commit_event(founder_endorsement.clone()).await.unwrap();
-        let head = founder_endorsement.authority_commit.clone();
-        assert_eq!(dc_footprint(&pool, &realm_id).await[6], 2);
-        (head, binding_ref, founder_endorsement)
+        assert_ne!(
+            peer_endorsement.authority_commit.event.event_id,
+            founder_endorsement.authority_commit.event.event_id
+        );
+        assert_eq!(
+            peer_endorsement.authority_commit.event.payload,
+            founder_endorsement.authority_commit.event.payload
+        );
+        let before = dc_footprint(&pool, &realm_id).await;
+        let (peer_result, founder_result) = tokio::join!(
+            uow.commit_event(peer_endorsement.clone()),
+            uow.commit_event(founder_endorsement.clone()),
+        );
+        assert_ne!(peer_result.is_ok(), founder_result.is_ok());
+        let (winner, loser, accepted, refused_result) = if peer_result.is_ok() {
+            (
+                peer_endorsement,
+                founder_endorsement,
+                peer_result,
+                founder_result,
+            )
+        } else {
+            (
+                founder_endorsement,
+                peer_endorsement,
+                founder_result,
+                peer_result,
+            )
+        };
+        assert!(accepted.unwrap().event_inserted);
+        assert_eq!(
+            refusal_code(refused_result),
+            ConflictCode::DuplicateConflict
+        );
+        let mut expected = before;
+        for index in [1, 2, 6] {
+            expected[index] += 1;
+        }
+        assert_eq!(dc_footprint(&pool, &realm_id).await, expected);
+        let binding_ref = winner.authority_commit.event.event_id.clone();
+        let original = store.committed_event(&binding_ref).await.unwrap().unwrap();
+        assert_eq!(original.event, winner.authority_commit.event);
+        assert_eq!(original.commit, winner.authority_commit.commit);
+        assert!(
+            store
+                .committed_event(&loser.authority_commit.event.event_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let replay = uow.commit_event(winner.clone()).await.unwrap();
+        assert!(!replay.event_inserted);
+        assert_eq!(replay.projections_inserted, 0);
+        assert_eq!(replay.outbox_inserted, 0);
+        assert_eq!(dc_footprint(&pool, &realm_id).await, expected);
+        assert_eq!(
+            store.committed_event(&binding_ref).await.unwrap().unwrap(),
+            original
+        );
+        assert_eq!(refused(&loser).await, ConflictCode::DuplicateConflict);
+        (winner.authority_commit, binding_ref, loser)
     })
     .await;
+    boxed_source(|| assert_direct_governance_fixed(&pair, &head, &create_ref, true)).await;
+    let original_binding = binding_current_row(&pool, &realm_id).await;
+    let arkret_wire::TypedCurrentRow::Value {
+        revision, value, ..
+    } = &original_binding;
+    assert_eq!(revision.commit_id, head.commit.commit_id);
+    assert_eq!(revision.stream_position, head.commit.stream_position);
+    let original_value: arkret_models_collaboration::events_payloads::direct_conversation::DirectConversationBindingCurrentValue = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(original_value.binding_event_ref, binding_ref);
     boxed_source(|| async {
     for participant in [&pair.founder, &pair.peer] {
         let snapshot =
@@ -4009,9 +4646,8 @@ async fn participant_authority_scenario() {
         );
         let value: arkret_models_collaboration::events_payloads::direct_conversation::DirectConversationBindingCurrentValue =
             serde_json::from_value(binding.1.clone()).unwrap();
-        assert_eq!(value.endorsements.len(), 2);
-        assert!(value.endorsed_by(&binding_ref));
-        assert!(value.endorsed_by(&founder_endorsement.authority_commit.event.event_id));
+        assert_eq!(value.binding_event_ref,binding_ref);
+        assert!(!value.references(&rejected_confirmation.authority_commit.event.event_id));
     }
     let stranger = AccountId::new(
         DidCoreId::new("ak:did_core:web:outsider.example".to_owned()).unwrap(),
@@ -4072,7 +4708,7 @@ async fn participant_authority_scenario() {
             .expect("accepted direct Realm resolves to its durable cut"),
         durable
     );
-    assert_eq!(durable.binding.unwrap().endorsements.len(), 2);
+    assert_eq!(durable.binding.unwrap().binding_event_ref,binding_ref);
     assert_eq!(
         refused(
             &boxed_source(|| sourced_cited(
@@ -4129,7 +4765,6 @@ async fn participant_authority_scenario() {
     let head = boxed_source(|| exercise_flat_topics(
         &pair,
         &pool,
-        &uow,
         head,
         &binding_ref,
         &add_ref,
@@ -4219,7 +4854,7 @@ async fn participant_authority_scenario() {
         assert_eq!(count(&pool, "SELECT COUNT(*) AS count FROM strand_watch_current_results WHERE realm_id=$1 AND value->>'level'='all'", &realm_id).await, rows_before + 1);
     }
 
-    // Both participants send under the binding, citing either endorsement.
+    // Both participants cite the original immutable confirmation.
     let peer_message = boxed_source(|| sourced_cited(
         &pair,
         &head,
@@ -4236,7 +4871,7 @@ async fn participant_authority_scenario() {
         EventKind::MessageCreate,
         founder.clone(),
         ciphertext(&facts.main_strand_id, 1, &add_ref),
-        Cites::Participant(&founder_endorsement.authority_commit.event.event_id),
+        Cites::Participant(&binding_ref),
     ))
     .await;
     uow.commit_event(founder_message.clone()).await.unwrap();
@@ -4261,6 +4896,11 @@ async fn participant_authority_scenario() {
         })
         .await;
         uow.commit_event(leave.clone()).await.unwrap();
+        assert_eq!(
+            binding_current_row(&pool, &realm_id).await,
+            original_binding,
+            "leave retains the original complete binding and revision"
+        );
         assert_eq!(
             refused(
                 &boxed_source(|| sourced_cited(
@@ -4288,6 +4928,11 @@ async fn participant_authority_scenario() {
         })
         .await;
         uow.commit_event(rejoin.clone()).await.unwrap();
+        assert_eq!(
+            binding_current_row(&pool, &realm_id).await,
+            original_binding,
+            "repair retains the original complete binding and revision"
+        );
         let head = rejoin.authority_commit.clone();
         let readers = store
             .replica_bootstrap_readers(
@@ -4410,6 +5055,11 @@ async fn participant_authority_scenario() {
             .await,
             watch_rows
         );
+        assert_eq!(
+            binding_current_row(&pool, &realm_id).await,
+            original_binding,
+            "withdrawal refusals retain the original complete binding and revision"
+        );
         // The actual structure sequence above includes classification cancellation
         // and lifecycle transitions. Cold hydration must preserve canonical state
         // even though this fixture gives many Commit positions equal timestamps.
@@ -4468,6 +5118,11 @@ async fn participant_authority_scenario() {
                 .filter(|strand| strand.realm_id == realm_id.as_str())
                 .count(),
             expected_count
+        );
+        assert_eq!(
+            binding_current_row(&pool, &realm_id).await,
+            original_binding,
+            "cold hydration retains the original complete binding and revision"
         );
     })
     .await;
@@ -4645,10 +5300,25 @@ async fn seed_peer_remove(
         .execute(&mut *conn).await.unwrap();
 }
 
+// Each request runs as a normal Tokio task, as it does at the HTTP boundary.
+// This avoids retaining the long scenario's poll frames during a transaction.
+async fn commit_participant_request(
+    pool: &PgPool,
+    request: coland_storage::EventCommitRequest,
+) -> coland_storage::PersistenceResult<coland_storage::EventCommitOutcome> {
+    let pool = pool.clone();
+    tokio::spawn(async move {
+        PgEventCommitUnitOfWork::new(pool)
+            .commit_event(request)
+            .await
+    })
+    .await
+    .expect("participant transaction task")
+}
+
 async fn exercise_flat_topics(
     pair: &Pair,
     pool: &PgPool,
-    uow: &PgEventCommitUnitOfWork,
     mut head: AuthorityCommitTransaction,
     binding: &arkret_wire::EventId,
     group: &arkret_wire::EventId,
@@ -4714,7 +5384,7 @@ async fn exercise_flat_topics(
             let before = dc_footprint(pool, &realm).await;
             let before_structure = structure(pool, &realm).await;
             assert_eq!(
-                refusal_code(uow.commit_event(request).await),
+                refusal_code(commit_participant_request(pool, request).await),
                 ConflictCode::DirectConversationSpaceForbidden
             );
             assert_eq!(dc_footprint(pool, &realm).await, before);
@@ -4732,7 +5402,9 @@ async fn exercise_flat_topics(
         })
         .await;
         let first = arkret_wire::SpaceId::from_event_id(&create.authority_commit.event.event_id);
-        uow.commit_event(create.clone()).await.unwrap();
+        commit_participant_request(pool, create.clone())
+            .await
+            .unwrap();
         head = create.authority_commit;
         space.created_by = peer.clone();
         space.created_at = head.commit.committed_at;
@@ -4749,7 +5421,9 @@ async fn exercise_flat_topics(
         })
         .await;
         let second = arkret_wire::SpaceId::from_event_id(&create.authority_commit.event.event_id);
-        uow.commit_event(create.clone()).await.unwrap();
+        commit_participant_request(pool, create.clone())
+            .await
+            .unwrap();
         head = create.authority_commit;
         let mut chat = Strand::new_create(realm.clone(), "", founder.clone());
         chat.metadata = None;
@@ -4772,7 +5446,9 @@ async fn exercise_flat_topics(
         })
         .await;
         let chat_id = arkret_wire::StrandId::from_event_id(&create.authority_commit.event.event_id);
-        uow.commit_event(create.clone()).await.unwrap();
+        commit_participant_request(pool, create.clone())
+            .await
+            .unwrap();
         head = create.authority_commit;
         (head, first, second, chat_id, space)
     })
@@ -4808,7 +5484,7 @@ async fn exercise_flat_topics(
             )
         })
         .await;
-        uow.commit_event(request.clone()).await.unwrap();
+        commit_participant_request(pool, request.clone()).await.unwrap();
         head = request.authority_commit;
         assert_eq!(
             current(pool, &chat_id).await["topic"],
@@ -4829,7 +5505,7 @@ async fn exercise_flat_topics(
     .await;
     let footprint_before = dc_footprint(pool, &realm).await;
     let structure_before = structure(pool, &realm).await;
-    assert!(uow.commit_event(request).await.is_err());
+    assert!(commit_participant_request(pool, request).await.is_err());
     assert_eq!(dc_footprint(pool, &realm).await, footprint_before);
     assert_eq!(structure(pool, &realm).await, structure_before);
     let invalid = vec![
@@ -4871,7 +5547,7 @@ async fn exercise_flat_topics(
         .await;
         let before = dc_footprint(pool, &realm).await;
         let state = structure(pool, &realm).await;
-        assert!(uow.commit_event(request).await.is_err(), "{kind}");
+        assert!(commit_participant_request(pool, request).await.is_err(), "{kind}");
         assert_eq!(dc_footprint(pool, &realm).await, before);
         assert_eq!(structure(pool, &realm).await, state);
     }
@@ -4889,7 +5565,9 @@ async fn exercise_flat_topics(
             )
         })
         .await;
-        uow.commit_event(archive.clone()).await.unwrap();
+        commit_participant_request(pool, archive.clone())
+            .await
+            .unwrap();
         head = archive.authority_commit;
         let delete = boxed_source(|| {
             sourced_cited(
@@ -4903,7 +5581,7 @@ async fn exercise_flat_topics(
         })
         .await;
         assert_eq!(
-            refusal_code(uow.commit_event(delete).await),
+            refusal_code(commit_participant_request(pool, delete).await),
             ConflictCode::SpaceHasLiveDependents
         );
         let restore = boxed_source(|| {
@@ -4917,7 +5595,9 @@ async fn exercise_flat_topics(
             )
         })
         .await;
-        uow.commit_event(restore.clone()).await.unwrap();
+        commit_participant_request(pool, restore.clone())
+            .await
+            .unwrap();
         head = restore.authority_commit;
         let archive = boxed_source(|| {
             sourced_cited(
@@ -4930,7 +5610,9 @@ async fn exercise_flat_topics(
             )
         })
         .await;
-        uow.commit_event(archive.clone()).await.unwrap();
+        commit_participant_request(pool, archive.clone())
+            .await
+            .unwrap();
         head = archive.authority_commit;
         assert_eq!(current(pool, &chat_id).await["state"], "active");
         let unset = StrandPatchPayload::for_topic(
@@ -4950,7 +5632,9 @@ async fn exercise_flat_topics(
             )
         })
         .await;
-        uow.commit_event(clear.clone()).await.unwrap();
+        commit_participant_request(pool, clear.clone())
+            .await
+            .unwrap();
         head = clear.authority_commit;
         assert!(current(pool, &chat_id).await.get("topic").is_none());
         let delete = boxed_source(|| {
@@ -4964,7 +5648,9 @@ async fn exercise_flat_topics(
             )
         })
         .await;
-        uow.commit_event(delete.clone()).await.unwrap();
+        commit_participant_request(pool, delete.clone())
+            .await
+            .unwrap();
         head = delete.authority_commit;
         assert_eq!(current(pool, main).await["state"], "active");
         assert_eq!(

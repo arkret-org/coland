@@ -51,12 +51,7 @@ async fn targeted_cut(
     }
     state
         .persistence()
-        .consent_current_cut(
-            &request.holder_account_id,
-            &request.peer,
-            request.consent_scope,
-            None,
-        )
+        .consent_current_cut(&request.holder_account_id, &request.peer, None)
         .await
         .map_err(unavailable)
 }
@@ -129,27 +124,36 @@ async fn current_at_authority(
     if cut.service_id != state.service_core_id() {
         return Err(unavailable("this Station no longer governs holder PCR"));
     }
+    if cut.records.len() > 1 {
+        return Err(unavailable(
+            "exact peer has multiple Consent current values",
+        ));
+    }
     let mut outcome = ConsentCurrentReadOutcome {
         request_digest: canonical_request_digest(request).map_err(invalid)?,
         realm_id: cut.realm_id,
         governance_generation: cut.generation,
         effective_stream_head: cut.head,
-        consents: cut
-            .records
-            .into_iter()
-            .map(|r| ConsentCurrentRow {
-                selector: ConsentCurrentSelector {
-                    kind: ConsentCurrentSelectorKind::Consent,
-                    consent_id: r.value.consent_id.clone(),
-                },
-                source_stream_ref: r.commit.stream_ref,
-                revision: arkret_wire::CurrentRevision {
-                    commit_id: r.commit.commit_id,
-                    stream_position: r.commit.stream_position,
-                },
-                value: r.value,
-            })
-            .collect(),
+        current: match cut.records.into_iter().next() {
+            Some(r) => {
+                let ConsentPeer::Actor { actor_id: peer_id } = r.peer;
+                ConsentCurrentState::Present {
+                    result: ConsentCurrentRow {
+                        selector: ConsentCurrentSelector {
+                            kind: ConsentCurrentSelectorKind::Consent,
+                            peer_id,
+                        },
+                        source_stream_ref: r.commit.stream_ref,
+                        revision: arkret_wire::CurrentRevision {
+                            commit_id: r.commit.commit_id,
+                            stream_position: r.commit.stream_position,
+                        },
+                        value: r.value,
+                    },
+                }
+            }
+            None => ConsentCurrentState::NeverWritten,
+        },
         evaluated_at: cut.evaluated_at,
         expires_at: cut.evaluated_at + Duration::seconds(30),
         proof: ConsentCurrentReadProof {
@@ -259,6 +263,44 @@ async fn verify_verdict(
     Ok(())
 }
 
+pub(crate) async fn read_current_for_holder(
+    state: &AppState,
+    request: &ConsentCurrentReadRequestBody,
+) -> Result<ConsentCurrentReadOutcome, AppError> {
+    let (realm, service) = holder_location(state, &request.holder_account_id).await?;
+    let outcome = if service == state.service_core_id() {
+        current_at_authority(state, request).await?
+    } else {
+        remote_post(state, &service, "/_arkret/peer/consent/current", request).await?
+    };
+    if outcome.request_digest != canonical_request_digest(request).map_err(invalid)?
+        || outcome.expires_at <= Utc::now()
+        || outcome.evaluated_at > Utc::now()
+        || outcome.expires_at > outcome.evaluated_at + Duration::seconds(30)
+    {
+        return Err(unavailable(
+            "current response does not bind the outstanding holder request",
+        ));
+    }
+    if outcome.realm_id != realm {
+        return Err(unavailable("current result names another holder PCR"));
+    }
+    outcome
+        .validate_for_request(request, outcome.governance_generation, Utc::now())
+        .map_err(unavailable)?;
+    verify_verdict(
+        state,
+        &realm,
+        &service,
+        outcome.governance_generation,
+        &outcome.proof.verification_method,
+        &outcome.proof.jws,
+        &outcome.signature_input().map_err(invalid)?,
+    )
+    .await?;
+    Ok(outcome)
+}
+
 #[endpoint(operation_id = "ak.self.consent.read.current")]
 async fn self_current(
     aa: AuthArgs,
@@ -275,31 +317,7 @@ async fn self_current(
             "current read belongs only to exact holder",
         ));
     }
-    let (realm, service) = holder_location(state, &holder).await?;
-    let outcome = if service == state.service_core_id() {
-        current_at_authority(state, &request).await?
-    } else {
-        remote_post(state, &service, "/_arkret/peer/consent/current", &request).await?
-    };
-    if outcome.request_digest != canonical_request_digest(&request).map_err(invalid)?
-        || outcome.expires_at <= Utc::now()
-        || outcome.evaluated_at > Utc::now()
-        || outcome.expires_at > outcome.evaluated_at + Duration::seconds(30)
-    {
-        return Err(unavailable(
-            "current response does not bind the outstanding holder request",
-        ));
-    }
-    verify_verdict(
-        state,
-        &realm,
-        &service,
-        outcome.governance_generation,
-        &outcome.proof.verification_method,
-        &outcome.proof.jws,
-        &outcome.signature_input().map_err(invalid)?,
-    )
-    .await?;
+    let outcome = read_current_for_holder(state, &request).await?;
     super::identity::session_actor::validated_session_actor(state, &session).await?;
     json_ok(outcome)
 }
@@ -334,7 +352,6 @@ async fn admission_at_authority(
         .consent_current_cut(
             &request.invitation.holder_account_id,
             &peer,
-            request.invitation.media.consent_scope(),
             Some(&request.subject_device_id),
         )
         .await
@@ -346,13 +363,14 @@ async fn admission_at_authority(
     }
     let admitted = cut.device_admitted
         && request.invitation.expires_at > cut.evaluated_at
-        && cut.records.iter().any(|r| {
-            r.permits(
+        && match cut.records.as_slice() {
+            [record] => record.permits(
                 &request.invitation.inviter_actor_id,
                 request.invitation.media.consent_scope(),
                 cut.evaluated_at,
-            )
-        });
+            ),
+            _ => false,
+        };
     let mut outcome = CallInvitationAdmissionOutcome {
         request_digest: canonical_request_digest(request).map_err(invalid)?,
         admitted,

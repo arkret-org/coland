@@ -16,7 +16,7 @@ mod pcr_genesis;
 use arkret_models_collaboration::call_invitation::*;
 use arkret_models_collaboration::consent_operations::*;
 use arkret_models_collaboration::events_payloads::consent::ConsentPeer;
-use arkret_wire::{ActorId, ConsentScope, EventKind};
+use arkret_wire::{ActorId, EventKind};
 use coland_storage::{ConsentAdmissionOutcome, ConsentCurrentStore};
 use coland_storage_postgres::PgConsentCurrentStore;
 use coland_storage_postgres::test_database::TestDatabase;
@@ -25,7 +25,7 @@ use coland_storage_postgres::test_database::TestDatabase;
 mod support;
 
 #[tokio::test]
-async fn consent_full_holder_current_and_call_cut_keep_exact_peers_revoke_and_independent_scopes() {
+async fn consent_full_holder_current_and_call_cut_keep_exact_peers_empty_and_independent_scopes() {
     let db = TestDatabase::lease().await;
     let pool = db.pool();
     let f = support::fixture(&pool).await;
@@ -37,7 +37,6 @@ async fn consent_full_holder_current_and_call_cut_keep_exact_peers_revoke_and_in
         peer: ConsentPeer::Actor {
             actor_id: peer.clone(),
         },
-        consent_scope: ConsentScope::VoiceCall,
         audience_actor_id: ActorId::service(f.history.account.station_id.clone()),
         nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
     };
@@ -45,7 +44,6 @@ async fn consent_full_holder_current_and_call_cut_keep_exact_peers_revoke_and_in
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(before.realm_id, f.unit.transactions[0].event.realm_id);
     assert!(before.records.is_empty());
     assert!(
         !support::call_permitted_at_native_cut(&store, &request, &f.history.account.station_id)
@@ -53,25 +51,15 @@ async fn consent_full_holder_current_and_call_cut_keep_exact_peers_revoke_and_in
             .unwrap()
             .unwrap()
     );
-    let any_id = "ak:consent:01964137-0000-7000-8000-000000000031";
-    let voice_id = "ak:consent:01964137-0000-7000-8000-000000000032";
-    let any = support::write(
+    let payload = |revision: Option<arkret_wire::CurrentRevision>, scopes: &[&str]| serde_json::json!({"peer":full_request.peer,"expected_current":revision.map_or(serde_json::json!({"state":"never_written"}),|r|serde_json::json!({"state":"present","revision":r})),"permissions":scopes.iter().map(|s|serde_json::json!({"consent_scope":s})).collect::<Vec<_>>()});
+    let first = support::write(
         &f,
         &f.unit.transactions[1].commit,
-        EventKind::ConsentGrant,
-        serde_json::json!({"consent_id":any_id,"peer":full_request.peer,"consent_scope":"any"}),
+        EventKind::ConsentReplace,
+        payload(None, &["voice_call", "video_call"]),
     );
-    let ConsentAdmissionOutcome::Committed(any) = store.admit(any).await.unwrap() else {
-        panic!("any grant")
-    };
-    let voice = support::write(
-        &f,
-        &any.commit,
-        EventKind::ConsentGrant,
-        serde_json::json!({"consent_id":voice_id,"peer":full_request.peer,"consent_scope":"voice_call"}),
-    );
-    let ConsentAdmissionOutcome::Committed(voice) = store.admit(voice).await.unwrap() else {
-        panic!("voice grant")
+    let ConsentAdmissionOutcome::Committed(active) = store.admit(first).await.unwrap() else {
+        panic!("initial full-set")
     };
     assert!(
         support::call_permitted_at_native_cut(&store, &request, &f.history.account.station_id)
@@ -79,40 +67,28 @@ async fn consent_full_holder_current_and_call_cut_keep_exact_peers_revoke_and_in
             .unwrap()
             .unwrap()
     );
+    let narrowed = support::write(
+        &f,
+        &active.commit,
+        EventKind::ConsentReplace,
+        payload(Some(active.view().revision), &["voice_call"]),
+    );
+    let ConsentAdmissionOutcome::Committed(narrowed) = store.admit(narrowed).await.unwrap() else {
+        panic!("narrow full-set")
+    };
     let full = support::read_current(&store, &full_request, &f.history.account.station_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(full.records.len(), 2);
-    assert_eq!(full.head.commit_id, voice.commit.commit_id);
-    let revoke = support::write(
-        &f,
-        &voice.commit,
-        EventKind::ConsentRevoke,
-        serde_json::json!({"consent_id":any_id,"expected_revision":any.view().revision}),
-    );
-    let ConsentAdmissionOutcome::Committed(revoked) = store.admit(revoke).await.unwrap() else {
-        panic!("revoke any")
-    };
+    assert_eq!(full.records.len(), 1);
+    assert_eq!(full.records[0].value.permissions.len(), 1);
+    assert_eq!(full.head.commit_id, narrowed.commit.commit_id);
     assert!(
         support::call_permitted_at_native_cut(&store, &request, &f.history.account.station_id)
             .await
             .unwrap()
             .unwrap()
     );
-    let full = support::read_current(&store, &full_request, &f.history.account.station_id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(full.records.len(), 2);
-    assert_eq!(
-        full.records
-            .iter()
-            .filter(|r| r.value.status == ConsentState::Revoked)
-            .count(),
-        1
-    );
-    assert_eq!(full.head.commit_id, revoked.commit.commit_id);
     let mut expanded = request.clone();
     expanded.invitation.media.video = true;
     assert!(
@@ -125,27 +101,31 @@ async fn consent_full_holder_current_and_call_cut_keep_exact_peers_revoke_and_in
     let mut account = f.history.account.clone();
     account.station_id = "ak:did_core:web:other-station.example".parse().unwrap();
     other.invitation.inviter_actor_id = ActorId::account(account);
-    other.envelope.sender_actor_id = other.invitation.inviter_actor_id.clone();
-    other.invitation.envelope_digest = call_invitation_envelope_digest(&other.envelope).unwrap();
     assert!(
         !support::call_permitted_at_native_cut(&store, &other, &f.history.account.station_id)
             .await
             .unwrap()
             .unwrap()
     );
-    let revoke = support::write(
+    let empty = support::write(
         &f,
-        &revoked.commit,
-        EventKind::ConsentRevoke,
-        serde_json::json!({"consent_id":voice_id,"expected_revision":voice.view().revision}),
+        &narrowed.commit,
+        EventKind::ConsentReplace,
+        payload(Some(narrowed.view().revision), &[]),
     );
-    store.admit(revoke).await.unwrap();
+    store.admit(empty).await.unwrap();
     assert!(
         !support::call_permitted_at_native_cut(&store, &request, &f.history.account.station_id)
             .await
             .unwrap()
             .unwrap()
     );
+    let full = support::read_current(&store, &full_request, &f.history.account.station_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(full.records.len(), 1);
+    assert!(full.records[0].value.permissions.is_empty());
     assert!(
         support::read_current(
             &store,

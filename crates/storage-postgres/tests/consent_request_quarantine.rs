@@ -123,6 +123,10 @@ async fn consent_request_quarantine_charges_and_writes_in_one_cut_or_nothing() {
         .collect();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].source_peer_principal_id, first.principal_id);
+    assert_eq!(
+        pending[0].source_peer_actor_id,
+        arkret_wire::ActorId::account(first.clone())
+    );
     assert!(pending[0].surface.invite_event_id().is_none());
     assert_eq!(count(&pool, "ledger").await, 1);
     assert_eq!(count(&pool, "changes").await, 1);

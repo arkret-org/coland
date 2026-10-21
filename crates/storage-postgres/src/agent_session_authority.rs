@@ -181,11 +181,10 @@ async fn read_source(
             )
             .await?
         {
-            binding.binding_digest().map_err(unavailable)?;
-            if binding.endorsements.iter().any(|entry| {
-                entry.value.realm_id != target.realm
-                    || !entry.value.unordered_participant_ids.contains(&actor)
-            }) {
+            binding.binding.validate_shape().map_err(unavailable)?;
+            if binding.binding.realm_id != target.realm
+                || !binding.binding.unordered_participant_ids.contains(&actor)
+            {
                 return Ok(false);
             }
         }

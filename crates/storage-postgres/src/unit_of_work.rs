@@ -1557,13 +1557,6 @@ pub(crate) async fn commit_contact_projection(
     Ok(())
 }
 
-/// Install one committed consent command's holder-private effects.
-///
-/// `consent-model.md` section 4.1.2 requires the eager holder-quarantine
-/// invalidation to land inside the same transaction boundary as the accepted
-/// revoke. The insert guard repeats admission's `(holder, consent_id)` intent
-/// binding under the row lock, so a concurrent grant cannot rebind the same
-/// `consent_id` between admission and commit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AccountDataCommitOutcome {
     Applied,

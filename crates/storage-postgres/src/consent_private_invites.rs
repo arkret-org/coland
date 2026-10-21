@@ -104,20 +104,16 @@ pub(crate) async fn admit(
         .ok_or_else(|| invalid("Invite producer is not a human Account"))?;
     let records = crate::consent_current::records_in_connection(conn, holder, realm).await?;
     let consent = match &delivery.introduction_evidence {
-        IntroductionEvidence::ConsentGrant {
-            consent_grant_ref,
-            consent_id,
-        } => records.iter().any(|record| {
-            record.event.event_id == *consent_grant_ref
-                && consent_id
-                    .as_ref()
-                    .is_none_or(|id| id == record.value.consent_id.as_str())
-                && record.permits(
+        IntroductionEvidence::ConsentGrant { consent_grant_ref } => records
+            .iter()
+            .find(|record| record.event.event_id == *consent_grant_ref)
+            .is_some_and(|record| {
+                record.permits(
                     &delivery.invite_event.actor_id,
                     arkret_wire::ConsentScope::Invite,
                     at,
                 )
-        }),
+            }),
         _ => false,
     };
     let decision = coland_domain::invite_receive::evaluate_resolved(
@@ -232,6 +228,7 @@ pub(crate) async fn admit(
     let entry = HolderQuarantineEntry {
         entry_digest,
         account_id: holder.clone(),
+        source_peer_actor_id: delivery.invite_event.actor_id.clone(),
         source_peer_principal_id: inviter.principal_id.clone(),
         source_id: body.notification_source_service_id.clone(),
         surface: HolderQuarantineSurface::InviteDelivery {

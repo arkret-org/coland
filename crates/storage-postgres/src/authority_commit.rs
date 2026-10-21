@@ -1947,7 +1947,7 @@ async fn commit_transaction_with_device_guard_inner(
             && transaction.event.actor_id.as_realm_actor_id().is_some());
     if matches!(
         transaction.event.kind,
-        arkret_wire::EventKind::ConsentGrant | arkret_wire::EventKind::ConsentRevoke
+        arkret_wire::EventKind::ConsentReplace
     ) && verified_unit != VerifiedPcrUnit::Consent
     {
         return Err(PersistenceError::Conflict("consent_current_unit_required".to_owned()).into());
@@ -3929,6 +3929,9 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                 .execute(&mut *conn)
                 .await?;
+            if event.kind == arkret_wire::EventKind::RealmGovernanceStationChange {
+                crate::pcr_private_authority::require_transferable(conn, &event.realm_id).await?;
+            }
             if crate::direct_conversation_admission::direct_conversation_realm_in_connection(
                 conn,
                 &event.realm_id,

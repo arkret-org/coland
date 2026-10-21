@@ -30,10 +30,8 @@ impl ConsentCurrentRecord {
         scope: arkret_wire::ConsentScope,
         at: chrono::DateTime<chrono::Utc>,
     ) -> bool {
-        self.peer
-            == (arkret_models_collaboration::events_payloads::consent::ConsentPeer::Actor {
-                actor_id: peer.clone(),
-            })
+        self.peer.actor_id() == peer
+            && self.value.validate().is_ok()
             && self.value.permissions.iter().any(|permission| {
                 permission.consent_scope == scope
                     && permission.not_before.is_none_or(|start| start <= at)

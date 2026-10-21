@@ -224,10 +224,27 @@ pub(crate) async fn read(
                     actor,
                     json!(selector),
                 )
-                .await?;
+                .await
+                .map_err(unavailable)?;
                 if let Some((value, source)) = current {
-                    crate::realm_actor_control_source::original(conn, &source).await?;
+                    let (original, _) = crate::realm_actor_control_source::original(conn, &source)
+                        .await
+                        .map_err(unavailable)?;
+                    let target_actor = if original.kind == arkret_wire::EventKind::RealmActorCreate
+                    {
+                        original.payload.get("actor_id")
+                    } else {
+                        original.payload.get("target_actor_id")
+                    };
+                    if target_actor
+                        .map_or(original.actor_id != *actor, |value| value != &json!(actor))
+                    {
+                        return Err(unavailable(
+                            "private current source belongs to another actor",
+                        ));
+                    }
                     entries.push(RealmActorMaterialCurrentEntry::Present {
+                        source_ref: source.clone(),
                         row: TypedCurrentRow::Value {
                             selector: selector.clone(),
                             source_stream_ref: source.stream_ref,

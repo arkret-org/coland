@@ -1281,5 +1281,19 @@ mod tests {
         assert!(
             arkret_wire::ServiceOperationId::from_wire(retired_message_prepare_operation).is_none()
         );
+        let description = describe(
+            &fixture_service_resolution(),
+            "memory",
+            &crate::config::AppConfig {
+                public_base_url: "https://coland.example/".to_owned(),
+                development_mode: true,
+                ..crate::config::AppConfig::test_default()
+            },
+        );
+        assert!(
+            !serde_json::to_string(&description)
+                .unwrap()
+                .contains(retired_message_prepare_operation)
+        );
     }
 }

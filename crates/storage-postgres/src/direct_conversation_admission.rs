@@ -386,7 +386,7 @@ fn root_reliant(event: &arkret_wire::Event) -> bool {
 }
 
 /// The root phase mask's closed `masked_actions` of the phase after the
-/// founding unit: until the first binding endorsement is accepted the Realm is
+/// founding unit: until the first binding Event is accepted the Realm is
 /// materializing and the root may carry the scope's unique `ak.mls.genesis`
 /// and the `ak.mls.commit` adding the other participant; once `found`, the
 /// mask is empty. The founding phase's four-Event unit never reaches here.
@@ -965,6 +965,12 @@ async fn evaluate_in_connection(
     realm: &DirectConversationRealm,
     event: &arkret_wire::Event,
 ) -> PersistenceResult<Result<ProfileAuthority, ConflictCode>> {
+    // Eligibility precedes every profile-table row, in every materialization stage.
+    if event.kind == EventKind::RealmGovernanceStationChange {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: Direct Conversation governance Station is fixed by accepted Genesis".into(),
+        ));
+    }
     let founding = realm.founding.as_ref();
     let group = group_state(conn, &event.realm_id).await?;
     let binding = binding_current_in_connection(conn, &event.realm_id).await?;
@@ -1213,9 +1219,8 @@ pub(crate) async fn guard_binding_snapshot_in_connection(
     let incoming: DirectConversationBindingCurrentValue =
         serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
     incoming
-        .binding
-        .validate_shape()
-        .map_err(PersistenceError::database)?;
+        .validate()
+        .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
     if *source_stream_ref
         != (arkret_wire::CommitStreamRef::Realm {
             realm_id: realm_id.clone(),

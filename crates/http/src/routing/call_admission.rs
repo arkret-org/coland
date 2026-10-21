@@ -135,23 +135,20 @@ async fn current_at_authority(
         governance_generation: cut.generation,
         effective_stream_head: cut.head,
         current: match cut.records.into_iter().next() {
-            Some(r) => {
-                let ConsentPeer::Actor { actor_id: peer_id } = r.peer;
-                ConsentCurrentState::Present {
-                    result: ConsentCurrentRow {
-                        selector: ConsentCurrentSelector {
-                            kind: ConsentCurrentSelectorKind::Consent,
-                            peer_id,
-                        },
-                        source_stream_ref: r.commit.stream_ref,
-                        revision: arkret_wire::CurrentRevision {
-                            commit_id: r.commit.commit_id,
-                            stream_position: r.commit.stream_position,
-                        },
-                        value: r.value,
+            Some(r) => ConsentCurrentState::Present {
+                result: ConsentCurrentRow {
+                    selector: ConsentCurrentSelector {
+                        kind: ConsentCurrentSelectorKind::Consent,
+                        peer_id: r.peer.actor_id().clone(),
                     },
-                }
-            }
+                    source_stream_ref: r.commit.stream_ref,
+                    revision: arkret_wire::CurrentRevision {
+                        commit_id: r.commit.commit_id,
+                        stream_position: r.commit.stream_position,
+                    },
+                    value: r.value,
+                },
+            },
             None => ConsentCurrentState::NeverWritten,
         },
         evaluated_at: cut.evaluated_at,

@@ -1487,11 +1487,10 @@ fn direct_current_membership_blocker(
     peer: &ActorId,
 ) -> Option<DirectConversationSendBlocker> {
     let facts = facts?;
-    let Some(binding) = facts.binding.as_ref() else {
+    let Some(binding) = facts.binding.as_ref().map(|binding| &binding.binding) else {
         return Some(DirectConversationSendBlocker::MemberCountInvalid);
     };
     let participants = binding
-        .binding
         .unordered_participant_ids
         .iter()
         .collect::<BTreeSet<_>>();
@@ -1500,7 +1499,7 @@ fn direct_current_membership_blocker(
         .iter()
         .map(|member| &member.member_id)
         .collect::<BTreeSet<_>>();
-    if binding.binding.unordered_participant_ids.len() != 2
+    if binding.unordered_participant_ids.len() != 2
         || participants.len() != 2
         || members != participants
     {
@@ -1983,18 +1982,19 @@ pub(crate) fn durable_binding_record(
     current: &arkret_models_collaboration::events_payloads::direct_conversation::DirectConversationBindingCurrentValue,
 ) -> Result<DirectConversationBindingRecord, AppError> {
     current
+        .binding
         .validate_shape()
         .map_err(|error| AppError::internal(error.to_string()))?;
+    let binding = &current.binding;
     Ok(DirectConversationBindingRecord {
-        participants_unordered: current
-            .binding
+        participants_unordered: binding
             .unordered_participant_ids
             .iter()
             .map(ToString::to_string)
             .collect(),
-        realm_id: current.binding.realm_id.to_string(),
-        main_strand_id: current.binding.main_strand_id.to_string(),
-        created_at: current.binding.created_at,
+        realm_id: binding.realm_id.to_string(),
+        main_strand_id: binding.main_strand_id.to_string(),
+        created_at: binding.created_at,
         binding_event_ref: current.binding_event_ref.to_string(),
     })
 }

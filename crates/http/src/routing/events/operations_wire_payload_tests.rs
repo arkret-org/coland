@@ -22,6 +22,27 @@ fn wire_operation(kind: arkret_wire::EventKind, payload: Value) -> Operation {
     )
 }
 
+#[test]
+fn consent_replace_accepts_full_set_and_empty_with_exact_expected_current() {
+    for permissions in [
+        json!([]),
+        json!([{"consent_scope":"invite"},{"consent_scope":"presence"}]),
+    ] {
+        let operation = wire_operation(
+            arkret_wire::EventKind::ConsentReplace,
+            json!({
+                "peer":{"kind":"actor","actor_id":{"kind":"account","account_id":{"principal_id":TEST_SUBJECT,"station_id":TEST_STATION}}},
+                "expected_current":{"state":"never_written"},"permissions":permissions
+            }),
+        );
+        assert!(
+            operation
+                .typed_payload::<arkret_wire::event_spec::ConsentReplace>()
+                .is_ok()
+        );
+    }
+}
+
 /// `relation.md` §2 — `effective_scope` is reducer-stamped, and on the create
 /// side the criterion now belongs entirely to the schema:
 /// `relation_create_object` reuses `relation.schema.json` and forbids `id`,

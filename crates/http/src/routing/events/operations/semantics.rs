@@ -144,7 +144,6 @@ fn validate_typed_payload_shapes(
         arkret_wire::EventKind::ConsentReplace => {
             operation
                 .typed_payload::<arkret_wire::event_spec::ConsentReplace>()
-                .and_then(|payload| Ok(payload.validate().map(|_| payload)?))
                 .map_err(|_| arkret_wire::ErrorCode::SCHEMA_VIOLATION)?;
             Ok(())
         }

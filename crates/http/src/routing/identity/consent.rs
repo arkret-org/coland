@@ -62,7 +62,7 @@ async fn get_consent(
     if records.next().is_some() {
         return Err(crate::app_error!(
             FailedPrecondition,
-            "Consent peer has multiple current results"
+            "Consent peer has multiple current values"
         ));
     }
     json_ok(record)

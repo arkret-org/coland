@@ -14,7 +14,9 @@ use diesel::{OptionalExtension, QueryableByName, sql_query};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use serde_json::Value;
 
-use crate::actor_profiles::{PcrSelfEventCut, corrupt, rejected, verify_pcr_self_event};
+use crate::actor_profiles::{
+    PcrSelfEventCut, corrupt, rejected, verify_pcr_self_event_before_current_guard,
+};
 use crate::{AsyncPgConnection, PgPool, PgTransactionError, pg_conn};
 
 pub struct PgConsentCurrentStore {
@@ -47,17 +49,24 @@ fn record(row: Row) -> PersistenceResult<ConsentCurrentRecord> {
     .map_err(PersistenceError::database)?;
     let value: ConsentValue =
         serde_json::from_value(row.value).map_err(PersistenceError::database)?;
+    let commit: RealmCommit =
+        serde_json::from_value(row.commit_json).map_err(PersistenceError::database)?;
     payload.validate().map_err(PersistenceError::database)?;
-    if event.kind != EventKind::ConsentReplace || value.permissions != payload.permissions {
-        return Err(PersistenceError::Conflict(
-            "Consent current differs from its accepted original".into(),
+    value.validate().map_err(PersistenceError::database)?;
+    if event.kind != EventKind::ConsentReplace
+        || value.permissions != payload.permissions
+        || commit.event_ref != event.event_id
+        || commit.realm_id != event.realm_id
+    {
+        return Err(PersistenceError::SchemaViolation(
+            "Consent current differs from its immutable source".into(),
         ));
     }
     Ok(ConsentCurrentRecord {
         peer: payload.peer,
         value,
         event,
-        commit: serde_json::from_value(row.commit_json).map_err(PersistenceError::database)?,
+        commit,
         quarantine_update: None,
     })
 }
@@ -82,8 +91,8 @@ pub(crate) async fn records_in_connection(
         #[diesel(sql_type=diesel::sql_types::Bool)]
         complete: bool,
     }
-    let complete=sql_query("SELECT NOT EXISTS(SELECT 1 FROM realm_commits c LEFT JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND c.stream_ref->>'kind'='realm' AND (e.pk IS NULL OR e.state<>'committed')) AND NOT EXISTS(SELECT 1 FROM (SELECT DISTINCT ON(e.envelope->'payload'->'peer'->'actor_id') e.envelope->'payload'->'peer'->'actor_id' AS peer_id,c.commit_id FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND e.envelope->>'kind' ='ak.consent.replace' ORDER BY e.envelope->'payload'->'peer'->'actor_id',c.stream_position DESC) latest LEFT JOIN consent_current_results r ON r.realm_id=$1 AND r.peer_id=latest.peer_id WHERE r.current_commit_id IS DISTINCT FROM latest.commit_id) AND NOT EXISTS(SELECT 1 FROM consent_current_results r LEFT JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position LEFT JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND (c.commit_id IS NULL OR e.pk IS NULL OR e.state<>'committed' OR e.envelope->>'kind' IS DISTINCT FROM 'ak.consent.replace' OR r.peer_id IS DISTINCT FROM e.envelope->'payload'->'peer'->'actor_id' OR r.holder_account_id IS DISTINCT FROM e.envelope->'actor_id'->'account_id' OR r.value->'permissions' IS DISTINCT FROM e.envelope->'payload'->'permissions')) AS complete")
-                .bind::<Text,_>(realm.as_str()).get_result::<Completeness>(&mut *conn).await?;
+    let complete=sql_query("SELECT NOT EXISTS(SELECT 1 FROM realm_commits c LEFT JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND c.stream_ref->>'kind'='realm' AND (e.pk IS NULL OR e.state<>'committed')) AND NOT EXISTS(SELECT 1 FROM (SELECT DISTINCT ON(e.envelope->'payload'->'peer'->'actor_id') e.envelope->'payload'->'peer'->'actor_id' AS peer_id,c.commit_id FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND e.envelope->>'kind' ='ak.consent.replace' ORDER BY e.envelope->'payload'->'peer'->'actor_id',c.stream_position DESC) latest LEFT JOIN consent_current_results r ON r.realm_id=$1 AND r.peer_id=latest.peer_id WHERE r.current_commit_id IS DISTINCT FROM latest.commit_id) AND NOT EXISTS(SELECT 1 FROM consent_current_results r LEFT JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position LEFT JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND (c.commit_id IS NULL OR e.pk IS NULL OR e.state<>'committed' OR e.envelope->>'kind' IS DISTINCT FROM 'ak.consent.replace' OR e.envelope->'payload'->'peer'->'actor_id' IS DISTINCT FROM r.peer_id OR e.envelope->'actor_id'->'account_id' IS DISTINCT FROM r.holder_account_id OR r.holder_account_id IS DISTINCT FROM $2 OR r.value->'permissions' IS DISTINCT FROM e.envelope->'payload'->'permissions')) AS complete")
+                .bind::<Text,_>(realm.as_str()).bind::<Jsonb,_>(serde_json::to_value(holder).map_err(corrupt)?).get_result::<Completeness>(&mut *conn).await?;
     if !complete.complete {
         return Err(rejected(
             ConflictCode::TemporarilyUnavailable,
@@ -122,14 +131,15 @@ async fn admit(
     })?;
     // The shared verifier takes the PCR lock and checks the accepted device
     // signature and the exact Account-to-PCR binding before any new write.
-    match verify_pcr_self_event(conn, tx, Some(auth), "Consent").await? {
-        PcrSelfEventCut::Known(commit) => {
-            return Ok(ConsentAdmissionOutcome::Duplicate(
-                version(conn, commit.commit_id.as_str()).await?,
-            ));
-        }
-        PcrSelfEventCut::Fresh(_) => {}
-    }
+    let confirmed_head =
+        match verify_pcr_self_event_before_current_guard(conn, tx, Some(auth), "Consent").await? {
+            PcrSelfEventCut::Known(commit) => {
+                return Ok(ConsentAdmissionOutcome::Duplicate(
+                    version(conn, commit.commit_id.as_str()).await?,
+                ));
+            }
+            PcrSelfEventCut::Fresh(signer) => signer.confirmed_head,
+        };
     let root = sql_query("SELECT controller_actor_id,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1 FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).get_result::<RootRow>(&mut *conn).await.optional()?
         .ok_or_else(|| rejected(ConflictCode::FailedPrecondition,"holder root is unavailable"))?;
@@ -153,11 +163,13 @@ async fn admit(
     replacement
         .validate()
         .map_err(|e| rejected(ConflictCode::SchemaViolation, &e.to_string()))?;
-    let peer_json = serde_json::to_value(replacement.peer.actor_id()).map_err(corrupt)?;
+    let ConsentPeer::Actor { actor_id: peer_id } = &replacement.peer;
+    let peer_json = serde_json::to_value(peer_id).map_err(corrupt)?;
     records_in_connection(conn, holder, &event.realm_id).await?;
-    let current = sql_query("SELECT r.value,e.envelope,c.commit_json FROM consent_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.peer_id=$2 FOR UPDATE OF r")
-        .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(&peer_json).get_result::<Row>(&mut *conn).await.optional()?.map(record).transpose()?;
-    let expected_matches = match (&replacement.expected_current, &current) {
+    let existing = sql_query("SELECT r.value,e.envelope,c.commit_json FROM consent_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.holder_account_id=$1 AND r.peer_id=$2 FOR UPDATE OF r")
+        .bind::<Jsonb,_>(&holder_json).bind::<Jsonb,_>(&peer_json).get_result::<Row>(&mut *conn).await.optional()?;
+    let previous = existing.map(record).transpose()?;
+    let expected_matches = match (&replacement.expected_current, &previous) {
         (ConsentExpectedCurrent::NeverWritten, None) => true,
         (ConsentExpectedCurrent::Present { revision }, Some(current)) => {
             revision.commit_id == current.commit.commit_id
@@ -168,19 +180,15 @@ async fn admit(
     if !expected_matches {
         return Err(rejected(
             ConflictCode::FailedPrecondition,
-            "Consent exact-peer revision changed; reread and reconfirm the complete replacement",
+            "Consent peer revision changed",
         ));
     }
-    let removed_invite = current.as_ref().is_some_and(|old| {
-        old.value
-            .permissions
-            .iter()
-            .any(|p| p.consent_scope == arkret_wire::ConsentScope::Invite)
-    }) && !replacement
-        .permissions
-        .iter()
-        .any(|p| p.consent_scope == arkret_wire::ConsentScope::Invite);
-    let peer = replacement.peer;
+    if tx.commit.previous_commit_ref.as_ref() != Some(&confirmed_head) {
+        return Err(rejected(
+            ConflictCode::TemporarilyUnavailable,
+            "Consent Commit does not extend the confirmed PCR head",
+        ));
+    }
     let next = ConsentValue {
         permissions: replacement.permissions,
     };
@@ -205,7 +213,7 @@ async fn admit(
     }
     let position = i64::try_from(tx.commit.stream_position).map_err(corrupt)?;
     let value = serde_json::to_value(&next).map_err(corrupt)?;
-    sql_query("INSERT INTO consent_current_results(holder_account_id,peer_id,realm_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(realm_id,peer_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at")
+    sql_query("INSERT INTO consent_current_results(holder_account_id,peer_id,realm_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(holder_account_id,peer_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at")
         .bind::<Jsonb,_>(&holder_json).bind::<Jsonb,_>(&peer_json).bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(tx.commit.commit_id.as_str()).bind::<BigInt,_>(position).bind::<Jsonb,_>(&value).bind::<Timestamptz,_>(tx.commit.committed_at).execute(&mut *conn).await?;
     sql_query("INSERT INTO consent_result_versions(commit_id,peer_id,value) VALUES($1,$2,$3)")
         .bind::<Text, _>(tx.commit.commit_id.as_str())
@@ -213,8 +221,18 @@ async fn admit(
         .bind::<Jsonb, _>(value)
         .execute(&mut *conn)
         .await?;
-    let quarantine_update = if removed_invite {
-        invalidate_quarantine(conn, holder, peer.actor_id(), tx.commit.committed_at).await?
+    let invite_closed = previous.as_ref().is_some_and(|old| {
+        old.value
+            .permissions
+            .iter()
+            .any(|p| p.consent_scope == arkret_wire::ConsentScope::Invite)
+            && !next
+                .permissions
+                .iter()
+                .any(|p| p.consent_scope == arkret_wire::ConsentScope::Invite)
+    });
+    let quarantine_update = if invite_closed {
+        invalidate_quarantine(conn, holder, peer_id, tx.commit.committed_at).await?
     } else {
         None
     };
@@ -222,7 +240,7 @@ async fn admit(
         crate::consent_private_effects::mark_pending(conn, holder, &event.realm_id).await?;
     }
     Ok(ConsentAdmissionOutcome::Committed(ConsentCurrentRecord {
-        peer,
+        peer: replacement.peer,
         value: next,
         event: event.clone(),
         commit: tx.commit.clone(),
@@ -325,7 +343,11 @@ impl ConsentCurrentStore for PgConsentCurrentStore {
                 serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
             )
             .map_err(PersistenceError::database)?;
-            if payload.peer.actor_id() != peer {
+            if payload.peer
+                != (ConsentPeer::Actor {
+                    actor_id: peer.clone(),
+                })
+            {
                 continue;
             }
             let pair = coland_storage::CommittedEventRecord { commit, event };
@@ -535,11 +557,13 @@ impl ConsentCurrentStore for PgConsentCurrentStore {
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             let authority = crate::pcr_private_authority::lock_holder(conn, &write.holder, Some(&write.acceptor_service_id)).await?;
             let holder = serde_json::to_value(&write.holder).map_err(corrupt)?;
-            // The original introduction is historical; authorization is the current exact-peer invite entry.
-            let peer=serde_json::to_value(&write.peer).map_err(corrupt)?;
-            let current=sql_query("SELECT r.value,e.envelope,c.commit_json FROM consent_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk JOIN realm_authority_root_current_results root ON root.realm_id=r.realm_id WHERE r.holder_account_id=$1 AND r.realm_id=$2 AND r.peer_id=$3 AND root.controller_actor_id=$4 AND EXISTS(SELECT 1 FROM canonical_events original JOIN realm_commits original_commit ON original_commit.event_pk=original.pk WHERE original_commit.realm_id=r.realm_id AND original.envelope->>'event_id'=$5 AND original.state='committed' AND original.envelope->>'kind'='ak.consent.replace' AND original.envelope->'actor_id'=$4 AND original.envelope->'payload'->'peer'->'actor_id'=$3 AND original.envelope->'payload'->'permissions' @> '[{\"consent_scope\":\"invite\"}]'::jsonb)")
-                .bind::<Jsonb,_>(&holder).bind::<Text,_>(authority.realm_id.as_str()).bind::<Jsonb,_>(peer)
-                .bind::<Jsonb,_>(serde_json::to_value(ActorId::account(write.holder.clone())).map_err(corrupt)?).bind::<Text,_>(write.consent_grant_ref.as_str())
+            // Match the canonical proof, then serialize with replacement on
+            // the same PCR lock. Re-read current AFTER acquiring that lock.
+            let peer = serde_json::to_value(&write.peer).map_err(corrupt)?;
+            let current = sql_query("SELECT r.value,e.envelope,c.commit_json FROM consent_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk JOIN realm_authorities a ON a.realm_id=r.realm_id JOIN realm_authority_root_current_results root ON root.realm_id=r.realm_id WHERE r.holder_account_id=$1 AND r.realm_id=$2 AND r.peer_id=$3 AND a.service_id=$4 AND root.controller_actor_id=$5 AND EXISTS(SELECT 1 FROM canonical_events original JOIN realm_commits original_commit ON original_commit.event_pk=original.pk WHERE original_commit.realm_id=r.realm_id AND original.envelope->>'event_id'=$6 AND original.state='committed' AND original.envelope->>'kind'='ak.consent.replace' AND original.envelope->'actor_id'=$5 AND original.envelope->'payload'->'peer'->'actor_id'=$3 AND original.envelope->'payload'->'permissions' @> '[{\"consent_scope\":\"invite\"}]'::jsonb)")
+                .bind::<Jsonb,_>(&holder).bind::<Text,_>(authority.realm_id.as_str()).bind::<Jsonb,_>(&peer)
+                .bind::<Text,_>(write.acceptor_service_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(ActorId::account(write.holder.clone())).map_err(corrupt)?)
+                .bind::<Text,_>(write.consent_grant_ref.as_str())
                 .get_result::<Row>(&mut *conn).await.optional()?;
             let Some(current) = current else { return Ok(None) };
             let current = record(current)?;

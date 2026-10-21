@@ -447,9 +447,12 @@ diesel::table! {
 diesel::table! {
     mimi_consent_correlations (consent_id) {
         consent_id -> Text,
+        requester_actor_id -> Text,
+        holder_account_id -> Text,
         purpose -> Text,
         strand_id -> Nullable<Text>,
         source_id -> Nullable<Text>,
+        source_class -> Text,
         created_at -> Timestamptz,
         expires_at -> Nullable<Timestamptz>,
     }

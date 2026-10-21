@@ -310,7 +310,9 @@ async fn prepare_or_replicate_one(
                 && welcomes.is_empty()
                 && !matches!(
                     event.kind,
-                    arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit
+                    arkret_wire::EventKind::MlsGenesis
+                        | arkret_wire::EventKind::MlsCommit
+                        | arkret_wire::EventKind::RealmGovernanceStationChange
                 )
             {
                 return Ok((CommittedReplicaOutcome::Duplicate, false));

@@ -24,8 +24,7 @@ use coland_storage_postgres::test_database::TestDatabase;
 mod support;
 
 #[tokio::test]
-async fn full_peer_current_preserves_scopes_and_native_call_gates_use_only_the_requested_scope() {
-    use serde_json::json;
+async fn consent_full_holder_current_and_call_cut_keep_exact_peers_empty_and_independent_scopes() {
     let db = TestDatabase::lease().await;
     let pool = db.pool();
     let f = support::fixture(&pool).await;
@@ -45,14 +44,21 @@ async fn full_peer_current_preserves_scopes_and_native_call_gates_use_only_the_r
         .unwrap()
         .unwrap();
     assert!(before.records.is_empty());
-    let event = support::write(
+    assert!(
+        !support::call_permitted_at_native_cut(&store, &request, &f.history.account.station_id)
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    let payload = |revision: Option<arkret_wire::CurrentRevision>, scopes: &[&str]| serde_json::json!({"peer":full_request.peer,"expected_current":revision.map_or(serde_json::json!({"state":"never_written"}),|r|serde_json::json!({"state":"present","revision":r})),"permissions":scopes.iter().map(|s|serde_json::json!({"consent_scope":s})).collect::<Vec<_>>()});
+    let first = support::write(
         &f,
         &f.unit.transactions[1].commit,
         EventKind::ConsentReplace,
-        json!({"peer":full_request.peer,"expected_current":{"state":"never_written"},"permissions":[{"consent_scope":"voice_call"},{"consent_scope":"presence","expires_at":"2020-01-01T00:00:00.000Z","constraints":[{"unknown":true}]}]}),
+        payload(None, &["voice_call", "video_call"]),
     );
-    let ConsentAdmissionOutcome::Committed(active) = store.admit(event).await.unwrap() else {
-        panic!("initial")
+    let ConsentAdmissionOutcome::Committed(active) = store.admit(first).await.unwrap() else {
+        panic!("initial full-set")
     };
     assert!(
         support::call_permitted_at_native_cut(&store, &request, &f.history.account.station_id)
@@ -60,17 +66,32 @@ async fn full_peer_current_preserves_scopes_and_native_call_gates_use_only_the_r
             .unwrap()
             .unwrap()
     );
+    let narrowed = support::write(
+        &f,
+        &active.commit,
+        EventKind::ConsentReplace,
+        payload(Some(active.view().revision), &["voice_call"]),
+    );
+    let ConsentAdmissionOutcome::Committed(narrowed) = store.admit(narrowed).await.unwrap() else {
+        panic!("narrow full-set")
+    };
     let full = support::read_current(&store, &full_request, &f.history.account.station_id)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(full.records.len(), 1);
-    assert_eq!(full.records[0].value.permissions.len(), 2);
-    assert_eq!(full.head.commit_id, active.commit.commit_id);
-    let mut video = request.clone();
-    video.invitation.media.video = true;
+    assert_eq!(full.records[0].value.permissions.len(), 1);
+    assert_eq!(full.head.commit_id, narrowed.commit.commit_id);
     assert!(
-        !support::call_permitted_at_native_cut(&store, &video, &f.history.account.station_id)
+        support::call_permitted_at_native_cut(&store, &request, &f.history.account.station_id)
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    let mut expanded = request.clone();
+    expanded.invitation.media.video = true;
+    assert!(
+        !support::call_permitted_at_native_cut(&store, &expanded, &f.history.account.station_id)
             .await
             .unwrap()
             .unwrap()
@@ -87,9 +108,9 @@ async fn full_peer_current_preserves_scopes_and_native_call_gates_use_only_the_r
     );
     let empty = support::write(
         &f,
-        &active.commit,
+        &narrowed.commit,
         EventKind::ConsentReplace,
-        json!({"peer":full_request.peer,"expected_current":{"state":"present","revision":active.view().revision},"permissions":[]}),
+        payload(Some(narrowed.view().revision), &[]),
     );
     store.admit(empty).await.unwrap();
     assert!(

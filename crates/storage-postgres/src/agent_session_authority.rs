@@ -181,7 +181,7 @@ async fn read_source(
             )
             .await?
         {
-            binding.validate_shape().map_err(unavailable)?;
+            binding.binding.validate_shape().map_err(unavailable)?;
             if binding.binding.realm_id != target.realm
                 || !binding.binding.unordered_participant_ids.contains(&actor)
             {

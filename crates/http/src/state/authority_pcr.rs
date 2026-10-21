@@ -148,10 +148,20 @@ pub(crate) async fn submit_self(
         || event.actor_id != actor
         || event.executed_by.is_some()
         || origin.account_id.station_id != state.service_core_id()
-        || session.human_device_id().map(String::as_str) != Some(producer.device_id.as_str())
     {
         return Err(ServiceError::SchemaViolation(
             "native Event differs from the authenticated full holder and Device".into(),
+        ));
+    }
+    if event.kind == EventKind::ConsentReplace {
+        super::authority_consent::require_replay_holder(state, session, request).await?;
+        if let Some(original) = super::authority_consent::accepted_original(state, request).await? {
+            return Ok(Some(original));
+        }
+    }
+    if session.human_device_id().map(String::as_str) != Some(producer.device_id.as_str()) {
+        return Err(ServiceError::SchemaViolation(
+            "native Event differs from the authenticated holder Device".into(),
         ));
     }
     submit_from_host(state, request).await.map(Some)

@@ -227,43 +227,16 @@ impl PersistenceHandle {
             .await
     }
 
-    pub async fn mimi_consent_update_outcome(
+    pub async fn bind_mimi_consent_decision(
         &self,
-        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
-    ) -> PersistenceResult<
-        Option<arkret_models_collaboration::mimi_operations::MimiUpdateConsentOutcome>,
-    > {
+        id: &str,
+        decision: &str,
+        submission: &arkret_wire::EventAdmissionSubmission,
+        allow_new: bool,
+    ) -> PersistenceResult<bool> {
         self.persistence
             .mimi_consent_correlations()
-            .update_outcome(request)
-            .await
-    }
-    pub async fn complete_mimi_consent_update(
-        &self,
-        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
-        outcome: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentOutcome,
-    ) -> PersistenceResult<()> {
-        self.persistence
-            .mimi_consent_correlations()
-            .complete_update(request, outcome)
-            .await
-    }
-    pub async fn mimi_consent_update_binding(
-        &self,
-        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
-    ) -> PersistenceResult<Option<bool>> {
-        self.persistence
-            .mimi_consent_correlations()
-            .update_binding(request)
-            .await
-    }
-    pub async fn freeze_mimi_consent_update(
-        &self,
-        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
-    ) -> PersistenceResult<()> {
-        self.persistence
-            .mimi_consent_correlations()
-            .freeze_update(request)
+            .bind_decision(id, decision, submission, allow_new)
             .await
     }
     pub async fn consent_historical_basis(

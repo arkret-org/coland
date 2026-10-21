@@ -862,6 +862,7 @@ pub(crate) async fn forward_self_event_with_session(
 }
 
 async fn require_live_forward(state: &AppState, event: &arkret_wire::Event) -> ServiceResult<()> {
+    super::authority_self_event_unit::require_governance_change_eligibility(state, event).await?;
     state
         .authority_commits()
         .require_held_replica_write_lifecycle(event)
@@ -1071,6 +1072,7 @@ pub(crate) async fn recover_forwarded_original(
         ));
     }
     validate_recovery_caller(state, session, event).await?;
+    super::authority_self_event_unit::require_governance_change_eligibility(state, event).await?;
     let authority = commits
         .current_authority(&event.realm_id)
         .await?

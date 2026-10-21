@@ -1284,13 +1284,19 @@ CREATE TABLE public.consent_current_results (
     current_stream_position bigint NOT NULL CHECK (current_stream_position > 0),
     value jsonb NOT NULL CHECK (jsonb_typeof(value->'permissions')='array'),
     updated_at timestamptz NOT NULL,
-    PRIMARY KEY(realm_id,peer_id),
-    UNIQUE(holder_account_id,peer_id)
+    PRIMARY KEY(holder_account_id,peer_id),
+    CHECK (jsonb_typeof(peer_id)='object'),
+    CHECK (value ? 'permissions'),
+    CHECK ((value - 'permissions')='{}'::jsonb),
+    CHECK (jsonb_typeof(value->'permissions')='array')
 );
 CREATE TABLE public.consent_result_versions (
     commit_id text PRIMARY KEY REFERENCES public.realm_commits(commit_id),
     peer_id jsonb NOT NULL,
-    value jsonb NOT NULL CHECK (jsonb_typeof(value->'permissions')='array')
+    value jsonb NOT NULL,
+    CHECK (value ? 'permissions'),
+    CHECK ((value - 'permissions')='{}'::jsonb),
+    CHECK (jsonb_typeof(value->'permissions')='array')
 );
 
 -- Private service-local MIMI request correlation. These rows are not accepted
@@ -1310,18 +1316,17 @@ CREATE TABLE public.mimi_consent_correlations (
     purpose text NOT NULL,
     strand_id text,
     source_id text,
+    source_class text NOT NULL CHECK (source_class IN ('service','session')),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone
 );
-
--- Frozen before forwarding; an unknown outcome retains the exact original Event.
-CREATE TABLE public.mimi_consent_updates (
+CREATE TABLE public.mimi_consent_decision_attempts (
     consent_id text PRIMARY KEY REFERENCES public.mimi_consent_correlations(consent_id),
     decision text NOT NULL CHECK (decision IN ('accept','deny','revoke')),
     event_id text NOT NULL UNIQUE,
-    submission jsonb NOT NULL,
-    terminal_outcome jsonb
+    submission jsonb NOT NULL
 );
+
 
 CREATE INDEX mimi_consent_correlations_expiry_idx
     ON public.mimi_consent_correlations USING btree (expires_at)
@@ -3312,20 +3317,19 @@ CREATE TABLE public.direct_conversation_group_states (
     CONSTRAINT direct_conversation_group_states_initial_check CHECK (NOT current_exact_pair OR initial_exact_pair_group_state_ref IS NOT NULL)
 );
 
--- Immutable original participant Event and its covering accepted revision.
+-- Immutable original Direct Conversation binding and its covering Commit.
 CREATE TABLE public.direct_conversation_binding_current_results (
     realm_id text PRIMARY KEY,
     pair_key text NOT NULL UNIQUE,
-    binding_event_ref text NOT NULL UNIQUE,
     current_commit_id text NOT NULL,
     current_stream_position bigint NOT NULL CHECK (current_stream_position BETWEEN 1 AND 9007199254740991),
     value jsonb NOT NULL,
     updated_at timestamptz NOT NULL,
     CHECK (jsonb_typeof(value) = 'object'),
-    CHECK ((value - 'binding_event_ref' - 'binding') = '{}'::jsonb),
-    CHECK (value->>'binding_event_ref'=binding_event_ref),
-    CHECK (value->'binding'->>'realm_id'=realm_id),
-    CHECK (value->'binding'->>'pair_key'=pair_key)
+    CHECK (value ?& ARRAY['binding_event_ref','binding']),
+    CHECK ((value - ARRAY['binding_event_ref','binding']) = '{}'::jsonb),
+    CHECK (jsonb_typeof(value->'binding_event_ref') = 'string'),
+    CHECK (jsonb_typeof(value->'binding') = 'object')
 );
 
 -- Durable Realm metadata projection: owner, lifecycle, visibility and the

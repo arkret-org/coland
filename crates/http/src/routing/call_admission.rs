@@ -126,7 +126,7 @@ async fn current_at_authority(
     }
     if cut.records.len() > 1 {
         return Err(unavailable(
-            "exact-peer Consent namespace contains multiple current rows",
+            "exact peer has multiple Consent current values",
         ));
     }
     let mut outcome = ConsentCurrentReadOutcome {
@@ -260,6 +260,44 @@ async fn verify_verdict(
     Ok(())
 }
 
+pub(crate) async fn read_current_for_holder(
+    state: &AppState,
+    request: &ConsentCurrentReadRequestBody,
+) -> Result<ConsentCurrentReadOutcome, AppError> {
+    let (realm, service) = holder_location(state, &request.holder_account_id).await?;
+    let outcome = if service == state.service_core_id() {
+        current_at_authority(state, request).await?
+    } else {
+        remote_post(state, &service, "/_arkret/peer/consent/current", request).await?
+    };
+    if outcome.request_digest != canonical_request_digest(request).map_err(invalid)?
+        || outcome.expires_at <= Utc::now()
+        || outcome.evaluated_at > Utc::now()
+        || outcome.expires_at > outcome.evaluated_at + Duration::seconds(30)
+    {
+        return Err(unavailable(
+            "current response does not bind the outstanding holder request",
+        ));
+    }
+    if outcome.realm_id != realm {
+        return Err(unavailable("current result names another holder PCR"));
+    }
+    outcome
+        .validate_for_request(request, outcome.governance_generation, Utc::now())
+        .map_err(unavailable)?;
+    verify_verdict(
+        state,
+        &realm,
+        &service,
+        outcome.governance_generation,
+        &outcome.proof.verification_method,
+        &outcome.proof.jws,
+        &outcome.signature_input().map_err(invalid)?,
+    )
+    .await?;
+    Ok(outcome)
+}
+
 #[endpoint(operation_id = "ak.self.consent.read.current")]
 async fn self_current(
     aa: AuthArgs,
@@ -276,42 +314,9 @@ async fn self_current(
             "current read belongs only to exact holder",
         ));
     }
-    let outcome = verified_holder_current(state, &request).await?;
+    let outcome = read_current_for_holder(state, &request).await?;
     super::identity::session_actor::validated_session_actor(state, &session).await?;
     json_ok(outcome)
-}
-
-/// Existing hosting-Service read authority; no caller-controlled key or generation is trusted.
-pub(crate) async fn verified_holder_current(
-    state: &AppState,
-    request: &ConsentCurrentReadRequestBody,
-) -> Result<ConsentCurrentReadOutcome, AppError> {
-    request.validate().map_err(invalid)?;
-    let (realm, service) = holder_location(state, &request.holder_account_id).await?;
-    let outcome = if service == state.service_core_id() {
-        current_at_authority(state, &request).await?
-    } else {
-        remote_post(state, &service, "/_arkret/peer/consent/current", &request).await?
-    };
-    if outcome.realm_id != realm {
-        return Err(unavailable(
-            "current response does not bind the outstanding holder request",
-        ));
-    }
-    outcome
-        .validate_for_request(request, outcome.governance_generation, Utc::now())
-        .map_err(unavailable)?;
-    verify_verdict(
-        state,
-        &realm,
-        &service,
-        outcome.governance_generation,
-        &outcome.proof.verification_method,
-        &outcome.proof.jws,
-        &outcome.signature_input().map_err(invalid)?,
-    )
-    .await?;
-    Ok(outcome)
 }
 
 #[endpoint(operation_id = "ak.peer.consent.read.current")]
@@ -355,13 +360,14 @@ async fn admission_at_authority(
     }
     let admitted = cut.device_admitted
         && request.invitation.expires_at > cut.evaluated_at
-        && cut.records.iter().any(|r| {
-            r.permits(
+        && match cut.records.as_slice() {
+            [record] => record.permits(
                 &request.invitation.inviter_actor_id,
                 request.invitation.media.consent_scope(),
                 cut.evaluated_at,
-            )
-        });
+            ),
+            _ => false,
+        };
     let mut outcome = CallInvitationAdmissionOutcome {
         request_digest: canonical_request_digest(request).map_err(invalid)?,
         admitted,

@@ -3929,6 +3929,9 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                 .execute(&mut *conn)
                 .await?;
+            if event.kind == arkret_wire::EventKind::RealmGovernanceStationChange {
+                replica::require_replica_governance_eligibility(conn, event).await?;
+            }
             if crate::direct_conversation_admission::direct_conversation_realm_in_connection(
                 conn,
                 &event.realm_id,

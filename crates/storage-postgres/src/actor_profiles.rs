@@ -130,6 +130,7 @@ fn payload<T: serde::de::DeserializeOwned>(
 pub(crate) struct PcrSigner {
     pub(crate) account: AccountId,
     pub(crate) device_key: arkret_signatures::PublicKeyMaterial,
+    pub(crate) confirmed_head: arkret_wire::RealmCommitId,
 }
 
 /// Either the exact Event is already committed (its Commit) or it is a new
@@ -249,6 +250,27 @@ pub(crate) async fn verify_pcr_self_event(
     authorization_ref: Option<&str>,
     what: &str,
 ) -> Result<PcrSelfEventCut, PgTransactionError> {
+    verify_pcr_self_event_at_cut(conn, transaction, authorization_ref, what, true).await
+}
+
+/// Consent evaluates its signed peer revision before rejecting a stale proposed
+/// Commit. Its caller checks `confirmed_head` after that CAS, under this lock.
+pub(crate) async fn verify_pcr_self_event_before_current_guard(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+    authorization_ref: Option<&str>,
+    what: &str,
+) -> Result<PcrSelfEventCut, PgTransactionError> {
+    verify_pcr_self_event_at_cut(conn, transaction, authorization_ref, what, false).await
+}
+
+async fn verify_pcr_self_event_at_cut(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+    authorization_ref: Option<&str>,
+    what: &str,
+    require_extending_commit: bool,
+) -> Result<PcrSelfEventCut, PgTransactionError> {
     let event = &transaction.event;
     let commit = &transaction.commit;
     if event.executed_by.is_some()
@@ -363,7 +385,9 @@ pub(crate) async fn verify_pcr_self_event(
         what,
     )
     .await?;
-    if commit.previous_commit_ref.as_ref() != Some(&status.authority.authority_commit_id) {
+    if require_extending_commit
+        && commit.previous_commit_ref.as_ref() != Some(&status.authority.authority_commit_id)
+    {
         return Err(rejected(
             ConflictCode::TemporarilyUnavailable,
             &format!("{what} Commit does not extend the confirmed PCR head"),
@@ -372,6 +396,7 @@ pub(crate) async fn verify_pcr_self_event(
     Ok(PcrSelfEventCut::Fresh(PcrSigner {
         account,
         device_key,
+        confirmed_head: status.authority.authority_commit_id,
     }))
 }
 

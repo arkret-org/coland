@@ -201,10 +201,8 @@ pub(crate) async fn direct_conversation_realm_in_connection(
     realm_id: &RealmId,
 ) -> PersistenceResult<Option<DirectConversationRealm>> {
     let purpose = sql_query(
-        "SELECT e.envelope->'payload'->'object'->>'purpose' AS purpose \
-         FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk \
-         WHERE c.realm_id=$1 AND c.stream_position=0 AND c.stream_ref->>'kind'='realm' \
-           AND e.kind='ak.realm.create' AND e.state='committed'",
+        "SELECT value->>'purpose' AS purpose FROM realm_bootstrap_current_results \
+         WHERE realm_id=$1 AND result_family='realm_genesis'",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<GenesisPurposeRow>(&mut *conn)
@@ -726,9 +724,10 @@ fn bound_payload(event: &arkret_wire::Event) -> Option<DirectConversationBoundPa
 }
 
 /// Binding integrity (`ak.direct_conversation.admission.binding_integrity.v1`):
-/// every immutable field of the Event equals the accepted founding facts,
+/// every immutable field of the binding equals the accepted founding facts,
 /// the canonical authorization basis and the first exact-pair winning state of
-/// the unique scope-derived group. An existing binding admits only its original Event.
+/// the unique scope-derived group, and an already accepted binding carries the
+/// same original Event and payload.
 fn binding_is_exact(
     event: &arkret_wire::Event,
     founding: Option<&FoundingFacts>,
@@ -740,7 +739,8 @@ fn binding_is_exact(
     let normalized_refs = |basis: &DirectConversationAuthorizationBasis| {
         basis.event_refs.iter().cloned().collect::<BTreeSet<_>>()
     };
-    let fields_match = payload.pair_key.as_str() == founding.pair_key
+    let fields_match = founding.pair().contains(&event.actor_id)
+        && payload.pair_key.as_str() == founding.pair_key
         && payload.realm_id == event.realm_id
         && payload.main_strand_id.as_str() == founding.main_strand_id
         && payload.founding_unit_digest.as_str() == founding.founding_unit_digest
@@ -830,10 +830,8 @@ async fn participant_authority_admits(
                 return Ok(false);
             }
             match (binding, &group.initial_exact_pair_group_state_ref) {
-                // First binding ends bootstrap. Binding integrity above
-                // permits only the original bound Event's exact replay here;
-                // every different Event has already been refused.
-                (Some(_), _) => event.kind == EventKind::DirectConversationBound,
+                // The first bound Event permanently exits both bootstrap phases.
+                (Some(_), _) => false,
                 // `exact_pair_founding_completion`.
                 (None, Some(_)) if peer_mls_admission_snapshot(conn, &event.realm_id).await?
                     == arkret_models_collaboration::direct_conversation::DirectConversationPeerMlsAdmission::Durable => {
@@ -852,7 +850,8 @@ async fn participant_authority_admits(
     if !admitted {
         return Ok(false);
     }
-    if (send_like(&event.kind)
+    if (event.kind == EventKind::DirectConversationBound
+        || send_like(&event.kind)
         || repair_action(event)
         || event.kind == EventKind::StrandWatchSet
         || arkret_models_collaboration::direct_conversation::direct_conversation_structure_action(
@@ -980,11 +979,7 @@ async fn evaluate_in_connection(
     {
         return Ok(Err(ConflictCode::DirectConversationBindingInvalid));
     }
-    if event.kind == EventKind::DirectConversationBound
-        && binding
-            .as_ref()
-            .is_some_and(|bound| bound.binding_event_ref != event.event_id)
-    {
+    if event.kind == EventKind::DirectConversationBound && binding.is_some() {
         return Ok(Err(ConflictCode::DuplicateConflict));
     }
     if matches!(
@@ -1071,6 +1066,9 @@ pub(crate) async fn admission_refusal_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
 ) -> PersistenceResult<Option<ConflictCode>> {
+    if event.kind == arkret_wire::EventKind::RealmGovernanceStationChange {
+        crate::pcr_private_authority::require_transferable(conn, &event.realm_id).await?;
+    }
     let Some(realm) = direct_conversation_realm_in_connection(conn, &event.realm_id).await? else {
         return Ok(None);
     };
@@ -1108,6 +1106,9 @@ pub(crate) async fn profile_authority_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
 ) -> PersistenceResult<Option<ProfileAuthority>> {
+    if event.kind == arkret_wire::EventKind::RealmGovernanceStationChange {
+        crate::pcr_private_authority::require_transferable(conn, &event.realm_id).await?;
+    }
     let Some(realm) = direct_conversation_realm_in_connection(conn, &event.realm_id).await? else {
         return Ok(None);
     };
@@ -1153,7 +1154,7 @@ pub(crate) async fn record_group_state_in_connection(
     Ok(())
 }
 
-/// Retain the first accepted participant Event and its covering Commit forever.
+/// Install the sole bound Event and payload in its accepting transaction.
 pub(crate) async fn commit_binding_current_result_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
@@ -1163,7 +1164,7 @@ pub(crate) async fn commit_binding_current_result_in_connection(
         return Ok(());
     }
     let payload = bound_payload(event)
-        .ok_or_else(|| PersistenceError::SchemaViolation("invalid binding payload".into()))?;
+        .ok_or_else(|| PersistenceError::SchemaViolation("invalid bound payload".into()))?;
     if payload.realm_id != event.realm_id
         || commit.realm_id != event.realm_id
         || commit.event_ref != event.event_id
@@ -1177,27 +1178,28 @@ pub(crate) async fn commit_binding_current_result_in_connection(
             })
     {
         return Err(PersistenceError::SchemaViolation(
-            "binding differs from its accepted Event and Commit".into(),
+            "binding differs from accepted Event/Realm stream".into(),
         ));
     }
-    let pair_key = payload.pair_key.clone();
     let value = DirectConversationBindingCurrentValue {
         binding_event_ref: event.event_id.clone(),
-        binding: payload,
+        binding: payload.clone(),
     };
-    let entry = arkret_wire::TypedCurrentRow::Value {
-        selector: arkret_wire::CurrentSelector::DirectConversationBinding { pair_key },
-        source_stream_ref: commit.stream_ref.clone(),
-        revision: arkret_wire::CurrentRevision {
-            commit_id: commit.commit_id.clone(),
-            stream_position: commit.stream_position,
-        },
-        value: serde_json::to_value(value).map_err(PersistenceError::database)?,
-    };
-    install_binding_snapshot_in_connection(conn, &event.realm_id, &entry, commit.committed_at).await
+    let position = i64::try_from(commit.stream_position).map_err(PersistenceError::database)?;
+    let changed = sql_query("INSERT INTO direct_conversation_binding_current_results (realm_id,pair_key,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(realm_id) DO NOTHING")
+        .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(payload.pair_key.as_str())
+        .bind::<Text,_>(commit.commit_id.as_str()).bind::<diesel::sql_types::BigInt,_>(position)
+        .bind::<Jsonb,_>(serde_json::to_value(value).map_err(PersistenceError::database)?)
+        .bind::<diesel::sql_types::Timestamptz,_>(commit.committed_at).execute(conn).await.map_err(PersistenceError::database)?;
+    if changed != 1 {
+        return Err(PersistenceError::Conflict(
+            "duplicate_conflict: Direct binding already accepted".into(),
+        ));
+    }
+    Ok(())
 }
 
-/// A replica must preserve the original binding value and its original revision.
+/// A replica may install the one original value; an existing value is immutable.
 pub(crate) async fn guard_binding_snapshot_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
@@ -1225,10 +1227,9 @@ pub(crate) async fn guard_binding_snapshot_in_connection(
         })
         || incoming.binding.realm_id != *realm_id
         || incoming.binding.pair_key != *pair_key
-        || revision.stream_position == 0
     {
         return Err(PersistenceError::SchemaViolation(
-            "binding differs from its exact pair, Realm or accepted revision".into(),
+            "binding Realm, pair or stream differs".into(),
         ));
     }
     #[derive(diesel::QueryableByName)]
@@ -1240,15 +1241,15 @@ pub(crate) async fn guard_binding_snapshot_in_connection(
         #[diesel(sql_type=Jsonb)]
         value: serde_json::Value,
     }
-    let old=sql_query("SELECT current_commit_id,current_stream_position,value FROM direct_conversation_binding_current_results WHERE realm_id=$1 FOR UPDATE")
-        .bind::<Text,_>(realm_id.as_str()).get_result::<Retained>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-    if old.is_some_and(|old| {
-        old.value != *value
-            || old.current_commit_id != revision.commit_id.as_str()
+    let retained=sql_query("SELECT current_commit_id,current_stream_position,value FROM direct_conversation_binding_current_results WHERE realm_id=$1 FOR UPDATE")
+        .bind::<Text,_>(realm_id.as_str()).get_result::<Retained>(conn).await.optional().map_err(PersistenceError::database)?;
+    if retained.is_some_and(|old| {
+        old.current_commit_id != revision.commit_id.as_str()
             || u64::try_from(old.current_stream_position).ok() != Some(revision.stream_position)
+            || old.value != *value
     }) {
         return Err(PersistenceError::Conflict(
-            "duplicate_conflict: a binding is immutable after its first accepted Event".into(),
+            "failed_precondition: immutable binding differs".into(),
         ));
     }
     Ok(())
@@ -1262,17 +1263,25 @@ pub(crate) async fn install_binding_snapshot_in_connection(
 ) -> PersistenceResult<()> {
     guard_binding_snapshot_in_connection(conn, realm_id, entry).await?;
     let arkret_wire::TypedCurrentRow::Value {
-        revision, value, ..
+        selector,
+        revision,
+        value,
+        ..
     } = entry;
-    let binding: DirectConversationBindingCurrentValue =
-        serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
-    let position = i64::try_from(revision.stream_position)
-        .map_err(|_| PersistenceError::SchemaViolation("binding revision exceeds BIGINT".into()))?;
-    sql_query("INSERT INTO direct_conversation_binding_current_results(realm_id,pair_key,binding_event_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(realm_id) DO NOTHING")
-        .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(binding.binding.pair_key.as_str()).bind::<Text,_>(binding.binding_event_ref.as_str())
-        .bind::<Text,_>(revision.commit_id.as_str()).bind::<diesel::sql_types::BigInt,_>(position).bind::<Jsonb,_>(value).bind::<diesel::sql_types::Timestamptz,_>(installed_at)
-        .execute(&mut *conn).await.map_err(PersistenceError::database)?;
-    guard_binding_snapshot_in_connection(conn, realm_id, entry).await
+    let arkret_wire::CurrentSelector::DirectConversationBinding { pair_key } = selector else {
+        unreachable!()
+    };
+    let position = i64::try_from(revision.stream_position).map_err(PersistenceError::database)?;
+    let changed = sql_query("INSERT INTO direct_conversation_binding_current_results(realm_id,pair_key,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(realm_id) DO UPDATE SET value=direct_conversation_binding_current_results.value WHERE direct_conversation_binding_current_results.pair_key=EXCLUDED.pair_key AND direct_conversation_binding_current_results.current_commit_id=EXCLUDED.current_commit_id AND direct_conversation_binding_current_results.current_stream_position=EXCLUDED.current_stream_position AND direct_conversation_binding_current_results.value=EXCLUDED.value")
+        .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(pair_key.as_str()).bind::<Text,_>(revision.commit_id.as_str())
+        .bind::<diesel::sql_types::BigInt,_>(position).bind::<Jsonb,_>(value)
+        .bind::<diesel::sql_types::Timestamptz,_>(installed_at).execute(conn).await.map_err(PersistenceError::database)?;
+    if changed != 1 {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: immutable binding differs".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

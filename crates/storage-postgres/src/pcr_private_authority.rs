@@ -336,3 +336,74 @@ pub(crate) async fn require_active_human_account(
     }
     Ok(())
 }
+
+/// Recheck immutable genesis restrictions even when reading an installed tenure.
+/// A persisted handoff is not evidence that a fixed-governor Realm could migrate.
+pub(crate) async fn validate_installed_governance(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+) -> PersistenceResult<arkret_wire::GenesisGovernance> {
+    #[derive(diesel::QueryableByName)]
+    struct Current {
+        #[diesel(sql_type = BigInt)]
+        generation: i64,
+        #[diesel(sql_type = Text)]
+        service_id: String,
+        #[diesel(sql_type = Bool)]
+        has_handoffs: bool,
+        #[diesel(sql_type = Bool)]
+        has_inception_original: bool,
+    }
+    let row = sql_query("SELECT a.generation,a.service_id,EXISTS(SELECT 1 FROM realm_authority_handoffs h WHERE h.realm_id=a.realm_id) AS has_handoffs,EXISTS(SELECT 1 FROM realm_commits c WHERE c.realm_id=a.realm_id AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',a.realm_id) AND c.stream_position=0 AND c.event_pk IS NOT NULL) AS has_inception_original FROM realm_authorities a WHERE a.realm_id=$1")
+        .bind::<Text,_>(realm.as_str()).get_result::<Current>(&mut *conn).await.map_err(PersistenceError::database)?;
+    // A withheld position-zero Commit contains no Genesis Event. If a Full
+    // original is present, however, its corruption must never fall back to the
+    // retained snapshot's genesis current.
+    let governance = if row.has_inception_original {
+        accepted_governance(conn, realm).await?
+    } else {
+        accepted_replica_governance(conn, realm).await?
+    };
+    governance
+        .validate_current(
+            &DidCoreId::new(row.service_id).map_err(refused)?,
+            u64::try_from(row.generation).map_err(refused)?,
+        )
+        .map_err(refused)?;
+    if row.has_handoffs {
+        governance.require_transferable().map_err(refused)?;
+    }
+    Ok(governance)
+}
+
+/// A since-join replica retains the verified Snapshot's immutable genesis
+/// current below its readable floor, without materializing the genesis Event.
+/// Use the same anchor coverage as `accepted_ordinary_realm`; mutable profile
+/// rows and an unanchored current never supply inception provenance.
+async fn accepted_replica_governance(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+) -> PersistenceResult<arkret_wire::GenesisGovernance> {
+    use arkret_models_collaboration::events_payloads::realm::{RealmGenesis, RealmPurpose};
+    #[derive(diesel::QueryableByName)]
+    struct Genesis {
+        #[diesel(sql_type = Jsonb)]
+        value: serde_json::Value,
+    }
+    let row = sql_query("SELECT g.value FROM realm_bootstrap_current_results g WHERE g.realm_id=$1 AND g.result_family='realm_genesis' AND g.current_stream_position=0 AND EXISTS(SELECT 1 FROM replica_stream_anchors a WHERE a.realm_id=g.realm_id AND a.stream_key=$2 AND a.anchor_stream_position>=g.current_stream_position)")
+        .bind::<Text,_>(realm.as_str())
+        .bind::<Text,_>(crate::authority_commit::stream_key(&arkret_wire::CommitStreamRef::Realm { realm_id: realm.clone() })?)
+        .get_result::<Genesis>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+        .ok_or_else(|| refused("accepted inception original or verified replica genesis is missing"))?;
+    let genesis: RealmGenesis = serde_json::from_value(row.value).map_err(refused)?;
+    genesis.validate().map_err(refused)?;
+    match genesis.purpose {
+        RealmPurpose::Collaboration => Ok(arkret_wire::GenesisGovernance::Collaboration),
+        RealmPurpose::DirectConversation => Ok(arkret_wire::GenesisGovernance::DirectConversation(
+            genesis.governance_station_id,
+        )),
+        _ => Err(refused(
+            "a replica anchor cannot establish native PCR provenance",
+        )),
+    }
+}

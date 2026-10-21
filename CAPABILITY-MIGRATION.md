@@ -530,8 +530,10 @@ Wiring `mod authority_commit;` on its own would therefore mount the new surface
 - [x] PostgreSQL schema: the authority/stream/snapshot tables now live directly
   in `migrations/00000000000000_initial/up.sql` rather than in a follow-on
   delta migration, the schema contract is `authority-commit-v1`, and
-  `consent_cells (cell_id)` became `consent_grants (consent_id)` so the table
-  matches the queries in `crates/storage-postgres/src/contacts.rs`.
+  the former per-ID `consent_cells`/`consent_grants` stores are retired. Consent
+  now uses one full-peer replacement in `consent_current_results`, with original
+  Event/Commit history in `consent_result_versions`; the queries live in
+  `crates/storage-postgres/src/consent_current.rs`.
 - [x] Six tables whose Rust store had already moved to the authority-commit
   shape while the migration kept the Seal-era columns now match their queries:
   `publication_evidence (event_id, committed_ref, accepted_at)`,

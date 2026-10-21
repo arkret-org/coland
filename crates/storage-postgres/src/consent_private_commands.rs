@@ -225,7 +225,7 @@ async fn apply_command(
             }
             let row=sql_query("SELECT v.value,c.commit_json FROM consent_result_versions v JOIN realm_commits c ON c.commit_id=v.commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE v.commit_id=$1 AND c.realm_id=$2 AND e.envelope->'actor_id'=$3 AND v.peer_id=$4 AND e.envelope->>'event_id'=$5")
                 .bind::<Text,_>(command.body.commit_id.as_str()).bind::<Text,_>(realm.as_str())
-                .bind::<Jsonb,_>(serde_json::to_value(ActorId::account(holder.clone())).map_err(invalid)?).bind::<Jsonb,_>(serde_json::to_value(command.body.peer.actor_id()).map_err(invalid)?).bind::<Text,_>(command.body.event_id.as_str())
+                .bind::<Jsonb,_>(serde_json::to_value(ActorId::account(holder.clone())).map_err(invalid)?).bind::<Jsonb,_>(serde_json::to_value(match &command.body.peer { arkret_models_collaboration::events_payloads::consent::ConsentPeer::Actor {actor_id} => actor_id }).map_err(invalid)?).bind::<Text,_>(command.body.event_id.as_str())
                 .get_result::<Original>(&mut *conn).await.optional()?.ok_or_else(||unavailable("exact original Consent version is missing"))?;
             let value: arkret_models_collaboration::consent_operations::ConsentValue =
                 serde_json::from_value(row.value).map_err(invalid)?;

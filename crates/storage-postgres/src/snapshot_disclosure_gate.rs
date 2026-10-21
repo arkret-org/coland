@@ -508,6 +508,7 @@ async fn issue_snapshot(
             else {
                 return Ok(None);
             };
+            crate::pcr_private_authority::validate_installed_governance(conn, realm_id).await?;
             let Some(material) =
                 actor_snapshot_material_in_connection(conn, realm_id, actor).await?
             else {
@@ -838,6 +839,14 @@ async fn prove_handoff_tenure_in_connection(
     conn: &mut AsyncPgConnection,
     material: &coland_storage::RealmStateSnapshotMaterial,
 ) -> PersistenceResult<()> {
+    let governance =
+        crate::pcr_private_authority::validate_installed_governance(conn, &material.realm_id)
+            .await?;
+    if material.governance_generation != 0 {
+        governance
+            .require_transferable()
+            .map_err(crate::pcr_private_authority::refused)?;
+    }
     if material.governance_generation == 0 {
         return Ok(());
     }
@@ -981,6 +990,7 @@ pub(crate) async fn actor_snapshot_candidates_in_connection(
     else {
         return Ok(None);
     };
+    crate::pcr_private_authority::validate_installed_governance(conn, realm_id).await?;
     let families = sql_query(
         "SELECT tablename FROM pg_catalog.pg_tables \
          WHERE schemaname=current_schema() AND tablename LIKE '%_current_results'",
@@ -2175,10 +2185,8 @@ pub(crate) fn disclose_to_actor(
                     serde_json::from_value(value.clone()).map_err(|_| {
                         rejected("Direct Conversation binding current value is not closed")
                     })?;
-                binding
-                    .validate_shape()
-                    .map_err(|_| rejected("invalid Direct Conversation binding"))?;
-                if binding.binding.pair_key != *pair_key
+                if binding.binding.validate_shape().is_err()
+                    || binding.binding.pair_key != *pair_key
                     || binding.binding.realm_id != material.realm_id
                     || !binding.binding.unordered_participant_ids.contains(&caller)
                 {

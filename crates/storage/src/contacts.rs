@@ -388,8 +388,33 @@ pub struct MimiConsentCorrelationRecord {
     pub purpose: String,
     pub strand_id: Option<String>,
     pub source_id: Option<String>,
+    pub source_class: MimiConsentSourceClass,
     pub created_at: chrono::DateTime<Utc>,
     pub expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+/// Authentication entrance retained by a private MIMI correlation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MimiConsentSourceClass {
+    Service,
+    Session,
+}
+
+impl MimiConsentSourceClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Service => "service",
+            Self::Session => "session",
+        }
+    }
+
+    pub fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "service" => Some(Self::Service),
+            "session" => Some(Self::Session),
+            _ => None,
+        }
+    }
 }
 
 #[async_trait]
@@ -399,45 +424,14 @@ pub trait MimiConsentCorrelationStore: Send + Sync {
         consent_id: &str,
     ) -> PersistenceResult<Option<MimiConsentCorrelationRecord>>;
     async fn put(&self, record: &MimiConsentCorrelationRecord) -> PersistenceResult<()>;
-    async fn update_outcome(
+    /// Freeze the exact decision and original submission before forwarding.
+    async fn bind_decision(
         &self,
-        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
-    ) -> PersistenceResult<
-        Option<arkret_models_collaboration::mimi_operations::MimiUpdateConsentOutcome>,
-    > {
-        let _ = request;
-        Err(super::PersistenceError::Conflict(
-            "MIMI terminal recovery is unavailable".into(),
-        ))
-    }
-    async fn complete_update(
-        &self,
-        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
-        outcome: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentOutcome,
-    ) -> PersistenceResult<()> {
-        let _ = (request, outcome);
-        Err(super::PersistenceError::Conflict(
-            "MIMI terminal retention is unavailable".into(),
-        ))
-    }
-    async fn update_binding(
-        &self,
-        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
-    ) -> PersistenceResult<Option<bool>> {
-        let _ = request;
-        Err(super::PersistenceError::Conflict(
-            "MIMI durable update binding is unavailable".into(),
-        ))
-    }
-    async fn freeze_update(
-        &self,
-        request: &arkret_models_collaboration::mimi_operations::MimiUpdateConsentRequestBody,
-    ) -> PersistenceResult<()> {
-        let _ = request;
-        Err(super::PersistenceError::Conflict(
-            "MIMI durable update freeze is unavailable".into(),
-        ))
-    }
+        consent_id: &str,
+        decision: &str,
+        submission: &arkret_wire::EventAdmissionSubmission,
+        allow_new: bool,
+    ) -> PersistenceResult<bool>;
 }
 #[doc(hidden)]
 pub type ContactKey = (ActorId, ActorId);

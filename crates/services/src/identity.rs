@@ -93,7 +93,7 @@ impl arkret_wire::PayloadSigner for Ed25519PayloadSigner {
 pub use coland_domain::identity::{ContactRecord, ContactRequestSlotState};
 pub use coland_storage::MimiConsentCorrelationRecord as MimiConsentCorrelation;
 
-/// The coordinates one `ak.direct_conversation.bound` endorsement settles.
+/// The coordinates the sole accepted `ak.direct_conversation.bound` settles.
 ///
 /// `contact-and-direct-conversation.md` §8.3: the binding is written once and
 /// never retired, so this carries no lifecycle state, no `supersedes` ref and
@@ -105,10 +105,7 @@ pub struct DirectConversationBindingRecord {
     pub realm_id: String,
     pub main_strand_id: String,
     pub created_at: DateTime<Utc>,
-    /// One Event that endorsed these coordinates. The or_set can hold an
-    /// endorsement per participant; this is the lowest endorsing `actor_id`'s,
-    /// so every replica names the same one. It is evidence, not a head — the
-    /// binding has no successor to point at.
+    /// The immutable original bound Event, retained across all later changes.
     pub binding_event_ref: String,
 }
 

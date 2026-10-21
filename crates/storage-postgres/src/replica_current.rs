@@ -40,7 +40,6 @@ const MEMBER_STATION_FAMILIES: &[&str] = &[
     "strand_position_current_results",
     "strand_watch_current_results",
     "agent_interaction_current_results",
-    "direct_conversation_binding_current_results",
     "rsvp_current_results",
     "realm_set_default_strand_current_results",
     "message_revision_current_results",
@@ -2217,7 +2216,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn binding_snapshot_and_successor_fold_keep_native_current_and_reject_forks() {
+    async fn binding_snapshot_keeps_original_current_and_rejects_successors_and_forks() {
         use arkret_models_collaboration::events_payloads::direct_conversation::{
             DirectConversationBindingCurrentValue, DirectConversationBoundPayload,
         };
@@ -2273,48 +2272,120 @@ mod tests {
         install_snapshot_in_connection(&mut conn, &realm, &head, std::slice::from_ref(&entry), at)
             .await
             .unwrap();
-        let mut new_ref = entry.clone();
-        let arkret_wire::TypedCurrentRow::Value { value, .. } = &mut new_ref;
-        value["binding_event_ref"] = json!(id(9));
-        assert!(
-            crate::direct_conversation_admission::guard_binding_snapshot_in_connection(
-                &mut conn, &realm, &new_ref
-            )
-            .await
-            .is_err()
-        );
-        let mut new_revision = entry.clone();
-        let arkret_wire::TypedCurrentRow::Value { revision, .. } = &mut new_revision;
-        revision.stream_position = 8;
-        revision.commit_id = arkret_wire::RealmCommitId::from_digest([8; 32]);
-        assert!(
-            crate::direct_conversation_admission::guard_binding_snapshot_in_connection(
-                &mut conn,
-                &realm,
-                &new_revision
-            )
-            .await
-            .is_err()
-        );
-        let newer = arkret_wire::CommitStreamHead {
-            stream_position: 8,
+        let event = arkret_wire::test_support::raw_event_for_actor_at(
+            "ak.direct_conversation.bound",
+            arkret_wire::ScopeRef::Realm {
+                realm_id: realm.clone(),
+            },
+            actor("bob"),
+            serde_json::to_value(&payload).unwrap(),
+            at,
+        )
+        .unwrap();
+        // Projection input is downstream of source Commit verification, as in
+        // the other replica fold tests. This is not a live signer fixture.
+        let commit = arkret_wire::RealmCommit {
+            producer_signer_fact_digest: None,
             commit_id: arkret_wire::RealmCommitId::from_digest([8; 32]),
-            ..head
+            realm_id: realm.clone(),
+            stream_ref: source.clone(),
+            stream_position: 8,
+            previous_commit_ref: Some(head.commit_id.clone()),
+            event_ref: event.event_id.clone(),
+            governance_generation: 0,
+            authority_ref: arkret_wire::RealmCommitAuthorityRef::GenesisOrChangeEvent(id(1)),
+            committed_at: at,
+            signature: arkret_wire::DetachedObjectSignature {
+                context: arkret_wire::DetachedSignatureContext::RealmCommit,
+                signature_algorithm: arkret_wire::DetachedSignatureAlgorithm::Ed25519,
+                verification_method: arkret_wire::DidUrl::new(
+                    "did:web:binding-station.example#authority",
+                )
+                .unwrap(),
+                signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "3".repeat(64)))
+                    .unwrap(),
+                created_at: at,
+                sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
+            },
+        };
+        assert!(
+            crate::direct_conversation_admission::commit_binding_current_result_in_connection(
+                &mut conn, &event, &commit
+            )
+            .await
+            .is_err()
+        );
+        let current =
+            crate::direct_conversation_admission::binding_current_in_connection(&mut conn, &realm)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(current, initial);
+        let complete = arkret_wire::TypedCurrentRow::Value {
+            selector: arkret_wire::CurrentSelector::DirectConversationBinding {
+                pair_key: payload.pair_key.clone(),
+            },
+            source_stream_ref: source.clone(),
+            revision: arkret_wire::CurrentRevision {
+                commit_id: head.commit_id.clone(),
+                stream_position: 7,
+            },
+            value: serde_json::to_value(current).unwrap(),
+        };
+        for mutation in 0..5 {
+            let mut bad = complete.clone();
+            let arkret_wire::TypedCurrentRow::Value {
+                revision,
+                value,
+                selector,
+                source_stream_ref,
+            } = &mut bad;
+            match mutation {
+                0 => revision.stream_position = 6,
+                1 => revision.commit_id = arkret_wire::RealmCommitId::from_digest([9; 32]),
+                2 => {
+                    revision.stream_position = 9;
+                    *value = serde_json::to_value(&initial).unwrap();
+                }
+                3 => {
+                    *selector = arkret_wire::CurrentSelector::DirectConversationBinding {
+                        pair_key: arkret_wire::Hash::new(format!("sha256:{}", "4".repeat(64)))
+                            .unwrap(),
+                    }
+                }
+                _ => {
+                    *source_stream_ref = arkret_wire::CommitStreamRef::Realm {
+                        realm_id: arkret_wire::RealmId::from_event_id(&id(9)),
+                    }
+                }
+            }
+            assert!(
+                guard_snapshot_revisions(&mut conn, &realm, &[bad])
+                    .await
+                    .is_err()
+            );
+        }
+        let newer = arkret_wire::CommitStreamHead {
+            stream_ref: source,
+            stream_position: 8,
+            commit_id: commit.commit_id,
         };
         assert!(
             install_snapshot_in_connection(&mut conn, &realm, &newer, &[], at)
                 .await
                 .is_err()
         );
-        install_snapshot_in_connection(&mut conn, &realm, &newer, &[entry], at)
+        install_snapshot_in_connection(&mut conn, &realm, &newer, &[complete], at)
             .await
             .unwrap();
-        let retained =
+        assert_eq!(
             crate::direct_conversation_admission::binding_current_in_connection(&mut conn, &realm)
                 .await
                 .unwrap()
-                .unwrap();
-        assert_eq!(retained, initial);
+                .unwrap()
+                .binding_event_ref,
+            initial.binding_event_ref
+        );
     }
 
     #[tokio::test]

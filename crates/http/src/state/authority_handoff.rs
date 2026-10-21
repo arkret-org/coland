@@ -32,12 +32,97 @@ fn signature_refused(error: impl std::fmt::Display) -> ServiceError {
     ServiceError::Conflict(format!("signature_invalid: {error}"))
 }
 
+// This is an eligibility refusal, never an authority or signature witness.
+// Derive it from the complete content-addressed genesis, before the bundle's
+// impossible Direct successor is reported as a generic shape failure.
+fn require_transferable_genesis(
+    genesis: &arkret_wire::Event,
+    realm: &arkret_wire::RealmId,
+) -> ServiceResult<()> {
+    let payload: arkret_models_collaboration::events_payloads::RealmCreatePayload =
+        serde_json::from_value(serde_json::to_value(&genesis.payload).map_err(refused)?)
+            .map_err(refused)?;
+    payload.object.validate().map_err(refused)?;
+    genesis
+        .verify_event_id_matches_content_with_digest_suite(realm.digest_suite_code().digest_suite())
+        .map_err(refused)?;
+    if genesis.scope_ref != arkret_wire::ScopeRef::RealmGenesis
+        || &genesis.realm_id != realm
+        || arkret_wire::RealmId::from_event_id(&genesis.event_id) != *realm
+    {
+        return Err(refused(
+            "the genesis original does not derive the handoff Realm",
+        ));
+    }
+    let governance = arkret_wire::GenesisGovernance::from_genesis(genesis).map_err(refused)?;
+    if matches!(
+        governance,
+        arkret_wire::GenesisGovernance::DirectConversation(_)
+    ) {
+        governance
+            .require_transferable()
+            .map_err(|error| ServiceError::Conflict(format!("failed_precondition: {error}")))?;
+    }
+    Ok(())
+}
+
+fn validate_handoff_admission(request: &AuthorityHandoffRequest) -> ServiceResult<()> {
+    // Keep absent/invalid mandatory new-admission material a schema failure.
+    request.handoff.validate_shape().map_err(refused)?;
+    let entries = request
+        .historical_signer_facts
+        .as_deref()
+        .ok_or_else(|| refused("new authority handoff requires the complete signer inventory"))?;
+    if request.handoff.historical_signer_facts_digest.as_ref()
+        != Some(
+            &arkret_models_collaboration::authority_commit::historical_signer_facts_digest(entries)
+                .map_err(refused)?,
+        )
+    {
+        return Err(refused(
+            "new authority handoff signer inventory digest differs",
+        ));
+    }
+    request
+        .management_private_state
+        .as_ref()
+        .ok_or_else(|| refused("new authority handoff requires the management private manifest"))?
+        .validate_handoff(&request.handoff)
+        .map_err(refused)?;
+    let genesis = &request.authority_bundle.genesis_event;
+    request
+        .authority_bundle
+        .genesis_commit
+        .validate_shape()
+        .map_err(refused)?;
+    if request.authority_bundle.realm_id != request.handoff.realm_id
+        || request.authority_bundle.genesis_commit.realm_id != request.handoff.realm_id
+        || request.authority_bundle.genesis_commit.event_ref != genesis.event_id
+        || request.authority_bundle.genesis_commit.stream_position != 0
+        || request
+            .authority_bundle
+            .genesis_commit
+            .governance_generation
+            != 0
+        || request.authority_bundle.genesis_commit.stream_ref
+            != (arkret_wire::CommitStreamRef::Realm {
+                realm_id: request.handoff.realm_id.clone(),
+            })
+        || request.authority_bundle.genesis_commit.authority_ref
+            != arkret_wire::RealmCommitAuthorityRef::GenesisOrChangeEvent(genesis.event_id.clone())
+    {
+        return Err(refused("handoff genesis original and first Commit differ"));
+    }
+    require_transferable_genesis(genesis, &request.handoff.realm_id)?;
+    request.validate_new_handoff().map_err(refused)
+}
+
 pub(crate) async fn install(
     state: &AppState,
     peer: &AuthenticatedPeerContext,
     request: AuthorityHandoffRequest,
 ) -> ServiceResult<RealmAuthorityHandoff> {
-    request.validate_new_handoff().map_err(refused)?;
+    validate_handoff_admission(&request)?;
     let local = state.service_core_id();
     let counterpart = if local == request.handoff.to_service_id {
         &request.handoff.from_service_id
@@ -385,6 +470,65 @@ async fn native_genesis_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn governance_genesis(purpose: &str) -> arkret_wire::Event {
+        // Local content/shape classification only; never an accepted original
+        // or a substitute for the subsequent signature chain verification.
+        arkret_wire::test_support::raw_event_at(
+            "ak.realm.create",
+            arkret_wire::ScopeRef::RealmGenesis,
+            "ak:did_core:web:handoff-holder.example".parse().unwrap(),
+            "ak:did_core:web:handoff-origin.example".parse().unwrap(),
+            serde_json::json!({"object":{
+                "schema":"ak.schema.realm_genesis.v1","purpose":purpose,
+                "genesis_salt":arkret_canonical::base64url_encode([0xc9;32]),
+                "trust_domain":"ak:trust_domain:handoff.example","security_class":"standard",
+                "governance_station_id":"ak:did_core:web:handoff-origin.example",
+                "initial_join_rule":"closed","initial_history_access":"since_join",
+                "initial_discoverability":"invite_only"
+            }}),
+            crate::wire::now(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn direct_handoff_eligibility_is_failed_precondition_without_mutating_original() {
+        let genesis = governance_genesis("direct_conversation");
+        let original = genesis.clone();
+        let error = require_transferable_genesis(&genesis, &genesis.realm_id).unwrap_err();
+        assert_eq!(
+            error.conflict_code(),
+            Some(coland_storage::ConflictCode::FailedPrecondition)
+        );
+        assert!(error.to_string().contains("Direct Conversation"));
+        assert_eq!(genesis, original);
+        let collaboration = governance_genesis("collaboration");
+        require_transferable_genesis(&collaboration, &collaboration.realm_id).unwrap();
+    }
+
+    #[test]
+    fn malformed_direct_handoff_genesis_is_schema_violation() {
+        let genesis = governance_genesis("direct_conversation");
+        let mut malformed = genesis.clone();
+        malformed.payload.remove("object");
+        assert!(matches!(
+            require_transferable_genesis(&malformed, &genesis.realm_id),
+            Err(ServiceError::SchemaViolation(_))
+        ));
+        let mut wrong_identity = genesis.clone();
+        wrong_identity.event_id =
+            arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0xca; 32]);
+        assert!(matches!(
+            require_transferable_genesis(&wrong_identity, &genesis.realm_id),
+            Err(ServiceError::SchemaViolation(_))
+        ));
+        let wrong_realm = arkret_wire::RealmId::from_event_id(&wrong_identity.event_id);
+        assert!(matches!(
+            require_transferable_genesis(&genesis, &wrong_realm),
+            Err(ServiceError::SchemaViolation(_))
+        ));
+    }
 
     #[tokio::test]
     async fn native_pcr_import_uses_original_producer_keys_and_rejects_tampering() {

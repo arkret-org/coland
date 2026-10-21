@@ -1923,6 +1923,37 @@ mod realm_native_fixture {
 
     use super::*;
 
+    /// The native test runner issues one loopback certificate chain and one
+    /// client trust store for this process. Every real fixture listener and
+    /// explicit client must use that same authority as production DID egress.
+    struct NativeTlsMaterial {
+        chain: Vec<u8>,
+        key: Vec<u8>,
+        ca: Vec<u8>,
+    }
+
+    fn native_tls_material() -> NativeTlsMaterial {
+        let read = |name: &str| {
+            let path = std::env::var_os(name).unwrap_or_else(|| {
+                panic!("{name} is required; run via cotest/scripts/run-native-rust-tests.py")
+            });
+            std::fs::read(&path).unwrap_or_else(|error| {
+                panic!("unable to read native fixture {name} at {path:?}: {error}")
+            })
+        };
+        let ca = read("COTEST_RUN_SCOPED_CA_PEM");
+        assert_eq!(
+            read("SSL_CERT_FILE"),
+            ca,
+            "native fixture and production DID egress must trust the same run-scoped CA"
+        );
+        NativeTlsMaterial {
+            chain: read("COLAND_TLS_CERT_PATH"),
+            key: read("COLAND_TLS_KEY_PATH"),
+            ca,
+        }
+    }
+
     struct ConfigurationResponseFault {
         completed: tokio::sync::oneshot::Sender<Value>,
         release: Option<std::sync::mpsc::Receiver<()>>,
@@ -1947,6 +1978,8 @@ mod realm_native_fixture {
     impl NativeService {
         fn new(applet: &AppletId, station: &arkret_wire::DidCoreId) -> Self {
             use std::io::{Read as _, Write as _};
+
+            use rustls::pki_types::pem::PemObject as _;
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let authority = listener.local_addr().unwrap().to_string();
@@ -1969,6 +2002,7 @@ mod realm_native_fixture {
             let signer =
                 Ed25519PayloadSigner::from_did_key_seed([13; 32], controller, method.clone());
             package.sign(&signer, &method).unwrap();
+            let material = native_tls_material();
             let tls = Arc::new(
                 rustls::ServerConfig::builder_with_provider(Arc::new(
                     rustls::crypto::ring::default_provider(),
@@ -1977,16 +2011,11 @@ mod realm_native_fixture {
                 .unwrap()
                 .with_no_client_auth()
                 .with_single_cert(
-                    vec![rustls::pki_types::CertificateDer::from(
-                        include_bytes!("../../../server/tests/fixtures/outbox-test-cert.der")
-                            .to_vec(),
-                    )],
-                    rustls::pki_types::PrivateKeyDer::Pkcs8(
-                        rustls::pki_types::PrivatePkcs8KeyDer::from(
-                            include_bytes!("../../../server/tests/fixtures/outbox-test-key.der")
-                                .to_vec(),
-                        ),
-                    ),
+                    rustls::pki_types::CertificateDer::pem_slice_iter(&material.chain)
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .expect("native fixture certificate chain PEM"),
+                    rustls::pki_types::PrivateKeyDer::from_pem_slice(&material.key)
+                        .expect("native fixture private key PEM"),
                 )
                 .unwrap(),
             );
@@ -2237,12 +2266,9 @@ mod realm_native_fixture {
         .unwrap();
         let client = reqwest::Client::builder()
             .tls_backend_rustls()
-            .tls_certs_only(vec![
-                reqwest::Certificate::from_pem(include_bytes!(
-                    "../../../server/tests/fixtures/outbox-test-ca.pem"
-                ))
-                .unwrap(),
-            ])
+            .tls_certs_only(
+                reqwest::Certificate::from_pem_bundle(&native_tls_material().ca).unwrap(),
+            )
             .build()
             .unwrap();
         let mut request = client.post(request_url);
@@ -4745,22 +4771,11 @@ mod realm_native_fixture {
         use salvo::conn::rustls::{Keycert, RustlsConfig};
         use salvo::conn::{Acceptor, Listener, TcpListener};
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let pem = |label: &str, bytes: &[u8]| {
-            format!(
-                "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
-                base64::engine::general_purpose::STANDARD.encode(bytes)
-            )
-        };
-        let cert = pem(
-            "CERTIFICATE",
-            include_bytes!("../../../server/tests/fixtures/outbox-test-cert.der"),
-        );
-        let key = pem(
-            "PRIVATE KEY",
-            include_bytes!("../../../server/tests/fixtures/outbox-test-key.der"),
-        );
+        let material = native_tls_material();
         let acceptor = TcpListener::new("127.0.0.1:0")
-            .rustls(RustlsConfig::new(Keycert::new().cert(cert).key(key)))
+            .rustls(RustlsConfig::new(
+                Keycert::new().cert(material.chain).key(material.key),
+            ))
             .bind()
             .await;
         let address = acceptor.holdings()[0]
@@ -5674,12 +5689,9 @@ mod realm_native_fixture {
             std::env::temp_dir().join(format!("arkret-bridge-real-{}.redb", uuid::Uuid::now_v7()));
         let http = reqwest::Client::builder()
             .tls_backend_rustls()
-            .tls_certs_only(vec![
-                reqwest::Certificate::from_pem(include_bytes!(
-                    "../../../server/tests/fixtures/outbox-test-ca.pem"
-                ))
-                .unwrap(),
-            ])
+            .tls_certs_only(
+                reqwest::Certificate::from_pem_bundle(&native_tls_material().ca).unwrap(),
+            )
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap();

@@ -2748,6 +2748,7 @@ async fn commit_one_inner(
         prepared_service,
         service_approvals,
         audit_unit,
+        fresh_claim_deadlines,
     ))
     .await
 }
@@ -2772,6 +2773,7 @@ fn commit_prepared_event<'a>(
     >,
     service_approvals: Vec<crate::approval_admission::QualifiedApproval>,
     audit_unit: Option<&'a coland_storage::RegisteredAuditCommit>,
+    fresh_claim_deadlines: &'a mut Vec<chrono::DateTime<chrono::Utc>>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
     Box::pin(commit_prepared_event_inner(
@@ -2786,6 +2788,7 @@ fn commit_prepared_event<'a>(
         prepared_service,
         service_approvals,
         audit_unit,
+        fresh_claim_deadlines,
     ))
 }
 
@@ -2809,6 +2812,7 @@ async fn commit_prepared_event_inner(
     >,
     service_approvals: Vec<crate::approval_admission::QualifiedApproval>,
     audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
+    fresh_claim_deadlines: &mut Vec<chrono::DateTime<chrono::Utc>>,
 ) -> Result<(), PgTransactionError> {
     let event = &request.authority_commit.event;
 

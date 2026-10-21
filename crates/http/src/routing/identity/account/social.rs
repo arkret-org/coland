@@ -10,9 +10,10 @@ pub(crate) use direct::{direct_binding_matches_projection, direct_pair_key};
 mod contact_write;
 
 pub(crate) use contact_write::{
-    canonical_contact_digest, contact_assertion_signer, contact_detached_jws, direction_version,
-    local_direction_current, local_requester_current_proof, materialize_contact_completions,
-    validate_request_receipt_cryptography, verify_contact_service_signature_bytes,
+    canonical_contact_digest, contact_assertion_signer, contact_delivery_address,
+    contact_detached_jws, local_direction_current, local_requester_current_proof,
+    materialize_contact_completions, validate_request_receipt_cryptography,
+    verify_contact_service_signature_bytes, verify_contact_service_signature_bytes_at,
 };
 
 fn contact_summary_diagnostic(branch: &'static str) {
@@ -37,7 +38,7 @@ pub(crate) async fn contact_request(
 ) -> JsonResult<ContactOperationOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    contact_write::request(state, &session, body.into_inner()).await
+    Box::pin(contact_write::request(state, &session, body.into_inner())).await
 }
 
 #[endpoint(
@@ -54,7 +55,7 @@ pub(crate) async fn contact_respond(
 ) -> JsonResult<ContactOperationOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    contact_write::respond(state, &session, body.into_inner()).await
+    Box::pin(contact_write::respond(state, &session, body.into_inner())).await
 }
 
 #[endpoint(
@@ -71,7 +72,7 @@ pub(crate) async fn contact_reject(
 ) -> JsonResult<ContactOperationOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    contact_write::reject(state, &session, body.into_inner()).await
+    Box::pin(contact_write::reject(state, &session, body.into_inner())).await
 }
 
 #[endpoint(
@@ -88,7 +89,12 @@ pub(crate) async fn contact_scope_update(
 ) -> JsonResult<ContactOperationOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    contact_write::scope_update(state, &session, body.into_inner()).await
+    Box::pin(contact_write::scope_update(
+        state,
+        &session,
+        body.into_inner(),
+    ))
+    .await
 }
 
 #[endpoint(
@@ -105,7 +111,7 @@ pub(crate) async fn contact_tombstone(
 ) -> JsonResult<ContactOperationOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    contact_write::tombstone(state, &session, body.into_inner()).await
+    Box::pin(contact_write::tombstone(state, &session, body.into_inner())).await
 }
 
 #[endpoint(
@@ -228,16 +234,7 @@ pub(crate) async fn list_contacts(
         .contacts_for_actor(&actor_id)
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
-    let include_continuity = match req.query::<String>("include_continuity").as_deref() {
-        None | Some("false") => false,
-        Some("true") => true,
-        Some(_) => {
-            return Err(AppError::param_invalid(
-                "include_continuity must be true or false",
-            ));
-        }
-    };
-    let contacts = contact_list_rows(state, &actor_id, records, include_continuity).await?;
+    let contacts = contact_list_rows(state, &actor_id, records).await?;
     json_ok(ContactList {
         contacts,
         has_more: false,
@@ -308,7 +305,6 @@ async fn contact_list_rows(
     state: &AppState,
     actor: &arkret_wire::ActorId,
     records: Vec<ContactRecord>,
-    include_continuity: bool,
 ) -> Result<Vec<ContactListRow>, AppError> {
     let mut rows: BTreeMap<String, ContactListRow> = BTreeMap::new();
     let mut selected = BTreeMap::<String, (ContactState, chrono::DateTime<chrono::Utc>)>::new();
@@ -319,14 +315,6 @@ async fn contact_list_rows(
             .then_with(|| left.contact_round_id.cmp(&right.contact_round_id))
     });
     for record in records {
-        let continuity_evidence = if include_continuity {
-            crate::routing::identity::contact_federation::committed_continuity_evidence(&record)
-        } else {
-            None
-        };
-        if continuity_evidence.is_some() {
-            contact_write::verify_stored_contact_evidence_for_read(state, &record, true).await?;
-        }
         let peer = if record.requester_id == *actor {
             record.target_id.clone()
         } else {
@@ -407,9 +395,11 @@ async fn contact_list_rows(
         {
             // Reverify the selected durable round before projecting its peer
             // producer. Failure omits a selector instead of guessing a device.
-            if contact_write::verify_stored_contact_evidence_for_read(state, &record, false)
-                .await
-                .is_ok()
+            if Box::pin(contact_write::verify_stored_contact_evidence_for_read(
+                state, &record,
+            ))
+            .await
+            .is_ok()
             {
                 contact_peer_endpoint(&record, &peer)
             } else {
@@ -444,7 +434,6 @@ async fn contact_list_rows(
             .collect(),
             bidirectional_scopes: Vec::new(),
             effective_scopes: None,
-            continuity_evidence,
             direct_conversation: None,
             contact_agent_projections: Vec::new(),
             peer_endpoint,

@@ -65,6 +65,7 @@ fn request_event(holder: &ContactPeer, peer: &ContactPeer, realm_id: &RealmId) -
         },
         holder.contact_actor_id(),
         json!({
+            "trust_domain_id":"ak:trust_domain:contact.test","version":1,
             "peer": peer,
             "granted_to_peer_scopes": ["direct_message"],
             "introduction_evidence_digest": hash('e'),
@@ -193,8 +194,8 @@ fn fixture(remote: bool) -> Fixture {
         .unwrap(),
         holder: holder.clone(),
         action: ContactCompletionAction::Request {
-            slot_version: 1,
-            slot_predecessor: None,
+            version: 1,
+            predecessor_event_ref: None,
         },
         response_binding: ContactCompletionBinding {
             authenticated_actor: holder.contact_actor_id(),
@@ -269,12 +270,21 @@ fn pending_row(intent: &ContactCompletionIntent) -> coland_storage::ContactRecor
         status: "pending".to_owned(),
         pending_incoming_admitted: false,
         request_event_ref: Some(intent.plan.event.event_id.clone()),
-        request_slot_states: Vec::new(),
+        request_slot_states: vec![coland_storage::ContactRequestSlotState {
+            owner_id: intent.plan.holder.contact_actor_id(),
+            peer_id: peer.contact_actor_id(),
+            version: 1,
+            head_event_ref: intent.plan.event.event_id.clone(),
+            operation_digest: None,
+            request_choice: Some(coland_domain::identity::ContactRequestChoice::Open {
+                request_event_ref: intent.plan.event.event_id.clone(),
+            }),
+        }],
         request_receipts: Vec::new(),
         request_mirror_receipts: Vec::new(),
         contact_round_evidence: None,
-        contact_round_evidence_history: Vec::new(),
-        control_outcomes: Vec::new(),
+        current_state: Default::default(),
+
         response_event_ref: None,
         tombstone_event_ref: None,
         message: None,
@@ -292,7 +302,7 @@ async fn stage(pool: &PgPool, fixture: &Fixture) {
         None,
         coland_storage::ContactProjectionCommit {
             completion_intent: None,
-            record: pending_row(&fixture.ready.intent),
+            record: Box::new(pending_row(&fixture.ready.intent)),
             expected_updated_at: None,
             conflict_code: "contact_round_conflict".to_owned(),
             verified_mirror: None,
@@ -631,4 +641,84 @@ async fn request_lookup_reads_detached_jws_receipts_and_rejects_bare_signatures(
     .unwrap();
     drop(conn);
     assert!(read().await.is_err());
+}
+
+#[tokio::test]
+async fn request_current_and_exact_delivery_freeze_in_the_same_completion() {
+    use arkret_models_collaboration::contact_operations::{
+        ContactCurrentProof, PeerContactSubmitRequestBody,
+    };
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let mut f = fixture(true);
+    stage(&pool, &f).await;
+    let ContactCompletionResult::Accepted { outcome } = &f.result else {
+        unreachable!()
+    };
+    let ContactAcceptedOutcome::Request {
+        request_acceptance_receipt,
+        ..
+    } = outcome.as_ref()
+    else {
+        unreachable!()
+    };
+    let core = &request_acceptance_receipt.core;
+    let key = SigningKey::from_bytes(&[41; 32]);
+    let proof = ContactCurrentProof::sign_with(
+        core.trust_domain_id.clone(),
+        core.holder.clone(),
+        core.peer.clone(),
+        None,
+        None,
+        core.issuer_id.clone(),
+        core.request_event_ref.clone(),
+        core.version,
+        vec![],
+        None,
+        core.accepted_at,
+        core.accepted_at + Duration::minutes(10),
+        |bytes| {
+            Ok(ProtocolSignature {
+                verification_method: DidUrl::new(RECEIPT_METHOD).unwrap(),
+                created_at: core.accepted_at,
+                jws: arkret_signatures::sign_ed25519_detached_jws(&key, bytes).unwrap(),
+            })
+        },
+    )
+    .unwrap();
+    let mut carrier = f.ready.intent.finalized_carrier(outcome).unwrap();
+    let PeerContactSubmitRequestBody::Request { current_proof, .. } = &mut carrier else {
+        unreachable!()
+    };
+    *current_proof = Some(proof.clone());
+    f.delivery.as_mut().unwrap().payload_json =
+        String::from_utf8(arkret_canonical::canonical_json_bytes(&carrier).unwrap()).unwrap();
+    assert!(
+        finalize(
+            &pool,
+            &f.ready,
+            &f.result,
+            f.delivery.as_ref(),
+            Some(&proof)
+        )
+        .await
+        .unwrap()
+    );
+    assert_terminal_once(&pool, &f).await;
+    assert!(
+        !finalize(
+            &pool,
+            &f.ready,
+            &f.result,
+            f.delivery.as_ref(),
+            Some(&proof)
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        finalize(&pool, &f.ready, &f.result, f.delivery.as_ref(), None)
+            .await
+            .is_err()
+    );
 }

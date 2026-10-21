@@ -44,7 +44,7 @@ pub fn admitted_cascade_agent_id(
 #[derive(Clone, Debug)]
 pub struct ContactProjectionCommit {
     pub completion_intent: Option<crate::ContactCompletionIntent>,
-    pub record: ContactRecord,
+    pub record: Box<ContactRecord>,
     pub expected_updated_at: Option<chrono::DateTime<chrono::Utc>>,
     pub conflict_code: String,
     pub verified_mirror: Option<ContactVerifiedMirrorRecord>,

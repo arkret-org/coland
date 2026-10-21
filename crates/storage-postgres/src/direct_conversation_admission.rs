@@ -44,8 +44,6 @@ use super::{
 const BINDING_REF_ROLE: &str = "direct_conversation_binding";
 /// The role of the critical ref a bootstrap Event names its founding unit by.
 const FOUNDING_UNIT_REF_ROLE: &str = "direct_conversation_founding_unit";
-/// The scope both directions of the pair must grant for a send-like action.
-const DIRECT_MESSAGE_SCOPE: &str = "direct_message";
 
 #[derive(QueryableByName)]
 struct GenesisPurposeRow {
@@ -59,6 +57,8 @@ struct FoundingSlotRow {
     founder_id: String,
     #[diesel(sql_type = Text)]
     peer_id: String,
+    #[diesel(sql_type = Text)]
+    trust_domain_id: String,
     #[diesel(sql_type = Text)]
     pair_key: String,
     #[diesel(sql_type = Text)]
@@ -141,13 +141,14 @@ impl DirectConversationRealm {
             )
             .await?,
         );
-        Ok(contact_grants_direct_message(contact.as_ref()))
+        contact_grants_direct_message(conn, contact.as_ref(), &founding.trust_domain_id).await
     }
 }
 
 struct FoundingFacts {
     founder: ActorId,
     peer: ActorId,
+    trust_domain_id: arkret_wire::TrustDomainId,
     pair_key: String,
     main_strand_id: String,
     founding_unit_digest: String,
@@ -213,7 +214,7 @@ pub(crate) async fn direct_conversation_realm_in_connection(
         return Ok(None);
     }
     let founding = sql_query(
-        "SELECT founder_id,peer_id,pair_key,main_strand_id,founding_unit_digest,\
+        "SELECT founder_id,peer_id,trust_domain_id,pair_key,main_strand_id,founding_unit_digest,\
                 authorization_basis,event_ids \
          FROM direct_conversation_founding_slots WHERE realm_id=$1",
     )
@@ -227,6 +228,8 @@ pub(crate) async fn direct_conversation_realm_in_connection(
         Ok::<_, PersistenceError>(FoundingFacts {
             founder: decode_actor(&row.founder_id, "founding slot founder")?,
             peer: decode_actor(&row.peer_id, "founding slot peer")?,
+            trust_domain_id: arkret_wire::TrustDomainId::new(row.trust_domain_id)
+                .map_err(|e| PersistenceError::Database(e.to_string()))?,
             pair_key: row.pair_key,
             main_strand_id: row.main_strand_id,
             founding_unit_digest: row.founding_unit_digest,
@@ -520,17 +523,99 @@ async fn pair_grants_direct_message(
         crate::contacts::pair_contacts_in_connection(conn, &founding.founder, &founding.peer)
             .await?,
     );
-    Ok(contact_grants_direct_message(contact.as_ref()))
+    contact_grants_direct_message(conn, contact.as_ref(), &founding.trust_domain_id).await
 }
 
-fn contact_grants_direct_message(contact: Option<&coland_storage::ContactRecord>) -> bool {
-    let grants = |scopes: &[String]| scopes.iter().any(|scope| scope == DIRECT_MESSAGE_SCOPE);
-    contact.is_some_and(|contact| {
-        contact.status == "accepted"
-            && contact.tombstone_event_ref.is_none()
-            && grants(&contact.granted_to_target_scopes)
-            && grants(&contact.granted_to_requester_scopes)
-    })
+/// Ordinary publication consumes durable verified instances and exact closes.
+/// A source lease expiring does not revoke those instances.
+pub(crate) async fn contact_grants_direct_message(
+    conn: &mut AsyncPgConnection,
+    contact: Option<&coland_storage::ContactRecord>,
+    domain: &arkret_wire::TrustDomainId,
+) -> PersistenceResult<bool> {
+    use arkret_models_collaboration::contact_operations::ContactScope;
+    let Some(contact) = contact else {
+        return Ok(false);
+    };
+    let current = &contact.current_state;
+    let (Some(initial), Some(basis)) = (&current.initial_identity, &current.round_basis) else {
+        return Ok(false);
+    };
+    if contact.status != "accepted"
+        || contact.tombstone_event_ref.is_some()
+        || initial.trust_domain_id != *domain
+        || initial.validate_shape().is_err()
+        || basis.validate_shape().is_err()
+        || contact.contact_round_id.as_ref() != Some(&basis.contact_round_id)
+        || current.directions.len() != 2
+    {
+        return Ok(false);
+    }
+    let mut holders = BTreeSet::new();
+    #[derive(QueryableByName)]
+    struct Closed {
+        #[diesel(sql_type=diesel::sql_types::Bool)]
+        closed: bool,
+    }
+    for direction in &current.directions {
+        let op = &direction.head_operation;
+        let holder = op.holder().contact_actor_id();
+        let peer = op.peer().contact_actor_id();
+        let digest = arkret_wire::Hash::new(
+            arkret_canonical::canonical_sha256(op).map_err(PersistenceError::database)?,
+        )
+        .map_err(PersistenceError::database)?;
+        if contact
+            .request_slot_states
+            .iter()
+            .find(|slot| slot.owner_id == holder)
+            .is_none_or(|slot| {
+                slot.peer_id != peer
+                    || slot.version != op.version()
+                    || slot.head_event_ref != op.event().event_id
+                    || slot.operation_digest.as_ref() != Some(&digest)
+            })
+        {
+            return Ok(false);
+        }
+
+        if op.trust_domain_id() != domain
+            || !holders.insert(holder.clone())
+            || !((holder == contact.requester_id && peer == contact.target_id)
+                || (holder == contact.target_id && peer == contact.requester_id))
+            || direction
+                .closed_round
+                .as_ref()
+                .is_some_and(|c| c.contact_round_id == basis.contact_round_id)
+        {
+            return Ok(false);
+        }
+        let Some(instance) = direction
+            .scope_instances
+            .iter()
+            .find(|i| i.contact_scope == ContactScope::DirectMessage)
+        else {
+            return Ok(false);
+        };
+        if !direction.scope_grants.iter().any(|grant| {
+            grant.event().event_id == instance.grant_event_ref
+                && grant.holder() == op.holder()
+                && grant.peer() == op.peer()
+                && grant.trust_domain_id() == domain
+                && grant.validate_shape().is_ok()
+                && grant
+                    .granted_scopes()
+                    .is_ok_and(|scopes| scopes.contains(&ContactScope::DirectMessage))
+        }) {
+            return Ok(false);
+        }
+        let closed=sql_query("SELECT EXISTS(SELECT 1 FROM contact_round_closures WHERE trust_domain_id=$1 AND ((holder=$2 AND peer=$3) OR (holder=$3 AND peer=$2)) AND contact_round_id=$4) OR EXISTS(SELECT 1 FROM contact_scope_intervals WHERE trust_domain_id=$1 AND holder=$2 AND peer=$3 AND grant_event_ref=$5 AND contact_scope='direct_message' AND closed_by IS NOT NULL) AS closed")
+            .bind::<Text,_>(domain.as_str()).bind::<Jsonb,_>(serde_json::to_value(op.holder()).map_err(PersistenceError::database)?).bind::<Jsonb,_>(serde_json::to_value(op.peer()).map_err(PersistenceError::database)?).bind::<Text,_>(basis.contact_round_id.as_str()).bind::<Text,_>(instance.grant_event_ref.as_str()).get_result::<Closed>(&mut *conn).await.map_err(PersistenceError::database)?;
+        if closed.closed {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Read the current peer leaf's creation provenance, never an obsolete Add.
@@ -1262,5 +1347,238 @@ pub(crate) async fn install_binding_snapshot_in_connection(
         Err(PersistenceError::Conflict(
             "failed_precondition: binding snapshot revision differs".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod contact_current_tests {
+    use arkret_models_collaboration::contact_operations::*;
+    use arkret_test_kit::contact::{ContactCeremonyFixture, ContactParticipant};
+    use arkret_test_kit::service_identity::ServiceIdentityFixture;
+    use chrono::{Duration, Utc};
+    use coland_storage::{ContactRecord, ContactRequestSlotState, ContactStore};
+
+    use super::*;
+    use crate::PgContactStore;
+    use crate::test_database::TestDatabase;
+
+    #[tokio::test]
+    async fn contact_gap_narrowing_persists_exact_closure_and_blocks_stale_ordinary_dm() {
+        let database = TestDatabase::lease().await;
+        let pool = database.pool();
+        let at = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
+        let authority = ServiceIdentityFixture::webvh(
+            &"https://contact-current-index.example/".parse().unwrap(),
+            1901,
+            [83; 32],
+            "source",
+            at - Duration::minutes(1),
+            at,
+        )
+        .unwrap();
+        let party = |seed: u8| {
+            let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+            let mb = arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+                &key.verifying_key().to_bytes(),
+            );
+            let did = arkret_wire::Did::new(format!("did:key:{mb}")).unwrap();
+            ContactParticipant {
+                account_id: arkret_wire::AccountId::new(
+                    arkret_wire::project_did_to_core_id(&did).unwrap(),
+                    authority.service_id.clone(),
+                ),
+                realm_id: arkret_wire::RealmId::from_event_id(&EventId::from_digest(
+                    arkret_canonical::DigestSuite::Sha256,
+                    [seed; 32],
+                )),
+                verification_method: arkret_wire::DidUrl::new(format!("{did}#{mb}")).unwrap(),
+                signing_seed: [seed; 32],
+                authority: &authority,
+            }
+        };
+        let (a, b) = (party(81), party(82));
+        let fixture = ContactCeremonyFixture::normal(&a, &b, at).unwrap();
+        let bundle = &fixture.round;
+        let domain = bundle.initial_identity.trust_domain_id.clone();
+        let mut current = ContactPrivateState::default();
+        for op in &bundle.current_operations {
+            current.apply_confirmed(op.clone()).unwrap();
+        }
+        current
+            .establish(bundle.basis(), bundle.round_events.clone())
+            .unwrap();
+        for d in &mut current.directions {
+            d.current_proof = bundle
+                .current_proofs
+                .iter()
+                .find(|p| p.holder == *d.head_operation.holder())
+                .cloned();
+        }
+        // Already expired leases do not revoke the original instances.
+        for d in &mut current.directions {
+            d.current_proof.as_mut().unwrap().fresh_until = at - Duration::seconds(1);
+        }
+        let slots: Vec<_> = bundle
+            .current_operations
+            .iter()
+            .map(|op| ContactRequestSlotState {
+                owner_id: op.holder().contact_actor_id(),
+                peer_id: op.peer().contact_actor_id(),
+                version: op.version(),
+                head_event_ref: op.event().event_id.clone(),
+                operation_digest: Some(
+                    arkret_wire::Hash::new(arkret_canonical::canonical_sha256(op).unwrap())
+                        .unwrap(),
+                ),
+                request_choice: None,
+            })
+            .collect();
+        let mut record = ContactRecord {
+            requester_id: a.peer().contact_actor_id(),
+            target_id: b.peer().contact_actor_id(),
+            contact_round_id: Some(bundle.contact_round_id.clone()),
+            granted_to_target_scopes: vec!["direct_message".into()],
+            granted_to_requester_scopes: vec!["direct_message".into()],
+            status: "accepted".into(),
+            pending_incoming_admitted: true,
+            request_event_ref: None,
+            request_slot_states: slots,
+            request_receipts: bundle.request_receipts.clone(),
+            request_mirror_receipts: vec![],
+            contact_round_evidence: None,
+            current_state: current,
+            response_event_ref: None,
+            tombstone_event_ref: None,
+            message: None,
+            peer_host_id: None,
+            peer_service_resolution: None,
+            created_at: at,
+            updated_at: at,
+        };
+        let store = PgContactStore { pool: pool.clone() };
+        store.put(&record).await.unwrap();
+        let mut conn = pool.get().await.unwrap();
+        assert!(
+            contact_grants_direct_message(&mut conn, Some(&record), &domain)
+                .await
+                .unwrap()
+        );
+        drop(conn);
+        let event = b
+            .event::<arkret_wire::event_spec::ContactScopeUpdate>(
+                ContactScopeUpdatePayload {
+                    schema: ContactScopeUpdateSchema::V1,
+                    trust_domain_id: domain.clone(),
+                    initial_contact_round_id: bundle.contact_round_id.clone(),
+                    version: 4,
+                    predecessor_event_ref: EventId::from_digest(
+                        arkret_canonical::DigestSuite::Sha256,
+                        [99; 32],
+                    ),
+                    peer: a.peer(),
+                    contact_round_id: bundle.contact_round_id.clone(),
+                    granted_to_peer_scopes: vec![],
+                },
+                at,
+            )
+            .unwrap();
+        let lineage = ContactLineage::sign_with(
+            domain.clone(),
+            Some(bundle.contact_round_id.clone()),
+            Some(bundle.contact_round_id.clone()),
+            b.peer(),
+            a.peer(),
+            4,
+            Some(EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [99; 32],
+            )),
+            event.event_id.clone(),
+            b.producer().unwrap(),
+            vec![],
+            at,
+            |bytes| authority.sign(bytes, at),
+        )
+        .unwrap();
+        let operation = ContactOperationEvidence::ScopeUpdate {
+            signed_event: event,
+            lineage,
+        };
+        let old = record.current_state.clone();
+        record
+            .current_state
+            .observe_authenticated_operation(&operation)
+            .unwrap();
+        let slot = record
+            .request_slot_states
+            .iter_mut()
+            .find(|s| s.owner_id == b.peer().contact_actor_id())
+            .unwrap();
+        slot.version = 4;
+        slot.head_event_ref = operation.event().event_id.clone();
+        slot.operation_digest = Some(
+            arkret_wire::Hash::new(arkret_canonical::canonical_sha256(&operation).unwrap())
+                .unwrap(),
+        );
+        record.updated_at = at + Duration::microseconds(1);
+        assert!(store.put_if_updated_at(at, &record).await.unwrap());
+        let grant = bundle
+            .current_operations
+            .iter()
+            .find(|op| op.holder() == &b.peer())
+            .unwrap();
+        let intervals = store
+            .scope_intervals(
+                &domain,
+                &b.peer(),
+                &a.peer(),
+                std::slice::from_ref(&grant.event().event_id),
+            )
+            .await
+            .unwrap();
+        assert!(!intervals.is_empty());
+        assert!(
+            intervals
+                .iter()
+                .all(|i| i.closed_by.as_ref() == Some(&operation))
+        );
+        assert_eq!(
+            record
+                .current_state
+                .direction(&b.peer())
+                .unwrap()
+                .head_operation
+                .version(),
+            1
+        );
+        // Reinstalling an old projection cannot bypass either the durable
+        // observed cursor or the independently persisted exact-grant closure.
+        let mut regressed = record.clone();
+        regressed.request_slot_states.clear();
+        regressed.updated_at = at + Duration::microseconds(2);
+        assert!(
+            store
+                .put_if_updated_at(record.updated_at, &regressed)
+                .await
+                .is_err()
+        );
+        record.current_state = old;
+        let mut conn = pool.get().await.unwrap();
+        assert!(
+            !contact_grants_direct_message(&mut conn, Some(&record), &domain)
+                .await
+                .unwrap()
+        );
+        record
+            .request_slot_states
+            .iter_mut()
+            .find(|s| s.owner_id == b.peer().contact_actor_id())
+            .unwrap()
+            .version = 1;
+        assert!(
+            !contact_grants_direct_message(&mut conn, Some(&record), &domain)
+                .await
+                .unwrap()
+        );
     }
 }

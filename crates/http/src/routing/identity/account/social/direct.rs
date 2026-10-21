@@ -10,79 +10,102 @@ pub(crate) async fn fresh_direct_contact_evidence(
     Option<arkret_models_collaboration::contact_operations::ContactRoundEvidenceBundle>,
     AppError,
 > {
-    let Some(mut bundle) = record.contact_round_evidence.clone() else {
-        return Ok(None);
-    };
-    if record.status != "accepted"
-        || record.contact_round_id.as_ref() != Some(&bundle.contact_round_id)
-        || bundle.current_proofs.len() != 2
-    {
+    if record.status != "accepted" {
         return Ok(None);
     }
-    super::contact_write::verify_stored_contact_evidence_for_read(state, record, true).await?;
+    let incomplete = record.current_state.initial_identity.is_none()
+        || record.current_state.round_basis.is_none()
+        || record.current_state.directions.len() != 2;
+    if incomplete {
+        if let Some(local) = record.current_state.directions.iter().find(|d| {
+            d.head_operation.holder().delivery_station_id().as_str() == state.service_id()
+        }) {
+            crate::routing::identity::contact_federation::request_remote_contact_current(
+                state,
+                local.head_operation.holder(),
+                local.head_operation.peer(),
+                &record.current_state,
+            )
+            .await?;
+        }
+        return Ok(None);
+    }
+    let mut updated = record.clone();
     let at = now();
-    for proof in &mut bundle.current_proofs {
-        let peer = proof.peer.contact_actor_id();
-        let (holder, head) = if peer == record.target_id {
-            (&record.requester_id, record.request_event_ref.as_ref())
-        } else if peer == record.requester_id {
-            (&record.target_id, record.response_event_ref.as_ref())
-        } else {
-            return Ok(None);
-        };
-        let glare_request_head = head.is_none()
-            && proof.complete_through == 1
-            && bundle.glare_concurrency_attestations.is_some()
-            && bundle.request_receipts.iter().any(|receipt| {
-                receipt.core.holder.contact_actor_id() == *holder
-                    && receipt.core.request_event_ref == proof.head_event_ref
-            });
-        if proof.terminal
-            || (head != Some(&proof.head_event_ref) && !glare_request_head)
-            || proof.contact_round_id != bundle.contact_round_id
-        {
-            return Ok(None);
-        }
-        if proof.fresh_until > at + chrono::Duration::minutes(1) {
-            continue;
-        }
-        if proof.issuer_id != state.service_core_id()
-            || holder
-                .as_account_id()
-                .is_none_or(|account| account.station_id != state.service_core_id())
-        {
-            return Ok(None);
-        }
-        let Some(accepted) = state
-            .authority_commits()
-            .committed_event(&proof.head_event_ref)
-            .await
-            .map_err(|error| {
-                AppError::internal(format!("Contact head decision lookup: {error}"))
-            })?
-        else {
-            return Ok(None);
-        };
-        if accepted.commit.event_ref != proof.head_event_ref {
-            return Ok(None);
-        }
-        let event = accepted.event;
-        if event.actor_id != *holder || event.event_id != proof.head_event_ref {
-            return Ok(None);
-        }
-        let digest_suite = event
-            .event_id
-            .event_digest()
-            .digest_suite()
-            .map_err(|error| AppError::internal(format!("Contact head digest suite: {error}")))?;
-        *proof = super::contact_write::signed_current_proof(
-            state,
-            bundle.contact_round_id.clone(),
-            proof.peer.clone(),
-            &event,
-            digest_suite,
+    for direction in record.current_state.directions.iter() {
+        let holder = direction.head_operation.holder();
+        let op = &direction.head_operation;
+        let original_digest = arkret_wire::Hash::new(
+            arkret_canonical::canonical_sha256(op)
+                .map_err(|e| AppError::internal(e.to_string()))?,
         )
-        .await?;
+        .map_err(|e| AppError::internal(e.to_string()))?;
+        if record
+            .request_slot_states
+            .iter()
+            .find(|slot| slot.owner_id == holder.contact_actor_id())
+            .is_none_or(|slot| {
+                slot.version != op.version()
+                    || slot.head_event_ref != op.event().event_id
+                    || slot.operation_digest.as_ref() != Some(&original_digest)
+            })
+        {
+            if holder.delivery_station_id().as_str() != state.service_id() {
+                crate::routing::identity::contact_federation::request_remote_contact_current(
+                    state,
+                    op.peer(),
+                    holder,
+                    &record.current_state,
+                )
+                .await?;
+            }
+            return Ok(None);
+        }
+
+        if holder.delivery_station_id().as_str() == state.service_id() {
+            let proof =
+                crate::routing::identity::contact_federation::refresh_local_contact_direction(
+                    state,
+                    &record.current_state,
+                    holder,
+                )
+                .await?;
+            updated
+                .current_state
+                .directions
+                .iter_mut()
+                .find(|d| d.head_operation.holder() == holder)
+                .expect("direction exists")
+                .current_proof = Some(proof);
+        } else if direction
+            .current_proof
+            .as_ref()
+            .is_none_or(|p| p.fresh_until <= at)
+        {
+            crate::routing::identity::contact_federation::request_remote_contact_current(
+                state,
+                direction.head_operation.peer(),
+                holder,
+                &record.current_state,
+            )
+            .await?;
+            return Ok(None);
+        }
+    }
+    let Ok(bundle) = updated.current_state.evidence_bundle() else {
+        return Ok(None);
+    };
+    crate::routing::identity::contact_federation::verify_contact_bundle(state, &bundle).await?;
+    if bundle.current_proofs.iter().any(|proof|proof.contact_round_id.as_ref()!=Some(&bundle.contact_round_id) || proof.closed_round.as_ref().is_some_and(|c|c.contact_round_id==bundle.contact_round_id) || !proof.scope_instances.iter().any(|i|i.contact_scope==arkret_models_collaboration::contact_operations::ContactScope::DirectMessage)) {return Ok(None);}
+    updated.contact_round_evidence = Some(bundle.clone());
+    updated.updated_at = now().max(record.updated_at + chrono::Duration::microseconds(1));
+    if !state
+        .contacts()
+        .save_contact_if_updated_at(record.updated_at, updated)
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+    {
+        return Ok(None);
     }
     Ok(Some(bundle))
 }
@@ -170,89 +193,37 @@ pub(crate) fn direct_founding_authority_from_contact(
     arkret_models_collaboration::objects::direct_conversation::DirectConversationFoundingAuthority,
     &'static str,
 > {
-    if let Some(bundle) = record.contact_round_evidence.as_ref() {
-        if record.contact_round_id.as_ref() != Some(&bundle.contact_round_id) {
-            return Err("direct_conversation_founding_authority_unavailable");
-        }
-        arkret_models_collaboration::objects::direct_conversation::DirectConversationFoundingAuthorityEvidence::Human {
-            contact_round_evidence: bundle.clone(),
-            contact_round_continuity_chains: record.contact_round_evidence_history.clone(),
-        }
-        .participants_and_founder()
+    use arkret_models_collaboration::contact_operations::ContactRound;
+    use arkret_models_collaboration::objects::direct_conversation::DirectConversationFoundingAuthority as Authority;
+    let initial = record
+        .current_state
+        .initial_identity
+        .as_ref()
+        .ok_or("direct_conversation_founding_authority_unavailable")?;
+    initial
+        .validate_shape()
         .map_err(|_| "direct_conversation_founding_authority_unavailable")?;
-        arkret_models_collaboration::contact_operations::validate_recontact_continuity(
-            bundle,
-            &record.contact_round_evidence_history,
-        )
-        .map_err(|_| "direct_conversation_founding_authority_unavailable")?;
-        let root = record
-            .contact_round_evidence_history
-            .last()
-            .unwrap_or(bundle);
-        root.contact_round
-            .validate_canonical_order()
-            .map_err(|_| "direct_conversation_founding_authority_unavailable")?;
-        if let arkret_models_collaboration::contact_operations::ContactRound::Glare {
-            requests,
-            ..
-        } = &root.contact_round
-        {
-            let attestations = root
-                .glare_concurrency_attestations
-                .as_ref()
-                .ok_or("direct_conversation_founding_authority_unavailable")?;
-            if root.request_receipts.len() != 2
-                || attestations.iter().any(|attestation| {
-                    attestation.complete_through == 0
-                        || requests.iter().any(|request| {
-                            !attestation
-                                .observed_commit_event_ids
-                                .contains(&request.request_event_ref)
-                        })
-                })
-            {
-                return Err("direct_conversation_founding_authority_unavailable");
-            }
-            let first = &requests[0];
-            let receipt = root
-                .request_receipts
-                .iter()
-                .find(|receipt| receipt.core.request_event_ref == first.request_event_ref)
-                .ok_or("direct_conversation_founding_authority_unavailable")?;
-            let digest = arkret_identifiers::Hash::new(
-                arkret_canonical::canonical_sha256(receipt)
-                    .map_err(|_| "direct_conversation_founding_authority_unavailable")?,
-            )
-            .map_err(|_| "direct_conversation_founding_authority_unavailable")?;
-            if digest != first.request_acceptance_receipt_digest {
-                return Err("direct_conversation_founding_authority_unavailable");
-            }
-            return Ok(
-                arkret_models_collaboration::objects::direct_conversation::DirectConversationFoundingAuthority::Glare {
-                    first_request_author_actor_id: receipt.core.holder.contact_actor_id().clone(),
-                },
-            );
-        }
-        let arkret_models_collaboration::contact_operations::ContactRound::Normal {
-            request_event_ref,
-            ..
-        } = &root.contact_round
-        else {
-            unreachable!("glare returned above")
-        };
-        let request_author_actor_id = root
-            .request_receipts
-            .iter()
-            .find(|receipt| receipt.core.request_event_ref == *request_event_ref)
-            .map(|receipt| receipt.core.holder.contact_actor_id().clone())
-            .ok_or("direct_conversation_founding_authority_unavailable")?;
-        return Ok(
-            arkret_models_collaboration::objects::direct_conversation::DirectConversationFoundingAuthority::Normal {
-                request_author_actor_id,
-            },
-        );
-    }
-    Err("direct_conversation_founding_authority_unavailable")
+    let request_ref = match &initial.round.contact_round {
+        ContactRound::Normal {
+            request_event_ref, ..
+        } => request_event_ref,
+        ContactRound::Glare { requests, .. } => &requests[0].request_event_ref,
+    };
+    let author = initial
+        .round
+        .request_receipts
+        .iter()
+        .find(|r| &r.core.request_event_ref == request_ref)
+        .map(|r| r.core.holder.contact_actor_id())
+        .ok_or("direct_conversation_founding_authority_unavailable")?;
+    Ok(match &initial.round.contact_round {
+        ContactRound::Normal { .. } => Authority::Normal {
+            request_author_actor_id: author,
+        },
+        ContactRound::Glare { .. } => Authority::Glare {
+            first_request_author_actor_id: author,
+        },
+    })
 }
 
 /// Which participant may author the founding unit for this pair, if it can be determined now.

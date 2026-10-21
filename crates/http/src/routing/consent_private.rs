@@ -130,7 +130,6 @@ pub(crate) async fn execute(
             "only the holder hosting Station may originate a private proxy",
         ));
     }
-    let (realm, service) = super::call_admission::holder_location(state, holder).await?;
     let origin = state
         .persistence()
         .principal_resolution_by_account_id(holder)
@@ -141,6 +140,7 @@ pub(crate) async fn execute(
         .map_err(unavailable)?
         .is_human()
     {
+        super::call_admission::holder_location(state, holder).await?;
         let prepared = super::invites::prepare_native_invite(state, holder, &command).await?;
         return state
             .persistence()
@@ -155,6 +155,8 @@ pub(crate) async fn execute(
             .await
             .map_err(unavailable);
     }
+    require_peer_holder(state, holder).await?;
+    let (realm, service) = super::call_admission::holder_location(state, holder).await?;
     let located =
         super::realm_join::resolve_verified_authority_of_service(state, &realm, &service).await?;
     let request = ConsentPrivateProxyRequest {

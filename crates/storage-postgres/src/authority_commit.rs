@@ -1387,7 +1387,11 @@ pub(crate) async fn locked_authority(
     .get_result::<AuthorityRow>(conn)
     .await
     .optional()?;
-    row.map(authority_from_row).transpose().map_err(Into::into)
+    let current = row.map(authority_from_row).transpose()?;
+    if let Some(current) = &current {
+        crate::pcr_private_authority::validate_agent_current(conn, current).await?;
+    }
+    Ok(current)
 }
 
 fn same_authority(left: &CurrentRealmAuthority, right: &CurrentRealmAuthority) -> bool {
@@ -4686,7 +4690,11 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .await
         .optional()
         .map_err(PersistenceError::database)?;
-        row.map(authority_from_row).transpose()
+        let current = row.map(authority_from_row).transpose()?;
+        if let Some(current) = &current {
+            crate::pcr_private_authority::validate_agent_current(&mut conn, current).await?;
+        }
+        Ok(current)
     }
 
     async fn local_current_member_joined(

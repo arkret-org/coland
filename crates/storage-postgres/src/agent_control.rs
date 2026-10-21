@@ -419,6 +419,15 @@ async fn admit_agent_control_in_connection(
         return Ok(AgentControlAdmissionOutcome::Duplicate(stored));
     }
 
+    if transaction.expected_authority.service_id != agent.station_id
+        || transaction.expected_authority.generation != 0
+    {
+        return Err(precondition(
+            "Agent PCR remains at its account Station and initial tenure",
+        ));
+    }
+    crate::pcr_private_authority::validate_installed_governance(conn, &event.realm_id).await?;
+
     // The Agent PCR is the Agent account's own, and the accepted provision
     // in the controller's PCR binds this controller and delegation to it.
     if pcr_of(conn, &agent).await?.as_ref() != Some(&event.realm_id) {

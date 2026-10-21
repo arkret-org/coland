@@ -4966,7 +4966,7 @@ async fn profile_accountability_requires_active_grant_at_commit_cut() {
     };
     assert_eq!(
         created.profile.accountable_principal_ids,
-        vec![issuer.principal_id.clone()]
+        Some(vec![issuer.principal_id.clone()])
     );
 
     // The issuer revokes the same exact set, spelled as the singleton string;
@@ -5035,7 +5035,7 @@ async fn profile_accountability_requires_active_grant_at_commit_cut() {
     .unwrap() else {
         panic!("removing accountable principals commits");
     };
-    assert!(cleared.profile.accountable_principal_ids.is_empty());
+    assert_eq!(cleared.profile.accountable_principal_ids, None);
 }
 
 #[derive(Debug, PartialEq, Eq, diesel::QueryableByName)]
@@ -5509,7 +5509,7 @@ async fn agent_profile_accountability_follows_the_provision_projection() {
     };
     assert_eq!(
         created.profile.accountable_principal_ids,
-        vec![controller.principal_id.clone()]
+        Some(vec![controller.principal_id.clone()])
     );
 
     // An independent grant on the same exact set, spelled as a one-element

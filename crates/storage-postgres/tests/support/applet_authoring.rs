@@ -5785,11 +5785,12 @@ mod realm_native_fixture {
             ArkretEdge, AuthoringJournal, AuthoringStore, FileAuthoringStore, PreparedGhost,
         };
         use coland_storage::MlsGroupCurrentStore as _;
-        struct LostRevokeReceipt {
+        struct LostDeviceReceipt {
             inner: FileAuthoringStore,
             armed: Arc<std::sync::atomic::AtomicBool>,
+            authorization_armed: Arc<std::sync::atomic::AtomicBool>,
         }
-        impl AuthoringStore for LostRevokeReceipt {
+        impl AuthoringStore for LostDeviceReceipt {
             fn load(&self, key: &str) -> arkret_bridge_runtime::Result<Option<String>> {
                 self.inner.load(key)
             }
@@ -5810,6 +5811,17 @@ mod realm_native_fixture {
                 {
                     return Err(arkret_bridge_runtime::BridgeError::App(
                         "injected crash before revoke receipt persistence".into(),
+                    ));
+                }
+                if expected
+                    .iter()
+                    .any(|(key, value)| key.starts_with("managed-device/v1/") && value.is_some())
+                    && self
+                        .authorization_armed
+                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(arkret_bridge_runtime::BridgeError::App(
+                        "injected crash before authorization receipt persistence".into(),
                     ));
                 }
                 self.inner.compare_exchange_batch(expected, writes)
@@ -5922,6 +5934,7 @@ mod realm_native_fixture {
             .build()
             .unwrap();
         let lost_receipt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lost_authorization = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let make_edge = || {
             Arc::new(
                 ArkretEdge::new_outbound(
@@ -5932,9 +5945,10 @@ mod realm_native_fixture {
                         did.clone(),
                         package.webhook_auth.key_ref.clone(),
                     ),
-                    AuthoringJournal::new(Arc::new(LostRevokeReceipt {
+                    AuthoringJournal::new(Arc::new(LostDeviceReceipt {
                         inner: FileAuthoringStore::new(path.clone()).unwrap(),
                         armed: lost_receipt.clone(),
+                        authorization_armed: lost_authorization.clone(),
                     })),
                 )
                 .unwrap(),
@@ -6078,10 +6092,31 @@ mod realm_native_fixture {
         }
         eprintln!("real Bridge runtime: current private control and native Device");
         let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
+        lost_authorization.store(true, std::sync::atomic::Ordering::SeqCst);
+        let failure = boxed_step(|| devices.device_for_actor(&actor))
+            .await
+            .err()
+            .expect("authorization outcome persistence must fail");
+        assert!(
+            failure
+                .to_string()
+                .contains("injected crash before authorization receipt persistence"),
+            "{failure}"
+        );
+        let authorized_nonces = control_nonce_count(&factory.fixture.pool, &actor).await;
+        drop(devices);
+        drop(edge);
+        let edge = make_edge();
+        let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
         let device = boxed_step(|| devices.device_for_actor(&actor))
             .await
             .unwrap();
         assert_eq!(device.actor_id, actor);
+        assert_eq!(
+            control_nonce_count(&factory.fixture.pool, &actor).await,
+            authorized_nonces,
+            "accepted authorization recovery must not issue another controller-authenticated request"
+        );
         assert_ne!(
             device.signer().verifying_key(),
             SigningKey::from_bytes(&[42; 32]).verifying_key()

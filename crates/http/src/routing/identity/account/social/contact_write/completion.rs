@@ -296,13 +296,13 @@ async fn sign_outcome(
                 sign_lineage,
             )
             .map_err(error)?;
-            let current_proof = latest_direction_proof(
+            let current_proof = Box::pin(latest_direction_proof(
                 state,
                 intent,
                 &payload.contact_round_id,
                 &payload.peer,
                 None,
-            )
+            ))
             .await?;
             ContactAcceptedOutcome::Response {
                 operation_id,
@@ -363,13 +363,13 @@ async fn sign_outcome(
                 sign_lineage,
             )
             .map_err(error)?;
-            let current_proof = latest_direction_proof(
+            let current_proof = Box::pin(latest_direction_proof(
                 state,
                 intent,
                 &payload.contact_round_id,
                 &payload.peer,
                 None,
-            )
+            ))
             .await?;
             ContactAcceptedOutcome::ScopeUpdate {
                 operation_id,
@@ -398,7 +398,7 @@ async fn sign_outcome(
                 sign_lineage,
             )
             .map_err(error)?;
-            let current_proof = latest_direction_proof(
+            let current_proof = Box::pin(latest_direction_proof(
                 state,
                 intent,
                 &payload.contact_round_id,
@@ -411,7 +411,7 @@ async fn sign_outcome(
                         lineage: lineage.clone(),
                     },
                 }),
-            )
+            ))
             .await?;
             ContactAcceptedOutcome::Tombstone {
                 operation_id,
@@ -487,7 +487,7 @@ async fn latest_direction_proof(
             "Contact local directional history is incomplete"
         ));
     }
-    let next = signed_current_proof(
+    let next = Box::pin(signed_current_proof(
         state,
         round_id.clone(),
         intent.plan.holder.clone(),
@@ -500,7 +500,7 @@ async fn latest_direction_proof(
             .event_digest()
             .digest_suite()
             .map_err(|error| AppError::internal(error.to_string()))?,
-    )
+    ))
     .await?;
     Ok(next)
 }

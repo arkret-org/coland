@@ -365,39 +365,39 @@ async fn validate_request_acceptance_receipt(
         })?;
         (event, stored.digest_suite)
     } else {
-        // A peer Contact is holder-private mirror material, not an Event in
-        // the recipient's principal-control Realm. Its verified source receipt
-        // and exact canonical Event must remain bound to this pending slot.
-        let target = contact_mirror_target_holder_key(&responder.contact_actor_id());
-        let mirror = state
-            .persistence()
-            .contact_verified_mirror(&target, receipt.core.request_event_ref.as_str())
-            .await
-            .map_err(|error| AppError::internal(format!("Contact request mirror lookup: {error}")))?
+        // The bounded private direction retains the exact peer original.
+        // Revalidate both holder and source after cold recovery instead of
+        // requiring a separate mirror cache populated by an obsolete path.
+        let original = &record
+            .current_state
+            .direction(&receipt.core.holder)
             .ok_or_else(|| {
-                crate::app_error!(
-                    FailedPrecondition,
-                    "verified Contact request mirror is unavailable"
-                )
-            })?;
-        let event: Event =
-            serde_json::from_slice(&mirror.canonical_event_bytes).map_err(|error| {
-                AppError::internal(format!("Contact request mirror decode: {error}"))
-            })?;
-        if mirror.target_holder_principal_id != target
-            || mirror.request_event_id != receipt.core.request_event_ref.as_str()
-            || mirror.issuer_id != expected_issuer
-            || mirror.source_receipt != *receipt
-            || mirror.request_digest != receipt.core.request_digest().as_str()
-            || arkret_canonical::canonical_json_bytes(&event).map_err(|error| {
-                AppError::internal(format!("Contact request mirror canonicalize: {error}"))
-            })? != mirror.canonical_event_bytes
-        {
+                crate::app_error!(FailedPrecondition, "Contact request original unavailable")
+            })?
+            .head_operation;
+        let ContactOperationEvidence::Request {
+            signed_event,
+            request_receipt,
+        } = original
+        else {
             return Err(crate::app_error!(
                 FailedPrecondition,
-                "verified Contact request mirror differs from its source receipt"
+                "Contact pending head is not its original request"
+            ));
+        };
+        if request_receipt != receipt || signed_event.event_id != receipt.core.request_event_ref {
+            return Err(crate::app_error!(
+                FailedPrecondition,
+                "Contact pending original differs from source receipt"
             ));
         }
+        Box::pin(
+            crate::routing::identity::contact_federation::verify_original_contact_operation(
+                state, original,
+            ),
+        )
+        .await?;
+        let event = signed_event.clone();
         let suite = receipt
             .core
             .request_digest()

@@ -150,8 +150,11 @@ requires_openai_auth = false
         })
         .await
         .expect("model must receive the original input");
+        eprintln!("native Bot restart: submit the intervening MLS update");
         realm_actor_mls_fixture::human_updates_group(fixture, scope, group).await;
+        eprintln!("native Bot restart: inspect the durable pre-update epoch");
         assert_eq!(devices.installed_mls_epoch(device).await.unwrap(), Some(1));
+        eprintln!("native Bot restart: release the model response");
         release.notify_one();
     }
     tokio::time::timeout(std::time::Duration::from_secs(300), async {
@@ -164,6 +167,7 @@ requires_openai_auth = false
     })
     .await
     .expect("actual worker must publish the model reply");
+    eprintln!("native Bot restart: stop the first worker after its durable reply");
     workers.shutdown().await;
     assert_eq!(calls.as_ref().load(std::sync::atomic::Ordering::SeqCst), 1);
     #[derive(diesel::QueryableByName)]
@@ -194,11 +198,13 @@ requires_openai_auth = false
         recipient.check_incarnation().is_err(),
         "retired worker must invalidate retained source authority"
     );
+    eprintln!("native Bot restart: open the retained consumer");
     let restarted = Arc::new(make_sink().await.unwrap());
     let mut workers =
         arkret_bridge_runtime::managed_device::ManagedDeviceWorkers::new(edge.clone())
             .unwrap()
             .with_content_sink(restarted.clone());
+    eprintln!("native Bot restart: start the replacement worker");
     workers.tick().await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {

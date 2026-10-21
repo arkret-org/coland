@@ -463,7 +463,7 @@ async fn current_binding(
         .await?;
         if let Err(error) = cut.require_open_business_mutation() {
             if error.conflict_code() == Some(coland_storage::ConflictCode::FailedPrecondition) {
-                return Ok(inactive);
+                return Ok(AppletInstallationCurrentBinding::Inactive);
             }
             return Err(error);
         }

@@ -104,3 +104,12 @@ async fn bridge_ghost_recovers_same_identity_after_admin_reenable_and_daily_key_
     ))
     .await;
 }
+
+#[tokio::test]
+async fn bridge_recovery_cancelled_before_publication_requires_a_new_intent() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_runtime_cancelled_recovery(
+        database.pool(),
+    ))
+    .await;
+}

@@ -41,14 +41,21 @@ struct Row {
 
 fn record(row: Row) -> PersistenceResult<ConsentCurrentRecord> {
     let event: Event = serde_json::from_value(row.envelope).map_err(PersistenceError::database)?;
-    let peer: ConsentPeer =
-        serde_json::from_value(event.payload.get("peer").cloned().ok_or_else(|| {
-            PersistenceError::SchemaViolation("Consent original peer is missing".into())
-        })?)
-        .map_err(PersistenceError::database)?;
+    let payload: ConsentReplacePayload = serde_json::from_value(
+        serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
+    )
+    .map_err(PersistenceError::database)?;
+    let value: ConsentValue =
+        serde_json::from_value(row.value).map_err(PersistenceError::database)?;
+    payload.validate().map_err(PersistenceError::database)?;
+    if event.kind != EventKind::ConsentReplace || value.permissions != payload.permissions {
+        return Err(PersistenceError::Conflict(
+            "Consent current differs from its accepted original".into(),
+        ));
+    }
     Ok(ConsentCurrentRecord {
-        peer,
-        value: serde_json::from_value(row.value).map_err(PersistenceError::database)?,
+        peer: payload.peer,
+        value,
         event,
         commit: serde_json::from_value(row.commit_json).map_err(PersistenceError::database)?,
         quarantine_update: None,
@@ -75,8 +82,8 @@ pub(crate) async fn records_in_connection(
         #[diesel(sql_type=diesel::sql_types::Bool)]
         complete: bool,
     }
-    let complete=sql_query("SELECT NOT EXISTS(SELECT 1 FROM realm_commits c LEFT JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND c.stream_ref->>'kind'='realm' AND (e.pk IS NULL OR e.state<>'committed')) AND NOT EXISTS(SELECT 1 FROM (SELECT DISTINCT ON(e.envelope->'payload'->'peer'->'actor_id') e.envelope->'payload'->'peer'->'actor_id' AS peer_id,c.commit_id FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND e.envelope->>'kind'='ak.consent.replace' ORDER BY e.envelope->'payload'->'peer'->'actor_id',c.stream_position DESC) latest LEFT JOIN consent_current_results r ON r.realm_id=$1 AND r.peer_id=latest.peer_id WHERE r.current_commit_id IS DISTINCT FROM latest.commit_id) AND NOT EXISTS(SELECT 1 FROM consent_current_results r LEFT JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position LEFT JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND (c.commit_id IS NULL OR e.pk IS NULL OR e.state<>'committed')) AS complete")
-        .bind::<Text,_>(realm.as_str()).get_result::<Completeness>(&mut *conn).await?;
+    let complete=sql_query("SELECT NOT EXISTS(SELECT 1 FROM realm_commits c LEFT JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND c.stream_ref->>'kind'='realm' AND (e.pk IS NULL OR e.state<>'committed')) AND NOT EXISTS(SELECT 1 FROM (SELECT DISTINCT ON(e.envelope->'payload'->'peer'->'actor_id') e.envelope->'payload'->'peer'->'actor_id' AS peer_id,c.commit_id FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND e.envelope->>'kind' ='ak.consent.replace' ORDER BY e.envelope->'payload'->'peer'->'actor_id',c.stream_position DESC) latest LEFT JOIN consent_current_results r ON r.realm_id=$1 AND r.peer_id=latest.peer_id WHERE r.current_commit_id IS DISTINCT FROM latest.commit_id) AND NOT EXISTS(SELECT 1 FROM consent_current_results r LEFT JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position LEFT JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND (c.commit_id IS NULL OR e.pk IS NULL OR e.state<>'committed' OR e.envelope->>'kind' IS DISTINCT FROM 'ak.consent.replace' OR r.peer_id IS DISTINCT FROM e.envelope->'payload'->'peer'->'actor_id' OR r.holder_account_id IS DISTINCT FROM e.envelope->'actor_id'->'account_id' OR r.value->'permissions' IS DISTINCT FROM e.envelope->'payload'->'permissions')) AS complete")
+                .bind::<Text,_>(realm.as_str()).get_result::<Completeness>(&mut *conn).await?;
     if !complete.complete {
         return Err(rejected(
             ConflictCode::TemporarilyUnavailable,
@@ -147,6 +154,7 @@ async fn admit(
         .validate()
         .map_err(|e| rejected(ConflictCode::SchemaViolation, &e.to_string()))?;
     let peer_json = serde_json::to_value(replacement.peer.actor_id()).map_err(corrupt)?;
+    records_in_connection(conn, holder, &event.realm_id).await?;
     let current = sql_query("SELECT r.value,e.envelope,c.commit_json FROM consent_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.peer_id=$2 FOR UPDATE OF r")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(&peer_json).get_result::<Row>(&mut *conn).await.optional()?.map(record).transpose()?;
     let expected_matches = match (&replacement.expected_current, &current) {

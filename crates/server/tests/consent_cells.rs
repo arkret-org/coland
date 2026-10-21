@@ -124,8 +124,7 @@ async fn opaque_consent_request_does_not_create_a_pending_cell() {
     let mut cell_url = url::Url::parse("http://server/_arkret/self/consent/result").unwrap();
     cell_url
         .query_pairs_mut()
-        .append_pair("peer", &serde_json::to_string(&peer).unwrap())
-        .append_pair("consent_scope", "voice_call");
+        .append_pair("peer", &serde_json::to_string(&peer).unwrap());
     let response = TestClient::get(cell_url.as_str())
         .add_header("Authorization", format!("Bearer {bob_token}"), true)
         .add_header(

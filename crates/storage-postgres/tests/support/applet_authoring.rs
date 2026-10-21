@@ -1910,10 +1910,16 @@ mod realm_native_fixture {
 
     use super::*;
 
+    struct ConfigurationResponseFault {
+        completed: tokio::sync::oneshot::Sender<Value>,
+        release: Option<std::sync::mpsc::Receiver<()>>,
+    }
+
     struct NativeService {
         package: AppletPackage,
         actor_log: Arc<Mutex<Vec<Value>>>,
         managed_router: Arc<Mutex<Option<Arc<salvo::Service>>>>,
+        configuration_response_fault: Arc<Mutex<Option<ConfigurationResponseFault>>>,
         stop: Arc<std::sync::atomic::AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
@@ -1977,6 +1983,9 @@ mod realm_native_fixture {
             let published_actor = actor_log.clone();
             let managed_router = Arc::new(Mutex::new(None::<Arc<salvo::Service>>));
             let served_router = managed_router.clone();
+            let configuration_response_fault =
+                Arc::new(Mutex::new(None::<ConfigurationResponseFault>));
+            let response_fault = configuration_response_fault.clone();
             let service_resolution = fixture_applet_service_history(&package);
             let resolution_path =
                 arkret_models_identity::canonical_service_resolution_path(&package.service_id);
@@ -1996,6 +2005,7 @@ mod realm_native_fixture {
                     let entry = native.log_entry.clone();
                     let published_actor = published_actor.clone();
                     let served_router = served_router.clone();
+                    let response_fault = response_fault.clone();
                     let service_resolution = service_resolution.clone();
                     let resolution_path = resolution_path.clone();
                     let runtime = runtime.clone();
@@ -2014,7 +2024,7 @@ mod realm_native_fixture {
                         let mut first=request.lines().next().unwrap().split_whitespace();
                         let method=first.next().unwrap();
                         let path=first.next().unwrap();
-                        if method == "GET" && path == resolution_path {
+                        if method == "GET" && path == resolution_path && served_router.lock().unwrap().is_none() {
                             let body = arkret_canonical::canonical_json_bytes(&service_resolution).unwrap();
                             let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
                             let _ = stream.write_all(header.as_bytes());
@@ -2023,7 +2033,7 @@ mod realm_native_fixture {
                             return;
                         }
                         let router=served_router.lock().unwrap().clone();
-                        if let Some(router)=router.filter(|_| path.starts_with("/_arkret/") || (path.starts_with("/webvh/") && !path.contains("/service/"))) {
+                        if let Some(router)=router.filter(|_| path.starts_with("/_arkret/") || path.starts_with("/webvh/")) {
                             let headers=request.lines().skip(1).filter_map(|line|line.split_once(':'))
                                 .map(|(name,value)|(name.to_owned(),value.trim().to_owned())).collect::<Vec<_>>();
                             let length=headers.iter().find(|(name,_)|name.eq_ignore_ascii_case("content-length"))
@@ -2041,6 +2051,18 @@ mod realm_native_fixture {
                                 let mut response=forwarded.send(router.as_ref()).await;
                                 (response.status_code.unwrap_or(StatusCode::OK), response.take_bytes(None).await.unwrap())
                             });
+                            if path == "/_arkret/edge/applet/configuration" && status.is_success() {
+                                let fault = response_fault.lock().unwrap().take();
+                                if let Some(fault) = fault {
+                                    let _ = fault.completed.send(serde_json::from_slice(&body).unwrap());
+                                    match fault.release {
+                                        Some(release) => {
+                                            if release.recv_timeout(std::time::Duration::from_secs(30)).is_err() { return; }
+                                        }
+                                        None => return,
+                                    }
+                                }
+                            }
                             let header=format!("HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",status.as_u16(),status.canonical_reason().unwrap_or("Result"),body.len());
                             let _=stream.write_all(header.as_bytes());let _=stream.write_all(&body);let _=stream.flush();
                             return;
@@ -2062,6 +2084,7 @@ mod realm_native_fixture {
                 package,
                 actor_log,
                 managed_router,
+                configuration_response_fault,
                 stop,
                 thread: Some(thread),
             }

@@ -59,6 +59,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
         "arkret":{
             "server_url":factory.fixture.state.config().public_base_url,
             "applet_base_url":package.base_url,"service_did":did,
+            "service_resolution":fixture_applet_service_history(package),
             "trust_domain":factory.fixture.state.config().trust_domain,
             "applet_id":id,"signing_key_seed_hex":"2a".repeat(32),
             "verification_method_fragment":"#applet-service-key",
@@ -220,6 +221,95 @@ pub(super) async fn run_configuration(pool: PgPool) {
     };
     let (status, _) = boxed_step(|| submit(changed)).await;
     assert_ne!(status, StatusCode::OK);
+
+    let mut existing = request.clone();
+    existing.intent.request_id = format!("ak:request:{}", uuid::Uuid::now_v7())
+        .parse()
+        .unwrap();
+    existing.intent.selection = AppletConfigurationSelection::ExistingRealmActor {
+        actor_id: candidate.actor_id.clone(),
+    };
+    existing.command = Command::Configure;
+    let (status, reused) = boxed_step(|| submit(existing.clone())).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "select the accepted managed identity: {reused}"
+    );
+    let reused: Outcome = serde_json::from_value(reused).unwrap();
+    assert_eq!(reused.admission_status, Admission::Accepted);
+    let source = reused.source_outcome.as_ref().unwrap();
+    assert_eq!(source.actor_id.as_ref(), Some(&candidate.actor_id));
+    assert!(source.create_event.is_none());
+    assert_eq!(
+        source.creation_refs.as_ref().unwrap().as_slice()[0].event_id,
+        original.event_id
+    );
+    existing.command = Command::Recover;
+    let (status, replay) = boxed_step(|| submit(existing)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "recover selected identity: {replay}"
+    );
+    assert_eq!(json!(reused), replay);
+
+    // The Applet finishes and durably retains the candidate, but its HTTPS
+    // connection closes before the governing Station receives any response.
+    let (completed, observed) = tokio::sync::oneshot::channel();
+    *native.configuration_response_fault.lock().unwrap() = Some(ConfigurationResponseFault {
+        completed,
+        release: None,
+    });
+    let mut lost = request.clone();
+    lost.intent.request_id = format!("ak:request:{}", uuid::Uuid::now_v7())
+        .parse()
+        .unwrap();
+    lost.command = Command::Configure;
+    let (status, failure) = boxed_step(|| submit(lost.clone())).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "lost Applet response: {failure}"
+    );
+    let retained = observed.await.unwrap();
+    let lost_candidate: arkret_wire::Event =
+        serde_json::from_value(retained["create_event"].clone()).unwrap();
+    assert!(
+        factory
+            .fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .committed_event(&lost_candidate.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    *native.managed_router.lock().unwrap() = Some(make_router());
+    lost.command = Command::Recover;
+    let (status, recovered) = boxed_step(|| submit(lost.clone())).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "recover the original after response loss: {recovered}"
+    );
+    assert_eq!(recovered["admission_status"], "accepted");
+    assert_eq!(recovered["source_outcome"], retained);
+    let committed = factory
+        .fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&lost_candidate.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(committed.event, lost_candidate);
+    let (status, replay) = boxed_step(|| submit(lost)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(recovered, replay);
+
     request.intent.request_id = format!("ak:request:{}", uuid::Uuid::now_v7())
         .parse()
         .unwrap();
@@ -432,34 +522,62 @@ pub(super) async fn run_configuration(pool: PgPool) {
     assert_eq!(status, StatusCode::OK, "pending before handoff: {pending}");
     assert_eq!(pending["admission_status"], "pending");
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let head = store
-        .stream_head(&arkret_wire::CommitStreamRef::Realm {
-            realm_id: factory.fixture.realm.clone(),
-        })
-        .await
-        .unwrap()
-        .unwrap();
-    let authority = store
-        .current_authority(&factory.fixture.realm)
-        .await
-        .unwrap()
-        .unwrap();
-    let change = factory.fixture.admin_event(
-        EventKind::RealmGovernanceStationChange,
-        ScopeRef::Realm {
-            realm_id: factory.fixture.realm.clone(),
-        },
-        json!({
-            "expected_governance_generation": authority.generation,
-            "expected_realm_stream_commit_id": head.commit_id,
-            "new_governance_station_id": "ak:did_core:web:configuration-next.example"
-        }),
+    let (completed, observed) = tokio::sync::oneshot::channel();
+    let (release, delayed) = std::sync::mpsc::channel();
+    *native.configuration_response_fault.lock().unwrap() = Some(ConfigurationResponseFault {
+        completed,
+        release: Some(delayed),
+    });
+    let mut delayed_request = request.clone();
+    delayed_request.command = Command::Recover;
+    let (late_response, (manifest, bytes)) =
+        tokio::join!(boxed_step(|| submit(delayed_request)), async {
+            let source = observed.await.unwrap();
+            assert_eq!(source, pending["source_outcome"]);
+            let head = store
+                .stream_head(&arkret_wire::CommitStreamRef::Realm {
+                    realm_id: factory.fixture.realm.clone(),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let authority = store
+                .current_authority(&factory.fixture.realm)
+                .await
+                .unwrap()
+                .unwrap();
+            let change = factory.fixture.admin_event(
+                EventKind::RealmGovernanceStationChange,
+                ScopeRef::Realm {
+                    realm_id: factory.fixture.realm.clone(),
+                },
+                json!({
+                    "expected_governance_generation": authority.generation,
+                    "expected_realm_stream_commit_id": head.commit_id,
+                    "new_governance_station_id": "ak:did_core:web:configuration-next.example"
+                }),
+            );
+            boxed_step(|| configuration_admin_event(&factory.fixture, change)).await;
+            let (manifest, bytes) = store
+                .export_management_private_state(&factory.fixture.realm)
+                .await
+                .unwrap();
+            // Release the genuine Applet response only after the signed governance
+            // change has frozen the Realm's private transfer bytes.
+            release.send(()).unwrap();
+            (manifest, bytes)
+        });
+    assert_eq!(
+        late_response.0,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "late Applet result cannot rewrite the frozen ledger: {}",
+        late_response.1
     );
-    boxed_step(|| configuration_admin_event(&factory.fixture, change)).await;
-    let (manifest, bytes) = store
+    let (_, after_late_response) = store
         .export_management_private_state(&factory.fixture.realm)
         .await
         .unwrap();
+    assert_eq!(bytes, after_late_response);
     let archive: Value = serde_json::from_slice(&bytes).unwrap();
     let row = archive["tables"]["applet_configurations"]
         .as_array()

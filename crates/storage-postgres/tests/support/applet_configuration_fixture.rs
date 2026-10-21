@@ -184,6 +184,130 @@ pub(super) async fn run_configuration(pool: PgPool) {
         .unwrap()
         .unwrap();
     assert_eq!(committed.event, **original);
+    let completions = factory
+        .fixture
+        .state
+        .test_persistence()
+        .applets()
+        .pending_authoring_completions(&factory.fixture.state.service_core_id(), 128)
+        .await
+        .unwrap();
+    let completion = completions
+        .into_iter()
+        .find(|item| item.actor_id == candidate.actor_id)
+        .expect("creation atomically retains completion");
+    assert_eq!(completion.creation_ref.event_id, original.event_id);
+    assert_eq!(
+        completion.creation_ref.commit_id,
+        committed.commit.commit_id
+    );
+    assert!(
+        factory
+            .fixture
+            .state
+            .test_persistence()
+            .applets()
+            .pending_authoring_completions(&factory.fixture.state.service_core_id(), 128)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a reserved delivery is not immediately claimed twice"
+    );
+    let delivery = prepare_configuration_completion(&factory.fixture, &completion)
+        .await
+        .unwrap();
+    let retry = prepare_configuration_completion(&factory.fixture, &completion)
+        .await
+        .unwrap();
+    assert_eq!(
+        json!(delivery),
+        json!(retry),
+        "unexpired transport attempts retain exact bytes"
+    );
+    boxed_step(|| deliver_configuration_completion(&factory.fixture, &completion, &delivery))
+        .await
+        .unwrap();
+    let receipts = FileAuthoringStore::shared(path.clone())
+        .unwrap()
+        .entries_with_prefix("applet-completion/v1/")
+        .unwrap();
+    assert_eq!(receipts.len(), 1, "one original durable HTTP receipt");
+    let receipt: Value = serde_json::from_str(&receipts[0].1).unwrap();
+    let authentication: arkret_models_integration::AppletDeliveryAuthenticationRecord =
+        serde_json::from_value(receipt["delivery_authentication_record"].clone()).unwrap();
+    assert_eq!(
+        receipt["delivery_authentication_record"]
+            .as_object()
+            .unwrap()
+            .len(),
+        14
+    );
+    assert_eq!(
+        authentication.registration_epoch,
+        native.package.registration_epoch
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    boxed_step(|| deliver_configuration_completion(&factory.fixture, &completion, &delivery))
+        .await
+        .unwrap();
+    assert_eq!(
+        FileAuthoringStore::shared(path.clone())
+            .unwrap()
+            .entries_with_prefix("applet-completion/v1/")
+            .unwrap(),
+        receipts,
+        "fresh HTTP times preserve the original full authentication record and outcome"
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+    assert!(
+        boxed_step(|| deliver_configuration_completion(&factory.fixture, &completion, &delivery))
+            .await
+            .is_err(),
+        "expired material cannot authorize another receipt even if an outcome was retained"
+    );
+    let fresh = prepare_configuration_completion(&factory.fixture, &completion)
+        .await
+        .unwrap();
+    assert_ne!(fresh.idempotency_key, delivery.idempotency_key);
+    assert_eq!(
+        json!(fresh.context.material.result),
+        json!(delivery.context.material.result),
+        "refresh preserves original Event, Commit and signer fact"
+    );
+    let mut conflict = fresh.clone();
+    conflict.idempotency_key = delivery.idempotency_key.clone();
+    let rejected =
+        boxed_step(|| deliver_configuration_completion(&factory.fixture, &completion, &conflict))
+            .await
+            .unwrap_err();
+    assert!(
+        rejected.contains("duplicate_conflict"),
+        "changed material under the same transport identity: {rejected}"
+    );
+    *native.managed_router.lock().unwrap() = None;
+    *native.managed_router.lock().unwrap() = Some(make_router());
+    boxed_step(|| deliver_configuration_completion(&factory.fixture, &completion, &fresh))
+        .await
+        .unwrap();
+    let stale_digest =
+        arkret_wire::Hash::new(arkret_canonical::canonical_sha256(&delivery).unwrap()).unwrap();
+    assert!(
+        factory
+            .fixture
+            .state
+            .test_persistence()
+            .applets()
+            .acknowledge_authoring_completion(
+                &completion.applet_id,
+                &completion.request_digest,
+                &factory.fixture.state.service_core_id(),
+                &stale_digest,
+                chrono::Utc::now()
+            )
+            .await
+            .is_err(),
+        "late acknowledgement cannot consume a newer attempt"
+    );
     let recovered_edge = make_edge();
     let recovery = arkret_bridge_runtime::applet_configuration::AppletConfigurationService::new(
         recovered_edge.clone(),
@@ -193,7 +317,8 @@ pub(super) async fn run_configuration(pool: PgPool) {
         boxed_step(|| recovery.recover_accepted_configurations())
             .await
             .unwrap(),
-        1
+        0,
+        "the durable HTTP completion already installed custody before restart"
     );
     assert!(
         recovered_edge
@@ -608,6 +733,36 @@ pub(super) async fn run_configuration(pool: PgPool) {
             .unwrap();
         assert_eq!(bytes, after, "frozen private configuration cannot change");
     }
+    assert!(
+        prepare_configuration_completion(&factory.fixture, &completion)
+            .await
+            .is_err(),
+        "frozen completion cannot create a new transport attempt"
+    );
+    let fresh_digest =
+        arkret_wire::Hash::new(arkret_canonical::canonical_sha256(&fresh).unwrap()).unwrap();
+    assert!(
+        factory
+            .fixture
+            .state
+            .test_persistence()
+            .applets()
+            .acknowledge_authoring_completion(
+                &completion.applet_id,
+                &completion.request_digest,
+                &factory.fixture.state.service_core_id(),
+                &fresh_digest,
+                chrono::Utc::now()
+            )
+            .await
+            .is_err(),
+        "late completion ACK cannot mutate the frozen handoff ledger"
+    );
+    let (_, after) = store
+        .export_management_private_state(&factory.fixture.realm)
+        .await
+        .unwrap();
+    assert_eq!(bytes, after);
     boxed_step(|| independent_management_archive(&factory.fixture, &manifest, &bytes, &archive))
         .await;
     boxed_step(|| {
@@ -618,9 +773,108 @@ pub(super) async fn run_configuration(pool: PgPool) {
             &manifest,
             &bytes,
             &pending,
+            &completion,
         )
     })
     .await;
+}
+
+async fn deliver_configuration_completion(
+    fixture: &Fixture,
+    completion: &coland_storage::AppletAuthoringCompletion,
+    delivery: &coland_storage::AppletAuthoringDelivery,
+) -> Result<arkret_models_integration::AppletTransactionOutcome, String> {
+    let http = reqwest::Client::builder()
+        .add_root_certificate(
+            reqwest::Certificate::from_pem(include_bytes!(
+                "../../../server/tests/fixtures/outbox-test-ca.pem"
+            ))
+            .unwrap(),
+        )
+        .build()
+        .unwrap();
+    let client = arkret_http_client::Client::builder(delivery.endpoint.parse().unwrap())
+        .http_client(http)
+        .retry(arkret_http_client::RetryConfig::disabled())
+        .http_message_signer(arkret_http_client::HttpMessageSigner::new(
+            fixture
+                .state
+                .service_verification_method("notary-key")
+                .unwrap()
+                .to_string(),
+            fixture.state.notary_signing_key().as_ref().clone(),
+        ))
+        .build()
+        .unwrap();
+    let body = arkret_models_integration::AppletTransactionRequestBody::Authoring(Box::new(
+        arkret_models_integration::AppletAuthoringTransactionRequestBody {
+            applet_id: completion.applet_id.clone(),
+            source_id: delivery.source_id.clone(),
+            authoring_context: delivery.context.clone(),
+        },
+    ));
+    let body = arkret_identity::VerifiedSubmission::from_verified_events(body, &[]).unwrap();
+    let outcome = client
+        .applet_transaction_from_service(
+            &delivery.idempotency_key,
+            &body,
+            &delivery.source_id,
+            &delivery.destination_id,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    match &outcome {
+        arkret_models_integration::AppletTransactionOutcome::Accepted {
+            committed_event_refs,
+            rejections,
+            retry_after_ms,
+        } if committed_event_refs.is_empty()
+            && rejections.is_empty()
+            && retry_after_ms.is_none() =>
+        {
+            Ok(outcome)
+        }
+        _ => Err(format!("historical completion did not finish: {outcome:?}")),
+    }
+}
+
+async fn prepare_configuration_completion(
+    fixture: &Fixture,
+    completion: &coland_storage::AppletAuthoringCompletion,
+) -> coland_storage::PersistenceResult<coland_storage::AppletAuthoringDelivery> {
+    let registration = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .applet_registration_for_realm(&completion.realm_id, &completion.applet_id)
+        .await
+        .unwrap();
+    let caller = coland_storage::RealmActorMaterialCaller::Service {
+        service_id: completion.destination_id.clone(),
+        verification_method: registration.webhook_auth.key_ref,
+        public_key: SigningKey::from_bytes(&[42; 32]).verifying_key().to_bytes(),
+        expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+    };
+    let sign = |body: &arkret_models_integration::RealmActorMaterialUnsigned| {
+        let signature = arkret_signatures::detached_object::sign_detached_object(
+            body,
+            arkret_wire::DetachedSignatureContext::RealmActorMaterial,
+            fixture
+                .state
+                .service_verification_method("notary-key")
+                .unwrap(),
+            body.issued_at,
+            fixture.state.notary_signing_key().as_ref(),
+        )
+        .map_err(coland_storage::PersistenceError::database)?;
+        Ok(body.clone().into_signed(signature))
+    };
+    fixture
+        .state
+        .test_persistence()
+        .applets()
+        .prepare_authoring_delivery(completion, &fixture.state.service_core_id(), &caller, &sign)
+        .await
 }
 
 async fn configuration_handoff_resume(
@@ -630,6 +884,7 @@ async fn configuration_handoff_resume(
     manifest: &arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManifest,
     bytes: &[u8],
     pending: &Value,
+    completion: &coland_storage::AppletAuthoringCompletion,
 ) {
     use arkret_models_collaboration::authority_commit::{
         AuthorityHandoffRequest, HistoricalProducerSignerFactEntry, historical_signer_facts_digest,
@@ -683,7 +938,11 @@ async fn configuration_handoff_resume(
             &arkret_models_identity::ServiceResolutionCarrier::ResolutionUrl {
                 resolution_url: format!(
                     "{}{}",
-                    previous.state.config().public_base_url.trim_end_matches('/'),
+                    previous
+                        .state
+                        .config()
+                        .public_base_url
+                        .trim_end_matches('/'),
                     arkret_models_identity::canonical_service_resolution_path(
                         &previous.state.service_core_id(),
                     ),
@@ -724,7 +983,10 @@ async fn configuration_handoff_resume(
     let mut facts = Vec::new();
     for full in source.handoff_originals(&previous.realm).await.unwrap() {
         assert_eq!(
-            arkret_identity::verification_method_did(full.commit.signature.verification_method.as_str()).unwrap(),
+            arkret_identity::verification_method_did(
+                full.commit.signature.verification_method.as_str()
+            )
+            .unwrap(),
             previous.state.service_did(),
             "handoff fixture must retain actual governance signatures: {}",
             full.event.event_id
@@ -844,7 +1106,10 @@ async fn configuration_handoff_resume(
     let mut bundle: RealmAuthorityBundle = response.take_json().await.unwrap();
     assert_eq!(
         bundle.genesis_commit.signature.verification_method,
-        previous.state.service_verification_method("notary-key").unwrap(),
+        previous
+            .state
+            .service_verification_method("notary-key")
+            .unwrap(),
         "handoff genesis must carry the actual governance signature"
     );
     let resolution_path =
@@ -897,21 +1162,38 @@ async fn configuration_handoff_resume(
     };
     activation.validate_new_handoff().unwrap();
     let mut invalid_signature = activation.clone();
-    invalid_signature.handoff.new_authority_acceptance_signature.sig =
-        Base64UrlString::new(arkret_canonical::base64url_encode([0u8; 64])).unwrap();
-    invalid_signature.authority_bundle.authority_transitions.last_mut().unwrap().handoff =
-        invalid_signature.handoff.clone();
+    invalid_signature
+        .handoff
+        .new_authority_acceptance_signature
+        .sig = Base64UrlString::new(arkret_canonical::base64url_encode([0u8; 64])).unwrap();
+    invalid_signature
+        .authority_bundle
+        .authority_transitions
+        .last_mut()
+        .unwrap()
+        .handoff = invalid_signature.handoff.clone();
     let (status, refused) = configuration_peer_post(
         previous,
         next,
         "/_arkret/peer/realm-authority/handoff",
         ServiceOperationId::PEER_REALM_AUTHORITY_COMMAND_HANDOFF_V1,
         &invalid_signature,
-    ).await;
+    )
+    .await;
     assert_ne!(status, StatusCode::OK);
-    assert_eq!(refused["type"], "https://arkret.org/problems/signature_invalid", "{refused}");
-    assert_eq!(target.current_authority(&previous.realm).await.unwrap().unwrap().generation,
-        manifest.governance_generation);
+    assert_eq!(
+        refused["type"], "https://arkret.org/problems/signature_invalid",
+        "{refused}"
+    );
+    assert_eq!(
+        target
+            .current_authority(&previous.realm)
+            .await
+            .unwrap()
+            .unwrap()
+            .generation,
+        manifest.governance_generation
+    );
     for (sender, receiver) in [(previous, next), (next, previous)] {
         let (status, result) = configuration_peer_post(
             sender,
@@ -927,6 +1209,27 @@ async fn configuration_handoff_resume(
             "activate signed configuration handoff: {result}"
         );
     }
+    assert!(
+        prepare_configuration_completion(previous, completion)
+            .await
+            .is_err(),
+        "outgoing governor cannot prepare another attempt"
+    );
+    let resumed_delivery = prepare_configuration_completion(next, completion)
+        .await
+        .unwrap();
+    assert_eq!(resumed_delivery.source_id, next.state.service_core_id());
+    assert_eq!(
+        resumed_delivery.context.material.governance_generation,
+        manifest.governance_generation + 1
+    );
+    let arkret_models_integration::RealmActorMaterialResult::Event { event, commit, .. } =
+        &resumed_delivery.context.material.result
+    else {
+        panic!("creation material required")
+    };
+    assert_eq!(event.event_id, completion.creation_ref.event_id);
+    assert_eq!(commit.commit_id, completion.creation_ref.commit_id);
     let reference = pending["review_request_id"].as_str().unwrap();
     let outcome: arkret_models_integration::AppletConfigurationOutcome =
         serde_json::from_value(pending.clone()).unwrap();
@@ -941,8 +1244,11 @@ async fn configuration_handoff_resume(
         .management_review_material(&actor, reference, &[])
         .await
         .unwrap();
-    assert_eq!(review.outcome.status, arkret_models_integration::ManagementReviewStatus::Pending,
-        "handoff preserves unchanged review pins for independent current revalidation");
+    assert_eq!(
+        review.outcome.status,
+        arkret_models_integration::ManagementReviewStatus::Pending,
+        "handoff preserves unchanged review pins for independent current revalidation"
+    );
     let mut continued = request.clone();
     continued.command = arkret_models_integration::AppletConfigurationCommand::Recover;
     continued.approval_signatures =
@@ -964,7 +1270,10 @@ async fn configuration_handoff_resume(
         StatusCode::OK,
         "original Account resumes through the new governor: {resumed}"
     );
-    assert_eq!(resumed["admission_status"], "accepted", "continued configuration: {resumed}");
+    assert_eq!(
+        resumed["admission_status"], "accepted",
+        "continued configuration: {resumed}"
+    );
     assert_eq!(resumed["source_outcome"], pending["source_outcome"]);
     let accepted = target
         .committed_event(&candidate.event_id)
@@ -983,14 +1292,47 @@ async fn configuration_handoff_resume(
             .unwrap()
             .is_none()
     );
-    let (status, replay) = previous.admin_post(
-        &path,
-        ServiceOperationId::SELF_APPLET_CONFIGURATION_COMMAND_SUBMIT_V1,
-        &json!(continued),
-        Some(continued.intent.request_id.as_str()),
-    ).await;
-    assert_eq!(status, StatusCode::OK, "accepted continuation replay: {replay}");
-    assert_eq!(replay, resumed, "replay returns the original new-generation result");
+    let (status, replay) = previous
+        .admin_post(
+            &path,
+            ServiceOperationId::SELF_APPLET_CONFIGURATION_COMMAND_SUBMIT_V1,
+            &json!(continued),
+            Some(continued.intent.request_id.as_str()),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "accepted continuation replay: {replay}"
+    );
+    assert_eq!(
+        replay, resumed,
+        "replay returns the original new-generation result"
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+    let delivered =
+        boxed_step(|| coland_http::state::deliver_pending_applet_completions(&next.state))
+            .await
+            .unwrap();
+    assert!(
+        delivered >= 1,
+        "the production sweeper delivers after governance handoff"
+    );
+    #[derive(diesel::QueryableByName)]
+    struct CompletionStatus {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        delivered: bool,
+    }
+    use diesel_async::RunQueryDsl as _;
+    let mut conn = next.pool.get().await.unwrap();
+    let status = diesel::sql_query("SELECT delivered_at IS NOT NULL AS delivered FROM applet_authoring_completions WHERE applet_id=$1 AND request_digest=$2")
+        .bind::<diesel::sql_types::Text, _>(completion.applet_id.as_str())
+        .bind::<diesel::sql_types::Text, _>(completion.request_digest.as_str())
+        .get_result::<CompletionStatus>(&mut conn).await.unwrap();
+    assert!(
+        status.delivered,
+        "the exact original creation receives a durable network acknowledgement"
+    );
 }
 
 fn configuration_review_vote(

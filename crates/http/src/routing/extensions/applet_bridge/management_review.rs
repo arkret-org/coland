@@ -17,8 +17,9 @@ pub(crate) async fn prepare_event_current(
         .applet_registration_for_realm(&event.realm_id, applet)
         .await?;
     let epoch = &registration.manifest.registration_epoch_evidence;
-    let service_did_document =
-        crate::jws_verify::resolve_did_document_async(state, &epoch.did).await.map_err(|_| {
+    let service_did_document = crate::jws_verify::resolve_did_document_async(state, &epoch.did)
+        .await
+        .map_err(|_| {
             coland_services::ServiceError::Conflict(
                 "temporarily_unavailable: Service DID current is unavailable".into(),
             )

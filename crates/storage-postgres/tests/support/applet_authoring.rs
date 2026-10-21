@@ -357,6 +357,49 @@ impl Fixture {
         })
     }
 
+    async fn admin_post_network(
+        &self,
+        path: &str,
+        operation: &str,
+        body: &Value,
+        idempotency: &str,
+    ) -> (StatusCode, Value) {
+        // Keep the client scenario off the server's authorization call stack.
+        let url = format!(
+            "{}{}",
+            self.state.config().public_base_url.trim_end_matches('/'),
+            path
+        );
+        let dpop = arkret_signatures::dpop::build_dpop_proof(
+            &arkret_signatures::dpop::DpopProofRequest::new("POST", &url)
+                .access_token(self.token.clone()),
+            &self.holder_key,
+        )
+        .unwrap();
+        let client = reqwest::Client::builder()
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(include_bytes!(
+                    "../../../server/tests/fixtures/outbox-test-ca.pem"
+                ))
+                .unwrap(),
+            )
+            .build()
+            .unwrap();
+        let response = client
+            .post(url)
+            .header("authorization", format!("DPoP {}", self.token))
+            .header("dpop", dpop.header_value)
+            .header("Arkret-Operation", operation)
+            .header("content-type", "application/json")
+            .header("Idempotency-Key", idempotency)
+            .body(arkret_canonical::canonical_json_bytes(body).unwrap())
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        (status, response.json().await.unwrap())
+    }
+
     async fn service_post(
         &self,
         package: &AppletPackage,
@@ -3595,6 +3638,198 @@ mod realm_native_fixture {
         );
     }
 
+    async fn installation_business_revocation(
+        fixture: &Fixture,
+        native: &NativeService,
+        candidate: &RealmActorCreatePayload,
+    ) {
+        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+        let persistence = fixture.state.test_persistence();
+        let grant_source = persistence
+            .authority_commits()
+            .committed_event(
+                &EventId::from_token_bytes(candidate.creation_authorization_ref.token_bytes())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let revoke = fixture.admin_event(EventKind::CapabilityRevoke, candidate.creation_scope.clone(), json!({
+            "grant_id":candidate.creation_authorization_ref,
+            "expected_revision":{"commit_id":grant_source.commit.commit_id,"stream_position":grant_source.commit.stream_position}
+        }));
+        eprintln!("recovery: revoking business grant");
+        let authority_path = format!(
+            "/_arkret/self/applets/{}/authority/material",
+            candidate.applet_id
+        );
+        let authority_request = json!({"effective_scope":candidate.creation_scope,"grant_ids":[candidate.creation_authorization_ref]});
+        let (status, active_material) = fixture
+            .service_post(
+                &native.package,
+                &authority_path,
+                arkret_wire::ServiceOperationId::SELF_APPLET_AUTHORITY_READ_MATERIAL_V1,
+                &authority_request,
+                "installation-before-revoke",
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "current installation material: {active_material}"
+        );
+        assert_eq!(active_material["current_binding"]["status"], "active");
+        let revoke_request =
+            SelfAuthoritySubmitRequest::Event(arkret_wire::EventAdmissionSubmission::new(revoke));
+        let (status, response) = fixture
+            .admin_post_network(
+                "/_arkret/self/events",
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                &json!(revoke_request),
+                "revoke-business-before-recovery",
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "real business grant revocation: {response}"
+        );
+        let (status, partial_material) = fixture
+            .service_post(
+                &native.package,
+                &authority_path,
+                arkret_wire::ServiceOperationId::SELF_APPLET_AUTHORITY_READ_MATERIAL_V1,
+                &authority_request,
+                "installation-after-revoke",
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "historical material after one grant revoke: {partial_material}"
+        );
+        assert_eq!(
+            partial_material["current_binding"]["status"], "active",
+            "other installation grants remain active"
+        );
+        let scope_key =
+            coland_storage::applet_effective_scope_key(&candidate.creation_scope).unwrap();
+        let installation = persistence
+            .applets()
+            .get(candidate.applet_id.as_str(), &scope_key)
+            .await
+            .unwrap()
+            .unwrap();
+        use diesel::sql_types::{Jsonb, Text};
+        use diesel_async::RunQueryDsl as _;
+        #[derive(diesel::QueryableByName)]
+        struct MissingRegistration {
+            #[diesel(sql_type = Jsonb)]
+            value: Value,
+        }
+        let mut conn = fixture.pool.get().await.unwrap();
+        let missing = diesel::sql_query("DELETE FROM applet_registration_current_results WHERE realm_id=$1 AND applet_id=$2 RETURNING to_jsonb(applet_registration_current_results) AS value")
+            .bind::<Text,_>(fixture.realm.as_str())
+            .bind::<Text,_>(candidate.applet_id.as_str())
+            .get_result::<MissingRegistration>(&mut conn).await.unwrap();
+        let (status, unavailable_material) = fixture
+            .service_post(
+                &native.package,
+                &authority_path,
+                arkret_wire::ServiceOperationId::SELF_APPLET_AUTHORITY_READ_MATERIAL_V1,
+                &authority_request,
+                "installation-missing-current-is-not-inactive",
+            )
+            .await;
+        diesel::sql_query("INSERT INTO applet_registration_current_results SELECT * FROM jsonb_populate_record(NULL::applet_registration_current_results,$1)")
+            .bind::<Jsonb,_>(missing.value).execute(&mut conn).await.unwrap();
+        drop(conn);
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "missing current registration must fail the entire read: {unavailable_material}"
+        );
+        assert!(unavailable_material.get("current_binding").is_none());
+        for original in installation["capability_grant_events"].as_array().unwrap() {
+            let original: arkret_wire::Event = serde_json::from_value(original.clone()).unwrap();
+            let grant_id = arkret_wire::GrantId::from_event_id(&original.event_id);
+            if grant_id == candidate.creation_authorization_ref {
+                continue;
+            }
+            let source = persistence
+                .authority_commits()
+                .committed_event(&original.event_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let revoke = fixture.admin_event(EventKind::CapabilityRevoke, candidate.creation_scope.clone(), json!({
+                "grant_id":grant_id,
+                "expected_revision":{"commit_id":source.commit.commit_id,"stream_position":source.commit.stream_position}
+            }));
+            let request = SelfAuthoritySubmitRequest::Event(
+                arkret_wire::EventAdmissionSubmission::new(revoke),
+            );
+            let (status, result) = fixture
+                .admin_post_network(
+                    "/_arkret/self/events",
+                    arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                    &json!(request),
+                    &format!("revoke-installation-{grant_id}"),
+                )
+                .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "revoke remaining installation grant: {result}"
+            );
+        }
+        let (status, inactive_material) = fixture
+            .service_post(
+                &native.package,
+                &authority_path,
+                arkret_wire::ServiceOperationId::SELF_APPLET_AUTHORITY_READ_MATERIAL_V1,
+                &authority_request,
+                "installation-after-all-grants-revoked",
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "historical source remains readable without business grants: {inactive_material}"
+        );
+        assert_eq!(
+            inactive_material["registration"],
+            active_material["registration"]
+        );
+        assert_eq!(
+            inactive_material["grant_events"],
+            active_material["grant_events"]
+        );
+        assert_eq!(
+            inactive_material["current_binding"],
+            json!({"status":"inactive"})
+        );
+        let pending = persistence
+            .applets()
+            .pending_authoring_completions(&fixture.state.service_core_id(), 128)
+            .await
+            .unwrap();
+        let completion = pending
+            .iter()
+            .find(|row| row.actor_id == candidate.actor_id)
+            .expect("creation completion survives business revocation");
+        let historical_delivery = prepare_configuration_completion(fixture, completion)
+            .await
+            .unwrap();
+        let RealmActorMaterialResult::Event { event, commit, .. } =
+            &historical_delivery.context.material.result
+        else {
+            panic!("expected original creation")
+        };
+        assert_eq!(event.event_id, completion.creation_ref.event_id);
+        assert_eq!(commit.commit_id, completion.creation_ref.commit_id);
+    }
+
     async fn recovery(
         fixture: &Fixture,
         native: &NativeService,
@@ -3629,35 +3864,7 @@ mod realm_native_fixture {
                 .unwrap()
                 .is_some()
         );
-        let grant_source = persistence
-            .authority_commits()
-            .committed_event(
-                &EventId::from_token_bytes(candidate.creation_authorization_ref.token_bytes())
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        let revoke = fixture.admin_event(EventKind::CapabilityRevoke, candidate.creation_scope.clone(), json!({
-            "grant_id":candidate.creation_authorization_ref,
-            "expected_revision":{"commit_id":grant_source.commit.commit_id,"stream_position":grant_source.commit.stream_position}
-        }));
-        eprintln!("recovery: revoking business grant");
-        let revoke_request =
-            SelfAuthoritySubmitRequest::Event(arkret_wire::EventAdmissionSubmission::new(revoke));
-        let (status, response) = fixture
-            .admin_post(
-                "/_arkret/self/events",
-                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-                &json!(revoke_request),
-                Some("revoke-business-before-recovery"),
-            )
-            .await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "real business grant revocation: {response}"
-        );
+        boxed_step(|| installation_business_revocation(fixture, native, candidate)).await;
         eprintln!("recovery: authoring native plan");
         let (plan, published) = recovery_plan(candidate, creation);
         let make_begin = |payload: RealmActorRecoveryBeginPayload| {

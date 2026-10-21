@@ -2142,6 +2142,7 @@ dependencies = [
  "arkret-bridge-runtime",
  "arkret-canonical",
  "arkret-event-draft",
+ "arkret-http-client",
  "arkret-identifiers",
  "arkret-identity",
  "arkret-mls",

@@ -83,10 +83,7 @@ const TABLES: &[(&str, &str)] = &[
         "applet_authoring_previews",
         "t.signed_request#>>'{basis,effective_scope,realm_id}'=$1",
     ),
-    (
-        "applet_authoring_completions",
-        "t.context#>>'{material,realm_id}'=$1",
-    ),
+    ("applet_authoring_completions", "t.realm_id=$1"),
     (
         "applet_authoring_units",
         "EXISTS(SELECT 1 FROM jsonb_array_elements(t.committed_event_refs) r WHERE r#>>'{stream_ref,realm_id}'=$1)",

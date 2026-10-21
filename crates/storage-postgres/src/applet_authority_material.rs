@@ -1,6 +1,7 @@
 //! Exact Service-owned Applet authority material at one read-only MVCC cut.
 use arkret_models_collaboration::applet_installation_authority::{
     AppletAuthorityMaterialOutcome, AppletAuthorityMaterialRequestBody, AppletCommittedEvent,
+    AppletCurrentBinding,
 };
 use arkret_models_collaboration::events_payloads::CapabilityGrantPayload;
 use arkret_models_collaboration::exact_current_results::{
@@ -125,17 +126,6 @@ pub(crate) async fn read(
         return Err(unavailable());
     }
     let realm = request.effective_scope.realm_id();
-    let scope_key = coland_storage::applet_effective_scope_key(&request.effective_scope)?;
-    let install=sql_query("SELECT record AS value FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2")
-        .bind::<Text,_>(applet.as_str()).bind::<Text,_>(scope_key).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unavailable)?;
-    if install
-        .value
-        .pointer("/package/service_id")
-        .and_then(Value::as_str)
-        != Some(service.as_str())
-    {
-        return Err(unavailable());
-    }
     // Audit provenance follows the original accepted parent, never the latest
     // mutable installation. A replaced installation may remain a read boundary
     // for this Service while its old grants carry only historical authority.
@@ -317,9 +307,142 @@ pub(crate) async fn read(
         registration,
         grant_events,
         current_results,
+        current_binding: current_binding(conn, applet, service, &request.effective_scope).await?,
     };
     outcome
         .validate_structural()
         .map_err(PersistenceError::database)?;
     Ok(outcome)
+}
+
+/// Read-only effective-installation continuity at the caller's MVCC cut.
+/// The requested historical grants never select or authorize a replacement.
+async fn current_binding(
+    conn: &mut AsyncPgConnection,
+    applet: &AppletId,
+    service: &DidCoreId,
+    scope: &arkret_wire::ScopeRef,
+) -> PersistenceResult<AppletCurrentBinding> {
+    use crate::capability_grant_current_results::{
+        RealmAuthorityRootReadRow, accepted_grant_is_current, decode_authority_root,
+    };
+    let scope_key = coland_storage::applet_effective_scope_key(scope)?;
+    let at = chrono::Utc::now();
+    let install = sql_query("SELECT record AS value FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2")
+        .bind::<Text,_>(applet.as_str()).bind::<Text,_>(scope_key)
+        .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let Some(install) = install else {
+        return Err(unavailable());
+    };
+    let install = install.value;
+    let package: arkret_models_integration::AppletPackage = decode(install["package"].clone())?;
+    if package.applet_id != *applet || install["effective_scope"] != serde_json::json!(scope) {
+        return Err(unavailable());
+    }
+    let installed = match install.get("status").and_then(Value::as_str) {
+        Some("installed" | "partially_installed") => true,
+        Some("revoking" | "rejected" | "revoked") => false,
+        _ => return Err(unavailable()),
+    };
+    let revoked_at: Option<chrono::DateTime<chrono::Utc>> = decode(install["revoked_at"].clone())?;
+    if package.service_id != *service || revoked_at.is_some() || !installed {
+        return Ok(AppletCurrentBinding::Inactive {});
+    }
+    let fence = sql_query("SELECT record AS value FROM applet_managed_identities WHERE applet_id=$1 AND target_station_id=$2")
+        .bind::<Text,_>(applet.as_str()).bind::<Text,_>(install["target_station_id"].as_str().ok_or_else(unavailable)?)
+        .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unavailable)?;
+    let fenced_at: Option<chrono::DateTime<chrono::Utc>> =
+        decode(fence.value["globally_fenced_at"].clone())?;
+    if fenced_at.is_some() {
+        return Ok(AppletCurrentBinding::Inactive {});
+    }
+    let current = sql_query(
+        "SELECT value FROM applet_registration_current_results WHERE realm_id=$1 AND applet_id=$2",
+    )
+    .bind::<Text, _>(scope.realm_id().as_str())
+    .bind::<Text, _>(applet.as_str())
+    .get_result::<JsonRow>(&mut *conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?
+    .ok_or_else(unavailable)?;
+    let registration: AppletRegistrationPayload = decode(current.value)?;
+    if registration.service_id != *service
+        || install["package"]["registration_epoch"]
+            != serde_json::json!(registration.registration_epoch)
+    {
+        return Ok(AppletCurrentBinding::Inactive {});
+    }
+    let did = arkret_identity::verification_method_did(registration.webhook_auth.key_ref.as_str())
+        .map_err(PersistenceError::database)?;
+    let document = sql_query(
+        "SELECT did_document AS value FROM webvh_documents WHERE id=$1 AND expires_at>$2",
+    )
+    .bind::<Text, _>(did.as_str())
+    .bind::<diesel::sql_types::Timestamptz, _>(at)
+    .get_result::<JsonRow>(&mut *conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?
+    .ok_or_else(unavailable)?;
+    let document: arkret_identity::DidDocument = decode(document.value)?;
+    if registration
+        .manifest
+        .registration_epoch_evidence
+        .validate_against_did_document(&document)
+        .is_err()
+    {
+        return Ok(AppletCurrentBinding::Inactive {});
+    }
+    let current_instance = sql_query("SELECT c.commit_json AS value FROM applet_registration_current_results r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref JOIN realm_commits c ON c.commit_id=a.accepted_commit_id WHERE r.realm_id=$1 AND r.applet_id=$2 AND a.registration_event_ref=$3")
+        .bind::<Text,_>(scope.realm_id().as_str()).bind::<Text,_>(applet.as_str())
+        .bind::<Text,_>(install["registration_event"]["event_id"].as_str().ok_or_else(unavailable)?)
+        .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let Some(current_instance) = current_instance else {
+        return Ok(AppletCurrentBinding::Inactive {});
+    };
+    let commit: arkret_wire::RealmCommit = decode(current_instance.value)?;
+    let registration_full = accepted(conn, &commit.event_ref).await?;
+    if registration_full.event.scope_ref != *scope || registration_full.commit != commit {
+        return Err(unavailable());
+    }
+    let rows = sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 ORDER BY grant_id")
+        .bind::<Text,_>(scope.realm_id().as_str()).load::<CapabilityGrantCurrentResultReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let mut grants = std::collections::BTreeMap::new();
+    for row in rows {
+        let row = decode_row(row)?;
+        grants.insert(row.grant_id, row.value);
+    }
+    let root = sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1")
+        .bind::<Text,_>(scope.realm_id().as_str()).get_result::<RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let root = decode_authority_root(root)?;
+    let originals = install["capability_grant_events"]
+        .as_array()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(unavailable)?;
+    let mut active = false;
+    for original in originals {
+        let event: arkret_wire::Event = decode(original.clone())?;
+        let id = GrantId::from_event_id(&event.event_id);
+        let grant = grants.get(&id).ok_or_else(unavailable)?;
+        if event.scope_ref != *scope
+            || !matches!(&grant.subject, CapabilitySubject::Actor(a) if a == &ActorId::service(service.clone()))
+        {
+            return Err(unavailable());
+        }
+        active |= accepted_grant_is_current(&id, &grants, &root, scope.realm_id(), at)?;
+    }
+    if !active {
+        return Ok(AppletCurrentBinding::Inactive {});
+    }
+    Ok(AppletCurrentBinding::Active {
+        registration_ref: arkret_wire::CommittedEventRef {
+            event_id: commit.event_ref,
+            commit_id: commit.commit_id,
+            stream_ref: commit.stream_ref,
+            stream_position: commit.stream_position,
+        },
+        registration_epoch: registration.registration_epoch,
+        service_id: service.clone(),
+    })
 }

@@ -49,7 +49,7 @@ pub(super) async fn require_authority_material_signature(
         let source=applet_required_header(req,"source-service-id")?;
         if applet_required_header(req,"destination-service-id")?!=*state.service_id() { return Err(applet_signature_error_invalid("destination does not identify this Station")); }
         let applet=applet_id_param(req)?;
-        let record=select_one_signed_scope_candidate(applet_records(state).await?.into_iter().filter(|r|r.applet_id.as_str()==applet && r.package.service_id.as_str()==source && r.effective_scope==body.effective_scope))?.ok_or_else(||AppError::not_found("requested authority material unavailable"))?;
+        let applet_id = arkret_wire::AppletId::new(applet).map_err(|e| AppError::param_invalid(e.to_string()))?;
         let signature_input=http_signature::parse_signature_input_header(req).map_err(applet_verification_error)?;
         let mut conditional=vec!["content-digest"];
         if req.headers().contains_key("idempotency-key") { conditional.push("idempotency-key"); }
@@ -65,7 +65,7 @@ pub(super) async fn require_authority_material_signature(
         }
         let key=authority_material_current_service_key(state,&source,&signature_input.key_id).await?;
         http_signature::verify_signed_canonical_json_request(req,&crate::routing::federation::signature_target_uri(req,state),&crate::routing::federation::signature_authority(req,state),&bytes,&key,&policy).map_err(applet_verification_error)?;
-        Ok(VerifiedAppletAuthorityService { applet_id:record.applet_id, service_id:record.package.service_id, effective_scope:body.effective_scope })
+        Ok(VerifiedAppletAuthorityService { applet_id, service_id:core, effective_scope:body.effective_scope })
     }.await;
     match verification {
         Ok(verified) => {

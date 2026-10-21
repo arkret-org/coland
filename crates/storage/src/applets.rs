@@ -175,6 +175,7 @@ pub trait AppletStore: Send + Sync {
     ) -> PersistenceResult<Option<AppletAuthoringPreviewRecord>>;
     async fn pending_authoring_completions(
         &self,
+        _governor: &arkret_wire::DidCoreId,
         _limit: u32,
     ) -> PersistenceResult<Vec<AppletAuthoringCompletion>> {
         Err(super::PersistenceError::Internal(
@@ -185,10 +186,23 @@ pub trait AppletStore: Send + Sync {
         &self,
         _applet_id: &arkret_wire::AppletId,
         _request_digest: &arkret_wire::Hash,
+        _governor: &arkret_wire::DidCoreId,
+        _delivery_digest: &arkret_wire::Hash,
         _at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<()> {
         Err(super::PersistenceError::Internal(
             "durable Applet completion acknowledgement is unavailable".to_owned(),
+        ))
+    }
+    async fn prepare_authoring_delivery(
+        &self,
+        _completion: &AppletAuthoringCompletion,
+        _governor: &arkret_wire::DidCoreId,
+        _caller: &crate::RealmActorMaterialCaller,
+        _sign: crate::RealmActorMaterialSigner<'_>,
+    ) -> PersistenceResult<AppletAuthoringDelivery> {
+        Err(super::PersistenceError::Internal(
+            "Applet delivery preparation unavailable".into(),
         ))
     }
 }
@@ -198,12 +212,23 @@ pub trait AppletStore: Send + Sync {
 pub struct AppletAuthoringCompletion {
     pub applet_id: arkret_wire::AppletId,
     pub request_digest: arkret_wire::Hash,
+    pub realm_id: arkret_wire::RealmId,
+    pub actor_id: arkret_wire::ActorId,
+    pub creation_ref: arkret_wire::CommittedEventRef,
+    pub destination_id: arkret_wire::DidCoreId,
+    pub recipient_package: arkret_models_integration::AppletPackage,
+}
+
+/// A durable transport attempt. Refreshing its signed material never changes
+/// the accepted creation or its immutable business identity.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppletAuthoringDelivery {
     pub source_id: arkret_wire::DidCoreId,
     pub destination_id: arkret_wire::DidCoreId,
     pub endpoint: String,
     pub idempotency_key: String,
     pub context: arkret_models_integration::AppletManagedActorAuthoringContext,
-    pub projection_attestation: arkret_models_identity::PrincipalResolutionProjectionAttestation,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

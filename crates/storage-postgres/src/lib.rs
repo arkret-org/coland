@@ -54,6 +54,7 @@ mod agent_session_authority;
 mod agents;
 mod applet_admission;
 mod applet_authority_material;
+mod applet_completion;
 mod applet_configuration;
 mod applet_current_results;
 mod applet_widget_tokens;

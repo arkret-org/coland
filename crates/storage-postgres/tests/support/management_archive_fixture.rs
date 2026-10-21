@@ -42,6 +42,26 @@ pub async fn seed_ordinary(
     destination: &PgPool,
     private_tables: &serde_json::Map<String, Value>,
 ) {
+    seed_ordinary_material(source, destination, private_tables, false).await;
+}
+
+/// Preserve the distinction between Realm transfer and the former Station's
+/// local Service identity / ordinary Account device directory. The destination
+/// provisions its own native Service after these ordinary prerequisites.
+pub async fn seed_ordinary_on_foreign_station(
+    source: &PgPool,
+    destination: &PgPool,
+    private_tables: &serde_json::Map<String, Value>,
+) {
+    seed_ordinary_material(source, destination, private_tables, true).await;
+}
+
+async fn seed_ordinary_material(
+    source: &PgPool,
+    destination: &PgPool,
+    private_tables: &serde_json::Map<String, Value>,
+    foreign_station: bool,
+) {
     let mut source = source.get().await.unwrap();
     let tables=sql_query("SELECT c.relname AS name,jsonb_agg(a.attname ORDER BY a.attnum) AS columns,COALESCE(jsonb_agg(a.attname ORDER BY a.attnum) FILTER (WHERE a.atttypid='jsonb'::regtype),'[]'::jsonb) AS json_columns,COALESCE(jsonb_agg(jsonb_build_object('column',a.attname,'sequence',pg_get_serial_sequence(format('public.%I',c.relname),a.attname))) FILTER (WHERE pg_get_serial_sequence(format('public.%I',c.relname),a.attname) IS NOT NULL),'[]'::jsonb) AS sequences FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped AND a.attgenerated='' WHERE n.nspname='public' AND c.relkind='r' AND c.relname<>'__diesel_schema_migrations' GROUP BY c.relname ORDER BY c.relname")
         .get_results::<Table>(&mut *source).await.unwrap();
@@ -52,8 +72,33 @@ pub async fn seed_ordinary(
         .map(|t| quoted(&t.name))
         .collect::<Vec<_>>()
         .join(",");
+    let mut excluded = BTreeSet::new();
+    if foreign_station {
+        excluded.extend([
+            "service_identity".to_owned(),
+            "device_inventory_station".to_owned(),
+            "account_status_replica_records".to_owned(),
+            "account_status_propagations".to_owned(),
+            "account_status_propagation_targets".to_owned(),
+            "principal_resolutions".to_owned(),
+            "pcr_genesis_units".to_owned(),
+        ]);
+        loop {
+            let children = foreign
+                .iter()
+                .filter(|fk| excluded.contains(&fk.parent))
+                .map(|fk| fk.child.clone())
+                .collect::<Vec<_>>();
+            let before = excluded.len();
+            excluded.extend(children);
+            if excluded.len() == before {
+                break;
+            }
+        }
+    }
     let mut remaining = tables
         .into_iter()
+        .filter(|t| !excluded.contains(&t.name))
         .filter(|t| {
             !private_tables.contains_key(&t.name)
                 || matches!(

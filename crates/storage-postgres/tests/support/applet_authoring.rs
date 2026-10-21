@@ -1013,6 +1013,19 @@ async fn admin_domain_request(
         arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
     );
     let mut request = ordinary_realm::source_request(&fixture.pool, request).await;
+    request.authority_commit.commit.signature =
+        arkret_signatures::detached_object::sign_detached_object(
+            &arkret_canonical::unsigned_value(&request.authority_commit.commit, &["signature"])
+                .unwrap(),
+            arkret_wire::DetachedSignatureContext::RealmCommit,
+            fixture
+                .state
+                .service_verification_method("notary-key")
+                .unwrap(),
+            request.authority_commit.commit.committed_at,
+            fixture.state.notary_signing_key().as_ref(),
+        )
+        .unwrap();
     if let Some(fact) = request
         .authority_commit
         .producer_signer_fact

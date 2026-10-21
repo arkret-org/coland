@@ -521,6 +521,9 @@ pub(super) async fn run_configuration(pool: PgPool) {
     let (status, pending) = boxed_step(|| submit(request.clone())).await;
     assert_eq!(status, StatusCode::OK, "pending before handoff: {pending}");
     assert_eq!(pending["admission_status"], "pending");
+    let destination_database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    let (next_governor, _next_server) =
+        boxed_step(|| network_fixture(destination_database.pool())).await;
     let store = PgAuthorityCommitStore { pool: pool.clone() };
     let (completed, observed) = tokio::sync::oneshot::channel();
     let (release, delayed) = std::sync::mpsc::channel();
@@ -552,10 +555,10 @@ pub(super) async fn run_configuration(pool: PgPool) {
                     realm_id: factory.fixture.realm.clone(),
                 },
                 json!({
-                    "expected_governance_generation": authority.generation,
-                    "expected_realm_stream_commit_id": head.commit_id,
-                    "new_governance_station_id": "ak:did_core:web:configuration-next.example"
-                }),
+                        "expected_governance_generation": authority.generation,
+                        "expected_realm_stream_commit_id": head.commit_id,
+                "new_governance_station_id": next_governor.state.service_core_id()
+                    }),
             );
             boxed_step(|| configuration_admin_event(&factory.fixture, change)).await;
             let (manifest, bytes) = store
@@ -607,6 +610,387 @@ pub(super) async fn run_configuration(pool: PgPool) {
     }
     boxed_step(|| independent_management_archive(&factory.fixture, &manifest, &bytes, &archive))
         .await;
+    boxed_step(|| {
+        configuration_handoff_resume(
+            &factory.fixture,
+            &next_governor,
+            &request,
+            &manifest,
+            &bytes,
+            &pending,
+        )
+    })
+    .await;
+}
+
+async fn configuration_handoff_resume(
+    previous: &Fixture,
+    next: &Fixture,
+    request: &arkret_models_integration::AppletConfigurationRequest,
+    manifest: &arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManifest,
+    bytes: &[u8],
+    pending: &Value,
+) {
+    use arkret_models_collaboration::authority_commit::{
+        AuthorityHandoffRequest, HistoricalProducerSignerFactEntry, historical_signer_facts_digest,
+    };
+    use arkret_wire::*;
+    let source = PgAuthorityCommitStore {
+        pool: previous.pool.clone(),
+    };
+    let target = PgAuthorityCommitStore {
+        pool: next.pool.clone(),
+    };
+    let local_identity = next
+        .state
+        .test_persistence()
+        .service_identity()
+        .get()
+        .await
+        .unwrap()
+        .unwrap();
+    let archive: Value = serde_json::from_slice(bytes).unwrap();
+    // Ordinary pre-import is a fixture prerequisite. The management-private
+    // transfer, signed activation and subsequent configuration are production
+    // operations against an independent destination database and HTTPS host.
+    management_archive_fixture::seed_ordinary_on_foreign_station(
+        &previous.pool,
+        &next.pool,
+        archive["tables"].as_object().unwrap(),
+    )
+    .await;
+    next.state
+        .test_persistence()
+        .service_identity()
+        .put(local_identity)
+        .await
+        .unwrap();
+    let restored = coland_test_support::app_state_with_persistence(
+        next.state.config().clone(),
+        Arc::new(coland_storage_postgres::PgPersistenceStore::new(
+            next.pool.clone(),
+        )),
+    )
+    .await;
+    assert_eq!(restored.service_core_id(), next.state.service_core_id());
+    // The receiving operator knows the outgoing peer's locator. Discovery still
+    // authenticates its complete history and Describe over the real HTTPS host.
+    // The old Station learns the new route from the production handoff itself.
+    next.state
+        .service_route_resolver()
+        .unwrap()
+        .resolve_carrier(
+            &arkret_models_identity::ServiceResolutionCarrier::ResolutionUrl {
+                resolution_url: format!(
+                    "{}{}",
+                    previous.state.config().public_base_url.trim_end_matches('/'),
+                    arkret_models_identity::canonical_service_resolution_path(
+                        &previous.state.service_core_id(),
+                    ),
+                ),
+            },
+            &previous.state.service_core_id(),
+            "station",
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+    target
+        .import_management_private_state(manifest, bytes)
+        .await
+        .unwrap();
+    let (_, imported) = target
+        .export_management_private_state(&previous.realm)
+        .await
+        .unwrap();
+    assert_eq!(bytes, imported);
+
+    let material = source
+        .realm_state_snapshot_material(&previous.realm)
+        .await
+        .unwrap()
+        .unwrap();
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let snapshot = coland_services::authority_commit::build_signed_realm_state_snapshot(
+        &material,
+        previous
+            .state
+            .service_verification_method("notary-key")
+            .unwrap(),
+        previous.state.notary_signing_key().as_ref(),
+        at,
+    )
+    .unwrap();
+    let mut facts = Vec::new();
+    for full in source.handoff_originals(&previous.realm).await.unwrap() {
+        assert_eq!(
+            arkret_identity::verification_method_did(full.commit.signature.verification_method.as_str()).unwrap(),
+            previous.state.service_did(),
+            "handoff fixture must retain actual governance signatures: {}",
+            full.event.event_id
+        );
+        if full.commit.producer_signer_fact_digest.is_some() {
+            facts.push(HistoricalProducerSignerFactEntry {
+                target: CommittedEventRef {
+                    event_id: full.event.event_id.clone(),
+                    commit_id: full.commit.commit_id.clone(),
+                    stream_ref: full.commit.stream_ref.clone(),
+                    stream_position: full.commit.stream_position,
+                },
+                producer_signer_fact: source
+                    .producer_signer_fact(&full.event, &full.commit)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            });
+        }
+    }
+    facts.sort_by_key(|entry| {
+        (
+            arkret_canonical::canonical_json_bytes(&entry.target.stream_ref).unwrap(),
+            entry.target.stream_position,
+            entry.target.event_id.to_string(),
+            entry.target.commit_id.to_string(),
+        )
+    });
+    let heads = material.visible_stream_heads.clone();
+    let head = heads
+        .iter()
+        .find(|head| {
+            head.stream_ref
+                == (CommitStreamRef::Realm {
+                    realm_id: previous.realm.clone(),
+                })
+        })
+        .unwrap()
+        .clone();
+    let change = source
+        .committed_event_by_commit_id(&head.commit_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut handoff = RealmAuthorityHandoff {
+        handoff_id: RealmAuthorityHandoffId::from_digest(rand::random()),
+        realm_id: previous.realm.clone(),
+        from_generation: material.governance_generation,
+        to_generation: material.governance_generation + 1,
+        from_service_id: previous.state.service_core_id(),
+        to_service_id: next.state.service_core_id(),
+        change_event_ref: change.event.event_id.clone(),
+        change_commit_id: change.commit.commit_id.clone(),
+        final_stream_heads_digest: Hash::new(arkret_canonical::canonical_sha256(&heads).unwrap())
+            .unwrap(),
+        historical_signer_facts_digest: Some(historical_signer_facts_digest(&facts).unwrap()),
+        snapshot_ref: snapshot.snapshot_id.clone(),
+        pcr_private_state_digest: None,
+        management_private_state_digest: Some(manifest.digest().unwrap()),
+        old_authority_signature: snapshot.signature.clone(),
+        new_authority_acceptance_signature: snapshot.signature.clone(),
+    };
+    let unsigned = arkret_canonical::unsigned_value(
+        &handoff,
+        &[
+            "old_authority_signature",
+            "new_authority_acceptance_signature",
+        ],
+    )
+    .unwrap();
+    handoff.old_authority_signature = sign_detached_object(
+        &unsigned,
+        DetachedSignatureContext::RealmAuthorityHandoffOld,
+        previous
+            .state
+            .service_verification_method("notary-key")
+            .unwrap(),
+        at,
+        previous.state.notary_signing_key().as_ref(),
+    )
+    .unwrap();
+    handoff.new_authority_acceptance_signature = sign_detached_object(
+        &unsigned,
+        DetachedSignatureContext::RealmAuthorityHandoffNewAcceptance,
+        next.state
+            .service_verification_method("notary-key")
+            .unwrap(),
+        at,
+        next.state.notary_signing_key().as_ref(),
+    )
+    .unwrap();
+    let bundle_request = AuthorityBundleRequest {
+        realm_id: previous.realm.clone(),
+        nonce: Base64UrlString::new(arkret_canonical::base64url_encode(
+            rand::random::<[u8; 32]>(),
+        ))
+        .unwrap(),
+    };
+    let mut response = TestClient::post(format!(
+        "{}/_arkret/open/realm-authority/bundle",
+        previous
+            .state
+            .config()
+            .public_base_url
+            .trim_end_matches('/')
+    ))
+    .add_header(
+        "arkret-operation",
+        ServiceOperationId::OPEN_REALM_AUTHORITY_READ_BUNDLE_V1,
+        true,
+    )
+    .add_header("content-type", "application/json", true)
+    .body(arkret_canonical::canonical_json_bytes(&bundle_request).unwrap())
+    .send(&service(previous.state.clone()))
+    .await;
+    assert_eq!(response.status_code, Some(StatusCode::OK));
+    let mut bundle: RealmAuthorityBundle = response.take_json().await.unwrap();
+    assert_eq!(
+        bundle.genesis_commit.signature.verification_method,
+        previous.state.service_verification_method("notary-key").unwrap(),
+        "handoff genesis must carry the actual governance signature"
+    );
+    let resolution_path =
+        arkret_models_identity::canonical_service_resolution_path(&next.state.service_core_id());
+    let mut response = TestClient::get(format!(
+        "{}{resolution_path}",
+        next.state.config().public_base_url
+    ))
+    .add_header(
+        "arkret-operation",
+        ServiceOperationId::OPEN_SERVICE_READ_RESOLUTION_V1,
+        true,
+    )
+    .send(&service(next.state.clone()))
+    .await;
+    assert_eq!(response.status_code, Some(StatusCode::OK));
+    bundle.current_route_record = response.take_json::<Value>().await.unwrap();
+    bundle.current_generation = handoff.to_generation;
+    bundle.current_service_id = handoff.to_service_id.clone();
+    bundle.realm_stream_head = head.clone();
+    bundle.authority_transitions.push(RealmAuthorityTransition {
+        change_event: change.event,
+        change_commit: change.commit,
+        handoff: handoff.clone(),
+    });
+    bundle.bundle_issued_at = at;
+    bundle.current_assertion.current_generation = handoff.to_generation;
+    bundle.current_assertion.current_service_id = handoff.to_service_id.clone();
+    bundle.current_assertion.last_handoff_ref = Some(handoff.handoff_id.clone());
+    bundle.current_assertion.realm_stream_head = head;
+    bundle.current_assertion.expires_at = at + chrono::Duration::minutes(5);
+    bundle.current_assertion.signature = sign_detached_object(
+        &arkret_canonical::unsigned_value(&bundle.current_assertion, &["signature"]).unwrap(),
+        DetachedSignatureContext::RealmAuthorityCurrentAssertion,
+        next.state
+            .service_verification_method("notary-key")
+            .unwrap(),
+        at,
+        next.state.notary_signing_key().as_ref(),
+    )
+    .unwrap();
+    let activation = AuthorityHandoffRequest {
+        handoff,
+        final_stream_heads: heads,
+        snapshot,
+        authority_bundle: bundle,
+        historical_signer_facts: Some(facts),
+        pcr_private_state: None,
+        management_private_state: Some(manifest.clone()),
+    };
+    activation.validate_new_handoff().unwrap();
+    let mut invalid_signature = activation.clone();
+    invalid_signature.handoff.new_authority_acceptance_signature.sig =
+        Base64UrlString::new(arkret_canonical::base64url_encode([0u8; 64])).unwrap();
+    invalid_signature.authority_bundle.authority_transitions.last_mut().unwrap().handoff =
+        invalid_signature.handoff.clone();
+    let (status, refused) = configuration_peer_post(
+        previous,
+        next,
+        "/_arkret/peer/realm-authority/handoff",
+        ServiceOperationId::PEER_REALM_AUTHORITY_COMMAND_HANDOFF_V1,
+        &invalid_signature,
+    ).await;
+    assert_ne!(status, StatusCode::OK);
+    assert_eq!(refused["type"], "https://arkret.org/problems/signature_invalid", "{refused}");
+    assert_eq!(target.current_authority(&previous.realm).await.unwrap().unwrap().generation,
+        manifest.governance_generation);
+    for (sender, receiver) in [(previous, next), (next, previous)] {
+        let (status, result) = configuration_peer_post(
+            sender,
+            receiver,
+            "/_arkret/peer/realm-authority/handoff",
+            ServiceOperationId::PEER_REALM_AUTHORITY_COMMAND_HANDOFF_V1,
+            &activation,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "activate signed configuration handoff: {result}"
+        );
+    }
+    let reference = pending["review_request_id"].as_str().unwrap();
+    let outcome: arkret_models_integration::AppletConfigurationOutcome =
+        serde_json::from_value(pending.clone()).unwrap();
+    let candidate = outcome.source_outcome.unwrap().create_event.unwrap();
+    let candidate_payload: RealmActorCreatePayload =
+        serde_json::from_value(json!(candidate.payload)).unwrap();
+    let actor = ActorId::service(candidate_payload.service_id.clone());
+    let review = next
+        .state
+        .test_persistence()
+        .agents()
+        .management_review_material(&actor, reference, &[])
+        .await
+        .unwrap();
+    assert_eq!(review.outcome.status, arkret_models_integration::ManagementReviewStatus::Pending,
+        "handoff preserves unchanged review pins for independent current revalidation");
+    let mut continued = request.clone();
+    continued.command = arkret_models_integration::AppletConfigurationCommand::Recover;
+    continued.approval_signatures =
+        Some(vec![configuration_review_vote(previous, &review.request)]);
+    let path = format!(
+        "/_arkret/self/applets/{}/configuration",
+        candidate_payload.applet_id
+    );
+    let (status, resumed) = previous
+        .admin_post(
+            &path,
+            ServiceOperationId::SELF_APPLET_CONFIGURATION_COMMAND_SUBMIT_V1,
+            &json!(continued),
+            Some(continued.intent.request_id.as_str()),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "original Account resumes through the new governor: {resumed}"
+    );
+    assert_eq!(resumed["admission_status"], "accepted", "continued configuration: {resumed}");
+    assert_eq!(resumed["source_outcome"], pending["source_outcome"]);
+    let accepted = target
+        .committed_event(&candidate.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(accepted.event, *candidate);
+    assert_eq!(
+        accepted.commit.governance_generation,
+        manifest.governance_generation + 1
+    );
+    assert!(
+        source
+            .committed_event(&accepted.event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let (status, replay) = previous.admin_post(
+        &path,
+        ServiceOperationId::SELF_APPLET_CONFIGURATION_COMMAND_SUBMIT_V1,
+        &json!(continued),
+        Some(continued.intent.request_id.as_str()),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "accepted continuation replay: {replay}");
+    assert_eq!(replay, resumed, "replay returns the original new-generation result");
 }
 
 fn configuration_review_vote(
@@ -871,8 +1255,45 @@ async fn peer_configuration_post(
     tamper: bool,
 ) -> (StatusCode, Value) {
     let bytes = arkret_canonical::canonical_json_bytes(body).unwrap();
-    let digest = content_digest_header(&bytes);
     let path = format!("/_arkret/peer/applets/{applet}/configuration");
+    let sent = if tamper {
+        let mut changed = body.clone();
+        changed.requester_account_id = destination.pcr.history.account.clone();
+        arkret_canonical::canonical_json_bytes(&changed).unwrap()
+    } else {
+        bytes.clone()
+    };
+    configuration_peer_post_wire(
+        source,
+        destination,
+        &path,
+        arkret_wire::ServiceOperationId::PEER_APPLET_CONFIGURATION_COMMAND_SUBMIT_V1,
+        bytes,
+        sent,
+    )
+    .await
+}
+
+async fn configuration_peer_post(
+    source: &Fixture,
+    destination: &Fixture,
+    path: &str,
+    operation: &str,
+    body: &impl serde::Serialize,
+) -> (StatusCode, Value) {
+    let bytes = arkret_canonical::canonical_json_bytes(body).unwrap();
+    configuration_peer_post_wire(source, destination, path, operation, bytes.clone(), bytes).await
+}
+
+async fn configuration_peer_post_wire(
+    source: &Fixture,
+    destination: &Fixture,
+    path: &str,
+    operation: &str,
+    bytes: Vec<u8>,
+    sent: Vec<u8>,
+) -> (StatusCode, Value) {
+    let digest = content_digest_header(&bytes);
     let request_url = format!(
         "{}{path}",
         destination
@@ -886,16 +1307,13 @@ async fn peer_configuration_post(
         method: "POST".into(),
         target_uri: request_url.clone(),
         authority: target[url::Position::BeforeHost..url::Position::AfterPort].into(),
-        path: path.clone(),
+        path: path.to_owned(),
         headers: vec![
-            (
-                "arkret-operation".into(),
-                arkret_wire::ServiceOperationId::PEER_APPLET_CONFIGURATION_COMMAND_SUBMIT_V1.into(),
-            ),
+            ("arkret-operation".into(), operation.into()),
             ("content-type".into(), "application/json".into()),
             (
                 "idempotency-key".into(),
-                arkret_canonical::canonical_sha256(body).unwrap(),
+                arkret_canonical::sha256_digest(&bytes),
             ),
             ("content-digest".into(), digest.clone()),
             ("source-service-id".into(), source.state.service_id().into()),
@@ -933,31 +1351,28 @@ async fn peer_configuration_post(
         source.state.notary_signing_key().as_ref(),
     )
     .unwrap();
-    let mut request = TestClient::post(request_url);
+    let client = reqwest::Client::builder()
+        .add_root_certificate(
+            reqwest::Certificate::from_pem(include_bytes!(
+                "../../../server/tests/fixtures/outbox-test-ca.pem"
+            ))
+            .unwrap(),
+        )
+        .timeout(std::time::Duration::from_secs(45))
+        .build()
+        .unwrap();
+    let mut request = client.post(request_url);
     for (name, value) in parts.headers {
-        request = request.add_header(
-            salvo::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
-            value,
-            true,
-        );
+        request = request.header(name, value);
     }
-    let bytes = if tamper {
-        let mut changed = body.clone();
-        changed.requester_account_id = destination.pcr.history.account.clone();
-        arkret_canonical::canonical_json_bytes(&changed).unwrap()
-    } else {
-        bytes
-    };
-    let mut response = request
-        .add_header("signature-input", signature.signature_input_header, true)
-        .add_header("signature", signature.signature_header, true)
-        .body(bytes)
-        .send(&service(destination.state.clone()))
-        .await;
-    (
-        response.status_code.unwrap(),
-        response.take_json().await.unwrap(),
-    )
+    let response = request
+        .header("signature-input", signature.signature_input_header)
+        .header("signature", signature.signature_header)
+        .body(sent)
+        .send()
+        .await
+        .unwrap();
+    (response.status(), response.json().await.unwrap())
 }
 
 async fn configuration_admin_event(fixture: &Fixture, event: Event) {

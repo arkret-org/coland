@@ -127,6 +127,24 @@ pub(crate) async fn install(
         )
         .map_err(key_unavailable)?;
     drop(originals);
+    if local == request.handoff.from_service_id {
+        // The accepted chain supplies the new governor's authenticated locator.
+        // Install it through ordinary discovery, including Describe binding and
+        // rollback checks, before the old Station starts forwarding requests.
+        let inline = serde_json::from_value(request.authority_bundle.current_route_record.clone())
+            .map_err(refused)?;
+        state
+            .service_route_resolver()
+            .map_err(key_unavailable)?
+            .resolve_carrier(
+                &arkret_models_identity::ServiceResolutionCarrier::Inline { inline },
+                &request.handoff.to_service_id,
+                "station",
+                crate::wire::now(),
+            )
+            .await
+            .map_err(key_unavailable)?;
+    }
     // Storage rechecks the frozen heads, complete current and signer inventory
     // under the same authority lock that every writer takes. Network checks
     // cannot race activation into accepting a different durable cut.

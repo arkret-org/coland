@@ -18,7 +18,7 @@ pub(crate) async fn prepare_event_current(
         .await?;
     let epoch = &registration.manifest.registration_epoch_evidence;
     let service_did_document =
-        crate::jws_verify::resolve_did_document(state, &epoch.did).map_err(|_| {
+        crate::jws_verify::resolve_did_document_async(state, &epoch.did).await.map_err(|_| {
             coland_services::ServiceError::Conflict(
                 "temporarily_unavailable: Service DID current is unavailable".into(),
             )

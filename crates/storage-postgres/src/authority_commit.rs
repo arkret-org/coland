@@ -6627,8 +6627,9 @@ impl PgAuthorityCommitStore {
             sql_query("INSERT INTO management_private_handoff_imports(handoff_id,realm_id,manifest) VALUES($1,$2,$3)")
                 .bind::<Text,_>(handoff.handoff_id.as_str()).bind::<Text,_>(handoff.realm_id.as_str())
                 .bind::<Jsonb,_>(serde_json::to_value(management).map_err(invalid)?).execute(&mut *conn).await?;
-            sql_query("UPDATE management_review_requests SET status='superseded' WHERE realm_id=$1 AND status IN ('pending','approved')")
-                .bind::<Text,_>(handoff.realm_id.as_str()).execute(&mut *conn).await?;
+            // Preserve the transferred review ledger. Every decision and consume
+            // rechecks its exact authority, policy, source and approver pins;
+            // only a changed binding supersedes an unconsumed approval.
             sql_query(
                 "UPDATE realm_authorities SET generation = $2, service_id = $3, \
                  authority_ref = $4, last_handoff_ref = $5, updated_at = now() WHERE realm_id = $1",

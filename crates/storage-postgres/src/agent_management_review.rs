@@ -720,17 +720,11 @@ async fn current_administrator(
     else {
         return Ok(None);
     };
-    let account = actor.as_account_id().ok_or_else(hidden)?;
-    let pcr = crate::morph_projection_reads::human_realm_in_connection(conn, account).await?;
-    crate::morph_projection_reads::require_accepted_human_identity(
+    require_current_accounts(
         conn,
-        account,
-        &pcr,
-        &current.station_id,
-        current
-            .observations
-            .iter()
-            .find(|observation| &observation.record().account_id == account),
+        scope.realm_id(),
+        std::slice::from_ref(account),
+        current,
     )
     .await?;
     Ok(Some(basis))

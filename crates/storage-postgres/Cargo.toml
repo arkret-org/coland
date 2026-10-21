@@ -58,6 +58,7 @@ url.workspace = true
 uuid = { workspace = true }
 
 [dev-dependencies]
+savfox-gateway-server.workspace = true
 arkret-http-client.workspace = true
 arkret-bridge-runtime = { path = "../../../bridges/crates/runtime", default-features = false, features = ["full", "postgres"] }
 arkret = { workspace = true, features = ["mls"] }

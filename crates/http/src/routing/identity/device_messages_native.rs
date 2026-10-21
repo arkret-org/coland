@@ -1,4 +1,4 @@
-//! Genuine Account Device queue access without constructing a bearer Session.
+//! Realm Device Welcome queue access without constructing a bearer Session.
 use super::*;
 use crate::routing::identity::applet_managed_device::{self, VerifiedAppletManagedDevice};
 

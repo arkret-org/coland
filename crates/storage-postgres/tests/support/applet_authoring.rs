@@ -1955,6 +1955,7 @@ pub async fn registered_service_pair(pool: PgPool) {
 
 mod realm_native_fixture {
     include!("applet_configuration_fixture.rs");
+    include!("realm_bot_consumer_fixture.rs");
     use arkret_canonical::canonical_sha256;
     use arkret_models_identity::*;
     use arkret_signatures::detached_object::sign_detached_object;
@@ -5772,7 +5773,12 @@ mod realm_native_fixture {
             .unwrap()
     }
 
-    pub(super) async fn run_bridge(pool: PgPool, circle: bool) {
+    pub(super) async fn run_bridge(
+        pool: PgPool,
+        circle: bool,
+        bot: bool,
+        rotate_during_reply: bool,
+    ) {
         use arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService;
         use arkret_bridge_runtime::managed_device::ManagedDeviceRuntime;
         use arkret_bridge_runtime::{
@@ -5833,6 +5839,19 @@ mod realm_native_fixture {
         };
         let id = AppletId::new(format!("ak:applet:{}", uuid::Uuid::now_v7())).unwrap();
         let mut native = NativeService::new(&id, &factory.fixture.state.service_core_id());
+        if bot {
+            native
+                .package
+                .endpoint_policy
+                .endpoints
+                .push(AppletEndpointEntry {
+                    method: AppletEndpointMethod::Post,
+                    path: "/_arkret/edge/applet/configuration".into(),
+                    auth: Some(AppletEndpointAuth::WebhookSignature),
+                    description: None,
+                    extra: Default::default(),
+                });
+        }
         realm_actor_mls_fixture::enable(&mut native.package);
         factory
             .packages
@@ -5864,6 +5883,7 @@ mod realm_native_fixture {
             "arkret": {
                 "server_url":factory.fixture.state.config().public_base_url,
                 "applet_base_url":package.base_url,
+                "service_resolution":fixture_applet_service_history(package),
                 "service_did":did, "trust_domain":factory.fixture.state.config().trust_domain,
                 "applet_id":id,"signing_key_seed_hex":"2a".repeat(32),
                 "verification_method_fragment":"#applet-service-key", "trusted_server_did":factory.fixture.state.service_did(),
@@ -5928,39 +5948,116 @@ mod realm_native_fixture {
             external_id: "user-1".into(),
         };
         eprintln!("real Bridge runtime: signed governance preview and independent native creation");
-        let prepared =
-            boxed_step(|| author.prepare_ghost_in_scope(&id, &content_scope, &external, None))
+        let candidate = if bot {
+            use arkret_models_integration::{
+                AppletConfigurationAdmissionStatus, AppletConfigurationCommand,
+                AppletConfigurationIntent, AppletConfigurationOutcome, AppletConfigurationRequest,
+                AppletConfigurationSelection,
+            };
+            *native.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
+                arkret_bridge_runtime::web::managed_applet_router(edge.clone()).unwrap(),
+            )));
+            let request = AppletConfigurationRequest {
+                command: AppletConfigurationCommand::Configure,
+                intent: AppletConfigurationIntent {
+                    request_id: format!("ak:request:{}", uuid::Uuid::now_v7())
+                        .parse()
+                        .unwrap(),
+                    effective_scope: content_scope.clone(),
+                    selection: AppletConfigurationSelection::NewBot {
+                        display_name: Some("Native Bot".into()),
+                    },
+                },
+                approval_signatures: None,
+            };
+            let endpoint = format!("/_arkret/self/applets/{id}/configuration");
+            let body = json!(request);
+            let (status, value) = boxed_step(|| {
+                factory.fixture.admin_post(
+                    &endpoint,
+                    arkret_wire::ServiceOperationId::SELF_APPLET_CONFIGURATION_COMMAND_SUBMIT_V1,
+                    &body,
+                    Some(request.intent.request_id.as_str()),
+                )
+            })
+            .await;
+            assert_eq!(status, StatusCode::OK, "Bot creation: {value}");
+            let accepted: AppletConfigurationOutcome = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                accepted.admission_status,
+                AppletConfigurationAdmissionStatus::Accepted
+            );
+            let original = accepted.source_outcome.unwrap().create_event.unwrap();
+            let candidate: RealmActorCreatePayload =
+                serde_json::from_value(json!(original.payload)).unwrap();
+            assert_eq!(
+                candidate.actor_role,
+                arkret::RealmActorCreatePayloadActorRole::Bot
+            );
+            *native.actor_log.lock().unwrap() = candidate
+                .method_history_evidence
+                .webvh_material()
+                .1
+                .to_vec();
+            let completion = factory
+                .fixture
+                .state
+                .test_persistence()
+                .applets()
+                .pending_authoring_completions(&factory.fixture.state.service_core_id(), 128)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|item| item.actor_id == candidate.actor_id)
+                .unwrap();
+            let delivery =
+                boxed_step(|| prepare_configuration_completion(&factory.fixture, &completion))
+                    .await
+                    .unwrap();
+            boxed_step(|| {
+                deliver_configuration_completion(&factory.fixture, &completion, &delivery)
+            })
+            .await
+            .unwrap();
+            candidate
+        } else {
+            let prepared =
+                boxed_step(|| author.prepare_ghost_in_scope(&id, &content_scope, &external, None))
+                    .await
+                    .unwrap();
+            let PreparedGhost::Create(command) = prepared else {
+                panic!("new Ghost must create");
+            };
+            let candidate: RealmActorCreatePayload = serde_json::from_value(
+                serde_json::to_value(&command.create_event.payload).unwrap(),
+            )
+            .unwrap();
+            *native.actor_log.lock().unwrap() = candidate
+                .method_history_evidence
+                .webvh_material()
+                .1
+                .to_vec();
+            let first = boxed_step(|| edge.submit_managed_creation(&command))
                 .await
                 .unwrap();
-        let PreparedGhost::Create(command) = prepared else {
-            panic!("new Ghost must create");
-        };
-        let candidate: RealmActorCreatePayload =
-            serde_json::from_value(serde_json::to_value(&command.create_event.payload).unwrap())
+            let arkret_wire::AuthoritySubmitOutcome::Accepted { commit, .. } = first else {
+                panic!("creation must be accepted");
+            };
+            assert_eq!(commit.stream_position, 0);
+            assert!(matches!(
+                commit.stream_ref,
+                CommitStreamRef::RealmControl { .. }
+            ));
+            let second = boxed_step(|| edge.submit_managed_creation(&command))
+                .await
                 .unwrap();
-        *native.actor_log.lock().unwrap() = candidate
-            .method_history_evidence
-            .webvh_material()
-            .1
-            .to_vec();
-        let first = boxed_step(|| edge.submit_managed_creation(&command))
-            .await
-            .unwrap();
-        let arkret_wire::AuthoritySubmitOutcome::Accepted { commit, .. } = first else {
-            panic!("creation must be accepted");
+            let arkret_wire::AuthoritySubmitOutcome::Accepted { commit: replay, .. } = second
+            else {
+                panic!("creation replay must be accepted");
+            };
+            assert_eq!(commit, replay);
+            candidate
         };
-        assert_eq!(commit.stream_position, 0);
-        assert!(matches!(
-            commit.stream_ref,
-            CommitStreamRef::RealmControl { .. }
-        ));
-        let second = boxed_step(|| edge.submit_managed_creation(&command))
-            .await
-            .unwrap();
-        let arkret_wire::AuthoritySubmitOutcome::Accepted { commit: replay, .. } = second else {
-            panic!("creation replay must be accepted");
-        };
-        assert_eq!(commit, replay);
         let actor = candidate.actor_id;
         assert!(
             edge.installed_managed_authoring(&candidate.creation_scope, &actor)
@@ -5971,12 +6068,14 @@ mod realm_native_fixture {
         drop(edge);
         let edge = make_edge();
         let author = ManagedActorAuthoringService::new(edge.clone()).unwrap();
-        assert!(matches!(
-            boxed_step(|| author.prepare_ghost_in_scope(&id, &content_scope, &external, None))
-                .await
-                .unwrap(),
-            PreparedGhost::Reuse { .. }
-        ));
+        if !bot {
+            assert!(matches!(
+                boxed_step(|| author.prepare_ghost_in_scope(&id, &content_scope, &external, None))
+                    .await
+                    .unwrap(),
+                PreparedGhost::Reuse { .. }
+            ));
+        }
         eprintln!("real Bridge runtime: current private control and native Device");
         let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
         let device = boxed_step(|| devices.device_for_actor(&actor))
@@ -6407,6 +6506,23 @@ mod realm_native_fixture {
                 .unwrap(),
             attachment_plaintext
         );
+        if bot {
+            boxed_step(|| {
+                verify_bot_consumer(
+                    &factory.fixture,
+                    edge.clone(),
+                    &devices,
+                    &device,
+                    &reader,
+                    &mut human_group,
+                    &actor,
+                    &content_scope,
+                    rotate_during_reply,
+                )
+            })
+            .await;
+            return;
+        }
         let sink = realm_actor_mls_fixture::ContentSink {
             event: incoming,
             plaintext: plaintext.clone(),
@@ -6869,13 +6985,17 @@ pub async fn realm_native_mls(pool: PgPool) {
 }
 
 pub async fn realm_bridge_runtime(pool: PgPool) {
-    realm_native_fixture::run_bridge(pool, false).await;
+    realm_native_fixture::run_bridge(pool, false, false, false).await;
 }
 
 pub async fn realm_bridge_circle_runtime(pool: PgPool) {
-    realm_native_fixture::run_bridge(pool, true).await;
+    realm_native_fixture::run_bridge(pool, true, false, false).await;
 }
 
 pub async fn realm_applet_configuration(pool: PgPool) {
     realm_native_fixture::run_configuration(pool).await;
+}
+
+pub async fn realm_bot_runtime(pool: PgPool, rotate_during_reply: bool) {
+    realm_native_fixture::run_bridge(pool, false, true, rotate_during_reply).await;
 }

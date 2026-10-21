@@ -2178,6 +2178,7 @@ dependencies = [
  "reqwest 0.13.5",
  "rustls",
  "salvo 1.0.1",
+ "savfox-gateway-server",
  "serde",
  "serde_json",
  "sha2 0.11.1",

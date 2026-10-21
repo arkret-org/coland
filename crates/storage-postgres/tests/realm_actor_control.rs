@@ -64,3 +64,23 @@ async fn applet_configuration_preserves_original_intent_and_candidate_over_real_
     ))
     .await;
 }
+
+#[tokio::test]
+async fn realm_bot_consumes_native_mentions_and_publishes_own_reply() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_test_writer()
+        .try_init();
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_bot_runtime(database.pool(), false)).await;
+}
+
+#[tokio::test]
+async fn realm_bot_retains_output_across_mls_update_and_worker_restart() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_test_writer()
+        .try_init();
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_bot_runtime(database.pool(), true)).await;
+}

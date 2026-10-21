@@ -224,14 +224,15 @@ async fn business_authority(
         }),
     );
     let parent_id = GrantId::from_event_id(&event.event_id);
+    let parent_request = event.event_id.to_string();
     let (status, value) = fixture
-        .admin_post(
+        .admin_post_network(
             "/_arkret/self/events",
             ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
             &json!(SelfAuthoritySubmitRequest::Event(
                 arkret_wire::EventAdmissionSubmission::new(event)
             )),
-            None,
+            &parent_request,
         )
         .await;
     assert_eq!(status, StatusCode::OK, "real business parent: {value}");
@@ -799,6 +800,77 @@ async fn submit_human_event(fixture: &Fixture, event: Event) {
         StatusCode::OK,
         "ordinary member original accepted: {value}"
     );
+}
+
+pub(super) async fn human_updates_group(
+    fixture: &Fixture,
+    scope: &ScopeRef,
+    group: &mut arkret_mls::ArkretMlsGroup,
+) {
+    let current = coland_storage_postgres::PgMlsGroupCurrentStore {
+        pool: fixture.pool.clone(),
+    }
+    .current(scope)
+    .await
+    .unwrap()
+    .unwrap()
+    .value;
+    let binding = MlsGovernanceBindingPayload::new(
+        scope.clone(),
+        Some(current.current_mls_commit_event_ref.clone()),
+        current.epoch,
+        current.epoch + 1,
+        current.current_key_access_revision,
+    )
+    .unwrap();
+    let commit = group
+        .self_update_commit_with_governance_binding(&binding)
+        .unwrap();
+    let payload = MlsCommitPayload::new(
+        current.current_mls_commit_event_ref.clone(),
+        current.current_key_access_revision,
+        &commit,
+        binding,
+    )
+    .unwrap();
+    let event = fixture.admin_event(EventKind::MlsCommit, scope.clone(), json!(payload));
+    let submission = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+        commit_event: event.clone(),
+        welcomes: Vec::new(),
+        idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
+    });
+    let (status, value) = boxed_step(|| {
+        account_request(
+            fixture,
+            reqwest::Method::POST,
+            "/_arkret/self/events",
+            ServiceOperationId::SelfEventsCommandSubmitV1,
+            Some(json!(submission)),
+        )
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ordinary member update during Bot processing: {value}"
+    );
+    let accepted = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    group
+        .install_accepted_commit(
+            &arkret_wire::CommittedEventFullView {
+                event: accepted.event,
+                commit: accepted.commit,
+            },
+            &current,
+        )
+        .unwrap();
 }
 
 pub(super) async fn verify_runtime_message(

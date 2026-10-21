@@ -87,7 +87,7 @@ async fn materialize_one(
             "Contact source signature requires the exact committed command"
         ));
     }
-    let outcome = sign_outcome(state, &ready.intent).await?;
+    let outcome = Box::pin(sign_outcome(state, &ready.intent)).await?;
     // A normal round whose requester is also this Station's holder completes
     // both directions here: the requester's own request is its direction head.
     // A local tombstone also confirms the opposite direction's terminal fence.
@@ -114,10 +114,12 @@ async fn materialize_one(
                 })
                 .map_err(|e| AppError::internal(e.to_string()))?;
             Some(
-                crate::routing::identity::contact_federation::refresh_local_contact_direction(
-                    state,
-                    &current,
-                    &ready.intent.plan.holder,
+                Box::pin(
+                    crate::routing::identity::contact_federation::refresh_local_contact_direction(
+                        state,
+                        &current,
+                        &ready.intent.plan.holder,
+                    ),
                 )
                 .await?,
             )
@@ -126,11 +128,11 @@ async fn materialize_one(
             normal_response_acceptance_receipt,
             ..
         } => {
-            super::local_requester_current_proof(
+            Box::pin(super::local_requester_current_proof(
                 state,
                 &normal_response_acceptance_receipt.contact_round_id,
                 &normal_response_acceptance_receipt.request_receipt,
-            )
+            ))
             .await?
         }
         _ => None,
@@ -186,10 +188,12 @@ async fn materialize_one(
             .as_str()
             == state.service_id()
         {
-            crate::routing::identity::contact_federation::enqueue_glare_finalize_if_ready(
-                state,
-                &ready.intent.plan.holder.contact_actor_id(),
-                &request_acceptance_receipt.core.peer.contact_actor_id(),
+            Box::pin(
+                crate::routing::identity::contact_federation::enqueue_glare_finalize_if_ready(
+                    state,
+                    &ready.intent.plan.holder.contact_actor_id(),
+                    &request_acceptance_receipt.core.peer.contact_actor_id(),
+                ),
             )
             .await?;
         }

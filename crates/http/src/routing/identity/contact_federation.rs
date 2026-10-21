@@ -818,13 +818,13 @@ async fn verify_round_originals(
             .iter()
             .find(|e| e.event_id == receipt.core.request_event_ref)
             .ok_or_else(|| contact_error("round original request missing"))?;
-        verify_original_contact_operation(
+        Box::pin(verify_original_contact_operation(
             state,
             &ContactOperationEvidence::Request {
                 signed_event: event.clone(),
                 request_receipt: receipt.clone(),
             },
-        )
+        ))
         .await?;
     }
     if let Some(receipt) = &basis.normal_response_receipt {
@@ -832,13 +832,13 @@ async fn verify_round_originals(
             .iter()
             .find(|e| e.event_id == receipt.response_event_ref)
             .ok_or_else(|| contact_error("round original acceptance missing"))?;
-        verify_original_contact_operation(
+        Box::pin(verify_original_contact_operation(
             state,
             &ContactOperationEvidence::Response {
                 signed_event: event.clone(),
                 response_receipt: receipt.clone(),
             },
-        )
+        ))
         .await?;
     }
     if let Some(attestations) = &basis.glare_concurrency_attestations {
@@ -875,7 +875,11 @@ async fn verify_current_proof(
         "Contact current",
     )?;
     if let Some(closure) = &proof.closed_round {
-        verify_original_contact_operation(state, &closure.operation.operation()).await?;
+        Box::pin(verify_original_contact_operation(
+            state,
+            &closure.operation.operation(),
+        ))
+        .await?;
     }
     Ok(())
 }
@@ -885,9 +889,13 @@ pub(crate) async fn verify_contact_current_material(
 ) -> Result<(), AppError> {
     material.validate_shape().map_err(contact_error)?;
     verify_current_proof(state, &material.current_proof).await?;
-    verify_original_contact_operation(state, &material.head_operation).await?;
+    Box::pin(verify_original_contact_operation(
+        state,
+        &material.head_operation,
+    ))
+    .await?;
     for grant in &material.scope_grants {
-        verify_original_contact_operation(state, grant).await?;
+        Box::pin(verify_original_contact_operation(state, grant)).await?;
     }
     if let Some(initial) = &material.initial_identity {
         verify_round_originals(state, &initial.round, &initial.events).await?;
@@ -905,9 +913,9 @@ pub(crate) async fn verify_contact_current_material(
     }
     for interval in &material.historical_intervals {
         verify_round_originals(state, &interval.round, &interval.round_events).await?;
-        verify_original_contact_operation(state, &interval.grant).await?;
+        Box::pin(verify_original_contact_operation(state, &interval.grant)).await?;
         if let Some(close) = &interval.closed_by {
-            verify_original_contact_operation(state, close).await?;
+            Box::pin(verify_original_contact_operation(state, close)).await?;
         }
     }
     Ok(())
@@ -925,7 +933,7 @@ pub(crate) async fn verify_contact_bundle(
     .await?;
     verify_round_originals(state, &bundle.basis(), &bundle.round_events).await?;
     for op in bundle.current_operations.iter().chain(&bundle.scope_grants) {
-        verify_original_contact_operation(state, op).await?;
+        Box::pin(verify_original_contact_operation(state, op)).await?;
     }
     for proof in &bundle.current_proofs {
         verify_current_proof(state, proof).await?;
@@ -1412,7 +1420,7 @@ async fn install_current_response(
             "current response differs from requested direction, instances or freshness",
         ));
     }
-    verify_contact_current_material(state, material).await?;
+    Box::pin(verify_contact_current_material(state, material)).await?;
     let prior = state
         .contacts()
         .contact_any(
@@ -1698,7 +1706,7 @@ pub(crate) async fn accept_outbound_contact_control_outcome(
                         "current original changes requested pair or domain",
                     ));
                 }
-                verify_original_contact_operation(state, op).await?;
+                Box::pin(verify_original_contact_operation(state, op)).await?;
                 persist_authenticated_observation(state, op).await?;
             }
             if material.head_operation.round_closure().is_some() {
@@ -1720,7 +1728,7 @@ pub(crate) async fn accept_outbound_contact_control_outcome(
                         "current original closure changes requested direction",
                     ));
                 }
-                verify_original_contact_operation(state, op).await?;
+                Box::pin(verify_original_contact_operation(state, op)).await?;
                 persist_verified_round_closure(state, op).await?;
             }
             if let Some(closure) = &material.current_proof.closed_round {
@@ -1742,10 +1750,10 @@ pub(crate) async fn accept_outbound_contact_control_outcome(
                         "current closure changes requested exact pair",
                     ));
                 }
-                verify_original_contact_operation(state, &op).await?;
+                Box::pin(verify_original_contact_operation(state, &op)).await?;
                 persist_verified_round_closure(state, &op).await?;
             }
-            install_current_response(state, request, material).await
+            Box::pin(install_current_response(state, request, material)).await
         }
         (
             PeerContactSubmitRequestBody::GlareFinalize { .. },
@@ -1777,12 +1785,12 @@ pub(crate) async fn accept_outbound_contact_control_outcome(
                     current_proof.as_ref(),
                 )?),
             )?;
-            install_glare_response(
+            Box::pin(install_glare_response(
                 state,
                 request,
                 glare_concurrency_attestation,
                 current_proof.as_ref(),
-            )
+            ))
             .await
         }
         (_, PeerContactSubmitOutcome::ControlDeferred(deferred)) => {
@@ -1952,7 +1960,7 @@ async fn establish_glare(
             })?
             .head_operation
             .clone();
-        verify_original_contact_operation(state, &original).await?;
+        Box::pin(verify_original_contact_operation(state, &original)).await?;
         events.push(original.event().clone());
     }
     let mut attestations = [local.clone(), remote.clone()];
@@ -2055,8 +2063,21 @@ async fn handle_glare_finalize(
         .ok_or_else(|| {
             crate::app_error!(TemporarilyUnavailable, "glare request material unavailable")
         })?;
-    let local = ensure_local_glare_choice(state, &mut record, holder, request_receipts).await?;
-    let proof = establish_glare(state, &mut record, request_receipts, &local, remote).await?;
+    let local = Box::pin(ensure_local_glare_choice(
+        state,
+        &mut record,
+        holder,
+        request_receipts,
+    ))
+    .await?;
+    let proof = Box::pin(establish_glare(
+        state,
+        &mut record,
+        request_receipts,
+        &local,
+        remote,
+    ))
+    .await?;
     let result =
         PeerContactSubmitOutcome::Control(PeerContactControlSubmitOutcome::GlareFinalize {
             status: PeerContactOutcome::Accepted,
@@ -2135,7 +2156,14 @@ async fn install_glare_response(
         return Err(contact_error("glare response changes durable local choice"));
     }
     let expected = record.updated_at;
-    establish_glare(state, &mut record, request_receipts, local, remote).await?;
+    Box::pin(establish_glare(
+        state,
+        &mut record,
+        request_receipts,
+        local,
+        remote,
+    ))
+    .await?;
     if let Some(proof) = remote_proof {
         verify_current_proof(state, proof).await?;
         if proof.holder != *peer || proof.peer != *holder || proof.fresh_until <= now() {
@@ -2266,11 +2294,28 @@ pub(crate) async fn enqueue_glare_finalize_if_ready(
             return Ok(());
         }
         let own = own.clone();
-        let local =
-            ensure_local_glare_choice(state, &mut record, &own.core.holder, &receipts).await?;
-        let remote =
-            ensure_local_glare_choice(state, &mut record, &own.core.peer, &receipts).await?;
-        establish_glare(state, &mut record, &receipts, &local, &remote).await?;
+        let local = Box::pin(ensure_local_glare_choice(
+            state,
+            &mut record,
+            &own.core.holder,
+            &receipts,
+        ))
+        .await?;
+        let remote = Box::pin(ensure_local_glare_choice(
+            state,
+            &mut record,
+            &own.core.peer,
+            &receipts,
+        ))
+        .await?;
+        Box::pin(establish_glare(
+            state,
+            &mut record,
+            &receipts,
+            &local,
+            &remote,
+        ))
+        .await?;
         let proof = sign_direction_proof(state, &record.current_state, &own.core.peer).await?;
         replace_direction_proof(&mut record.current_state, proof)?;
         sync_contact_summary(&mut record);
@@ -2290,7 +2335,13 @@ pub(crate) async fn enqueue_glare_finalize_if_ready(
         return Ok(());
     };
     let own = own.clone();
-    let local = ensure_local_glare_choice(state, &mut record, &own.core.holder, &receipts).await?;
+    let local = Box::pin(ensure_local_glare_choice(
+        state,
+        &mut record,
+        &own.core.holder,
+        &receipts,
+    ))
+    .await?;
     let (round, core, _) = derive_glare_basis(&receipts)?;
     let Some(address) =
         super::account::contact_delivery_address(state, &own.core.peer, None).await?
@@ -2679,6 +2730,14 @@ async fn peer_contacts_submit(
     depot: &mut Depot,
     req: &mut Request,
 ) -> JsonResult<PeerContactSubmitOutcome> {
+    Box::pin(peer_contacts_submit_inner(depot, req)).await
+}
+
+// Keep unrelated carrier branches out of the peer authentication poll frame.
+async fn peer_contacts_submit_inner(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> JsonResult<PeerContactSubmitOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     super::super::events::peer::validate_peer_request(state, req, true).await?;
     let source_id = req
@@ -2716,10 +2775,10 @@ async fn peer_contacts_submit(
     }
     match &delivery {
         PeerContactSubmitRequestBody::CurrentRefresh { .. } => {
-            return json_ok(handle_current_refresh(state, &delivery, &source_id).await?);
+            return json_ok(Box::pin(handle_current_refresh(state, &delivery, &source_id)).await?);
         }
         PeerContactSubmitRequestBody::GlareFinalize { .. } => {
-            return json_ok(handle_glare_finalize(state, &delivery, &source_id).await?);
+            return json_ok(Box::pin(handle_glare_finalize(state, &delivery, &source_id)).await?);
         }
         _ => {}
     }
@@ -2735,7 +2794,7 @@ async fn peer_contacts_submit(
     if let Some(result) = read_exact_control(state, &delivery, operation.holder()).await? {
         return json_ok(result);
     }
-    verify_original_contact_operation(state, &operation).await?;
+    Box::pin(verify_original_contact_operation(state, &operation)).await?;
     if !matches!(operation, ContactOperationEvidence::Request { .. }) {
         persist_authenticated_observation(state, &operation).await?;
     }
@@ -2765,7 +2824,7 @@ async fn peer_contacts_submit(
                     "carried closure changes exact operation pair/domain",
                 ));
             }
-            verify_original_contact_operation(state, &close).await?;
+            Box::pin(verify_original_contact_operation(state, &close)).await?;
             persist_verified_round_closure(state, &close).await?;
         }
 
@@ -2881,7 +2940,13 @@ async fn peer_contacts_submit(
         current_proof: None,
         retry_after_ms: None,
     });
-    apply_delivered_operation(state, &delivery, &operation, &mut response).await?;
+    Box::pin(apply_delivered_operation(
+        state,
+        &delivery,
+        &operation,
+        &mut response,
+    ))
+    .await?;
     if matches!(operation, ContactOperationEvidence::Request { .. }) {
         if let PeerContactSubmitOutcome::Event(result) = &response {
             persist_request_mirror_receipt(
@@ -2892,11 +2957,11 @@ async fn peer_contacts_submit(
             )
             .await?;
         }
-        enqueue_glare_finalize_if_ready(
+        Box::pin(enqueue_glare_finalize_if_ready(
             state,
             &operation.peer().contact_actor_id(),
             &operation.holder().contact_actor_id(),
-        )
+        ))
         .await?;
     }
     // Recovery of the opposite current is a separate bounded read. The
@@ -2982,7 +3047,11 @@ pub(crate) async fn accept_outbound_contact_event_outcome(
             .ok_or_else(|| contact_error("outbound Contact original missing"))?;
         let expected = record.updated_at;
         if let Some(closure) = &proof.closed_round {
-            verify_original_contact_operation(state, &closure.operation.operation()).await?;
+            Box::pin(verify_original_contact_operation(
+                state,
+                &closure.operation.operation(),
+            ))
+            .await?;
             record
                 .current_state
                 .close_round((**closure).clone())
@@ -3020,11 +3089,11 @@ pub(crate) async fn accept_outbound_contact_event_outcome(
             &outcome.mirror_receipt,
         )
         .await?;
-        enqueue_glare_finalize_if_ready(
+        Box::pin(enqueue_glare_finalize_if_ready(
             state,
             &holder.contact_actor_id(),
             &peer.contact_actor_id(),
-        )
+        ))
         .await?;
     }
     Ok(())

@@ -38,7 +38,7 @@ pub(crate) async fn contact_request(
 ) -> JsonResult<ContactOperationOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    contact_write::request(state, &session, body.into_inner()).await
+    Box::pin(contact_write::request(state, &session, body.into_inner())).await
 }
 
 #[endpoint(
@@ -55,7 +55,7 @@ pub(crate) async fn contact_respond(
 ) -> JsonResult<ContactOperationOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    contact_write::respond(state, &session, body.into_inner()).await
+    Box::pin(contact_write::respond(state, &session, body.into_inner())).await
 }
 
 #[endpoint(
@@ -72,7 +72,7 @@ pub(crate) async fn contact_reject(
 ) -> JsonResult<ContactOperationOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    contact_write::reject(state, &session, body.into_inner()).await
+    Box::pin(contact_write::reject(state, &session, body.into_inner())).await
 }
 
 #[endpoint(
@@ -89,7 +89,12 @@ pub(crate) async fn contact_scope_update(
 ) -> JsonResult<ContactOperationOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    contact_write::scope_update(state, &session, body.into_inner()).await
+    Box::pin(contact_write::scope_update(
+        state,
+        &session,
+        body.into_inner(),
+    ))
+    .await
 }
 
 #[endpoint(
@@ -106,7 +111,7 @@ pub(crate) async fn contact_tombstone(
 ) -> JsonResult<ContactOperationOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    contact_write::tombstone(state, &session, body.into_inner()).await
+    Box::pin(contact_write::tombstone(state, &session, body.into_inner())).await
 }
 
 #[endpoint(
@@ -390,9 +395,11 @@ async fn contact_list_rows(
         {
             // Reverify the selected durable round before projecting its peer
             // producer. Failure omits a selector instead of guessing a device.
-            if contact_write::verify_stored_contact_evidence_for_read(state, &record)
-                .await
-                .is_ok()
+            if Box::pin(contact_write::verify_stored_contact_evidence_for_read(
+                state, &record,
+            ))
+            .await
+            .is_ok()
             {
                 contact_peer_endpoint(&record, &peer)
             } else {

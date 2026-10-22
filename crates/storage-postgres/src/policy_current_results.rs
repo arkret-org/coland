@@ -1172,9 +1172,55 @@ mod admission_tests {
             applet_id: format!("ak:applet:{}", uuid::Uuid::now_v7())
                 .parse()
                 .unwrap(),
+            service_id: "ak:did_core:web:applet-policy-service.example"
+                .parse()
+                .unwrap(),
             effective_scope: scope.clone(),
         });
         assert!(require_supported_policy(&policy, &scope).is_ok());
+        // The restriction binds the Applet Service, independently from its
+        // administrator's Account and Station. A nonmatching rule grants no
+        // authority; it only leaves this management restriction unapplied.
+        let Some(AppletPolicyTarget::Installation {
+            applet_id,
+            service_id,
+            ..
+        }) = &policy.rules[0].applet_target
+        else {
+            unreachable!()
+        };
+        let other_service: arkret_wire::DidCoreId =
+            "ak:did_core:web:another-applet-service.example"
+                .parse()
+                .unwrap();
+        let resources = [arkret_models_collaboration::governance::operation_wire::PolicyResourceSelector {
+            kind: arkret_models_collaboration::governance::operation_wire::PolicyResourceKind::Realm,
+            realm_id: Some(realm.clone()),
+            resource_ref: Some(realm.to_string()),
+        }];
+        for (actual_service, expected) in [
+            (service_id, arkret_wire::PolicyEffect::Deny),
+            (&other_service, arkret_wire::PolicyEffect::Allow),
+        ] {
+            let effect = arkret_policy::applet_management::evaluate_applet_management(
+                Some(std::slice::from_ref(&policy)),
+                &arkret_policy::applet_management::AppletManagementContext {
+                    realm_id: &realm,
+                    requester_actor_id: &policy.created_by,
+                    applet_id,
+                    service_id: actual_service,
+                    effective_scope: &scope,
+                    managed_actor_id: None,
+                    operation: AppletPolicyOperation::Join,
+                    content_action: None,
+                    device_control: None,
+                    resources: Some(&resources),
+                    at: policy.created_at,
+                },
+            )
+            .unwrap();
+            assert_eq!(effect, expected);
+        }
         let circle = arkret_wire::ScopeRef::Circle {
             realm_id: realm.clone(),
             circle_id: arkret_wire::CircleId::from_event_id(&arkret_wire::EventId::from_digest(

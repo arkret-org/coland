@@ -8805,6 +8805,19 @@ pub fn completion_application(
     )
 }
 
+pub async fn realm_creation_completion_fixture(
+    pool: PgPool,
+) -> realm_native_fixture::CompletionFixture {
+    Box::pin(realm_native_fixture::completion_fixture(pool, 1)).await
+}
+
+pub async fn realm_creation_completion_fixtures(
+    pool: PgPool,
+    count: usize,
+) -> realm_native_fixture::CompletionFixture {
+    Box::pin(realm_native_fixture::completion_fixture(pool, count)).await
+}
+
 pub async fn realm_bridge_completion_receiver(pool: PgPool) {
     realm_native_fixture::run_bridge_recipient_mode(pool, false, 3).await;
 }

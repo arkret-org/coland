@@ -232,7 +232,7 @@ pub(crate) async fn inventory(
     lock_install(conn, install, false).await?;
     let scope = coland_storage::applet_effective_scope_key(&install.effective_scope)?;
     sql_query("SELECT record FROM applet_widget_tokens WHERE applet_id=$1 AND effective_scope_key=$2 AND registration_event_ref=$3 AND registration_epoch=$4 AND invalidated_at IS NULL AND expires_at>$5 ORDER BY token_ref")
-        .bind::<Text,_>(install.applet_id.as_str()).bind::<Text,_>(scope).bind::<Text,_>(install.registration_event_ref.as_str()).bind::<Text,_>(install.registration_event_ref.as_str())
+        .bind::<Text,_>(install.applet_id.as_str()).bind::<Text,_>(scope).bind::<Text,_>(install.registration_event_ref.as_str())
         .bind::<Text,_>(install.registration_epoch.as_str()).bind::<Timestamptz,_>(at)
         .load::<RecordRow>(&mut *conn).await.map_err(PersistenceError::database)?.into_iter()
         .map(|r|serde_json::from_value(r.record).map_err(PersistenceError::database)).collect()

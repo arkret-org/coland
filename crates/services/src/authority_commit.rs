@@ -1707,6 +1707,18 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    pub async fn applet_managed_membership_events(
+        &self,
+        realm: &arkret_wire::RealmId,
+        applet: &arkret_wire::AppletId,
+        service: &arkret_wire::DidCoreId,
+    ) -> ServiceResult<Vec<arkret_wire::CommittedEventFullView>> {
+        Ok(self
+            .store()
+            .applet_managed_membership_events(realm, applet, service)
+            .await?)
+    }
+
     pub async fn applet_realm_actor_creations(
         &self,
         realm: &arkret_wire::RealmId,

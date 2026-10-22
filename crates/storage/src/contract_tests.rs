@@ -1651,9 +1651,9 @@ pub async fn assert_applet_formal_commit_transaction_contract(
         );
     }
 
-    // Distinct scopes share a single insert-only identity winner. The losing
-    // first install rolls back its registration/grants and retries with the
-    // accepted identity bytes, never replacing the immutable original winner.
+    // Distinct scopes share the Service registration CAS and an insert-only
+    // identity winner. The loser must reauthor a new signed registration from
+    // current state; refreshing an unsigned database expectation is insufficient.
     let scopes_id = contract_applet_id();
     let left = stores
         .factory
@@ -1674,16 +1674,25 @@ pub async fn assert_applet_formal_commit_transaction_contract(
     ));
     let (l, r) = tokio::join!(left.commit(stores.applets), right.commit(stores.applets));
     assert_eq!(usize::from(l.is_ok()) + usize::from(r.is_ok()), 1);
-    let (winner, mut loser, error) = match l {
-        Ok(_) => (left, right, r.unwrap_err()),
-        Err(error) => (right, left, error),
+    let (winner, loser, loser_label, error) = match l {
+        Ok(_) => (
+            left,
+            right,
+            format!("{namespace}:scope-right"),
+            r.unwrap_err(),
+        ),
+        Err(error) => (right, left, format!("{namespace}:scope-left"), error),
     };
     assert_eq!(
         error.conflict_code(),
-        Some(super::ConflictCode::DuplicateConflict)
+        Some(super::ConflictCode::CasConflict)
     );
     assert_contract_event_group_visibility(stores.events, &winner.event_ids, true).await;
     assert_contract_event_group_visibility(stores.events, &loser.event_ids, false).await;
+    let mut loser = stores
+        .factory
+        .prepare_install(&scopes_id, &loser_label)
+        .await;
     loser.refresh_expected(stores.applets).await;
     let identity = loser.input.expected_identity.clone().unwrap();
     loser.commit(stores.applets).await.unwrap();

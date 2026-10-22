@@ -80,6 +80,7 @@ url = "2.5"
 uuid = { workspace = true, features = ["v4", "v7", "serde"] }
 
 [dev-dependencies]
+chacha20poly1305.workspace = true
 getrandom.workspace = true
 garth = { version = "0.3.0", path = "../../../garth-realm-actors", default-features = false }
 arkret-bridge-runtime = { version = "0.3.0", path = "../../../bridges-realm-actors/crates/runtime", default-features = false, features = ["full", "postgres"] }

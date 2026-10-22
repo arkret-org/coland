@@ -1188,69 +1188,39 @@ async fn exact_managed_membership_removals(
     record: &AppletRecord,
     reason_code: &arkret_wire::ReasonCode,
 ) -> Result<Vec<AppletMembershipRemoveIntent>, AppError> {
-    let realm_id = record.effective_scope.realm_id().as_str().to_owned();
-    let managed_actor_ids = std::collections::BTreeSet::from_iter(
-        record
-            .bots
-            .iter()
-            .map(|bot| bot.bot_actor_id.clone())
-            .chain(
-                record
-                    .ghosts
-                    .iter()
-                    .map(|ghost| ghost.ghost_actor_id.clone()),
-            ),
-    );
-    let current_members = {
-        let projection = state.projections().snapshot();
-        projection
-            .members_of_realm(&realm_id)
-            .into_iter()
-            .filter(|membership| {
-                serde_json::from_str::<arkret_wire::ActorId>(&membership.member)
-                    .is_ok_and(|member| managed_actor_ids.contains(&member))
-            })
-            .map(|membership| {
-                (
-                    membership.member.clone(),
-                    membership.membership_event_ref.clone(),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
+    let current_members = state
+        .authority_commits()
+        .applet_managed_membership_events(
+            record.effective_scope.realm_id(),
+            &record.applet_id,
+            &record.package.service_id,
+        )
+        .await
+        .map_err(|error| incomplete_managed_membership_projection(error))?;
     let mut removals = Vec::new();
-    for (projected_member, membership_event_ref) in current_members {
-        let membership_event_ref = membership_event_ref.ok_or_else(|| {
-            incomplete_managed_membership_projection(format!(
-                "current joined member {projected_member} has no winning Event ref"
-            ))
-        })?;
-        let accepted = state
-            .event_queries()
-            .accepted_event(&membership_event_ref)
-            .await
-            .map_err(|error| {
-                incomplete_managed_membership_projection(format!(
-                    "cannot load winning membership Event {membership_event_ref}: {error}"
-                ))
-            })?
-            .ok_or_else(|| {
-                incomplete_managed_membership_projection(format!(
-                    "winning membership Event {membership_event_ref} is not durably accepted"
-                ))
-            })?;
-        if accepted.event_id != membership_event_ref {
-            return Err(incomplete_managed_membership_projection(format!(
-                "accepted membership lookup returned {} for winning Event {membership_event_ref}",
-                accepted.event_id
-            )));
-        }
-        let event =
-            serde_json::from_value::<arkret_wire::Event>(accepted.envelope).map_err(|error| {
-                incomplete_managed_membership_projection(format!(
-                    "winning membership Event {membership_event_ref} is invalid: {error}"
-                ))
-            })?;
+    for accepted in current_members {
+        let event = accepted.event;
+        let member = match event.kind {
+            EventKind::MemberState => serde_json::from_value::<arkret_wire::ActorId>(
+                event
+                    .payload
+                    .get("member_id")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            )
+            .map_err(incomplete_managed_membership_projection)?,
+            EventKind::InviteAccept => event.actor_id.clone(),
+            _ => {
+                return Err(incomplete_managed_membership_projection(
+                    "durable current is not a membership join",
+                ));
+            }
+        };
+        // The durable read verifies the current manager and winning membership
+        // under the same Realm authority lock, including partial Service changes.
+        let projected_member = member.to_string();
+        let managed_actor_ids = std::collections::BTreeSet::from([member]);
+        let membership_event_ref = event.event_id.to_string();
         if let Some(intent) = classify_current_managed_membership(
             record.applet_id.as_str(),
             &record.effective_scope,

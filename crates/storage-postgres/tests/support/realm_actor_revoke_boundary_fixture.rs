@@ -73,12 +73,14 @@ pub(super) async fn run_active_revoke(
     let installation = store
         .get(
             package.applet_id.as_str(),
+            package.service_id.as_str(),
             &coland_storage::applet_effective_scope_key(&candidate.creation_scope).unwrap(),
         )
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(installation["status"], "installed");
+    assert_eq!(installation["status"], "partially_installed");
+    assert!(installation["capabilities"].as_array().unwrap().len() < package.requested_scopes.len());
     let creation = fixture
         .state
         .test_persistence()
@@ -313,6 +315,7 @@ pub(super) async fn run_active_revoke(
     let fenced = store
         .get(
             package.applet_id.as_str(),
+            package.service_id.as_str(),
             &coland_storage::applet_effective_scope_key(&candidate.creation_scope).unwrap(),
         )
         .await

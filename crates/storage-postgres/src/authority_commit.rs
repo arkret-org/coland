@@ -3438,6 +3438,20 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         crate::mls_group_state_material_read::read(&self.pool, request, issuer, source_peer).await
     }
 
+    async fn applet_managed_membership_events(
+        &self,
+        realm: &arkret_wire::RealmId,
+        applet: &arkret_wire::AppletId,
+        service: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Vec<arkret_wire::CommittedEventFullView>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            crate::realm_actor_creation::joined_memberships(conn, realm, applet, service).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn applet_realm_actor_creations(
         &self,
         realm: &arkret_wire::RealmId,

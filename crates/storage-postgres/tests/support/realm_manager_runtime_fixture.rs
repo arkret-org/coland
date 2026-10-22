@@ -196,9 +196,7 @@ async fn run_manager_runtime_transfer(
     // changes. The new Service itself has a distinct native DID and HTTPS host.
     let path = retained_path.to_owned();
     let retained_store = FileAuthoringStore::new(path.clone()).unwrap();
-    let retained_originals = retained_store.entries_with_prefix("managed-authoring/original/").unwrap();
     let retained_devices = retained_actor_devices(&retained_store, actor);
-    assert!(!retained_originals.is_empty());
     assert!(!retained_devices.is_empty());
     let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let make_edge = || {
@@ -231,6 +229,20 @@ async fn run_manager_runtime_transfer(
             .unwrap()
             .is_none()
     );
+    let receiving_author = arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService::new(edge.clone()).unwrap();
+    let receiving_external = arkret::GhostExternalTuple {
+        protocol: "fixture".into(), instance_id: "bridge-native".into(), external_id: "already-on-receiving-service".into(),
+    };
+    let prepared = boxed_step(|| receiving_author.prepare_ghost_in_scope(&candidate.applet_id, &candidate.creation_scope, &receiving_external, None)).await.unwrap();
+    let arkret_bridge_runtime::PreparedGhost::Create(receiving_command) = prepared else { panic!("new receiving companion required"); };
+    let receiving_candidate: RealmActorCreatePayload = serde_json::from_value(serde_json::to_value(&receiving_command.create_event.payload).unwrap()).unwrap();
+    assert!(matches!(boxed_step(|| edge.submit_managed_creation(&receiving_command)).await.unwrap(), arkret::AuthoritySubmitOutcome::Accepted { .. }));
+    boxed_step(|| realm_actor_mls_fixture::business_parent(fixture, &receiving.package, &receiving_candidate.actor_id, &candidate.creation_scope)).await;
+    let receiving_device = boxed_step(|| runtime.device_for_actor(&receiving_candidate.actor_id)).await.unwrap();
+    boxed_step(|| runtime.ensure_realm_membership(&receiving_device)).await.unwrap();
+    let receiving_before = snapshot(fixture, &receiving_candidate.actor_id).await;
+    let retained_originals = retained_store.entries_with_prefix("managed-authoring/original/").unwrap();
+    assert_eq!(retained_originals.len(), 3, "two old subjects and one receiving subject precede transfer");
     eprintln!("manager runtime: retained custody and per-actor Service acceptance");
     let offer =
         boxed_step(|| runtime.management_transfer_offer(&plan, &candidate.initial_resolution.did))
@@ -283,12 +295,7 @@ async fn run_manager_runtime_transfer(
         before["realm_actor_manager"]["service_id"],
         json!(previous.package.service_id)
     );
-    assert!(
-        boxed_step(|| runtime.local_actor_for_realm(&fixture.realm))
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert_eq!(boxed_step(|| runtime.local_actor_for_realm(&fixture.realm)).await.unwrap(), Some(receiving_candidate.actor_id.clone()));
     *previous.principal_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
         Arc::new(
             arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService::new(
@@ -320,6 +327,16 @@ async fn run_manager_runtime_transfer(
             + 1
     );
     assert_eq!(accepted["realm_actor_statusowner"], "paused");
+    // Cover the retired leaf before remaining members publish new content.
+    boxed_step(|| realm_actor_mls_fixture::human_rotates_out_runtime(fixture, previous_device, &mut human_group)).await;
+    boxed_step(|| runtime.maintain_mls_key_packages(&receiving_device, 2)).await.unwrap();
+    human_group = boxed_step(|| realm_actor_mls_fixture::human_adds_runtime_to_group(fixture, &receiving_device, human_group)).await;
+    let receiving_reader = boxed_step(|| runtime.open_reader(&receiving_device)).await.unwrap();
+    let receiving_welcome = boxed_step(|| runtime.poll_welcome_queue(&receiving_device, &receiving_reader)).await.unwrap();
+    assert_eq!(receiving_welcome.durable_welcomes, 1);
+    assert!(receiving_welcome.acknowledged);
+    assert_eq!(runtime.installed_mls_epoch(&receiving_device).await.unwrap(), Some(4));
+
     assert_eq!(snapshot(fixture, &other_candidate.actor_id).await, other_before,
         "one actor's Service change must not alter another actor's manager, control or generation");
     assert!(boxed_step(|| query_managed_actor(fixture, previous, actor)).await.is_err(),
@@ -363,12 +380,13 @@ async fn run_manager_runtime_transfer(
         accepted,
         "exact retry changes no accepted state"
     );
-    assert_eq!(
-        boxed_step(|| runtime.local_actor_for_realm(&fixture.realm))
-            .await
-            .unwrap(),
-        Some(actor.clone())
-    );
+    assert_eq!(boxed_step(|| query_managed_actor(fixture, &receiving, actor)).await.unwrap().actor_id.as_ref(), Some(actor));
+    assert_eq!(boxed_step(|| query_managed_actor(fixture, &receiving, &receiving_candidate.actor_id)).await.unwrap().actor_id.as_ref(), Some(&receiving_candidate.actor_id));
+    assert_eq!(snapshot(fixture, &receiving_candidate.actor_id).await, receiving_before);
+    let receiving_reader = boxed_step(|| runtime.open_reader(&receiving_device)).await.unwrap();
+    boxed_step(|| receiving_reader.client().snapshot_head(&fixture.realm)).await.unwrap();
+    let receiving_location = json!({"protocol":"fixture","network_id":"bridge-native","location_id":"receiving-companion"});
+    boxed_step(|| runtime.submit_portal_strand(&receiving_candidate.actor_id, &candidate.creation_scope, "Already managed by the receiving Service", &receiving_location)).await.unwrap();
     let store = FileAuthoringStore::new(path.clone()).unwrap();
     assert_eq!(store.entries_with_prefix("managed-authoring/original/").unwrap(), retained_originals,
         "historical creation custody is preserved byte-for-byte");
@@ -377,6 +395,35 @@ async fn run_manager_runtime_transfer(
     boxed_step(|| runtime.rotate_control(actor, "receiving-control-rotation"))
         .await
         .unwrap();
+    let old_did = candidate.initial_resolution.did.clone();
+    let locator = applet_service_did(&receiving.package).as_str().splitn(4, ':').nth(3).unwrap().to_owned();
+    let target_did: arkret::Did = format!("did:webvh:{}:{}",
+        old_did.as_str().split(':').nth(2).unwrap(),
+        locator.replace(":webvh:service", ":webvh:relocated-actor")).parse().unwrap();
+    let mut moved_config = config.clone();
+    moved_config.arkret.managed_actor_authoring.principal_endpoint = receiving.package.base_url.clone();
+    let moved_edge = Arc::new(ArkretEdge::new_outbound(Arc::new(moved_config), client.clone(),
+        Ed25519PayloadSigner::new(SigningKey::from_bytes(&[42; 32]),
+            applet_service_did(&receiving.package), receiving.package.webhook_auth.key_ref.clone()),
+        AuthoringJournal::new(Arc::new(FileAuthoringStore::new(path.clone()).unwrap()))).unwrap());
+    *receiving.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
+        arkret_bridge_runtime::web::managed_applet_host_router(moved_edge.clone()).unwrap())));
+    let runtime = ManagedDeviceRuntime::new(moved_edge.clone()).unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let relocation = boxed_step(|| runtime.relocate_control(actor, "retained-data-host-move", &target_did)).await.unwrap();
+    drop(runtime);
+    let runtime = ManagedDeviceRuntime::new(moved_edge.clone()).unwrap();
+    assert_eq!(boxed_step(|| runtime.relocate_control(actor, "retained-data-host-move", &target_did)).await.unwrap(), relocation);
+    let old_url: url::Url = arkret_identity::DidWebvhResolver::document_url(&old_did).unwrap().parse().unwrap();
+    let prefix = old_url.path().strip_suffix("did.json").unwrap().to_owned();
+    previous.unavailable_principals.lock().unwrap().insert(prefix);
+    let network = native_http_client(std::time::Duration::from_secs(30));
+    assert_eq!(network.get(old_url).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+    let new_url = arkret_identity::DidWebvhResolver::document_url(&target_did).unwrap();
+    let new_document: Value = network.get(new_url).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(new_document["id"], json!(target_did));
+    assert_eq!(snapshot(fixture, actor).await["realm_actor_control"]["resolution"]["did"], json!(target_did));
+    let edge = moved_edge;
     boxed_step(|| {
         runtime.set_owner_status(
             actor,
@@ -459,14 +506,14 @@ async fn run_manager_runtime_transfer(
         .unwrap();
     boxed_step(|| runtime.open_reader(&device)).await.unwrap();
     eprintln!("manager runtime: ordinary member admits the replacement Device, then native business resumes");
-    boxed_step(|| realm_actor_mls_fixture::human_rotates_out_runtime(fixture, previous_device, &mut human_group)).await;
+
     boxed_step(|| runtime.maintain_mls_key_packages(&device, 2)).await.unwrap();
     let _human_group = boxed_step(|| realm_actor_mls_fixture::human_adds_runtime_to_group(fixture, &device, human_group)).await;
     let reader = boxed_step(|| runtime.open_reader(&device)).await.unwrap();
     let welcome = boxed_step(|| runtime.poll_welcome_queue(&device, &reader)).await.unwrap();
     assert_eq!(welcome.durable_welcomes, 1);
     assert!(welcome.acknowledged);
-    assert_eq!(runtime.installed_mls_epoch(&device).await.unwrap(), Some(4));
+    assert_eq!(runtime.installed_mls_epoch(&device).await.unwrap(), Some(5));
     assert_eq!(runtime.installed_mls_epoch(previous_device).await.unwrap(), Some(1));
     let location = json!({"protocol":"fixture","network_id":"bridge-native","location_id":"receiving-service-resumes"});
     boxed_step(|| runtime.submit_portal_strand(actor, &candidate.creation_scope, "Resumed on the receiving Service", &location)).await.unwrap();

@@ -2724,6 +2724,20 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// One ordinary managed PCR successor, relayed by its exact Service.
     /// Rechecks accepted provenance, resolution, generation, scope installs,
     /// possession and producer proof under the PCR and installation locks.
+    /// Accepted joined membership originals for the Applet's current Service,
+    /// observed together with manager bindings at one durable Realm cut.
+    async fn applet_managed_membership_events(
+        &self,
+        realm: &arkret_wire::RealmId,
+        applet: &arkret_wire::AppletId,
+        service: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Vec<arkret_wire::CommittedEventFullView>> {
+        let _ = (realm, applet, service);
+        Err(PersistenceError::Internal(
+            "durable Applet membership inventory unavailable".into(),
+        ))
+    }
+
     async fn applet_realm_actor_creations(
         &self,
         realm: &arkret_wire::RealmId,

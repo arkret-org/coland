@@ -2078,6 +2078,7 @@ mod realm_native_fixture {
         actor_log: Arc<Mutex<Vec<Value>>>,
         managed_router: Arc<Mutex<Option<Arc<salvo::Service>>>>,
         principal_router: Arc<Mutex<Option<Arc<salvo::Service>>>>,
+        unavailable_principals: Arc<Mutex<std::collections::BTreeSet<String>>>,
         configuration_response_fault: Arc<Mutex<Option<ConfigurationResponseFault>>>,
         completion_handler: Arc<Mutex<Option<CompletionHandler>>>,
         stop: Arc<std::sync::atomic::AtomicBool>,
@@ -2142,6 +2143,9 @@ mod realm_native_fixture {
             let served_router = managed_router.clone();
             let principal_router = Arc::new(Mutex::new(None::<Arc<salvo::Service>>));
             let served_principal = principal_router.clone();
+            let unavailable_principals =
+                Arc::new(Mutex::new(std::collections::BTreeSet::<String>::new()));
+            let unavailable_resources = unavailable_principals.clone();
             let configuration_response_fault =
                 Arc::new(Mutex::new(None::<ConfigurationResponseFault>));
             let response_fault = configuration_response_fault.clone();
@@ -2168,6 +2172,7 @@ mod realm_native_fixture {
                     let published_actor = published_actor.clone();
                     let served_router = served_router.clone();
                     let served_principal = served_principal.clone();
+                    let unavailable_resources = unavailable_resources.clone();
                     let response_fault = response_fault.clone();
                     let served_completion = served_completion.clone();
                     let service_resolution = served_service_resolution.clone();
@@ -2188,6 +2193,11 @@ mod realm_native_fixture {
                         let mut first=request.lines().next().unwrap().split_whitespace();
                         let method=first.next().unwrap();
                         let path=first.next().unwrap();
+                        if unavailable_resources.lock().unwrap().iter().any(|prefix| path.starts_with(prefix)) {
+                            stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                            stream.flush().unwrap();
+                            return;
+                        }
                         let completion=served_completion.lock().unwrap().clone();
                         if method == "POST" && path == "/_arkret/edge/applet/transactions" && completion.is_some() {
                             let length=request.lines().skip(1).filter_map(|line|line.split_once(':'))
@@ -2278,6 +2288,7 @@ mod realm_native_fixture {
                 actor_log,
                 managed_router,
                 principal_router,
+                unavailable_principals,
                 configuration_response_fault,
                 completion_handler,
                 stop,
@@ -3128,7 +3139,7 @@ mod realm_native_fixture {
             "creation_authorization_ref":grant,
             "initial_resolution":{"did":document.id,"method_history_head":head,"version_id":inception.version_id},
             "method_history_evidence":evidence,"control_method_kid":method,
-            "expires_at":at + chrono::Duration::minutes(5),
+            "expires_at":arkret_canonical::format_timestamp_canonical(at + chrono::Duration::minutes(5)),
             "external_ref":{"protocol":"matrix","instance_id":"chat.example","external_id":"external-user"},
             "recovery":{"kind":"manager_native","enabled":true}
         });
@@ -8784,4 +8795,16 @@ pub async fn realm_bridge_completion_receiver(pool: PgPool) {
 /// Real initial Device and KeyPackage accepted-outcome persistence recovery.
 pub async fn realm_native_runtime_recovery(pool: PgPool) {
     realm_native_fixture::run_bridge_recipient_mode(pool, false, 4).await;
+}
+
+pub async fn widget_inventory_native_install_and_revoke() {
+    applet_widget_inventory_fixture::run_widget_inventory().await;
+}
+
+pub async fn realm_bridge_cross_circle_queue_boundaries(pool: PgPool) {
+    realm_native_fixture::run_bridge_recipient_mode(pool, true, 2).await;
+}
+
+pub async fn realm_bridge_welcome_recovery_boundaries(pool: PgPool) {
+    realm_native_fixture::run_bridge_recipient_mode(pool, false, 1).await;
 }

@@ -177,6 +177,56 @@ pub(crate) async fn admit(
     Ok(outcome)
 }
 
+/// Retain the same authority lock across current managers and membership originals.
+pub(crate) async fn joined_memberships(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    applet: &arkret_wire::AppletId,
+    service: &arkret_wire::DidCoreId,
+) -> Result<Vec<arkret_wire::CommittedEventFullView>, PgTransactionError> {
+    use diesel::sql_types::{Jsonb, Text};
+    use diesel::{OptionalExtension, QueryableByName, sql_query};
+    use diesel_async::RunQueryDsl;
+    #[derive(QueryableByName)]
+    struct Row {
+        #[diesel(sql_type=Jsonb)]
+        value: serde_json::Value,
+    }
+    let actors = inventory(conn, realm, applet, Some(service)).await?;
+    let mut result = Vec::new();
+    for original in actors {
+        let candidate = crate::realm_actor_control::creation(&original.event)?
+            .ok_or_else(|| invalid("managed membership inventory has no creation"))?;
+        let row = sql_query("SELECT jsonb_build_object('event',e.envelope,'commit',c.commit_json) AS value FROM member_state_current_results m LEFT JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=m.realm_id LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join'")
+            .bind::<Text,_>(realm.as_str()).bind::<Text,_>(candidate.actor_id.to_string())
+            .get_result::<Row>(&mut *conn).await.optional()?;
+        let Some(row) = row else { continue };
+        let full: arkret_wire::CommittedEventFullView =
+            serde_json::from_value(row.value).map_err(invalid)?;
+        full.validate_shape().map_err(invalid)?;
+        let member_matches = match full.event.kind {
+            arkret_wire::EventKind::MemberState => {
+                full.event.payload.get("member_id") == Some(&json!(candidate.actor_id))
+                    && full
+                        .event
+                        .payload
+                        .get("membership")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("join")
+            }
+            arkret_wire::EventKind::InviteAccept => full.event.actor_id == candidate.actor_id,
+            _ => false,
+        };
+        if !member_matches || full.event.realm_id != *realm {
+            return Err(invalid(
+                "managed membership current differs from its accepted original",
+            ));
+        }
+        result.push(full);
+    }
+    Ok(result)
+}
+
 /// Reconstruct accepted originals, optionally restricted to their current managing Service.
 pub(crate) async fn inventory(
     conn: &mut AsyncPgConnection,

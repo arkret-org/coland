@@ -311,6 +311,7 @@ async fn boundary_install_deadline(
         .applets()
         .get(
             package.applet_id.as_str(),
+            package.service_id.as_str(),
             &coland_storage::applet_effective_scope_key(&ScopeRef::Realm {
                 realm_id: fixture.realm.clone(),
             })

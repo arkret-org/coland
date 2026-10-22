@@ -321,6 +321,7 @@ fn realm_review_installation_target(
     );
     arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Installation {
         applet_id: context.package.applet_id.clone(),
+        service_id: context.package.service_id.clone(),
         effective_scope,
     }
 }

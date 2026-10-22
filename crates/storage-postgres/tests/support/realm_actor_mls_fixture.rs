@@ -2244,7 +2244,7 @@ async fn human_adds_runtime_to_group_in_authority(
     // The accepted Add changes the occupied leaves. Recover their identities
     // from the real authenticated roster and original Genesis material before
     // this member can author another transition by ActorId.
-    boxed_step(|| install_received_roster(governor, &accepted, &mut group)).await;
+    boxed_step(|| install_received_roster(fixture, &accepted, &mut group)).await;
     assert!(
         group
             .verified_leaf_bindings()

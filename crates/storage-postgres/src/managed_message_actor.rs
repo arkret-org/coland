@@ -311,8 +311,8 @@ async fn require_applet_producer_inner(
     if (!grant_is_active_at(grant, at) && !revoking_own_child)
         || !matches!(&grant.subject,CapabilitySubject::Actor(actor) if actor==grant_actor)
     {
-        return Err(denied(
-            "Applet authorization grant is not active for the exact original producer",
+        return Err(PersistenceError::Conflict(
+            "capability_denied: Applet authorization grant is not active for the exact original producer".into(),
         ));
     }
     if matches!(

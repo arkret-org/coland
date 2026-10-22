@@ -257,10 +257,11 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
         before
     );
     let creations = PgAuthorityCommitStore { pool }
-        .applet_realm_actor_creations(&factory.fixture.realm, &id)
+        .applet_realm_actor_creations(&factory.fixture.realm, &id, Some(&package.service_id))
         .await
         .unwrap();
-    assert_eq!(creations.len(), 3);
+    assert_eq!(creations.len(), 4);
+    assert!(creations.iter().any(|record| record.event.payload["actor_id"] == json!(outside.actor_id)));
     for actor in actors {
         assert!(
             creations
@@ -457,6 +458,7 @@ async fn authority_material_survives_service_rotation(
             ),
         }));
     document["assertionMethod"] = json!([method]);
+    document["authentication"] = json!([method]);
     let next = arkret_canonical::ed25519_pubkey_to_did_key_multibase(
         SigningKey::from_bytes(&[45; 32]).verifying_key().as_bytes(),
     );

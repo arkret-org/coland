@@ -179,6 +179,27 @@ pub(super) async fn install_admission_policy(
     );
 }
 
+async fn station_excludes_applet_queries(fixture: &Fixture) {
+    use arkret_wire::ServiceOperationId as Op;
+    let client = native_http_client(std::time::Duration::from_secs(30));
+    let base = fixture.state.config().public_base_url.trim_end_matches('/');
+    let response = client.get(format!("{base}/_arkret/describe"))
+        .header("Arkret-Operation", Op::ServerReadDescribeV1.as_str()).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let describe: arkret::ServiceDescribe = response.json().await.unwrap();
+    for (operation, path) in [
+        (Op::EdgeAppletRealmReadResolveV1, "realms/known-portal"),
+        (Op::EdgeAppletReadProtocolMetadataV1, "protocols/fixture"),
+        (Op::EdgeAppletThirdPartyUsersReadListV1, "third_party/users?protocol=fixture&external_id=known"),
+        (Op::EdgeAppletThirdPartyLocationsReadListV1, "third_party/locations?protocol=fixture&external_id=known"),
+    ] {
+        assert!(!describe.supports_operation(operation));
+        let response = client.get(format!("{base}/_arkret/edge/applet/{path}"))
+            .header("Arkret-Operation", operation.as_str()).send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 404, "Station cannot answer Applet lookup {operation:?}");
+    }
+}
+
 pub(super) async fn run_install_admission(pool: PgPool) {
     let (fixture, _station) = boxed_step(|| async { network_fixture(pool).await }).await;
     let factory = AppletAuthoringFactory {
@@ -254,6 +275,7 @@ pub(super) async fn run_install_admission(pool: PgPool) {
             before
         );
     }
+    boxed_step(|| station_excludes_applet_queries(&factory.fixture)).await;
     boxed_step(|| async { install_admission_reproof_and_missing_creation(&factory).await }).await;
     boxed_step(|| install_admission_circle_claim_independence(&factory)).await;
     let id = AppletId::new(format!("ak:applet:{}", uuid::Uuid::now_v7())).unwrap();

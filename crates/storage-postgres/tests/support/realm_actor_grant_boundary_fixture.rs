@@ -368,8 +368,8 @@ pub(super) async fn grant_authority_boundaries(
         "error_code":"external_unavailable","retriable":true,"visibility_scope":"realm_members"});
     let mut wrong_applet = payload.clone();
     wrong_applet["applet_id"] = json!(format!("ak:applet:{}", uuid::Uuid::now_v7()));
-    for event in [
-        signed_event(
+    for (event, reason) in [
+        (signed_event(
             package,
             service.clone(),
             scope.clone(),
@@ -377,8 +377,8 @@ pub(super) async fn grant_authority_boundaries(
             payload.clone(),
             Some(&child),
             &signer,
-        ),
-        signed_event(
+        ), arkret_wire::ErrorCode::CAPABILITY_DENIED),
+        (signed_event(
             package,
             service.clone(),
             scope.clone(),
@@ -386,7 +386,7 @@ pub(super) async fn grant_authority_boundaries(
             wrong_applet,
             Some(bridge_grant),
             &signer,
-        ),
+        ), arkret_wire::ErrorCode::FAILED_PRECONDITION),
     ] {
         let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
         let (status, problem) = boxed_step(|| grant_boundary_send(fixture, package, &event)).await;
@@ -396,7 +396,7 @@ pub(super) async fn grant_authority_boundaries(
                 &event,
                 status,
                 problem,
-                arkret_wire::ErrorCode::FAILED_PRECONDITION,
+                reason,
             )
         })
         .await;
@@ -469,7 +469,7 @@ pub(super) async fn grant_authority_boundaries(
             &fresh,
             status,
             problem,
-            arkret_wire::ErrorCode::FAILED_PRECONDITION,
+            arkret_wire::ErrorCode::CAPABILITY_DENIED,
         )
     })
     .await;

@@ -1885,7 +1885,7 @@ pub(super) async fn human_admits_runtime(
         "cipher_suite":"MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519", "group_info_ref":info,"ratchet_tree_ref":tree,
         "creator_leaf_authority":{"leaf_signature_key_b64u":arkret_canonical::base64url_encode(key.verifying_key().as_bytes()),
             "endpoint":{"kind":"device","device_id":history.founding_device_id},"authorization_event_ref":authorization},
-        "governance_binding":binding,"created_at":at
+        "governance_binding":binding,"created_at":arkret_canonical::format_timestamp_canonical(at)
     }),at).unwrap();
     let genesis = fixture.sign_admin(raw);
     let (status, value) = boxed_step(|| {

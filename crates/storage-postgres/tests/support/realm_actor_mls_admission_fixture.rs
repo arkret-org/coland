@@ -1742,6 +1742,7 @@ async fn admission_read_material_and_snapshot_guards(
     .await;
     assert_eq!(expired.status_code, Some(StatusCode::NOT_FOUND));
     let problem: Value = expired.take_json().await.unwrap();
+    assert_eq!(problem["status"], 404);
     assert_eq!(problem["type"], "https://arkret.org/problems/not_found");
     assert!(problem.get("group_info_bytes_b64").is_none());
     assert!(problem.get("ratchet_tree_bytes_b64").is_none());

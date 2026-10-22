@@ -750,6 +750,7 @@ pub(super) async fn admission_circle_claim_after_realm_fence(
         "actual native Circle requester bound to its real MLS group: {original}"
     );
     let result: KeyPackagesClaimOutcome = serde_json::from_value(original.clone()).unwrap();
+    assert_eq!(result.claim_receipt.request, request.unsigned_request());
     assert_eq!(result.claims.len(), 1);
     assert_eq!(result.claims[0].keypackage_ref, reference.as_str());
     assert_eq!(

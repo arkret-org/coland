@@ -3074,15 +3074,31 @@ mod realm_native_fixture {
         (serde_json::from_value(value).unwrap(), signer)
     }
 
-    fn recovery_plan(
+    async fn native_successor_time(previous: &[Value]) -> chrono::DateTime<chrono::Utc> {
+        let previous_time: chrono::DateTime<chrono::Utc> = previous.last().unwrap()["versionTime"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let earliest = previous_time + chrono::Duration::seconds(1);
+        loop {
+            let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+            if at >= earliest {
+                return at;
+            }
+            tokio::time::sleep((earliest - at).to_std().unwrap()).await;
+        }
+    }
+
+    async fn recovery_plan(
         creation: &RealmActorCreatePayload,
         commit: &arkret_wire::RealmCommit,
     ) -> (
         RealmActorRecoveryBeginPayload,
         AppletManagedActorMethodHistoryEvidence,
     ) {
-        let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
         let (_, previous, _) = creation.method_history_evidence.webvh_material();
+        let at = native_successor_time(previous).await;
         let next_control = SigningKey::from_bytes(&[44; 32]);
         let next_update = SigningKey::from_bytes(&[45; 32]);
         let next_method = DidUrl::new(format!(
@@ -3233,14 +3249,14 @@ mod realm_native_fixture {
         authored.into_event()
     }
 
-    fn control_successor(
+    async fn control_successor(
         candidate: &RealmActorCreatePayload,
         current: &arkret_wire::RealmCommit,
         published: &AppletManagedActorMethodHistoryEvidence,
         keep_old: bool,
     ) -> RealmActorControlUpdatePayload {
-        let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
         let previous = published.webvh_material().1;
+        let at = native_successor_time(previous).await;
         let did = &candidate.initial_resolution.did;
         let next = DidUrl::new(format!("{did}#rotated-controller")).unwrap();
         let key = SigningKey::from_bytes(&[55; 32]);
@@ -3356,7 +3372,7 @@ mod realm_native_fixture {
             nonce: String::new(),
         };
         for keep_old in [false, true] {
-            let payload = control_successor(candidate, current, published, keep_old);
+            let payload = control_successor(candidate, current, published, keep_old).await;
             if keep_old {
                 *native.actor_log.lock().unwrap() =
                     payload.method_history_evidence.webvh_material().1.to_vec();
@@ -3891,7 +3907,7 @@ mod realm_native_fixture {
             "real business grant revocation: {response}"
         );
         eprintln!("recovery: authoring native plan");
-        let (plan, published) = recovery_plan(candidate, creation);
+        let (plan, published) = recovery_plan(candidate, creation).await;
         let make_begin = |payload: RealmActorRecoveryBeginPayload| {
             let at = payload.control_signature.created_at;
             let intent = arkret_event_draft::TypedEventDraft::<

@@ -101,18 +101,18 @@ fn station(url: String) -> (AppState, PgPool, Arc<dyn coland_storage::Persistenc
         ..crate::config::AppConfig::test_default()
     };
     assert_eq!(local.trust_domain, external.trust_domain);
+    use coland_test_support::AppStateTestExt as _;
+    let keep_lease = leased.test_persistence();
     let state = AppState::new_with_service_identity(
         local,
         coland_storage_postgres::Db {
             pool: Some(pool.clone()),
         },
-        Arc::new(PgPersistenceStore::new(pool.clone())),
+        keep_lease.clone(),
         coland_test_support::fixture_service_identity(&external),
         leased.service_resolution_commitment().as_ref().clone(),
         [83; 32],
     );
-    use coland_test_support::AppStateTestExt as _;
-    let keep_lease = leased.test_persistence();
     (state, pool, keep_lease)
 }
 
@@ -1480,18 +1480,18 @@ fn station_with_webvh_provider(
         ..crate::config::AppConfig::test_default()
     };
     assert_eq!(local.trust_domain, external.trust_domain);
+    use coland_test_support::AppStateTestExt as _;
+    let keep_lease = leased.test_persistence();
     let state = AppState::new_with_service_identity(
         local,
         coland_storage_postgres::Db {
             pool: Some(pool.clone()),
         },
-        Arc::new(PgPersistenceStore::new(pool.clone())),
+        keep_lease.clone(),
         coland_test_support::fixture_service_identity(&external),
         leased.service_resolution_commitment().as_ref().clone(),
         [83; 32],
     );
-    use coland_test_support::AppStateTestExt as _;
-    let keep_lease = leased.test_persistence();
     (state, pool, keep_lease)
 }
 

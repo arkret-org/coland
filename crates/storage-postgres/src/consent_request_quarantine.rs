@@ -274,7 +274,7 @@ pub(crate) async fn admit_in_connection(
         entry_digest: Hash::new(digest)
             .map_err(|_| invalid("Consent request digest is invalid"))?,
         account_id: input.holder.clone(),
-        source_peer_actor_id: arkret_wire::ActorId::account(input.requester.clone()),
+        source_peer_actor_id: requester_actor,
         source_peer_principal_id: input.requester.principal_id.clone(),
         source_id: input.requester.station_id.clone(),
         surface: HolderQuarantineSurface::ConsentRequest {

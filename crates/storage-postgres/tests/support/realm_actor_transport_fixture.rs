@@ -467,6 +467,10 @@ async fn realm_device_wrong_possession_is_rejected(
     use ed25519_dalek::Signer as _;
     arkret_signatures::verify_realm_device_authorize_possession(correct, &candidate.actor_id)
         .unwrap();
+    boxed_step(|| {
+        realm_device_noncanonical_expiry_is_rejected(fixture, candidate, correct, metadata, at)
+    })
+    .await;
     let mut bad = correct.clone();
     let input = bad
         .realm_device_possession_signature_input(&candidate.actor_id)
@@ -543,6 +547,94 @@ async fn realm_device_wrong_possession_is_rejected(
         boxed_step(|| native_business_footprint(fixture)).await,
         before,
         "wrong inner PoP cannot retain Device current, Event, Commit, signer fact or quota"
+    );
+}
+
+async fn realm_device_noncanonical_expiry_is_rejected(
+    fixture: &Fixture,
+    candidate: &RealmActorCreatePayload,
+    correct: &arkret_models_collaboration::events_payloads::DeviceAuthorizePayload,
+    metadata: &RealmActorControlHttpMetadata,
+    at: chrono::DateTime<chrono::Utc>,
+) {
+    use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+    let mut payload = serde_json::to_value(correct).unwrap();
+    let canonical = payload["expires_at"].as_str().unwrap().to_owned();
+    // The valid PoP binds this same millisecond. A loose receiver would accept
+    // the finer spelling, then produce a current that differs from its source.
+    payload["expires_at"] = json!(format!("{}001Z", canonical.strip_suffix('Z').unwrap()));
+    assert!(
+        serde_json::from_value::<
+            arkret_models_collaboration::events_payloads::DeviceAuthorizePayload,
+        >(payload.clone())
+        .is_err()
+    );
+    let mut event = arkret_wire::test_support::raw_event_for_actor_at(
+        EventKind::DeviceAuthorize.as_str(),
+        ScopeRef::RealmControl {
+            realm_id: fixture.realm.clone(),
+        },
+        candidate.actor_id.clone(),
+        payload,
+        at,
+    )
+    .unwrap();
+    event.applet_id = Some(candidate.applet_id.clone());
+    event.producer_proof = None;
+    let mut authored = arkret_wire::AuthoredEvent::finalize_with_digest_suite(
+        event,
+        arkret_canonical::DigestSuite::Sha256,
+    )
+    .unwrap();
+    arkret_signatures::sign_event(
+        &mut authored,
+        &Ed25519PayloadSigner::new(
+            SigningKey::from_bytes(&[33; 32]),
+            candidate.initial_resolution.did.clone(),
+            candidate.control_method_kid.clone(),
+        ),
+        arkret_signatures::SignEventOptions::new().with_created_at(at),
+    )
+    .unwrap();
+    let event = authored.into_event();
+    let request = SelfAuthoritySubmitRequest::Event(arkret_wire::EventAdmissionSubmission::new(
+        event.clone(),
+    ));
+    let mut metadata = metadata.clone();
+    metadata.nonce = arkret_canonical::base64url_encode(rand::random::<[u8; 32]>());
+    let before = boxed_step(|| native_business_footprint(fixture)).await;
+    let (status, problem) = control_post(
+        fixture,
+        &metadata,
+        &candidate.control_method_kid,
+        "/_arkret/self/events",
+        arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1,
+        &json!(request),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a valid control proof cannot admit a noncanonical Device expiry: {problem}"
+    );
+    assert_eq!(
+        problem["type"],
+        "https://arkret.org/problems/schema_violation"
+    );
+    assert!(
+        fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .committed_event(&event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        boxed_step(|| native_business_footprint(fixture)).await,
+        before,
+        "expiry parsing must fail before retaining any Device or accepted original"
     );
 }
 

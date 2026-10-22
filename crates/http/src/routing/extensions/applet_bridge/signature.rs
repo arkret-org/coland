@@ -45,7 +45,7 @@ pub(super) async fn require_authority_material_signature(
         http_signature::reject_content_encoding(req, || applet_signature_error_invalid("signed JSON cannot use Content-Encoding"))?;
         let bytes=req.payload().await.map_err(|e|AppError::json_invalid(e.to_string()))?.to_vec();
         let body: arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialRequestBody=serde_json::from_slice(&bytes).map_err(|e|AppError::json_invalid(e.to_string()))?;
-        body.validate().map_err(|e|AppError::param_invalid(e.to_string()))?;
+        body.validate().map_err(|e|AppError::schema_violation(e.to_string()))?;
         let source=applet_required_header(req,"source-service-id")?;
         if applet_required_header(req,"destination-service-id")?!=*state.service_id() { return Err(applet_signature_error_invalid("destination does not identify this Station")); }
         let applet=applet_id_param(req)?;

@@ -231,15 +231,37 @@ pub(crate) async fn submit_from_host(
     .await
     .map_err(unavailable)?;
     let outcome = super::authority_forward::relay_governance_response(&forward, response)?;
-    let AuthoritySubmitOutcome::Accepted { commit, .. } = &outcome else {
-        return Err(unavailable("did not return an accepted original"));
-    };
-    super::authority_forward::verify_forwarded_acknowledgement(state, &service, event, commit)
-        .await?;
-    state
-        .authority_commits()
-        .retain_forwarded_acceptance(event, commit, crate::wire::now())
-        .await?;
+    if let AuthoritySubmitOutcome::Accepted { commit, .. } = &outcome {
+        super::authority_forward::verify_forwarded_acknowledgement(state, &service, event, commit)
+            .await?;
+        state
+            .authority_commits()
+            .retain_forwarded_acceptance(event, commit, crate::wire::now())
+            .await?;
+    }
     // This witness authorizes no replica read or private current.
     Ok(outcome)
+}
+
+/// Dedicated Consent and MIMI adapters must not report a native refusal as success.
+pub(crate) fn require_accepted(
+    outcome: AuthoritySubmitOutcome,
+) -> ServiceResult<arkret_wire::RealmCommit> {
+    match outcome {
+        AuthoritySubmitOutcome::Accepted { commit, .. } => Ok(commit),
+        AuthoritySubmitOutcome::Rejected {
+            status: arkret_wire::AuthorityRejectionStatus::Rejected,
+            reason_code,
+        } => {
+            let code = arkret_wire::ErrorCode::from_wire(&reason_code)
+                .ok_or_else(|| unavailable("unrecognized native authority refusal"))?;
+            Err(ServiceError::protocol(
+                code,
+                "native Consent authority refused the original",
+            ))
+        }
+        AuthoritySubmitOutcome::Rejected { .. } => {
+            Err(unavailable("native authority outcome remains retryable"))
+        }
+    }
 }

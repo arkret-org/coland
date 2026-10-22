@@ -62,6 +62,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::RealmOrganization
         | EventKind::RealmLink
         | EventKind::RealmJoinRule
+        | EventKind::RealmHistoryAccess
         | EventKind::CircleMemberState
         | EventKind::StrandCreate
         | EventKind::RealmProfile
@@ -90,6 +91,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::SchemaDefine
         | EventKind::RealmPolicyBundle
         | EventKind::PolicySet
+        | EventKind::PolicyAction
         | EventKind::DirectConversationBound
         | EventKind::RealmSetDefaultStrand
         | EventKind::ScopeReadReceiptPolicy
@@ -928,6 +930,9 @@ mod tests {
         for kind in [EventKind::MlsGenesis, EventKind::MlsCommit] {
             assert_eq!(self_event_route(&kind).unwrap(), SelfEventRoute::Mls);
         }
+        for kind in [EventKind::ConsentReplace] {
+            assert_eq!(self_event_route(&kind).unwrap(), SelfEventRoute::Consent);
+        }
         for kind in [
             EventKind::AppletBridgeError,
             EventKind::PinAdd,
@@ -942,6 +947,8 @@ mod tests {
             EventKind::RealmPolicyBundle,
             EventKind::RealmGovernanceStationChange,
             EventKind::PolicySet,
+            EventKind::PolicyAction,
+            EventKind::AgentActionApprove,
             EventKind::DirectConversationBound,
             EventKind::InviteClaim,
             EventKind::CircleCreate,
@@ -950,6 +957,7 @@ mod tests {
             EventKind::RealmOrganization,
             EventKind::RealmLink,
             EventKind::RealmJoinRule,
+            EventKind::RealmHistoryAccess,
             EventKind::StrandCreate,
             EventKind::RealmProfile,
             EventKind::ScopeReadReceiptPolicy,
@@ -976,6 +984,8 @@ mod tests {
             EventKind::SpaceTombstone,
             EventKind::RealmSetDefaultStrand,
             EventKind::CallCreate,
+            EventKind::CallState,
+            EventKind::RealmMediaService,
             EventKind::MessageCreate,
             EventKind::MemberState,
             EventKind::CapabilityGrant,
@@ -1008,9 +1018,6 @@ mod tests {
     #[test]
     fn every_other_active_kind_is_unsupported_event_kind_not_internal() {
         let routed = [
-            EventKind::CallState,
-            EventKind::RealmMediaService,
-            EventKind::AgentActionApprove,
             EventKind::RealmActorStatusSet,
             EventKind::RealmActorRecoverySet,
             EventKind::AppletBridgeError,
@@ -1025,6 +1032,7 @@ mod tests {
             EventKind::RealmOrganization,
             EventKind::RealmLink,
             EventKind::RealmJoinRule,
+            EventKind::RealmHistoryAccess,
             EventKind::StrandCreate,
             EventKind::RealmProfile,
             EventKind::ScopeReadReceiptPolicy,
@@ -1052,6 +1060,8 @@ mod tests {
             EventKind::DirectConversationBound,
             EventKind::RealmSetDefaultStrand,
             EventKind::CallCreate,
+            EventKind::CallState,
+            EventKind::RealmMediaService,
             EventKind::MessageCreate,
             EventKind::MemberState,
             EventKind::CapabilityGrant,
@@ -1081,6 +1091,8 @@ mod tests {
             EventKind::RealmPolicyBundle,
             EventKind::RealmGovernanceStationChange,
             EventKind::PolicySet,
+            EventKind::PolicyAction,
+            EventKind::AgentActionApprove,
             EventKind::SchemaDefine,
             EventKind::SidecarContextAttach,
             EventKind::AgentSidecarExchangeControl,

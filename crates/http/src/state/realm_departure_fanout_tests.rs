@@ -162,6 +162,20 @@ async fn departure(membership: &str, another_member_remains: bool) {
                 "membership":membership,"reason":"governing administrator ban"}),
         )
     };
+    // Arm the receiver before committing the source's durable delivery intent.
+    // An independently running dispatcher must encounter the same rollback cut.
+    execute(&receiver.pool, "CREATE OR REPLACE FUNCTION reject_departing_current() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.membership IN ('leave','ban') THEN RAISE EXCEPTION 'departure rollback'; END IF; RETURN NEW; END $$").await;
+    execute(&receiver.pool, "CREATE TRIGGER reject_departing_current BEFORE UPDATE ON member_state_current_results FOR EACH ROW EXECUTE FUNCTION reject_departing_current()").await;
+    assert!(
+        receiver
+            .state
+            .authority_commits()
+            .committed_event(&departing.authority_commit.event.event_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "departure must not precede the owned receiver fault"
+    );
     Box::pin(uow.commit_event(departing.clone())).await.unwrap();
     let planned = terminal_persistent_rows(&source.pool).await;
     let row = fanout_row(&planned, &departing.authority_commit.commit.commit_id);
@@ -173,8 +187,6 @@ async fn departure(membership: &str, another_member_remains: bool) {
         && witness["membership_event_ref"] == departing.authority_commit.event.event_id.as_str()));
 
     // Membership/current and all other accepting effects must roll back together.
-    execute(&receiver.pool, "CREATE OR REPLACE FUNCTION reject_departing_current() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.membership IN ('leave','ban') THEN RAISE EXCEPTION 'departure rollback'; END IF; RETURN NEW; END $$").await;
-    execute(&receiver.pool, "CREATE TRIGGER reject_departing_current BEFORE UPDATE ON member_state_current_results FOR EACH ROW EXECUTE FUNCTION reject_departing_current()").await;
     let before = terminal_persistent_rows(&receiver.pool).await;
     Box::pin(dispatch_due(
         &dispatcher,

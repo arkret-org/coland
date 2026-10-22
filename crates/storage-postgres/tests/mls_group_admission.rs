@@ -1848,7 +1848,10 @@ fn remote_welcome(
 ) -> VerifiedMlsWelcome {
     let recipient = DeviceRevocationGateSelector {
         principal_id: member.signing_principal_id().clone(),
-        station_id: member.route_service_id().clone(),
+        station_id: member
+            .fixed_route_service_id()
+            .expect("fixture recipient is an Account")
+            .clone(),
         device_id: format!("ak:device:{}", uuid::Uuid::now_v7()),
         authorization_ref: arkret_wire::CommittedEventRef {
             event_id: commit.authority_commit.event.event_id.clone(),
@@ -1971,7 +1974,7 @@ fn signed_remote_add_attestation(
         agent_id: None,
         agent_verification_method: None,
         keypackage: keypackage.keypackage.clone(),
-        capabilities: vec!["mls".to_owned()],
+        capabilities: keypackage.capabilities.clone(),
         device_authorize_event_id: Some(authorization_event_ref.clone()),
         agent_key_authorize_event_id: None,
         expires_at: at + chrono::Duration::hours(1),
@@ -1985,12 +1988,16 @@ fn signed_remote_add_attestation(
             "intended_realm_id": delivery.realm_id,
             "mls_group_id": delivery.effective_scope.canonical_mls_group_id().unwrap(),
             "claim_purpose": "realm_membership",
-            "required_capabilities": ["mls"],
+            "requester_account_id": commit.authority_commit.event.actor_id.as_account_id().unwrap(),
+            "target_account_id": delivery.recipient_actor_id.as_account_id().unwrap(),
+            "target_device_ids": [record.device_id.as_ref().unwrap()],
+            "required_capabilities": [arkret_models_crypto::ARKRET_CONTENT_V1],
             "expires_at": arkret_canonical::format_timestamp_canonical(at + chrono::Duration::hours(1)),
         }),
     )
     .unwrap();
     let mut receipt = PeerKeyPackageClaimReceipt {
+        claim_authority_ref: None,
         claim_request_id: claim_request.claim_request_id.clone(),
         request_digest: arkret_wire::Hash::new(format!("sha256:{}", "6".repeat(64))).unwrap(),
         claims_digest: arkret_wire::Hash::new(
@@ -1998,7 +2005,11 @@ fn signed_remote_add_attestation(
         )
         .unwrap(),
         source_id: station.clone(),
-        destination_id: delivery.recipient_actor_id.route_service_id().clone(),
+        destination_id: delivery
+            .recipient_actor_id
+            .fixed_route_service_id()
+            .expect("fixture recipient is an Account")
+            .clone(),
         request: claim_request,
         claimed_at: at,
         expires_at: at + chrono::Duration::hours(1),
@@ -2016,7 +2027,12 @@ fn signed_remote_add_attestation(
         claim_receipt: receipt.clone(),
     };
     let mut attestation = MlsAddAuthorityAttestation {
-        attestor_station_id: delivery.recipient_actor_id.route_service_id().clone(),
+        claim_authority_ref: None,
+        attestor_station_id: delivery
+            .recipient_actor_id
+            .fixed_route_service_id()
+            .expect("fixture recipient is an Account")
+            .clone(),
         realm_id: delivery.realm_id.clone(),
         effective_scope: delivery.effective_scope.clone(),
         mls_group_id: delivery.effective_scope.canonical_mls_group_id().unwrap(),
@@ -2313,6 +2329,7 @@ async fn same_station_add_installs_signed_history_atomically() {
     drop(conn);
     local.claim = Some(key);
     local.roster_witness = Some(coland_storage::VerifiedMlsRecipientRosterWitness {
+        claim_issuer_resolution: None,
         accepted_genesis_event_ref: genesis_ref.clone(),
         signed_attest_add_request_canonical_json: arkret_canonical::canonical_json_bytes(&proof)
             .unwrap(),
@@ -2586,12 +2603,17 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
         coland_storage::MlsRosterAuthorityRead::RevisionUnavailable
     ));
     let verified = coland_storage::VerifiedMlsAddAuthorityAttestation {
+        claim_issuer_resolution: attestor.clone(),
         source_station_id: arkret_wire::DidCoreId::new(remote_station).unwrap(),
         request: proof.clone(),
         attestor_resolution: attestor,
     };
-    arkret::verify_mls_attest_add_request(&verified.request, &verified.attestor_resolution)
-        .unwrap();
+    arkret::verify_mls_attest_add_request(
+        &verified.request,
+        &verified.attestor_resolution,
+        &verified.attestor_resolution,
+    )
+    .unwrap();
     let closure_bytes =
         arkret_canonical::canonical_json_bytes(&verified.attestor_resolution).unwrap();
     let closure_roundtrip: arkret_models_identity::AuthenticatedServiceResolution =
@@ -2601,7 +2623,12 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
         arkret_canonical::canonical_json_bytes(&closure_roundtrip).unwrap(),
         "historical closure must have stable typed canonical bytes"
     );
-    arkret::verify_mls_attest_add_request(&verified.request, &closure_roundtrip).unwrap();
+    arkret::verify_mls_attest_add_request(
+        &verified.request,
+        &closure_roundtrip,
+        &closure_roundtrip,
+    )
+    .unwrap();
     let mut wrong_source = verified.clone();
     wrong_source.source_station_id = station.clone();
     assert!(
@@ -2648,6 +2675,7 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
     .key_package_record()
     .unwrap();
     let wrong_keypackage = coland_storage::VerifiedMlsAddAuthorityAttestation {
+        claim_issuer_resolution: verified.claim_issuer_resolution.clone(),
         source_station_id: verified.source_station_id.clone(),
         attestor_resolution: verified.attestor_resolution.clone(),
         request: signed_remote_add_attestation(
@@ -2668,6 +2696,7 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
     );
     let unknown_welcome = remote_welcome(&commit, &first);
     let wrong_welcome = coland_storage::VerifiedMlsAddAuthorityAttestation {
+        claim_issuer_resolution: verified.claim_issuer_resolution.clone(),
         source_station_id: verified.source_station_id.clone(),
         attestor_resolution: verified.attestor_resolution.clone(),
         request: signed_remote_add_attestation(
@@ -2752,6 +2781,7 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
                 && arkret_canonical::canonical_json_bytes(attestor_resolution).unwrap() == original_resolution
     ));
     let conflicting_replay = coland_storage::VerifiedMlsAddAuthorityAttestation {
+        claim_issuer_resolution: verified.claim_issuer_resolution.clone(),
         source_station_id: verified.source_station_id.clone(),
         attestor_resolution: verified.attestor_resolution.clone(),
         request: signed_remote_add_attestation(

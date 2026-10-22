@@ -353,6 +353,7 @@ async fn widget_inventory_real_install_checks_scope_consent_and_three_revoke_mod
         let install_before = store
             .get(
                 install.package.applet_id.as_str(),
+                install.package.service_id.as_str(),
                 &coland_storage::applet_effective_scope_key(&selector.effective_scope).unwrap(),
             )
             .await
@@ -411,6 +412,7 @@ async fn widget_inventory_real_install_checks_scope_consent_and_three_revoke_mod
             let current = store
                 .get(
                     install.package.applet_id.as_str(),
+                    install.package.service_id.as_str(),
                     &coland_storage::applet_effective_scope_key(&selector.effective_scope).unwrap(),
                 )
                 .await

@@ -5,18 +5,17 @@ use arkret_models_collaboration::governance::grant_constraint::{
 };
 use arkret_models_discovery::ServiceDescribe;
 use arkret_models_integration::{
-    AppletActorView, AppletCapabilityRevokeIntent, AppletGhostAuthoringRequestBasis,
-    AppletInstallOutcome, AppletInstallPreviewOutcome, AppletInstallPreviewRequestBody,
-    AppletInstallRequestBody, AppletManagedActorAuthoringRequest, AppletManagedActorPurpose,
-    AppletManagedMembershipRemoval, AppletMembershipRemoveIntent, AppletNamespaceDomain,
-    AppletPingOutcome, AppletProtocolMetadata, AppletRealmView, AppletRevokeCommittedEventStatus,
+    AppletCapabilityRevokeIntent, AppletGhostAuthoringRequestBasis, AppletInstallOutcome,
+    AppletInstallPreviewOutcome, AppletInstallPreviewRequestBody, AppletInstallRequestBody,
+    AppletManagedActorAuthoringRequest, AppletManagedActorPurpose, AppletManagedMembershipRemoval,
+    AppletMembershipRemoveIntent, AppletPingOutcome, AppletRevokeCommittedEventStatus,
     AppletRevokeCommittedEventStep, AppletRevokeEffectRef, AppletRevokeEventEffectKind,
     AppletRevokeLocalEffectKind, AppletRevokeLocalEffectRef, AppletRevokeLocalEffectStatus,
     AppletRevokeLocalEffectStep, AppletRevokeOutcome, AppletRevokePlan, AppletRevokePreviewOutcome,
     AppletRevokePreviewRequestBody, AppletRevokeRequestBody, AppletRevokeSagaStatus,
     AppletRevokeStep, AppletRevokeSubmittedEventStatus, AppletRevokeSubmittedEventStep,
-    AppletTransactionOutcome, AppletTransactionRequestBody, ExternalRef, FieldDefinition,
-    GhostPreviewOutcome, GhostPreviewRequestBody, ProtocolInstance, namespace_pattern_matches,
+    AppletTransactionOutcome, AppletTransactionRequestBody, GhostPreviewOutcome,
+    GhostPreviewRequestBody,
 };
 use arkret_wire::{
     AppletRevokeMode, CommittedEventRef, CurrentRevision, EventId, EventKind, ProtocolOperationId,
@@ -35,8 +34,7 @@ use super::install::{
     require_realm_admin, validate_admin_install_events, validate_applet_package,
 };
 use super::record::{
-    applet_id_param, applet_record, applet_records, ensure_not_revoked, idempotency_key,
-    persist_applet_record, query_value,
+    applet_id_param, applet_record, ensure_not_revoked, idempotency_key, persist_applet_record,
 };
 use super::signature::{
     VerifiedAppletProvisionService, VerifiedAppletServiceSignature,
@@ -62,17 +60,6 @@ pub(in crate::routing::extensions) fn protocol_router() -> Router {
                         Router::with_path("transactions")
                             .hoop(require_inbound_transaction_signature)
                             .post(transaction_endpoint),
-                    )
-                    .push(
-                        Router::with_path("realms/{realm_id_or_alias}").get(resolve_realm_endpoint),
-                    )
-                    .push(Router::with_path("protocols/{protocol}").get(protocol_metadata_endpoint))
-                    .push(
-                        Router::with_path("third_party")
-                            .push(Router::with_path("users").get(third_party_users_endpoint))
-                            .push(
-                                Router::with_path("locations").get(third_party_locations_endpoint),
-                            ),
                     ),
             ),
         )
@@ -1762,218 +1749,6 @@ async fn transaction_endpoint(
     let outcome =
         process_verified_transaction(&state, transaction, &idempotency_key, verified).await?;
     json_ok(outcome)
-}
-
-#[salvo::oapi::endpoint(operation_id = "ak.edge.applet.realm.read.resolve", tags("extensions"))]
-#[tracing::instrument(skip_all, fields(op = "ak.edge.applet.realm.read.resolve.v1"))]
-async fn resolve_realm_endpoint(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> JsonResult<AppletRealmView> {
-    let state = depot.get_typed::<AppState>().expect("state injected");
-    let realm_id_or_alias = req
-        .param::<String>("realm_id_or_alias")
-        .ok_or_else(|| AppError::param_missing("realm_id_or_alias path segment required"))?;
-    let record = applet_records(state).await?.into_iter().find(|record| {
-        record.portal_realm_id.as_str() == realm_id_or_alias
-            || record.package.namespaces.realms.iter().any(|claim| {
-                namespace_pattern_matches(
-                    AppletNamespaceDomain::Realms,
-                    &claim.pattern,
-                    &realm_id_or_alias,
-                )
-            })
-            || record.applet_id.as_str() == realm_id_or_alias
-    });
-    if let Some(record) = record {
-        let realm_id = record.portal_realm_id.clone();
-        return json_ok(AppletRealmView {
-            exists: true,
-            realm_id: Some(realm_id),
-            title: Some(record.package.package_id.clone()),
-            external_ref: Some(ExternalRef {
-                protocol: record
-                    .package
-                    .protocols
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "applet".to_owned()),
-                external_id: record.applet_id.to_string(),
-                instance_id: Some(record.install_id),
-                display_name: None,
-                url: None,
-            }),
-        });
-    }
-    json_ok(AppletRealmView {
-        exists: false,
-        realm_id: None,
-        title: None,
-        external_ref: None,
-    })
-}
-
-#[salvo::oapi::endpoint(
-    operation_id = "ak.edge.applet.read.protocol_metadata",
-    tags("extensions")
-)]
-#[tracing::instrument(skip_all, fields(op = "ak.edge.applet.read.protocol_metadata.v1"))]
-async fn protocol_metadata_endpoint(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> JsonResult<AppletProtocolMetadata> {
-    let state = depot.get_typed::<AppState>().expect("state injected");
-    let protocol = req
-        .param::<String>("protocol")
-        .ok_or_else(|| AppError::param_missing("protocol path segment required"))?;
-    let instances = applet_records(state)
-        .await?
-        .into_iter()
-        .filter(|record| {
-            record
-                .package
-                .protocols
-                .iter()
-                .any(|item| item == &protocol)
-        })
-        .map(|record| ProtocolInstance {
-            instance_id: record.applet_id.to_string(),
-            display_name: record.package.package_id.clone(),
-            external_ref: Some(ExternalRef {
-                protocol: protocol.clone(),
-                external_id: record.applet_id.to_string(),
-                instance_id: Some(record.install_id),
-                display_name: None,
-                url: None,
-            }),
-        })
-        .collect::<Vec<_>>();
-    json_ok(AppletProtocolMetadata {
-        protocol: protocol.clone(),
-        display_name: format!("{protocol} applet protocol"),
-        icon_blob_ref: None,
-        field_definitions: [
-            ("applet_id", true),
-            ("service_id", false),
-            ("status", false),
-        ]
-        .into_iter()
-        .map(|(name, required)| {
-            (
-                name.to_owned(),
-                FieldDefinition {
-                    value_kind: "string".to_owned(),
-                    required: required.then_some(true),
-                    enum_values: None,
-                    description: None,
-                },
-            )
-        })
-        .collect(),
-        instances,
-    })
-}
-
-#[salvo::oapi::endpoint(
-    operation_id = "ak.edge.applet.third_party_users.read.list",
-    tags("extensions")
-)]
-#[tracing::instrument(skip_all, fields(op = "ak.edge.applet.third_party_users.read.list.v1"))]
-async fn third_party_users_endpoint(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> JsonResult<AppletActorView> {
-    let state = depot.get_typed::<AppState>().expect("state injected");
-    let protocol = query_value(req, "protocol")
-        .ok_or_else(|| AppError::param_missing("protocol is required"))?;
-    let instance_id = query_value(req, "instance_id")
-        .ok_or_else(|| AppError::param_missing("instance_id is required"))?;
-    let external_id = query_value(req, "user")
-        .or_else(|| query_value(req, "user_id"))
-        .or_else(|| query_value(req, "external_id"))
-        .ok_or_else(|| AppError::param_missing("external_id is required"))?;
-    for record in applet_records(state).await? {
-        if let Some(ghost) = record.ghosts.iter().find(|ghost| {
-            ghost.external_ref.protocol == protocol
-                && ghost.external_ref.instance_id == instance_id
-                && ghost.external_ref.external_id == external_id
-        }) {
-            let actor_id = ghost.ghost_actor_id.clone();
-            return json_ok(AppletActorView {
-                exists: true,
-                actor_id: Some(actor_id),
-                display_name: ghost.display_name.clone(),
-                external_ref: Some(ExternalRef {
-                    protocol: ghost.external_ref.protocol.clone(),
-                    external_id: ghost.external_ref.external_id.clone(),
-                    instance_id: Some(ghost.external_ref.instance_id.clone()),
-                    display_name: ghost.display_name.clone(),
-                    url: None,
-                }),
-            });
-        }
-    }
-    json_ok(AppletActorView {
-        exists: false,
-        actor_id: None,
-        display_name: None,
-        external_ref: None,
-    })
-}
-
-#[salvo::oapi::endpoint(
-    operation_id = "ak.edge.applet.third_party_locations.read.list",
-    tags("extensions")
-)]
-#[tracing::instrument(
-    skip_all,
-    fields(op = "ak.edge.applet.third_party_locations.read.list.v1")
-)]
-async fn third_party_locations_endpoint(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> JsonResult<AppletRealmView> {
-    let state = depot.get_typed::<AppState>().expect("state injected");
-    let location = query_value(req, "location")
-        .or_else(|| query_value(req, "channel"))
-        .or_else(|| query_value(req, "realm"));
-    if let Some(location) = location
-        && let Some(record) = applet_records(state).await?.into_iter().find(|record| {
-            record.portal_realm_id.as_str() == location
-                || record.package.namespaces.realms.iter().any(|claim| {
-                    namespace_pattern_matches(
-                        AppletNamespaceDomain::Realms,
-                        &claim.pattern,
-                        &location,
-                    )
-                })
-        })
-    {
-        let realm_id = record.portal_realm_id.clone();
-        return json_ok(AppletRealmView {
-            exists: true,
-            realm_id: Some(realm_id),
-            title: Some(record.package.package_id.clone()),
-            external_ref: Some(ExternalRef {
-                protocol: record
-                    .package
-                    .protocols
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "applet".to_owned()),
-                external_id: location,
-                instance_id: Some(record.install_id),
-                display_name: None,
-                url: None,
-            }),
-        });
-    }
-    json_ok(AppletRealmView {
-        exists: false,
-        realm_id: None,
-        title: None,
-        external_ref: None,
-    })
 }
 
 #[cfg(test)]

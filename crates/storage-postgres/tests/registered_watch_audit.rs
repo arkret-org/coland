@@ -694,7 +694,9 @@ async fn independent_handoff_preserves_unit_fences_and_frozen_reads_and_rejects_
         )
     });
     let heads = material.visible_stream_heads;
+    let (management, private_bytes) = old.export_management_private_state(&realm).await.unwrap();
     let mut handoff = arkret_wire::RealmAuthorityHandoff {
+        management_private_state_digest: Some(management.digest().unwrap()),
         pcr_private_state_digest: None,
         handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest([63; 32]),
         realm_id: realm.clone(),
@@ -749,13 +751,18 @@ async fn independent_handoff_preserves_unit_fences_and_frozen_reads_and_rejects_
         pool: destination.pool(),
     };
     assert_ne!(source.url(), destination.url());
+    new.import_management_private_state(&management, &private_bytes)
+        .await
+        .unwrap();
+    let (_, reexported) = new.export_management_private_state(&realm).await.unwrap();
+    assert_eq!(reexported, private_bytes);
     let business = &pair.events[0].authority_commit.event.event_id;
     let mut conn = destination.pool().get().await.unwrap();
     diesel::sql_query("UPDATE registered_audit_units SET private_audit_digest='incomplete' WHERE business_event_id=$1")
         .bind::<Text,_>(business.as_str()).execute(&mut *conn).await.unwrap();
     drop(conn);
     let error = new
-        .install_handoff(&handoff, &heads, &snapshot)
+        .install_handoff_with_private_state(&handoff, &heads, &snapshot, None, &management)
         .await
         .unwrap_err();
     assert!(
@@ -772,7 +779,12 @@ async fn independent_handoff_preserves_unit_fences_and_frozen_reads_and_rejects_
     );
     // Re-import the frozen complete source after the rejected activation.
     copy_private_database(source.url(), destination.url()).await;
-    new.install_handoff(&handoff, &heads, &snapshot)
+    new.import_management_private_state(&management, &private_bytes)
+        .await
+        .unwrap();
+    let (_, reexported) = new.export_management_private_state(&realm).await.unwrap();
+    assert_eq!(reexported, private_bytes);
+    new.install_handoff_with_private_state(&handoff, &heads, &snapshot, None, &management)
         .await
         .unwrap();
     let reopened = PgAuthorityCommitStore {

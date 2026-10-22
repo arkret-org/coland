@@ -769,7 +769,12 @@ product_agent: None,
                     let mut new_signature = ordinary_realm::signature(&next_station, signal_at);
                     new_signature.context =
                         arkret_wire::DetachedSignatureContext::RealmAuthorityHandoffNewAcceptance;
+                    let (management, private_bytes) = store.export_management_private_state(&realm).await.unwrap();
+                    store.import_management_private_state(&management, &private_bytes).await.unwrap();
+                    let (_, reexported) = store.export_management_private_state(&realm).await.unwrap();
+                    assert_eq!(reexported, private_bytes);
                     let handoff = arkret_wire::RealmAuthorityHandoff {
+                        management_private_state_digest: Some(management.digest().unwrap()),
                         pcr_private_state_digest: None,
                         handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest([0x92; 32]),
                         realm_id: realm.clone(),
@@ -791,7 +796,7 @@ product_agent: None,
                     // Storage fixtures use structural signatures; the Garth verified-scan fixture
                     // independently verifies the real dual Ed25519 signatures and complete manifest.
                     store
-                        .install_handoff(&handoff, &heads, &snapshot)
+                        .install_handoff_with_private_state(&handoff, &heads, &snapshot, None, &management)
                         .await
                         .unwrap();
                     assert!(
@@ -816,7 +821,7 @@ product_agent: None,
                     stale.handoff_id = arkret_wire::RealmAuthorityHandoffId::from_digest([0x93; 32]);
                     assert!(matches!(
                         store
-                            .install_handoff(&stale, &heads, &snapshot)
+                            .install_handoff_with_private_state(&stale, &heads, &snapshot, None, &management)
                             .await
                             .unwrap_err(),
                         PersistenceError::Conflict(_)

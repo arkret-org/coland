@@ -123,13 +123,24 @@ async fn durable_completion_retries_real_signed_delivery_before_ack() {
             (StatusCode::OK,serde_json::to_value(AppletTransactionOutcome::Accepted {committed_event_refs:vec![],rejections:vec![],retry_after_ms:None}).unwrap())
         }
     }));
+    // Preparing the expected material also schedules the next durable attempt.
+    // Let that real deadline elapse before asking the worker to select it.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     assert_eq!(
         coland_http::state::deliver_pending_applet_completions(&fixture.state)
             .await
             .unwrap(),
         0
     );
-    let first = receive.recv().await.unwrap();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), receive.recv())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "first delivery did not reach the authenticated receiver; attempts={}",
+                attempts.load(Ordering::SeqCst)
+            )
+        })
+        .expect("delivery receiver remains open");
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     let retained = fixture
         .state
@@ -154,7 +165,15 @@ async fn durable_completion_retries_real_signed_delivery_before_ack() {
             .unwrap(),
         1
     );
-    let second = receive.recv().await.unwrap();
+    let second = tokio::time::timeout(std::time::Duration::from_secs(5), receive.recv())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "retry did not reach the authenticated receiver; attempts={}",
+                attempts.load(Ordering::SeqCst)
+            )
+        })
+        .expect("delivery receiver remains open");
     assert_eq!(
         first.0, second.0,
         "retry sends the immutable accepted context"

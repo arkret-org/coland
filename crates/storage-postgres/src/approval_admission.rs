@@ -506,6 +506,12 @@ async fn qualify_principal_or_actor(
     if event.is_some_and(|event| principal == event.actor_id.signing_principal_id()) {
         return Ok(None);
     }
+    // Approval qualification may require a different explicit capability from
+    // the action being approved. The original vote and candidate stay bound
+    // to `action`; the registry alone selects the approver's current authority.
+    let approver_action = arkret_schema::capability_action_descriptor(action)
+        .approver_capability_action
+        .unwrap_or(action);
     let members = sql_query("SELECT member_id,jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position) AS membership_revision FROM member_state_current_results WHERE realm_id=$1 AND membership='join'")
         .bind::<Text,_>(realm.as_str()).load::<Member>(&mut *conn).await.map_err(PersistenceError::database)?;
     for member in members {
@@ -517,11 +523,8 @@ async fn qualify_principal_or_actor(
         {
             continue;
         }
-        let approval_action =
-            arkret_schema::capability_action_descriptor(action).approver_capability_action;
-        let qualification_action = approval_action.unwrap_or(action);
-        let checks = arkret_schema::capability_action_descriptor(qualification_action)
-            .required_evaluator_checks;
+        let checks =
+            arkret_schema::capability_action_descriptor(approver_action).required_evaluator_checks;
         if checks.iter().any(|check| match *check {
             "applet_managed_self_join" => rejects_managed_self_join_context(event, facts),
             "actor_eq_target_author" => facts.target_owner.as_ref() != Some(&actor),
@@ -539,9 +542,9 @@ async fn qualify_principal_or_actor(
         let authorization =
             crate::boxed_future(|| cut.enforcing_actor_authorization_in_connection(conn, at))
                 .await?;
-        let actions = [qualification_action.as_str()];
+        let actions = [approver_action.as_str()];
         let owner_covers = allow_owner
-            && approval_action.is_none()
+            && approver_action == action
             && authorization.agent_ceiling.is_none()
             && cut.actor_is_root_controller()
             && arkret_schema::capability_action_descriptor(action)
@@ -575,7 +578,7 @@ async fn qualify_principal_or_actor(
                 .collect::<Vec<_>>();
             let basis = serde_json::json!({"actor_id":actor,"membership":"join","membership_revision":member.membership_revision,
                 "evaluated_at":arkret_canonical::format_timestamp_canonical(at),
-                "action":action,"qualification_action":qualification_action,"target":target,"effective_grants":grants,"owner_aggregate":owner_covers,"realm_authority_root":root_basis.value});
+                "action":action,"approver_capability_action":approver_action,"target":target,"effective_grants":grants,"owner_aggregate":owner_covers,"realm_authority_root":root_basis.value});
             return Ok(Some(basis));
         }
     }

@@ -3133,7 +3133,7 @@ async fn profile_admission_table_refuses_in_registered_precedence_with_zero_writ
     );
 
     // A participant who left still counts for the exact-two gate
-    // (`contact-and-direct-conversation.md` Â§8.4): the pair-external invite
+    // (`contact-and-direct-conversation.md` §8.4): the pair-external invite
     // keeps its third-party reason.  This pre-binding Realm cannot use repair:
     // the registered repair source requires an accepted stable binding.  The
     // complete found -> leave -> rejoin path is exercised below.
@@ -4212,7 +4212,7 @@ async fn binding_current_row(pool: &PgPool, realm_id: &RealmId) -> arkret_wire::
 /// peer; once the peer's Welcome of the first exact-pair Commit is durable,
 /// the completion phase admits one immutable participant binding, whose integrity is
 /// checked against the founding facts and that Commit; after the first
-/// endorsement both phases exit and every participant write names the binding
+/// binding both phases exit and every participant write names the binding
 /// under the participant source, with the pair's Contact still granting
 /// `direct_message`. A request authored against an older cut is re-decided
 /// at the current one, and every refusal writes nothing.
@@ -4261,7 +4261,7 @@ async fn participant_authority_scenario() {
     .await;
 
     let (genesis_ref, add, add_ref, mut encryption_group, scope) = boxed_source(|| async {
-        // realm-and-space.md Â§2.5 row 5: the founding create fixed history.
+        // realm-and-space.md §2.5 row 5: the founding create fixed history.
         assert_eq!(
             count(
                 &pool,
@@ -4543,7 +4543,7 @@ async fn participant_authority_scenario() {
     // The canonical basis is the round's accepted request and accept heads.
     assert_eq!(basis["kind"], "accepted_contact");
     assert_eq!(basis["event_refs"].as_array().unwrap().len(), 2);
-    let endorsement = |group_state_ref: &arkret_wire::EventId, seconds: i64| {
+    let binding_payload = |group_state_ref: &arkret_wire::EventId, seconds: i64| {
         serde_json::json!({
             "pair_key": facts.pair_key,
             "unordered_participant_ids": [founder.clone(), peer.clone()],
@@ -4560,14 +4560,14 @@ async fn participant_authority_scenario() {
     let (stale_provisional, later_provisional) = boxed_source(|| async {
         record_peer_welcome(&pool, &pair.station, &add, &peer, "claimed", 0).await;
         // Until the peer's Welcome is durable the Realm stays provisional: no
-        // endorsement, while the founder still sends at the new epoch.
+        // binding, while the founder still sends at the new epoch.
         let early_binding = boxed_source(|| {
             sourced_cited(
                 &pair,
                 &add.authority_commit,
                 EventKind::DirectConversationBound,
                 peer.clone(),
-                endorsement(&add_ref, 1),
+                binding_payload(&add_ref, 1),
                 Cites::Bootstrap(&create_ref),
             )
         })
@@ -4654,12 +4654,12 @@ async fn participant_authority_scenario() {
         );
         for (mutated, code) in [
             (
-                endorsement(&genesis_ref, 1),
+                binding_payload(&genesis_ref, 1),
                 ConflictCode::DirectConversationBindingInvalid,
             ),
             (
                 {
-                    let mut payload = endorsement(&add_ref, 1);
+                    let mut payload = binding_payload(&add_ref, 1);
                     payload["pair_key"] = serde_json::json!(fixture_hash('9'));
                     payload
                 },
@@ -4667,7 +4667,7 @@ async fn participant_authority_scenario() {
             ),
             (
                 {
-                    let mut payload = endorsement(&add_ref, 1);
+                    let mut payload = binding_payload(&add_ref, 1);
                     payload["authorization_basis"]["event_refs"][0] =
                         serde_json::json!(unique_event_id("other-head"));
                     payload
@@ -4688,13 +4688,13 @@ async fn participant_authority_scenario() {
             .await;
             assert_eq!(refused(&request).await, code);
         }
-        let peer_endorsement = boxed_source(|| {
+        let accepted_binding = boxed_source(|| {
             sourced_cited(
                 &pair,
                 &head,
                 EventKind::DirectConversationBound,
                 peer.clone(),
-                endorsement(&add_ref, 1),
+                binding_payload(&add_ref, 1),
                 Cites::Bootstrap(&create_ref),
             )
         })
@@ -4705,28 +4705,28 @@ async fn participant_authority_scenario() {
                 &head,
                 EventKind::DirectConversationBound,
                 founder.clone(),
-                endorsement(&add_ref, 1),
+                binding_payload(&add_ref, 1),
                 Cites::Bootstrap(&create_ref),
             )
         })
         .await;
         assert_ne!(
-            peer_endorsement.authority_commit.event.event_id,
+            accepted_binding.authority_commit.event.event_id,
             founder_endorsement.authority_commit.event.event_id
         );
         assert_eq!(
-            peer_endorsement.authority_commit.event.payload,
+            accepted_binding.authority_commit.event.payload,
             founder_endorsement.authority_commit.event.payload
         );
         let before = dc_footprint(&pool, &realm_id).await;
         let (peer_result, founder_result) = tokio::join!(
-            uow.commit_event(peer_endorsement.clone()),
+            uow.commit_event(accepted_binding.clone()),
             uow.commit_event(founder_endorsement.clone()),
         );
         assert_ne!(peer_result.is_ok(), founder_result.is_ok());
         let (winner, loser, accepted, refused_result) = if peer_result.is_ok() {
             (
-                peer_endorsement,
+                accepted_binding,
                 founder_endorsement,
                 peer_result,
                 founder_result,
@@ -4734,7 +4734,7 @@ async fn participant_authority_scenario() {
         } else {
             (
                 founder_endorsement,
-                peer_endorsement,
+                accepted_binding,
                 founder_result,
                 peer_result,
             )
@@ -4888,7 +4888,7 @@ async fn participant_authority_scenario() {
         .await,
         ConflictCode::DirectConversationParticipantAuthorityDenied
     );
-    // The participant source needs an accepted endorsement as its ref.
+    // The participant source needs an accepted original binding as its ref.
     assert_eq!(
         refused(
             &boxed_source(|| sourced_cited(

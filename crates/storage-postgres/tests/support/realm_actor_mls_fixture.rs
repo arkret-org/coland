@@ -44,7 +44,7 @@ pub(super) fn enable(package: &mut AppletPackage) {
         .unwrap();
 }
 
-fn signed_event(
+pub(super) fn signed_event(
     package: &AppletPackage,
     actor: ActorId,
     scope: ScopeRef,
@@ -54,6 +54,19 @@ fn signed_event(
     signer: &Ed25519PayloadSigner,
 ) -> Event {
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    signed_event_at(package, actor, scope, kind, payload, grant, signer, at)
+}
+
+pub(super) fn signed_event_at(
+    package: &AppletPackage,
+    actor: ActorId,
+    scope: ScopeRef,
+    kind: EventKind,
+    payload: Value,
+    grant: Option<&GrantId>,
+    signer: &Ed25519PayloadSigner,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Event {
     let mut event =
         arkret_wire::test_support::raw_event_for_actor_at(kind.as_str(), scope, actor, payload, at)
             .unwrap();
@@ -140,11 +153,24 @@ async fn read_service_grants(
     )
 }
 
-async fn business_grant(fixture: &Fixture, package: &AppletPackage, actor: &ActorId) -> GrantId {
+pub(super) async fn business_grant(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    actor: &ActorId,
+) -> GrantId {
     let scope = ScopeRef::Realm {
         realm_id: fixture.realm.clone(),
     };
     boxed_step(|| business_authority(fixture, package, actor, false, &scope)).await
+}
+
+pub(super) async fn business_grant_at_scope(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    actor: &ActorId,
+    scope: &ScopeRef,
+) -> GrantId {
+    boxed_step(|| business_authority(fixture, package, actor, false, scope)).await
 }
 
 pub(super) async fn business_parent(
@@ -311,7 +337,7 @@ async fn business_terminal_child(
                 committed_events: vec![],
                 signals: vec![],
             }),
-            "realm-mls-business-child",
+            &format!("realm-mls-business-child-{child_id}"),
         )
         .await;
     assert_eq!(
@@ -2210,15 +2236,22 @@ async fn human_adds_runtime_to_group_in_authority(
             );
         }
     }
-    group
-        .install_accepted_commit(
-            &arkret_wire::CommittedEventFullView {
-                event: accepted.event,
-                commit: accepted.commit,
-            },
-            &current,
-        )
-        .unwrap();
+    let accepted = arkret_wire::CommittedEventFullView {
+        event: accepted.event,
+        commit: accepted.commit,
+    };
+    group.install_accepted_commit(&accepted, &current).unwrap();
+    // The accepted Add changes the occupied leaves. Recover their identities
+    // from the real authenticated roster and original Genesis material before
+    // this member can author another transition by ActorId.
+    boxed_step(|| install_received_roster(governor, &accepted, &mut group)).await;
+    assert!(
+        group
+            .verified_leaf_bindings()
+            .unwrap()
+            .iter()
+            .any(|binding| binding.actor_id == device.actor_id)
+    );
     group
 }
 
@@ -2304,15 +2337,46 @@ pub(super) async fn human_rotates_out_runtime(
         .await
         .unwrap()
         .unwrap();
-    group
-        .install_accepted_commit(
-            &arkret_wire::CommittedEventFullView {
-                event: accepted.event,
-                commit: accepted.commit,
-            },
-            &current,
-        )
-        .unwrap();
+    let accepted = arkret_wire::CommittedEventFullView {
+        event: accepted.event,
+        commit: accepted.commit,
+    };
+    group.install_accepted_commit(&accepted, &current).unwrap();
+    boxed_step(|| install_received_roster(fixture, &accepted, group)).await;
+    assert!(
+        group
+            .verified_leaf_bindings()
+            .unwrap()
+            .iter()
+            .all(|binding| binding.actor_id != device.actor_id)
+    );
 }
 
 include!("realm_actor_obligation_fixture.rs");
+include!("realm_actor_mls_admission_fixture.rs");
+include!("realm_actor_mls_boundary_fixture.rs");
+include!("realm_actor_grant_boundary_fixture.rs");
+
+pub(super) async fn run_admission(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    candidate: &RealmActorCreatePayload,
+    device: &DeviceId,
+) {
+    let authority = fixture
+        .state
+        .test_persistence()
+        .device_revocations()
+        .applet_managed_device_authority(&candidate.actor_id, device, chrono::Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    let child = boxed_step(|| business_grant(fixture, package, &candidate.actor_id)).await;
+    boxed_step(|| keypackage_before_genesis(fixture, &authority)).await;
+    let mut group =
+        boxed_step(|| genesis(fixture, package, candidate, device, &authority, &child)).await;
+    boxed_step(|| {
+        keypackage_admission(fixture, package, candidate, &authority, &child, &mut group)
+    })
+    .await;
+}

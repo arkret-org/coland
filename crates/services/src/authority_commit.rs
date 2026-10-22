@@ -1931,8 +1931,7 @@ impl AuthorityCommitApplication {
         signing_key: &SigningKey,
         request_digest: &arkret_wire::Hash,
     ) -> ServiceResult<AuthorityEventAdmissionOutcome> {
-        event
-            .validate_for_submit_structural()
+        arkret_event_draft::validate_event_for_submit(event)
             .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
         let at = arkret_canonical::normalize_timestamp_canonical(Utc::now());
         let fact = self
@@ -3839,6 +3838,8 @@ mod tests {
         assert_eq!(snapshot.created_at.timestamp_subsec_micros(), 456_000);
         let identity = RealmSnapshotIdentityBody {
             realm_id: &snapshot.realm_id,
+            purpose: snapshot.purpose,
+            history_basis: snapshot.history_basis.as_ref(),
             governance_generation: snapshot.governance_generation,
             visible_stream_heads: &snapshot.visible_stream_heads,
             current_state_entries: &snapshot.current_state_entries,

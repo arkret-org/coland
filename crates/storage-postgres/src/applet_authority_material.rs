@@ -428,7 +428,7 @@ async fn current_binding(
     .optional()
     .map_err(PersistenceError::database)?
     .ok_or_else(unavailable)?;
-    let registration: AppletRegistrationPayload = decode(current.value)?;
+    let registration: AppletRegistrationPayload = decode(current.value.clone())?;
     if registration.service_id != *service
         || install["package"]["registration_epoch"]
             != serde_json::json!(registration.registration_epoch)
@@ -456,9 +456,10 @@ async fn current_binding(
     {
         return Ok(AppletInstallationCurrentBinding::Inactive);
     }
-    let current_instance = sql_query("SELECT c.commit_json AS value FROM applet_registration_current_results r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref JOIN realm_commits c ON c.commit_id=a.accepted_commit_id WHERE r.realm_id=$1 AND r.applet_id=$2 AND a.registration_event_ref=$3")
+    let current_instance = sql_query("SELECT c.commit_json AS value FROM applet_registration_current_results r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref JOIN realm_commits c ON c.commit_id=a.accepted_commit_id WHERE r.realm_id=$1 AND r.applet_id=$2 AND a.registration_event_ref=$3 AND r.service_id=$4")
         .bind::<Text,_>(scope.realm_id().as_str()).bind::<Text,_>(applet.as_str())
         .bind::<Text,_>(install["registration_event"]["event_id"].as_str().ok_or_else(unavailable)?)
+        .bind::<Text,_>(service.as_str())
         .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     let Some(current_instance) = current_instance else {
         return Ok(AppletInstallationCurrentBinding::Inactive);
@@ -467,6 +468,11 @@ async fn current_binding(
     let registration_full = accepted(conn, &commit.event_ref).await?;
     if registration_full.event.scope_ref != arkret_wire::ScopeRef::realm(scope.realm_id().clone())
         || registration_full.commit != commit
+        || serde_json::to_value(&registration_full.event).map_err(PersistenceError::database)?
+            != install["registration_event"]
+        || crate::applet_current_results::registration_security_value(
+            &registration_full.event.payload,
+        ) != crate::applet_current_results::registration_security_value(&current.value)
     {
         return Err(unavailable());
     }

@@ -790,6 +790,7 @@ pub(crate) async fn admit_member_state_in_connection(
     }
     require_realm_stream_carrier(event, commit)?;
     lock_realm_authorization_cut(conn, &event.realm_id).await?;
+    crate::applets::require_revoke_member_current_in_connection(conn, event).await?;
     if event.applet_id.is_some() {
         crate::managed_message_actor::require_managed_actor_in_connection(
             conn,

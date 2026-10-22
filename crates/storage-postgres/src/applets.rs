@@ -10,6 +10,68 @@ struct AppletRegistrationRow {
     #[diesel(sql_type = Jsonb)]
     record: Value,
 }
+
+/// Recheck a durable uninstall member effect at the same accepting Realm cut.
+/// An administrator's unrelated membership Event keeps its ordinary authority.
+pub(crate) async fn require_revoke_member_current_in_connection(
+    conn: &mut diesel_async::AsyncPgConnection,
+    event: &arkret_wire::Event,
+) -> PersistenceResult<()> {
+    let Some(target) = event.payload.get("member_id") else {
+        return Ok(());
+    };
+    let target: arkret_wire::ActorId = serde_json::from_value(target.clone())
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    if !matches!(target, arkret_wire::ActorId::Realm { .. }) {
+        return Ok(());
+    }
+    let matching = serde_json::json!({"revoke_execution":{"request":{
+        "membership_state_events":[{"event":{"event_id":event.event_id}}]
+    }}});
+    let rows = sql_query("SELECT record FROM applet_installations WHERE record @> $1")
+        .bind::<Jsonb, _>(&matching)
+        .load::<AppletRegistrationRow>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+    for row in rows {
+        let request: arkret_models_integration::AppletRevokeRequestBody = serde_json::from_value(
+            row.record
+                .pointer("/revoke_execution/request")
+                .cloned()
+                .ok_or_else(|| {
+                    PersistenceError::SchemaViolation("Applet revoke request is absent".into())
+                })?,
+        )
+        .map_err(PersistenceError::database)?;
+        let original = request
+            .membership_state_events
+            .iter()
+            .find(|submission| submission.event.event_id == event.event_id)
+            .ok_or_else(|| {
+                PersistenceError::SchemaViolation("Applet revoke member original is absent".into())
+            })?;
+        if original.event != *event
+            || request.effective_scope.realm_id() != &event.realm_id
+            || row.record.pointer("/package/service_id")
+                != Some(&serde_json::json!(request.service_id))
+        {
+            return Err(PersistenceError::SchemaViolation(
+                "Applet revoke member differs from its durable request".into(),
+            ));
+        }
+        let (manager, _) = crate::realm_actor_control::current_source(
+            conn,
+            &target,
+            serde_json::json!({"kind":"realm_actor_manager","actor_id":target}),
+        )
+        .await?;
+        if manager.get("service_id") != Some(&serde_json::json!(request.service_id)) {
+            return Err(PersistenceError::Conflict(
+                "capability_denied: Applet revoke cannot remove a subject managed by another Service".into()));
+        }
+    }
+    Ok(())
+}
 #[derive(QueryableByName)]
 struct AppletTransactionReplayRow {
     #[diesel(sql_type = Text)]

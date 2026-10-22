@@ -29,6 +29,99 @@ async fn query_managed_actor(
     client.applet_actor(&fixture.state.service_core_id(), &service.package.service_id, actor).await
 }
 
+// Simulate a crash after the real preview and durable request save, before any effect.
+async fn freeze_manager_revoke_request(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    candidate: &RealmActorCreatePayload,
+) -> (
+    AppletRevokeRequestBody,
+    arkret_wire::EventAdmissionSubmission,
+) {
+    let mode = arkret_wire::AppletRevokeMode::RevokeRuntimeOnly;
+    let reason = arkret_wire::ReasonCode::from_wire("applet_revoked");
+    let preview_request = AppletRevokePreviewRequestBody {
+        service_id: package.service_id.clone(),
+        effective_scope: candidate.creation_scope.clone(),
+        reason_code: reason.clone(),
+        revoke_mode: mode,
+    };
+    let (status, body) = fixture
+        .admin_post(
+            &format!("/_arkret/self/applets/{}/revoke/preview", package.applet_id),
+            arkret_wire::ServiceOperationId::SELF_APPLET_REVOKE_COMMAND_PREVIEW_V1,
+            &json!(preview_request),
+            None,
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "pre-transfer revoke preview: {body}"
+    );
+    let preview: AppletRevokePreviewOutcome = serde_json::from_value(body).unwrap();
+    let request = AppletRevokeRequestBody {
+        service_id: package.service_id.clone(),
+        revoke_plan_digest: arkret_wire::Hash::new(arkret_canonical::canonical_sha256(&preview.revoke_plan).unwrap()).unwrap(),
+        effective_scope: candidate.creation_scope.clone(), reason_code: reason, revoke_mode: mode,
+        capability_revoke_events: preview.revoke_plan.capability_revocations.iter().map(|intent| {
+            arkret_wire::EventAdmissionSubmission::new(fixture.admin_event(EventKind::CapabilityRevoke,
+                candidate.creation_scope.clone(), json!({"grant_id":intent.grant_id,"expected_revision":intent.expected_revision,"reason":intent.reason_code})))
+        }).collect(),
+        membership_state_events: preview.revoke_plan.membership_removals.iter().map(|intent| {
+            arkret_wire::EventAdmissionSubmission::new(fixture.admin_event(EventKind::MemberState,
+                candidate.creation_scope.clone(), json!({"member_id":intent.member_id,"membership":intent.membership,"reason":intent.reason_code})))
+        }).collect(),
+    };
+    let effect = request
+        .membership_state_events
+        .iter()
+        .find(|submission| {
+            submission.event.payload.get("member_id") == Some(&json!(candidate.actor_id))
+        })
+        .unwrap()
+        .clone();
+    let store = PgAppletStore {
+        pool: fixture.pool.clone(),
+    };
+    let scope_key = coland_storage::applet_effective_scope_key(&candidate.creation_scope).unwrap();
+    let expected = store
+        .get(
+            package.applet_id.as_str(),
+            package.service_id.as_str(),
+            &scope_key,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut replacement = expected.clone();
+    let mut steps: Vec<_> = request.capability_revoke_events.iter().map(|submission| ("capability_revoke_event", submission))
+        .chain(request.membership_state_events.iter().map(|submission| ("membership_state_event", submission)))
+        .map(|(effect_kind, submission)| json!({"effect_kind":effect_kind,"submitted_event_id":submission.event.event_id,"status":"pending"})).collect();
+    steps.push(json!({"effect_kind":"local_applet_fence","effect_ref":package.applet_id,"status":"pending"}));
+    replacement["revoke_execution"] = json!({
+        "principal_id":fixture.state.service_id(),"admin_actor_id":effect.event.actor_id.to_string(),
+        "idempotency_key":"manager-race-frozen-revoke","request_digest":arkret_canonical::canonical_sha256(&request).unwrap(),
+        "request":request,"revoke_plan":preview.revoke_plan,
+        "outcome":{"operation_id":format!("ak:operation:{}",uuid::Uuid::now_v7()),"revoke_plan_digest":request.revoke_plan_digest,"status":"in_progress","steps":steps,"revoked_refs":[],"rejections":[]},
+    });
+    let _: arkret_models_integration::AppletRevokeOutcome =
+        serde_json::from_value(replacement["revoke_execution"]["outcome"].clone()).unwrap();
+    assert!(
+        store
+            .compare_and_swap(
+                package.applet_id.as_str(),
+                package.service_id.as_str(),
+                &scope_key,
+                &expected,
+                replacement
+            )
+            .await
+            .unwrap()
+    );
+    (request, effect)
+}
+
 // Same Applet, two Services, complete durable custody retained in a shared backend.
 async fn run_manager_runtime_transfer(
     factory: &AppletAuthoringFactory,
@@ -107,6 +200,7 @@ async fn run_manager_runtime_transfer(
     assert_eq!(other_welcome.durable_welcomes, 1);
     assert!(other_welcome.acknowledged);
     assert_eq!(previous_runtime.installed_mls_epoch(&other_device).await.unwrap(), Some(2));
+    let (frozen_revoke_request, frozen_revoke) = boxed_step(|| freeze_manager_revoke_request(fixture, &previous.package, candidate)).await;
     eprintln!("manager runtime: explicit pause and independent receiving installation");
     boxed_step(|| {
         previous_runtime.set_owner_status(
@@ -327,6 +421,13 @@ async fn run_manager_runtime_transfer(
             + 1
     );
     assert_eq!(accepted["realm_actor_statusowner"], "paused");
+    let (status, body) = fixture.admin_post_network(
+        "/_arkret/self/events", arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+        &json!(SelfAuthoritySubmitRequest::Event(frozen_revoke.clone())), "manager-race-old-revoke-effect",
+    ).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "old Service revoke cannot remove the transferred subject: {body}");
+    assert!(fixture.state.test_persistence().authority_commits().committed_event(&frozen_revoke.event.event_id).await.unwrap().is_none());
+    assert_eq!(snapshot(fixture, actor).await, accepted, "stale revoke has no control side effects");
     // Cover the retired leaf before remaining members publish new content.
     boxed_step(|| realm_actor_mls_fixture::human_rotates_out_runtime(fixture, previous_device, &mut human_group)).await;
     boxed_step(|| runtime.maintain_mls_key_packages(&receiving_device, 2)).await.unwrap();
@@ -605,4 +706,25 @@ async fn run_manager_runtime_transfer(
             .await
             .is_err()
     );
+    let (status, body) = fixture.admin_post_network(
+        &format!("/_arkret/self/applets/{}/revoke", candidate.applet_id),
+        arkret_wire::ServiceOperationId::SELF_APPLET_COMMAND_REVOKE_V1,
+        &json!(frozen_revoke_request), "manager-race-frozen-revoke",
+    ).await;
+    assert_eq!(status, StatusCode::OK, "resume the exact saved uninstall request: {body}");
+    let outcome: arkret_models_integration::AppletRevokeOutcome = serde_json::from_value(body).unwrap();
+    assert_eq!(outcome.status, arkret_models_integration::AppletRevokeSagaStatus::PartiallyCompleted);
+    assert!(outcome.steps.iter().any(|step| matches!(step,
+        arkret_models_integration::AppletRevokeStep::SubmittedEvent(step)
+        if step.submitted_event_id == frozen_revoke.event.event_id
+            && step.status == arkret_models_integration::AppletRevokeSubmittedEventStatus::Rejected)));
+    assert!(fixture.state.test_persistence().authority_commits().committed_event(&frozen_revoke.event.event_id).await.unwrap().is_none());
+    let independent_leave = fixture.admin_event(EventKind::MemberState, candidate.creation_scope.clone(),
+        json!({"member_id":actor,"membership":"leave","reason":"independent admin decision after transfer"}));
+    let (status, body) = fixture.admin_post_network(
+        "/_arkret/self/events", arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+        &json!(SelfAuthoritySubmitRequest::Event(arkret_wire::EventAdmissionSubmission::new(independent_leave))),
+        "manager-race-independent-admin-leave",
+    ).await;
+    assert_eq!(status, StatusCode::OK, "independent admin member authority remains valid: {body}");
 }

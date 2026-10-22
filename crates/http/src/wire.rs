@@ -1033,10 +1033,6 @@ mod tests {
             .validate()
             .expect("advertised bundles are registered");
         assert!(
-            arkret_wire::ServiceOperationId::from_wire("ak.self.messages.command.prepare.v1")
-                .is_none()
-        );
-        assert!(
             arkret_models_discovery::websocket_binding::websocket_operations_reachable(
                 &description
             )

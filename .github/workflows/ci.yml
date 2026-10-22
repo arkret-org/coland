@@ -309,6 +309,7 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgres://coland:coland@localhost:5432/coland_contracts
+      COLAND_TEST_DATABASE_URL: postgres://coland:coland@localhost:5432/coland_contracts
     steps:
       - name: Checkout coland
         uses: actions/checkout@v6

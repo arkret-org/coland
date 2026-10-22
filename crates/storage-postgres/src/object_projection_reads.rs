@@ -1046,9 +1046,8 @@ mod tests {
             list_dependencies(&output, &strands, &rows[..2]).is_err(),
             "metadata and parent alone cannot replace a missing policy family"
         );
-        if let TypedCurrentRow::Value { value, .. } = &mut rows[1] {
-            *value = serde_json::json!({"parent_space_id":parent_id});
-        }
+        let TypedCurrentRow::Value { value, .. } = &mut rows[1];
+        *value = serde_json::json!({"parent_space_id":parent_id});
         let mut parent_output = output.clone();
         parent_output.spaces[0].parent_space_id = Some(parent_id);
         assert_eq!(

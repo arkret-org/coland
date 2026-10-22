@@ -227,8 +227,8 @@ pub(crate) async fn recovery_service_fact(
             "recovery Applet does not own the target Realm identity",
         ));
     }
-    let registered=sql_query("SELECT c.commit_json AS value FROM applet_registration_current_results r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref JOIN realm_commits c ON c.commit_id=a.accepted_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.applet_id=$2 AND e.state='committed'")
-        .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(registration.applet_id.as_str()).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let registered=sql_query("SELECT c.commit_json AS value FROM applet_registration_current_results r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref JOIN realm_commits c ON c.commit_id=a.accepted_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3 AND e.state='committed'")
+        .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(registration.applet_id.as_str()).bind::<Text,_>(registration.service_id.as_str()).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let registration_commit: RealmCommit =
         serde_json::from_value(registered.value).map_err(denied)?;
     let proof = event
@@ -315,34 +315,6 @@ pub(crate) async fn admit_creation(
         return Err(denied(
             "creation registration instance is no longer current",
         ));
-    }
-    if candidate.actor_role == RealmActorCreatePayloadActorRole::Ghost {
-        let did = candidate.initial_resolution.did.as_str();
-        let source = registration
-            .manifest
-            .registration_epoch_evidence
-            .did
-            .as_str();
-        let parts = did.split(':').collect::<Vec<_>>();
-        let source_parts = source.split(':').collect::<Vec<_>>();
-        if parts.len() < 5
-            || source_parts.len() < 4
-            || parts[0..2] != ["did", "webvh"]
-            || source_parts[0..2] != ["did", "webvh"]
-            || parts[3] != source_parts[3]
-            || parts[2] == source_parts[2]
-            || !registration.namespaces.actors.iter().any(|namespace| {
-                arkret_models_integration::namespace_pattern_matches(
-                    arkret_models_integration::AppletNamespaceDomain::Actors,
-                    &namespace.pattern,
-                    did,
-                )
-            })
-        {
-            return Err(denied(
-                "Ghost native DID is outside the registered independent actor namespace",
-            ));
-        }
     }
     // The parent Realm lock serializes the empty-stream case and all uniqueness keys.
     let occupied = sql_query("SELECT to_jsonb(c) AS value FROM realm_actor_creations c WHERE realm_id=$1 AND (actor_id=$2 OR (applet_id=$3 AND request_id=$4) OR ($5::jsonb IS NOT NULL AND applet_id=$3 AND external_ref=$5)) LIMIT 1")

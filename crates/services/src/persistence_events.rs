@@ -514,9 +514,14 @@ impl crate::events::AppletPort for PersistenceEventReader {
     async fn applet(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
     ) -> crate::ServiceResult<Option<Value>> {
-        Ok(self.0.applets().get(applet_id, effective_scope_key).await?)
+        Ok(self
+            .0
+            .applets()
+            .get(applet_id, service_id, effective_scope_key)
+            .await?)
     }
     async fn applets(&self) -> crate::ServiceResult<Vec<Value>> {
         Ok(self.0.applets().list().await?)
@@ -524,6 +529,7 @@ impl crate::events::AppletPort for PersistenceEventReader {
     async fn compare_and_swap_applet(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
         expected: &Value,
         replacement: Value,
@@ -531,12 +537,19 @@ impl crate::events::AppletPort for PersistenceEventReader {
         Ok(self
             .0
             .applets()
-            .compare_and_swap(applet_id, effective_scope_key, expected, replacement)
+            .compare_and_swap(
+                applet_id,
+                service_id,
+                effective_scope_key,
+                expected,
+                replacement,
+            )
             .await?)
     }
     async fn fence_applet_installation(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
         target_station_id: &str,
         expected: &Value,
@@ -548,6 +561,7 @@ impl crate::events::AppletPort for PersistenceEventReader {
             .applets()
             .fence_installation(
                 applet_id,
+                service_id,
                 effective_scope_key,
                 target_station_id,
                 expected,

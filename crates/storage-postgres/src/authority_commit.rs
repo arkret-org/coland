@@ -797,7 +797,7 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_
                 current_commit_id, current_stream_position, value \
            FROM direct_conversation_binding_current_results WHERE realm_id = $1 \
          UNION ALL \
-         SELECT 'applet_registration'::text AS selector_kind, to_jsonb(applet_id) AS selector_subject, \
+         SELECT 'applet_registration'::text AS selector_kind, jsonb_build_object('kind','applet_registration','applet_id',applet_id,'service_id',service_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
            FROM applet_registration_current_results WHERE realm_id = $1 \
          UNION ALL \
@@ -1062,9 +1062,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 ("member_identity_updates", Some(selector)) => serde_json::from_value::<arkret_wire::CurrentSelector>(selector)
                     .map_err(|error| PersistenceError::Internal(format!("stored member identity selector is invalid: {error}")))?,
                 ("actor_profile", Some(id)) => arkret_wire::CurrentSelector::ActorProfile {actor_profile_id:serde_json::from_value(id).map_err(PersistenceError::database)?},
-                ("applet_registration", Some(applet_id)) => arkret_wire::CurrentSelector::AppletRegistration {
-                    applet_id: serde_json::from_value(applet_id).map_err(PersistenceError::database)?,
-                },
+                ("applet_registration", Some(selector)) => serde_json::from_value::<arkret_wire::CurrentSelector>(selector).map_err(PersistenceError::database)?,
                 ("circle", Some(circle_id)) => arkret_wire::CurrentSelector::Circle {
                     circle_id: serde_json::from_value(circle_id).map_err(|error| {
                         PersistenceError::Internal(format!("stored Circle selector identity is invalid: {error}"))
@@ -3240,13 +3238,12 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
-    async fn applet_registration_for_realm(
+    async fn applet_registration_for_event(
         &self,
-        realm: &arkret_wire::RealmId,
-        applet: &arkret_wire::AppletId,
+        event: &arkret_wire::Event,
     ) -> PersistenceResult<arkret_models_integration::AppletRegistrationPayload> {
         let mut conn = pg_conn(&self.pool).await?;
-        crate::managed_message_actor::registration_for_scope(&mut conn, realm, applet).await
+        crate::managed_message_actor::registration(&mut conn, event).await
     }
 
     async fn realm_actor_control_carrier(
@@ -3445,10 +3442,11 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         &self,
         realm: &arkret_wire::RealmId,
         applet: &arkret_wire::AppletId,
+        service: Option<&arkret_wire::DidCoreId>,
     ) -> PersistenceResult<Vec<arkret_wire::CommittedEventFullView>> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async |conn| {
-            crate::realm_actor_creation::inventory(conn, realm, applet).await
+            crate::realm_actor_creation::inventory(conn, realm, applet, service).await
         })
         .await
         .map_err(PgTransactionError::into_persistence)

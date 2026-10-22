@@ -303,8 +303,8 @@ pub(super) async fn pins(
         ));
     }
     let scope_key = coland_storage::applet_effective_scope_key(&candidate.creation_scope)?;
-    let installation = sql_query("SELECT record AS value FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2 FOR UPDATE")
-        .bind::<Text,_>(candidate.applet_id.as_str()).bind::<Text,_>(scope_key)
+    let installation = sql_query("SELECT record AS value FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2 AND service_id=$3 FOR UPDATE")
+        .bind::<Text,_>(candidate.applet_id.as_str()).bind::<Text,_>(scope_key).bind::<Text,_>(candidate.service_id.as_str())
         .get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let (policies, decision) = select_current_creation(conn, event, at).await?;
     let ids = policies
@@ -388,6 +388,7 @@ pub(super) async fn select_current_creation(
             realm_id: scope.realm_id(),
             requester_actor_id: &event.actor_id,
             applet_id: &candidate.applet_id,
+            service_id: &candidate.service_id,
             effective_scope: scope,
             managed_actor_id: Some(&candidate.actor_id),
             operation: match candidate.actor_role {

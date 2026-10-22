@@ -5,7 +5,7 @@ use super::*;
 
 fn operation(original: &AppletAuthoringTransactionRequestBody) -> String {
     format!(
-        "initial-device/{}",
+        "initial-device/{}/0",
         crate::managed_runtime::completion_event(original).event_id
     )
 }

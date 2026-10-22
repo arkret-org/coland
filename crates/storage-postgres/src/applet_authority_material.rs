@@ -159,16 +159,18 @@ pub(crate) async fn read(
             .registration_epoch
             .as_ref()
             .ok_or_else(unavailable)?;
-        // Only positions in the same exact Commit stream are compared. The
-        // registration accepted immediately before this parent is its source
-        // anchor, including after an epoch was replaced and later restored.
-        let row=sql_query("SELECT r.envelope,rc.commit_json FROM realm_commits gc JOIN canonical_events g ON g.pk=gc.event_pk JOIN realm_commits rc ON rc.stream_key=gc.stream_key AND rc.stream_position<gc.stream_position JOIN canonical_events r ON r.pk=rc.event_pk JOIN applet_registration_instances a ON a.accepted_commit_id=rc.commit_id AND a.registration_event_ref=r.envelope->>'event_id' WHERE g.id=$1 AND g.state='committed' AND r.state='committed' AND r.kind='ak.applet.registration' AND r.envelope->'scope_ref'=$2 AND a.applet_id=$3 AND r.envelope#>>'{payload,service_id}'=$4 AND r.envelope#>>'{payload,registration_epoch}'=$5 ORDER BY rc.stream_position DESC LIMIT 1")
-            .bind::<Binary,_>(event_id.token_bytes().to_vec()).bind::<Jsonb,_>(serde_json::to_value(&request.effective_scope).map_err(PersistenceError::database)?)
+        // The acceptance transaction freezes each parent's exact registration,
+        // including parents issued after installation and Circle-scoped grants.
+        let rows = sql_query("SELECT r.envelope,rc.commit_json FROM applet_grant_registration_sources s JOIN canonical_events r ON r.envelope->>'event_id'=s.registration_event_ref JOIN realm_commits rc ON rc.event_pk=r.pk WHERE s.realm_id=$1 AND s.grant_id=$2 AND s.applet_id=$3 AND s.service_id=$4 AND r.state='committed' AND r.kind='ak.applet.registration' AND r.envelope#>>'{payload,registration_epoch}'=$5")
+            .bind::<Text,_>(realm.as_str()).bind::<Text,_>(id.as_str())
             .bind::<Text,_>(applet.as_str()).bind::<Text,_>(service.as_str()).bind::<Text,_>(epoch.as_str())
-            .get_result::<AcceptedRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unavailable)?;
+            .get_results::<AcceptedRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+        let [row] = rows.as_slice() else {
+            return Err(unavailable());
+        };
         let registration = CommittedEventFullView {
-            event: decode(row.envelope)?,
-            commit: decode(row.commit_json)?,
+            event: decode(row.envelope.clone())?,
+            commit: decode(row.commit_json.clone())?,
         };
         let registration = accepted(conn, &registration.event.event_id).await?;
         if source_registration
@@ -184,7 +186,7 @@ pub(crate) async fn read(
         serde_json::to_value(&registration.event.payload).map_err(PersistenceError::database)?,
     )?;
     if registration.event.kind != EventKind::AppletRegistration
-        || registration.event.scope_ref != request.effective_scope
+        || registration.event.scope_ref != arkret_wire::ScopeRef::realm(realm.clone())
         || registration_payload.applet_id != *applet
         || registration_payload.service_id != *service
     {
@@ -301,13 +303,72 @@ pub(crate) async fn read(
         grant_events.push(original);
         current_results.push(present);
     }
+    let current_binding = current_binding(conn, applet, service, &request.effective_scope).await?;
+    if matches!(
+        request.effective_scope,
+        arkret_wire::ScopeRef::Circle { .. }
+    ) && matches!(
+        current_binding,
+        AppletInstallationCurrentBinding::Active { .. }
+    ) {
+        use arkret_models_collaboration::exact_current_results::{
+            AppletRegistrationExactCurrentRow, AppletRegistrationExactCurrentSelector,
+            AppletRegistrationExactCurrentSelectorKind,
+        };
+        #[derive(QueryableByName)]
+        struct RegistrationCurrent {
+            #[diesel(sql_type=Text)]
+            current_commit_id: String,
+            #[diesel(sql_type=BigInt)]
+            current_stream_position: i64,
+            #[diesel(sql_type=Jsonb)]
+            value: Value,
+        }
+        let current = sql_query("SELECT current_commit_id,current_stream_position,value FROM applet_registration_current_results WHERE realm_id=$1 AND applet_id=$2 AND service_id=$3")
+            .bind::<Text,_>(realm.as_str()).bind::<Text,_>(applet.as_str()).bind::<Text,_>(service.as_str())
+            .get_result::<RegistrationCurrent>(&mut *conn).await.map_err(PersistenceError::database)?;
+        let stream = CommitStreamRef::Realm {
+            realm_id: realm.clone(),
+        };
+        let head = sql_query("SELECT commit_json AS value FROM realm_commits WHERE stream_key=$1 ORDER BY stream_position DESC LIMIT 1")
+            .bind::<Text,_>(crate::authority_commit::stream_key(&stream)?)
+            .get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+        let head: arkret_wire::RealmCommit = decode(head.value)?;
+        current_results.push(ExactCurrentResultsReadOutcome::Present {
+            realm_id: realm.clone(),
+            governance_generation: generation,
+            effective_stream_head: CommitStreamHead {
+                stream_ref: stream.clone(),
+                commit_id: head.commit_id,
+                stream_position: head.stream_position,
+            },
+            entry: ExactCurrentResultEntry::AppletRegistration(AppletRegistrationExactCurrentRow {
+                selector: AppletRegistrationExactCurrentSelector {
+                    kind: AppletRegistrationExactCurrentSelectorKind::AppletRegistration,
+                    applet_id: applet.clone(),
+                    service_id: service.clone(),
+                },
+                source_stream_ref: stream,
+                revision: arkret_wire::CurrentRevision {
+                    commit_id: current
+                        .current_commit_id
+                        .parse()
+                        .map_err(PersistenceError::database)?,
+                    stream_position: u64::try_from(current.current_stream_position)
+                        .map_err(PersistenceError::database)?,
+                },
+                value: current.value,
+            }),
+        });
+    }
     let outcome = AppletAuthorityMaterialOutcome {
         applet_id: applet.clone(),
+        service_id: service.clone(),
         effective_scope: request.effective_scope.clone(),
         registration,
         grant_events,
         current_results,
-        current_binding: current_binding(conn, applet, service, &request.effective_scope).await?,
+        current_binding,
     };
     outcome
         .validate_structural()
@@ -328,8 +389,8 @@ async fn current_binding(
     };
     let scope_key = coland_storage::applet_effective_scope_key(scope)?;
     let at = chrono::Utc::now();
-    let install = sql_query("SELECT record AS value FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2")
-        .bind::<Text,_>(applet.as_str()).bind::<Text,_>(scope_key)
+    let install = sql_query("SELECT record AS value FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2 AND service_id=$3")
+        .bind::<Text,_>(applet.as_str()).bind::<Text,_>(scope_key).bind::<Text,_>(service.as_str())
         .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     let Some(install) = install else {
         return Err(unavailable());
@@ -357,10 +418,11 @@ async fn current_binding(
         return Ok(AppletInstallationCurrentBinding::Inactive);
     }
     let current = sql_query(
-        "SELECT value FROM applet_registration_current_results WHERE realm_id=$1 AND applet_id=$2",
+        "SELECT value FROM applet_registration_current_results WHERE realm_id=$1 AND applet_id=$2 AND service_id=$3",
     )
     .bind::<Text, _>(scope.realm_id().as_str())
     .bind::<Text, _>(applet.as_str())
+    .bind::<Text, _>(service.as_str())
     .get_result::<JsonRow>(&mut *conn)
     .await
     .optional()
@@ -403,7 +465,9 @@ async fn current_binding(
     };
     let commit: arkret_wire::RealmCommit = decode(current_instance.value)?;
     let registration_full = accepted(conn, &commit.event_ref).await?;
-    if registration_full.event.scope_ref != *scope || registration_full.commit != commit {
+    if registration_full.event.scope_ref != arkret_wire::ScopeRef::realm(scope.realm_id().clone())
+        || registration_full.commit != commit
+    {
         return Err(unavailable());
     }
     let rows = sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 ORDER BY grant_id")

@@ -111,7 +111,7 @@ pub(super) fn validate_admin_install_events(
         || registration.actor_id.as_account_id().map(|a| &a.station_id)
             != Some(&basis.target_station_id)
         || &registration.realm_id != realm_id
-        || registration.scope_ref != basis.effective_scope
+        || registration.scope_ref != ScopeRef::realm(realm_id.clone())
         || registration.producer_proof.is_none()
     {
         return Err(crate::app_error!(
@@ -120,8 +120,11 @@ pub(super) fn validate_admin_install_events(
         ));
     }
     let registration_epoch_evidence = registration_epoch_evidence_from_event(registration)?;
-    let expected_registration =
-        registration_payload_from_package(package, &registration_epoch_evidence)?;
+    let expected_registration = registration_payload_from_package(
+        package,
+        &registration_epoch_evidence,
+        registration_revision_from_event(registration)?,
+    )?;
     let submitted_registration = serde_json::to_value(&registration.payload).map_err(|error| {
         AppError::internal(format!(
             "registration_event payload cannot be canonicalized: {error}"
@@ -289,34 +292,41 @@ pub(super) async fn register_package_install(
     let ghost_actors_allowed =
         ghost_actors_allowed_for_install(&package, &approved_actions, actor_policy.as_ref());
 
-    if let Some(existing) = applet_record(state, &applet_id, &effective_scope).await? {
+    let existing_installation = applet_record(
+        state,
+        &applet_id,
+        package.service_id.as_str(),
+        &effective_scope,
+    )
+    .await?;
+    if let Some(existing) = &existing_installation {
         if existing.idempotency_key == idempotency_key {
             if existing.install_body_digest.as_str() == body_digest {
                 res.status_code(StatusCode::OK);
-                return Ok(existing.install_response);
+                return Ok(existing.install_response.clone());
             }
             return Err(AppError::conflict(
                 "Idempotency-Key was already used with a different applet install body",
             )
             .with_wire_code("duplicate_conflict"));
         }
-        return Err(
-            AppError::conflict("applet package is already installed in this scope")
-                .with_wire_code("failed_precondition"),
-        );
     }
+    let expected_installation = existing_installation
+        .as_ref()
+        .map(encode_applet_record)
+        .transpose()?;
 
     let existing_identity = applet_identity(state, &applet_id, target_station_id.as_str()).await?;
-    let (identity, expected_identity) = if let Some(existing) = existing_identity {
+    let (identity, expected_identity) = if let Some(mut existing) = existing_identity {
         if package.applet_id != existing.initial_package.applet_id
             || package.controller_principal_id != existing.initial_package.controller_principal_id
-            || package.service_id != existing.initial_package.service_id
         {
             return Err(AppError::conflict(
                 "Applet Service identity differs from its original installation",
             ));
         }
         let expected = encode_applet_identity(&existing)?;
+        existing.globally_fenced_at = None;
         (existing, Some(expected))
     } else {
         (
@@ -376,7 +386,7 @@ pub(super) async fn register_package_install(
         },
         creation_service_resolution: None,
         expected_identity: expected_identity.clone(),
-        expected_installation: None,
+        expected_installation: expected_installation.clone(),
         preview_subject_key: String::new(),
         operation_id: "ak.self.applet.command.install".to_owned(),
         idempotency_key: idempotency_key.clone(),
@@ -394,6 +404,7 @@ pub(super) async fn register_package_install(
         let response = AppletInstallOutcome {
             install_id: install_id.clone(),
             applet_id: package.applet_id.clone(),
+            service_id: package.service_id.clone(),
             registration_event_ref,
             registration_epoch: package.registration_epoch.clone(),
             capability_grant_refs: capability_grant_refs.clone(),
@@ -460,7 +471,7 @@ pub(super) async fn register_package_install(
                     expected_record: expected_identity.clone(),
                     record: identity_value.clone(),
                 },
-                expected_record: None,
+                expected_record: expected_installation.clone(),
                 record: encode_applet_record(&record).map_err(|error| {
                     coland_storage::PersistenceError::Internal(error.to_string())
                 })?,
@@ -874,6 +885,7 @@ pub(super) async fn build_install_plan(
     registration_epoch_evidence: &AppletRegistrationEpochEvidence,
     scope: &ScopeRef,
     approved_scopes: Vec<ScopeGrant>,
+    expected_revision: Option<arkret_wire::CurrentRevision>,
 ) -> Result<AppletInstallPlan, AppError> {
     let namespace_conflicts =
         namespace_conflicts_for(state, package.applet_id.as_str(), &package.namespaces).await?;
@@ -884,7 +896,7 @@ pub(super) async fn build_install_plan(
     let approved_actions = actions_from_approved_scopes(&approved_scopes);
     let denied_scopes = denied_scope_values(package, &approved_actions);
     let registration_payload =
-        registration_payload_from_package(package, registration_epoch_evidence)?;
+        registration_payload_from_package(package, registration_epoch_evidence, expected_revision)?;
     let package_digest = package
         .package_digest
         .clone()
@@ -899,6 +911,7 @@ pub(super) async fn build_install_plan(
         plan_id: arkret_wire::PlanId::new(UNASSIGNED_PLAN_ID)
             .map_err(|error| AppError::internal(error.to_string()))?,
         applet_id: package.applet_id.clone(),
+        service_id: package.service_id.clone(),
         package_digest: package_digest.clone(),
         registration_epoch: package.registration_epoch.clone(),
         effective_scope: scope.clone(),
@@ -928,9 +941,10 @@ pub(super) async fn build_install_plan(
 pub(super) fn registration_payload_from_package(
     package: &AppletPackage,
     registration_epoch_evidence: &AppletRegistrationEpochEvidence,
+    expected_revision: Option<arkret_wire::CurrentRevision>,
 ) -> Result<Value, AppError> {
     let registration = package
-        .to_registration(registration_epoch_evidence)
+        .to_registration(registration_epoch_evidence, expected_revision)
         .map_err(|error| AppError::schema_violation(error.to_string()))?;
     serde_json::to_value(registration).map_err(|error| {
         AppError::internal(format!("Applet registration cannot be serialized: {error}"))
@@ -1253,7 +1267,7 @@ mod tests {
         );
         package.sign(&signer, &verification_method).unwrap();
 
-        let payload = registration_payload_from_package(&package, &evidence).unwrap();
+        let payload = registration_payload_from_package(&package, &evidence, None).unwrap();
         assert_eq!(payload["created_at"], "2026-01-01T00:00:00.000Z");
         let registration: arkret_models_integration::AppletRegistrationPayload =
             serde_json::from_value(payload).unwrap();
@@ -1641,4 +1655,15 @@ mod tests {
             .is_err()
         );
     }
+}
+
+pub(super) fn registration_revision_from_event(
+    event: &Event,
+) -> Result<Option<arkret_wire::CurrentRevision>, AppError> {
+    let payload: arkret_models_integration::AppletRegistrationPayload = serde_json::from_value(
+        serde_json::to_value(&event.payload)
+            .map_err(|e| AppError::schema_violation(e.to_string()))?,
+    )
+    .map_err(|e| AppError::schema_violation(e.to_string()))?;
+    Ok(payload.expected_revision)
 }

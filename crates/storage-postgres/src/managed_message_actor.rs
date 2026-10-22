@@ -34,16 +34,18 @@ pub(crate) async fn registration(
         .applet_id
         .as_ref()
         .ok_or_else(|| denied("Applet producer has no applet_id"))?;
-    registration_for_scope(conn, &event.realm_id, applet).await
+    let service = service_for_event(conn, event).await?;
+    registration_for_scope(conn, &event.realm_id, applet, &service).await
 }
 
 pub(crate) async fn registration_for_scope(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
     applet: &arkret_wire::AppletId,
+    service: &arkret_wire::DidCoreId,
 ) -> PersistenceResult<AppletRegistrationPayload> {
-    let row=sql_query("SELECT r.value FROM applet_registration_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.applet_id=$2 AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position AND e.kind='ak.applet.registration' AND e.state='committed' FOR SHARE OF r")
-        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(applet.as_str()).get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+    let row=sql_query("SELECT r.value FROM applet_registration_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3 AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position AND e.kind='ak.applet.registration' AND e.state='committed' FOR SHARE OF r")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(applet.as_str()).bind::<Text,_>(service.as_str()).get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(||denied("Applet has no accepted current registration"))?;
     serde_json::from_value(row.value).map_err(PersistenceError::database)
 }
@@ -167,8 +169,8 @@ async fn require_applet_producer_inner(
         .validate_against_did_document(&guard.service_did_document)
         .map_err(denied)?;
     let scope = coland_storage::applet_effective_scope_key(&effective_scope)?;
-    let install=sql_query("SELECT i.record AS value FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{registration_event,event_id}' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 FOR UPDATE OF i")
-        .bind::<Text,_>(registration.applet_id.as_str()).bind::<Text,_>(scope).bind::<Text,_>(event.realm_id.as_str())
+    let install=sql_query("SELECT i.record AS value FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id AND r.service_id=i.service_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{registration_event,event_id}' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND i.service_id=$4 FOR UPDATE OF i")
+        .bind::<Text,_>(registration.applet_id.as_str()).bind::<Text,_>(scope).bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(registration.service_id.as_str())
         .get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(||denied("Applet is not installed on this exact scope"))?;
     if install
@@ -866,4 +868,33 @@ pub(crate) async fn require_managed_identity_in_connection(
     }
     let _ = (subject, at);
     Ok(())
+}
+
+pub(crate) async fn service_for_event(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+) -> PersistenceResult<arkret_wire::DidCoreId> {
+    if event.kind == arkret_wire::EventKind::RealmActorManagerChange {
+        let change: arkret_models_integration::RealmActorManagerChangePayload =
+            serde_json::from_value(
+                serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
+            )
+            .map_err(PersistenceError::database)?;
+        return Ok(change.new_service_id);
+    }
+    if let ActorId::Service { service_id } = event.executed_by.as_ref().unwrap_or(&event.actor_id) {
+        return Ok(service_id.clone());
+    }
+    if matches!(&event.actor_id, ActorId::Realm { .. }) {
+        let (value, _) = crate::realm_actor_control::current_source(
+            conn,
+            &event.actor_id,
+            serde_json::json!({"kind":"realm_actor_manager","actor_id":event.actor_id}),
+        )
+        .await?;
+        let manager: arkret_models_integration::RealmActorManagerValue =
+            serde_json::from_value(value).map_err(PersistenceError::database)?;
+        return Ok(manager.service_id);
+    }
+    Err(denied("Applet Event has no accepted Service executor"))
 }

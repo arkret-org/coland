@@ -548,12 +548,14 @@ CREATE TABLE public.applet_managed_identities (
 
 CREATE TABLE public.applet_installations (
     applet_id text NOT NULL,
+    service_id text NOT NULL,
     effective_scope_key text NOT NULL,
     record jsonb NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT applet_installations_pkey PRIMARY KEY (applet_id, effective_scope_key),
+    CONSTRAINT applet_installations_pkey PRIMARY KEY (applet_id, service_id, effective_scope_key),
     CONSTRAINT applet_installations_record_key_check CHECK (
         record->>'applet_id' = applet_id
+        AND record#>>'{package,service_id}' = service_id
         AND NOT (record ?| ARRAY[
             'identity', 'registry_id', 'bot_actor_id', 'bot_actor_station_id',
             'bot_actor_provision_ref', 'bot_principal_control_realm_id', 'initial_package',
@@ -591,10 +593,11 @@ CREATE TABLE public.applet_configurations (
 
 CREATE TABLE public.applet_namespace_claims (
     applet_id text NOT NULL,
-    domain text NOT NULL CHECK (domain IN ('actors', 'realms', 'handles')),
+    service_id text NOT NULL,
+    domain text NOT NULL CHECK (domain IN ('realms', 'handles')),
     pattern text NOT NULL,
     exclusive boolean NOT NULL,
-    PRIMARY KEY (applet_id, domain, pattern)
+    PRIMARY KEY (applet_id, service_id, domain, pattern)
 );
 
 CREATE INDEX applet_namespace_claims_domain_pattern_idx
@@ -687,6 +690,7 @@ CREATE TABLE public.applet_widget_tokens (
     token_ref text PRIMARY KEY,
     token_digest text NOT NULL UNIQUE,
     applet_id text NOT NULL,
+    service_id text NOT NULL,
     effective_scope_key text NOT NULL,
     registration_event_ref text NOT NULL,
     registration_epoch text NOT NULL,
@@ -694,8 +698,8 @@ CREATE TABLE public.applet_widget_tokens (
     issued_at timestamp with time zone NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     invalidated_at timestamp with time zone,
-    FOREIGN KEY (applet_id,effective_scope_key)
-        REFERENCES public.applet_installations(applet_id,effective_scope_key),
+    FOREIGN KEY (applet_id,service_id,effective_scope_key)
+        REFERENCES public.applet_installations(applet_id,service_id,effective_scope_key),
     CHECK (expires_at > issued_at),
     CHECK (record->>'token_ref'=token_ref AND record->>'token_digest'=token_digest
         AND record->'install'->>'applet_id'=applet_id
@@ -3411,15 +3415,30 @@ CREATE TABLE public.applet_registration_instances (
     PRIMARY KEY (realm_id, applet_id, registration_event_ref)
 );
 
+-- The registration accepted with each Service parent is immutable provenance.
+-- Realm registration and Circle grant positions are never compared across streams.
+CREATE TABLE public.applet_grant_registration_sources (
+    realm_id text NOT NULL,
+    grant_id text NOT NULL,
+    applet_id text NOT NULL,
+    service_id text NOT NULL,
+    registration_event_ref text NOT NULL,
+    PRIMARY KEY (realm_id, grant_id),
+    FOREIGN KEY (realm_id, applet_id, registration_event_ref)
+        REFERENCES public.applet_registration_instances (realm_id, applet_id, registration_event_ref)
+);
+
 CREATE TABLE public.applet_registration_current_results (
     realm_id text NOT NULL,
     applet_id text NOT NULL,
+    service_id text NOT NULL,
     instance_event_ref text NOT NULL,
     current_commit_id text NOT NULL REFERENCES public.realm_commits(commit_id),
     current_stream_position bigint NOT NULL CHECK (current_stream_position >= 0),
     value jsonb NOT NULL,
     updated_at timestamptz NOT NULL,
-    PRIMARY KEY (realm_id, applet_id)
+    PRIMARY KEY (realm_id, applet_id, service_id),
+    CHECK (value->>'applet_id' = applet_id AND value->>'service_id' = service_id)
 );
 
 -- Registered append-only member identity assertions and their covering Commit.

@@ -169,6 +169,7 @@ async fn require_current(
             realm_id: scope.realm_id(),
             requester_actor_id: &actor,
             applet_id: &registration.applet_id,
+            service_id: &registration.service_id,
             effective_scope: scope,
             managed_actor_id: Some(&actor),
             operation: AppletPolicyOperation::Execute,

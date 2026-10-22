@@ -188,7 +188,7 @@ async fn native_exact_current_results(
     }
     if &request.realm_id != device.metadata.effective_scope.realm_id()
         || matches!(request.selector,
-            arkret_models_collaboration::exact_current_results::ExactCurrentResultSelector::CapabilityGrant(_))
+            arkret_models_collaboration::exact_current_results::ExactCurrentResultSelector::CapabilityGrant(_) | arkret_models_collaboration::exact_current_results::ExactCurrentResultSelector::AppletRegistration(_))
     { return not_found(res); }
     let result = state
         .authority_commits()

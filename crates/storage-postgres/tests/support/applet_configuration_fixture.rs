@@ -112,6 +112,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
     let mut request = AppletConfigurationRequest {
         command: Command::Recover,
         intent: AppletConfigurationIntent {
+                    service_id: package.service_id.clone(),
             request_id: format!("ak:request:{}", uuid::Uuid::now_v7())
                 .parse()
                 .unwrap(),
@@ -175,35 +176,11 @@ pub(super) async fn run_configuration(pool: PgPool) {
         .unwrap()
         .unwrap();
     assert_eq!(committed.event, **original);
-    let completions = factory
-        .fixture
-        .state
-        .test_persistence()
-        .applets()
-        .pending_authoring_completions(128)
-        .await
-        .unwrap();
-    let completion = completions
-        .into_iter()
-        .find(|item| item.actor_id == candidate.actor_id)
-        .expect("creation atomically retains completion");
+    let completion = durable_completion(&factory.fixture, &candidate.actor_id).await;
     assert_eq!(completion.creation_ref.event_id, original.event_id);
-    assert_eq!(
-        completion.creation_ref.commit_id,
-        committed.commit.commit_id
-    );
-    assert!(
-        factory
-            .fixture
-            .state
-            .test_persistence()
-            .applets()
-            .pending_authoring_completions(128)
-            .await
-            .unwrap()
-            .iter().any(|row| row.creation_ref == completion.creation_ref),
-        "repeated pending enumeration preserves the exact original"
-    );
+    assert_eq!(completion.creation_ref.commit_id, committed.commit.commit_id);
+    assert_eq!(durable_completion(&factory.fixture, &candidate.actor_id).await.creation_ref, completion.creation_ref,
+        "repeated durable enumeration preserves the exact original");
     let delivery = prepare_configuration_completion(&factory.fixture, &completion)
         .await
         .unwrap();
@@ -220,14 +197,14 @@ pub(super) async fn run_configuration(pool: PgPool) {
         .unwrap();
     let receipts = FileAuthoringStore::shared(path.clone())
         .unwrap()
-        .entries_with_prefix("applet-completion/v1/")
+        .entries_with_prefix("managed-authoring/delivery/")
         .unwrap();
     assert_eq!(receipts.len(), 1, "one original durable HTTP receipt");
     let receipt: Value = serde_json::from_str(&receipts[0].1).unwrap();
     let authentication: arkret_models_integration::AppletDeliveryAuthenticationRecord =
-        serde_json::from_value(receipt["delivery_authentication_record"].clone()).unwrap();
+        serde_json::from_value(receipt["record"].clone()).unwrap();
     assert_eq!(
-        receipt["delivery_authentication_record"]
+        receipt["record"]
             .as_object()
             .unwrap()
             .len(),
@@ -244,7 +221,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
     assert_eq!(
         FileAuthoringStore::shared(path.clone())
             .unwrap()
-            .entries_with_prefix("applet-completion/v1/")
+            .entries_with_prefix("managed-authoring/delivery/")
             .unwrap(),
         receipts,
         "fresh HTTP times preserve the original full authentication record and outcome"
@@ -445,7 +422,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
     assert!(cancelled["source_outcome"].get("create_event").is_none());
 
     boxed_step(|| {
-        cross_station_configuration(&factory.fixture, &id, &request.intent.effective_scope)
+        cross_station_configuration(&factory.fixture, &id, &package.service_id, &request.intent.effective_scope)
     })
     .await;
 
@@ -822,7 +799,7 @@ async fn deliver_configuration_completion(
 async fn prepare_configuration_completion(
     fixture: &Fixture,
     completion: &coland_storage::AppletAuthoringCompletion,
-) -> coland_storage::PersistenceResult<coland_storage::AppletAuthoringCompletion> {
+) -> coland_services::ServiceResult<coland_storage::AppletAuthoringCompletion> {
     completion_application(&fixture.state)
         .prepare_applet_authoring_completion(
             completion,
@@ -1450,7 +1427,7 @@ fn configuration_review_vote(
     vote
 }
 
-async fn cross_station_configuration(governor: &Fixture, applet: &AppletId, scope: &ScopeRef) {
+async fn cross_station_configuration(governor: &Fixture, applet: &AppletId, service: &arkret_wire::DidCoreId, scope: &ScopeRef) {
     use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let (account_station, _server) = boxed_step(|| network_fixture(database.pool())).await;
@@ -1528,6 +1505,7 @@ async fn cross_station_configuration(governor: &Fixture, applet: &AppletId, scop
     let mut request = arkret_models_integration::AppletConfigurationRequest {
         command: arkret_models_integration::AppletConfigurationCommand::Recover,
         intent: arkret_models_integration::AppletConfigurationIntent {
+            service_id: service.clone(),
             request_id: arkret_wire::new_prefixed_uuid7("ak:request:")
                 .parse()
                 .unwrap(),

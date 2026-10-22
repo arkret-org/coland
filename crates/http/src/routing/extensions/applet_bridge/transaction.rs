@@ -2,10 +2,7 @@ use arkret_identifiers::EventId;
 #[cfg(test)]
 use arkret_models_integration::AppletTransactionStatus;
 use arkret_models_integration::applet_models::AppletEventTransactionRequestBody;
-use arkret_models_integration::{
-    AppletEventRejection, AppletNamespaceDomain, AppletTransactionOutcome,
-    namespace_pattern_matches,
-};
+use arkret_models_integration::{AppletEventRejection, AppletTransactionOutcome};
 use arkret_wire::{CommittedEventRef, Event};
 use coland_http::error::AppError;
 use coland_services::events::{AppletTransactionReplayResult, AppletTransactionReplayState};
@@ -63,16 +60,17 @@ pub(super) async fn process_verified_transaction(
     let mut rejected = Vec::new();
     for event in transaction.events {
         let event_id = event.event_id.to_string();
-        let install = match applet_record(state, applet_id.as_str(), &event.scope_ref).await? {
-            Some(install) => install,
-            None => {
-                rejected.push(rejected_event(
-                    &event_id,
-                    "applet_registration_unauthorized",
-                ));
-                continue;
-            }
-        };
+        let install =
+            match applet_record(state, applet_id.as_str(), &source_id, &event.scope_ref).await? {
+                Some(install) => install,
+                None => {
+                    rejected.push(rejected_event(
+                        &event_id,
+                        "applet_registration_unauthorized",
+                    ));
+                    continue;
+                }
+            };
         if let Err(reason_code) = validate_transaction_event_binding(&install, &source_id, &event) {
             rejected.push(rejected_event(&event_id, reason_code));
             continue;
@@ -257,7 +255,6 @@ fn validate_transaction_event_binding(
     {
         return Err("authorization_ref_missing");
     }
-    let actor_id = event.actor_id.signing_principal_id().as_str();
     if event.actor_id == arkret_wire::ActorId::service(package.service_id.clone()) {
         return if event.executed_by.is_none() {
             Ok(())
@@ -279,27 +276,15 @@ fn validate_transaction_event_binding(
     {
         return Ok(());
     }
-    let matched = event
-        .actor_id
-        .as_account_id()
-        .is_some_and(|account| account.station_id == install.target_station_id)
-        && install.package.namespaces.actors.iter().any(|entry| {
-            !namespace_pattern_is_wildcard(&entry.pattern)
-                && namespace_pattern_matches(
-                    AppletNamespaceDomain::Actors,
-                    &entry.pattern,
-                    actor_id,
-                )
-        });
-    if matched {
+    if event.actor_id.as_account_id().is_some()
+        && event.executed_by.as_ref()
+            == Some(&arkret_wire::ActorId::service(package.service_id.clone()))
+    {
+        // The accepted full-Account delegation grant is checked by admission.
         Ok(())
     } else {
-        Err("applet_namespace_mismatch")
+        Err("applet_registration_unauthorized")
     }
-}
-
-fn namespace_pattern_is_wildcard(pattern: &str) -> bool {
-    pattern.contains('*') || pattern.ends_with(':') || pattern.ends_with('/')
 }
 
 /// Retry window advertised with a shed delivery. It is a fixed, small window:

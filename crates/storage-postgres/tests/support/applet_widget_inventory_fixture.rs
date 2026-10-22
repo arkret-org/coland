@@ -9,11 +9,12 @@ use super::*;
 impl Fixture {
     async fn install_widget(&self) -> WidgetInstalled {
         let ghost = false;
-        let namespace = format!("bridge.{}", uuid::Uuid::now_v7().simple());
         let id = format!("ak:applet:{}", uuid::Uuid::now_v7());
-        let native = NativeAppletService::new(&id, &namespace, &self.state.service_core_id());
+        let native = realm_native_fixture::NativeService::new(
+            &id.parse().unwrap(),
+            &self.state.service_core_id(),
+        );
         let mut package = native.package.clone();
-        self.native_services.lock().unwrap().push(native);
         package
             .claimed_profiles
             .push("ak.profile.applet_widget.v1".into());
@@ -54,7 +55,7 @@ impl Fixture {
             ScopeRef::Realm {
                 realm_id: self.realm.clone(),
             },
-            serde_json::to_value(package.to_registration(&evidence).unwrap()).unwrap(),
+            serde_json::to_value(package.to_registration(&evidence, None).unwrap()).unwrap(),
         );
         let actions = if ghost {
             vec![
@@ -144,6 +145,7 @@ impl Fixture {
         assert_eq!(status, StatusCode::CREATED, "install commit: {outcome}");
         let outcome: AppletInstallOutcome = serde_json::from_value(outcome).unwrap();
         WidgetInstalled {
+            _native: native,
             package,
             outcome,
             body,
@@ -347,6 +349,7 @@ pub(super) async fn run_widget_inventory() {
         let install_before = store
             .get(
                 install.package.applet_id.as_str(),
+                install.package.service_id.as_str(),
                 &coland_storage::applet_effective_scope_key(&selector.effective_scope).unwrap(),
             )
             .await
@@ -405,6 +408,7 @@ pub(super) async fn run_widget_inventory() {
             let current = store
                 .get(
                     install.package.applet_id.as_str(),
+                    install.package.service_id.as_str(),
                     &coland_storage::applet_effective_scope_key(&selector.effective_scope).unwrap(),
                 )
                 .await
@@ -417,6 +421,7 @@ pub(super) async fn run_widget_inventory() {
 }
 
 struct WidgetInstalled {
+    _native: realm_native_fixture::NativeService,
     package: AppletPackage,
     outcome: AppletInstallOutcome,
     body: Value,
@@ -432,6 +437,7 @@ impl Fixture {
         Box::pin(async move {
             let reason = arkret_wire::ReasonCode::from_wire("applet_revoked");
             let preview_body = serde_json::to_value(AppletRevokePreviewRequestBody {
+                service_id: install.package.service_id.clone(),
                 effective_scope: ScopeRef::Realm {
                     realm_id: self.realm.clone(),
                 },
@@ -484,6 +490,7 @@ impl Fixture {
             event:self.admin_event(EventKind::MemberState,ScopeRef::Realm {realm_id:self.realm.clone()},json!({"member_id":intent.member_id,"membership":intent.membership,"reason":intent.reason_code})), approval_signatures:None,
         }).collect();
             let body = serde_json::to_value(AppletRevokeRequestBody {
+                service_id: install.package.service_id.clone(),
                 revoke_plan_digest,
                 effective_scope: preview.revoke_plan.effective_scope,
                 reason_code: reason,

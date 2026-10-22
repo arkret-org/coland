@@ -1,90 +1,9 @@
-// Fixture-only adapter. Volatile claims coordinate simultaneous
-// HTTP deliveries; the real ArkretEdge AuthoringJournal is the durable
-// original/full-record/fixed-outcome store. Do not call this a durable DB.
-struct ReceiverClaimStore(arkret::IdempotencyWindow<arkret::AppletTransactionOutcome>);
-impl Default for ReceiverClaimStore {
-    fn default() -> Self {
-        Self(arkret::IdempotencyWindow::new(
-            std::time::Duration::from_secs(24 * 60 * 60),
-        ))
-    }
-}
-impl arkret::TransactionIdempotencyStore<arkret::AppletTransactionOutcome> for ReceiverClaimStore {
-    type Error = arkret_bridge_runtime::BridgeError;
-    fn claim(
-        &self,
-        identity: &arkret::IdempotencyIdentity,
-        body: &str,
-        binding: &str,
-    ) -> arkret_bridge_runtime::Result<arkret::TransactionClaim<arkret::AppletTransactionOutcome>>
-    {
-        let body = arkret::Hash::new(body)
-            .map_err(|error| arkret_bridge_runtime::BridgeError::App(error.to_string()))?;
-        Ok(match self.0.claim(identity, &body, binding) {
-            arkret::IdempotencyClaim::Fresh => arkret::TransactionClaim::Claimed,
-            arkret::IdempotencyClaim::InFlight { .. } => arkret::TransactionClaim::Pending,
-            arkret::IdempotencyClaim::Duplicate { outcome, .. } => {
-                arkret::TransactionClaim::Duplicate(outcome)
-            }
-            arkret::IdempotencyClaim::DuplicateConflict { .. } => {
-                arkret::TransactionClaim::Conflict
-            }
-        })
-    }
-    fn record(
-        &self,
-        identity: &arkret::IdempotencyIdentity,
-        body: &str,
-        binding: &str,
-        outcome: &arkret::AppletTransactionOutcome,
-    ) -> arkret_bridge_runtime::Result<()> {
-        let digest = arkret::Hash::new(body)
-            .map_err(|error| arkret_bridge_runtime::BridgeError::App(error.to_string()))?;
-        match self.0.claim(identity, &digest, binding) {
-            arkret::IdempotencyClaim::InFlight { .. }
-                if self.0.complete(identity, outcome.clone()) =>
-            {
-                Ok(())
-            }
-            arkret::IdempotencyClaim::Duplicate { outcome: prior, .. } if &prior == outcome => {
-                Ok(())
-            }
-            _ => Err(arkret_bridge_runtime::BridgeError::App(
-                "fixture terminal claim coordinates changed".into(),
-            )),
-        }
-    }
-    fn release(
-        &self,
-        identity: &arkret::IdempotencyIdentity,
-        body: &str,
-        binding: &str,
-    ) -> arkret_bridge_runtime::Result<()> {
-        let digest = arkret::Hash::new(body)
-            .map_err(|error| arkret_bridge_runtime::BridgeError::App(error.to_string()))?;
-        match self.0.claim(identity, &digest, binding) {
-            arkret::IdempotencyClaim::InFlight { .. } if self.0.release(identity) => Ok(()),
-            _ => Err(arkret_bridge_runtime::BridgeError::App(
-                "fixture release claim coordinates changed".into(),
-            )),
-        }
-    }
-}
-
 fn mount_completion_receiver(native: &NativeService, edge: Arc<arkret_bridge_runtime::ArkretEdge>) {
     assert!(
         native.completion_handler.lock().unwrap().is_none(),
         "real receiver must not be intercepted by a callback"
     );
-    let router = salvo::Router::new()
-        .push(arkret_bridge_runtime::web::managed_applet_router(edge.clone()).unwrap())
-        .push(
-            arkret_bridge_runtime::web::applet_completion_router(
-                edge,
-                Arc::new(ReceiverClaimStore::default()),
-            )
-            .unwrap(),
-        );
+    let router = arkret_bridge_runtime::web::managed_applet_host_router(edge).unwrap();
     *native.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(router)));
 }
 

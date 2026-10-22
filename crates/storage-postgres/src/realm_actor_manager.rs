@@ -121,17 +121,8 @@ pub(crate) async fn admit(
     let registration = crate::managed_message_actor::registration(conn, event).await?;
     if registration.service_id != payload.new_service_id
         || registration.webhook_auth.key_ref != payload.new_service_signature.verification_method
-        || !registration.namespaces.actors.iter().any(|namespace| {
-            namespace_pattern_matches(
-                AppletNamespaceDomain::Actors,
-                &namespace.pattern,
-                payload.next_resolution.did.as_str(),
-            )
-        })
     {
-        return Err(invalid(
-            "receiving Service registration or retained DID namespace differs",
-        ));
+        return Err(invalid("receiving Service registration differs"));
     }
     registration
         .manifest

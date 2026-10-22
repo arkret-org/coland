@@ -531,7 +531,7 @@ where
                     "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE '%realm_keypackage_claim_sources%' AND a.query ILIKE '%FOR SHARE%') AS waiting"
                 }
                 NativeWriterWaitTarget::RealmAuthority => {
-                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE '%realm_authorities%' AND a.query ILIKE '%FOR UPDATE%') AS waiting"
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE '%realm_authorities%' AND (a.query ILIKE '%FOR UPDATE%' OR a.query ILIKE '%FOR SHARE%')) AS waiting"
                 }
                 NativeWriterWaitTarget::ConsumePackage { .. } => {
                     "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE 'SELECT % FROM mls_key_packages WHERE keypackage_ref=$1 FOR UPDATE') AS waiting"
@@ -1421,7 +1421,7 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
         .state
         .test_persistence()
         .authority_commits()
-        .applet_realm_actor_creations(&fixture.realm, &candidate.applet_id)
+        .applet_realm_actor_creations(&fixture.realm, &candidate.applet_id, None)
         .await
         .unwrap()
         .into_iter()

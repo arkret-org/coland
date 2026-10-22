@@ -31,6 +31,7 @@ fn coordinates(entry: &Entry) -> PersistenceResult<(&CommitStreamRef, &CurrentRe
         Entry::ModerationState(row) => (&row.source_stream_ref, &row.revision),
         Entry::AgentInteraction(row) => (&row.source_stream_ref, &row.revision),
         Entry::Policy(row) => (&row.source_stream_ref, &row.revision),
+        Entry::AppletRegistration(row) => (&row.source_stream_ref, &row.revision),
         Entry::CalendarScheduleSource(row) => (&row.source_stream_ref, &row.revision),
         // This selector's only registered exception belongs to the original
         // owned Agent issuer, not an Applet Device or the owning Service.
@@ -144,6 +145,11 @@ pub(super) async fn prepare(
                     })
                 }
                 NeverWrittenExactCurrentSelector::AgentInteraction(_) => (),
+                NeverWrittenExactCurrentSelector::AppletRegistration(_) => {
+                    return Err(refused(
+                        "Applet registration requires an Account administrator",
+                    ));
+                }
                 // The common reader currently supplies no authorized absent
                 // Relation endpoint cut; a missing row cannot invent one.
                 NeverWrittenExactCurrentSelector::Relation(_) => {

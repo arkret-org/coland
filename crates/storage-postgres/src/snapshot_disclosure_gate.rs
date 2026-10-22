@@ -2195,10 +2195,13 @@ pub(crate) fn disclose_to_actor(
                     ));
                 }
             }
-            CurrentSelector::AppletRegistration { applet_id } => {
+            CurrentSelector::AppletRegistration {
+                applet_id,
+                service_id,
+            } => {
                 let registration: arkret_models_integration::AppletRegistrationPayload =
                     serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
-                if registration.applet_id != *applet_id {
+                if registration.applet_id != *applet_id || registration.service_id != *service_id {
                     return Err(rejected(
                         "Applet registration differs from its current selector",
                     ));

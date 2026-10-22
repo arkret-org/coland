@@ -61,6 +61,7 @@ pub(crate) async fn require_install_policy(
             realm_id: scope.realm_id(),
             requester_actor_id: &basis.install_actor_id,
             applet_id: &body.applet_package.applet_id,
+            service_id: &body.applet_package.service_id,
             effective_scope: scope,
             managed_actor_id: None,
             operation: AppletPolicyOperation::Install,
@@ -170,7 +171,9 @@ pub(crate) async fn current_consent(
         || basis.effective_scope != *scope
         || basis.service_id != registration.service_id
         || basis.registration_event.kind != EventKind::AppletRegistration
-        || json!(basis.registration_event.payload) != json!(registration)
+        || crate::applet_current_results::registration_security_value(&json!(
+            basis.registration_event.payload
+        )) != crate::applet_current_results::registration_security_value(&json!(registration))
         || installation["registration_event"] != json!(basis.registration_event)
         || installation["capability_grant_events"] != json!(basis.capability_grant_events)
         || installation["package"] != json!(body.applet_package)
@@ -198,7 +201,7 @@ pub(crate) async fn current_consent(
     for source in std::iter::once(&basis.registration_event).chain(&basis.capability_grant_events) {
         let original = sql_query("SELECT e.envelope FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.envelope->>'event_id'=$1 AND e.state='committed' AND c.realm_id=$2 AND e.envelope->'scope_ref'=$3 AND c.committed_at<=$4 FOR SHARE OF e,c")
             .bind::<Text,_>(source.event_id.as_str()).bind::<Text,_>(scope.realm_id().as_str())
-            .bind::<Jsonb,_>(json!(scope)).bind::<Timestamptz,_>(at)
+            .bind::<Jsonb,_>(json!(source.scope_ref)).bind::<Timestamptz,_>(at)
             .get_result::<Original>(&mut *conn).await.optional().map_err(PersistenceError::database)?
             .ok_or_else(|| refused("original accepted installation Event is absent"))?;
         let event: Event = serde_json::from_value(original.envelope).map_err(refused)?;

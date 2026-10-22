@@ -188,7 +188,17 @@ pub(crate) fn validate_input(
         if unique_actions != approved {
             return Err(rejected("staged grant differs from approved plan actions"));
         }
-        let derived = input.package.to_registration(&epoch).map_err(rejected)?;
+        let derived = input
+            .package
+            .to_registration(
+                &epoch,
+                serde_json::from_value::<arkret_models_integration::AppletRegistrationPayload>(
+                    serde_json::to_value(&basis.registration_event.payload).map_err(rejected)?,
+                )
+                .map_err(rejected)?
+                .expected_revision,
+            )
+            .map_err(rejected)?;
         if serde_json::to_value(derived).map_err(rejected)?
             != serde_json::to_value(&basis.registration_event.payload).map_err(rejected)?
         {
@@ -199,7 +209,12 @@ pub(crate) fn validate_input(
         if events.iter().any(|e| {
             e.actor_id != input.admin_actor_id
                 || e.realm_id != *basis.effective_scope.realm_id()
-                || e.scope_ref != basis.effective_scope
+                || e.scope_ref
+                    != if e.kind == EventKind::AppletRegistration {
+                        arkret_wire::ScopeRef::realm(e.realm_id.clone())
+                    } else {
+                        basis.effective_scope.clone()
+                    }
                 || e.executed_by.is_some()
         }) {
             return Err(rejected("admin Event does not bind the installation scope"));

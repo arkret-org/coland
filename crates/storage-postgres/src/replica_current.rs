@@ -981,10 +981,11 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             continue;
         }
         match selector {
-            S::AppletRegistration { applet_id } => {
+            S::AppletRegistration { applet_id, service_id } => {
                 let registration: arkret_models_integration::AppletRegistrationPayload =
                     serde_json::from_value(value.clone()).map_err(malformed)?;
-                if registration.applet_id != *applet_id {
+                if registration.applet_id != *applet_id || registration.service_id != *service_id
+                    || *source_stream_ref != (arkret_wire::CommitStreamRef::Realm { realm_id: realm_id.clone() }) {
                     return Err(malformed("Applet registration differs from its selector"));
                 }
                 // The signed row is retained in replica_authorization_rows.

@@ -242,9 +242,13 @@ pub(crate) async fn installation_identity(
     at: chrono::DateTime<chrono::Utc>,
     writer: bool,
 ) -> PersistenceResult<(arkret_models_integration::AppletRegistrationPayload, Value)> {
-    let registration =
-        crate::managed_message_actor::registration_for_scope(conn, scope.realm_id(), applet)
-            .await?;
+    let registration = crate::managed_message_actor::registration_for_scope(
+        conn,
+        scope.realm_id(),
+        applet,
+        service,
+    )
+    .await?;
     if &registration.service_id != service {
         return Err(denied(
             "native provision Service differs from current registration",
@@ -264,12 +268,13 @@ pub(crate) async fn installation_identity(
         "FOR SHARE OF i,m NOWAIT"
     };
     let query = format!(
-        "SELECT i.record AS value,(m.record->>'globally_fenced_at' IS NOT NULL) AS globally_fenced FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{{registration_event,event_id}}' JOIN applet_managed_identities m ON m.applet_id=i.applet_id AND m.target_station_id=i.record->>'target_station_id' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 {locking}"
+        "SELECT i.record AS value,(m.record->>'globally_fenced_at' IS NOT NULL) AS globally_fenced FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id AND r.service_id=i.service_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{{registration_event,event_id}}' JOIN applet_managed_identities m ON m.applet_id=i.applet_id AND m.target_station_id=i.record->>'target_station_id' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND i.service_id=$4 {locking}"
     );
     let row = sql_query(query)
         .bind::<Text, _>(applet.as_str())
         .bind::<Text, _>(key)
         .bind::<Text, _>(scope.realm_id().as_str())
+        .bind::<Text, _>(service.as_str())
         .get_result::<InstallationRow>(&mut *conn)
         .await
         .optional()
@@ -460,6 +465,7 @@ pub(crate) async fn select_management(
             realm_id: &event.realm_id,
             requester_actor_id: &service,
             applet_id: &registration.applet_id,
+            service_id: &registration.service_id,
             effective_scope: &event.scope_ref,
             managed_actor_id: Some(&event.actor_id),
             operation,

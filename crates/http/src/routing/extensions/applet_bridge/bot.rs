@@ -56,9 +56,14 @@ pub(super) async fn preview(
         ));
     }
     let path = applet_id_param(req)?;
-    let record = applet_record(state, &path, &body.effective_scope)
-        .await?
-        .ok_or_else(|| AppError::not_found("Applet installation absent"))?;
+    let record = applet_record(
+        state,
+        &path,
+        body.service_id.as_str(),
+        &body.effective_scope,
+    )
+    .await?
+    .ok_or_else(|| AppError::not_found("Applet installation absent"))?;
     ensure_not_revoked(&record)?;
     if verified.install.effective_scope != record.effective_scope
         || verified.install.package.service_id != record.package.service_id

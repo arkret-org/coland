@@ -107,8 +107,7 @@ pub(crate) async fn publish_basis(
         .applet_id
         .as_ref()
         .ok_or_else(|| denied("Profile has no Applet"))?;
-    let registration =
-        crate::managed_message_actor::registration_for_scope(conn, &event.realm_id, applet).await?;
+    let registration = crate::managed_message_actor::registration(conn, event).await?;
     let document = sql_query(
         "SELECT did_document AS value FROM webvh_documents WHERE id=$1 AND expires_at>$2 FOR SHARE",
     )
@@ -163,6 +162,7 @@ pub(crate) async fn publish_basis(
             realm_id: &event.realm_id,
             requester_actor_id: &service,
             applet_id: applet,
+            service_id: &registration.service_id,
             effective_scope: scope,
             managed_actor_id: Some(&event.actor_id),
             operation: AppletPolicyOperation::Publish,

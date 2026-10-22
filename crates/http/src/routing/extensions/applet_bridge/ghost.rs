@@ -11,20 +11,22 @@ pub(super) async fn revoke_applet_record_after_admin_gate(
     state: &AppState,
     actor: &str,
     applet_id: &str,
+    service_id: &str,
     effective_scope: &arkret_wire::ScopeRef,
 ) -> Result<super::types::AppletRevokeRecordOutcome, AppError> {
-    revoke_applet_record_inner(state, actor, applet_id, effective_scope).await
+    revoke_applet_record_inner(state, actor, applet_id, service_id, effective_scope).await
 }
 
 async fn revoke_applet_record_inner(
     state: &AppState,
     actor: &str,
     applet_id: &str,
+    service_id: &str,
     effective_scope: &arkret_wire::ScopeRef,
 ) -> Result<super::types::AppletRevokeRecordOutcome, AppError> {
     let mut attempts = 0_u8;
     let (record, globally_fenced) = loop {
-        let current = applet_record(state, applet_id, effective_scope)
+        let current = applet_record(state, applet_id, service_id, effective_scope)
             .await?
             .ok_or_else(|| AppError::not_found("applet is not registered"))?;
         if current.status == "revoked" {

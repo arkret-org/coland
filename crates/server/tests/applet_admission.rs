@@ -1779,7 +1779,7 @@ async fn real_install_without_ghost_scope_refuses_provision_preview() {
 }
 
 #[tokio::test]
-async fn valid_service_signed_ghost_outside_declared_namespace_is_rejected() {
+async fn ghost_did_host_is_independent_of_its_applet_service_host() {
     let fixture = Box::new(Box::pin(Fixture::new()).await);
     let install = Box::new(Box::pin(fixture.install(true)).await);
     let (status, preview) = fixture.ghost_preview(&install, "remote-b").await;
@@ -1796,21 +1796,12 @@ async fn valid_service_signed_ghost_outside_declared_namespace_is_rejected() {
         &foreign,
         install.outcome.registration_event_ref.clone(),
     ));
-    let before = authority_snapshot(&fixture.pool).await;
-    let (status, rejection) = fixture
-        .ghost_commit(&install, &body, "outside-namespace")
+    let (status, outcome) = fixture
+        .ghost_commit(&install, &body, "independent-did-host")
         .await;
-    assert_eq!(
-        status,
-        StatusCode::CONFLICT,
-        "namespace mismatch: {rejection}"
-    );
-    assert_eq!(
-        rejection["type"],
-        "https://arkret.org/problems/failed_precondition"
-    );
-    assert!(rejection["detail"].as_str().unwrap().contains("namespace"));
-    assert_eq!(authority_snapshot(&fixture.pool).await, before);
+    assert_eq!(status, StatusCode::OK, "independent DID hosting: {outcome}");
+    let accepted = CreatedActor::accepted(&body, outcome);
+    assert_eq!(accepted.actor_id.signing_principal_id(), &foreign.actor_id);
 }
 
 #[tokio::test]
@@ -1882,6 +1873,7 @@ async fn revoke_all_needs_no_account_authority_and_has_no_delegated_session_mode
         install.package.applet_id
     );
     let mut unknown_mode = serde_json::to_value(AppletRevokePreviewRequestBody {
+        service_id: install.package.service_id.clone(),
         effective_scope: ScopeRef::Realm {
             realm_id: fixture.realm.clone(),
         },
@@ -2416,10 +2408,7 @@ impl NativeAppletService {
             arkret_wire::project_did_to_core_id(&Did::new(inception.did.clone()).unwrap()).unwrap();
         package.webhook_auth.key_ref =
             arkret_wire::DidUrl::new(inception.did_key_id.clone()).unwrap();
-        package.namespaces.actors = vec![AppletNamespaceEntry::exclusive(format!(
-            "did:webvh:*:{}:webvh:*",
-            inception.did.split(':').nth(3).unwrap()
-        ))];
+
         resign_native_applet_package(&mut package);
         native_applet_service_histories()
             .lock()
@@ -2639,10 +2628,6 @@ fn signed_applet_package(
             .unwrap_or_else(|| format!("https://{}.applet.example", safe_did_token(namespace))),
         vec!["arkret.portal".to_owned()],
         AppletWireNamespaces {
-            actors: vec![AppletNamespaceEntry::exclusive(format!(
-                "did:webvh:*:{}.applet.example:webvh:*",
-                safe_did_token(namespace)
-            ))],
             handles: vec![AppletNamespaceEntry::exclusive(namespace.to_owned())],
             ..Default::default()
         },
@@ -3056,6 +3041,7 @@ impl Fixture {
         Box::pin(async move {
             let reason = arkret_wire::ReasonCode::from_wire("applet_revoked");
             let preview_body = serde_json::to_value(AppletRevokePreviewRequestBody {
+                service_id: install.package.service_id.clone(),
                 effective_scope: ScopeRef::Realm {
                     realm_id: self.realm.clone(),
                 },
@@ -3108,6 +3094,7 @@ impl Fixture {
             event:self.admin_event(EventKind::MemberState,ScopeRef::Realm {realm_id:self.realm.clone()},json!({"member_id":intent.member_id,"membership":intent.membership,"reason":intent.reason_code})), approval_signatures:None,
         }).collect();
             let body = serde_json::to_value(AppletRevokeRequestBody {
+                service_id: install.package.service_id.clone(),
                 revoke_plan_digest,
                 effective_scope: preview.revoke_plan.effective_scope,
                 reason_code: reason,
@@ -3875,10 +3862,11 @@ impl Fixture {
     ) -> (AppletPackage, Value) {
         ingest_applet_service_id_document(&self.state, &package).await;
         let evidence = applet_registration_epoch_evidence(&package);
+        let revision = registration_revision(self, &package).await;
         let registration = self.admin_event(
             EventKind::AppletRegistration,
-            scope.clone(),
-            serde_json::to_value(package.to_registration(&evidence).unwrap()).unwrap(),
+            ScopeRef::realm(self.realm.clone()),
+            serde_json::to_value(package.to_registration(&evidence, revision).unwrap()).unwrap(),
         );
         let actions = if ghost {
             vec![
@@ -4309,25 +4297,48 @@ async fn admin_domain_request(
     request
 }
 
-// Registration replacement uses the same closed native aggregate as install.
-// HTTP's ordinary duplicate-install guard remains in force; no isolated
-// registration Event or fabricated Commit is accepted for this fixture.
+async fn registration_revision(
+    fixture: &Fixture,
+    package: &AppletPackage,
+) -> Option<arkret_wire::CurrentRevision> {
+    use arkret_models_collaboration::exact_current_results::{
+        ExactCurrentResultEntry, ExactCurrentResultsReadOutcome,
+    };
+    let (status, value) = fixture.admin_post(
+        "/_arkret/self/current-results/exact",
+        arkret_wire::ServiceOperationId::SELF_CURRENT_RESULTS_READ_EXACT_V1,
+        &json!({"realm_id":fixture.realm,"selector":{"kind":"applet_registration","applet_id":package.applet_id,"service_id":package.service_id}}),
+        None,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "registration current: {value}");
+    match serde_json::from_value::<ExactCurrentResultsReadOutcome>(value).unwrap() {
+        ExactCurrentResultsReadOutcome::Present {
+            entry: ExactCurrentResultEntry::AppletRegistration(row),
+            ..
+        } => Some(row.revision),
+        ExactCurrentResultsReadOutcome::NeverWritten { .. } => None,
+        _ => panic!("unexpected registration family"),
+    }
+}
+
+// Replacement uses the same authenticated preview and commit as production.
 async fn replace_installation_closed_unit(
     fixture: &Fixture,
     prior: &Installed,
     package: AppletPackage,
 ) -> AppletInstallOutcome {
-    use coland_storage::{AppletStore as _, PersistenceError, SelfProducerCommitGuard};
     let mut body: AppletInstallRequestBody = serde_json::from_value(prior.body.clone()).unwrap();
     body.applet_package = package.clone();
     body.authoring_request_basis.package_digest = package.package_digest.clone().unwrap();
+    assert_eq!(package.service_id, prior.package.service_id);
+    let revision = registration_revision(fixture, &package).await;
     let basis = &mut body.authoring_request_basis;
     basis.registration_event = fixture.admin_event(
         EventKind::AppletRegistration,
-        basis.effective_scope.clone(),
+        ScopeRef::realm(fixture.realm.clone()),
         serde_json::to_value(
             package
-                .to_registration(&applet_registration_epoch_evidence(&package))
+                .to_registration(&applet_registration_epoch_evidence(&package), revision)
                 .unwrap(),
         )
         .unwrap(),
@@ -4363,223 +4374,16 @@ async fn replace_installation_closed_unit(
     assert_eq!(status, StatusCode::OK, "{preview}");
     let plan: AppletInstallPlan = serde_json::from_value(preview["plan"].clone()).unwrap();
     body.plan_digest = plan.plan_digest.clone();
-    let store = coland_storage_postgres::PgAppletStore {
-        pool: fixture.pool.clone(),
-    };
-    let identity = store
-        .get_identity(package.applet_id.as_str(), fixture.state.service_id())
-        .await
-        .unwrap()
-        .unwrap();
-    let scope =
-        coland_storage::applet_effective_scope_key(&body.authoring_request_basis.effective_scope)
-            .unwrap();
-    let old = store
-        .get(package.applet_id.as_str(), &scope)
-        .await
-        .unwrap()
-        .unwrap();
-    let mut guards = vec![];
-    for event in std::iter::once(&body.authoring_request_basis.registration_event)
-        .chain(&body.authoring_request_basis.capability_grant_events)
-    {
-        guards.push(
-            admin_domain_request(fixture, event.clone())
-                .await
-                .self_producer_guard
-                .unwrap(),
-        );
-    }
-    let SelfProducerCommitGuard::HumanDeviceEvidence { evidence, .. } = &guards[0] else {
-        panic!("original regular Device root")
-    };
-    let service_resolution = evidence.service_resolution.clone();
-    let key = fixture.state.notary_signing_key();
-    let vm = fixture
-        .state
-        .service_verification_method("notary-key")
-        .unwrap();
-    let app = coland_services::authority_commit::AuthorityCommitApplication::new(
-        coland_services::persistence::PersistenceHandle::from_shared(
-            fixture.state.test_persistence(),
-        ),
-        0,
-    );
-    let signing_key = key.clone();
-    let signing_method = vm.clone();
-    let author: coland_storage::AppletCommitAuthor =
-        Arc::new(move |event, authority, head, at, fact, core| {
-            let commit = app
-                .sign_event_commit_at_authority_cut(
-                    event,
-                    authority,
-                    head,
-                    signing_method.clone(),
-                    signing_key.as_ref(),
-                    at,
-                    fact,
-                )
-                .map_err(|e| PersistenceError::Conflict(e.to_string()))?;
-            let root = core.map(|core| arkret_models_identity::AccountDeviceSignerEvidence {
-                device_projection_attestation:
-                    arkret_signatures::device_projection::sign_device_projection_attestation(
-                        core.clone(),
-                        signing_method.clone(),
-                        signing_key.as_ref(),
-                    )
-                    .unwrap(),
-                service_resolution: service_resolution.clone(),
-            });
-            Ok((commit, root))
-        });
-    let attester: coland_storage::AppletResolutionAttester = Arc::new(move |core| {
-        arkret_signatures::service_resolution::sign_principal_resolution_projection_attestation(
-            core,
-            vm.clone(),
-            key.as_ref(),
+    let (status, value) = fixture
+        .admin_post(
+            "/_arkret/self/applets/install",
+            arkret_wire::ServiceOperationId::SELF_APPLET_COMMAND_INSTALL_V1,
+            &serde_json::to_value(body).unwrap(),
+            Some(&format!("replacement-{}", uuid::Uuid::now_v7())),
         )
-        .map_err(|e| PersistenceError::Conflict(e.to_string()))
-    });
-    let actor = body.authoring_request_basis.install_actor_id.clone();
-    let digest = arkret_canonical::canonical_sha256(&body).unwrap();
-    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let idempotency_key = format!("closed-replacement-{}", uuid::Uuid::now_v7());
-    let input = coland_storage::AppletAuthoringUnitWrite {
-        candidate: coland_storage::AppletAuthoringCandidate {
-            request: coland_storage::AppletAdmissionRequest::Install(Box::new(body.clone())),
-            package: package.clone(),
-            recomputed_install_plan: Some(plan),
-            service_did_document: applet_service_id_document(&package),
-            controller_did_document: arkret_identity::DidResolver::resolve_did(
-                &arkret_identity::DidKeyResolver::new(),
-                &Did::new(
-                    package
-                        .proof
-                        .as_ref()
-                        .unwrap()
-                        .verification_method
-                        .as_str()
-                        .split('#')
-                        .next()
-                        .unwrap(),
-                )
-                .unwrap(),
-            )
-            .unwrap()
-            .document,
-            station_verification_method: fixture
-                .state
-                .service_verification_method("notary-key")
-                .unwrap(),
-            station_public_key: *fixture
-                .state
-                .notary_signing_key()
-                .verifying_key()
-                .as_bytes(),
-            admin_actor_id: actor.clone(),
-            admin_producer_guards: guards,
-            request_digest: Hash::new(digest.clone()).unwrap(),
-            canonical_request_hash: Hash::new(digest.clone()).unwrap(),
-            prior_managed_refs: vec![],
-            prior_service_signer_evidence: None,
-            accepted_at: at,
-        },
-        creation_service_resolution: None,
-        expected_identity: Some(identity.clone()),
-        expected_installation: Some(old.clone()),
-        preview_subject_key: String::new(),
-        operation_id: "ak.self.applet.command.install".to_owned(),
-        idempotency_key: idempotency_key.clone(),
-        operation_approvals: None,
-    };
-    let mut outcome = prior.outcome.clone();
-    outcome.install_id = coland_storage::ids::generate("install");
-    outcome.registration_event_ref = body
-        .authoring_request_basis
-        .registration_event
-        .event_id
-        .clone();
-    outcome.registration_epoch = package.registration_epoch.clone();
-    outcome.capability_grant_refs = body
-        .authoring_request_basis
-        .capability_grant_events
-        .iter()
-        .map(|e| arkret_wire::GrantId::from_event_id(&e.event_id))
-        .collect();
-    let response = serde_json::to_value(&outcome).unwrap();
-    let finalizer: coland_storage::AppletUnitFinalizer = Arc::new(move |_| {
-        let mut record = old.clone();
-        record["package"] = serde_json::to_value(&package).unwrap();
-        record["registration_event"] =
-            serde_json::to_value(&body.authoring_request_basis.registration_event).unwrap();
-        record["capability_grant_events"] =
-            serde_json::to_value(&body.authoring_request_basis.capability_grant_events).unwrap();
-        record["install_response"] = response.clone();
-        record["install_id"] = response["install_id"].clone();
-        record["idempotency_key"] = json!(idempotency_key);
-        record["install_body_digest"] = json!(digest);
-        record["registered_at"] = json!(at);
-        record["install_execution"]["idempotency_key"] = json!(idempotency_key);
-        record["install_execution"]["body_hash"] = json!(digest);
-        record["install_execution"]["submitted_plan_digest"] = json!(body.plan_digest);
-        let events = std::iter::once(&body.authoring_request_basis.registration_event)
-            .chain(body.authoring_request_basis.capability_grant_events.iter())
-            .collect::<Vec<_>>();
-        record["install_execution"]["produced_event_refs"] = json!(
-            events
-                .iter()
-                .map(|event| &event.event_id)
-                .collect::<Vec<_>>()
-        );
-        record["install_execution"]["steps"] =
-            json!(events.iter().enumerate().map(|(index, event)| {
-            let mut step = json!({
-                "step_index": index,
-                "target_event_kind": event.kind.as_str(),
-                "canonical_event_body_hash": arkret_canonical::canonical_sha256(event).unwrap(),
-                "status": "accepted",
-                "planned_event_ref": event.event_id,
-                "event_ref": event.event_id,
-            });
-            if event.kind == EventKind::CapabilityGrant {
-                step["grant_binding"] = json!({
-                    "applet_id": package.applet_id,
-                    "grant_id": arkret_wire::GrantId::from_event_id(&event.event_id),
-                    "executed_by": ActorId::service(package.service_id.clone()),
-                    "registration_epoch": package.registration_epoch,
-                });
-            }
-            step
-        }).collect::<Vec<_>>());
-        Ok(coland_storage::AppletUnitFinalization {
-            applet_record: coland_storage::AppletRecordCommit {
-                applet_id: package.applet_id.clone(),
-                identity: coland_storage::AppletIdentityCommit {
-                    target_station_id: body.authoring_request_basis.target_station_id.clone(),
-                    expected_record: Some(identity.clone()),
-                    record: identity.clone(),
-                },
-                expected_record: Some(old.clone()),
-                record,
-            },
-            idempotency_record: coland_storage::IdempotencyRecord {
-                authenticated_actor: actor.clone(),
-                operation_id: "ak.self.applet.command.install".to_owned(),
-                idempotency_key: idempotency_key.clone(),
-                request_hash: digest.clone(),
-                response_status: 201,
-                response_body: response.clone(),
-                created_at: at,
-                expires_at: at + chrono::Duration::days(1),
-            },
-            response_body: response.clone(),
-        })
-    });
-    let accepted = store
-        .admit_authoring_unit(input, author, attester, finalizer)
-        .await
-        .unwrap();
-    serde_json::from_value(accepted.response_body).unwrap()
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "replacement install: {value}");
+    serde_json::from_value(value).unwrap()
 }
 
 async fn accepted_admin_domain_event(fixture: &Fixture, event: Event) {

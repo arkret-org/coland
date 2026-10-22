@@ -7,7 +7,7 @@ use arkret_models_crypto::*;
 use arkret_wire::{DeviceId, DidUrl, GrantId, ServiceOperationId};
 use coland_storage::MlsGroupCurrentStore as _;
 
-use super::realm_native_fixture::{boxed_step, native_tls_material};
+use super::realm_native_fixture::boxed_step;
 use super::*;
 
 pub(super) fn enable(package: &mut AppletPackage) {
@@ -1962,13 +1962,22 @@ async fn human_admits_runtime_in_authority(
     group
         .install_local_creator_binding(actor.clone(), Some(authorization.clone()))
         .unwrap();
-    human_adds_runtime_to_group(fixture, device, Box::new(group)).await
+    human_adds_runtime_to_group_in_authority(fixture, device, Box::new(group), next).await
 }
 
 pub(super) async fn human_adds_runtime_to_group(
     fixture: &Fixture,
     device: &arkret_bridge_runtime::managed_device::ManagedDevice,
+    group: Box<arkret_mls::ArkretMlsGroup>,
+) -> Box<arkret_mls::ArkretMlsGroup> {
+    human_adds_runtime_to_group_in_authority(fixture, device, group, None).await
+}
+
+async fn human_adds_runtime_to_group_in_authority(
+    fixture: &Fixture,
+    device: &arkret_bridge_runtime::managed_device::ManagedDevice,
     mut group: Box<arkret_mls::ArkretMlsGroup>,
+    next: Option<&Fixture>,
 ) -> Box<arkret_mls::ArkretMlsGroup> {
     let history = &fixture.pcr.history;
     let scope = device.effective_scope().clone();
@@ -2229,6 +2238,19 @@ pub(super) async fn human_rotates_out_runtime(
     .unwrap()
     .unwrap()
     .value;
+    let accepted = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&current.current_mls_commit_event_ref)
+        .await
+        .unwrap()
+        .unwrap();
+    let accepted = arkret_wire::CommittedEventFullView {
+        event: accepted.event,
+        commit: accepted.commit,
+    };
+    install_received_roster(fixture, &accepted, group).await;
     let binding = MlsGovernanceBindingPayload::new(
         scope.clone(),
         Some(current.current_mls_commit_event_ref.clone()),

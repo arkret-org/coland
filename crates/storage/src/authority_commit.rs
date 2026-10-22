@@ -1967,12 +1967,11 @@ pub trait AuthorityCommitStore: Send + Sync {
         ))
     }
 
-    async fn applet_registration_for_realm(
+    async fn applet_registration_for_event(
         &self,
-        realm: &arkret_wire::RealmId,
-        applet: &arkret_wire::AppletId,
+        event: &arkret_wire::Event,
     ) -> PersistenceResult<arkret_models_integration::AppletRegistrationPayload> {
-        let _ = (realm, applet);
+        let _ = (event);
         Err(PersistenceError::Conflict(
             "dependency_missing: accepted Applet registration unavailable".into(),
         ))
@@ -2729,8 +2728,9 @@ pub trait AuthorityCommitStore: Send + Sync {
         &self,
         realm: &arkret_wire::RealmId,
         applet: &arkret_wire::AppletId,
+        service: Option<&arkret_wire::DidCoreId>,
     ) -> PersistenceResult<Vec<arkret_wire::CommittedEventFullView>> {
-        let _ = (realm, applet);
+        let _ = (realm, applet, service);
         Err(PersistenceError::Conflict(
             "dependency_missing: Realm actor creation inventory unavailable".into(),
         ))

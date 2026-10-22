@@ -1283,10 +1283,15 @@ async fn ensure_applet_admission_in_transaction(
     )?;
     let install = sql_query(
         "SELECT record FROM applet_installations \
-         WHERE applet_id = $1 AND effective_scope_key = $2 FOR UPDATE",
+         WHERE applet_id = $1 AND effective_scope_key = $2 AND service_id = $3 FOR UPDATE",
     )
     .bind::<Text, _>(applet_id.as_str())
     .bind::<Text, _>(&scope_key)
+    .bind::<Text, _>(
+        crate::managed_message_actor::service_for_event(conn, event)
+            .await?
+            .as_str(),
+    )
     .get_result::<AppletAdmissionRecordRow>(&mut *conn)
     .await
     .optional()
@@ -2282,18 +2287,21 @@ pub(crate) async fn commit_applet_record(
     }
     let identity_updated =
         if let Some(expected_identity) = mutation.identity.expected_record.as_ref() {
-            if expected_identity != &mutation.identity.record {
+            let mut retained = expected_identity.clone();
+            retained["globally_fenced_at"] = serde_json::Value::Null;
+            if retained != mutation.identity.record {
                 return Err(conflict(
                     "duplicate_conflict: Applet identity winner changed",
                 ));
             }
             sql_query(
-                "UPDATE applet_managed_identities SET record = record \
+                "UPDATE applet_managed_identities SET record = $4 \
              WHERE applet_id = $1 AND target_station_id = $2 AND record = $3",
             )
             .bind::<Text, _>(mutation.applet_id.as_str())
             .bind::<Text, _>(mutation.identity.target_station_id.as_str())
             .bind::<Jsonb, _>(expected_identity)
+            .bind::<Jsonb, _>(&mutation.identity.record)
             .execute(&mut *conn)
             .await
             .map_err(PersistenceError::database)?
@@ -2317,13 +2325,6 @@ pub(crate) async fn commit_applet_record(
         ));
     }
     let canonical_namespaces = coland_storage::applet_namespaces_from_record(&mutation.record)?;
-    if let Some(expected_record) = mutation.expected_record.as_ref()
-        && canonical_namespaces != coland_storage::applet_namespaces_from_record(expected_record)?
-    {
-        return Err(PersistenceError::SchemaViolation(
-            "Applet package.namespaces are immutable".to_owned(),
-        ));
-    }
     if mutation.record.get("bots").is_some() || mutation.record.get("ghosts").is_some() {
         return Err(PersistenceError::SchemaViolation(
             "Applet installation cannot contain managed identity inventories".to_owned(),
@@ -2332,9 +2333,8 @@ pub(crate) async fn commit_applet_record(
     let updated = if let Some(expected_record) = mutation.expected_record {
         sql_query(
             "UPDATE applet_installations SET record = $4, updated_at = NOW() \
-             WHERE applet_id = $1 AND effective_scope_key = $2 AND record = $3 \
-               AND record->>'revoked_at' IS NULL \
-               AND record->>'status' IN ('installed', 'partially_installed')",
+             WHERE applet_id = $1 AND effective_scope_key = $2 AND service_id = $3#>>'{package,service_id}' AND record = $3 \
+",
         )
         .bind::<Text, _>(mutation.applet_id.as_str())
         .bind::<Text, _>(&effective_scope_key)
@@ -2345,8 +2345,8 @@ pub(crate) async fn commit_applet_record(
         .map_err(PersistenceError::database)?
     } else {
         sql_query(
-            "INSERT INTO applet_installations (applet_id, effective_scope_key, record, updated_at) \
-             VALUES ($1, $2, $3, NOW()) ON CONFLICT (applet_id, effective_scope_key) DO NOTHING",
+            "INSERT INTO applet_installations (applet_id, effective_scope_key, record, updated_at, service_id) \
+             VALUES ($1, $2, $3, NOW(), $3#>>'{package,service_id}') ON CONFLICT (applet_id, service_id, effective_scope_key) DO NOTHING",
         )
         .bind::<Text, _>(mutation.applet_id.as_str())
         .bind::<Text, _>(&effective_scope_key)
@@ -2365,11 +2365,6 @@ pub(crate) async fn commit_applet_record(
 
     let namespace_claims = [
         (
-            arkret_models_integration::AppletNamespaceDomain::Actors,
-            "actors",
-            canonical_namespaces.actors,
-        ),
-        (
             arkret_models_integration::AppletNamespaceDomain::Realms,
             "realms",
             canonical_namespaces.realms,
@@ -2380,10 +2375,6 @@ pub(crate) async fn commit_applet_record(
             canonical_namespaces.handles,
         ),
     ];
-    if !replacing
-        && namespace_claims
-            .iter()
-            .any(|(_, _, claims)| !claims.is_empty())
     {
         sql_query(
             "SELECT pg_advisory_xact_lock(hashtextextended('arkret.applet.namespace.claims', 0))",
@@ -2391,6 +2382,19 @@ pub(crate) async fn commit_applet_record(
         .execute(&mut *conn)
         .await
         .map_err(PersistenceError::database)?;
+        let service = mutation
+            .record
+            .pointer("/package/service_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                PersistenceError::SchemaViolation("installation omits Service".into())
+            })?;
+        sql_query("DELETE FROM applet_namespace_claims WHERE applet_id=$1 AND service_id=$2")
+            .bind::<Text, _>(mutation.applet_id.as_str())
+            .bind::<Text, _>(service)
+            .execute(&mut *conn)
+            .await
+            .map_err(PersistenceError::database)?;
         let existing = sql_query(
             "SELECT claims.domain, claims.pattern, claims.exclusive \
              FROM applet_namespace_claims claims WHERE claims.applet_id <> $1",
@@ -2413,14 +2417,15 @@ pub(crate) async fn commit_applet_record(
                     return Err(conflict("applet_namespace_conflict"));
                 }
                 sql_query(
-                    "INSERT INTO applet_namespace_claims (applet_id, domain, pattern, exclusive) \
-                     VALUES ($1, $2, $3, $4) \
-                     ON CONFLICT (applet_id, domain, pattern) DO NOTHING",
+                    "INSERT INTO applet_namespace_claims (applet_id, domain, pattern, exclusive, service_id) \
+                     VALUES ($1, $2, $3, $4, $5) \
+                     ON CONFLICT (applet_id, service_id, domain, pattern) DO NOTHING",
                 )
                 .bind::<Text, _>(mutation.applet_id.as_str())
                 .bind::<Text, _>(*domain_wire)
                 .bind::<Text, _>(&claim.pattern)
                 .bind::<Bool, _>(claim.exclusive)
+                .bind::<Text, _>(service)
                 .execute(&mut *conn)
                 .await
                 .map_err(PersistenceError::database)?;

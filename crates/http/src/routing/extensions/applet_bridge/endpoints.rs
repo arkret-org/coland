@@ -63,7 +63,6 @@ pub(in crate::routing::extensions) fn protocol_router() -> Router {
                             .hoop(require_inbound_transaction_signature)
                             .post(transaction_endpoint),
                     )
-                    .push(Router::with_path("actors/{actor_id}").get(resolve_actor_endpoint))
                     .push(
                         Router::with_path("realms/{realm_id_or_alias}").get(resolve_realm_endpoint),
                     )
@@ -198,6 +197,7 @@ async fn install_preview_endpoint(
         &registration_epoch_evidence,
         &basis.effective_scope,
         approved_scopes,
+        super::install::registration_revision_from_event(&basis.registration_event)?,
     )
     .await?;
     require_realm_admin(state, &session, &basis.effective_scope).await?;
@@ -230,18 +230,21 @@ async fn install_endpoint(
     if let Some(existing) = applet_record(
         state,
         commit.applet_package.applet_id.as_str(),
+        commit.applet_package.service_id.as_str(),
         &basis.effective_scope,
     )
     .await?
     {
-        require_exact_successful_install_replay(
-            &existing.idempotency_key,
-            existing.install_body_digest.as_str(),
-            &idempotency_key,
-            &body_digest,
-        )?;
-        res.status_code(StatusCode::OK);
-        return json_ok(existing.install_response);
+        if existing.idempotency_key == idempotency_key {
+            require_exact_successful_install_replay(
+                &existing.idempotency_key,
+                existing.install_body_digest.as_str(),
+                &idempotency_key,
+                &body_digest,
+            )?;
+            res.status_code(StatusCode::OK);
+            return json_ok(existing.install_response);
+        }
     }
     let registration_epoch_evidence =
         registration_epoch_evidence_from_event(&basis.registration_event)?;
@@ -265,6 +268,7 @@ async fn install_endpoint(
         &registration_epoch_evidence,
         &basis.effective_scope,
         approved_scopes,
+        super::install::registration_revision_from_event(&basis.registration_event)?,
     )
     .await?;
     if commit.plan_digest != recomputed_plan.plan_digest {
@@ -421,9 +425,14 @@ async fn revoke_preview_endpoint(
     let session = aa.authenticated_session(state, req).await?;
     let applet_id = applet_id_param(req)?;
     let preview = body.into_inner();
-    let record = applet_record(state, &applet_id, &preview.effective_scope)
-        .await?
-        .ok_or_else(|| AppError::not_found("applet is not registered"))?;
+    let record = applet_record(
+        state,
+        &applet_id,
+        preview.service_id.as_str(),
+        &preview.effective_scope,
+    )
+    .await?
+    .ok_or_else(|| AppError::not_found("applet is not registered"))?;
     validate_revoke_scope(&record, &preview.effective_scope)?;
     require_realm_admin(state, &session, &preview.effective_scope).await?;
     json_ok(build_revoke_plan(state, &record, &preview).await?)
@@ -471,10 +480,16 @@ async fn revoke_install_inner(
         .map_err(|error| AppError::param_invalid(format!("revoke request invalid: {error}")))?;
     let request_digest = arkret_canonical::canonical_sha256(&request_value)
         .map_err(|error| AppError::param_invalid(format!("revoke request invalid: {error}")))?;
-    let mut record =
-        crate::boxed_future(|| applet_record(state, &applet_id, &revoke.effective_scope))
-            .await?
-            .ok_or_else(|| AppError::not_found("applet is not registered"))?;
+    let mut record = crate::boxed_future(|| {
+        applet_record(
+            state,
+            &applet_id,
+            revoke.service_id.as_str(),
+            &revoke.effective_scope,
+        )
+    })
+    .await?
+    .ok_or_else(|| AppError::not_found("applet is not registered"))?;
     validate_revoke_scope(&record, &revoke.effective_scope)?;
     crate::boxed_future(|| require_realm_admin(state, &session, &revoke.effective_scope)).await?;
     let admin_actor =
@@ -495,6 +510,7 @@ async fn revoke_install_inner(
 
     if stored_outcome.is_none() {
         let preview = AppletRevokePreviewRequestBody {
+            service_id: revoke.service_id.clone(),
             effective_scope: revoke.effective_scope.clone(),
             reason_code: revoke.reason_code.clone(),
             revoke_mode: revoke.revoke_mode,
@@ -813,6 +829,7 @@ async fn revoke_install_inner(
                 state,
                 &session.actor,
                 &applet_id,
+                revoke.service_id.as_str(),
                 &revoke.effective_scope,
             )
         })
@@ -854,9 +871,16 @@ async fn revoke_install_inner(
     }
     deduplicate_revoke_effect_refs(&mut outcome.revoked_refs)?;
     outcome.status = AppletRevokeSagaStatus::Complete;
-    record = crate::boxed_future(|| applet_record(state, &applet_id, &revoke.effective_scope))
-        .await?
-        .ok_or_else(|| AppError::not_found("applet disappeared during revoke"))?;
+    record = crate::boxed_future(|| {
+        applet_record(
+            state,
+            &applet_id,
+            revoke.service_id.as_str(),
+            &revoke.effective_scope,
+        )
+    })
+    .await?
+    .ok_or_else(|| AppError::not_found("applet disappeared during revoke"))?;
     crate::boxed_future(|| {
         persist_revoke_execution(
             state,
@@ -1110,6 +1134,7 @@ async fn build_revoke_plan(
     membership_removals.sort_by(|left, right| left.member_id.cmp(&right.member_id));
     let plan = AppletRevokePlan {
         applet_id: record.applet_id.clone(),
+        service_id: record.package.service_id.clone(),
         effective_scope: preview.effective_scope.clone(),
         registration_epoch: package.registration_epoch.clone(),
         reason_code: preview.reason_code.clone(),
@@ -1481,9 +1506,14 @@ async fn persist_revoke_execution(
         }
         let applet_id = record.applet_id.clone();
         let effective_scope = record.effective_scope.clone();
-        *record = applet_record(state, applet_id.as_str(), &effective_scope)
-            .await?
-            .ok_or_else(|| AppError::not_found("applet disappeared during revoke"))?;
+        *record = applet_record(
+            state,
+            applet_id.as_str(),
+            current.package.service_id.as_str(),
+            &effective_scope,
+        )
+        .await?
+        .ok_or_else(|| AppError::not_found("applet disappeared during revoke"))?;
         if let Some(stored) = load_stored_revoke_outcome(
             record.revoke_execution.as_ref(),
             state.service_id(),
@@ -1594,9 +1624,14 @@ async fn preview_ghost_actor_endpoint(
     let state = depot.get_typed::<AppState>().expect("state injected");
     let path_applet_id = applet_id_param(req)?;
     let preview = body.into_inner();
-    let record = applet_record(state, &path_applet_id, &preview.effective_scope)
-        .await?
-        .ok_or_else(|| AppError::not_found("applet is not installed"))?;
+    let record = applet_record(
+        state,
+        &path_applet_id,
+        verified.install.package.service_id.as_str(),
+        &preview.effective_scope,
+    )
+    .await?
+    .ok_or_else(|| AppError::not_found("applet is not installed"))?;
     ensure_not_revoked(&record)?;
     if verified.install.applet_id.as_str() != path_applet_id
         || verified.install.package.service_id != record.package.service_id
@@ -1727,55 +1762,6 @@ async fn transaction_endpoint(
     let outcome =
         process_verified_transaction(&state, transaction, &idempotency_key, verified).await?;
     json_ok(outcome)
-}
-
-#[salvo::oapi::endpoint(operation_id = "ak.edge.applet.actor.read.resolve", tags("extensions"))]
-#[tracing::instrument(skip_all, fields(op = "ak.edge.applet.actor.read.resolve.v1"))]
-async fn resolve_actor_endpoint(
-    req: &mut Request,
-    depot: &mut Depot,
-) -> JsonResult<AppletActorView> {
-    let state = depot.get_typed::<AppState>().expect("state injected");
-    let actor_id = req
-        .param::<String>("actor_id")
-        .ok_or_else(|| AppError::param_missing("actor_id path segment required"))?;
-    let actor_id = arkret_identifiers::DidCoreId::new(actor_id)
-        .map_err(|error| AppError::param_invalid(format!("actor_id is invalid: {error}")))?;
-    for record in applet_records(state).await? {
-        if record.revoked_at.is_some() {
-            continue;
-        }
-        if let Some(bot) = record
-            .bots
-            .iter()
-            .find(|bot| bot.bot_actor_id.signing_principal_id() == &actor_id)
-        {
-            return json_ok(AppletActorView {
-                exists: true,
-                actor_id: Some(bot.bot_actor_id.clone()),
-                display_name: Some(record.package.package_id.clone()),
-                external_ref: None,
-            });
-        }
-        if let Some(ghost) = record
-            .ghosts
-            .iter()
-            .find(|ghost| ghost.ghost_actor_id.signing_principal_id() == &actor_id)
-        {
-            return json_ok(AppletActorView {
-                exists: true,
-                actor_id: Some(ghost.ghost_actor_id.clone()),
-                display_name: ghost.display_name.clone(),
-                external_ref: None,
-            });
-        }
-    }
-    json_ok(AppletActorView {
-        exists: false,
-        actor_id: None,
-        display_name: None,
-        external_ref: None,
-    })
 }
 
 #[salvo::oapi::endpoint(operation_id = "ak.edge.applet.realm.read.resolve", tags("extensions"))]
@@ -2196,6 +2182,7 @@ mod revoke_saga_tests {
         .unwrap();
         let plan: AppletRevokePlan = serde_json::from_value(json!({
             "applet_id": "ak:applet:01904100-0000-7000-8000-000000000001",
+            "service_id": "ak:did_core:webvh:zservice",
             "effective_scope": scope,
             "registration_epoch": format!("sha256:{}", "a".repeat(64)),
             "reason_code": "requested_by_admin",
@@ -2205,6 +2192,7 @@ mod revoke_saga_tests {
             "widget_token_refs": []
         })).unwrap();
         let mut request = AppletRevokeRequestBody {
+            service_id: plan.service_id.clone(),
             revoke_plan_digest: Hash::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
             effective_scope: scope,
             reason_code: plan.reason_code.clone(),
@@ -2289,6 +2277,7 @@ mod revoke_saga_tests {
         .unwrap();
         event.actor_id = actor.clone();
         let mut request = AppletRevokeRequestBody {
+            service_id: plan.service_id.clone(),
             revoke_plan_digest: Hash::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
             effective_scope: realm_scope(),
             reason_code: plan.reason_code.clone(),

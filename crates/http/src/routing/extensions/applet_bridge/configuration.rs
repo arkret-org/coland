@@ -309,10 +309,14 @@ async fn govern(
         .configuration_intent(&governor, applet, &actor, &request.intent, &current)
         .await
         .map_err(service_error)?;
-    let record =
-        super::record::applet_record(state, applet.as_str(), &request.intent.effective_scope)
-            .await?
-            .ok_or_else(|| AppError::not_found("Applet installation absent"))?;
+    let record = super::record::applet_record(
+        state,
+        applet.as_str(),
+        request.intent.service_id.as_str(),
+        &request.intent.effective_scope,
+    )
+    .await?
+    .ok_or_else(|| AppError::not_found("Applet installation absent"))?;
     let intent = if let Some(original) = original {
         original
     } else {

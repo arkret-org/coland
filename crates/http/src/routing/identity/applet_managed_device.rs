@@ -243,6 +243,7 @@ pub(crate) async fn scope_guard_for_authority(
     let record = crate::routing::extensions::applet_bridge::record::applet_record(
         state,
         authority.applet_id.as_str(),
+        authority.source_service_id.as_str(),
         effective_scope,
     )
     .await

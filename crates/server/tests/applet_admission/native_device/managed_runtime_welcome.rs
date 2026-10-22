@@ -77,7 +77,7 @@ fn exercise(ghost: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = (
         .await;
         let (account, original, _) = &context.accepted[usize::from(ghost)];
         let operation = format!(
-            "initial-device/{}",
+            "initial-device/{}/0",
             crate::managed_runtime::completion_event(original).event_id
         );
         let store = FileAuthoringStore::shared(context.store_path.clone()).unwrap();

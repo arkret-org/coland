@@ -2551,6 +2551,7 @@ async fn revalidate_projection_inputs_in_connection(
             Entry::AgentInteraction(row) => (&row.source_stream_ref, &row.revision),
             Entry::CapabilityGrant(row) => (&row.source_stream_ref, &row.revision),
             Entry::Policy(row) => (&row.source_stream_ref, &row.revision),
+            Entry::AppletRegistration(row) => (&row.source_stream_ref, &row.revision),
             Entry::CalendarScheduleSource(row) => (&row.source_stream_ref, &row.revision),
         };
         if matches!(entry, Entry::Policy(_)) {

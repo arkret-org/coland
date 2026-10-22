@@ -177,11 +177,12 @@ pub(crate) async fn admit(
     Ok(outcome)
 }
 
-/// Reconstruct installation-local views from accepted originals, never a copied Account list.
+/// Reconstruct accepted originals, optionally restricted to their current managing Service.
 pub(crate) async fn inventory(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
     applet: &arkret_wire::AppletId,
+    service: Option<&arkret_wire::DidCoreId>,
 ) -> Result<Vec<arkret_wire::CommittedEventFullView>, PgTransactionError> {
     use diesel::sql_types::{Jsonb, Text};
     use diesel::{QueryableByName, sql_query};
@@ -219,6 +220,21 @@ pub(crate) async fn inventory(
             return Err(invalid(
                 "creation inventory is not backed by its original authority",
             ));
+        }
+        if let Some(service) = service {
+            let (manager, _) = crate::realm_actor_control::current_source(
+                conn,
+                &candidate.actor_id,
+                serde_json::json!({"kind":"realm_actor_manager", "actor_id":candidate.actor_id}),
+            )
+            .await?;
+            if manager
+                .get("service_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(service.as_str())
+            {
+                continue;
+            }
         }
         result.push(full);
     }

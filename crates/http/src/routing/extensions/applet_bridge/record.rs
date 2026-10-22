@@ -70,13 +70,14 @@ pub(crate) async fn applet_identity(
 pub(crate) async fn applet_record(
     state: &AppState,
     applet_id: &str,
+    service_id: &str,
     effective_scope: &arkret_wire::ScopeRef,
 ) -> Result<Option<AppletRecord>, AppError> {
     let effective_scope_key = coland_storage::applet_effective_scope_key(effective_scope)
         .map_err(|error| AppError::internal(format!("effective scope key failed: {error}")))?;
     let Some(value) = state
         .event_queries()
-        .applet(applet_id, &effective_scope_key)
+        .applet(applet_id, service_id, &effective_scope_key)
         .await
         .map_err(|error| {
             tracing::error!(%error, %applet_id, "failed to read applet record");
@@ -142,7 +143,9 @@ pub(super) async fn persist_applet_record(
     expected: &AppletRecord,
     replacement: &AppletRecord,
 ) -> Result<bool, AppError> {
-    if expected.applet_id != replacement.applet_id {
+    if expected.package.service_id != replacement.package.service_id
+        || expected.applet_id != replacement.applet_id
+    {
         return Err(AppError::internal(
             "Applet record CAS cannot change applet_id",
         ));
@@ -161,6 +164,7 @@ pub(super) async fn persist_applet_record(
         .event_queries()
         .compare_and_swap_applet(
             replacement.applet_id.as_str(),
+            replacement.package.service_id.as_str(),
             &effective_scope_key,
             &expected_value,
             replacement_value,
@@ -178,7 +182,8 @@ pub(super) async fn fence_applet_record(
     replacement: &AppletRecord,
     fenced_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<coland_storage::AppletInstallationFenceOutcome, AppError> {
-    if expected.applet_id != replacement.applet_id
+    if expected.package.service_id != replacement.package.service_id
+        || expected.applet_id != replacement.applet_id
         || expected.effective_scope != replacement.effective_scope
     {
         return Err(AppError::internal(
@@ -194,6 +199,7 @@ pub(super) async fn fence_applet_record(
         .event_queries()
         .fence_applet_installation(
             replacement.applet_id.as_str(),
+            replacement.package.service_id.as_str(),
             &effective_scope_key,
             replacement.target_station_id.as_str(),
             &expected_value,
@@ -237,7 +243,11 @@ pub(super) fn applet_id_param(req: &Request) -> Result<String, AppError> {
 async fn load_realm_actors(state: &AppState, record: &mut AppletRecord) -> Result<(), AppError> {
     let originals = state
         .authority_commits()
-        .applet_realm_actor_creations(record.effective_scope.realm_id(), &record.applet_id)
+        .applet_realm_actor_creations(
+            record.effective_scope.realm_id(),
+            &record.applet_id,
+            Some(&record.package.service_id),
+        )
         .await
         .map_err(|e| AppError::internal(e.to_string()))?;
     for full in originals {

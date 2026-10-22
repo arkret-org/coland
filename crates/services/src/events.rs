@@ -473,12 +473,14 @@ pub trait AppletPort: Send + Sync {
     async fn applet(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
     ) -> ServiceResult<Option<Value>>;
     async fn applets(&self) -> ServiceResult<Vec<Value>>;
     async fn compare_and_swap_applet(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
         expected: &Value,
         replacement: Value,
@@ -486,6 +488,7 @@ pub trait AppletPort: Send + Sync {
     async fn fence_applet_installation(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
         target_station_id: &str,
         expected: &Value,
@@ -945,9 +948,12 @@ impl EventQueryService {
     pub async fn applet(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
     ) -> ServiceResult<Option<Value>> {
-        self.applets.applet(applet_id, effective_scope_key).await
+        self.applets
+            .applet(applet_id, service_id, effective_scope_key)
+            .await
     }
     pub async fn applet_identity(
         &self,
@@ -976,17 +982,25 @@ impl EventQueryService {
     pub async fn compare_and_swap_applet(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
         expected: &Value,
         replacement: Value,
     ) -> ServiceResult<bool> {
         self.applets
-            .compare_and_swap_applet(applet_id, effective_scope_key, expected, replacement)
+            .compare_and_swap_applet(
+                applet_id,
+                service_id,
+                effective_scope_key,
+                expected,
+                replacement,
+            )
             .await
     }
     pub async fn fence_applet_installation(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
         target_station_id: &str,
         expected: &Value,
@@ -996,6 +1010,7 @@ impl EventQueryService {
         self.applets
             .fence_applet_installation(
                 applet_id,
+                service_id,
                 effective_scope_key,
                 target_station_id,
                 expected,

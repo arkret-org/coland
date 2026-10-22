@@ -63,13 +63,14 @@ const TABLES: &[(&str, &str)] = &[
     ),
     ("applet_registration_instances", "t.realm_id=$1"),
     ("applet_registration_current_results", "t.realm_id=$1"),
+    ("applet_grant_registration_sources", "t.realm_id=$1"),
     (
         "applet_managed_identities",
         "EXISTS(SELECT 1 FROM applet_registration_instances r WHERE r.realm_id=$1 AND r.applet_id=t.applet_id)",
     ),
     (
         "applet_namespace_claims",
-        "EXISTS(SELECT 1 FROM applet_registration_instances r WHERE r.realm_id=$1 AND r.applet_id=t.applet_id)",
+        "EXISTS(SELECT 1 FROM applet_registration_instances r JOIN realm_commits c ON c.commit_id=r.accepted_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.applet_id=t.applet_id AND e.envelope#>>'{payload,service_id}'=t.service_id)",
     ),
     (
         "applet_installations",

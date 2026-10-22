@@ -110,7 +110,8 @@ async fn gate(
         if registration.commit.commit_id != intent.registration_ref.commit_id
             || registration.commit.stream_ref != intent.registration_ref.stream_ref
             || registration.commit.stream_position != intent.registration_ref.stream_position
-            || registration.event.scope_ref != intent.effective_scope
+            || registration.event.scope_ref
+                != arkret_wire::ScopeRef::realm(intent.effective_scope.realm_id().clone())
         {
             return Err(invalid(
                 "configuration registration reference differs from its original",
@@ -187,7 +188,8 @@ pub(crate) async fn original_intent(
         return Ok(None);
     };
     let original: Intent = serde_json::from_value(row.intent).map_err(invalid)?;
-    if original.applet_id != *applet
+    if original.service_id != request.service_id
+        || original.applet_id != *applet
         || original.originating_actor_id != *actor
         || original.effective_scope != request.effective_scope
         || original.selection != request.selection
@@ -262,6 +264,7 @@ pub(crate) async fn command(
 ) -> PersistenceResult<Outcome> {
     ingress.request.validate().map_err(invalid)?;
     if intent.originating_actor_id.as_account_id() != Some(&ingress.requester_account_id)
+        || intent.service_id != ingress.request.intent.service_id
         || intent.request_id != ingress.request.intent.request_id
         || intent.effective_scope != ingress.request.intent.effective_scope
         || intent.selection != ingress.request.intent.selection

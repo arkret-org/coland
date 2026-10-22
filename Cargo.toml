@@ -46,40 +46,40 @@ unimplemented = "deny"
 [workspace.dependencies]
 anyhow = "1.0.104"
 arc-swap = "1.9.2"
-arkret = { version = "0.3.0", path = "../arkret-rust-sdk/crates/sdk", default-features = false }
-arkret-bootstrap = { version = "0.3.0", path = "../arkret-rust-sdk/crates/bootstrap", default-features = false }
-arkret-canonical = { version = "0.3.0", path = "../arkret-rust-sdk/crates/canonical", default-features = false }
-arkret-crypto = { version = "0.3.0", path = "../arkret-rust-sdk/crates/crypto", default-features = false }
-arkret-egress-policy = { version = "0.3.0", path = "../arkret-rust-sdk/crates/egress-policy", default-features = false }
-arkret-egress-reqwest = { version = "0.3.0", path = "../arkret-rust-sdk/crates/egress-reqwest", default-features = false }
-arkret-event-draft = { version = "0.3.0", path = "../arkret-rust-sdk/crates/event-draft", default-features = false }
-arkret-hlc = { version = "0.3.0", path = "../arkret-rust-sdk/crates/hlc", default-features = false }
-arkret-http-client = { version = "0.3.0", path = "../arkret-rust-sdk/crates/http-client", default-features = false, features = ["tls-rustls"] }
-arkret-identifiers = { version = "0.3.0", path = "../arkret-rust-sdk/crates/identifiers", default-features = false }
-arkret-identity = { version = "0.3.0", path = "../arkret-rust-sdk/crates/identity", default-features = false }
-arkret-keystore = { version = "0.3.0", path = "../arkret-rust-sdk/crates/keystore", default-features = false }
-arkret-mls = { version = "0.3.0", path = "../arkret-rust-sdk/crates/mls", default-features = false }
-arkret-models-collaboration = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-collaboration", default-features = false }
-arkret-models-crypto = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-crypto", default-features = false }
-arkret-models-discovery = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-discovery", default-features = false }
-arkret-models-identity = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-identity", default-features = false }
-arkret-models-integration = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-integration", default-features = false }
-arkret-policy = { version = "0.3.0", path = "../arkret-rust-sdk/crates/policy", default-features = false }
-arkret-rate-limit = { version = "0.3.0", path = "../arkret-rust-sdk/crates/rate-limit", default-features = false }
-arkret-schema = { version = "0.3.0", path = "../arkret-rust-sdk/crates/schema", default-features = false }
-arkret-schema-conformance = { version = "0.3.0", path = "../arkret-rust-sdk/crates/schema-conformance", default-features = false }
-arkret-server = { version = "0.3.0", path = "../arkret-rust-sdk/crates/server", default-features = false }
-arkret-signatures = { version = "0.3.0", path = "../arkret-rust-sdk/crates/signatures", default-features = false }
-arkret-state = { version = "0.3.0", path = "../arkret-rust-sdk/crates/state", default-features = false }
-arkret-test-kit = { version = "0.3.0", path = "../arkret-rust-sdk/crates/test-kit" }
-arkret-wire = { version = "0.3.0", path = "../arkret-rust-sdk/crates/wire", default-features = false }
+arkret = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/sdk", default-features = false }
+arkret-bootstrap = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/bootstrap", default-features = false }
+arkret-canonical = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/canonical", default-features = false }
+arkret-crypto = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/crypto", default-features = false }
+arkret-egress-policy = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/egress-policy", default-features = false }
+arkret-egress-reqwest = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/egress-reqwest", default-features = false }
+arkret-event-draft = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/event-draft", default-features = false }
+arkret-hlc = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/hlc", default-features = false }
+arkret-http-client = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/http-client", default-features = false, features = ["tls-rustls"] }
+arkret-identifiers = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/identifiers", default-features = false }
+arkret-identity = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/identity", default-features = false }
+arkret-keystore = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/keystore", default-features = false }
+arkret-mls = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/mls", default-features = false }
+arkret-models-collaboration = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/models-collaboration", default-features = false }
+arkret-models-crypto = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/models-crypto", default-features = false }
+arkret-models-discovery = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/models-discovery", default-features = false }
+arkret-models-identity = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/models-identity", default-features = false }
+arkret-models-integration = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/models-integration", default-features = false }
+arkret-policy = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/policy", default-features = false }
+arkret-rate-limit = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/rate-limit", default-features = false }
+arkret-schema = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/schema", default-features = false }
+arkret-schema-conformance = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/schema-conformance", default-features = false }
+arkret-server = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/server", default-features = false }
+arkret-signatures = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/signatures", default-features = false }
+arkret-state = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/state", default-features = false }
+arkret-test-kit = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/test-kit" }
+arkret-wire = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/wire", default-features = false }
 async-stream = "0.3.6"
 async-trait = "0.1.92"
 base64 = "0.23.1"
 bs58 = "0.5.1"
 bytes = "1.12.1"
-chacha20poly1305 = "0.11"
 chrono = "0.4.45"
+chacha20poly1305 = "0.11"
 chrono-tz = { version = "0.10.4", default-features = false }
 deadpool = "0.13"
 diesel = "2.3.12"
@@ -144,16 +144,16 @@ opentelemetry-semantic-conventions = { git = "https://github.com/open-telemetry/
 # Embedded Savfox has portable Git dependencies. Coland owns the checked-out
 # sibling workspace and must share one SDK/type universe across every consumer.
 [patch."https://github.com/arkret-org/arkret-rust-sdk.git"]
-arkret = { version = "0.3.0", path = "../arkret-rust-sdk/crates/sdk" }
-arkret-schema = { version = "0.3.0", path = "../arkret-rust-sdk/crates/schema" }
-arkret-crypto = { version = "0.3.0", path = "../arkret-rust-sdk/crates/crypto" }
-arkret-models-collaboration = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-collaboration" }
-arkret-models-crypto = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-crypto" }
-arkret-signatures = { version = "0.3.0", path = "../arkret-rust-sdk/crates/signatures" }
-arkret-wire = { version = "0.3.0", path = "../arkret-rust-sdk/crates/wire" }
+arkret = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/sdk" }
+arkret-schema = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/schema" }
+arkret-crypto = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/crypto" }
+arkret-models-collaboration = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/models-collaboration" }
+arkret-models-crypto = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/models-crypto" }
+arkret-signatures = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/signatures" }
+arkret-wire = { version = "0.3.0", path = "../arkret-rust-sdk-realm-actors/crates/wire" }
 
 [patch."https://github.com/arkret-org/garth.git"]
-garth = { version = "0.3.0", path = "../garth" }
+garth = { version = "0.3.0", path = "../garth-realm-actors" }
 
 [patch."https://github.com/arkret-org/bridges.git"]
-arkret-bridge-runtime = { version = "0.3.0", path = "../bridges/crates/runtime" }
+arkret-bridge-runtime = { version = "0.3.0", path = "../bridges-realm-actors/crates/runtime" }

@@ -169,3 +169,31 @@ async fn bridge_completion_receiver_preserves_original_over_signed_retries_cold_
     ))
     .await;
 }
+
+#[tokio::test]
+async fn bridge_ghost_transfers_management_between_independent_runtimes() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_test_writer()
+        .try_init();
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_runtime_manager_transfer(
+        database.pool(),
+        false,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn bridge_bot_transfers_management_between_independent_runtimes() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_test_writer()
+        .try_init();
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_runtime_manager_transfer(
+        database.pool(),
+        true,
+    ))
+    .await;
+}

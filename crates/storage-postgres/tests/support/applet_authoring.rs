@@ -640,10 +640,6 @@ fn signed_applet_package(
             .unwrap_or_else(|| format!("https://{}.applet.example", safe_did_token(namespace))),
         vec!["arkret.portal".to_owned()],
         AppletWireNamespaces {
-            actors: vec![AppletNamespaceEntry::exclusive(format!(
-                "did:webvh:*:{}.applet.example:webvh:*",
-                safe_did_token(namespace)
-            ))],
             handles: vec![AppletNamespaceEntry::exclusive(namespace.to_owned())],
             ..Default::default()
         },
@@ -1406,10 +1402,34 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
         drop(packages);
         ingest_applet_service_id_document(&self.fixture.state, &package).await;
         let evidence = applet_registration_epoch_evidence(&package);
+        let (status, current) = self.fixture.admin_post(
+            "/_arkret/self/current-results/exact",
+            arkret_wire::ServiceOperationId::SELF_CURRENT_RESULTS_READ_EXACT_V1,
+            &json!({"realm_id":self.fixture.realm,"selector":{"kind":"applet_registration","applet_id":package.applet_id,"service_id":package.service_id}}),
+            None,
+        ).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "registration exact current: {current}"
+        );
+        let current: arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome = serde_json::from_value(current).unwrap();
+        let expected_revision = match current {
+            arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome::Present {
+                entry: arkret_models_collaboration::exact_current_results::ExactCurrentResultEntry::AppletRegistration(row), ..
+            } => Some(row.revision),
+            arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome::NeverWritten { .. } => None,
+            _ => panic!("wrong registration current family"),
+        };
         let registration = self.fixture.admin_event(
             EventKind::AppletRegistration,
-            scope.clone(),
-            serde_json::to_value(package.to_registration(&evidence).unwrap()).unwrap(),
+            ScopeRef::realm(self.fixture.realm.clone()),
+            serde_json::to_value(
+                package
+                    .to_registration(&evidence, expected_revision)
+                    .unwrap(),
+            )
+            .unwrap(),
         );
         let mut actions = vec![
             "ak.message.create",
@@ -1535,6 +1555,7 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
         let prior = store
             .get(
                 applet_id.as_str(),
+                package.service_id.as_str(),
                 &coland_storage::applet_effective_scope_key(&scope).unwrap(),
             )
             .await
@@ -1567,6 +1588,7 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
                 let outcome = AppletInstallOutcome {
                     install_id: format!("install-{}", frozen.idempotency_key),
                     applet_id: package.applet_id.clone(),
+                    service_id: package.service_id.clone(),
                     registration_event_ref: accepted_ref(refs, registration)?.event_id,
                     registration_epoch: package.registration_epoch.clone(),
                     capability_grant_refs: grant_refs.clone(),
@@ -1595,7 +1617,7 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
                 let record = json!({
                     "applet_id":package.applet_id,"target_station_id":body.authoring_request_basis.target_station_id,"owner_actor_id":registration.actor_id,
                     "portal_realm_id":body.authoring_request_basis.effective_scope.realm_id(),"effective_scope":body.authoring_request_basis.effective_scope,
-                    "capabilities":actions,"package":package,"ghost_actors_allowed":true,"status":"installed","registered_at":frozen.accepted_at,"revoked_at":null,
+                    "capabilities":actions,"package":package,"ghost_actors_allowed":true,"status":"installed","registered_at":arkret_canonical::format_timestamp_canonical(frozen.accepted_at),"revoked_at":null,
                     "idempotency_key":frozen.idempotency_key,"install_body_digest":frozen.canonical_request_hash,"install_id":outcome.install_id,"install_response":outcome,
                     "registration_event":registration,"capability_grant_events":grants,
                     "install_execution":{"idempotency_key":frozen.idempotency_key,"body_hash":frozen.canonical_request_hash,"submitted_plan_digest":body.plan_digest,
@@ -1635,6 +1657,7 @@ pub async fn registered_service_pair(pool: PgPool) {
     let record = applets
         .get(
             id.as_str(),
+            install.input.package.service_id.as_str(),
             &coland_storage::applet_effective_scope_key(&install.effective_scope).unwrap(),
         )
         .await
@@ -1977,6 +2000,7 @@ mod realm_native_fixture {
     include!("realm_actor_transport_fixture.rs");
     include!("realm_actor_queue_boundary_fixture.rs");
     include!("realm_actor_completion_fixture.rs");
+    include!("realm_manager_runtime_fixture.rs");
     use arkret_canonical::canonical_sha256;
     use arkret_models_identity::*;
     use arkret_signatures::detached_object::sign_detached_object;
@@ -2035,10 +2059,11 @@ mod realm_native_fixture {
         release: Option<std::sync::mpsc::Receiver<()>>,
     }
 
-    struct NativeService {
-        package: AppletPackage,
+    pub(super) struct NativeService {
+        pub(super) package: AppletPackage,
         actor_log: Arc<Mutex<Vec<Value>>>,
         managed_router: Arc<Mutex<Option<Arc<salvo::Service>>>>,
+        principal_router: Arc<Mutex<Option<Arc<salvo::Service>>>>,
         configuration_response_fault: Arc<Mutex<Option<ConfigurationResponseFault>>>,
         completion_handler: Arc<Mutex<Option<CompletionHandler>>>,
         stop: Arc<std::sync::atomic::AtomicBool>,
@@ -2054,7 +2079,7 @@ mod realm_native_fixture {
         }
     }
     impl NativeService {
-        fn new(applet: &AppletId, station: &arkret_wire::DidCoreId) -> Self {
+        pub(super) fn new(applet: &AppletId, station: &arkret_wire::DidCoreId) -> Self {
             use std::io::{Read as _, Write as _};
 
             use rustls::pki_types::pem::PemObject as _;
@@ -2068,10 +2093,7 @@ mod realm_native_fixture {
                 signed_applet_package(applet.as_str(), "realm-native", station, Some(&endpoint));
             package.service_id = project_did_to_core_id(&did).unwrap();
             package.webhook_auth.key_ref = DidUrl::new(native.did_key_id.clone()).unwrap();
-            package.namespaces.actors = vec![AppletNamespaceEntry::exclusive(format!(
-                "did:webvh:*:{}:webvh:*",
-                authority.replace(':', "%3A")
-            ))];
+
             let method = package.proof.as_ref().unwrap().verification_method.clone();
             let evidence = applet_registration_epoch_evidence(&package);
             package.stamp_registration_epoch(&evidence).unwrap();
@@ -2103,6 +2125,8 @@ mod realm_native_fixture {
             let published_actor = actor_log.clone();
             let managed_router = Arc::new(Mutex::new(None::<Arc<salvo::Service>>));
             let served_router = managed_router.clone();
+            let principal_router = Arc::new(Mutex::new(None::<Arc<salvo::Service>>));
+            let served_principal = principal_router.clone();
             let configuration_response_fault =
                 Arc::new(Mutex::new(None::<ConfigurationResponseFault>));
             let response_fault = configuration_response_fault.clone();
@@ -2127,6 +2151,7 @@ mod realm_native_fixture {
                     let entry = native.log_entry.clone();
                     let published_actor = published_actor.clone();
                     let served_router = served_router.clone();
+                    let served_principal = served_principal.clone();
                     let response_fault = response_fault.clone();
                     let served_completion = served_completion.clone();
                     let service_resolution = service_resolution.clone();
@@ -2171,8 +2196,12 @@ mod realm_native_fixture {
                             let _ = stream.flush();
                             return;
                         }
-                        let router=served_router.lock().unwrap().clone();
-                        if let Some(router)=router.filter(|_| path.starts_with("/_arkret/") || path.starts_with("/webvh/")) {
+                        let router = if path.starts_with("/webvh/") {
+                            served_principal.lock().unwrap().clone().or_else(|| served_router.lock().unwrap().clone())
+                        } else { served_router.lock().unwrap().clone() };
+                        // Service identity hosting is independent of the managed principal router.
+                        // Replacing the Applet backend must not intercept its native Service DID.
+                        if let Some(router)=router.filter(|_| path.starts_with("/_arkret/") || (path.starts_with("/webvh/") && !path.starts_with("/webvh/service/"))) {
                             let headers=request.lines().skip(1).filter_map(|line|line.split_once(':'))
                                 .map(|(name,value)|(name.to_owned(),value.trim().to_owned())).collect::<Vec<_>>();
                             let length=headers.iter().find(|(name,_)|name.eq_ignore_ascii_case("content-length"))
@@ -2225,6 +2254,7 @@ mod realm_native_fixture {
                 package,
                 actor_log,
                 managed_router,
+                principal_router,
                 configuration_response_fault,
                 completion_handler,
                 stop,
@@ -3818,13 +3848,36 @@ mod realm_native_fixture {
         );
     }
 
+    async fn durable_completion(
+        fixture: &Fixture,
+        actor: &ActorId,
+    ) -> coland_storage::AppletAuthoringCompletion {
+        use diesel_async::RunQueryDsl as _;
+        #[derive(diesel::QueryableByName)]
+        struct Row {
+            #[diesel(sql_type = diesel::sql_types::Jsonb)]
+            value: Value,
+        }
+        let mut conn = fixture.pool.get().await.unwrap();
+        let rows = diesel::sql_query("SELECT to_jsonb(t) AS value FROM applet_authoring_completions t WHERE realm_id=$1 AND actor_id=$2")
+            .bind::<diesel::sql_types::Text,_>(fixture.realm.as_str())
+            .bind::<diesel::sql_types::Jsonb,_>(json!(actor))
+            .load::<Row>(&mut conn).await.unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "accepted creation retains one durable completion"
+        );
+        serde_json::from_value(rows.into_iter().next().unwrap().value).unwrap()
+    }
+
     async fn installation_business_revocation(
         fixture: &Fixture,
         native: &NativeService,
         candidate: &RealmActorCreatePayload,
-        completion_pending: bool,
     ) {
         use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+        let completion_before = durable_completion(fixture, &candidate.actor_id).await;
         let persistence = fixture.state.test_persistence();
         let grant_source = persistence
             .authority_commits()
@@ -3897,7 +3950,11 @@ mod realm_native_fixture {
             coland_storage::applet_effective_scope_key(&candidate.creation_scope).unwrap();
         let installation = persistence
             .applets()
-            .get(candidate.applet_id.as_str(), &scope_key)
+            .get(
+                candidate.applet_id.as_str(),
+                candidate.service_id.as_str(),
+                &scope_key,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -3990,27 +4047,20 @@ mod realm_native_fixture {
             inactive_material["current_binding"],
             json!({"status":"inactive"})
         );
-        let pending = persistence
-            .applets()
-            .pending_authoring_completions(128)
-            .await
-            .unwrap();
-        let completion = pending
-            .iter()
-            .find(|row| row.actor_id == candidate.actor_id);
+        let completion = durable_completion(fixture, &candidate.actor_id).await;
         assert_eq!(
-            completion.is_some(),
-            completion_pending,
-            "revocation preserves the existing completion delivery state"
+            completion.creation_ref, completion_before.creation_ref,
+            "revocation preserves the immutable completion even while delivery progresses"
         );
-        let Some(completion) = completion else {
-            return;
-        };
-        let historical_delivery = prepare_configuration_completion(fixture, completion)
+        let historical_delivery = prepare_configuration_completion(fixture, &completion)
             .await
             .unwrap();
-        let RealmActorMaterialResult::Event { event, commit, .. } =
-            &historical_delivery.context.as_ref().unwrap().material.result
+        let RealmActorMaterialResult::Event { event, commit, .. } = &historical_delivery
+            .context
+            .as_ref()
+            .unwrap()
+            .material
+            .result
         else {
             panic!("expected original creation")
         };
@@ -4052,7 +4102,7 @@ mod realm_native_fixture {
                 .unwrap()
                 .is_some()
         );
-        boxed_step(|| installation_business_revocation(fixture, native, candidate, true)).await;
+        boxed_step(|| installation_business_revocation(fixture, native, candidate)).await;
         eprintln!("recovery: authoring native plan");
         let (plan, published) = recovery_plan(candidate, creation);
         let make_begin = |payload: RealmActorRecoveryBeginPayload| {
@@ -4583,7 +4633,7 @@ mod realm_native_fixture {
             .unwrap()
             .verification_method
             .clone();
-        receiving.package.namespaces.actors = native.package.namespaces.actors.clone();
+
         let epoch = applet_registration_epoch_evidence(&receiving.package);
         receiving.package.stamp_registration_epoch(&epoch).unwrap();
         receiving.package.stamp_package_digest().unwrap();
@@ -4610,6 +4660,7 @@ mod realm_native_fixture {
         let record = applets
             .get(
                 candidate.applet_id.as_str(),
+                install.input.package.service_id.as_str(),
                 &coland_storage::applet_effective_scope_key(&install.effective_scope).unwrap(),
             )
             .await
@@ -5259,10 +5310,7 @@ mod realm_native_fixture {
         };
         let arkret_wire::TypedCurrentRow::Value {
             revision, value, ..
-        } = row
-        else {
-            panic!("value required")
-        };
+        } = row;
         assert_eq!(value["enabled"], true);
         assert_eq!(source_ref.event_id, enable.event_id);
         assert_ne!(source_ref.event_id, creation.event_ref);
@@ -6191,6 +6239,7 @@ mod realm_native_fixture {
             recovery_scenario,
             false,
             0,
+            false,
         )
     }
 
@@ -6241,7 +6290,7 @@ mod realm_native_fixture {
     }
 
     pub(super) async fn run_bridge_recipient_mode(pool: PgPool, circle: bool, mode: u8) {
-        run_bridge_case(pool, circle, false, false, None, false, mode).await;
+        run_bridge_case(pool, circle, false, false, None, false, mode, false).await;
     }
 
     pub(super) async fn run_bridge_case(
@@ -6252,6 +6301,7 @@ mod realm_native_fixture {
         recovery_scenario: Option<RecoveryScenario>,
         governance_handoff: bool,
         recipient_mode: u8,
+        manager_transfer: bool,
     ) {
         use arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService;
         use arkret_bridge_runtime::managed_device::ManagedDeviceRuntime;
@@ -6414,15 +6464,7 @@ mod realm_native_fixture {
                     control_was_accepted
                 );
             }
-            boxed_step(|| {
-                installation_business_revocation(
-                    fixture,
-                    native,
-                    candidate,
-                    candidate.actor_role == arkret::RealmActorCreatePayloadActorRole::Ghost,
-                )
-            })
-            .await;
+            boxed_step(|| installation_business_revocation(fixture, native, candidate)).await;
             eprintln!("independent runtime recovery: erase daily key only");
             let custody = FileAuthoringStore::new(path.clone()).unwrap();
             // Delete every daily controller copy, including the encrypted
@@ -6592,7 +6634,7 @@ mod realm_native_fixture {
             drop(edge);
             let edge = make_edge();
             *native.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
-                arkret_bridge_runtime::web::managed_applet_router(edge.clone()).unwrap(),
+                arkret_bridge_runtime::web::managed_applet_host_router(edge.clone()).unwrap(),
             )));
             let author = ManagedActorAuthoringService::new(edge.clone()).unwrap();
             let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
@@ -7076,8 +7118,9 @@ mod realm_native_fixture {
         };
         eprintln!("real Bridge runtime: signed governance preview and independent native creation");
         *native.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
-            arkret_bridge_runtime::web::managed_applet_router(edge.clone()).unwrap(),
+            arkret_bridge_runtime::web::managed_applet_host_router(edge.clone()).unwrap(),
         )));
+        let mut creation_commit = None;
         let candidate = if bot {
             use arkret_models_integration::{
                 AppletConfigurationAdmissionStatus, AppletConfigurationCommand,
@@ -7087,6 +7130,7 @@ mod realm_native_fixture {
             let request = AppletConfigurationRequest {
                 command: AppletConfigurationCommand::Configure,
                 intent: AppletConfigurationIntent {
+                    service_id: package.service_id.clone(),
                     request_id: format!("ak:request:{}", uuid::Uuid::now_v7())
                         .parse()
                         .unwrap(),
@@ -7183,6 +7227,7 @@ mod realm_native_fixture {
                 panic!("creation replay must be accepted");
             };
             assert_eq!(commit, replay);
+            creation_commit = Some(commit);
             candidate
         };
         let actor = candidate.actor_id.clone();
@@ -7204,6 +7249,8 @@ mod realm_native_fixture {
             ));
         }
         if recipient_mode == 3 {
+            let commit =
+                creation_commit.expect("Ghost completion scenario retains its accepted Commit");
             drop(author);
             drop(edge);
             boxed_step(|| {
@@ -7363,6 +7410,16 @@ mod realm_native_fixture {
             .await
             .unwrap();
         snapshot.value().unwrap();
+        if manager_transfer {
+            boxed_step(|| {
+                run_manager_runtime_transfer(
+                    &factory, &native, &candidate, &config, &client, &devices, &device, &path,
+                    &edge,
+                )
+            })
+            .await;
+            return;
+        }
         if governance_handoff {
             boxed_step(|| {
                 resume_runtime_after_handoff(&factory.fixture, &device, &actor, &make_edge)
@@ -8191,6 +8248,7 @@ mod realm_native_fixture {
         let record = applets
             .get(
                 id.as_str(),
+                install.input.package.service_id.as_str(),
                 &coland_storage::applet_effective_scope_key(&install.effective_scope).unwrap(),
             )
             .await
@@ -8371,7 +8429,7 @@ mod realm_native_fixture {
         boxed_step(|| private_management_archive(&factory.fixture, false)).await;
         let store = PgAuthorityCommitStore { pool };
         let originals = store
-            .applet_realm_actor_creations(&factory.fixture.realm, &id)
+            .applet_realm_actor_creations(&factory.fixture.realm, &id, None)
             .await
             .unwrap();
         assert_eq!(originals.len(), 1);
@@ -8477,5 +8535,23 @@ pub async fn realm_runtime_recovery_with_unresolved_control(pool: PgPool, accept
 }
 
 pub async fn realm_runtime_mls_handoff(pool: PgPool) {
-    realm_native_fixture::run_bridge_case(pool, false, false, false, None, true, 0).await;
+    realm_native_fixture::run_bridge_case(pool, false, false, false, None, true, 0, false).await;
+}
+
+pub async fn realm_runtime_manager_transfer(pool: PgPool, bot: bool) {
+    realm_native_fixture::run_bridge_case(pool, false, bot, false, None, false, 0, true).await;
+}
+
+/// Compose the existing application against the fixture's registered store.
+pub fn completion_application(
+    state: &AppState,
+) -> coland_services::authority_commit::AuthorityCommitApplication {
+    coland_services::authority_commit::AuthorityCommitApplication::new(
+        coland_services::persistence::PersistenceHandle::from_shared(state.test_persistence()),
+        state.config().to_device_queue_capacity,
+    )
+}
+
+pub async fn realm_bridge_completion_receiver(pool: PgPool) {
+    realm_native_fixture::run_bridge_recipient_mode(pool, false, 3).await;
 }

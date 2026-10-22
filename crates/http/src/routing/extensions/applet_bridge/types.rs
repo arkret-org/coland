@@ -220,7 +220,7 @@ impl AppletRecord {
             || self.package.controller_principal_id == self.package.service_id
             || self.package.controller_principal_id
                 != self.identity.initial_package.controller_principal_id
-            || self.package.service_id != self.identity.initial_package.service_id
+            || self.package.service_id != self.install_response.service_id
             || &self.portal_realm_id != self.effective_scope.realm_id()
             || self.install_id != self.install_response.install_id
             || self.install_response.registration_epoch != self.package.registration_epoch
@@ -256,7 +256,10 @@ impl AppletRecord {
         let expected_initial_registration = self
             .identity
             .initial_package
-            .to_registration(&initial_evidence)
+            .to_registration(
+                &initial_evidence,
+                initial_registration.expected_revision.clone(),
+            )
             .map_err(|error| {
                 format!("stored initial Applet package cannot derive registration: {error}")
             })?;
@@ -265,7 +268,9 @@ impl AppletRecord {
             || self.identity.initial_registration_event.actor_id
                 != self.identity.initial_owner_actor_id
             || self.identity.initial_registration_event.scope_ref
-                != self.identity.initial_effective_scope
+                != arkret_wire::ScopeRef::realm(
+                    self.identity.initial_effective_scope.realm_id().clone(),
+                )
             || self.identity.initial_registration_event.realm_id
                 != *self.identity.initial_effective_scope.realm_id()
             || initial_registration != expected_initial_registration
@@ -281,13 +286,16 @@ impl AppletRecord {
         self.package
             .validate_with_epoch_evidence(&evidence)
             .map_err(|error| format!("stored Applet package is invalid: {error}"))?;
-        let expected_registration = self.package.to_registration(&evidence).map_err(|error| {
-            format!("stored Applet package cannot derive registration: {error}")
-        })?;
+        let expected_registration = self
+            .package
+            .to_registration(&evidence, registration.expected_revision.clone())
+            .map_err(|error| {
+                format!("stored Applet package cannot derive registration: {error}")
+            })?;
         if self.registration_event.kind != arkret_wire::EventKind::AppletRegistration
             || self.registration_event.actor_id != self.owner_actor_id
             || self.registration_event.realm_id != self.portal_realm_id
-            || self.registration_event.scope_ref != self.effective_scope
+            || self.registration_event.scope_ref != ScopeRef::realm(self.portal_realm_id.clone())
             || registration != expected_registration
             || self.install_response.registration_event_ref != self.registration_event.event_id
         {

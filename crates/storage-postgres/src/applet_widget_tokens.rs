@@ -31,8 +31,8 @@ async fn current_permission(
         CapabilityGrantCurrentResultReadRow, RealmAuthorityRootReadRow, decode_authority_root,
         decode_row, grant_is_active_at, validate_ancestor_graph,
     };
-    let current=sql_query("SELECT value AS record FROM applet_registration_current_results WHERE realm_id=$1 AND applet_id=$2 FOR SHARE")
-        .bind::<Text,_>(install.effective_scope.realm_id().as_str()).bind::<Text,_>(install.applet_id.as_str())
+    let current=sql_query("SELECT value AS record FROM applet_registration_current_results WHERE realm_id=$1 AND applet_id=$2 AND instance_event_ref=(SELECT instance_event_ref FROM applet_registration_instances WHERE realm_id=$1 AND applet_id=$2 AND registration_event_ref=$3) FOR SHARE")
+        .bind::<Text,_>(install.effective_scope.realm_id().as_str()).bind::<Text,_>(install.applet_id.as_str()).bind::<Text,_>(install.registration_event_ref.as_str())
         .get_result::<RecordRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(||denied("widget registration current is absent"))?;
     if current
         .record
@@ -104,8 +104,8 @@ pub(crate) async fn lock_install(
     active: bool,
 ) -> PersistenceResult<Value> {
     let scope = coland_storage::applet_effective_scope_key(&install.effective_scope)?;
-    let row=sql_query("SELECT record FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2 FOR UPDATE")
-        .bind::<Text,_>(install.applet_id.as_str()).bind::<Text,_>(scope)
+    let row=sql_query("SELECT record FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2 AND record#>>'{install_response,registration_event_ref}'=$3 FOR UPDATE")
+        .bind::<Text,_>(install.applet_id.as_str()).bind::<Text,_>(scope).bind::<Text,_>(install.registration_event_ref.as_str())
         .get_result::<RecordRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(||denied("widget exact installation is absent"))?;
     if row
@@ -165,6 +165,7 @@ pub(crate) async fn issue(
     let basis = &request.authoring_request_basis;
     if basis.effective_scope != record.install.effective_scope
         || basis.applet_id != record.install.applet_id
+        || current["package"]["service_id"] != serde_json::json!(basis.service_id)
         || !basis.approval_request.widget_allowed
         || basis
             .widget_policy
@@ -201,10 +202,10 @@ pub(crate) async fn issue(
     .await?;
     let scope = coland_storage::applet_effective_scope_key(&record.install.effective_scope)?;
     let value = serde_json::to_value(record).map_err(PersistenceError::database)?;
-    let inserted=sql_query("INSERT INTO applet_widget_tokens(token_ref,token_digest,applet_id,effective_scope_key,registration_event_ref,registration_epoch,record,issued_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING")
+    let inserted=sql_query("INSERT INTO applet_widget_tokens(token_ref,token_digest,applet_id,effective_scope_key,registration_event_ref,registration_epoch,record,issued_at,expires_at,service_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING")
         .bind::<Text,_>(&record.token_ref).bind::<Text,_>(record.token_digest.as_str()).bind::<Text,_>(record.install.applet_id.as_str())
         .bind::<Text,_>(scope).bind::<Text,_>(record.install.registration_event_ref.as_str()).bind::<Text,_>(record.install.registration_epoch.as_str())
-        .bind::<Jsonb,_>(&value).bind::<Timestamptz,_>(record.issued_at).bind::<Timestamptz,_>(record.token_scope.expires_at)
+        .bind::<Jsonb,_>(&value).bind::<Timestamptz,_>(record.issued_at).bind::<Timestamptz,_>(record.token_scope.expires_at).bind::<Text,_>(basis.service_id.as_str())
         .execute(&mut *conn).await.map_err(PersistenceError::database)?;
     if inserted == 1 {
         return Ok(true);
@@ -231,7 +232,7 @@ pub(crate) async fn inventory(
     lock_install(conn, install, false).await?;
     let scope = coland_storage::applet_effective_scope_key(&install.effective_scope)?;
     sql_query("SELECT record FROM applet_widget_tokens WHERE applet_id=$1 AND effective_scope_key=$2 AND registration_event_ref=$3 AND registration_epoch=$4 AND invalidated_at IS NULL AND expires_at>$5 ORDER BY token_ref")
-        .bind::<Text,_>(install.applet_id.as_str()).bind::<Text,_>(scope).bind::<Text,_>(install.registration_event_ref.as_str())
+        .bind::<Text,_>(install.applet_id.as_str()).bind::<Text,_>(scope).bind::<Text,_>(install.registration_event_ref.as_str()).bind::<Text,_>(install.registration_event_ref.as_str())
         .bind::<Text,_>(install.registration_epoch.as_str()).bind::<Timestamptz,_>(at)
         .load::<RecordRow>(&mut *conn).await.map_err(PersistenceError::database)?.into_iter()
         .map(|r|serde_json::from_value(r.record).map_err(PersistenceError::database)).collect()

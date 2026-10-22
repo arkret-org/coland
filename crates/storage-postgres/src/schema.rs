@@ -207,8 +207,9 @@ diesel::table! {
 }
 
 diesel::table! {
-    applet_installations (applet_id, effective_scope_key) {
+    applet_installations (applet_id, service_id, effective_scope_key) {
         applet_id -> Text,
+        service_id -> Text,
         effective_scope_key -> Text,
         record -> Jsonb,
         updated_at -> Timestamptz,

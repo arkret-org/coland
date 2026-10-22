@@ -163,7 +163,7 @@ async fn realm_device_physical_expiry_refuses_current_http(
         .state
         .test_persistence()
         .authority_commits()
-        .applet_realm_actor_creations(&fixture.realm, &candidate.applet_id)
+        .applet_realm_actor_creations(&fixture.realm, &candidate.applet_id, None)
         .await
         .unwrap()
         .into_iter()

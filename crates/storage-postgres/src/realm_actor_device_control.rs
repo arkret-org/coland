@@ -275,7 +275,8 @@ pub(crate) async fn admit(
         for action in &entry.actions {
             let decision=arkret_policy::applet_management::select_applet_management(Some(&policies),&arkret_policy::applet_management::AppletManagementContext {
                 device_control:None,realm_id:&event.realm_id,requester_actor_id:&requester,applet_id:&value.applet_id,
-                effective_scope:scope,managed_actor_id:Some(actor),
+                service_id: &registration.service_id,
+            effective_scope:scope,managed_actor_id:Some(actor),
                 operation:arkret_models_collaboration::governance::operation_wire::AppletPolicyOperation::Authorize,
                 content_action:Some(*action),resources:Some(&resources),at:commit.committed_at,
             }).map_err(invalid)?;

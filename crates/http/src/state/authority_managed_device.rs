@@ -141,10 +141,14 @@ async fn submit_inner(
     let record = crate::routing::extensions::applet_bridge::record::applet_record(
         state,
         authority.applet_id.as_str(),
+        authority.source_service_id.as_str(),
         &event.scope_ref,
     )
     .await
-    .map_err(|_| denied("exact Applet installation is unavailable"))?
+    .map_err(|error| {
+        tracing::warn!(%error, applet_id = %authority.applet_id, service_id = %authority.source_service_id, "managed Device installation read failed");
+        denied("exact Applet installation is unavailable")
+    })?
     .ok_or_else(|| denied("exact Applet installation is absent"))?;
     let epoch = crate::routing::extensions::applet_bridge::registration_epoch_evidence_from_event(
         &record.registration_event,

@@ -54,7 +54,7 @@ impl Fixture {
             ScopeRef::Realm {
                 realm_id: self.realm.clone(),
             },
-            serde_json::to_value(package.to_registration(&evidence).unwrap()).unwrap(),
+            serde_json::to_value(package.to_registration(&evidence, None).unwrap()).unwrap(),
         );
         let actions = if ghost {
             vec![

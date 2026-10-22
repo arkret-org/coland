@@ -327,16 +327,18 @@ impl AppletStore for PgAppletStore {
     async fn get(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
     ) -> PersistenceResult<Option<Value>> {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
         sql_query(applet_registration_select_sql(
-            "WHERE applet_id = $1 AND effective_scope_key = $2",
+            "WHERE applet_id = $1 AND effective_scope_key = $2 AND service_id = $3",
         ))
         .bind::<Text, _>(applet_id)
         .bind::<Text, _>(effective_scope_key)
+        .bind::<Text, _>(service_id)
         .get_result::<AppletRegistrationRow>(&mut *conn)
         .await
         .optional()
@@ -347,13 +349,22 @@ impl AppletStore for PgAppletStore {
     async fn compare_and_swap(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
         expected: &Value,
         replacement: Value,
     ) -> PersistenceResult<bool> {
         coland_storage::validate_applet_installation_record(expected)?;
         coland_storage::validate_applet_installation_record(&replacement)?;
-        if coland_storage::applet_id_from_record(expected)? != applet_id
+        if expected
+            .pointer("/package/service_id")
+            .and_then(Value::as_str)
+            != Some(service_id)
+            || replacement
+                .pointer("/package/service_id")
+                .and_then(Value::as_str)
+                != Some(service_id)
+            || coland_storage::applet_id_from_record(expected)? != applet_id
             || coland_storage::applet_id_from_record(&replacement)? != applet_id
             || coland_storage::applet_effective_scope_key_from_record(&replacement)?
                 != effective_scope_key
@@ -367,8 +378,8 @@ impl AppletStore for PgAppletStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            let current=sql_query("SELECT record FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2 FOR UPDATE")
-                .bind::<Text,_>(applet_id).bind::<Text,_>(effective_scope_key)
+            let current=sql_query("SELECT record FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2 AND service_id=$3 FOR UPDATE")
+                .bind::<Text,_>(applet_id).bind::<Text,_>(effective_scope_key).bind::<Text,_>(service_id)
                 .get_result::<AppletRegistrationRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
             if current.as_ref().map(|r|&r.record)!=Some(expected) {return Ok(false);}
             if expected.get("revoke_execution")!=replacement.get("revoke_execution")
@@ -386,8 +397,8 @@ impl AppletStore for PgAppletStore {
                         if actual!=planned {return Err(PersistenceError::Conflict("stale_state: widget inventory differs from the frozen revoke plan".into()).into());}
                     }
                 }
-            let updated=sql_query("UPDATE applet_installations SET record=$3,updated_at=NOW() WHERE applet_id=$1 AND effective_scope_key=$2")
-                .bind::<Text,_>(applet_id).bind::<Text,_>(effective_scope_key).bind::<Jsonb,_>(&replacement)
+            let updated=sql_query("UPDATE applet_installations SET record=$3,updated_at=NOW() WHERE applet_id=$1 AND effective_scope_key=$2 AND service_id=$4")
+                .bind::<Text,_>(applet_id).bind::<Text,_>(effective_scope_key).bind::<Jsonb,_>(&replacement).bind::<Text,_>(service_id)
                 .execute(conn).await.map_err(PersistenceError::database)?;
             Ok(updated==1)
         }).await.map_err(PgTransactionError::into_persistence)
@@ -396,6 +407,7 @@ impl AppletStore for PgAppletStore {
     async fn fence_installation(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
         target_station_id: &str,
         expected: &Value,
@@ -404,7 +416,15 @@ impl AppletStore for PgAppletStore {
     ) -> PersistenceResult<coland_storage::AppletInstallationFenceOutcome> {
         coland_storage::validate_applet_installation_record(expected)?;
         coland_storage::validate_applet_installation_record(&replacement)?;
-        if coland_storage::applet_id_from_record(expected)? != applet_id
+        if expected
+            .pointer("/package/service_id")
+            .and_then(Value::as_str)
+            != Some(service_id)
+            || replacement
+                .pointer("/package/service_id")
+                .and_then(Value::as_str)
+                != Some(service_id)
+            || coland_storage::applet_id_from_record(expected)? != applet_id
             || coland_storage::applet_id_from_record(&replacement)? != applet_id
             || coland_storage::applet_effective_scope_key_from_record(&replacement)?
                 != effective_scope_key
@@ -442,12 +462,13 @@ impl AppletStore for PgAppletStore {
 
             let updated = sql_query(
                 "UPDATE applet_installations SET record = $4, updated_at = NOW() \
-                 WHERE applet_id = $1 AND effective_scope_key = $2 AND record = $3",
+                 WHERE applet_id = $1 AND effective_scope_key = $2 AND record = $3 AND service_id = $5",
             )
             .bind::<Text, _>(applet_id)
             .bind::<Text, _>(effective_scope_key)
             .bind::<Jsonb, _>(expected)
             .bind::<Jsonb, _>(&replacement)
+            .bind::<Text, _>(service_id)
             .execute(&mut *conn)
             .await?;
             if updated == 0 {

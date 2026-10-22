@@ -9,12 +9,12 @@ pub(crate) async fn prepare_event_current(
     target: &ManagementReviewTarget,
 ) -> coland_services::ServiceResult<Option<Box<coland_storage::AppletEventReviewCurrent>>> {
     let ManagementReviewTarget::Event { event } = target;
-    let Some(applet) = &event.applet_id else {
+    let Some(_) = &event.applet_id else {
         return Ok(None);
     };
     let registration = state
         .authority_commits()
-        .applet_registration_for_realm(&event.realm_id, applet)
+        .applet_registration_for_event(event)
         .await?;
     let epoch = &registration.manifest.registration_epoch_evidence;
     let service_did_document = crate::jws_verify::resolve_did_document_async(state, &epoch.did)

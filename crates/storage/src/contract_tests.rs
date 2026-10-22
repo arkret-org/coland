@@ -1427,6 +1427,7 @@ impl AppletFormalCommitUnit {
         self.input.expected_installation = store
             .get(
                 self.input.package.applet_id.as_str(),
+                self.input.package.service_id.as_str(),
                 &applet_effective_scope_key(&self.effective_scope).unwrap(),
             )
             .await
@@ -1471,6 +1472,7 @@ async fn contract_installation(
         .applets
         .get(
             unit.input.package.applet_id.as_str(),
+            unit.input.package.service_id.as_str(),
             &applet_effective_scope_key(&unit.effective_scope).unwrap(),
         )
         .await
@@ -1632,6 +1634,7 @@ pub async fn assert_applet_formal_commit_transaction_contract(
                 .applets
                 .get(
                     invalid_id.as_str(),
+                    unit.input.package.service_id.as_str(),
                     &applet_effective_scope_key(&unit.effective_scope).unwrap()
                 )
                 .await
@@ -1710,6 +1713,7 @@ pub async fn assert_applet_formal_commit_transaction_contract(
             .applets
             .get(
                 scopes_id.as_str(),
+                conflicting.input.package.service_id.as_str(),
                 &applet_effective_scope_key(&conflicting.effective_scope).unwrap()
             )
             .await
@@ -1750,6 +1754,7 @@ pub async fn assert_applet_formal_commit_transaction_contract(
     let (l, r) = tokio::join!(
         stores.applets.fence_installation(
             scopes_id.as_str(),
+            winner.input.package.service_id.as_str(),
             &left_key,
             station,
             &left_record,
@@ -1758,6 +1763,7 @@ pub async fn assert_applet_formal_commit_transaction_contract(
         ),
         stores.applets.fence_installation(
             scopes_id.as_str(),
+            loser.input.package.service_id.as_str(),
             &right_key,
             station,
             &right_record,

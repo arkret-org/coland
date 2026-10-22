@@ -135,6 +135,7 @@ impl ReadProof {
                     realm_id: self.context.endpoint.effective_scope.realm_id(),
                     requester_actor_id: &service,
                     applet_id: &self.context.registration.applet_id,
+                    service_id: &self.context.registration.service_id,
                     effective_scope: &self.context.endpoint.effective_scope,
                     managed_actor_id: Some(&account),
                     operation: mode,

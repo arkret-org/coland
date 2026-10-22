@@ -1677,15 +1677,11 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
-    pub async fn applet_registration_for_realm(
+    pub async fn applet_registration_for_event(
         &self,
-        realm: &arkret_wire::RealmId,
-        applet: &arkret_wire::AppletId,
+        event: &arkret_wire::Event,
     ) -> ServiceResult<arkret_models_integration::AppletRegistrationPayload> {
-        Ok(self
-            .store()
-            .applet_registration_for_realm(realm, applet)
-            .await?)
+        Ok(self.store().applet_registration_for_event(event).await?)
     }
 
     pub async fn realm_actor_control_carrier(
@@ -1715,10 +1711,11 @@ impl AuthorityCommitApplication {
         &self,
         realm: &arkret_wire::RealmId,
         applet: &arkret_wire::AppletId,
+        service: Option<&arkret_wire::DidCoreId>,
     ) -> ServiceResult<Vec<arkret_wire::CommittedEventFullView>> {
         Ok(self
             .store()
-            .applet_realm_actor_creations(realm, applet)
+            .applet_realm_actor_creations(realm, applet, service)
             .await?)
     }
     pub async fn realm_actor_creation_replay(

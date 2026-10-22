@@ -731,10 +731,11 @@ async fn require_non_event_registration_binding(
         return Err(exceeds());
     };
     let registration = sql_query(
-        "SELECT value FROM applet_registration_current_results          WHERE realm_id=$1 AND applet_id=$2 FOR SHARE",
+        "SELECT value FROM applet_registration_current_results          WHERE realm_id=$1 AND applet_id=$2 AND service_id=$3 FOR SHARE",
     )
     .bind::<Text, _>(event.realm_id.as_str())
     .bind::<Text, _>(applet_id.as_str())
+    .bind::<Text, _>(match binding.executed_by.as_ref() { Some(ActorId::Service { service_id }) => service_id.as_str(), _ => return Err(exceeds()) })
     .get_result::<RegistrationCurrentRow>(&mut *conn)
     .await
     .optional()
@@ -1505,6 +1506,10 @@ async fn commit_capability_grant_current_result_inner(
     })?;
     let stream_ref =
         serde_json::to_value(&commit.stream_ref).map_err(PersistenceError::database)?;
+    if current.is_none() {
+        crate::applet_current_results::retain_service_grant_source(conn, &event.realm_id, &value)
+            .await?;
+    }
     let value = serde_json::to_value(&value).map_err(PersistenceError::database)?;
     sql_query(
         "INSERT INTO capability_grant_current_results \

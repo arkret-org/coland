@@ -133,11 +133,13 @@ pub trait AppletStore: Send + Sync {
     async fn get(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
     ) -> PersistenceResult<Option<Value>>;
     async fn compare_and_swap(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
         expected: &Value,
         replacement: Value,
@@ -147,6 +149,7 @@ pub trait AppletStore: Send + Sync {
     async fn fence_installation(
         &self,
         applet_id: &str,
+        service_id: &str,
         effective_scope_key: &str,
         target_station_id: &str,
         expected: &Value,

@@ -473,6 +473,113 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
         } => (generation, head),
     };
     let selector = match &request.selector {
+        ExactCurrentResultSelector::AppletRegistration(selector) => {
+            use arkret_models_collaboration::exact_current_results::{
+                AppletRegistrationExactCurrentRow, NeverWrittenExactCurrentSelector,
+            };
+            if caller.as_account_id().is_none() {
+                return Ok(SelfExactCurrentRead::NotFound);
+            }
+            let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
+                conn,
+                &request.realm_id,
+                &caller,
+            )
+            .await?;
+            if !cut.permits_unreserved_current_actions(
+                &[arkret_wire::CapabilityActionId::REALM_ADMIN],
+                &arkret_wire::WireResourceSelector::realm(request.realm_id.clone()),
+                chrono::Utc::now(),
+            ) {
+                return Ok(SelfExactCurrentRead::NotFound);
+            }
+            if let Some(account) = caller.as_account_id()
+                && crate::realm_authorization_cut::is_owned_agent_in_connection(
+                    conn,
+                    &request.realm_id,
+                    account,
+                )
+                .await?
+            {
+                let check =
+                    arkret_models_collaboration::governance::authorization::AuthzCheckRequestBody {
+                        actor_id: caller.clone(),
+                        action: arkret_wire::CapabilityActionId::REALM_ADMIN.to_owned(),
+                        resource: Some(arkret_wire::WireResourceSelector::realm(
+                            request.realm_id.clone(),
+                        )),
+                        context: None,
+                    };
+                if !crate::realm_authorization_cut::owned_agent_authorization_check_in_connection(
+                    conn, &caller, &check,
+                )
+                .await?
+                .is_some_and(|result| result.decision == arkret_wire::AuthzDecision::Allow)
+                {
+                    return Ok(SelfExactCurrentRead::NotFound);
+                }
+            }
+            #[derive(QueryableByName)]
+            struct RegistrationRow {
+                #[diesel(sql_type = Text)]
+                current_commit_id: String,
+                #[diesel(sql_type = BigInt)]
+                current_stream_position: i64,
+                #[diesel(sql_type = Jsonb)]
+                value: serde_json::Value,
+            }
+            let row = sql_query("SELECT r.current_commit_id,r.current_stream_position,r.value FROM applet_registration_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3 AND c.stream_ref->>'kind'='realm'")
+                .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(selector.applet_id.as_str()).bind::<Text,_>(selector.service_id.as_str())
+                .get_result::<RegistrationRow>(&mut *conn).await.optional()?;
+            let outcome = if let Some(row) = row {
+                let payload: arkret_models_integration::AppletRegistrationPayload =
+                    serde_json::from_value(row.value.clone())
+                        .map_err(PersistenceError::database)?;
+                if payload.applet_id != selector.applet_id
+                    || payload.service_id != selector.service_id
+                {
+                    return Err(PersistenceError::SchemaViolation(
+                        "registration selector differs from accepted payload".into(),
+                    )
+                    .into());
+                }
+                ExactCurrentResultsReadOutcome::Present {
+                    realm_id: request.realm_id.clone(),
+                    governance_generation: generation,
+                    effective_stream_head: head.clone(),
+                    entry: ExactCurrentResultEntry::AppletRegistration(
+                        AppletRegistrationExactCurrentRow {
+                            selector: selector.clone(),
+                            source_stream_ref: head.stream_ref.clone(),
+                            revision: CurrentRevision {
+                                commit_id: row
+                                    .current_commit_id
+                                    .parse()
+                                    .map_err(PersistenceError::database)?,
+                                stream_position: to_u64(
+                                    row.current_stream_position,
+                                    "Applet registration current",
+                                )?,
+                            },
+                            value: row.value,
+                        },
+                    ),
+                }
+            } else {
+                ExactCurrentResultsReadOutcome::NeverWritten {
+                    realm_id: request.realm_id.clone(),
+                    governance_generation: generation,
+                    effective_stream_head: head,
+                    selector: NeverWrittenExactCurrentSelector::AppletRegistration(
+                        selector.clone(),
+                    ),
+                }
+            };
+            outcome
+                .validate_for_request(request, generation)
+                .map_err(PersistenceError::database)?;
+            return Ok(SelfExactCurrentRead::Answer(outcome));
+        }
         ExactCurrentResultSelector::Policy(selector) => {
             return policy_exact_read(conn, request, selector, &caller, generation, head).await;
         }

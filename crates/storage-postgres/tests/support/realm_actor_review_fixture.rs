@@ -788,7 +788,7 @@ async fn realm_review_governance_only_creation(pool: PgPool) {
         boxed_step(|| realm_review_creation_grant(&context, "ak.applet.bot.provision", true)).await;
     let (candidate, signer) = realm_review_candidate(&context, &grant, true);
     let fresh = realm_review_create_event(&candidate, &signer);
-    assert_ne!(fresh.actor_id, event.actor_id);
+    assert_ne!(fresh.payload["actor_id"], event.payload["actor_id"]);
     assert_ne!(fresh.payload["request_id"], event.payload["request_id"]);
     let votes = vec![realm_review_vote(
         fixture,

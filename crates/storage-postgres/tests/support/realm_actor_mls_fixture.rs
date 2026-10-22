@@ -151,6 +151,15 @@ pub(super) async fn business_grant(
     boxed_step(|| business_authority(fixture, package, actor, false, &scope)).await
 }
 
+pub(super) async fn business_grant_at_scope(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    actor: &ActorId,
+    scope: &ScopeRef,
+) -> GrantId {
+    boxed_step(|| business_authority(fixture, package, actor, false, scope)).await
+}
+
 pub(super) async fn business_parent(
     fixture: &Fixture,
     package: &AppletPackage,

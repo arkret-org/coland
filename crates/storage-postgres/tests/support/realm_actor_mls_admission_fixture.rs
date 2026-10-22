@@ -462,20 +462,30 @@ pub(super) async fn keypackage_admission(
 }
 
 fn admission_last_resort_claim(
-    fixture: &Fixture,
+    source: &coland_storage::AppletManagedDeviceAuthority,
     recipient: &coland_storage::AppletManagedDeviceAuthority,
+    scope: &ScopeRef,
     reference: &str,
 ) -> KeyPackagesClaimRequestBody {
-    admission_signed_claim(fixture, recipient, reference, true)
+    admission_signed_claim(source, recipient, scope, reference, true)
 }
 
 fn admission_signed_claim(
-    fixture: &Fixture,
+    source: &coland_storage::AppletManagedDeviceAuthority,
     recipient: &coland_storage::AppletManagedDeviceAuthority,
+    scope: &ScopeRef,
     reference: &str,
     last_resort: bool,
 ) -> KeyPackagesClaimRequestBody {
-    let history = &fixture.pcr.history;
+    assert_eq!(source.realm_id, recipient.realm_id);
+    assert!(
+        source
+            .scopes
+            .entries()
+            .iter()
+            .any(|entry| &entry.effective_scope == scope)
+    );
+    let method = DidUrl::new(format!("{}#{}", source.native_did, source.device_id)).unwrap();
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let mut body = KeyPackagesClaimRequestBody {
         claim_request_id: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
@@ -484,14 +494,10 @@ fn admission_signed_claim(
         .unwrap(),
         target_account_id: None,
         target_actor_id: Some(recipient.actor_id.clone()),
-        requester_account_id: Some(history.account.clone()),
-        requester_actor_id: None,
-        intended_realm_id: fixture.realm.clone(),
-        mls_group_id: ScopeRef::Realm {
-            realm_id: fixture.realm.clone(),
-        }
-        .canonical_mls_group_id()
-        .unwrap(),
+        requester_account_id: None,
+        requester_actor_id: Some(source.actor_id.clone()),
+        intended_realm_id: source.realm_id.clone(),
+        mls_group_id: scope.canonical_mls_group_id().unwrap(),
         claim_purpose: PeerKeyPackageClaimPurpose::RealmMembership,
         required_capabilities: vec![arkret_wire::NonEmptyString::new("ak.content.v1").unwrap()],
         expires_at: at + chrono::Duration::minutes(4),
@@ -508,22 +514,16 @@ fn admission_signed_claim(
         pair_key: None,
         last_resort_allowed: last_resort.then_some(true),
         service_binding: KeyPackagesClaimServiceBinding {
-            source_id: fixture.state.service_core_id(),
-            destination_id: fixture.state.service_core_id(),
+            source_id: source.governance_service_id.clone(),
+            destination_id: recipient.governance_service_id.clone(),
         },
-        requester_authorization: PeerKeyPackageRequesterAuthorization::Device {
-            verification_method: history.device_verification_method.clone(),
-            requester_device_id: history.founding_device_id.clone(),
-            device_authorize_event_id: history
-                .events
-                .iter()
-                .find(|e| e.kind == EventKind::DeviceAuthorize)
-                .unwrap()
-                .event_id
-                .clone(),
+        requester_authorization: PeerKeyPackageRequesterAuthorization::RealmDevice {
+            verification_method: method.clone(),
+            requester_device_id: source.device_id.clone(),
+            device_authorize_event_id: source.authorization_ref.event_id.clone(),
             signed_at: at,
             signature: arkret_signatures::keypackages::keypackage_signature_from_bytes(
-                history.device_verification_method.as_str(),
+                method.as_str(),
                 &[0; 64],
             )
             .unwrap(),
@@ -535,14 +535,14 @@ fn admission_signed_claim(
         &body.requester_authorization,
     )
     .unwrap();
-    let PeerKeyPackageRequesterAuthorization::Device { signature, .. } =
+    let PeerKeyPackageRequesterAuthorization::RealmDevice { signature, .. } =
         &mut body.requester_authorization
     else {
         unreachable!()
     };
     *signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
-        &history.founding_device_signing_seed,
-        history.device_verification_method.as_str(),
+        &[79; 32],
+        method.as_str(),
         &input,
     )
     .unwrap();
@@ -588,7 +588,8 @@ async fn admission_native_last_resort(
     let upload = admission_upload(&identity, &recipient, seed, true);
     let reference =
         boxed_step(|| admission_native_upload(fixture, &recipient, seed, &upload)).await;
-    let request = admission_last_resort_claim(fixture, &recipient, &reference);
+    let request =
+        admission_last_resort_claim(source, &recipient, &candidate.creation_scope, &reference);
     assert!(request.target_keypackage_ref.is_none());
     assert_eq!(request.last_resort_allowed, Some(true));
     // A real Device signature cannot make the closed exact-reference /
@@ -603,27 +604,29 @@ async fn admission_native_last_resort(
         &exact_last_resort.requester_authorization,
     )
     .unwrap();
-    let history = &fixture.pcr.history;
-    let PeerKeyPackageRequesterAuthorization::Device { signature, .. } =
-        &mut exact_last_resort.requester_authorization
+    let PeerKeyPackageRequesterAuthorization::RealmDevice {
+        verification_method,
+        signature,
+        ..
+    } = &mut exact_last_resort.requester_authorization
     else {
         unreachable!()
     };
     *signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
-        &history.founding_device_signing_seed,
-        history.device_verification_method.as_str(),
+        &[79; 32],
+        verification_method.as_str(),
         &signing_input,
     )
     .unwrap();
     assert!(exact_last_resort.validate_shape().is_err());
     let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
     let (status, problem) = boxed_step(|| {
-        account_request(
+        device_post(
             fixture,
-            reqwest::Method::POST,
+            source,
             "/_arkret/self/keys/keypackages/claim",
             ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
-            Some(json!(exact_last_resort)),
+            json!(exact_last_resort),
         )
     })
     .await;
@@ -637,12 +640,12 @@ async fn admission_native_last_resort(
         before
     );
     let (status, value) = boxed_step(|| {
-        account_request(
+        device_post(
             fixture,
-            reqwest::Method::POST,
+            source,
             "/_arkret/self/keys/keypackages/claim",
             ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
-            Some(json!(request)),
+            json!(request),
         )
     })
     .await;
@@ -652,6 +655,7 @@ async fn admission_native_last_resort(
         "negotiated actual native last-resort claim: {value}"
     );
     let claim: KeyPackagesClaimOutcome = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(claim.claim_receipt.request, request.unsigned_request());
     assert_eq!(claim.claims.len(), 1);
     assert_eq!(claim.claims[0].keypackage_ref, reference);
     assert_eq!(claim.claims[0].last_resort, Some(true));
@@ -922,14 +926,15 @@ async fn admission_native_last_resort(
         boxed_step(|| obligation_mls_footprint(fixture)).await,
         before
     );
-    let another = admission_last_resort_claim(fixture, &recipient, &reference);
+    let another =
+        admission_last_resort_claim(source, &recipient, &candidate.creation_scope, &reference);
     let (status, value) = boxed_step(|| {
-        account_request(
+        device_post(
             fixture,
-            reqwest::Method::POST,
+            source,
             "/_arkret/self/keys/keypackages/claim",
             ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
-            Some(json!(another)),
+            json!(another),
         )
     })
     .await;
@@ -939,6 +944,7 @@ async fn admission_native_last_resort(
         "same published last-resort package has independent second audit: {value}"
     );
     let second: KeyPackagesClaimOutcome = serde_json::from_value(value).unwrap();
+    assert_eq!(second.claim_receipt.request, another.unsigned_request());
     assert_eq!(second.claims[0].keypackage_ref, reference);
     assert_ne!(second.claims[0].claim_id, command.claim_id.as_str());
     let prior = store
@@ -1318,14 +1324,20 @@ async fn admission_claimed_target_fence(
     let upload = admission_upload(&identity, &recipient, &seed, false);
     let reference =
         boxed_step(|| admission_native_upload(fixture, &recipient, &seed, &upload)).await;
-    let request = admission_signed_claim(fixture, &recipient, &reference, false);
+    let request = admission_signed_claim(
+        source,
+        &recipient,
+        &candidate.creation_scope,
+        &reference,
+        false,
+    );
     let (status, value) = boxed_step(|| {
-        account_request(
+        device_post(
             fixture,
-            reqwest::Method::POST,
+            source,
             "/_arkret/self/keys/keypackages/claim",
             ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
-            Some(json!(request)),
+            json!(request),
         )
     })
     .await;
@@ -1335,6 +1347,7 @@ async fn admission_claimed_target_fence(
         "genuine claim before independent target fence: {value}"
     );
     let claim: KeyPackagesClaimOutcome = serde_json::from_value(value).unwrap();
+    assert_eq!(claim.claim_receipt.request, request.unsigned_request());
     assert_eq!(claim.claims.len(), 1);
     assert_eq!(claim.claims[0].actor_id, target.actor_id);
     assert_eq!(claim.claims[0].keypackage_ref, reference);

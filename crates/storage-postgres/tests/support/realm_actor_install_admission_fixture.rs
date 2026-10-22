@@ -1258,25 +1258,38 @@ async fn install_admission_circle_claim_independence(factory: &AppletAuthoringFa
         .unwrap()
         .unwrap();
     for scope in [&realm, &circle] {
-        boxed_step(|| {
-            realm_actor_mls_fixture::business_parent(
-                fixture,
-                &native.package,
-                &candidate.actor_id,
-                scope,
-            )
-        })
-        .await;
-        let (kind, payload, join_ref) = if scope == &realm {
+        let (kind, payload, join_grant) = if scope == &realm {
+            boxed_step(|| {
+                realm_actor_mls_fixture::business_parent(
+                    fixture,
+                    &native.package,
+                    &candidate.actor_id,
+                    scope,
+                )
+            })
+            .await;
             (
                 EventKind::MemberState,
                 json!({"member_id":candidate.actor_id,"membership":"join"}),
-                source(&realm_body, "ak.applet.join"),
+                arkret_wire::GrantId::from_event_id(&source(&realm_body, "ak.applet.join")),
             )
         } else {
             let ScopeRef::Circle { circle_id, .. } = scope else {
                 unreachable!()
             };
+            assert_eq!(scope, &circle_body.authoring_request_basis.effective_scope);
+            // Circle membership is ordinary native business authority. Its
+            // subject must be this actor, rather than the installation's
+            // Service subject used by subject-only Realm join above.
+            let child = boxed_step(|| {
+                realm_actor_mls_fixture::business_grant_at_scope(
+                    fixture,
+                    &native.package,
+                    &candidate.actor_id,
+                    scope,
+                )
+            })
+            .await;
             let parent = ordinary_realm::parent_membership_revision(
                 &fixture.pool,
                 &fixture.realm,
@@ -1286,7 +1299,7 @@ async fn install_admission_circle_claim_independence(factory: &AppletAuthoringFa
             (
                 EventKind::CircleMemberState,
                 json!({"circle_id":circle_id,"member_id":candidate.actor_id,"membership":"join","parent_membership_revision":parent}),
-                source(&circle_body, "ak.applet.join"),
+                child,
             )
         };
         let event = realm_actor_mls_fixture::admission_native_scope_event(
@@ -1296,7 +1309,7 @@ async fn install_admission_circle_claim_independence(factory: &AppletAuthoringFa
             scope,
             kind,
             payload,
-            &arkret_wire::GrantId::from_event_id(&join_ref),
+            &join_grant,
             &[98; 32],
         );
         let request =

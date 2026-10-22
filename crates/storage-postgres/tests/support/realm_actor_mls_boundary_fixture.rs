@@ -831,6 +831,16 @@ async fn boundary_encrypted_read_expiry(
 ) {
     let deadline = boxed_step(|| boundary_install_deadline(fixture, package, child)).await;
     assert!(authority.expires_at > deadline + chrono::Duration::seconds(10));
+    assert!(
+        authority.scopes.permits(
+            &candidate.creation_scope,
+            &[
+                arkret_wire::CapabilityActionId::EventRead,
+                arkret_wire::CapabilityActionId::ObjectReadContent,
+            ],
+        ),
+        "the original native Device must authorize both Event and full Message content reading"
+    );
     let event = boxed_step(|| {
         boundary_encrypted_message(
             fixture, package, candidate, authority, child, strand_id, group,
@@ -838,6 +848,10 @@ async fn boundary_encrypted_read_expiry(
     })
     .await;
     let path = format!("/_arkret/self/committed-events/{}", event.event_id);
+    assert!(
+        chrono::Utc::now() < deadline,
+        "the initial positive encrypted read must precede the original installation deadline"
+    );
     let mut positive = boxed_step(|| {
         boundary_native_response(
             fixture,
@@ -849,8 +863,15 @@ async fn boundary_encrypted_read_expiry(
         )
     })
     .await;
-    assert_eq!(positive.status_code, Some(StatusCode::OK));
-    let positive: arkret_wire::CommittedEventView = positive.take_json().await.unwrap();
+    let positive_status = positive.status_code;
+    let positive_body = positive.take_bytes(None).await.unwrap();
+    assert_eq!(
+        positive_status,
+        Some(StatusCode::OK),
+        "initial positive encrypted Message read: {}",
+        String::from_utf8_lossy(&positive_body)
+    );
+    let positive: arkret_wire::CommittedEventView = serde_json::from_slice(&positive_body).unwrap();
     let arkret_wire::CommittedEventView::Full(original) = positive else {
         panic!("actual encrypted original must initially be Full")
     };

@@ -247,11 +247,31 @@ async fn same_device_cross_circle_queue(
     let ack = DeviceMessagesAckRequestBody {
         ack_token: second.ack_token.clone().unwrap(),
     };
+    let before_wrong_ack = boxed_step(|| native_queue_handoff_footprint(&factory.fixture)).await;
     let denied = b.client().ack_device_messages(&ack).await.unwrap_err();
     assert_eq!(
         denied.error_code(),
-        Some(arkret_wire::ErrorCode::CapabilityDenied),
+        Some(arkret_wire::ErrorCode::ParamInvalid),
         "same Device still cannot use the other Circle's token: {denied}"
+    );
+    let arkret::http_client::Error::Api { status, error } = &denied else {
+        panic!("the real queue endpoint must reject the cross-binding token: {denied}");
+    };
+    assert_eq!(*status, StatusCode::BAD_REQUEST.as_u16());
+    assert_eq!(error.status, StatusCode::BAD_REQUEST.as_u16());
+    assert_eq!(
+        error.problem_type,
+        "https://arkret.org/problems/param_invalid"
+    );
+    assert_eq!(error.detail, "invalid ack token");
+    assert_eq!(
+        error.extensions.get("reason_code"),
+        Some(&json!(arkret_wire::ReasonCode::INVALID_ACK_TOKEN))
+    );
+    assert_eq!(
+        boxed_step(|| native_queue_handoff_footprint(&factory.fixture)).await,
+        before_wrong_ack,
+        "a cross-Circle token must not alter either queue, ACK frontier or cursor state"
     );
     let a_still = a
         .client()

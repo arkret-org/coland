@@ -7203,20 +7203,23 @@ mod realm_native_fixture {
         .await;
         eprintln!("native lifecycle: first Device");
         let device = if mls {
-            boxed_step(|| {
-                authorize_device_with_actions(
-                    &factory.fixture,
-                    &candidate,
-                    &before,
-                    79,
-                    &[
-                        "ak.applet.join",
-                        "ak.event.read",
-                        "ak.message.create",
-                        "ak.mls.commit",
-                        "ak.mls.genesis",
-                    ],
+            let mut actions = vec![
+                "ak.applet.join",
+                "ak.event.read",
+                "ak.message.create",
+                "ak.mls.commit",
+                "ak.mls.genesis",
+            ];
+            if matches!(
+                suite,
+                NativeSuite::MlsBoundary(
+                    realm_actor_mls_fixture::BoundaryCase::EncryptedReadExpiry
                 )
+            ) {
+                actions.push("ak.object.read_content");
+            }
+            boxed_step(|| {
+                authorize_device_with_actions(&factory.fixture, &candidate, &before, 79, &actions)
             })
             .await
         } else {

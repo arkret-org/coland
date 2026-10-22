@@ -270,12 +270,13 @@ pub(super) async fn run_widget_inventory() {
             json!({"object":{"schema":"ak.schema.strand.v1","realm_id":fixture.realm,
                 "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
                 "metadata":{"title":"Widget accepted write"},"state":"active",
-                "created_by":ActorId::account(fixture.pcr.history.account.clone()),"created_at":at}}));
+                "created_by":ActorId::account(fixture.pcr.history.account.clone()),"created_at":arkret_canonical::format_timestamp_canonical(at)}}));
         // admin_event supplies its own wall-clock timestamp. The original
         // Strand object must use the exact Event creation time; finalize both
         // before recomputing the real Device proof and EventId below.
         event.created_at = at;
-        event.payload.get_mut("object").unwrap()["created_at"] = serde_json::to_value(at).unwrap();
+        event.payload.get_mut("object").unwrap()["created_at"] =
+            json!(arkret_canonical::format_timestamp_canonical(at));
         event.authorization_ref =
             Some(arkret_wire::AuthorizationRef::new(gate.authorization_ref.to_string()).unwrap());
         event = fixture.sign_admin(event);

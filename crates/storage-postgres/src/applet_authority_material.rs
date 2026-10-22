@@ -471,7 +471,7 @@ async fn current_binding(
         || serde_json::to_value(&registration_full.event).map_err(PersistenceError::database)?
             != install["registration_event"]
         || crate::applet_current_results::registration_security_value(
-            &registration_full.event.payload,
+            &serde_json::to_value(&registration_full.event.payload).map_err(PersistenceError::database)?,
         ) != crate::applet_current_results::registration_security_value(&current.value)
     {
         return Err(unavailable());

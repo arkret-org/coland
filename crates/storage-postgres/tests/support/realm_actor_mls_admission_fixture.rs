@@ -1113,6 +1113,7 @@ async fn admission_current_mls_policy(
         super::realm_native_fixture::install_admission_policy(
             fixture,
             &package.applet_id,
+            &package.service_id,
             "execute",
         )
     })

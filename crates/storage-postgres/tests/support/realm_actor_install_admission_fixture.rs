@@ -48,10 +48,10 @@ fn install_admission_rebind_package(fixture: &Fixture, body: &mut AppletInstallR
     basis.package_digest = package.package_digest.clone().unwrap();
     basis.registration_event = fixture.admin_event(
         EventKind::AppletRegistration,
-        basis.effective_scope.clone(),
+        ScopeRef::realm(basis.effective_scope.realm_id().clone()),
         serde_json::to_value(
             package
-                .to_registration(&applet_registration_epoch_evidence(package))
+                .to_registration(&applet_registration_epoch_evidence(package), serde_json::from_value(basis.registration_event.payload["expected_revision"].clone()).unwrap())
                 .unwrap(),
         )
         .unwrap(),
@@ -133,6 +133,7 @@ pub(super) async fn prepare_expiring_install(
 pub(super) async fn install_admission_policy(
     fixture: &Fixture,
     applet: &AppletId,
+    service: &arkret_wire::DidCoreId,
     operation: &str,
 ) {
     let actor = ActorId::account(fixture.pcr.history.account.clone());
@@ -142,7 +143,7 @@ pub(super) async fn install_admission_policy(
     let target = if operation == "install" {
         json!({"kind":"requester","actor_id":actor})
     } else {
-        json!({"kind":"installation","applet_id":applet,"effective_scope":scope})
+        json!({"kind":"installation","applet_id":applet,"service_id":service,"effective_scope":scope})
     };
     let id = format!("ak:policy:{}", uuid::Uuid::now_v7());
     let event=fixture.admin_event(EventKind::PolicySet,scope,json!({"policy_id":id,"expected_revision":null,"value":{
@@ -272,7 +273,7 @@ pub(super) async fn run_install_admission(pool: PgPool) {
     let coland_storage::AppletAdmissionRequest::Install(body) = unit.input.candidate.request else {
         panic!("actual install required")
     };
-    install_admission_policy(&factory.fixture, &id, "install").await;
+    install_admission_policy(&factory.fixture, &id, &service.package.service_id, "install").await;
     let before = boxed_step(|| async { install_admission_footprint(&factory.fixture).await }).await;
     let (status, problem) = boxed_step(|| async {
         factory
@@ -350,7 +351,7 @@ async fn install_admission_exact_material_binding(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(material.registration.event.scope_ref, *scope);
+    assert_eq!(material.registration.event.scope_ref, ScopeRef::realm(scope.realm_id().clone()));
     assert_eq!(json!(material.registration.event), json!(original.event));
     assert_eq!(json!(material.registration.commit), json!(original.commit));
     let AppletInstallationCurrentBinding::Active {
@@ -379,7 +380,7 @@ async fn install_admission_exact_material_binding(
 
 async fn install_admission_reproof_and_missing_creation(factory: &AppletAuthoringFactory) {
     // A proof refresh changes neither security epoch nor an already accepted
-    // Realm installation. A distinct Circle has its own registration original.
+    // Realm installation. Each Circle retains its accepted Realm registration original.
     let id = AppletId::new(format!("ak:applet:{}", uuid::Uuid::now_v7())).unwrap();
     let mut service = NativeService::new(&id, &factory.fixture.state.service_core_id());
     realm_actor_mls_fixture::enable(&mut service.package);
@@ -654,6 +655,7 @@ pub(super) async fn policy_blocks_fresh_native_join(fixture: &Fixture, package: 
     }
     .get(
         package.applet_id.as_str(),
+        package.service_id.as_str(),
         &coland_storage::applet_effective_scope_key(&scope).unwrap(),
     )
     .await
@@ -777,7 +779,7 @@ pub(super) async fn policy_blocks_fresh_native_join(fixture: &Fixture, package: 
     // A distinct accepted identity still joins after both provision sources
     // close. The original subject below is already created and authorized too.
     boxed_step(|| admission_native_endpoint(fixture, package, 93, true)).await;
-    install_admission_policy(fixture, &package.applet_id, "join").await;
+    install_admission_policy(fixture, &package.applet_id, &package.service_id, "join").await;
     let metadata = AppletManagedDeviceMetadata {
         actor_id: candidate.actor_id,
         device_id: device,
@@ -845,6 +847,7 @@ pub(super) async fn admission_native_endpoint(
     }
     .get(
         package.applet_id.as_str(),
+        package.service_id.as_str(),
         &coland_storage::applet_effective_scope_key(&scope).unwrap(),
     )
     .await

@@ -220,6 +220,7 @@ pub(super) async fn run_active_revoke(
     let mode = arkret_wire::AppletRevokeMode::RevokeRuntimeOnly;
     let reason = arkret_wire::ReasonCode::from_wire("applet_revoked");
     let preview_request = AppletRevokePreviewRequestBody {
+        service_id: package.service_id.clone(),
         effective_scope: candidate.creation_scope.clone(),
         reason_code: reason.clone(),
         revoke_mode: mode,
@@ -276,6 +277,7 @@ pub(super) async fn run_active_revoke(
         ))
     }).collect();
     let request = AppletRevokeRequestBody {
+        service_id: package.service_id.clone(),
         revoke_plan_digest: Hash::new(
             arkret_canonical::canonical_sha256(&preview.revoke_plan).unwrap(),
         )

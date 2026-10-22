@@ -221,6 +221,7 @@ async fn realm_review_setup(pool: PgPool) -> Box<RealmReviewFixture> {
     let installation = store
         .get(
             id.as_str(),
+            native.package.service_id.as_str(),
             &coland_storage::applet_effective_scope_key(&install.effective_scope).unwrap(),
         )
         .await
@@ -309,7 +310,7 @@ fn realm_review_installation_target(
     let effective_scope: ScopeRef =
         serde_json::from_value(context.installation["effective_scope"].clone()).unwrap();
     assert_eq!(effective_scope, candidate.creation_scope);
-    assert_eq!(context.registration.scope_ref, effective_scope);
+    assert_eq!(context.registration.scope_ref, ScopeRef::realm(effective_scope.realm_id().clone()));
     assert_eq!(
         context.registration.payload["applet_id"],
         json!(context.package.applet_id)

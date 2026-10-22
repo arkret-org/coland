@@ -245,7 +245,7 @@ struct GenerationCutRow {
 
 /// The PCR `device_generation` typed current from one REPEATABLE READ
 /// snapshot of an accepted PCR head. The projection must equal what its latest
-/// accepted writer (a registration anchor, managed PCR genesis or reanchor) derives, or the
+/// accepted writer (a registration anchor or reanchor) derives, or the
 /// read fails closed.
 pub(crate) async fn confirmed_pcr_generation(
     pool: &PgPool,
@@ -264,33 +264,23 @@ pub(crate) async fn confirmed_pcr_generation(
                 WHERE c.realm_id=p.pcr_realm_id AND \
                   (e.kind='ak.device.reanchor' OR \
                    (e.kind='ak.device.authorize' AND \
-                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor') OR \
-                   (e.kind='ak.realm.create' AND c.stream_position=0 AND \
-                    e.envelope->>'event_id'=p.genesis_event_id AND \
-                    e.envelope#>>'{payload,object,purpose}'='applet_managed_control')) \
+                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
                 ORDER BY c.stream_position DESC LIMIT 1) AS latest_generation_commit_id, \
                (SELECT c.stream_position FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
                 WHERE c.realm_id=p.pcr_realm_id AND \
                   (e.kind='ak.device.reanchor' OR \
                    (e.kind='ak.device.authorize' AND \
-                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor') OR \
-                   (e.kind='ak.realm.create' AND c.stream_position=0 AND \
-                    e.envelope->>'event_id'=p.genesis_event_id AND \
-                    e.envelope#>>'{payload,object,purpose}'='applet_managed_control')) \
+                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
                 ORDER BY c.stream_position DESC LIMIT 1) AS latest_generation_stream_position, \
                (SELECT jsonb_build_object('current_device_generation_ref', \
                         CASE WHEN e.kind='ak.device.reanchor' \
                           THEN e.envelope->'payload'->'new_device_generation' \
-                          WHEN e.kind='ak.realm.create' THEN '1'::jsonb \
                           ELSE e.envelope->'payload'->'authorized_generation_ref' END) \
                 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
                 WHERE c.realm_id=p.pcr_realm_id AND \
                   (e.kind='ak.device.reanchor' OR \
                    (e.kind='ak.device.authorize' AND \
-                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor') OR \
-                   (e.kind='ak.realm.create' AND c.stream_position=0 AND \
-                    e.envelope->>'event_id'=p.genesis_event_id AND \
-                    e.envelope#>>'{payload,object,purpose}'='applet_managed_control')) \
+                    e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
                 ORDER BY c.stream_position DESC LIMIT 1) AS expected_generation_value \
              FROM principal_resolutions p \
              JOIN LATERAL (SELECT commit_id FROM realm_commits \

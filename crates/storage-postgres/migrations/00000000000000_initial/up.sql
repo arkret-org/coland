@@ -617,19 +617,20 @@ CREATE INDEX applet_transactions_received_idx ON public.applet_transactions USIN
 
 CREATE TABLE public.applet_authoring_completions (
     applet_id text NOT NULL,
-    request_digest text NOT NULL,
     realm_id text NOT NULL,
     actor_id jsonb NOT NULL,
     creation_ref jsonb NOT NULL,
+    request_digest text NOT NULL,
+    source_id text NOT NULL,
     destination_id text NOT NULL,
-    recipient_package jsonb NOT NULL,
-    delivery_attempt jsonb,
-    delivery_digest text,
+    endpoint text NOT NULL,
+    idempotency_key text NOT NULL,
+    context jsonb,
+    delivery_key_digest text,
+    next_attempt_at timestamp with time zone,
     accepted_at timestamp with time zone NOT NULL,
-    next_attempt_at timestamp with time zone NOT NULL,
     delivered_at timestamp with time zone,
-    PRIMARY KEY (applet_id, request_digest),
-    CHECK ((delivery_attempt IS NULL) = (delivery_digest IS NULL))
+    PRIMARY KEY (applet_id, request_digest)
 );
 
 CREATE INDEX applet_authoring_completions_pending_idx

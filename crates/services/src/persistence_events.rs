@@ -465,33 +465,25 @@ impl crate::events::AppletPort for PersistenceEventReader {
 
     async fn pending_applet_authoring_completions(
         &self,
-        governor: &arkret_wire::DidCoreId,
         limit: u32,
     ) -> crate::ServiceResult<Vec<coland_storage::AppletAuthoringCompletion>> {
         Ok(self
             .0
             .applets()
-            .pending_authoring_completions(governor, limit)
+            .pending_authoring_completions(limit)
             .await?)
     }
     async fn acknowledge_applet_authoring_completion(
         &self,
         applet_id: &arkret_wire::AppletId,
         request_digest: &arkret_wire::Hash,
-        governor: &arkret_wire::DidCoreId,
-        delivery_digest: &arkret_wire::Hash,
+        idempotency_key: &str,
         at: chrono::DateTime<chrono::Utc>,
     ) -> crate::ServiceResult<()> {
         Ok(self
             .0
             .applets()
-            .acknowledge_authoring_completion(
-                applet_id,
-                request_digest,
-                governor,
-                delivery_digest,
-                at,
-            )
+            .acknowledge_authoring_completion(applet_id, request_digest, idempotency_key, at)
             .await?)
     }
     async fn admit_applet_authoring_unit(

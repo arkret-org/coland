@@ -353,6 +353,9 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
     {
         return Err(coland_storage::MlsSendGateRefusal::EpochUpdateRequired.into_conflict());
     }
+    let deadlines =
+        crate::boxed_future(|| fresh_claim_deadlines_in_connection(conn, transaction)).await?;
+    require_live_claim_deadlines(conn, &deadlines).await?;
     write_group(
         conn,
         &key,
@@ -401,7 +404,7 @@ pub(crate) async fn commit_mls_group_current_result_in_connection(
             continue;
         };
         require_native_welcome_target(conn, welcome).await?;
-        require_live_claim(conn, claim, commit.committed_at).await?;
+        require_live_claim(conn, claim, None).await?;
         crate::devices::enqueue_mls_welcome_in_connection(
             conn,
             &welcome.delivery,
@@ -639,7 +642,7 @@ async fn queue_one_replicated_welcome(
         return store_recipient_roster_outbox(conn, event, commit, welcome, at).await;
     }
     require_native_welcome_target(conn, welcome).await?;
-    require_live_claim(conn, claim, at).await?;
+    require_live_claim(conn, claim, Some(at)).await?;
     crate::devices::enqueue_mls_welcome_in_connection(conn, delivery, event_pk, at, None)
         .await
         .map_err(crate::PgTransactionError::into_persistence)?;
@@ -1116,11 +1119,200 @@ pub(crate) async fn require_native_welcome_target(
     .await
 }
 
+#[derive(QueryableByName)]
+struct PhysicalClock {
+    #[diesel(sql_type = Timestamptz)]
+    at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn physical_clock(
+    conn: &mut AsyncPgConnection,
+) -> PersistenceResult<chrono::DateTime<chrono::Utc>> {
+    Ok(sql_query("SELECT clock_timestamp() AS at")
+        .get_result::<PhysicalClock>(conn)
+        .await
+        .map_err(PersistenceError::database)?
+        .at)
+}
+
+/// Fresh acceptance, never historical replica installation or exact accepted
+/// replay. Recheck after held-cut and writer waits: a candidate's signed Commit
+/// time cannot keep an unconsumed reservation alive (§2.6).
+pub(crate) async fn fresh_claim_deadlines_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+) -> PersistenceResult<Vec<chrono::DateTime<chrono::Utc>>> {
+    let mut deadlines = Vec::new();
+    if transaction.event.kind != EventKind::MlsCommit {
+        return Ok(deadlines);
+    }
+    for welcome in &transaction.welcomes {
+        if let Some(claim) = &welcome.claim {
+            deadlines.push(require_live_claim(conn, claim, None).await?);
+        } else if transaction.event.actor_id.as_realm_actor_id().is_some() {
+            deadlines.push(
+                crate::boxed_future(|| require_realm_source_claim(conn, transaction, welcome))
+                    .await?,
+            );
+        }
+    }
+    Ok(deadlines)
+}
+
+/// The final batch barrier uses one physical instant after every writer and
+/// every claim's original/current checks. A later Welcome cannot keep an
+/// earlier reservation alive by delaying its own verification or row lock.
+pub(crate) async fn require_live_claim_deadlines(
+    conn: &mut AsyncPgConnection,
+    deadlines: &[chrono::DateTime<chrono::Utc>],
+) -> PersistenceResult<()> {
+    if !deadlines.is_empty() {
+        let at = physical_clock(conn).await?;
+        if deadlines.iter().any(|deadline| at >= *deadline) {
+            return Err(failed_precondition(
+                "an MLS Add claim reservation expired before final batch acceptance",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn require_realm_source_claim(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+    welcome: &coland_storage::VerifiedMlsWelcome,
+) -> PersistenceResult<chrono::DateTime<chrono::Utc>> {
+    #[derive(QueryableByName)]
+    struct Source {
+        #[diesel(sql_type = Text)]
+        source_id: String,
+        #[diesel(sql_type = Text)]
+        claim_request_id: String,
+    }
+    let event = &transaction.event;
+    let delivery = &welcome.delivery;
+    // This is the existing outbound Realm-owned ledger, not a fabricated
+    // recipient ledger or an inference from Welcome wire fields. The held
+    // Realm cut precedes this source row lock, as in source-result retention.
+    let sources = sql_query(
+        "SELECT source_id,claim_request_id FROM realm_keypackage_claim_sources \
+         WHERE governing_realm_id=$1 AND result @> $2 LIMIT 2 FOR SHARE",
+    )
+    .bind::<Text, _>(event.realm_id.as_str())
+    .bind::<Jsonb, _>(serde_json::json!({
+        "claim_outcome": {"claims": [{"claim_id": delivery.keypackage_claim_ref.as_str()}]}
+    }))
+    .load::<Source>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    let [source] = sources.as_slice() else {
+        return Err(failed_precondition(
+            "Realm Add has no unique original claim source",
+        ));
+    };
+    // Reuse the original-method history and receipt verification. A cached
+    // unsigned expiry or a producer's assertion is not sufficient evidence.
+    let original = crate::boxed_future(|| {
+        crate::realm_claim_source::read(conn, &source.source_id, &source.claim_request_id)
+    })
+    .await?
+    .ok_or_else(|| failed_precondition("Realm Add original claim source disappeared"))?;
+    let result = original
+        .result
+        .ok_or_else(|| failed_precondition("Realm Add has no original claim result"))?;
+    if result.state != arkret_models_crypto::PeerKeyPackagesClaimQueryState::Claimed
+        || original.request.intended_realm_id != event.realm_id
+        || original.request.mls_group_id
+            != event
+                .scope_ref
+                .canonical_mls_group_id()
+                .map_err(PersistenceError::database)?
+    {
+        return Err(failed_precondition(
+            "Realm Add claim source is not a live reservation for this group",
+        ));
+    }
+    let outcome = result
+        .claim_outcome
+        .ok_or_else(|| failed_precondition("Realm Add source lost its original claim outcome"))?;
+    let mut claims = outcome
+        .claims
+        .iter()
+        .filter(|record| record.claim_id == delivery.keypackage_claim_ref.as_str());
+    let record = claims
+        .next()
+        .ok_or_else(|| failed_precondition("Realm Add original claim id differs"))?;
+    if claims.next().is_some() {
+        return Err(failed_precondition(
+            "Realm Add original claim id is ambiguous",
+        ));
+    }
+    arkret_models_crypto::validate_target_claim_evidence(record, &outcome.claim_receipt).map_err(
+        |error| failed_precondition(format!("Realm Add original target differs: {error}")),
+    )?;
+    let endpoint_matches = match &delivery.recipient_endpoint {
+        arkret_wire::MlsWelcomeRecipientEndpoint::Device { device_id } => {
+            record.device_id.as_ref() == Some(device_id)
+        }
+        arkret_wire::MlsWelcomeRecipientEndpoint::AgentRuntime {
+            verification_method,
+        } => record.agent_verification_method.as_ref() == Some(verification_method),
+    };
+    let package = arkret_canonical::base64url_decode(&record.keypackage)
+        .map_err(PersistenceError::database)?;
+    if record.actor_id != delivery.recipient_actor_id
+        || !endpoint_matches
+        || arkret_canonical::sha256_digest(&package) != record.keypackage_ref
+        || arkret_canonical::canonical_sha256(&outcome.claims)
+            .map_err(PersistenceError::database)?
+            != outcome.claim_receipt.claims_digest.as_str()
+    {
+        return Err(binding_mismatch(
+            "Realm Add Welcome differs from its original claim target",
+        ));
+    }
+    let installation = transaction
+        .mls_state
+        .as_ref()
+        .ok_or_else(|| failed_precondition("Realm Add has no verified public transition"))?;
+    let mut matches = 0_usize;
+    for proposal in &installation.consumed_proposals {
+        if proposal.proposal_type == 1 {
+            let leaf =
+                arkret_mls::verify_add_proposal_leaf(&proposal.proposal_wire).map_err(|error| {
+                    binding_mismatch(format!("Realm Add proposal is invalid: {error}"))
+                })?;
+            if leaf.actor_id == record.actor_id && leaf.key_package_bytes == package {
+                matches += 1;
+            }
+        }
+    }
+    if matches != 1 {
+        return Err(binding_mismatch(
+            "Realm Add original package does not match one consumed Add",
+        ));
+    }
+    let at = physical_clock(conn).await?;
+    if at >= original.request.expires_at
+        || at >= outcome.claim_receipt.expires_at
+        || at >= record.expires_at
+    {
+        return Err(failed_precondition(
+            "Realm Add original claim reservation expired before acceptance",
+        ));
+    }
+    Ok(original
+        .request
+        .expires_at
+        .min(outcome.claim_receipt.expires_at)
+        .min(record.expires_at))
+}
+
 async fn require_live_claim(
     conn: &mut AsyncPgConnection,
     claim: &coland_storage::MlsWelcomeClaimLedgerKey,
-    at: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<()> {
+    historical_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> PersistenceResult<chrono::DateTime<chrono::Utc>> {
     let row = sql_query(
         "SELECT request_digest,state,claim_expires_at_unix_ms FROM peer_keypackage_claims \
          WHERE source_id=$1 AND claim_request_id=$2 FOR UPDATE",
@@ -1132,6 +1324,12 @@ async fn require_live_claim(
     .optional()
     .map_err(PersistenceError::database)?
     .ok_or_else(|| failed_precondition("the Welcome's KeyPackage claim is not in the ledger"))?;
+    // A fresh acceptance may have waited on this ledger lock. The signed
+    // candidate Commit timestamp is not the accepting transaction's clock.
+    let at = match historical_at {
+        Some(at) => at,
+        None => physical_clock(conn).await?,
+    };
     if row.request_digest != claim.request_digest
         || !matches!(row.state.as_str(), "claimed" | "last_resort_claimed")
         || row
@@ -1142,7 +1340,9 @@ async fn require_live_claim(
             "the Welcome's KeyPackage claim is no longer live",
         ));
     }
-    Ok(())
+    row.claim_expires_at_unix_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .ok_or_else(|| failed_precondition("the Welcome's original claim deadline is invalid"))
 }
 
 fn message_envelopes(

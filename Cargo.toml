@@ -87,7 +87,6 @@ diesel-async = "0.9"
 diesel_migrations = "2.3.2"
 dotenvy = "0.15.7"
 ed25519-dalek = "3.0.0"
-floria-contracts = { version = "0.3.0", path = "../floria/crates/floria-contracts" }
 futures-util = "0.3.34"
 getrandom = "0.4.3"
 hex = "0.4.3"

@@ -94,6 +94,58 @@ pub(crate) async fn read(
         None
     };
     let (requester, credential_expiry) = match caller {
+        RealmActorMaterialCaller::CreationCompletion {
+            applet_id,
+            request_digest,
+            creation_ref,
+            service_id,
+        } => {
+            let RealmActorMaterialRequest::Event { target, .. } = request else {
+                return Err(hidden());
+            };
+            if target != creation_ref {
+                return Err(hidden());
+            }
+            let task = sql_query("SELECT to_jsonb(c) AS value FROM applet_authoring_completions c WHERE c.applet_id=$1 AND c.request_digest=$2 AND c.realm_id=$3 AND c.actor_id=$4 AND c.creation_ref=$5 AND c.destination_id=$6 AND c.delivered_at IS NULL FOR SHARE")
+                .bind::<Text,_>(applet_id.as_str()).bind::<Text,_>(request_digest.as_str())
+                .bind::<Text,_>(subject.realm_id.as_str()).bind::<Jsonb,_>(json!(actor))
+                .bind::<Jsonb,_>(json!(creation_ref)).bind::<Text,_>(service_id.as_str())
+                .get_result::<Row>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+            let task = task.ok_or_else(hidden)?;
+            let (original, _) =
+                crate::realm_actor_control_source::original(conn, creation_ref).await?;
+            let creation = crate::realm_actor_control::creation(&original)?.ok_or_else(hidden)?;
+            if &creation.actor_id != actor
+                || &creation.applet_id != applet_id
+                || &creation.service_id != service_id
+            {
+                return Err(hidden());
+            }
+            let registration = sql_query("SELECT e.envelope->'payload' AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.state='committed' AND e.kind='ak.applet.registration' AND e.envelope->>'event_id'=$1 AND c.realm_id=$2")
+                .bind::<Text,_>(creation.registration_ref.as_str()).bind::<Text,_>(subject.realm_id.as_str())
+                .get_result::<Row>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+                .ok_or_else(hidden)?;
+            let registration: AppletRegistrationPayload = decode(registration.value)?;
+            if registration.applet_id != *applet_id
+                || registration.service_id != *service_id
+                || task.value["endpoint"] != json!(registration.base_url)
+            {
+                return Err(hidden());
+            }
+            let (manager, _) = crate::realm_actor_control::current_source(
+                conn,
+                actor,
+                json!({"kind":"realm_actor_manager","actor_id":actor}),
+            )
+            .await?;
+            if manager["service_id"] != json!(service_id) {
+                return Err(hidden());
+            }
+            (
+                ActorId::service(service_id.clone()),
+                at + chrono::Duration::seconds(60),
+            )
+        }
         RealmActorMaterialCaller::Account {
             account_id,
             expires_at,

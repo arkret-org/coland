@@ -2000,19 +2000,7 @@ async fn commit_transaction_with_device_guard_inner(
         )
         .into());
     }
-    let applet_genesis = transaction.event.kind == arkret_wire::EventKind::RealmCreate
-        && transaction
-            .event
-            .payload
-            .get("object")
-            .and_then(|object| object.get("purpose"))
-            .and_then(serde_json::Value::as_str)
-            == Some("applet_managed_control");
-    if (applet_genesis
-        || matches!(
-            transaction.event.kind,
-            arkret_wire::EventKind::AppletRegistration
-        ))
+    if transaction.event.kind == arkret_wire::EventKind::AppletRegistration
         && verified_unit != VerifiedPcrUnit::Applet
     {
         return Err(PersistenceError::Conflict("applet_authoring_unit_required".to_owned()).into());
@@ -3225,6 +3213,28 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             crate::realm_actor_material::read(conn, request, caller, governor, sign)
                 .await
                 .map_err(Into::into)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
+    async fn prepare_applet_authoring_completion(
+        &self,
+        completion: &coland_storage::AppletAuthoringCompletion,
+        governor: &arkret_wire::DidCoreId,
+        delivery_key_digest: &arkret_wire::Hash,
+        sign: coland_storage::RealmActorMaterialSigner<'_>,
+    ) -> PersistenceResult<coland_storage::AppletAuthoringCompletion> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            Ok(crate::applet_completion::prepare(
+                conn,
+                completion,
+                governor,
+                delivery_key_digest,
+                sign,
+            )
+            .await?)
         })
         .await
         .map_err(PgTransactionError::into_persistence)

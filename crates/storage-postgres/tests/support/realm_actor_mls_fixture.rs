@@ -126,14 +126,14 @@ async fn read_service_grants(
             .append_pair("realm_id", fixture.realm.as_str())
             .append_pair("subject_actor_id", &other.to_string());
     }
-    let mut response = TestClient::get(url.as_str())
+    let request = TestClient::get(url.as_str())
         .add_header("Arkret-Operation", operation, true)
         .add_header("Source-Service-ID", package.service_id.as_str(), true)
         .add_header("Destination-Service-ID", fixture.state.service_id(), true)
         .add_header("Signature-Input", signature.signature_input_header, true)
-        .add_header("Signature", signature.signature_header, true)
-        .send(&service(fixture.state.clone()))
-        .await;
+        .add_header("Signature", signature.signature_header, true);
+    let router = service(fixture.state.clone());
+    let mut response = boxed_step(|| request.send(&router)).await;
     (
         response.status_code.unwrap(),
         response.take_json().await.unwrap(),
@@ -141,16 +141,10 @@ async fn read_service_grants(
 }
 
 async fn business_grant(fixture: &Fixture, package: &AppletPackage, actor: &ActorId) -> GrantId {
-    business_authority(
-        fixture,
-        package,
-        actor,
-        false,
-        &ScopeRef::Realm {
-            realm_id: fixture.realm.clone(),
-        },
-    )
-    .await
+    let scope = ScopeRef::Realm {
+        realm_id: fixture.realm.clone(),
+    };
+    boxed_step(|| business_authority(fixture, package, actor, false, &scope)).await
 }
 
 pub(super) async fn business_parent(
@@ -159,7 +153,7 @@ pub(super) async fn business_parent(
     actor: &ActorId,
     scope: &ScopeRef,
 ) -> GrantId {
-    business_authority(fixture, package, actor, true, scope).await
+    boxed_step(|| business_authority(fixture, package, actor, true, scope)).await
 }
 
 async fn business_authority(
@@ -185,6 +179,7 @@ async fn business_authority(
         issuer_id: ActorId::account(fixture.pcr.history.account.clone()),
         subject: CapabilitySubject::Actor(service_actor.clone()),
         actions: vec![
+            "ak.applet.join".into(),
             "ak.circle.member.add".into(),
             "ak.event.read".into(),
             "ak.message.create".into(),
@@ -262,6 +257,18 @@ async fn business_authority(
     if parent_only {
         return parent_id;
     }
+    boxed_step(|| business_terminal_child(fixture, package, actor, scope, parent, parent_id)).await
+}
+
+async fn business_terminal_child(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    actor: &ActorId,
+    scope: ScopeRef,
+    parent: CapabilityGrantCreateBody,
+    parent_id: GrantId,
+) -> GrantId {
+    let service_actor = ActorId::service(package.service_id.clone());
     let mut child = parent;
     child.issuer_id = service_actor.clone();
     child.subject = CapabilitySubject::Actor(actor.clone());
@@ -319,7 +326,80 @@ async fn business_authority(
         "{result:?}"
     );
     eprintln!("native MLS: terminal child accepted");
+    boxed_step(|| {
+        service_cannot_proxy_terminal_child_membership(fixture, package, actor, &child_id, &signer)
+    })
+    .await;
     child_id
+}
+
+async fn service_cannot_proxy_terminal_child_membership(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    actor: &ActorId,
+    child: &GrantId,
+    signer: &Ed25519PayloadSigner,
+) {
+    let before =
+        boxed_step(|| super::realm_native_fixture::native_business_footprint(fixture)).await;
+    for membership in ["join", "leave"] {
+        let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+        let mut event = arkret_wire::test_support::raw_event_for_actor_at(
+            EventKind::MemberState.as_str(),
+            ScopeRef::Realm {
+                realm_id: fixture.realm.clone(),
+            },
+            actor.clone(),
+            json!({"member_id":actor,"membership":membership}),
+            at,
+        )
+        .unwrap();
+        event.applet_id = Some(package.applet_id.clone());
+        event.authorization_ref = Some(child.clone().into());
+        event.executed_by = Some(ActorId::service(package.service_id.clone()));
+        event.producer_proof = None;
+        let mut authored = arkret_wire::AuthoredEvent::finalize_with_digest_suite(
+            event,
+            arkret_canonical::DigestSuite::Sha256,
+        )
+        .unwrap();
+        arkret_signatures::sign_event(
+            &mut authored,
+            signer,
+            arkret_signatures::SignEventOptions::new().with_created_at(at),
+        )
+        .unwrap();
+        let request = SelfAuthoritySubmitRequest::Event(
+            arkret_wire::EventAdmissionSubmission::new(authored.into_event()),
+        );
+        request.validate().unwrap();
+        let (status, problem) = boxed_step(|| async {
+            fixture
+                .service_post(
+                    package,
+                    "/_arkret/self/events",
+                    ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                    &json!(request),
+                    &format!("service-cannot-proxy-terminal-child-{membership}"),
+                )
+                .await
+        })
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "Service proxy {membership}: {problem}"
+        );
+        assert_eq!(
+            problem["type"],
+            "https://arkret.org/problems/capability_denied"
+        );
+        assert_eq!(
+            boxed_step(|| super::realm_native_fixture::native_business_footprint(fixture)).await,
+            before,
+            "Service must not borrow the accepted Realm actor terminal child for {membership}"
+        );
+    }
 }
 
 async fn device_post(
@@ -468,10 +548,11 @@ async fn foreign_member(governor: &Fixture, member: &Fixture) {
     );
 }
 
-fn claim_request(
+fn claim_request_with_lifetime(
     authority: &coland_storage::AppletManagedDeviceAuthority,
     target: &Fixture,
     keypackage: &str,
+    lifetime: chrono::Duration,
 ) -> KeyPackagesClaimRequestBody {
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let method = DidUrl::new(format!("{}#{}", authority.native_did, authority.device_id)).unwrap();
@@ -491,7 +572,7 @@ fn claim_request(
         mls_group_id: scope.canonical_mls_group_id().unwrap(),
         claim_purpose: PeerKeyPackageClaimPurpose::RealmMembership,
         required_capabilities: vec![arkret_wire::NonEmptyString::new("ak.content.v1").unwrap()],
-        expires_at: at + chrono::Duration::minutes(4),
+        expires_at: at + lifetime,
         target_device_ids: vec![target.pcr.history.founding_device_id.clone()],
         target_keypackage_ref: Some(arkret_wire::KeyPackageRef::new(keypackage).unwrap()),
         target_agent_id: None,
@@ -552,6 +633,8 @@ pub(super) async fn run(
         .await
         .unwrap()
         .unwrap();
+    boxed_step(|| realm_device_multi_parent_shared_ancestor_quota(fixture, package, &authority))
+        .await;
     let child = boxed_step(|| business_grant(fixture, package, &candidate.actor_id)).await;
     eprintln!("native MLS: foreign member");
     let database = boxed_step(coland_storage_postgres::test_database::TestDatabase::lease).await;
@@ -562,9 +645,24 @@ pub(super) async fn run(
     eprintln!("native MLS: foreign member joined");
     let mut group =
         boxed_step(|| genesis(fixture, package, candidate, device, &authority, &child)).await;
+    let _additional_recipient = boxed_step(|| {
+        realm_device_prepared_add_writer_wait_crosses_claim_deadline(
+            fixture, package, candidate, device, &authority, &child, &recipient, &group,
+        )
+    })
+    .await;
+    boxed_step(|| {
+        realm_device_prepared_claim_guard_crosses_actual_deadline(fixture, package, &authority)
+    })
+    .await;
+    boxed_step(|| {
+        realm_device_owned_query_prepared_guard_crosses_deadline(fixture, package, &authority)
+    })
+    .await;
     let (recipient_identity, claim) =
         boxed_step(|| claim_remote(fixture, &recipient, &authority)).await;
-    boxed_step(|| {
+    let original_deadline = claim.claim_receipt.expires_at;
+    let (accepted_add, original_commit) = boxed_step(|| {
         commit_add(
             fixture,
             package,
@@ -579,6 +677,54 @@ pub(super) async fn run(
         )
     })
     .await;
+    boxed_step(|| {
+        realm_device_consume_writer_wait_crosses_physical_device_expiry(
+            fixture, package, candidate, device, &authority, &child, &mut group,
+        )
+    })
+    .await;
+    tokio::time::sleep(
+        (original_deadline - chrono::Utc::now())
+            .to_std()
+            .unwrap_or_default()
+            + std::time::Duration::from_millis(40),
+    )
+    .await;
+    assert!(chrono::Utc::now() >= original_deadline);
+    let before_retry = boxed_step(|| obligation_mls_footprint(fixture)).await;
+    let recipient_before_retry = boxed_step(|| obligation_mls_footprint(&recipient)).await;
+    let (status, replay) = boxed_step(|| {
+        device_post(
+            fixture,
+            &authority,
+            "/_arkret/self/events",
+            ServiceOperationId::SelfEventsCommandSubmitV1,
+            json!(accepted_add),
+        )
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "accepted Add replay after reservation expiry: {replay}"
+    );
+    let replay: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome =
+        serde_json::from_value(replay).unwrap();
+    let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(
+        arkret_wire::AuthoritySubmitOutcome::Accepted { commit, .. },
+    ) = replay
+    else {
+        panic!("accepted Add replay must restore its original Commit");
+    };
+    assert_eq!(commit, original_commit);
+    assert_eq!(
+        boxed_step(|| obligation_mls_footprint(fixture)).await,
+        before_retry
+    );
+    assert_eq!(
+        boxed_step(|| obligation_mls_footprint(&recipient)).await,
+        recipient_before_retry
+    );
 }
 
 async fn genesis(
@@ -1055,6 +1201,25 @@ async fn claim_remote(
     recipient: &Fixture,
     authority: &coland_storage::AppletManagedDeviceAuthority,
 ) -> (arkret_mls::ArkretMlsIdentity, KeyPackagesClaimOutcome) {
+    boxed_step(|| {
+        claim_remote_with_lifetime(
+            fixture,
+            recipient,
+            authority,
+            chrono::Duration::seconds(60),
+            true,
+        )
+    })
+    .await
+}
+
+async fn claim_remote_with_lifetime(
+    fixture: &Fixture,
+    recipient: &Fixture,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    lifetime: chrono::Duration,
+    exercise_writer_wait: bool,
+) -> (arkret_mls::ArkretMlsIdentity, KeyPackagesClaimOutcome) {
     eprintln!("native MLS: remote KeyPackage claim");
     let recipient_key = SigningKey::from_bytes(&recipient.pcr.history.founding_device_signing_seed);
     let recipient_identity = arkret_mls::ArkretMlsIdentity::new_human_device(
@@ -1084,11 +1249,18 @@ async fn claim_remote(
         "real foreign Account package upload: {value}"
     );
     assert_eq!(value["accepted"], 1);
-    let command = claim_request(
+    let command = claim_request_with_lifetime(
         &authority,
         &recipient,
         &upload.keypackages[0].keypackage_ref,
+        lifetime,
     );
+    if exercise_writer_wait {
+        boxed_step(|| {
+            realm_device_claim_writer_wait_crosses_deadline(fixture, recipient, authority, &command)
+        })
+        .await;
+    }
     let before = recipient
         .state
         .test_persistence()
@@ -1210,7 +1382,7 @@ async fn commit_add(
     recipient_identity: arkret_mls::ArkretMlsIdentity,
     claim: KeyPackagesClaimOutcome,
     group: &mut arkret_mls::ArkretMlsGroup,
-) {
+) -> (SelfAuthoritySubmitRequest, arkret_wire::RealmCommit) {
     let scope = candidate.creation_scope.clone();
     let key = SigningKey::from_bytes(&[79; 32]);
     let signer = Ed25519PayloadSigner::new(
@@ -1331,6 +1503,7 @@ async fn commit_add(
         )
     })
     .await;
+    (submission, accepted.commit)
 }
 
 async fn account_request(
@@ -1350,11 +1523,8 @@ async fn account_request(
         &account.holder_key,
     )
     .unwrap();
-    let client = reqwest::Client::builder()
-        .tls_backend_rustls()
-        .tls_certs_only(reqwest::Certificate::from_pem_bundle(&native_tls_material().ca).unwrap())
-        .build()
-        .unwrap();
+    let client =
+        super::realm_native_fixture::native_http_client(std::time::Duration::from_secs(30));
     let mut request = client
         .request(method, url)
         .header("authorization", format!("DPoP {}", account.token))
@@ -1383,7 +1553,8 @@ async fn receive_and_consume(
     claim: &KeyPackagesClaimOutcome,
 ) {
     use arkret_models_collaboration::device_messages::{
-        DeviceMessagesGetOutcome, RecipientDelivery,
+        DeviceMessagesAckOutcome, DeviceMessagesAckRequestBody, DeviceMessagesGetOutcome,
+        RecipientDelivery,
     };
     let sender =
         coland_http::routing::federation::outbox::FederationDispatcher::new(governor.state.clone());
@@ -1391,6 +1562,7 @@ async fn receive_and_consume(
         recipient.state.clone(),
     );
     let mut queued = None;
+    let mut delivered_page = None;
     for _ in 0..12 {
         boxed_step(|| sender.run_one_pass()).await.unwrap();
         boxed_step(|| receiver.run_one_pass()).await.unwrap();
@@ -1406,21 +1578,61 @@ async fn receive_and_consume(
         .await;
         assert_eq!(status, StatusCode::OK, "real recipient queue: {value}");
         let page: DeviceMessagesGetOutcome = serde_json::from_value(value).unwrap();
-        queued = page.deliveries.into_iter().find_map(|item| match item {
+        assert_ne!(page.lost, Some(true));
+        queued = page.deliveries.iter().find_map(|item| match item {
             RecipientDelivery::MlsWelcome { mls_welcome }
                 if mls_welcome.welcome_id == welcome.welcome_id =>
             {
-                Some(mls_welcome)
+                Some(mls_welcome.clone())
             }
             _ => None,
         });
         if queued.is_some() {
+            delivered_page = Some(page);
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
     let queued = queued.expect("remote committed replication must queue the original Welcome");
     assert_eq!(json!(queued), json!(welcome));
+    // The authentic recipient acknowledges the delivered prefix. Consume must
+    // remain independent of the queue row and recover the retained claim.
+    let delivered_page = delivered_page.unwrap();
+    let ack = DeviceMessagesAckRequestBody {
+        ack_token: delivered_page.ack_token.unwrap(),
+    };
+    let (status, acknowledged) = boxed_step(|| {
+        account_request(
+            recipient,
+            reqwest::Method::POST,
+            "/_arkret/self/device_messages/ack",
+            ServiceOperationId::SelfDeviceMessagesCommandAckV1,
+            Some(json!(ack)),
+        )
+    })
+    .await;
+    assert_eq!(status, StatusCode::OK, "actual Welcome ACK: {acknowledged}");
+    let acknowledged: DeviceMessagesAckOutcome = serde_json::from_value(acknowledged).unwrap();
+    assert!(acknowledged.pruned_count > 0);
+    let (status, after_ack) = boxed_step(|| {
+        account_request(
+            recipient,
+            reqwest::Method::GET,
+            "/_arkret/self/device_messages",
+            ServiceOperationId::SelfDeviceMessagesReadListV1,
+            None,
+        )
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "actual queue after ACK: {after_ack}"
+    );
+    let after_ack: DeviceMessagesGetOutcome = serde_json::from_value(after_ack).unwrap();
+    assert!(!after_ack.deliveries.iter().any(|delivery| matches!(delivery,
+        RecipientDelivery::MlsWelcome { mls_welcome } if mls_welcome.welcome_id == welcome.welcome_id
+    )), "ACK must prune the original even without a continuation cursor");
     let replicated = recipient
         .state
         .test_persistence()
@@ -1506,6 +1718,56 @@ async fn receive_and_consume(
                 .unwrap(),
         )
         .unwrap();
+    let before_refusals =
+        boxed_step(|| super::realm_native_fixture::native_business_footprint(recipient)).await;
+    for (name, digest, epoch) in [
+        (
+            "wrong_welcome_digest",
+            arkret_wire::Hash::new(format!("sha256:{}", "7".repeat(64))).unwrap(),
+            restored.epoch(),
+        ),
+        (
+            "wrong_epoch",
+            queued.durable_receipt_digest().unwrap(),
+            restored.epoch() + 1,
+        ),
+    ] {
+        let mut rejected = command.clone();
+        rejected.recipient_durable_receipt.welcome_digest = digest;
+        rejected.recipient_durable_receipt.mls_epoch = epoch;
+        rejected.recipient_durable_receipt = joined
+            .identity()
+            .sign_recipient_mls_durable_receipt(rejected.recipient_durable_receipt)
+            .unwrap();
+        rejected = joined
+            .identity()
+            .signed_key_packages_consume_request(
+                queued.keypackage_claim_ref.clone(),
+                rejected.recipient_durable_receipt,
+            )
+            .unwrap();
+        let (status, problem) = boxed_step(|| {
+            account_request(
+                recipient,
+                reqwest::Method::POST,
+                "/_arkret/self/keys/keypackages/consume",
+                ServiceOperationId::SelfKeysKeypackagesCommandConsumeV1,
+                Some(json!(rejected)),
+            )
+        })
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{name}: {problem}");
+        assert_eq!(
+            problem["type"], "https://arkret.org/problems/conflict",
+            "{name}"
+        );
+        assert_eq!(
+            boxed_step(|| { super::realm_native_fixture::native_business_footprint(recipient) })
+                .await,
+            before_refusals,
+            "{name}: signed invalid receipt must leave the claim live and unchanged"
+        );
+    }
     let (status, consumed) = boxed_step(|| {
         account_request(
             recipient,
@@ -1700,6 +1962,25 @@ async fn human_admits_runtime_in_authority(
     group
         .install_local_creator_binding(actor.clone(), Some(authorization.clone()))
         .unwrap();
+    human_adds_runtime_to_group(fixture, device, Box::new(group)).await
+}
+
+pub(super) async fn human_adds_runtime_to_group(
+    fixture: &Fixture,
+    device: &arkret_bridge_runtime::managed_device::ManagedDevice,
+    mut group: Box<arkret_mls::ArkretMlsGroup>,
+) -> Box<arkret_mls::ArkretMlsGroup> {
+    let history = &fixture.pcr.history;
+    let scope = device.effective_scope().clone();
+    let key = SigningKey::from_bytes(&history.founding_device_signing_seed);
+    let authorization = history
+        .events
+        .iter()
+        .find(|e| e.kind == EventKind::DeviceAuthorize)
+        .unwrap()
+        .event_id
+        .clone();
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let mut claim = KeyPackagesClaimRequestBody {
         claim_request_id: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
             rand::random::<[u8; 32]>(),
@@ -1929,5 +2210,87 @@ async fn human_admits_runtime_in_authority(
             &current,
         )
         .unwrap();
-    Box::new(group)
+    group
 }
+
+/// A real covering Commit removes the old leaf before the next legitimate Add.
+/// The RealmActor's Circle membership and Device original remain unchanged.
+pub(super) async fn human_rotates_out_runtime(
+    fixture: &Fixture,
+    device: &arkret_bridge_runtime::managed_device::ManagedDevice,
+    group: &mut arkret_mls::ArkretMlsGroup,
+) {
+    let scope = device.effective_scope().clone();
+    let current = coland_storage_postgres::PgMlsGroupCurrentStore {
+        pool: fixture.pool.clone(),
+    }
+    .current(&scope)
+    .await
+    .unwrap()
+    .unwrap()
+    .value;
+    let binding = MlsGovernanceBindingPayload::new(
+        scope.clone(),
+        Some(current.current_mls_commit_event_ref.clone()),
+        current.epoch,
+        current.epoch + 1,
+        current.current_key_access_revision,
+    )
+    .unwrap();
+    let removed = group
+        .remove_members_by_actor_with_governance_binding(&[device.actor_id.clone()], &binding)
+        .unwrap();
+    assert_eq!(removed.removed_actors, vec![device.actor_id.clone()]);
+    let event = fixture.admin_event(
+        EventKind::MlsCommit,
+        scope,
+        json!(
+            MlsCommitPayload::new(
+                current.current_mls_commit_event_ref.clone(),
+                current.current_key_access_revision,
+                &removed.commit,
+                binding
+            )
+            .unwrap()
+        ),
+    );
+    let submission = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+        commit_event: event.clone(),
+        welcomes: vec![],
+        idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
+    });
+    let (status, value) = boxed_step(|| {
+        account_request(
+            fixture,
+            reqwest::Method::POST,
+            "/_arkret/self/events",
+            ServiceOperationId::SelfEventsCommandSubmitV1,
+            Some(json!(submission)),
+        )
+    })
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "actual Remove before fresh Welcome: {value}"
+    );
+    let accepted = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    group
+        .install_accepted_commit(
+            &arkret_wire::CommittedEventFullView {
+                event: accepted.event,
+                commit: accepted.commit,
+            },
+            &current,
+        )
+        .unwrap();
+}
+
+include!("realm_actor_obligation_fixture.rs");

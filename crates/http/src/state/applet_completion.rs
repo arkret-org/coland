@@ -28,20 +28,19 @@ pub fn spawn_pending_applet_completion_sweeper(state: AppState) -> tokio::task::
 pub async fn deliver_pending_applet_completions(state: &AppState) -> Result<usize, String> {
     let pending = state
         .event_queries()
-        .pending_applet_authoring_completions(&state.service_core_id(), 16)
+        .pending_applet_authoring_completions(16)
         .await
         .map_err(|error| error.to_string())?;
     let mut delivered = 0;
     for completion in pending {
         match deliver_one(state, &completion).await {
-            Ok(delivery_digest) => {
+            Ok(delivery_key) => {
                 state
                     .event_queries()
                     .acknowledge_applet_authoring_completion(
                         &completion.applet_id,
                         &completion.request_digest,
-                        &state.service_core_id(),
-                        &delivery_digest,
+                        &delivery_key,
                         chrono::Utc::now(),
                     )
                     .await
@@ -59,76 +58,75 @@ pub async fn deliver_pending_applet_completions(state: &AppState) -> Result<usiz
 async fn deliver_one(
     state: &AppState,
     completion: &AppletAuthoringCompletion,
-) -> Result<arkret_wire::Hash, String> {
-    let governor = state.service_core_id();
-    let registration = &completion.recipient_package;
-    if registration.service_id != completion.destination_id {
-        return Err("original completion recipient differs".into());
-    }
-    let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let resolution = crate::routing::identity::agents::evidence::fetch_service_resolution(
-        state,
-        &completion.destination_id,
-        Some(&registration.base_url),
-    )
-    .await
-    .map_err(|e| format!("Service resolution unavailable: {e:?}"))?;
-    let document = arkret_identity::authenticated_service_document_at(
-        &resolution,
-        &completion.destination_id,
-        now,
-    )
-    .map_err(|e| e.to_string())?;
-    let (verification_method, public_key) =
-        std::iter::once(registration.webhook_auth.key_ref.to_string())
-            .chain(document.verification_methods.keys().cloned())
-            .filter_map(|method| arkret_wire::DidUrl::new(method).ok())
-            .find_map(|method| {
-                arkret_identity::validate_verification_method_relationship(
-                    &document,
-                    &method,
-                    &document.id,
-                    arkret_identity::DidVerificationRelationship::AssertionMethod,
-                )
-                .ok()?;
-                let key = arkret_identity::public_key_material_from_document(&document, &method)
-                    .ok()?
-                    .ed25519_bytes()
-                    .ok()?;
-                Some((method, key))
-            })
-            .ok_or("completion recipient has no current assertion key")?;
-    let caller = coland_storage::RealmActorMaterialCaller::Service {
-        service_id: completion.destination_id.clone(),
-        verification_method,
-        public_key,
-        authenticated_document: document,
-        expires_at: now + chrono::Duration::seconds(60),
-    };
+) -> Result<String, String> {
     let method = state.service_verification_method("notary-key")?;
-    let sign = |body: &arkret_models_integration::RealmActorMaterialUnsigned| {
-        let signature = arkret_signatures::detached_object::sign_detached_object(
-            body,
-            arkret_wire::DetachedSignatureContext::RealmActorMaterial,
-            method.clone(),
-            body.issued_at,
+    let completion = state
+        .authority_commits()
+        .prepare_applet_authoring_completion(
+            completion,
+            &state.service_core_id(),
+            &method,
             state.notary_signing_key().as_ref(),
         )
-        .map_err(coland_storage::PersistenceError::database)?;
-        Ok(body.clone().into_signed(signature))
-    };
-    let delivery = state
-        .persistence()
-        .prepare_applet_authoring_delivery(completion, &governor, &caller, &sign)
         .await
-        .map_err(|e| e.to_string())?;
-    let delivery_digest = arkret_wire::Hash::new(
-        arkret_canonical::canonical_sha256(&delivery).map_err(|e| e.to_string())?,
+        .map_err(|error| error.to_string())?;
+    let context = completion
+        .context
+        .as_ref()
+        .ok_or("creation completion has no signed material")?;
+    context.validate().map_err(|error| error.to_string())?;
+    let material = &context.material;
+    if completion.source_id != state.service_core_id()
+        || material.requester_actor_id
+            != arkret_wire::ActorId::service(completion.destination_id.clone())
+        || completion.idempotency_key.is_empty()
+    {
+        return Err("accepted Applet completion has inconsistent service identity".into());
+    }
+    let authority = state
+        .authority_commits()
+        .current_authority(&material.realm_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or("Realm authority unavailable")?;
+    if authority.service_id != completion.source_id
+        || authority.generation != material.governance_generation
+        || authority.authority_ref != material.authority_ref
+    {
+        return Err("accepted Applet completion must be refreshed at current governance".into());
+    }
+    let resolution =
+        crate::routing::system::service_resolution::current_authenticated_service_resolution(state)
+            .await
+            .map_err(|error| error.to_string())?;
+    let document = arkret_identity::authenticated_service_document_at(
+        &resolution,
+        &completion.source_id,
+        material.issued_at,
     )
-    .map_err(|e| e.to_string())?;
-    let method = state.service_verification_method("notary-key")?;
+    .map_err(|error| error.to_string())?;
+    arkret_identity::validate_verification_method_relationship(
+        &document,
+        &material.signature.verification_method,
+        &document.id,
+        arkret_identity::DidVerificationRelationship::AssertionMethod,
+    )
+    .map_err(|error| error.to_string())?;
+    let key = arkret_identity::public_key_material_from_document(
+        &document,
+        &material.signature.verification_method,
+    )
+    .map_err(|error| error.to_string())?;
+    arkret_signatures::detached_object::verify_detached_object_signature(
+        &material.signature,
+        &arkret_canonical::unsigned_value(material, &["signature"])
+            .map_err(|error| error.to_string())?,
+        arkret_wire::DetachedSignatureContext::RealmActorMaterial,
+        &key,
+    )
+    .map_err(|error| error.to_string())?;
     let (base, transport) = crate::security::validate_http_url_for_egress_with_pinned_client(
-        &delivery.endpoint,
+        &completion.endpoint,
         "Applet authoring completion",
         state.config().development_mode,
         std::time::Duration::from_secs(15),
@@ -147,23 +145,22 @@ async fn deliver_one(
     let body =
         AppletTransactionRequestBody::Authoring(Box::new(AppletAuthoringTransactionRequestBody {
             applet_id: completion.applet_id.clone(),
-            source_id: delivery.source_id.clone(),
-            authoring_context: delivery.context.clone(),
+            source_id: completion.source_id.clone(),
+            authoring_context: context.clone(),
         }));
     // Authoring returns accepted context; this branch publishes no new originals.
     let body = arkret_identity::VerifiedSubmission::from_verified_events(body, &[])
         .map_err(|error| error.to_string())?;
     let outcome = client
         .applet_transaction_from_service(
-            &delivery.idempotency_key,
+            &completion.idempotency_key,
             &body,
-            &delivery.source_id,
-            &delivery.destination_id,
+            &completion.source_id,
+            &completion.destination_id,
         )
         .await
         .map_err(|error| error.to_string())?;
     if outcome.status() != AppletTransactionStatus::Accepted
-        || !outcome.committed_event_refs().is_empty()
         || !outcome.rejections().is_empty()
         || outcome.retry_after_ms().is_some()
     {
@@ -171,5 +168,5 @@ async fn deliver_one(
             "Applet did not acknowledge the complete accepted authoring context".to_owned(),
         );
     }
-    Ok(delivery_digest)
+    Ok(completion.idempotency_key)
 }

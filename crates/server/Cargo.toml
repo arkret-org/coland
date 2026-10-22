@@ -82,16 +82,18 @@ uuid = { workspace = true, features = ["v4", "v7", "serde"] }
 [dev-dependencies]
 getrandom.workspace = true
 garth = { version = "0.3.0", path = "../../../garth", default-features = false }
-arkret-bridge-runtime = { version = "0.3.0", path = "../../../bridges/crates/runtime", default-features = false, features = ["edge", "managed-authoring"] }
+arkret-bridge-runtime = { version = "0.3.0", path = "../../../bridges/crates/runtime", default-features = false, features = ["full", "postgres"] }
+rand.workspace = true
+coland-storage-postgres = { workspace = true, features = ["test-support"] }
 coland-contracts.workspace = true
 diesel = { workspace = true, features = ["postgres", "serde_json"] }
 diesel-async = { workspace = true, features = ["postgres", "deadpool"] }
 arkret-schema-conformance = { workspace = true }
-arkret.workspace = true
+arkret = { workspace = true, features = ["mls"] }
 arkret-bootstrap.workspace = true
 arkret-crypto = { workspace = true, features = ["account-data"] }
 arkret-event-draft = { workspace = true, features = ["test-support"] }
-arkret-mls.workspace = true
+arkret-mls = { workspace = true, features = ["test-utils"] }
 arkret-models-collaboration.workspace = true
 arkret-models-crypto.workspace = true
 arkret-models-discovery.workspace = true
@@ -99,7 +101,6 @@ arkret-models-integration.workspace = true
 arkret-policy.workspace = true
 arkret-schema = { workspace = true }
 bs58 = { workspace = true }
-floria-contracts = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 parking_lot = { workspace = true }

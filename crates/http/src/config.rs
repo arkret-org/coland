@@ -539,26 +539,6 @@ pub struct AppConfig {
     pub db_pool_max_size: Option<usize>,
     /// Env: `COLAND_DB_POOL_ACQUIRE_TIMEOUT_SECS`.
     pub db_pool_acquire_timeout_seconds: Option<u64>,
-    /// Base URL of the push gateway (floria) this deployment notifies over
-    /// the registered internal channel when an account is deactivated
-    /// (`account-lifecycle.md` §7.1, Push-route completion criterion). The fanout
-    /// endpoint is derived by appending
-    /// `floria_contracts::ACCOUNT_DEACTIVATE_FANOUT_PATH`.
-    ///
-    /// `None` (default) declares that this deployment has **no** independent
-    /// push gateway holding registration/delivery state — the single-box /
-    /// dev posture. In that posture the local push-route purge is the
-    /// complete Push-route fanout action and `deactivation_partial` is never
-    /// raised for the gateway leg. Deployments that run floria MUST set this,
-    /// or the spec's gateway-side stop-delivery guarantee silently does not
-    /// exist. Env: `COLAND_DEACTIVATION_PUSH_GATEWAY_URL`.
-    pub deactivation_push_gateway_url: Option<String>,
-    /// Bearer token for floria's `http.internal_auth` profile on the
-    /// deactivation fanout endpoint. When the gateway URL is set but this is
-    /// missing, the fanout is still attempted (and honestly fails with 401,
-    /// keeping `deactivation_partial=true`) rather than being silently
-    /// skipped. Env: `COLAND_DEACTIVATION_PUSH_GATEWAY_BEARER`.
-    pub deactivation_push_gateway_bearer: Option<String>,
     /// Resumable (tus) blob upload — staging directory for in-progress
     /// upload parts before they are completed into the blob store. See
     /// spec crypto-media/media-and-blob.md §2.1.
@@ -976,8 +956,6 @@ impl AppConfig {
             otel: OtelConfig::default(),
             db_pool_max_size: None,
             db_pool_acquire_timeout_seconds: None,
-            deactivation_push_gateway_url: None,
-            deactivation_push_gateway_bearer: None,
             resumable_upload_dir: PathBuf::from("./coland-resumable-uploads"),
             resumable_upload_incomplete_ttl_seconds: 86_400,
             seed_demo_data: false,
@@ -1347,15 +1325,6 @@ impl AppConfig {
         let db_pool_acquire_timeout_seconds =
             env_non_empty(values, "COLAND_DB_POOL_ACQUIRE_TIMEOUT_SECS")
                 .and_then(|value| value.parse::<u64>().ok());
-        let deactivation_push_gateway_url =
-            env_non_empty(values, "COLAND_DEACTIVATION_PUSH_GATEWAY_URL");
-        let deactivation_push_gateway_bearer =
-            env_non_empty(values, "COLAND_DEACTIVATION_PUSH_GATEWAY_BEARER");
-        if deactivation_push_gateway_url.is_none() && deactivation_push_gateway_bearer.is_some() {
-            anyhow::bail!(
-                "COLAND_DEACTIVATION_PUSH_GATEWAY_BEARER is set without COLAND_DEACTIVATION_PUSH_GATEWAY_URL"
-            );
-        }
         let resumable_upload_dir = env_non_empty(values, "COLAND_RESUMABLE_UPLOAD_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("./coland-resumable-uploads"));
@@ -1478,8 +1447,6 @@ impl AppConfig {
             otel,
             db_pool_max_size,
             db_pool_acquire_timeout_seconds,
-            deactivation_push_gateway_url,
-            deactivation_push_gateway_bearer,
             resumable_upload_dir,
             resumable_upload_incomplete_ttl_seconds,
             seed_demo_data,

@@ -1897,7 +1897,6 @@ dependencies = [
  "diesel-async",
  "dotenvy",
  "ed25519-dalek 3.0.0",
- "floria-contracts",
  "futures-util",
  "garth",
  "getrandom 0.4.3",
@@ -1909,6 +1908,7 @@ dependencies = [
  "opentelemetry_sdk 0.32.1",
  "parking_lot",
  "proptest",
+ "rand 0.10.2",
  "rand_chacha 0.10.0",
  "reqwest 0.13.5",
  "rustls",
@@ -2018,7 +2018,6 @@ dependencies = [
  "diesel",
  "diesel-async",
  "ed25519-dalek 3.0.0",
- "floria-contracts",
  "futures-util",
  "garth",
  "hex",
@@ -3802,13 +3801,6 @@ dependencies = [
  "crc32fast",
  "miniz_oxide",
  "zlib-rs",
-]
-
-[[package]]
-name = "floria-contracts"
-version = "0.3.0"
-dependencies = [
- "serde",
 ]
 
 [[package]]

@@ -513,7 +513,6 @@ pub trait AppletPort: Send + Sync {
     ) -> ServiceResult<Option<AppletAuthoringPreviewState>>;
     async fn pending_applet_authoring_completions(
         &self,
-        _governor: &arkret_wire::DidCoreId,
         _limit: u32,
     ) -> ServiceResult<Vec<coland_storage::AppletAuthoringCompletion>> {
         Err(coland_storage::PersistenceError::Internal(
@@ -525,8 +524,7 @@ pub trait AppletPort: Send + Sync {
         &self,
         _applet_id: &arkret_wire::AppletId,
         _request_digest: &arkret_wire::Hash,
-        _governor: &arkret_wire::DidCoreId,
-        _delivery_digest: &arkret_wire::Hash,
+        _idempotency_key: &str,
         _at: DateTime<Utc>,
     ) -> ServiceResult<()> {
         Err(coland_storage::PersistenceError::Internal(
@@ -1145,29 +1143,21 @@ impl EventQueryService {
     }
     pub async fn pending_applet_authoring_completions(
         &self,
-        governor: &arkret_wire::DidCoreId,
         limit: u32,
     ) -> ServiceResult<Vec<coland_storage::AppletAuthoringCompletion>> {
         self.applets
-            .pending_applet_authoring_completions(governor, limit)
+            .pending_applet_authoring_completions(limit)
             .await
     }
     pub async fn acknowledge_applet_authoring_completion(
         &self,
         applet_id: &arkret_wire::AppletId,
         request_digest: &arkret_wire::Hash,
-        governor: &arkret_wire::DidCoreId,
-        delivery_digest: &arkret_wire::Hash,
+        idempotency_key: &str,
         at: DateTime<Utc>,
     ) -> ServiceResult<()> {
         self.applets
-            .acknowledge_applet_authoring_completion(
-                applet_id,
-                request_digest,
-                governor,
-                delivery_digest,
-                at,
-            )
+            .acknowledge_applet_authoring_completion(applet_id, request_digest, idempotency_key, at)
             .await
     }
 

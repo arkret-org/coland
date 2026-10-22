@@ -260,7 +260,6 @@ fn forward_with_material(
         event_submission: EventAdmissionSubmission::new(event.clone()),
         mls_genesis_material: material,
         producer_device_evidence: None,
-        producer_managed_provenance: None,
         producer_agent_evidence: None,
     };
     if let Some(mut evidence) = evidence {

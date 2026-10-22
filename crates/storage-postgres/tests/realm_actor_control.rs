@@ -159,3 +159,13 @@ async fn bridge_keeps_original_claim_across_real_governance_handoff_and_cold_wel
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     Box::pin(applet_authoring::realm_runtime_mls_handoff(database.pool())).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_completion_receiver_preserves_original_over_signed_retries_cold_recovery_and_expiry()
+ {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_bridge_completion_receiver(
+        database.pool(),
+    ))
+    .await;
+}

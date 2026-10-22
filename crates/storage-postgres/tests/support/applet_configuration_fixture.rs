@@ -72,12 +72,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
         "arkret-configuration-{}.redb",
         uuid::Uuid::now_v7()
     ));
-    let http = reqwest::Client::builder()
-        .tls_backend_rustls()
-        .tls_certs_only(reqwest::Certificate::from_pem_bundle(&native_tls_material().ca).unwrap())
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap();
+    let http = native_http_client(std::time::Duration::from_secs(30));
     let station_url: Url = factory
         .fixture
         .state
@@ -185,7 +180,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
         .state
         .test_persistence()
         .applets()
-        .pending_authoring_completions(&factory.fixture.state.service_core_id(), 128)
+        .pending_authoring_completions(128)
         .await
         .unwrap();
     let completion = completions
@@ -203,11 +198,11 @@ pub(super) async fn run_configuration(pool: PgPool) {
             .state
             .test_persistence()
             .applets()
-            .pending_authoring_completions(&factory.fixture.state.service_core_id(), 128)
+            .pending_authoring_completions(128)
             .await
             .unwrap()
-            .is_empty(),
-        "a reserved delivery is not immediately claimed twice"
+            .iter().any(|row| row.creation_ref == completion.creation_ref),
+        "repeated pending enumeration preserves the exact original"
     );
     let delivery = prepare_configuration_completion(&factory.fixture, &completion)
         .await
@@ -266,8 +261,8 @@ pub(super) async fn run_configuration(pool: PgPool) {
         .unwrap();
     assert_ne!(fresh.idempotency_key, delivery.idempotency_key);
     assert_eq!(
-        json!(fresh.context.material.result),
-        json!(delivery.context.material.result),
+        json!(fresh.context.as_ref().unwrap().material.result),
+        json!(delivery.context.as_ref().unwrap().material.result),
         "refresh preserves original Event, Commit and signer fact"
     );
     let mut conflict = fresh.clone();
@@ -285,8 +280,6 @@ pub(super) async fn run_configuration(pool: PgPool) {
     boxed_step(|| deliver_configuration_completion(&factory.fixture, &completion, &fresh))
         .await
         .unwrap();
-    let stale_digest =
-        arkret_wire::Hash::new(arkret_canonical::canonical_sha256(&delivery).unwrap()).unwrap();
     assert!(
         factory
             .fixture
@@ -296,8 +289,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
             .acknowledge_authoring_completion(
                 &completion.applet_id,
                 &completion.request_digest,
-                &factory.fixture.state.service_core_id(),
-                &stale_digest,
+                &delivery.idempotency_key,
                 chrono::Utc::now()
             )
             .await
@@ -735,8 +727,6 @@ pub(super) async fn run_configuration(pool: PgPool) {
             .is_err(),
         "frozen completion cannot create a new transport attempt"
     );
-    let fresh_digest =
-        arkret_wire::Hash::new(arkret_canonical::canonical_sha256(&fresh).unwrap()).unwrap();
     assert!(
         factory
             .fixture
@@ -746,8 +736,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
             .acknowledge_authoring_completion(
                 &completion.applet_id,
                 &completion.request_digest,
-                &factory.fixture.state.service_core_id(),
-                &fresh_digest,
+                &fresh.idempotency_key,
                 chrono::Utc::now()
             )
             .await
@@ -778,7 +767,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
 async fn deliver_configuration_completion(
     fixture: &Fixture,
     completion: &coland_storage::AppletAuthoringCompletion,
-    delivery: &coland_storage::AppletAuthoringDelivery,
+    delivery: &coland_storage::AppletAuthoringCompletion,
 ) -> Result<arkret_models_integration::AppletTransactionOutcome, String> {
     let http = reqwest::Client::builder()
         .tls_backend_rustls()
@@ -802,7 +791,7 @@ async fn deliver_configuration_completion(
         arkret_models_integration::AppletAuthoringTransactionRequestBody {
             applet_id: completion.applet_id.clone(),
             source_id: delivery.source_id.clone(),
-            authoring_context: delivery.context.clone(),
+            authoring_context: delivery.context.clone().expect("prepared completion"),
         },
     ));
     let body = arkret_identity::VerifiedSubmission::from_verified_events(body, &[]).unwrap();
@@ -833,41 +822,16 @@ async fn deliver_configuration_completion(
 async fn prepare_configuration_completion(
     fixture: &Fixture,
     completion: &coland_storage::AppletAuthoringCompletion,
-) -> coland_storage::PersistenceResult<coland_storage::AppletAuthoringDelivery> {
-    let registration = fixture
-        .state
-        .test_persistence()
-        .authority_commits()
-        .applet_registration_for_realm(&completion.realm_id, &completion.applet_id)
-        .await
-        .unwrap();
-    let caller = coland_storage::RealmActorMaterialCaller::Service {
-        authenticated_document: applet_service_id_document(&completion.recipient_package),
-        service_id: completion.destination_id.clone(),
-        verification_method: registration.webhook_auth.key_ref,
-        public_key: SigningKey::from_bytes(&[42; 32]).verifying_key().to_bytes(),
-        expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
-    };
-    let sign = |body: &arkret_models_integration::RealmActorMaterialUnsigned| {
-        let signature = arkret_signatures::detached_object::sign_detached_object(
-            body,
-            arkret_wire::DetachedSignatureContext::RealmActorMaterial,
-            fixture
-                .state
-                .service_verification_method("notary-key")
-                .unwrap(),
-            body.issued_at,
+) -> coland_storage::PersistenceResult<coland_storage::AppletAuthoringCompletion> {
+    completion_application(&fixture.state)
+        .prepare_applet_authoring_completion(
+            completion,
+            &fixture.state.service_core_id(),
+            &fixture.state.service_verification_method("notary-key").unwrap(),
             fixture.state.notary_signing_key().as_ref(),
         )
-        .map_err(coland_storage::PersistenceError::database)?;
-        Ok(body.clone().into_signed(signature))
-    };
-    fixture
-        .state
-        .test_persistence()
-        .applets()
-        .prepare_authoring_delivery(completion, &fixture.state.service_core_id(), &caller, &sign)
         .await
+
 }
 
 // The same signed activation is exercised by configuration and native MLS.
@@ -1322,11 +1286,11 @@ async fn configuration_handoff_resume(
         .unwrap();
     assert_eq!(resumed_delivery.source_id, next.state.service_core_id());
     assert_eq!(
-        resumed_delivery.context.material.governance_generation,
+        resumed_delivery.context.as_ref().unwrap().material.governance_generation,
         manifest.governance_generation + 1
     );
     let arkret_models_integration::RealmActorMaterialResult::Event { event, commit, .. } =
-        &resumed_delivery.context.material.result
+        &resumed_delivery.context.as_ref().unwrap().material.result
     else {
         panic!("creation material required")
     };
@@ -1795,12 +1759,7 @@ async fn configuration_peer_post_wire(
         source.state.notary_signing_key().as_ref(),
     )
     .unwrap();
-    let client = reqwest::Client::builder()
-        .tls_backend_rustls()
-        .tls_certs_only(reqwest::Certificate::from_pem_bundle(&native_tls_material().ca).unwrap())
-        .timeout(std::time::Duration::from_secs(45))
-        .build()
-        .unwrap();
+    let client = native_http_client(std::time::Duration::from_secs(45));
     let mut request = client.post(request_url);
     for (name, value) in parts.headers {
         request = request.header(name, value);

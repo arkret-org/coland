@@ -1,56 +1,26 @@
-//! Immutable creation completion and replaceable, durable delivery attempts.
-use arkret_models_integration::AppletManagedActorAuthoringContext;
-use arkret_wire::{AppletId, CommittedEventRef, DidCoreId, Event, Hash, RealmCommit};
+//! Original Realm creation tasks and current-governor material for retry delivery.
+use arkret_models_integration::{AppletManagedActorAuthoringContext, RealmActorMaterialRequest};
+use arkret_wire::{CommittedEventRef, DidCoreId, Event, Hash, RealmCommit};
 use coland_storage::{
-    AppletAuthoringCompletion, AppletAuthoringDelivery, PersistenceError, PersistenceResult,
+    AppletAuthoringCompletion, PersistenceError, PersistenceResult, RealmActorMaterialCaller,
+    RealmActorMaterialSigner,
 };
-use diesel::sql_types::{Jsonb, Nullable, Text, Timestamptz};
+use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel::{OptionalExtension as _, QueryableByName, sql_query};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Value, json};
 
-fn invalid(message: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError::Conflict(format!("failed_precondition: {message}"))
-}
-fn decode<T: serde::de::DeserializeOwned>(value: Value) -> PersistenceResult<T> {
-    serde_json::from_value(value).map_err(PersistenceError::database)
-}
-
 #[derive(QueryableByName)]
-pub(crate) struct CompletionRow {
-    #[diesel(sql_type=Text)]
-    pub applet_id: String,
-    #[diesel(sql_type=Text)]
-    pub request_digest: String,
-    #[diesel(sql_type=Text)]
-    pub realm_id: String,
-    #[diesel(sql_type=Jsonb)]
-    pub actor_id: Value,
-    #[diesel(sql_type=Jsonb)]
-    pub creation_ref: Value,
-    #[diesel(sql_type=Text)]
-    pub destination_id: String,
-    #[diesel(sql_type=Jsonb)]
-    pub recipient_package: Value,
+struct Row {
+    #[diesel(sql_type = Jsonb)]
+    value: Value,
 }
-impl CompletionRow {
-    pub(crate) fn decode(self) -> PersistenceResult<AppletAuthoringCompletion> {
-        Ok(AppletAuthoringCompletion {
-            applet_id: self.applet_id.parse().map_err(PersistenceError::database)?,
-            request_digest: self
-                .request_digest
-                .parse()
-                .map_err(PersistenceError::database)?,
-            realm_id: self.realm_id.parse().map_err(PersistenceError::database)?,
-            actor_id: decode(self.actor_id)?,
-            creation_ref: decode(self.creation_ref)?,
-            recipient_package: decode(self.recipient_package)?,
-            destination_id: self
-                .destination_id
-                .parse()
-                .map_err(PersistenceError::database)?,
-        })
-    }
+fn unavailable(detail: impl std::fmt::Display) -> PersistenceError {
+    PersistenceError::Conflict(format!("temporarily_unavailable: {detail}"))
+}
+const FIELDS: &str = "jsonb_build_object('applet_id',applet_id,'realm_id',realm_id,'actor_id',actor_id,'creation_ref',creation_ref,'request_digest',request_digest,'source_id',source_id,'destination_id',destination_id,'endpoint',endpoint,'idempotency_key',idempotency_key,'context',context,'delivery_key_digest',delivery_key_digest)";
+fn decode(row: Row) -> PersistenceResult<AppletAuthoringCompletion> {
+    serde_json::from_value(row.value).map_err(PersistenceError::database)
 }
 
 pub(crate) async fn retain(
@@ -58,182 +28,150 @@ pub(crate) async fn retain(
     event: &Event,
     commit: &RealmCommit,
     digest: &Hash,
+    governor: &DidCoreId,
 ) -> PersistenceResult<()> {
-    let candidate = crate::realm_actor_control::creation(event)?
-        .ok_or_else(|| invalid("completion requires a creation"))?;
-    let creation = CommittedEventRef {
+    let creation = crate::realm_actor_control::creation(event)?
+        .ok_or_else(|| unavailable("completion requires original creation"))?;
+    let registration = crate::managed_message_actor::registration(conn, event).await?;
+    let reference = CommittedEventRef {
         event_id: event.event_id.clone(),
         commit_id: commit.commit_id.clone(),
         stream_ref: commit.stream_ref.clone(),
         stream_position: commit.stream_position,
     };
-    let package = sql_query("SELECT record->'package' AS value FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2")
-        .bind::<Text,_>(candidate.applet_id.as_str()).bind::<Text,_>(coland_storage::applet_effective_scope_key(&candidate.creation_scope)?)
-        .get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    let package: arkret_models_integration::AppletPackage = decode(package.value)?;
-    if package.service_id != candidate.service_id || package.applet_id != candidate.applet_id {
-        return Err(invalid(
-            "completion recipient package differs from accepted creation",
-        ));
-    }
-    let written = sql_query("INSERT INTO applet_authoring_completions(applet_id,request_digest,realm_id,actor_id,creation_ref,destination_id,recipient_package,accepted_at,next_attempt_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8) ON CONFLICT DO NOTHING")
-        .bind::<Text,_>(candidate.applet_id.as_str()).bind::<Text,_>(digest.as_str()).bind::<Text,_>(event.realm_id.as_str())
-        .bind::<Jsonb,_>(json!(candidate.actor_id)).bind::<Jsonb,_>(json!(creation)).bind::<Text,_>(candidate.service_id.as_str())
-        .bind::<Jsonb,_>(json!(package)).bind::<Timestamptz,_>(commit.committed_at).execute(conn).await.map_err(PersistenceError::database)?;
-    if written != 1 {
-        return Err(invalid("creation completion already exists"));
+    let inserted = sql_query("INSERT INTO applet_authoring_completions(applet_id,realm_id,actor_id,creation_ref,request_digest,source_id,destination_id,endpoint,idempotency_key,context,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL,$10) ON CONFLICT DO NOTHING")
+        .bind::<Text,_>(creation.applet_id.as_str()).bind::<Text,_>(event.realm_id.as_str())
+        .bind::<Jsonb,_>(json!(creation.actor_id)).bind::<Jsonb,_>(json!(reference)).bind::<Text,_>(digest.as_str())
+        .bind::<Text,_>(governor.as_str()).bind::<Text,_>(creation.service_id.as_str())
+        .bind::<Text,_>(&registration.base_url).bind::<Text,_>(format!("creation:{}",event.event_id))
+        .bind::<Timestamptz,_>(commit.committed_at).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+    if inserted != 1 {
+        return Err(unavailable("creation completion identity already exists"));
     }
     Ok(())
 }
 
-#[derive(QueryableByName)]
-struct JsonRow {
-    #[diesel(sql_type=Jsonb)]
-    value: Value,
-}
-#[derive(QueryableByName)]
-struct AttemptRow {
-    #[diesel(sql_type=Nullable<Jsonb>)]
-    delivery_attempt: Option<Value>,
-    #[diesel(sql_type=Nullable<Text>)]
-    delivery_digest: Option<String>,
+pub(crate) async fn pending(
+    conn: &mut AsyncPgConnection,
+    limit: u32,
+) -> PersistenceResult<Vec<AppletAuthoringCompletion>> {
+    sql_query(format!("SELECT {FIELDS} AS value FROM applet_authoring_completions c WHERE delivered_at IS NULL AND (next_attempt_at IS NULL OR next_attempt_at<=clock_timestamp()) AND EXISTS(SELECT 1 FROM realm_authorities a WHERE a.realm_id=c.realm_id AND a.service_id=current_device_inventory_station()) AND EXISTS(SELECT 1 FROM realm_actor_current_results m WHERE m.realm_id=c.realm_id AND m.selector=jsonb_build_object('kind','realm_actor_manager','actor_id',c.actor_id) AND m.value->>'service_id'=c.destination_id) AND NOT EXISTS(SELECT 1 FROM realm_authorities a JOIN realm_commits rc ON rc.realm_id=a.realm_id AND rc.governance_generation=a.generation JOIN canonical_events e ON e.pk=rc.event_pk WHERE a.realm_id=c.realm_id AND e.kind='ak.realm.governance_station.change') ORDER BY next_attempt_at NULLS FIRST,accepted_at,applet_id,request_digest LIMIT $1"))
+        .bind::<BigInt,_>(i64::from(limit.min(128))).load::<Row>(conn).await.map_err(PersistenceError::database)?
+        .into_iter().map(decode).collect()
 }
 
 pub(crate) async fn prepare(
     conn: &mut AsyncPgConnection,
-    completion: &AppletAuthoringCompletion,
+    expected: &AppletAuthoringCompletion,
     governor: &DidCoreId,
-    caller: &coland_storage::RealmActorMaterialCaller,
-    sign: coland_storage::RealmActorMaterialSigner<'_>,
-) -> PersistenceResult<AppletAuthoringDelivery> {
-    crate::realm_actor_control::require_current_governor(conn, &completion.realm_id, governor)
+    delivery_key_digest: &Hash,
+    sign: RealmActorMaterialSigner<'_>,
+) -> PersistenceResult<AppletAuthoringCompletion> {
+    crate::realm_actor_control::require_current_governor(conn, &expected.realm_id, governor)
         .await?;
-    crate::realm_management_archive::require_unfrozen(conn, &completion.realm_id).await?;
-    let row = sql_query("SELECT delivery_attempt,delivery_digest FROM applet_authoring_completions WHERE applet_id=$1 AND request_digest=$2 AND realm_id=$3 AND actor_id=$4 AND creation_ref=$5 AND destination_id=$6 AND recipient_package=$7 AND delivered_at IS NULL FOR UPDATE")
-        .bind::<Text,_>(completion.applet_id.as_str()).bind::<Text,_>(completion.request_digest.as_str()).bind::<Text,_>(completion.realm_id.as_str())
-        .bind::<Jsonb,_>(json!(completion.actor_id)).bind::<Jsonb,_>(json!(completion.creation_ref)).bind::<Text,_>(completion.destination_id.as_str()).bind::<Jsonb,_>(json!(completion.recipient_package))
-        .get_result::<AttemptRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(|| invalid("completion no longer pending"))?;
-    let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let coland_storage::RealmActorMaterialCaller::Service { service_id, .. } = caller else {
-        return Err(invalid("completion recipient must be its Service"));
-    };
-    if service_id != &completion.destination_id {
-        return Err(invalid("completion recipient changed"));
+    crate::realm_management_archive::require_unfrozen(conn, &expected.realm_id).await?;
+    let row = sql_query(format!("SELECT {FIELDS} AS value FROM applet_authoring_completions WHERE applet_id=$1 AND request_digest=$2 AND delivered_at IS NULL FOR UPDATE"))
+        .bind::<Text,_>(expected.applet_id.as_str()).bind::<Text,_>(expected.request_digest.as_str())
+        .get_result::<Row>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+        .ok_or_else(|| unavailable("creation completion is no longer pending"))?;
+    let mut completion = decode(row)?;
+    if completion.realm_id != expected.realm_id
+        || completion.actor_id != expected.actor_id
+        || completion.creation_ref != expected.creation_ref
+        || completion.destination_id != expected.destination_id
+    {
+        return Err(unavailable("creation completion original changed"));
     }
-    // Retries never re-run authoring. A fresh read rechecks the current manager
-    // and signs the same accepted Event/Commit/fact at the current governance cut.
-    let request = arkret_models_integration::RealmActorMaterialRequest::Event {
+    let request = RealmActorMaterialRequest::Event {
         actor_id: completion.actor_id.clone(),
-        request_nonce: format!("{}{}", uuid::Uuid::now_v7(), uuid::Uuid::now_v7()),
+        request_nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
         target: completion.creation_ref.clone(),
     };
-    let material =
-        crate::realm_actor_material::read(conn, &request, caller, governor, sign).await?;
-    let arkret_models_integration::RealmActorMaterialResult::Event { event, .. } = &material.result
-    else {
-        return Err(invalid("completion material is not an Event"));
+    let caller = RealmActorMaterialCaller::CreationCompletion {
+        applet_id: completion.applet_id.clone(),
+        request_digest: completion.request_digest.clone(),
+        creation_ref: completion.creation_ref.clone(),
+        service_id: completion.destination_id.clone(),
     };
-    let candidate = crate::realm_actor_control::creation(event)?
-        .ok_or_else(|| invalid("completion original is not creation"))?;
-    if candidate.applet_id != completion.applet_id
-        || candidate.actor_id != completion.actor_id
-        || candidate.service_id != completion.destination_id
-    {
-        return Err(invalid("completion original identity changed"));
+    // Reprove the original and today's exact manager even for a cached body.
+    let current =
+        crate::realm_actor_material::read(conn, &request, &caller, governor, sign).await?;
+    if let Some(context) = &completion.context {
+        context.validate().map_err(unavailable)?;
+        if context.material.actor_id != completion.actor_id
+            || context.material.realm_id != completion.realm_id
+            || context.material.requester_actor_id
+                != arkret_wire::ActorId::service(completion.destination_id.clone())
+            || json!(context.material.result) != json!(current.result)
+        {
+            return Err(unavailable(
+                "cached completion differs from its original creation",
+            ));
+        }
     }
-    // Routing was frozen with the accepted creation. Uninstalling or replacing
-    // the business installation does not redirect this private receipt.
-    let package = &completion.recipient_package;
-    if package.service_id != completion.destination_id
-        || !package.endpoint_policy.endpoints.iter().any(|endpoint| {
-            endpoint.path == "/_arkret/edge/applet/transactions"
-                && endpoint.method == arkret_models_integration::AppletEndpointMethod::Post
-                && endpoint.auth
-                    == Some(arkret_models_integration::AppletEndpointAuth::WebhookSignature)
+    sql_query("UPDATE applet_authoring_completions SET next_attempt_at=clock_timestamp()+INTERVAL '1 second' WHERE applet_id=$1 AND request_digest=$2 AND delivered_at IS NULL")
+        .bind::<Text,_>(completion.applet_id.as_str()).bind::<Text,_>(completion.request_digest.as_str())
+        .execute(&mut *conn).await.map_err(PersistenceError::database)?;
+    let at = chrono::Utc::now();
+    if completion.source_id == *governor
+        && completion.delivery_key_digest.as_ref() == Some(delivery_key_digest)
+        && completion.context.as_ref().is_some_and(|context| {
+            context.material.expires_at > at + chrono::Duration::seconds(5)
+                && context.material.governance_generation == current.governance_generation
+                && context.material.authority_ref == current.authority_ref
         })
     {
-        return Err(invalid(
-            "original completion recipient endpoint is unavailable",
-        ));
+        return Ok(completion);
     }
-    let delivery = if let Some(prior) = row.delivery_attempt {
-        if row.delivery_digest.as_deref()
-            != Some(
-                arkret_canonical::canonical_sha256(&prior)
-                    .map_err(PersistenceError::database)?
-                    .as_str(),
-            )
-        {
-            return Err(invalid("delivery digest differs"));
-        }
-        let prior: AppletAuthoringDelivery = decode(prior)?;
-        if prior.source_id == *governor
-            && prior.context.material.governance_generation == material.governance_generation
-            && prior.context.material.authority_ref == material.authority_ref
-            && prior.endpoint == package.base_url
-            && prior.context.material.expires_at > now + chrono::Duration::seconds(20)
-        {
-            if json!(prior.context.material.result) != json!(material.result) {
-                return Err(invalid("completion original changed"));
-            }
-            prior
-        } else {
-            fresh(
-                governor,
-                &completion.destination_id,
-                &package.base_url,
-                material,
-            )
-        }
-    } else {
-        fresh(
-            governor,
-            &completion.destination_id,
-            &package.base_url,
-            material,
-        )
-    };
-    let value = json!(delivery);
-    let digest = arkret_canonical::canonical_sha256(&value).map_err(PersistenceError::database)?;
-    sql_query("UPDATE applet_authoring_completions SET delivery_attempt=$3,delivery_digest=$4,next_attempt_at=$5 WHERE applet_id=$1 AND request_digest=$2")
-        .bind::<Text,_>(completion.applet_id.as_str()).bind::<Text,_>(completion.request_digest.as_str()).bind::<Jsonb,_>(value).bind::<Text,_>(digest)
-        .bind::<Timestamptz,_>(now + chrono::Duration::seconds(30)).execute(conn).await.map_err(PersistenceError::database)?;
-    Ok(delivery)
-}
-
-fn fresh(
-    governor: &DidCoreId,
-    destination: &DidCoreId,
-    endpoint: &str,
-    material: arkret_models_integration::RealmActorMaterialOutcome,
-) -> AppletAuthoringDelivery {
-    AppletAuthoringDelivery {
-        source_id: governor.clone(),
-        destination_id: destination.clone(),
-        endpoint: endpoint.to_owned(),
-        idempotency_key: uuid::Uuid::now_v7().to_string(),
-        context: AppletManagedActorAuthoringContext { material },
-    }
+    completion.source_id = governor.clone();
+    completion.delivery_key_digest = Some(delivery_key_digest.clone());
+    completion.context = Some(AppletManagedActorAuthoringContext { material: current });
+    completion.idempotency_key = arkret_canonical::canonical_sha256(&json!({
+        "applet_id":completion.applet_id,"source_id":completion.source_id,"context":completion.context,
+    })).map_err(unavailable)?;
+    sql_query("UPDATE applet_authoring_completions SET source_id=$3,idempotency_key=$4,context=$5,delivery_key_digest=$6 WHERE applet_id=$1 AND request_digest=$2 AND delivered_at IS NULL")
+        .bind::<Text,_>(completion.applet_id.as_str()).bind::<Text,_>(completion.request_digest.as_str())
+        .bind::<Text,_>(completion.source_id.as_str()).bind::<Text,_>(&completion.idempotency_key)
+        .bind::<Jsonb,_>(json!(completion.context)).bind::<Text,_>(delivery_key_digest.as_str()).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+    Ok(completion)
 }
 
 pub(crate) async fn acknowledge(
     conn: &mut AsyncPgConnection,
-    applet: &AppletId,
-    request: &Hash,
-    governor: &DidCoreId,
+    applet: &arkret_wire::AppletId,
     digest: &Hash,
+    idempotency_key: &str,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
-    let row = sql_query("SELECT to_jsonb(realm_id) AS value FROM applet_authoring_completions WHERE applet_id=$1 AND request_digest=$2")
-        .bind::<Text,_>(applet.as_str()).bind::<Text,_>(request.as_str()).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    let realm = decode(row.value)?;
-    crate::realm_actor_control::require_current_governor(conn, &realm, governor).await?;
-    crate::realm_management_archive::require_unfrozen(conn, &realm).await?;
-    let updated = sql_query("UPDATE applet_authoring_completions SET delivered_at=COALESCE(delivered_at,$4) WHERE applet_id=$1 AND request_digest=$2 AND delivery_digest=$3 AND delivery_attempt->>'source_id'=$5")
-        .bind::<Text,_>(applet.as_str()).bind::<Text,_>(request.as_str()).bind::<Text,_>(digest.as_str()).bind::<Timestamptz,_>(at).bind::<Text,_>(governor.as_str()).execute(conn).await.map_err(PersistenceError::database)?;
+    let row = sql_query(format!("SELECT {FIELDS} AS value FROM applet_authoring_completions WHERE applet_id=$1 AND request_digest=$2"))
+        .bind::<Text,_>(applet.as_str()).bind::<Text,_>(digest.as_str())
+        .get_result::<Row>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+        .ok_or_else(|| PersistenceError::NotFound("accepted creation completion is absent".into()))?;
+    let completion = decode(row)?;
+    crate::realm_actor_control::require_current_governor(
+        conn,
+        &completion.realm_id,
+        &completion.source_id,
+    )
+    .await?;
+    crate::realm_management_archive::require_unfrozen(conn, &completion.realm_id).await?;
+    let (manager, _) = crate::realm_actor_control::current_source(
+        conn,
+        &completion.actor_id,
+        json!({"kind":"realm_actor_manager","actor_id":completion.actor_id}),
+    )
+    .await?;
+    if manager["service_id"] != json!(completion.destination_id) {
+        return Err(PersistenceError::NotFound(
+            "creation completion manager no longer qualified".into(),
+        ));
+    }
+    let updated = sql_query("UPDATE applet_authoring_completions SET delivered_at=COALESCE(delivered_at,$3) WHERE applet_id=$1 AND request_digest=$2 AND idempotency_key=$4")
+        .bind::<Text,_>(applet.as_str()).bind::<Text,_>(digest.as_str())
+        .bind::<Timestamptz,_>(at).bind::<Text,_>(idempotency_key).execute(&mut *conn).await.map_err(PersistenceError::database)?;
     if updated != 1 {
-        return Err(invalid(
-            "completion acknowledgement differs from current attempt",
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: creation completion delivery key changed".into(),
         ));
     }
     Ok(())

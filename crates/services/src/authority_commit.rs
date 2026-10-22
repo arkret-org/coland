@@ -1648,6 +1648,35 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    pub async fn prepare_applet_authoring_completion(
+        &self,
+        completion: &coland_storage::AppletAuthoringCompletion,
+        governor: &DidCoreId,
+        verification_method: &DidUrl,
+        signing_key: &SigningKey,
+    ) -> ServiceResult<coland_storage::AppletAuthoringCompletion> {
+        let sign = |body: &arkret_models_integration::RealmActorMaterialUnsigned| {
+            let signature = arkret_signatures::detached_object::sign_detached_object(
+                body,
+                DetachedSignatureContext::RealmActorMaterial,
+                verification_method.clone(),
+                body.issued_at,
+                signing_key,
+            )
+            .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))?;
+            Ok(body.clone().into_signed(signature))
+        };
+        let delivery_key_digest = arkret_wire::Hash::new(arkret_canonical::canonical_sha256(&serde_json::json!({
+            "verification_method":verification_method,
+            "public_key":arkret_canonical::base64url_encode(signing_key.verifying_key().as_bytes()),
+        })).map_err(|error| ServiceError::Internal(error.to_string()))?)
+            .map_err(|error| ServiceError::Internal(error.to_string()))?;
+        Ok(self
+            .store()
+            .prepare_applet_authoring_completion(completion, governor, &delivery_key_digest, &sign)
+            .await?)
+    }
+
     pub async fn applet_registration_for_realm(
         &self,
         realm: &arkret_wire::RealmId,

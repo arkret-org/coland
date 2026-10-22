@@ -37,18 +37,6 @@ pub struct PersistenceHandle {
 }
 
 impl PersistenceHandle {
-    pub async fn prepare_applet_authoring_delivery(
-        &self,
-        completion: &coland_storage::AppletAuthoringCompletion,
-        governor: &arkret_wire::DidCoreId,
-        caller: &coland_storage::RealmActorMaterialCaller,
-        sign: coland_storage::RealmActorMaterialSigner<'_>,
-    ) -> PersistenceResult<coland_storage::AppletAuthoringDelivery> {
-        self.persistence
-            .applets()
-            .prepare_authoring_delivery(completion, governor, caller, sign)
-            .await
-    }
     pub async fn management_review_request(
         &self,
         caller: &arkret_wire::ActorId,

@@ -27,47 +27,20 @@ async fn prepared_completion(
     fixture: &Fixture,
     completion: &coland_storage::AppletAuthoringCompletion,
 ) -> AppletAuthoringTransactionRequestBody {
-    let registration = fixture
-        .state
-        .test_persistence()
-        .authority_commits()
-        .applet_registration_for_realm(&completion.realm_id, &completion.applet_id)
-        .await
-        .unwrap();
-    let caller = coland_storage::RealmActorMaterialCaller::Service {
-        authenticated_document: applet_service_id_document(&completion.recipient_package),
-        service_id: completion.destination_id.clone(),
-        public_key: applet_service_signing_key(&registration.webhook_auth.key_ref)
-            .verifying_key()
-            .to_bytes(),
-        verification_method: registration.webhook_auth.key_ref,
-        expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
-    };
-    let sign = |body: &RealmActorMaterialUnsigned| {
-        let signature = arkret_signatures::detached_object::sign_detached_object(
-            body,
-            arkret_wire::DetachedSignatureContext::RealmActorMaterial,
-            fixture
-                .state
-                .service_verification_method("notary-key")
-                .unwrap(),
-            body.issued_at,
-            fixture.state.notary_signing_key().as_ref(),
-        )
-        .map_err(coland_storage::PersistenceError::database)?;
-        Ok(body.clone().into_signed(signature))
-    };
-    let delivery = fixture
-        .state
-        .test_persistence()
-        .applets()
-        .prepare_authoring_delivery(completion, &fixture.state.service_core_id(), &caller, &sign)
-        .await
-        .unwrap();
+    let application = coland_services::authority_commit::AuthorityCommitApplication::new(
+        coland_services::persistence::PersistenceHandle::from_shared(fixture.state.test_persistence()),
+        fixture.state.config().to_device_queue_capacity,
+    );
+    let delivery = application.prepare_applet_authoring_completion(
+        completion,
+        &fixture.state.service_core_id(),
+        &fixture.state.service_verification_method("notary-key").unwrap(),
+        fixture.state.notary_signing_key().as_ref(),
+    ).await.unwrap();
     AppletAuthoringTransactionRequestBody {
         applet_id: completion.applet_id.clone(),
         source_id: delivery.source_id,
-        authoring_context: delivery.context,
+        authoring_context: delivery.context.expect("prepared completion"),
     }
 }
 
@@ -656,16 +629,7 @@ pub(crate) fn setup_with_mls(
                 .iter()
                 .find(|row| row["creation_ref"]["event_id"] == json!(created.event.event_id))
                 .expect("durable original completion remains available after transport delivery");
-            let completion = coland_storage::AppletAuthoringCompletion {
-                applet_id: serde_json::from_value(row["applet_id"].clone()).unwrap(),
-                request_digest: serde_json::from_value(row["request_digest"].clone()).unwrap(),
-                realm_id: serde_json::from_value(row["realm_id"].clone()).unwrap(),
-                actor_id: serde_json::from_value(row["actor_id"].clone()).unwrap(),
-                creation_ref: serde_json::from_value(row["creation_ref"].clone()).unwrap(),
-                destination_id: serde_json::from_value(row["destination_id"].clone()).unwrap(),
-                recipient_package: serde_json::from_value(row["recipient_package"].clone())
-                    .unwrap(),
-            };
+            let completion: coland_storage::AppletAuthoringCompletion = serde_json::from_value(row.clone()).unwrap();
             let original = prepared_completion(&fixture, &completion).await;
             edge.install_managed_authoring_completion(&original)
                 .await

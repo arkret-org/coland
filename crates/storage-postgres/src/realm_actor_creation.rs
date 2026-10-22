@@ -166,7 +166,14 @@ pub(crate) async fn admit(
     )
     .await?;
     crate::applet_configuration::accepted(conn, event).await?;
-    crate::applet_completion::retain(conn, event, commit, digest).await?;
+    crate::applet_completion::retain(
+        conn,
+        event,
+        commit,
+        digest,
+        &transaction.expected_authority.service_id,
+    )
+    .await?;
     Ok(outcome)
 }
 

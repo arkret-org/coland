@@ -22,6 +22,76 @@ async fn grant_boundary_send(
         .await
 }
 
+async fn grant_boundary_assert_rejected(
+    fixture: &Fixture,
+    event: &Event,
+    status: StatusCode,
+    value: Value,
+    reason: &str,
+) {
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "per-Event business refusal: {value}"
+    );
+    assert!(value.get("committed_event_refs").is_none());
+    let outcome: AppletTransactionOutcome = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        outcome,
+        AppletTransactionOutcome::Rejected {
+            rejections: vec![arkret_models_integration::AppletEventRejection {
+                event_id: Some(event.event_id.clone()),
+                reason_code: arkret_wire::ReasonCode::from_wire(reason),
+                retry_after_ms: None,
+            }],
+            retry_after_ms: None,
+        },
+    );
+    assert!(
+        fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .committed_event(&event.event_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a rejected Event must not acquire a Commit"
+    );
+}
+
+async fn grant_boundary_assert_accepted(
+    fixture: &Fixture,
+    event: &Event,
+    value: Value,
+) -> AppletTransactionOutcome {
+    let outcome: AppletTransactionOutcome = serde_json::from_value(value).unwrap();
+    let original = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&original.event, event);
+    assert_eq!(
+        outcome,
+        AppletTransactionOutcome::Accepted {
+            committed_event_refs: vec![arkret_wire::CommittedEventRef {
+                event_id: event.event_id.clone(),
+                commit_id: original.commit.commit_id,
+                stream_ref: original.commit.stream_ref,
+                stream_position: original.commit.stream_position,
+            }],
+            rejections: Vec::new(),
+            retry_after_ms: None,
+        },
+        "acceptance must disclose exactly the original Event and covering Commit"
+    );
+    outcome
+}
+
 async fn grant_boundary_historical_source(
     fixture: &Fixture,
     package: &AppletPackage,
@@ -206,11 +276,16 @@ pub(super) async fn grant_authority_boundaries(
     );
     let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
     let (status, problem) = boxed_step(|| grant_boundary_send(fixture, package, &relinquish)).await;
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "Service is not the child subject: {problem}"
-    );
+    boxed_step(|| {
+        grant_boundary_assert_rejected(
+            fixture,
+            &relinquish,
+            status,
+            problem,
+            arkret_wire::ReasonCode::GRANT_RELINQUISH_NOT_SUBJECT,
+        )
+    })
+    .await;
     assert_eq!(
         boxed_step(|| obligation_mls_footprint(fixture)).await,
         before
@@ -232,8 +307,8 @@ pub(super) async fn grant_authority_boundaries(
         StatusCode::OK,
         "original issuer cleanup after parent revocation: {value}"
     );
-    let accepted: AppletTransactionOutcome = serde_json::from_value(value).unwrap();
-    assert_eq!(accepted.status(), AppletTransactionStatus::Accepted);
+    let accepted_revoke =
+        boxed_step(|| grant_boundary_assert_accepted(fixture, &revoke, value)).await;
     let rows = fixture
         .state
         .test_persistence()
@@ -254,6 +329,11 @@ pub(super) async fn grant_authority_boundaries(
         StatusCode::OK,
         "exact issuer cleanup retry: {replay}"
     );
+    let replay: AppletTransactionOutcome = serde_json::from_value(replay).unwrap();
+    assert_eq!(
+        replay, accepted_revoke,
+        "exact retry must recover the original Commit refs"
+    );
     assert_eq!(
         boxed_step(|| obligation_mls_footprint(fixture)).await,
         before
@@ -268,11 +348,16 @@ pub(super) async fn grant_authority_boundaries(
         &signer,
     );
     let (status, problem) = boxed_step(|| grant_boundary_send(fixture, package, &stale)).await;
-    assert_eq!(
-        status,
-        StatusCode::CONFLICT,
-        "fresh cleanup must compare exact revision: {problem}"
-    );
+    boxed_step(|| {
+        grant_boundary_assert_rejected(
+            fixture,
+            &stale,
+            status,
+            problem,
+            arkret_wire::ErrorCode::CAS_CONFLICT,
+        )
+    })
+    .await;
     assert_eq!(
         boxed_step(|| obligation_mls_footprint(fixture)).await,
         before
@@ -305,11 +390,16 @@ pub(super) async fn grant_authority_boundaries(
     ] {
         let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
         let (status, problem) = boxed_step(|| grant_boundary_send(fixture, package, &event)).await;
-        assert_eq!(
-            status,
-            StatusCode::FORBIDDEN,
-            "BridgeError requires its exact installed source: {problem}"
-        );
+        boxed_step(|| {
+            grant_boundary_assert_rejected(
+                fixture,
+                &event,
+                status,
+                problem,
+                arkret_wire::ErrorCode::FAILED_PRECONDITION,
+            )
+        })
+        .await;
         assert_eq!(
             boxed_step(|| obligation_mls_footprint(fixture)).await,
             before
@@ -326,8 +416,8 @@ pub(super) async fn grant_authority_boundaries(
     );
     let (status, value) = boxed_step(|| grant_boundary_send(fixture, package, &event)).await;
     assert_eq!(status, StatusCode::OK, "real Service BridgeError: {value}");
-    let accepted: AppletTransactionOutcome = serde_json::from_value(value).unwrap();
-    assert_eq!(accepted.status(), AppletTransactionStatus::Accepted);
+    let accepted_audit =
+        boxed_step(|| grant_boundary_assert_accepted(fixture, &event, value)).await;
     let original = fixture
         .state
         .test_persistence()
@@ -343,6 +433,11 @@ pub(super) async fn grant_authority_boundaries(
     let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
     let (status, replay) = boxed_step(|| grant_boundary_send(fixture, package, &event)).await;
     assert_eq!(status, StatusCode::OK, "BridgeError exact retry: {replay}");
+    let replay: AppletTransactionOutcome = serde_json::from_value(replay).unwrap();
+    assert_eq!(
+        replay, accepted_audit,
+        "exact audit retry must retain its original Commit refs"
+    );
     assert_eq!(
         boxed_step(|| obligation_mls_footprint(fixture)).await,
         before
@@ -368,11 +463,16 @@ pub(super) async fn grant_authority_boundaries(
     );
     let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
     let (status, problem) = boxed_step(|| grant_boundary_send(fixture, package, &fresh)).await;
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "closed exact BridgeError grant: {problem}"
-    );
+    boxed_step(|| {
+        grant_boundary_assert_rejected(
+            fixture,
+            &fresh,
+            status,
+            problem,
+            arkret_wire::ErrorCode::FAILED_PRECONDITION,
+        )
+    })
+    .await;
     assert_eq!(
         boxed_step(|| obligation_mls_footprint(fixture)).await,
         before

@@ -430,9 +430,15 @@ async fn require_applet_producer_inner(
                 "ak.applet.ghost.provision"
             }
         };
-        if !native_service || !grant.actions.iter().any(|value| value == action) {
+        if !native_service {
             return Err(denied(
                 "creation requires its exact Service provisioning permission",
+            ));
+        }
+        if !grant.actions.iter().any(|value| value == action) {
+            return Err(PersistenceError::Conflict(
+                "capability_denied: creation requires its exact Service provisioning permission"
+                    .into(),
             ));
         }
         let facts = coland_storage::OperationFacts {

@@ -734,25 +734,12 @@ async fn boundary_encrypted_message(
     candidate: &RealmActorCreatePayload,
     authority: &coland_storage::AppletManagedDeviceAuthority,
     child: &GrantId,
+    strand_id: &arkret_wire::StrandId,
     group: &mut arkret_mls::ArkretMlsGroup,
 ) -> Event {
     let scope = candidate.creation_scope.clone();
-    let mut strand = fixture.admin_event(
-        EventKind::StrandCreate,
-        scope.clone(),
-        json!({"object":{
-        "schema":"ak.schema.strand.v1","realm_id":fixture.realm,
-        "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
-        "metadata":{"title":"Actual native encrypted boundary payload"},"state":"active",
-        "created_by":ActorId::account(fixture.pcr.history.account.clone()),
-        "created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}}),
-    );
-    strand.payload.get_mut("object").unwrap()["created_at"] = json!(strand.created_at);
-    strand = fixture.sign_admin(strand);
-    let strand_id = arkret_wire::StrandId::from_event_id(&strand.event_id);
-    boxed_step(|| submit_human_event(fixture, strand)).await;
     let mut payload = arkret::MessageCreatePayload::with_content(
-        strand_id,
+        strand_id.clone(),
         "discussion",
         arkret::ContentBlock::new(
             arkret::ContentBlockKind::Text,
@@ -839,12 +826,15 @@ async fn boundary_encrypted_read_expiry(
     candidate: &RealmActorCreatePayload,
     authority: &coland_storage::AppletManagedDeviceAuthority,
     child: &GrantId,
+    strand_id: &arkret_wire::StrandId,
     group: &mut arkret_mls::ArkretMlsGroup,
 ) {
     let deadline = boxed_step(|| boundary_install_deadline(fixture, package, child)).await;
     assert!(authority.expires_at > deadline + chrono::Duration::seconds(10));
     let event = boxed_step(|| {
-        boundary_encrypted_message(fixture, package, candidate, authority, child, group)
+        boundary_encrypted_message(
+            fixture, package, candidate, authority, child, strand_id, group,
+        )
     })
     .await;
     let path = format!("/_arkret/self/committed-events/{}", event.event_id);
@@ -1068,7 +1058,7 @@ pub(super) async fn realm_actor_mls_boundary(
         BoundaryCase::EncryptedReadExpiry => {
             boxed_step(|| {
                 boundary_encrypted_read_expiry(
-                    fixture, package, candidate, authority, child, &mut group,
+                    fixture, package, candidate, authority, child, &source.0, &mut group,
                 )
             })
             .await
@@ -1108,6 +1098,36 @@ pub(super) async fn run_boundary(
 // requester retains its complete RealmActor identity and has no personal PCR.
 async fn boundary_refresh_accepted_human_pcr(human: &mut Fixture) {
     let persistence = human.state.test_persistence();
+    // Pin the serving Station and its actual self-event signer independently
+    // of the Commit being checked. The durable Service document must publish
+    // this exact method as an assertion method with the runtime's public key.
+    let expected_method = human
+        .state
+        .service_verification_method("federation-fanout-key")
+        .unwrap();
+    let stored = human.state.stored_service_identity().await.unwrap();
+    stored.validate().unwrap();
+    assert_eq!(
+        stored.identity.service_id,
+        human.pcr.history.account.station_id
+    );
+    assert_eq!(stored.identity.did, human.state.service_did());
+    assert_eq!(stored.did_document.id, stored.identity.did);
+    assert!(
+        stored
+            .did_document
+            .assertion_method
+            .iter()
+            .any(|method| method == expected_method.as_str())
+    );
+    let document: arkret_models_identity::DidDocument =
+        serde_json::from_value(serde_json::to_value(&stored.did_document).unwrap()).unwrap();
+    let commit_key =
+        arkret_identity::public_key_material_from_document(&document, &expected_method).unwrap();
+    assert_eq!(
+        commit_key.ed25519_bytes().unwrap(),
+        human.state.notary_verifying_key().to_bytes()
+    );
     let history = &mut human.pcr.history;
     assert_eq!(history.events.len(), history.commits.len());
     let stream = history.commits[0].stream_ref.clone();
@@ -1188,18 +1208,13 @@ async fn boundary_refresh_accepted_human_pcr(human: &mut Fixture) {
         .unwrap();
         assert_eq!(
             accepted.commit.signature.verification_method,
-            human
-                .state
-                .service_verification_method("notary-key")
-                .unwrap()
+            expected_method
         );
         arkret_signatures::detached_object::verify_detached_object_signature(
             &accepted.commit.signature,
             &arkret_canonical::unsigned_value(&accepted.commit, &["signature"]).unwrap(),
             arkret_wire::DetachedSignatureContext::RealmCommit,
-            &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
-                bytes: human.state.notary_verifying_key().to_bytes().to_vec(),
-            },
+            &commit_key,
         )
         .unwrap();
         cursor = accepted

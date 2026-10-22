@@ -380,31 +380,13 @@ fn realm_review_candidate(
     grant: &arkret_wire::GrantId,
     bot: bool,
 ) -> (RealmActorCreatePayload, Ed25519PayloadSigner) {
-    let (candidate, signer) = realm_candidate(
+    authority_admission_candidate(
         &context.package,
-        &context.factory.fixture.realm,
+        &context.factory.fixture,
         &context.registration.event_id,
         grant,
-    );
-    if !bot {
-        return (candidate, signer);
-    }
-    let mut value = json!(candidate);
-    value.as_object_mut().unwrap().remove("control_signature");
-    value.as_object_mut().unwrap().remove("external_ref");
-    value["actor_role"] = json!("bot");
-    let transcript: RealmActorCreationTranscript = serde_json::from_value(value.clone()).unwrap();
-    value["control_signature"] = json!(
-        sign_detached_object(
-            &transcript,
-            DetachedSignatureContext::RealmActorCreation,
-            candidate.control_method_kid,
-            candidate.control_signature.created_at,
-            &SigningKey::from_bytes(&[33; 32])
-        )
-        .unwrap()
-    );
-    (serde_json::from_value(value).unwrap(), signer)
+        bot,
+    )
 }
 
 fn realm_review_create_event(
@@ -806,6 +788,8 @@ async fn realm_review_governance_only_creation(pool: PgPool) {
         boxed_step(|| realm_review_creation_grant(&context, "ak.applet.bot.provision", true)).await;
     let (candidate, signer) = realm_review_candidate(&context, &grant, true);
     let fresh = realm_review_create_event(&candidate, &signer);
+    assert_ne!(fresh.actor_id, event.actor_id);
+    assert_ne!(fresh.payload["request_id"], event.payload["request_id"]);
     let votes = vec![realm_review_vote(
         fixture,
         &fresh,

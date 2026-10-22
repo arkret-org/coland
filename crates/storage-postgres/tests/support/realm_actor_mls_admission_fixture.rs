@@ -496,7 +496,10 @@ fn admission_signed_claim(
         required_capabilities: vec![arkret_wire::NonEmptyString::new("ak.content.v1").unwrap()],
         expires_at: at + chrono::Duration::minutes(4),
         target_device_ids: vec![recipient.device_id.clone()],
-        target_keypackage_ref: Some(arkret_wire::KeyPackageRef::new(reference).unwrap()),
+        // Exact references select ordinary single-use packages only. A
+        // negotiated last-resort claim selects this Device's available pool.
+        target_keypackage_ref: (!last_resort)
+            .then(|| arkret_wire::KeyPackageRef::new(reference).unwrap()),
         target_agent_id: None,
         target_agent_verification_method: None,
         target_agent_key_authorize_event_id: None,
@@ -586,6 +589,53 @@ async fn admission_native_last_resort(
     let reference =
         boxed_step(|| admission_native_upload(fixture, &recipient, seed, &upload)).await;
     let request = admission_last_resort_claim(fixture, &recipient, &reference);
+    assert!(request.target_keypackage_ref.is_none());
+    assert_eq!(request.last_resort_allowed, Some(true));
+    // A real Device signature cannot make the closed exact-reference /
+    // last-resort combination legal. Reject it before accepting the same
+    // correctly authored pool-selection request below.
+    let mut exact_last_resort = request.clone();
+    exact_last_resort.target_keypackage_ref =
+        Some(arkret_wire::KeyPackageRef::new(reference.as_str()).unwrap());
+    let signing_input = keypackage_claim_authorization_signing_bytes(
+        &exact_last_resort.unsigned_request(),
+        &exact_last_resort.service_binding,
+        &exact_last_resort.requester_authorization,
+    )
+    .unwrap();
+    let history = &fixture.pcr.history;
+    let PeerKeyPackageRequesterAuthorization::Device { signature, .. } =
+        &mut exact_last_resort.requester_authorization
+    else {
+        unreachable!()
+    };
+    *signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
+        &history.founding_device_signing_seed,
+        history.device_verification_method.as_str(),
+        &signing_input,
+    )
+    .unwrap();
+    assert!(exact_last_resort.validate_shape().is_err());
+    let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
+    let (status, problem) = boxed_step(|| {
+        account_request(
+            fixture,
+            reqwest::Method::POST,
+            "/_arkret/self/keys/keypackages/claim",
+            ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
+            Some(json!(exact_last_resort)),
+        )
+    })
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert_eq!(
+        problem["type"],
+        "https://arkret.org/problems/schema_violation"
+    );
+    assert_eq!(
+        boxed_step(|| obligation_mls_footprint(fixture)).await,
+        before
+    );
     let (status, value) = boxed_step(|| {
         account_request(
             fixture,

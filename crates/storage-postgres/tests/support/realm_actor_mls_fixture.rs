@@ -2058,15 +2058,22 @@ pub(super) async fn human_adds_runtime_to_group(
         .await
         .unwrap()
         .unwrap();
-    group
-        .install_accepted_commit(
-            &arkret_wire::CommittedEventFullView {
-                event: accepted.event,
-                commit: accepted.commit,
-            },
-            &current,
-        )
-        .unwrap();
+    let accepted = arkret_wire::CommittedEventFullView {
+        event: accepted.event,
+        commit: accepted.commit,
+    };
+    group.install_accepted_commit(&accepted, &current).unwrap();
+    // The accepted Add changes the occupied leaves. Recover their identities
+    // from the real authenticated roster and original Genesis material before
+    // this member can author another transition by ActorId.
+    boxed_step(|| install_received_roster(fixture, &accepted, &mut group)).await;
+    assert!(
+        group
+            .verified_leaf_bindings()
+            .unwrap()
+            .iter()
+            .any(|binding| binding.actor_id == device.actor_id)
+    );
     group
 }
 
@@ -2139,15 +2146,19 @@ pub(super) async fn human_rotates_out_runtime(
         .await
         .unwrap()
         .unwrap();
-    group
-        .install_accepted_commit(
-            &arkret_wire::CommittedEventFullView {
-                event: accepted.event,
-                commit: accepted.commit,
-            },
-            &current,
-        )
-        .unwrap();
+    let accepted = arkret_wire::CommittedEventFullView {
+        event: accepted.event,
+        commit: accepted.commit,
+    };
+    group.install_accepted_commit(&accepted, &current).unwrap();
+    boxed_step(|| install_received_roster(fixture, &accepted, group)).await;
+    assert!(
+        group
+            .verified_leaf_bindings()
+            .unwrap()
+            .iter()
+            .all(|binding| binding.actor_id != device.actor_id)
+    );
 }
 
 include!("realm_actor_obligation_fixture.rs");

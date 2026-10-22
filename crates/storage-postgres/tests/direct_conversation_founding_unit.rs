@@ -3932,6 +3932,7 @@ async fn assert_direct_governance_fixed(
             "applet_managed_device_nonces",
             "applet_registration_instances",
             "applet_registration_current_results",
+            "applet_grant_registration_sources",
             "applet_managed_identities",
             "applet_namespace_claims",
             "applet_installations",

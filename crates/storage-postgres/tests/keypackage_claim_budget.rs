@@ -461,7 +461,7 @@ fn agent_request(
     );
     let event = arkret_wire::EventId::from_digest(
         arkret_canonical::DigestSuite::Sha256,
-        arkret_canonical::sha256_bytes(&[index]),
+        arkret_canonical::sha256_bytes([index]),
     );
     let method = format!("did:web:{requester_agent}.example#runtime-{index}");
     let signed_at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());

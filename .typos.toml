@@ -4,6 +4,10 @@ extend-ignore-identifiers-re = [
     "AttributeID.*Supress.*",
 ]
 extend-ignore-re = [
+    # PowerShell's case-insensitive inequality operator.
+    '-ine\b',
+    # Windows tasklist's output-format switch.
+    '"/fo"',
     # multibase/base58 strings (did:key, did:webvh)
     "z[1-9A-HJ-NP-Za-km-z]{20,}",
     # long base64 / base64url runs (signatures, JWT segments, fixtures)

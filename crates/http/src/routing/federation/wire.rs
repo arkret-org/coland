@@ -6,7 +6,8 @@
 /// on every inbound federation request.
 #[derive(Debug, Clone)]
 pub(crate) struct FederationTrustHeaders {
-    pub source_trust_domain: arkret_identifiers::TrustDomainId,
+    // Retain the validated source; peer signature verification authenticates it separately.
+    pub _source_trust_domain: arkret_identifiers::TrustDomainId,
     pub destination_trust_domain: arkret_identifiers::TrustDomainId,
 }
 
@@ -38,7 +39,7 @@ impl FederationTrustHeaders {
             )
         })?;
         Ok(Self {
-            source_trust_domain: source,
+            _source_trust_domain: source,
             destination_trust_domain: destination,
         })
     }

@@ -1741,6 +1741,10 @@ impl AuthorityCommitApplication {
             .realm_actor_creation_replay(event, digest, governor)
             .await?)
     }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Admission binds the complete original producer, request and current authority cut."
+    )]
     pub async fn admit_realm_actor_creation(
         &self,
         event: &Event,
@@ -1796,6 +1800,10 @@ impl AuthorityCommitApplication {
             .realm_actor_recovery_replay(event, digest, governor)
             .await?)
     }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Admission binds the complete original producer, request and current authority cut."
+    )]
     pub async fn admit_realm_actor_recovery(
         &self,
         event: &Event,
@@ -1850,6 +1858,10 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Admission binds the complete original producer, request and current authority cut."
+    )]
     pub async fn admit_realm_actor_owner_control(
         &self,
         event: &Event,
@@ -1903,6 +1915,10 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Admission binds the complete original producer, request and current authority cut."
+    )]
     pub async fn admit_realm_actor_profile(
         &self,
         event: &Event,
@@ -2573,6 +2589,10 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Admission binds the complete original producer, request and current authority cut."
+    )]
     pub async fn issue_stream_history_snapshot_for_account(
         &self,
         realm_id: &arkret_wire::RealmId,

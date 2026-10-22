@@ -180,23 +180,21 @@ async fn materialize_one(
         request_acceptance_receipt,
         ..
     } = &outcome
-    {
-        if request_acceptance_receipt
+        && request_acceptance_receipt
             .core
             .peer
             .delivery_station_id()
             .as_str()
             == state.service_id()
-        {
-            Box::pin(
-                crate::routing::identity::contact_federation::enqueue_glare_finalize_if_ready(
-                    state,
-                    &ready.intent.plan.holder.contact_actor_id(),
-                    &request_acceptance_receipt.core.peer.contact_actor_id(),
-                ),
-            )
-            .await?;
-        }
+    {
+        Box::pin(
+            crate::routing::identity::contact_federation::enqueue_glare_finalize_if_ready(
+                state,
+                &ready.intent.plan.holder.contact_actor_id(),
+                &request_acceptance_receipt.core.peer.contact_actor_id(),
+            ),
+        )
+        .await?;
     }
     Ok(())
 }

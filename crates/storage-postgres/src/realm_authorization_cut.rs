@@ -1133,6 +1133,10 @@ impl RealmAuthorizationCut {
         .await
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Admission binds the original Event, operation and qualified approval cut."
+    )]
     async fn admit_evaluation_in_connection(
         &self,
         conn: &mut AsyncPgConnection,
@@ -3274,12 +3278,12 @@ impl RealmAuthorizationCut {
             return Ok((admission, Vec::new(), dependencies));
         }
         if matches!(
-            self.evaluate(&actions, target, facts, commit.committed_at),
+            self.evaluate(actions, target, facts, commit.committed_at),
             GrantEvaluation::Denied | GrantEvaluation::Quarantined
         ) {
             self.admit_actions_in_connection(
                 conn,
-                &actions,
+                actions,
                 target,
                 facts,
                 owner,

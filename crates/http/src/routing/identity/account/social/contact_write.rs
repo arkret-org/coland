@@ -745,17 +745,15 @@ async fn prepare_context<K: arkret_event_draft::EventSpec, T: Serialize>(
             .request_slot_states
             .iter()
             .find(|s| s.owner_id == holder.contact_actor_id())
-        {
-            if record
+            && record
                 .current_state
                 .direction(&holder)
                 .is_none_or(|d| d.head_operation.event().event_id != slot.head_event_ref)
-            {
-                return Err(crate::app_error!(
-                    TemporarilyUnavailable,
-                    "previous Contact source confirmation is incomplete"
-                ));
-            }
+        {
+            return Err(crate::app_error!(
+                TemporarilyUnavailable,
+                "previous Contact source confirmation is incomplete"
+            ));
         }
     }
     let request_hash = arkret_canonical::canonical_sha256(&json!({

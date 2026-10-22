@@ -32,7 +32,7 @@ impl EndpointWindow {
 enum Endpoint {
     RemoteDevice,
     RealmDevice {
-        authority: coland_storage::AppletManagedDeviceAuthority,
+        authority: Box<coland_storage::AppletManagedDeviceAuthority>,
     },
     Device {
         account: AccountId,
@@ -228,7 +228,9 @@ async fn realm_device(
             not_before: Some(authority.not_before),
             expires_at: Some(authority.expires_at),
         },
-        endpoint: Endpoint::RealmDevice { authority },
+        endpoint: Endpoint::RealmDevice {
+            authority: Box::new(authority),
+        },
     })
 }
 

@@ -87,6 +87,8 @@ uuid = { workspace = true, features = ["v4", "v7", "serde"] }
 zeroize = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
+# Shared integration fixtures exercise the embedded production Agent runtime.
+savfox-gateway-server.workspace = true
 arkret-bridge-runtime = { version = "0.3.0", path = "../../../bridges/crates/runtime", default-features = false, features = ["edge", "managed-authoring"] }
 garth = { version = "0.3.0", path = "../../../garth", default-features = false }
 rand_chacha = "0.10.0"

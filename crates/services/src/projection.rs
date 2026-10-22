@@ -990,6 +990,66 @@ fn morph_write_through_record(
     })
 }
 
+fn key_package_record_from_projection(
+    row: coland_domain::reducer::MlsKeyPackageProjection,
+) -> crate::events::MlsKeyPackageState {
+    crate::events::MlsKeyPackageState {
+        id: row.id,
+        keypackage_ref: row.keypackage_ref,
+        keypackage_digest: row.keypackage_digest,
+        owner_actor_id: row.owner_actor_id,
+        effective_scope: row.effective_scope,
+        actor_id: row.actor_id,
+        device_id: row.device_id,
+        endpoint_verification_method: row.endpoint_verification_method,
+        key_package_bytes: row.key_package_bytes,
+        capabilities: row.capabilities,
+        capabilities_digest: row.capabilities_digest,
+        last_resort: row.last_resort,
+        last_resort_realm_id: row.last_resort_realm_id,
+        lifetime_not_before: row.lifetime.not_before,
+        lifetime_not_after: row.lifetime.not_after,
+        claimed_by_mls_group_id: row.claimed_by,
+        device_authorize_event_id: row.device_authorize_event_id,
+        agent_key_authorize_event_id: row.agent_key_authorize_event_id,
+        claimed_at: row.claimed_at,
+        claim_expires_at_unix_ms: row.claim_expires_at_unix_ms,
+        consumed_at: row.consumed_at,
+        created_at: row.created_at,
+    }
+}
+
+pub(crate) fn key_package_projection_from_record(
+    row: crate::events::MlsKeyPackageState,
+) -> coland_domain::reducer::MlsKeyPackageProjection {
+    coland_domain::reducer::MlsKeyPackageProjection {
+        id: row.id,
+        keypackage_ref: row.keypackage_ref,
+        keypackage_digest: row.keypackage_digest,
+        owner_actor_id: row.owner_actor_id,
+        effective_scope: row.effective_scope,
+        actor_id: row.actor_id,
+        device_id: row.device_id,
+        endpoint_verification_method: row.endpoint_verification_method,
+        lifetime: coland_domain::reducer::KeyPackageLifetimeProjection {
+            not_before: row.lifetime_not_before,
+            not_after: row.lifetime_not_after,
+        },
+        key_package_bytes: row.key_package_bytes,
+        capabilities: row.capabilities,
+        capabilities_digest: row.capabilities_digest,
+        last_resort: row.last_resort,
+        last_resort_realm_id: row.last_resort_realm_id,
+        claimed_by: row.claimed_by_mls_group_id,
+        device_authorize_event_id: row.device_authorize_event_id,
+        agent_key_authorize_event_id: row.agent_key_authorize_event_id,
+        claimed_at: row.claimed_at,
+        claim_expires_at_unix_ms: row.claim_expires_at_unix_ms,
+        consumed_at: row.consumed_at,
+        created_at: row.created_at,
+    }
+}
+
 #[cfg(test)]
 mod projection_service_tests {
     use arkret_wire::{Did, ScopeRef, project_did_to_core_id};
@@ -1284,65 +1344,5 @@ mod projection_service_tests {
             .unwrap_err();
         assert_eq!(error.operation_index, 1);
         assert!(error.reason.contains("partially projected"));
-    }
-}
-
-fn key_package_record_from_projection(
-    row: coland_domain::reducer::MlsKeyPackageProjection,
-) -> crate::events::MlsKeyPackageState {
-    crate::events::MlsKeyPackageState {
-        id: row.id,
-        keypackage_ref: row.keypackage_ref,
-        keypackage_digest: row.keypackage_digest,
-        owner_actor_id: row.owner_actor_id,
-        effective_scope: row.effective_scope,
-        actor_id: row.actor_id,
-        device_id: row.device_id,
-        endpoint_verification_method: row.endpoint_verification_method,
-        key_package_bytes: row.key_package_bytes,
-        capabilities: row.capabilities,
-        capabilities_digest: row.capabilities_digest,
-        last_resort: row.last_resort,
-        last_resort_realm_id: row.last_resort_realm_id,
-        lifetime_not_before: row.lifetime.not_before,
-        lifetime_not_after: row.lifetime.not_after,
-        claimed_by_mls_group_id: row.claimed_by,
-        device_authorize_event_id: row.device_authorize_event_id,
-        agent_key_authorize_event_id: row.agent_key_authorize_event_id,
-        claimed_at: row.claimed_at,
-        claim_expires_at_unix_ms: row.claim_expires_at_unix_ms,
-        consumed_at: row.consumed_at,
-        created_at: row.created_at,
-    }
-}
-
-pub(crate) fn key_package_projection_from_record(
-    row: crate::events::MlsKeyPackageState,
-) -> coland_domain::reducer::MlsKeyPackageProjection {
-    coland_domain::reducer::MlsKeyPackageProjection {
-        id: row.id,
-        keypackage_ref: row.keypackage_ref,
-        keypackage_digest: row.keypackage_digest,
-        owner_actor_id: row.owner_actor_id,
-        effective_scope: row.effective_scope,
-        actor_id: row.actor_id,
-        device_id: row.device_id,
-        endpoint_verification_method: row.endpoint_verification_method,
-        lifetime: coland_domain::reducer::KeyPackageLifetimeProjection {
-            not_before: row.lifetime_not_before,
-            not_after: row.lifetime_not_after,
-        },
-        key_package_bytes: row.key_package_bytes,
-        capabilities: row.capabilities,
-        capabilities_digest: row.capabilities_digest,
-        last_resort: row.last_resort,
-        last_resort_realm_id: row.last_resort_realm_id,
-        claimed_by: row.claimed_by_mls_group_id,
-        device_authorize_event_id: row.device_authorize_event_id,
-        agent_key_authorize_event_id: row.agent_key_authorize_event_id,
-        claimed_at: row.claimed_at,
-        claim_expires_at_unix_ms: row.claim_expires_at_unix_ms,
-        consumed_at: row.consumed_at,
-        created_at: row.created_at,
     }
 }

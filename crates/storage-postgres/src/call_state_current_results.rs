@@ -281,7 +281,7 @@ async fn read_before_in_connection(
         .generation;
     let current: CallStateCurrentValue =
         serde_json::from_value(row.value).map_err(PersistenceError::database)?;
-    current.validate().map_err(|e| invalid(&e.to_string()))?;
+    current.validate().map_err(invalid)?;
     Ok(Some(coland_storage::CallCurrentCut {
         scope_ref: scope,
         head: arkret_wire::CommitStreamHead {
@@ -582,15 +582,13 @@ async fn commit_state(
         expected_revision,
         ..
     }) = &payload.moderation_delta
-    {
-        if current.moderation_revision.as_ref() != Some(expected_revision)
+        && (current.moderation_revision.as_ref() != Some(expected_revision)
             || !current
                 .moderation
                 .iter()
-                .any(|r| &r.actor_id == actor_id && r.action == CallParticipantRemovalAction::Ban)
-        {
-            return Err(conflict("active ban or moderation revision changed"));
-        }
+                .any(|r| &r.actor_id == actor_id && r.action == CallParticipantRemovalAction::Ban))
+    {
+        return Err(conflict("active ban or moderation revision changed"));
     }
     if payload.recording_transition.is_some() || payload.transcript_transition.is_some() {
         return Err(conflict(

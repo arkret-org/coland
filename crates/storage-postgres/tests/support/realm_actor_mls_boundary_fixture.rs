@@ -816,8 +816,8 @@ async fn boundary_encrypted_message(
         .unwrap()
         .unwrap();
     assert_eq!(accepted.event, event);
-    assert!(event.payload.get("encrypted_content").is_some());
-    assert!(event.payload.get("content").is_none());
+    assert!(event.payload.contains_key("encrypted_content"));
+    assert!(!event.payload.contains_key("content"));
     event
 }
 
@@ -1052,6 +1052,7 @@ async fn boundary_exact_floor_expiry(
     assert!(matches!(positive,arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome::Present{..}));
 }
 
+#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
 pub(super) async fn realm_actor_mls_boundary(
     fixture: &Fixture,
     package: &AppletPackage,

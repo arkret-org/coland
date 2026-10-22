@@ -356,6 +356,10 @@ pub use coland_storage::{
 };
 
 #[async_trait::async_trait]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The port preserves the complete typed authoring and authority context."
+)]
 pub trait AppletPort: Send + Sync {
     /// Internal exact-candidate lookup for current Account lock planning.
     async fn configuration_review_account(
@@ -997,6 +1001,10 @@ impl EventQueryService {
             )
             .await
     }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "The installation fence binds the original Applet, source and authority cut."
+    )]
     pub async fn fence_applet_installation(
         &self,
         applet_id: &str,

@@ -120,8 +120,8 @@ pub(super) async fn supply(
     state
         .authority_commits()
         .read_realm_actor_material(
-            &request,
-            &caller,
+            request,
+            caller,
             &state.service_core_id(),
             &method,
             state.notary_signing_key().as_ref(),

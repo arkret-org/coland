@@ -177,7 +177,7 @@ pub(crate) async fn project(
         if held.generation>generation || (held.generation==generation && (held.service_id!=source.as_str() || held.authority_ref!=serde_json::to_value(&authority.authority_ref).map_err(PersistenceError::database)? || held.last_handoff_ref.as_deref()!=authority.last_handoff_ref.as_ref().map(|r|r.as_str()))) {
             return Err(unavailable("known governing authority rejects the verified publication chain").into());
         }
-        #[derive(diesel::QueryableByName)] struct Recipient {#[diesel(sql_type=BigInt)] pk:i64}
+        #[derive(diesel::QueryableByName)] struct Recipient {#[diesel(sql_type=BigInt)] #[diesel(column_name=pk)] _pk:i64}
         let recipient=sql_query("SELECT a.pk FROM accounts a LEFT JOIN account_lifecycle l ON l.account_pk=a.pk WHERE a.principal_id=$1 AND a.station_id=$2 AND a.disabled_at IS NULL AND COALESCE(l.state NOT IN ('deactivated','erasure_pending'),TRUE) FOR SHARE OF a")
             .bind::<Text,_>(request.holder_account_id.principal_id.as_str()).bind::<Text,_>(request.holder_account_id.station_id.as_str()).get_result::<Recipient>(&mut *conn).await.optional()?;
         if recipient.is_none() {return Err(PersistenceError::NotFound("private effect recipient is unavailable".into()).into());}
@@ -185,9 +185,8 @@ pub(crate) async fn project(
         let existing=sql_query("SELECT realm_id,governance_generation,head_stream_position,head_commit_id,cell_revisions FROM consent_private_proxy_cuts WHERE holder_account_id=$1 FOR UPDATE")
             .bind::<Jsonb,_>(&holder).get_result::<Cut>(&mut *conn).await.optional()?;
         let mut cells=existing.as_ref().map_or_else(||json!({}),|row|row.cell_revisions.clone());
-        if let Some(existing)=existing {
-            if existing.realm_id!=request.realm_id.as_str() || existing.governance_generation>generation || existing.head_stream_position>position || (existing.head_stream_position==position && existing.head_commit_id!=request.effective_stream_head.commit_id.as_str()) {return Err(unavailable("known authority cut rejects rollback or fork").into());}
-        }
+        if let Some(existing)=existing
+            && (existing.realm_id!=request.realm_id.as_str() || existing.governance_generation>generation || existing.head_stream_position>position || (existing.head_stream_position==position && existing.head_commit_id!=request.effective_stream_head.commit_id.as_str())) {return Err(unavailable("known authority cut rejects rollback or fork").into());}
         #[derive(diesel::QueryableByName)] struct Fence {#[diesel(sql_type=Text)] request_digest:String,#[diesel(sql_type=Jsonb)] outcome:Value}
         let fence=sql_query("SELECT request_digest,outcome FROM consent_private_effect_fences WHERE holder_account_id=$1 AND governance_generation=$2 AND nonce=$3")
             .bind::<Jsonb,_>(&holder).bind::<BigInt,_>(generation).bind::<Text,_>(&request.nonce).get_result::<Fence>(&mut *conn).await.optional()?;
@@ -219,9 +218,8 @@ pub(crate) async fn project(
             let current=sql_query("SELECT p.revision,p.policy_payload AS content,FALSE AS tombstone FROM invite_receive_policies p JOIN accounts a ON a.pk=p.account_pk WHERE a.principal_id=$1 AND a.station_id=$2 FOR UPDATE OF p")
                 .bind::<Text,_>(request.holder_account_id.principal_id.as_str()).bind::<Text,_>(request.holder_account_id.station_id.as_str()).get_result::<Cell>(&mut *conn).await.optional()?;
             let revision=i64::try_from(revision).map_err(PersistenceError::database)?;
-            if let Some(current)=&current {
-                if current.revision>revision || (current.revision==revision && current.content!=content) {return Err(unavailable("policy revision rollback or content fork").into());}
-            }
+            if let Some(current)=&current
+                && (current.revision>revision || (current.revision==revision && current.content!=content)) {return Err(unavailable("policy revision rollback or content fork").into());}
             if current.is_none_or(|row|row.revision<revision) {
                 let applied=sql_query("INSERT INTO invite_receive_policies(account_pk,revision,policy_payload,updated_at) SELECT pk,$3,$4,$5 FROM accounts WHERE principal_id=$1 AND station_id=$2 ON CONFLICT(account_pk) DO UPDATE SET revision=EXCLUDED.revision,policy_payload=EXCLUDED.policy_payload,updated_at=EXCLUDED.updated_at")
                     .bind::<Text,_>(request.holder_account_id.principal_id.as_str()).bind::<Text,_>(request.holder_account_id.station_id.as_str()).bind::<BigInt,_>(revision).bind::<Jsonb,_>(content).bind::<Timestamptz,_>(request.evaluated_at).execute(&mut *conn).await?;

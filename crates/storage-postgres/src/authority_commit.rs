@@ -2787,9 +2787,7 @@ pub(crate) async fn accepted_realm_reader_in_connection(
         )
         .await?
         {
-            return Ok(
-                accepted_current_member_joined_in_connection(conn, realm_id, &controller).await?,
-            );
+            return accepted_current_member_joined_in_connection(conn, realm_id, &controller).await;
         }
         return Ok(true);
     }
@@ -5213,8 +5211,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         }
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            let producer = native.and_then(|(source, _)| match source {
-                coland_storage::ManagedMlsRefusalSource::Local(guard) => Some(SelfProducerCommitGuard::AppletManagedDevice(Box::new(guard.clone()))),
+            let producer = native.map(|(source, _)| match source {
+                coland_storage::ManagedMlsRefusalSource::Local(guard) => SelfProducerCommitGuard::AppletManagedDevice(Box::new(guard.clone())),
             });
             crate::agent_management_review::lock_candidate_current_realms_in_connection(conn, event, None, producer.as_ref(), &[]).await?;
             let current = locked_authority(conn, &event.realm_id).await?

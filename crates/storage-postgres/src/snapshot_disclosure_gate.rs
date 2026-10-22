@@ -913,24 +913,6 @@ pub(crate) async fn actor_snapshot_material_in_connection(
     actor_snapshot_candidate_in_connection(conn, realm_id, actor, None).await
 }
 
-/// Reapply current authority to original rows without replacing their values.
-/// Candidate heads are used only for validation against the current accepted
-/// prefix; an archived signed object is never rewritten with this projection.
-pub(crate) async fn account_snapshot_candidate_in_connection(
-    conn: &mut AsyncPgConnection,
-    realm_id: &RealmId,
-    account: &AccountId,
-    candidate: Option<coland_storage::RealmStateSnapshotMaterial>,
-) -> PersistenceResult<Option<coland_storage::RealmStateSnapshotMaterial>> {
-    actor_snapshot_candidate_in_connection(
-        conn,
-        realm_id,
-        &ActorId::account(account.clone()),
-        candidate,
-    )
-    .await
-}
-
 pub(crate) async fn actor_snapshot_candidate_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
@@ -948,24 +930,6 @@ pub(crate) async fn actor_snapshot_candidate_in_connection(
             "the disclosure cut returned an unexpected candidate count",
         )),
     }
-}
-
-/// Prove related candidates at one transaction cut. Immutable authority,
-/// controller and per-source content facts are shared within this call only;
-/// each candidate still proves its complete rows, streams and readable floors.
-pub(crate) async fn account_snapshot_candidates_in_connection(
-    conn: &mut AsyncPgConnection,
-    realm_id: &RealmId,
-    account: &AccountId,
-    candidates: Vec<Option<coland_storage::RealmStateSnapshotMaterial>>,
-) -> PersistenceResult<Option<Vec<coland_storage::RealmStateSnapshotMaterial>>> {
-    actor_snapshot_candidates_in_connection(
-        conn,
-        realm_id,
-        &ActorId::account(account.clone()),
-        candidates,
-    )
-    .await
 }
 
 pub(crate) async fn actor_snapshot_candidates_in_connection(
@@ -1752,7 +1716,7 @@ pub(crate) fn disclose_to_actor(
         ));
     }
     if let Some(kind) = &facts.undisclosed_kind {
-        return Err(rejected(&format!(
+        return Err(rejected(format!(
             "accepted Event kind {kind} is outside the disclosure subset"
         )));
     }
@@ -2123,7 +2087,7 @@ pub(crate) fn disclose_to_actor(
                 let context: arkret_models_collaboration::events_payloads::sidecar::SidecarContextAttachPayload = serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
                 context
                     .validate()
-                    .map_err(|error| rejected(&error.to_string()))?;
+                    .map_err(|error| rejected(error.to_string()))?;
                 if context.sidecar_id != *sidecar_id
                     || context.source_context_ref != *source_context_ref
                 {
@@ -2138,7 +2102,7 @@ pub(crate) fn disclose_to_actor(
                     serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
                 controls
                     .validate_for_context(sidecar_id, source_context_ref)
-                    .map_err(|error| rejected(&error.to_string()))?;
+                    .map_err(|error| rejected(error.to_string()))?;
                 if controls.assertions().is_empty() {
                     return Err(rejected(
                         "Sidecar control current has no accepted assertion",
@@ -2358,10 +2322,10 @@ pub(crate) fn disclose_to_actor(
                     serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
                 entry
                     .validate()
-                    .map_err(|error| rejected(&error.to_string()))?;
+                    .map_err(|error| rejected(error.to_string()))?;
                 if let Some(occurrence) = occurrence {
                     arkret_models_collaboration::objects::productivity::validate_canonical_occurrence_key(occurrence)
-                        .map_err(|error| rejected(&error.to_string()))?;
+                        .map_err(|error| rejected(error.to_string()))?;
                 }
                 let target = strands
                     .get(event_ref)

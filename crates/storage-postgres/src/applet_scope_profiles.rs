@@ -307,17 +307,16 @@ pub(crate) async fn prepare_control(
             "Realm Profile changes identity or includes Account-only fields",
         ));
     }
-    if let Some(intent) = intent(&profile)? {
-        if intent.effective_scope.realm_id() != &event.realm_id
+    if let Some(intent) = intent(&profile)?
+        && (intent.effective_scope.realm_id() != &event.realm_id
             || !matches!(
                 intent.effective_scope,
                 ScopeRef::Realm { .. } | ScopeRef::Circle { .. }
-            )
-        {
-            return Err(denied(
-                "Profile intent must select a business scope of its own Realm",
-            ));
-        }
+            ))
+    {
+        return Err(denied(
+            "Profile intent must select a business scope of its own Realm",
+        ));
     }
     let publish_scope = publish_transition(previous_profile.as_ref(), &profile)?;
     Ok(Admission {

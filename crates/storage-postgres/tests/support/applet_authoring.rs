@@ -840,7 +840,7 @@ fn applet_registration_epoch_evidence(
 ) -> arkret_models_integration::AppletRegistrationEpochEvidence {
     arkret_models_integration::AppletRegistrationEpochEvidence::from_did_document(
         &applet_service_id_document(package),
-        service_method_version_evidence(&package),
+        service_method_version_evidence(package),
     )
     .unwrap()
 }
@@ -2200,7 +2200,7 @@ mod realm_native_fixture {
                             return;
                         }
                         let completion=served_completion.lock().unwrap().clone();
-                        if method == "POST" && path == "/_arkret/edge/applet/transactions" && completion.is_some() {
+                        if method == "POST" && path == "/_arkret/edge/applet/transactions" && let Some(completion) = completion {
                             let length=request.lines().skip(1).filter_map(|line|line.split_once(':'))
                                 .find(|(name,_)|name.eq_ignore_ascii_case("content-length"))
                                 .map(|(_,value)|value.trim().parse::<usize>().unwrap()).unwrap();
@@ -2209,7 +2209,7 @@ mod realm_native_fixture {
                                 let count=stream.read(&mut buffer).unwrap();assert!(count>0);bytes.extend_from_slice(&buffer[..count]);
                             }
                             bytes.truncate(header_end+length);
-                            let (status,body)=completion.unwrap()(bytes);
+                            let (status,body)=completion(bytes);
                             let body=arkret_canonical::canonical_json_bytes(&body).unwrap();
                             let header=format!("HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",status.as_u16(),status.canonical_reason().unwrap_or("Result"),body.len());
                             stream.write_all(header.as_bytes()).unwrap();stream.write_all(&body).unwrap();stream.flush().unwrap();
@@ -2393,6 +2393,10 @@ mod realm_native_fixture {
         .await
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
+    )]
     async fn managed_device_post_with_fault(
         fixture: &Fixture,
         metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
@@ -3792,8 +3796,7 @@ mod realm_native_fixture {
                 .await
                 .is_err()
         );
-        for index in 0..2 {
-            let (digest, outcome, authority) = &pending[index];
+        for (digest, outcome, authority) in &pending[..2] {
             let mut terminal = outcome.clone();
             let RealmActorOperationOutcome::DeviceRevoke {
                 state, decided_at, ..
@@ -6374,6 +6377,10 @@ mod realm_native_fixture {
         run_bridge_case(pool, circle, false, false, None, false, mode, false).await;
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
+    )]
     pub(super) async fn run_bridge_case(
         pool: PgPool,
         circle: bool,
@@ -6494,6 +6501,10 @@ mod realm_native_fixture {
             .unwrap()
             .count
         }
+        #[allow(
+            clippy::too_many_arguments,
+            reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
+        )]
         async fn recover_runtime_key_loss(
             fixture: &Fixture,
             native: &NativeService,
@@ -6679,8 +6690,7 @@ mod realm_native_fixture {
             eprintln!("independent runtime recovery: begin with receipt failure");
             let failure = boxed_step(|| devices.recover_control(&actor, "lost-daily-key"))
                 .await
-                .err()
-                .expect("accepted begin receipt persistence must fail");
+                .expect_err("accepted begin receipt persistence must fail");
             assert!(
                 failure.to_string().contains(if unaccepted {
                     "injected crash after initial recovery plan persistence"
@@ -7406,8 +7416,7 @@ mod realm_native_fixture {
         lost_control.store(true, std::sync::atomic::Ordering::SeqCst);
         let failure = boxed_step(|| devices.rotate_control(&actor, "native-control-rotation"))
             .await
-            .err()
-            .expect("control receipt persistence must fail");
+            .expect_err("control receipt persistence must fail");
         assert!(
             failure
                 .to_string()

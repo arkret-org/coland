@@ -2437,6 +2437,10 @@ pub(crate) async fn commit_applet_record(
 }
 
 /// Install every write one accepted Event produces.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The transaction preserves the original commit and all independently prepared authority proofs."
+)]
 fn commit_one_in_connection<'a>(
     conn: &'a mut AsyncPgConnection,
     request: EventCommitRequest,
@@ -2474,6 +2478,10 @@ fn managed_device_source(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The transaction preserves the original commit and all independently prepared authority proofs."
+)]
 async fn commit_one_inner(
     conn: &mut AsyncPgConnection,
     request: EventCommitRequest,
@@ -2672,7 +2680,7 @@ async fn commit_one_inner(
             )
             .await?;
         service_approvals = approvals;
-        if request.authority_commit.producer_signer_fact.as_ref() != Some(&fact.clone().into()) {
+        if request.authority_commit.producer_signer_fact.as_ref() != Some(&fact.clone()) {
             return Err(PersistenceError::Conflict(
                 "Service signer source changed before acceptance".into(),
             )
@@ -3004,19 +3012,19 @@ async fn commit_prepared_event_inner(
     .await?;
     queue_event_in_connection(conn, event, request.event.received_at).await?;
 
-    if let Some(profile) = scope_profile.as_ref() {
-        if profile.is_public() {
-            let cut =
-                crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
-                    .await?;
-            cut.require_managed_self_action_in_connection(
-                conn,
-                event,
-                &request.authority_commit.commit,
-                event_approvals,
-            )
-            .await?;
-        }
+    if let Some(profile) = scope_profile.as_ref()
+        && profile.is_public()
+    {
+        let cut =
+            crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(conn, event)
+                .await?;
+        cut.require_managed_self_action_in_connection(
+            conn,
+            event,
+            &request.authority_commit.commit,
+            event_approvals,
+        )
+        .await?;
     }
     let authority_write = if let Some(profile) = scope_profile.as_ref() {
         crate::authority_commit::commit_managed_scope_profile_in_connection(

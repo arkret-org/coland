@@ -2011,23 +2011,18 @@ async fn store_scanned(
     let fact = evidence.producer_signer_fact;
     let commit = item.commit();
     ensure_historical_method_key(state, located, &commit.signature).await?;
-    if let CommittedEventView::Full(view) = item {
-        if view.event.kind == arkret_wire::EventKind::CallState {
-            let payload: arkret_models_collaboration::events_payloads::call::CallStatePayload =
-                serde_json::from_value(
-                    serde_json::to_value(&view.event.payload).map_err(temporary)?,
-                )
+    if let CommittedEventView::Full(view) = item
+        && view.event.kind == arkret_wire::EventKind::CallState
+    {
+        let payload: arkret_models_collaboration::events_payloads::call::CallStatePayload =
+            serde_json::from_value(serde_json::to_value(&view.event.payload).map_err(temporary)?)
                 .map_err(temporary)?;
-            if let Some(
-                arkret_models_collaboration::events_payloads::call::CallRosterDelta::Join {
-                    participant,
-                },
-            ) = payload.roster_delta
-            {
-                if let Some(binding) = participant.participant_binding {
-                    ensure_call_issuer_history(state, &binding.issuer_kid).await?;
-                }
-            }
+        if let Some(arkret_models_collaboration::events_payloads::call::CallRosterDelta::Join {
+            participant,
+        }) = payload.roster_delta
+            && let Some(binding) = participant.participant_binding
+        {
+            ensure_call_issuer_history(state, &binding.issuer_kid).await?;
         }
     }
     let commits = state.authority_commits();

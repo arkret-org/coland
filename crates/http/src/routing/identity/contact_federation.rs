@@ -1431,18 +1431,17 @@ async fn install_current_response(
         .map_err(|e| AppError::internal(e.to_string()))?;
     let expected = prior.as_ref().map(|r| r.updated_at);
     let mut record = prior.unwrap_or_else(|| empty_contact(&proof.holder, requester));
-    if let Some(round) = &proof.contact_round_id {
-        if let Some(known) = state
+    if let Some(round) = &proof.contact_round_id
+        && let Some(known) = state
             .contacts()
             .known_round_closure(trust_domain_id, &proof.holder, requester, round)
             .await
             .map_err(|e| AppError::internal(e.to_string()))?
-        {
-            record
-                .current_state
-                .close_round(known)
-                .map_err(contact_error)?;
-        }
+    {
+        record
+            .current_state
+            .close_round(known)
+            .map_err(contact_error)?;
     }
     let original_digest =
         Hash::new(canonical::canonical_sha256(&material.head_operation).map_err(contact_error)?)
@@ -1451,98 +1450,94 @@ async fn install_current_response(
         .request_slot_states
         .iter()
         .find(|s| s.owner_id == proof.holder.contact_actor_id())
-    {
-        if proof.version < known.version
+        && (proof.version < known.version
             || (proof.version == known.version
                 && (proof.head_event_ref != known.head_event_ref
                     || known
                         .operation_digest
                         .as_ref()
-                        .is_some_and(|digest| digest != &original_digest)))
-        {
-            return Err(contact_error(
-                "current response rolls back or conflicts with durable observed operation",
-            ));
-        }
+                        .is_some_and(|digest| digest != &original_digest))))
+    {
+        return Err(contact_error(
+            "current response rolls back or conflicts with durable observed operation",
+        ));
     }
-    if material.round_evidence.is_none() {
-        if let ContactOperationEvidence::Request {
+    if material.round_evidence.is_none()
+        && let ContactOperationEvidence::Request {
             signed_event,
             request_receipt,
         } = &material.head_operation
-        {
-            let own_pending = record.status == "pending"
-                && record.current_state.direction(requester).is_some_and(|d| {
-                    matches!(d.head_operation, ContactOperationEvidence::Request { .. })
-                });
-            let admitted = record.pending_incoming_admitted
-                || record.current_state.initial_identity.is_some()
-                || own_pending;
-            let admitted = if admitted {
-                true
-            } else {
-                let target = match requester {
-                    ContactPeer::Human { account_id } => account_id,
-                    ContactPeer::Agent {
-                        controller_account_id,
-                        ..
-                    } => controller_account_id,
-                };
-                crate::routing::invites::admit_quarantine_new_source(
-                    state,
-                    target,
-                    proof
-                        .holder
-                        .contact_actor_id()
-                        .signing_principal_id()
-                        .as_str(),
-                    now(),
-                )
-                .await?
+    {
+        let own_pending = record.status == "pending"
+            && record.current_state.direction(requester).is_some_and(|d| {
+                matches!(d.head_operation, ContactOperationEvidence::Request { .. })
+            });
+        let admitted = record.pending_incoming_admitted
+            || record.current_state.initial_identity.is_some()
+            || own_pending;
+        let admitted = if admitted {
+            true
+        } else {
+            let target = match requester {
+                ContactPeer::Human { account_id } => account_id,
+                ContactPeer::Agent {
+                    controller_account_id,
+                    ..
+                } => controller_account_id,
             };
-            if !admitted {
-                return Err(crate::app_error!(
-                    TemporarilyUnavailable,
-                    "Contact pending recovery is unavailable"
-                ));
-            }
-            if !own_pending {
-                record.request_receipts.clear();
-                record.request_mirror_receipts.clear();
-                record.requester_id = proof.holder.contact_actor_id();
-                record.target_id = requester.contact_actor_id();
-                record.response_event_ref = None;
-                record.tombstone_event_ref = None;
-            }
-            record
-                .request_receipts
-                .retain(|r| r.core.holder != proof.holder);
-            record.request_receipts.push(request_receipt.clone());
-            if record.requester_id == proof.holder.contact_actor_id() {
-                record.request_event_ref = Some(signed_event.event_id.clone());
-            } else {
-                record.response_event_ref = Some(signed_event.event_id.clone());
-            }
-            record.pending_incoming_admitted = true;
-            record.status = "pending".into();
-            record.contact_round_id = None;
-            record.message = signed_event
-                .payload
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
+            crate::routing::invites::admit_quarantine_new_source(
+                state,
+                target,
+                proof
+                    .holder
+                    .contact_actor_id()
+                    .signing_principal_id()
+                    .as_str(),
+                now(),
+            )
+            .await?
+        };
+        if !admitted {
+            return Err(crate::app_error!(
+                TemporarilyUnavailable,
+                "Contact pending recovery is unavailable"
+            ));
         }
+        if !own_pending {
+            record.request_receipts.clear();
+            record.request_mirror_receipts.clear();
+            record.requester_id = proof.holder.contact_actor_id();
+            record.target_id = requester.contact_actor_id();
+            record.response_event_ref = None;
+            record.tombstone_event_ref = None;
+        }
+        record
+            .request_receipts
+            .retain(|r| r.core.holder != proof.holder);
+        record.request_receipts.push(request_receipt.clone());
+        if record.requester_id == proof.holder.contact_actor_id() {
+            record.request_event_ref = Some(signed_event.event_id.clone());
+        } else {
+            record.response_event_ref = Some(signed_event.event_id.clone());
+        }
+        record.pending_incoming_admitted = true;
+        record.status = "pending".into();
+        record.contact_round_id = None;
+        record.message = signed_event
+            .payload
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
     }
-    if material.round_evidence.is_none() {
-        if let ContactOperationEvidence::Reject { reject_receipt, .. } = &material.head_operation {
-            if record.current_state.direction(requester).is_some_and(|d| {
-                d.head_operation.event().event_id
-                    == reject_receipt.request_receipt.core.request_event_ref
-            }) {
-                record.status = "rejected".into();
-                record.contact_round_id = None;
-            }
-        }
+    if material.round_evidence.is_none()
+        && let ContactOperationEvidence::Reject { reject_receipt, .. } = &material.head_operation
+        && record.current_state.direction(requester).is_some_and(|d| {
+            d.head_operation.event().event_id
+                == reject_receipt.request_receipt.core.request_event_ref
+        })
+    {
+        record.status = "rejected".into();
+        record.contact_round_id = None;
     }
     for instance in &proof.scope_instances {
         let intervals = state
@@ -1823,16 +1818,15 @@ async fn ensure_local_glare_choice(
         .local_glare_attestations
         .iter()
         .find(|a| a.subject_id == holder.contact_actor_id())
+        && prior.contact_round_id == round
     {
-        if prior.contact_round_id == round {
-            if prior.request_event_ref != own.core.request_event_ref
-                || prior.version != own.core.version
-                || prior.request_receipt_digests != digests
-            {
-                return Err(contact_error("glare retry changes fixed original requests"));
-            }
-            return Ok(prior.clone());
+        if prior.request_event_ref != own.core.request_event_ref
+            || prior.version != own.core.version
+            || prior.request_receipt_digests != digests
+        {
+            return Err(contact_error("glare retry changes fixed original requests"));
         }
+        return Ok(prior.clone());
     }
     let peer_request = receipts
         .iter()
@@ -2481,15 +2475,15 @@ async fn apply_delivered_operation(
     if operation.version() < prior_version {
         return Ok(());
     }
-    if let Some(prior) = record.current_state.direction(holder) {
-        if prior.head_operation.version() == operation.version() {
-            if canonical::canonical_json_bytes(&prior.head_operation).map_err(contact_error)?
-                != canonical::canonical_json_bytes(operation).map_err(contact_error)?
-            {
-                return Err(contact_error("same version changes immutable original"));
-            }
-            return Ok(());
+    if let Some(prior) = record.current_state.direction(holder)
+        && prior.head_operation.version() == operation.version()
+    {
+        if canonical::canonical_json_bytes(&prior.head_operation).map_err(contact_error)?
+            != canonical::canonical_json_bytes(operation).map_err(contact_error)?
+        {
+            return Err(contact_error("same version changes immutable original"));
         }
+        return Ok(());
     }
     let installed_version = record
         .current_state
@@ -2709,10 +2703,10 @@ async fn apply_delivered_operation(
             }
             _ => {}
         }
-        if let Some(proof) = carried_current(delivery) {
-            if proof.head_event_ref == operation.event().event_id {
-                replace_direction_proof(&mut record.current_state, proof.clone())?;
-            }
+        if let Some(proof) = carried_current(delivery)
+            && proof.head_event_ref == operation.event().event_id
+        {
+            replace_direction_proof(&mut record.current_state, proof.clone())?;
         }
     }
     if let Some(local) = record

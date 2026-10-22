@@ -221,17 +221,16 @@ async fn install_endpoint(
         &basis.effective_scope,
     )
     .await?
+        && existing.idempotency_key == idempotency_key
     {
-        if existing.idempotency_key == idempotency_key {
-            require_exact_successful_install_replay(
-                &existing.idempotency_key,
-                existing.install_body_digest.as_str(),
-                &idempotency_key,
-                &body_digest,
-            )?;
-            res.status_code(StatusCode::OK);
-            return json_ok(existing.install_response);
-        }
+        require_exact_successful_install_replay(
+            &existing.idempotency_key,
+            existing.install_body_digest.as_str(),
+            &idempotency_key,
+            &body_digest,
+        )?;
+        res.status_code(StatusCode::OK);
+        return json_ok(existing.install_response);
     }
     let registration_epoch_evidence =
         registration_epoch_evidence_from_event(&basis.registration_event)?;
@@ -1182,7 +1181,7 @@ async fn exact_managed_membership_removals(
             &record.package.service_id,
         )
         .await
-        .map_err(|error| incomplete_managed_membership_projection(error))?;
+        .map_err(incomplete_managed_membership_projection)?;
     let mut removals = Vec::new();
     for accepted in current_members {
         let event = accepted.event;

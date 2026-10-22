@@ -729,6 +729,7 @@ async fn realm_device_claim_writer_wait_crosses_deadline(
     );
 }
 
+#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
 async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
     fixture: &Fixture,
     package: &AppletPackage,
@@ -826,7 +827,7 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
         scope.clone(),
         EventKind::MlsCommit,
         json!(payload),
-        Some(&child),
+        Some(child),
         &signer,
     );
     let at = event.created_at;
@@ -1402,6 +1403,7 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
     }
 }
 
+#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
 async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
     fixture: &Fixture,
     package: &AppletPackage,
@@ -1596,7 +1598,7 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
         scope.clone(),
         EventKind::MlsCommit,
         json!(payload),
-        Some(&child),
+        Some(child),
         &signer,
     );
     let at = event.created_at;

@@ -295,13 +295,12 @@ async fn check_circle_reads(history: &str) {
     );
     assert_eq!(realm_history.visible_stream_heads.len(), 1);
     assert!(
-        circle_history
+        !circle_history
             .history_basis
             .as_ref()
             .unwrap()
             .accepted_dependency_refs
-            .len()
-            >= 1
+            .is_empty()
     );
     assert_ne!(realm_history.snapshot_id, issued.snapshot_id);
     for narrow in [&realm_history, &circle_history] {

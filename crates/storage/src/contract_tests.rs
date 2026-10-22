@@ -4295,7 +4295,7 @@ pub async fn assert_invite_new_source_ledger_contract(
     for suffix in ["a", "b"] {
         assert_eq!(
             ledger
-                .admit_new_source(&holder, &format!("{namespace}-{suffix}"), now, &quota)
+                .admit_new_source(holder, &format!("{namespace}-{suffix}"), now, &quota)
                 .await
                 .expect("admit new source"),
             super::NewSourceAdmission::Admitted,
@@ -4307,7 +4307,7 @@ pub async fn assert_invite_new_source_ledger_contract(
     // consuming quota.
     assert_eq!(
         ledger
-            .admit_new_source(&holder, &format!("{namespace}-a"), now, &quota)
+            .admit_new_source(holder, &format!("{namespace}-a"), now, &quota)
             .await
             .expect("re-admit seen source"),
         super::NewSourceAdmission::Seen
@@ -4316,14 +4316,14 @@ pub async fn assert_invite_new_source_ledger_contract(
     // The third distinct source is over the short window.
     assert_eq!(
         ledger
-            .admit_new_source(&holder, &format!("{namespace}-c"), now, &quota)
+            .admit_new_source(holder, &format!("{namespace}-c"), now, &quota)
             .await
             .expect("evaluate over-quota source"),
         super::NewSourceAdmission::Denied
     );
     assert_eq!(
         ledger
-            .retained_source_count(&holder)
+            .retained_source_count(holder)
             .await
             .expect("count ledger rows"),
         2,
@@ -4335,7 +4335,7 @@ pub async fn assert_invite_new_source_ledger_contract(
     let later = now + Duration::seconds(4_000);
     assert_eq!(
         ledger
-            .admit_new_source(&holder, &format!("{namespace}-c"), later, &quota)
+            .admit_new_source(holder, &format!("{namespace}-c"), later, &quota)
             .await
             .expect("admit after the short window slid"),
         super::NewSourceAdmission::Admitted
@@ -4345,7 +4345,7 @@ pub async fn assert_invite_new_source_ledger_contract(
     // though the short window has room.
     assert_eq!(
         ledger
-            .admit_new_source(&holder, &format!("{namespace}-d"), later, &quota)
+            .admit_new_source(holder, &format!("{namespace}-d"), later, &quota)
             .await
             .expect("evaluate over-retention source"),
         super::NewSourceAdmission::Denied
@@ -4356,14 +4356,14 @@ pub async fn assert_invite_new_source_ledger_contract(
     let past_retention = now + Duration::seconds(12_000);
     assert_eq!(
         ledger
-            .admit_new_source(&holder, &format!("{namespace}-e"), past_retention, &quota)
+            .admit_new_source(holder, &format!("{namespace}-e"), past_retention, &quota)
             .await
             .expect("admit after retention expiry"),
         super::NewSourceAdmission::Admitted
     );
     assert_eq!(
         ledger
-            .retained_source_count(&holder)
+            .retained_source_count(holder)
             .await
             .expect("count ledger rows after prune"),
         1,
@@ -4372,12 +4372,12 @@ pub async fn assert_invite_new_source_ledger_contract(
 
     // Erasure drops the holder's whole ledger.
     ledger
-        .delete_for_holder(&holder)
+        .delete_for_holder(holder)
         .await
         .expect("delete ledger for holder");
     assert_eq!(
         ledger
-            .retained_source_count(&holder)
+            .retained_source_count(holder)
             .await
             .expect("count ledger rows after erasure"),
         0

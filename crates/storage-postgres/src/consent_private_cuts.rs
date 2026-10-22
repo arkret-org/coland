@@ -112,12 +112,11 @@ pub(crate) async fn observe(
         let held=sql_query("SELECT realm_id,governance_generation,head_stream_position,head_commit_id,cell_revisions FROM consent_private_proxy_cuts WHERE holder_account_id=$1 FOR UPDATE")
             .bind::<Jsonb,_>(&holder).get_result::<Cut>(&mut *conn).await.optional()?;
         let mut cells=held.as_ref().map_or_else(||json!({}),|cut|cut.cell_revisions.clone());
-        if let Some(held)=held {
-            if held.realm_id!=outcome.realm_id.as_str() || generation<held.governance_generation || position<held.head_stream_position
-                || (position==held.head_stream_position && held.head_commit_id!=outcome.effective_stream_head.commit_id.as_str()) {
+        if let Some(held)=held
+            && (held.realm_id!=outcome.realm_id.as_str() || generation<held.governance_generation || position<held.head_stream_position
+                || (position==held.head_stream_position && held.head_commit_id!=outcome.effective_stream_head.commit_id.as_str())) {
                 return Err(unavailable("rejects an obsolete or forked response").into());
             }
-        }
         for (key,value) in revisions {
             if let Some(old)=cells.get(&key).filter(|v|!v.is_null()) {
                 let previous=old.get("revision").and_then(Value::as_u64).ok_or_else(||unavailable("stored private-cell cut is incomplete"))?;

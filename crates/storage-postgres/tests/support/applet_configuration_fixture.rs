@@ -87,7 +87,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
         .build()
         .unwrap();
     let make_edge = || {
-        let edge = Arc::new(
+        Arc::new(
             ArkretEdge::new_outbound(
                 Arc::new(config.clone()),
                 client.clone(),
@@ -99,8 +99,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
                 AuthoringJournal::new(FileAuthoringStore::shared(path.clone()).unwrap()),
             )
             .unwrap(),
-        );
-        edge
+        )
     };
     let make_router = || {
         Arc::new(salvo::Service::new(

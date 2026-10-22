@@ -1971,7 +1971,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         &self,
         event: &arkret_wire::Event,
     ) -> PersistenceResult<arkret_models_integration::AppletRegistrationPayload> {
-        let _ = (event);
+        let _ = event;
         Err(PersistenceError::Conflict(
             "dependency_missing: accepted Applet registration unavailable".into(),
         ))

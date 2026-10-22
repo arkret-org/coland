@@ -94,7 +94,7 @@ fn bootstrap_snapshot(
     identity.as_object_mut().unwrap().remove("snapshot_id");
     identity.as_object_mut().unwrap().remove("signature");
     snapshot.snapshot_id = arkret_wire::RealmSnapshotId::from_digest(
-        arkret_canonical::sha256_bytes(&arkret_canonical::canonical_json_bytes(&identity).unwrap()),
+        arkret_canonical::sha256_bytes(arkret_canonical::canonical_json_bytes(&identity).unwrap()),
     );
     snapshot
 }
@@ -3217,7 +3217,7 @@ async fn replica_bootstrap_waits_for_authority_without_holding_anchor_case() {
 /// genesis current; a receiver need not invent the unavailable position 0.
 #[tokio::test]
 async fn collaboration_governance_change_replica_uses_verified_since_join_genesis() {
-    heap_future(|| collaboration_governance_change_replica_case()).await;
+    heap_future(collaboration_governance_change_replica_case).await;
 }
 
 async fn collaboration_governance_change_replica_case() {

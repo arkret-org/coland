@@ -1430,11 +1430,10 @@ pub(crate) async fn issue_stream_history_snapshot(
             else {
                 return Ok(None);
             };
-            if let Some(expected) = expected_membership {
-                if !material.current_state_entries.iter().any(|row| matches!(row, arkret_wire::TypedCurrentRow::Value { selector: arkret_wire::CurrentSelector::MemberState { actor_id }, revision, .. } if actor_id.as_account_id() == Some(account) && &revision.commit_id == expected)) {
+            if let Some(expected) = expected_membership
+                && !material.current_state_entries.iter().any(|row| matches!(row, arkret_wire::TypedCurrentRow::Value { selector: arkret_wire::CurrentSelector::MemberState { actor_id }, revision, .. } if actor_id.as_account_id() == Some(account) && &revision.commit_id == expected)) {
                     return Err(undisclosable("history request no longer names the current opening join").into());
                 }
-            }
             require_snapshot_serving_cut(conn, account, issuer, &tenure.service_id, &material)
                 .await?;
             let Some(head) = material
@@ -1478,6 +1477,10 @@ pub(crate) async fn issue_stream_history_snapshot(
 /// Materialize a complete target selector set from an immutable accepted cut.
 /// Only its own governor may sign a new history object. A member Station may
 /// reuse an already issued narrow original, never re-sign foreign material.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Snapshot verification binds the original stream, anchor, floor and signing authority."
+)]
 async fn stream_history_original(
     conn: &mut AsyncPgConnection,
     account: &arkret_wire::AccountId,

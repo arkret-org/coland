@@ -61,7 +61,7 @@ uuid = { workspace = true }
 chacha20poly1305 = { workspace = true }
 savfox-gateway-server.workspace = true
 arkret-http-client.workspace = true
-arkret-bridge-runtime = { path = "../../../bridges/crates/runtime", default-features = false, features = ["full", "postgres"] }
+arkret-bridge-runtime = { version = "0.3.0", path = "../../../bridges/crates/runtime", default-features = false, features = ["full", "postgres"] }
 arkret = { workspace = true, features = ["mls"] }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 tracing-subscriber.workspace = true

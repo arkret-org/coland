@@ -105,9 +105,7 @@ pub(super) async fn prepare_expiring_install(
 ) -> AppletInstallRequestBody {
     let expires_at = arkret_canonical::normalize_timestamp_canonical(expires_at);
     let unit = boxed_step(|| async { factory.prepare_install(applet, scope_label).await }).await;
-    let coland_storage::AppletAdmissionRequest::Install(body) = unit.input.candidate.request else {
-        panic!("actual install request required")
-    };
+    let coland_storage::AppletAdmissionRequest::Install(body) = unit.input.candidate.request;
     let mut body = *body;
     for original in &mut body.authoring_request_basis.capability_grant_events {
         let mut payload: CapabilityGrantPayload =
@@ -219,10 +217,7 @@ pub(super) async fn run_install_admission(pool: PgPool) {
         let unit =
             boxed_step(|| async { factory.prepare_install(&id, "native-e2ee-admission").await })
                 .await;
-        let coland_storage::AppletAdmissionRequest::Install(body) = unit.input.candidate.request
-        else {
-            panic!("actual install required")
-        };
+        let coland_storage::AppletAdmissionRequest::Install(body) = unit.input.candidate.request;
         let mut body = *body;
         match missing {
             "profile" => body
@@ -292,9 +287,7 @@ pub(super) async fn run_install_admission(pool: PgPool) {
             .await
     })
     .await;
-    let coland_storage::AppletAdmissionRequest::Install(body) = unit.input.candidate.request else {
-        panic!("actual install required")
-    };
+    let coland_storage::AppletAdmissionRequest::Install(body) = unit.input.candidate.request;
     install_admission_policy(&factory.fixture, &id, &service.package.service_id, "install").await;
     let before = boxed_step(|| async { install_admission_footprint(&factory.fixture).await }).await;
     let (status, problem) = boxed_step(|| async {
@@ -415,10 +408,7 @@ async fn install_admission_reproof_and_missing_creation(factory: &AppletAuthorin
         boxed_step(|| async { factory.prepare_install(&id, "reproof-first-realm").await }).await;
     let first_outcome =
         boxed_step(|| async { commit_install_http(&factory.fixture, &first).await }).await;
-    let coland_storage::AppletAdmissionRequest::Install(first_body) = first.input.candidate.request
-    else {
-        unreachable!()
-    };
+    let coland_storage::AppletAdmissionRequest::Install(first_body) = first.input.candidate.request;
     let first_registration = first_body
         .authoring_request_basis
         .registration_event
@@ -575,9 +565,7 @@ async fn install_admission_reproof_and_missing_creation(factory: &AppletAuthorin
             .await
     })
     .await;
-    let coland_storage::AppletAdmissionRequest::Install(body) = unit.input.candidate.request else {
-        unreachable!()
-    };
+    let coland_storage::AppletAdmissionRequest::Install(body) = unit.input.candidate.request;
     let mut body = *body;
     body.authoring_request_basis
         .capability_grant_events
@@ -1197,15 +1185,9 @@ async fn install_admission_circle_claim_independence(factory: &AppletAuthoringFa
     let circle = circle_unit.effective_scope.clone();
     let _circle_outcome = boxed_step(|| commit_install_http(fixture, &circle_unit)).await;
     let coland_storage::AppletAdmissionRequest::Install(realm_body) =
-        realm_unit.input.candidate.request
-    else {
-        unreachable!()
-    };
+        realm_unit.input.candidate.request;
     let coland_storage::AppletAdmissionRequest::Install(circle_body) =
-        circle_unit.input.candidate.request
-    else {
-        unreachable!()
-    };
+        circle_unit.input.candidate.request;
     let source = |body: &AppletInstallRequestBody, action: &str| {
         body.authoring_request_basis
             .capability_grant_events

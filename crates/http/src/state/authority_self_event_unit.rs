@@ -240,17 +240,16 @@ pub(super) async fn require_governance_change_eligibility(
     state: &AppState,
     event: &Event,
 ) -> ServiceResult<()> {
-    if event.kind == arkret_wire::EventKind::RealmGovernanceStationChange {
-        if let coland_storage::DirectConversationAdmissionCut::Refused(code) = state
+    if event.kind == arkret_wire::EventKind::RealmGovernanceStationChange
+        && let coland_storage::DirectConversationAdmissionCut::Refused(code) = state
             .authority_commits()
             .direct_conversation_admission(event)
             .await?
-        {
-            return Err(ServiceError::Conflict(format!(
-                "{}: governance change is refused by immutable Realm inception",
-                code.as_str()
-            )));
-        }
+    {
+        return Err(ServiceError::Conflict(format!(
+            "{}: governance change is refused by immutable Realm inception",
+            code.as_str()
+        )));
     }
     Ok(())
 }
@@ -495,8 +494,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
                 state
                     .authority_commits()
                     .prepare_service_signer_fact(event, guard, committed_at)
-                    .await?
-                    .into(),
+                    .await?,
             ),
             AdmittedProducer::Local(guard) if matches!(guard.as_ref(), SelfProducerCommitGuard::AppletManagedDevice(_)) => Some(
                 arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::RealmDevice(

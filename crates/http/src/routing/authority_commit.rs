@@ -1057,7 +1057,7 @@ async fn submit_applet_control(
                 .authority_commits()
                 .admit_applet_managed_device_authorization(
                     &submission.event,
-                    &source,
+                    source,
                     &app_state.service_core_id(),
                     method,
                     app_state.notary_signing_key().as_ref(),
@@ -1065,7 +1065,8 @@ async fn submit_applet_control(
                 )
                 .await?;
             use coland_services::authority_commit::AuthorityEventAdmissionOutcome;
-            let outcome = match outcome {
+
+            match outcome {
                 AuthorityEventAdmissionOutcome::Committed(commit) => {
                     arkret_wire::AuthoritySubmitOutcome::Accepted {
                         status: arkret_wire::AuthorityCommitStatus::Committed,
@@ -1083,8 +1084,7 @@ async fn submit_applet_control(
                         "stale_realm_authority: subject Realm is not governed here".into(),
                     ));
                 }
-            };
-            outcome
+            }
         };
         let outcome =
             arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(

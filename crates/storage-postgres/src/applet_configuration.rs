@@ -280,9 +280,9 @@ pub(crate) async fn command(
         {
             return Err(invalid("foreign Account requires verified peer ingress"));
         }
-        coland_storage::AppletConfigurationIngressSource::Peer {
-            source_service_id, ..
-        } if *source_service_id != ingress.requester_account_id.station_id => {
+        coland_storage::AppletConfigurationIngressSource::Peer(peer)
+            if peer.source_service_id != ingress.requester_account_id.station_id =>
+        {
             return Err(invalid(
                 "configuration peer source differs from Account Station",
             ));
@@ -381,22 +381,21 @@ pub(crate) async fn source(
     let mut outcome = read(conn, intent)
         .await?
         .ok_or_else(|| invalid("configuration result has no frozen administrator intent"))?;
-    if let Some(original) = &outcome.source_outcome {
-        if arkret_canonical::canonical_json_bytes(original).map_err(invalid)?
+    if let Some(original) = &outcome.source_outcome
+        && arkret_canonical::canonical_json_bytes(original).map_err(invalid)?
             != arkret_canonical::canonical_json_bytes(source).map_err(invalid)?
-            && original.status != SourceStatus::Pending
-            && !(original.status == SourceStatus::Candidate
-                && source.status == SourceStatus::Created
-                && original.create_event.as_deref().is_some_and(|event| {
-                    source.creation_refs.as_ref().is_some_and(|refs| {
-                        refs.as_slice()
-                            .first()
-                            .is_some_and(|reference| reference.event_id == event.event_id)
-                    })
-                }))
-        {
-            return Err(invalid("configuration terminal source result changed"));
-        }
+        && original.status != SourceStatus::Pending
+        && !(original.status == SourceStatus::Candidate
+            && source.status == SourceStatus::Created
+            && original.create_event.as_deref().is_some_and(|event| {
+                source.creation_refs.as_ref().is_some_and(|refs| {
+                    refs.as_slice()
+                        .first()
+                        .is_some_and(|reference| reference.event_id == event.event_id)
+                })
+            }))
+    {
+        return Err(invalid("configuration terminal source result changed"));
     }
     if let Some(event) = source.create_event.as_deref() {
         let original = sql_query("SELECT intent,outcome,candidate FROM applet_configurations WHERE realm_id=$1 AND request_id=$2 FOR UPDATE")

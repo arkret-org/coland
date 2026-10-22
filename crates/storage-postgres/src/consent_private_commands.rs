@@ -194,6 +194,10 @@ pub(crate) async fn execute(
     Ok(outcome)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The command transaction binds the holder, Realm, constraints and prepared delivery."
+)]
 async fn apply_command(
     conn: &mut AsyncPgConnection,
     holder: &AccountId,

@@ -12,7 +12,7 @@ use arkret_wire::Event;
 pub enum RegisteredAuditCommit {
     Pair {
         request: Box<AuditPairedEventUnitSubmission>,
-        approvals: [Option<crate::EventApprovalCommit>; 2],
+        approvals: Box<[Option<crate::EventApprovalCommit>; 2]>,
     },
     WatchRead {
         request: Box<WatchAuditReadRequest>,

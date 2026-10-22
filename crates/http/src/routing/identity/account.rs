@@ -148,11 +148,9 @@ mod social;
 pub(crate) use social::direct_binding_matches_projection;
 use social::*;
 pub(crate) use social::{
-    accepted_contact_for_pair, canonical_contact_digest, contact_assertion_signer,
-    contact_delivery_address, contact_detached_jws, local_direction_current,
-    local_requester_current_proof, materialize_contact_completions,
-    validate_request_receipt_cryptography, verify_contact_service_signature_bytes,
-    verify_contact_service_signature_bytes_at,
+    accepted_contact_for_pair, contact_assertion_signer, contact_delivery_address,
+    contact_detached_jws, materialize_contact_completions, validate_request_receipt_cryptography,
+    verify_contact_service_signature_bytes, verify_contact_service_signature_bytes_at,
 };
 pub(crate) mod lifecycle;
 // Re-export the lifecycle surface used by sibling routing modules.

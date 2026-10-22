@@ -44,7 +44,12 @@ fn deactivation_never_sends_principal_to_legacy_gateway() {
             listener.set_nonblocking(true).unwrap();
             // Raw deployment input for the retired URL must not re-enable a
             // transport after its config fields and producer have been removed.
+            let stable_notary_seed = [86; 32];
             let values = std::collections::BTreeMap::from([
+                (
+                    "COLAND_NOTARY_SIGNING_KEY".to_owned(),
+                    arkret_canonical::base64url_encode(stable_notary_seed),
+                ),
                 (
                     "COLAND_DEACTIVATION_PUSH_GATEWAY_URL".to_owned(),
                     format!("http://{}", listener.local_addr().unwrap()),
@@ -57,6 +62,11 @@ fn deactivation_never_sends_principal_to_legacy_gateway() {
             let parsed =
                 AppConfig::from_values(&values, coland_http::config::StartupOverrides::default())
                     .unwrap();
+            assert!(
+                !parsed.development_mode,
+                "retain the production startup key gate"
+            );
+            assert_eq!(parsed.notary_signing_key_seed, Some(stable_notary_seed));
             let fixture = test_config();
             let state = coland_test_support::app_state(AppConfig {
                 public_base_url: fixture.public_base_url,
@@ -276,8 +286,13 @@ impl ReceiptGateway {
                         std::thread::sleep(Duration::from_millis(5));
                         continue;
                     }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(error) => panic!("Gateway accept: {error}"),
                 };
+                // Windows inherits the listener's nonblocking mode. The TLS
+                // connection uses blocking I/O with explicit read/write
+                // deadlines; only the listener polls so Drop can stop it.
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();

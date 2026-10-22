@@ -91,3 +91,103 @@ async fn realm_device_welcome_checkpoint_lost_consume_and_cold_ack_preserve_orig
     ))
     .await;
 }
+
+#[tokio::test]
+async fn native_install_admission_rechecks_each_e2ee_choice_and_policy() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_install_admission(
+        database.pool(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_authority_admission_preserves_identity_sources_and_exact_retries() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_authority_admission(
+        database.pool(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_keypackage_admission_rejects_opaque_identity_and_preserves_exact_consumption() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_mls_admission(
+        database.pool(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_reviews_keep_candidate_grant_and_postimage_approvals_independent() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_review_admission(
+        database.pool(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_workers_share_claim_budget_and_observe_later_publication() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_worker_publication_budget(
+        database.pool(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_claim_handoff_holds_the_real_human_counterpart_pcr() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_human_pcr_handoff(
+        database.pool(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_claim_handoff_rechecks_original_e2ee_install_expiry() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_claim_e2ee_expiry(
+        database.pool(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_query_handoff_rechecks_original_e2ee_install_expiry() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_query_e2ee_expiry(
+        database.pool(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_encrypted_read_handoff_rechecks_original_e2ee_install_expiry() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_encrypted_read_e2ee_expiry(
+        database.pool(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_exact_current_below_history_floor_requires_its_live_read_source() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_exact_current_floor(
+        database.pool(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_authorization_and_keypackage_upload_recover_exact_originals_after_local_outcome_failure()
+ {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_runtime_recovery(
+        database.pool(),
+    ))
+    .await;
+}

@@ -24,7 +24,7 @@ pub(super) async fn read(
     let request = body.into_inner();
     request
         .validate()
-        .map_err(|e| AppError::param_invalid(e.to_string()))?;
+        .map_err(|e| AppError::schema_violation(e.to_string()))?;
     if request.effective_scope != verified.effective_scope {
         return Err(AppError::capability_denied(
             "authenticated Applet scope differs",

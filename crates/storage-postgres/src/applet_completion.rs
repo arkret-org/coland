@@ -158,7 +158,10 @@ pub(crate) async fn acknowledge(
     let (manager, _) = crate::realm_actor_control::current_source(
         conn,
         &completion.actor_id,
-        json!({"kind":"realm_actor_manager","actor_id":completion.actor_id}),
+        serde_json::to_value(arkret_wire::CurrentSelector::RealmActorManager {
+            actor_id: completion.actor_id.clone(),
+        })
+        .map_err(PersistenceError::database)?,
     )
     .await?;
     if manager["service_id"] != json!(completion.destination_id) {

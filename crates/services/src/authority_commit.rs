@@ -1934,8 +1934,7 @@ impl AuthorityCommitApplication {
         signing_key: &SigningKey,
         request_digest: &arkret_wire::Hash,
     ) -> ServiceResult<AuthorityEventAdmissionOutcome> {
-        event
-            .validate_for_submit_structural()
+        arkret_event_draft::validate_event_for_submit(event)
             .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
         let at = arkret_canonical::normalize_timestamp_canonical(Utc::now());
         let fact = self

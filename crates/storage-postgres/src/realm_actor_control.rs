@@ -1,5 +1,5 @@
 //! Realm-owned Applet control state, committed with the original Event.
-use arkret_models_integration::{RealmActorCreatePayload, RealmActorCreatePayloadActorRole};
+use arkret_models_integration::RealmActorCreatePayload;
 use arkret_wire::{ActorId, Event, EventKind, RealmCommit, ScopeRef, TypedCurrentRow};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Binary, Jsonb, Nullable, Text};

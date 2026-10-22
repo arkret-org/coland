@@ -149,6 +149,25 @@ async fn run(raw_args: Vec<String>) -> anyhow::Result<()> {
         return run_healthcheck(&raw_args).await;
     }
 
+    // Initialization has a large poll frame even when its future is boxed.
+    // Complete that frame before entering synchronous router / OpenAPI schema
+    // construction on the same default-size main-thread stack.
+    let serve = prepare_server_on_heap(raw_args).await?;
+    serve.await
+}
+
+type ServingFuture = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>>>>;
+
+// Construct the startup future outside the small driver's poll frame. Boxing
+// only `run` at Runtime::block_on does not remove its active poll stack frame.
+#[inline(never)]
+fn prepare_server_on_heap(
+    raw_args: Vec<String>,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = anyhow::Result<ServingFuture>>>> {
+    Box::pin(prepare_server(raw_args))
+}
+
+async fn prepare_server(raw_args: Vec<String>) -> anyhow::Result<ServingFuture> {
     // Configuration comes first: the subscriber, the exporter and everything
     // after all read `AppConfig`, so there is one parse of every value.
     // Logging deliberately does not precede this. A configuration failure
@@ -401,57 +420,79 @@ async fn run(raw_args: Vec<String>) -> anyhow::Result<()> {
         "background worker configured"
     );
 
-    tracing::info!(
-        bind = %config.bind,
-        metrics_bind = %config.metrics_bind,
-        public_base_url = %config.public_base_url,
-        service_id = %state.service_id(),
-        tls_enabled = config.tls_enabled(),
-        tls_cert_path = ?config.tls_cert_path,
-        tls_key_path = ?config.tls_key_path,
-        embedded_webvh_provider_enabled = config.embedded_webvh_provider_enabled,
-        external_webvh_provider_url = ?config.external_webvh_provider_url,
-        object_storage_backend = %config.object_storage.backend_name(),
-        object_storage_target = %config.object_storage.log_target(),
-        development_mode = config.development_mode,
-        storage = state.storage_mode(),
-        "starting coland"
-    );
-    if config.tls_enabled() {
-        let keycert = Keycert::new()
-            .cert_from_path(
-                config
-                    .tls_cert_path
-                    .as_ref()
-                    .expect("tls_enabled guarantees cert path"),
-            )
-            .context("failed to read COLAND_TLS_CERT_PATH")?
-            .key_from_path(
-                config
-                    .tls_key_path
-                    .as_ref()
-                    .expect("tls_enabled guarantees key path"),
-            )
-            .context("failed to read COLAND_TLS_KEY_PATH")?;
-        let acceptor = low_latency_tcp_listener(config.bind.to_string())
-            .rustls(RustlsConfig::new(keycert))
-            .bind()
-            .await;
-        tracing::info!(
-            event = "tls_listener_enabled",
-            tls_provider = "rustls",
-            bind = %config.bind,
-            "TLS listener enabled"
+    Ok(Box::pin(async move {
+        // Keep exactly the original runtime guards alive until serving ends.
+        // Tuple fields drop in order, so reverse the original independent
+        // local declarations: metrics first, native runtime then tracing last.
+        let _runtime_guards = (
+            _metrics_server,
+            _applet_completion_sweeper,
+            _franking_sweeper,
+            _replica_anchor_sweeper,
+            _federation_dispatcher,
+            _resumable_upload_ttl_sweeper,
+            _account_data_change_retention_sweeper,
+            _sync_cursor_ttl_sweeper,
+            _public_push_revoke_retry_worker,
+            _deactivation_push_fanout_worker,
+            _security_rotation_worker,
+            _account_erasure_worker,
+            _consent_effect_publication_worker,
+            _native_public_replies,
+            _tracing_guards,
         );
-        run_server(acceptor, state).await;
-    } else {
-        let acceptor = low_latency_tcp_listener(config.bind.to_string())
-            .bind()
-            .await;
-        run_server(acceptor, state).await;
-    }
-    tracing::info!(event = "shutdown_complete", "coland stopped");
-    Ok(())
+        tracing::info!(
+            bind = %config.bind,
+            metrics_bind = %config.metrics_bind,
+            public_base_url = %config.public_base_url,
+            service_id = %state.service_id(),
+            tls_enabled = config.tls_enabled(),
+            tls_cert_path = ?config.tls_cert_path,
+            tls_key_path = ?config.tls_key_path,
+            embedded_webvh_provider_enabled = config.embedded_webvh_provider_enabled,
+            external_webvh_provider_url = ?config.external_webvh_provider_url,
+            object_storage_backend = %config.object_storage.backend_name(),
+            object_storage_target = %config.object_storage.log_target(),
+            development_mode = config.development_mode,
+            storage = state.storage_mode(),
+            "starting coland"
+        );
+        if config.tls_enabled() {
+            let keycert = Keycert::new()
+                .cert_from_path(
+                    config
+                        .tls_cert_path
+                        .as_ref()
+                        .expect("tls_enabled guarantees cert path"),
+                )
+                .context("failed to read COLAND_TLS_CERT_PATH")?
+                .key_from_path(
+                    config
+                        .tls_key_path
+                        .as_ref()
+                        .expect("tls_enabled guarantees key path"),
+                )
+                .context("failed to read COLAND_TLS_KEY_PATH")?;
+            let acceptor = low_latency_tcp_listener(config.bind.to_string())
+                .rustls(RustlsConfig::new(keycert))
+                .bind()
+                .await;
+            tracing::info!(
+                event = "tls_listener_enabled",
+                tls_provider = "rustls",
+                bind = %config.bind,
+                "TLS listener enabled"
+            );
+            run_server(acceptor, state).await;
+        } else {
+            let acceptor = low_latency_tcp_listener(config.bind.to_string())
+                .bind()
+                .await;
+            run_server(acceptor, state).await;
+        }
+        tracing::info!(event = "shutdown_complete", "coland stopped");
+        Ok(())
+    }))
 }
 
 /// Build the tracing subscriber.

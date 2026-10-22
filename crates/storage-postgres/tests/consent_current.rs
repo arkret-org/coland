@@ -1039,3 +1039,83 @@ async fn disabled_human_account_cannot_execute_native_commands_or_drain_notifica
         vec![holder.clone()]
     );
 }
+
+#[tokio::test]
+async fn incomplete_holder_projection_cannot_issue_or_accept_never_written_for_an_accepted_peer() {
+    let db = TestDatabase::lease().await;
+    let pool = db.pool();
+    let f = fixture(&pool).await;
+    let holder = &f.history.account;
+    let peer = ActorId::account(holder.clone());
+    let store = PgConsentCurrentStore { pool: pool.clone() };
+    let original = write(
+        &f,
+        &f.unit.transactions[1].commit,
+        EventKind::ConsentReplace,
+        replacement(&peer, None, &[]),
+    );
+    let ConsentAdmissionOutcome::Committed(accepted) = store.admit(original).await.unwrap() else {
+        panic!("the original empty replacement must really commit")
+    };
+    let selector = arkret_models_collaboration::events_payloads::consent::ConsentPeer::Actor {
+        actor_id: peer.clone(),
+    };
+    assert_eq!(
+        store
+            .read_cut(holder, &selector, None)
+            .await
+            .unwrap()
+            .records
+            .len(),
+        1
+    );
+    let mut misplaced = holder.clone();
+    misplaced.station_id = "ak:did_core:web:other-station.example".parse().unwrap();
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("UPDATE consent_current_results SET holder_account_id=$1 WHERE realm_id=$2")
+        .bind::<Jsonb, _>(serde_json::to_value(misplaced).unwrap())
+        .bind::<Text, _>(f.unit.transactions[1].commit.realm_id.as_str())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let before = footprint(&pool).await;
+    let error = store.read_cut(holder, &selector, None).await.unwrap_err();
+    assert!(
+        error.to_string().contains("temporarily_unavailable"),
+        "{error}"
+    );
+    assert_eq!(footprint(&pool).await, before);
+    let candidate = write(
+        &f,
+        &accepted.commit,
+        EventKind::ConsentReplace,
+        replacement(&peer, None, &["invite"]),
+    );
+    let error = store.admit(candidate.clone()).await.unwrap_err();
+    assert!(
+        error.to_string().contains("temporarily_unavailable"),
+        "{error}"
+    );
+    assert_eq!(footprint(&pool).await, before);
+
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("DELETE FROM consent_current_results WHERE realm_id=$1")
+        .bind::<Text, _>(accepted.event.realm_id.as_str())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let before = footprint(&pool).await;
+    let error = store.read_cut(holder, &selector, None).await.unwrap_err();
+    assert!(
+        error.to_string().contains("temporarily_unavailable"),
+        "{error}"
+    );
+    let error = store.admit(candidate).await.unwrap_err();
+    assert!(
+        error.to_string().contains("temporarily_unavailable"),
+        "{error}"
+    );
+    assert_eq!(footprint(&pool).await, before);
+}

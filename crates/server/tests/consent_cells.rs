@@ -390,7 +390,11 @@ async fn consent_holder_reads_one_peer_current_preserves_empty_and_rejects_local
         .append_pair("peer", &serde_json::to_string(&peer).unwrap());
     let mut get = TestClient::get(query.as_str())
         .add_header("Authorization", format!("Bearer {token}"), true)
-        .add_header("Arkret-Operation", "ak.self.consent.resource.get.v1", true)
+        .add_header(
+            "Arkret-Operation",
+            arkret_wire::ServiceOperationId::SELF_CONSENT_RESOURCE_GET_V1,
+            true,
+        )
         .send(&app)
         .await;
     assert_eq!(get.status_code.unwrap(), StatusCode::OK);
@@ -415,7 +419,11 @@ async fn consent_holder_reads_one_peer_current_preserves_empty_and_rejects_local
     assert_eq!(admit_consent_fixture(&state, initial).await, first);
     let mut listed = TestClient::get("http://server/_arkret/self/consent/results")
         .add_header("Authorization", format!("Bearer {token}"), true)
-        .add_header("Arkret-Operation", "ak.self.consent.read.list.v1", true)
+        .add_header(
+            "Arkret-Operation",
+            arkret_wire::ServiceOperationId::SELF_CONSENT_READ_LIST_V1,
+            true,
+        )
         .send(&app)
         .await;
     let list: arkret_models_collaboration::consent_operations::ConsentList =
@@ -424,7 +432,11 @@ async fn consent_holder_reads_one_peer_current_preserves_empty_and_rejects_local
     assert!(list.consents[0].permission_scopes.is_empty());
     let mut private = TestClient::get("http://server/_arkret/self/consent/results")
         .add_header("Authorization", format!("Bearer {other_token}"), true)
-        .add_header("Arkret-Operation", "ak.self.consent.read.list.v1", true)
+        .add_header(
+            "Arkret-Operation",
+            arkret_wire::ServiceOperationId::SELF_CONSENT_READ_LIST_V1,
+            true,
+        )
         .send(&app)
         .await;
     assert!(

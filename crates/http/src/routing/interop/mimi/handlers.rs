@@ -502,11 +502,12 @@ pub(super) async fn mimi_consent_update(
             crate::state::authority_pcr::submit_self(state, &session, &body.consent_event)
                 .await
                 .and_then(|outcome| {
-                    outcome.map(|_| ()).ok_or_else(|| {
+                    let outcome = outcome.ok_or_else(|| {
                         coland_services::ServiceError::SchemaViolation(
                             "MIMI Consent is outside the accepted holder PCR".into(),
                         )
-                    })
+                    })?;
+                    crate::state::authority_pcr::require_accepted(outcome).map(|_| ())
                 })
         }
         None => {

@@ -164,6 +164,7 @@ jobs:
           --shm-size=1g
     env:
       DATABASE_URL: postgres://coland:coland@localhost:5432/coland_ws
+      COLAND_TEST_DATABASE_URL: postgres://coland:coland@localhost:5432/coland_ws
       # Demand is `test threads * live AppStates per test`, not the thread
       # count: restart fixtures hold two leases at once and the deep-stack
       # runners give each test its own thread. A 12-thread local run peaks near

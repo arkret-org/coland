@@ -540,32 +540,31 @@ pub(crate) async fn admit_with_audit_in_connection(
                     "Circle self-membership edge is invalid",
                 ));
             }
-            if next == CircleMembership::Join {
-                if member.as_realm_actor_id().is_some() || event.applet_id.is_some() {
-                    if member != event.actor_id
-                        || event.applet_id.is_none()
-                        || event.executed_by.is_some()
-                    {
-                        return Err(conflict(
-                            ConflictCode::CapabilityDenied,
-                            "managed Circle join requires its original self Device consent",
-                        ));
-                    }
-                    crate::managed_message_actor::require_managed_actor_in_connection(
-                        conn,
-                        event,
-                        commit.committed_at,
-                    )
-                    .await?;
-                    let cut =
-                        crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(
-                            conn, event,
-                        )
-                        .await?;
-
-                    cut.require_managed_self_action_in_connection(conn, event, commit, prepared)
-                        .await?;
+            if next == CircleMembership::Join
+                && (member.as_realm_actor_id().is_some() || event.applet_id.is_some())
+            {
+                if member != event.actor_id
+                    || event.applet_id.is_none()
+                    || event.executed_by.is_some()
+                {
+                    return Err(conflict(
+                        ConflictCode::CapabilityDenied,
+                        "managed Circle join requires its original self Device consent",
+                    ));
                 }
+                crate::managed_message_actor::require_managed_actor_in_connection(
+                    conn,
+                    event,
+                    commit.committed_at,
+                )
+                .await?;
+                let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read_for_event(
+                    conn, event,
+                )
+                .await?;
+
+                cut.require_managed_self_action_in_connection(conn, event, commit, prepared)
+                    .await?;
             }
             if next == CircleMembership::Join {
                 let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(

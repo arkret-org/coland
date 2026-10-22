@@ -944,17 +944,16 @@ async fn blob_presign(
         .ok()
         .flatten()
         .ok_or_else(|| AppError::not_found("blob not found"))?;
-    if let Some(session) = session.as_ref() {
-        if !blob_visible_to_session(
+    if let Some(session) = session.as_ref()
+        && !blob_visible_to_session(
             state,
             &blob,
             session,
             body.realm_id.as_ref().map(|realm_id| realm_id.as_str()),
         )
         .await
-        {
-            return Err(AppError::not_found("blob not found"));
-        }
+    {
+        return Err(AppError::not_found("blob not found"));
     }
     let native_guard = if let Some(native) = native {
         if body

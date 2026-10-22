@@ -196,7 +196,7 @@ async fn damage_hydration_mirror(
     let mut conn = pool.get().await.unwrap();
     // This leased test database simulates physical mirror corruption, not
     // an admitted write. Restore the immutable trigger in the same transaction.
-    (&mut *conn)
+    (*conn)
         .transaction::<_, diesel::result::Error, _>(async move |conn| {
             diesel::sql_query(
                 "ALTER TABLE canonical_events DISABLE TRIGGER canonical_events_immutable",
@@ -4266,7 +4266,7 @@ async fn self_moderation_report_commits_exact_current_and_refuses_with_zero_writ
         .producer_proof
         .as_mut()
         .unwrap();
-    proof.created_at = proof.created_at + chrono::Duration::seconds(1);
+    proof.created_at += chrono::Duration::seconds(1);
     divergent.event.envelope = serde_json::to_value(&divergent.authority_commit.event).unwrap();
     let error = uow.commit_event(divergent).await.unwrap_err();
     assert!(
@@ -4687,7 +4687,7 @@ async fn moderation_queue_view_derives_from_the_report_family_at_one_cut() {
     uow.commit_event(dismiss.clone()).await.unwrap();
     let statuses = |view: Vec<ModerationQueueItem>| {
         view.iter()
-            .map(|item| serde_json::to_value(&item.status).unwrap())
+            .map(|item| serde_json::to_value(item.status).unwrap())
             .collect::<Vec<_>>()
     };
     assert_eq!(
@@ -5441,29 +5441,26 @@ fn source_if_human(
                 proof.jws
                     == arkret_wire::test_support::structural_only_detached_jws(&proof.event_digest)
             })
-        {
-            if let Some(event) =
+            && let Some(event) =
                 human_profile::sign_fixture_event(request.authority_commit.event.clone())
-            {
-                request.event.event_id = event.event_id.to_string();
-                request.event.actor_id = event.actor_id.to_string();
-                request.event.envelope = serde_json::to_value(&event).unwrap();
-                request.event.canonical_bytes =
-                    arkret_canonical::canonical_json_bytes(&event.digest_payload().unwrap())
-                        .unwrap();
-                request.event.canonical_digest = event
-                    .event_digest_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
-                    .unwrap();
-                for projection in &mut request.projections {
-                    projection.event_id = event.event_id.to_string();
-                }
-                if request.realm_fanout_source.is_some() {
-                    request.realm_fanout_source =
-                        Some(arkret_wire::EventAdmissionSubmission::new(event.clone()));
-                }
-                request.authority_commit.commit.event_ref = event.event_id.clone();
-                request.authority_commit.event = event;
+        {
+            request.event.event_id = event.event_id.to_string();
+            request.event.actor_id = event.actor_id.to_string();
+            request.event.envelope = serde_json::to_value(&event).unwrap();
+            request.event.canonical_bytes =
+                arkret_canonical::canonical_json_bytes(&event.digest_payload().unwrap()).unwrap();
+            request.event.canonical_digest = event
+                .event_digest_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
+                .unwrap();
+            for projection in &mut request.projections {
+                projection.event_id = event.event_id.to_string();
             }
+            if request.realm_fanout_source.is_some() {
+                request.realm_fanout_source =
+                    Some(arkret_wire::EventAdmissionSubmission::new(event.clone()));
+            }
+            request.authority_commit.commit.event_ref = event.event_id.clone();
+            request.authority_commit.event = event;
         }
         if request
             .authority_commit
@@ -6466,12 +6463,12 @@ fn relation_snapshot_base(
     Box::pin(async move {
         use arkret_wire::EventKind;
         human_profile::admit(
-            &pool,
+            pool,
             &arkret_wire::DidCoreId::new("ak:did_core:web:bootstrap-station.example").unwrap(),
             "bootstrap-actor",
         )
         .await;
-        let unit = unit_with_plaintext_service(&pool).await;
+        let unit = unit_with_plaintext_service(pool).await;
         let creator = creator_account(&unit);
         let realm_id = unit.transactions[0].event.realm_id.clone();
         let store = PgAuthorityCommitStore { pool: pool.clone() };
@@ -6505,8 +6502,8 @@ fn relation_snapshot_base(
             EventKind::StrandCreate,
             public_payload.clone(),
         );
-        let public = source_if_human(&pool, public).await;
-        let public = source_request(&pool, public).await;
+        let public = source_if_human(pool, public).await;
+        let public = source_request(pool, public).await;
         Box::pin(uow.commit_event(public.clone())).await.unwrap();
         let circle = realm_event_request_as(
             &public,
@@ -6522,7 +6519,7 @@ fn relation_snapshot_base(
                 }
             }),
         );
-        let circle = source_if_human(&pool, circle).await;
+        let circle = source_if_human(pool, circle).await;
         Box::pin(uow.commit_event(circle.clone())).await.unwrap();
         RelationSnapshotBase {
             unit,
@@ -6581,7 +6578,7 @@ fn relation_snapshot_fixture(
             payload,
             scope.clone(),
         );
-        let private = source_if_human(&pool, private).await;
+        let private = source_if_human(pool, private).await;
         Box::pin(uow.commit_event(private.clone())).await.unwrap();
         let private_id = StrandId::from_event_id(&private.authority_commit.event.event_id);
         let domain = serde_json::json!({"domain_kind":"from","relation_kind":"confidential_discussion_of","from_ref":private_id});
@@ -6595,7 +6592,7 @@ fn relation_snapshot_fixture(
             }),
             scope.clone(),
         );
-        let relation = source_if_human(&pool, relation).await;
+        let relation = source_if_human(pool, relation).await;
         Box::pin(uow.commit_event(relation.clone())).await.unwrap();
         RelationSnapshotFixture {
             unit,
@@ -6644,7 +6641,7 @@ fn assert_circle_relation_snapshot_disclosure<'a>(
             arkret_wire::CircleId::from_event_id(&circle.authority_commit.event.event_id);
         let domain = serde_json::json!({"domain_kind":"from","relation_kind":"confidential_discussion_of","from_ref":private_id});
         let relation_id = RelationId::from_event_id(&relation.authority_commit.event.event_id);
-        let current = account_snapshot_material(&pool, &realm_id, &creator)
+        let current = account_snapshot_material(pool, realm_id, &creator)
             .await
             .unwrap()
             .unwrap();
@@ -6681,7 +6678,7 @@ fn assert_circle_relation_snapshot_disclosure<'a>(
             relation.authority_commit.commit.commit_id
         );
         assert_eq!(value["id"], serde_json::json!(relation_id));
-        let hidden = account_snapshot_material(&pool, &realm_id, &bob)
+        let hidden = account_snapshot_material(pool, realm_id, bob)
             .await
             .unwrap()
             .unwrap();
@@ -6731,7 +6728,7 @@ fn assert_cross_realm_relation_snapshot_disclosure<'a>(
         .unwrap();
         let cross_domain = serde_json::json!({"domain_kind":"tuple","relation_kind":"references","from_ref":public_id,"to_ref":foreign.strand_id});
         let cross = realm_event_request_as(
-            &circle,
+            circle,
             &creator,
             EventKind::RelationCreate,
             serde_json::json!({
@@ -6739,9 +6736,9 @@ fn assert_cross_realm_relation_snapshot_disclosure<'a>(
                 "relation":{"relation_kind":"references","from_ref":public_id,"to_ref":foreign.strand_id},
             }),
         );
-        let cross = source_if_human(&pool, cross).await;
+        let cross = source_if_human(pool, cross).await;
         uow.commit_event(cross.clone()).await.unwrap();
-        let hidden_cross = account_snapshot_material(&pool, &realm_id, &creator)
+        let hidden_cross = account_snapshot_material(pool, realm_id, &creator)
             .await
             .unwrap()
             .unwrap();
@@ -6769,7 +6766,7 @@ fn assert_cross_realm_relation_snapshot_disclosure<'a>(
         // Reuse the actually accepted foreign founder PCR/Profile in this module's
         // registry before its new invite, without treating inherited Fact as source.
         let foreign_founder =
-            human_profile::admit(&pool, &creator.station_id, "ordinary-founder").await;
+            human_profile::admit(pool, &creator.station_id, "ordinary-founder").await;
         assert_eq!(foreign_founder, creator_account(&foreign.unit));
         let join_pool = pool.clone();
         let join_unit = foreign.unit.clone();
@@ -6781,7 +6778,7 @@ fn assert_cross_realm_relation_snapshot_disclosure<'a>(
         })
         .await
         .unwrap();
-        let visible_cross = account_snapshot_material(&pool, &realm_id, &creator)
+        let visible_cross = account_snapshot_material(pool, realm_id, &creator)
             .await
             .unwrap()
             .unwrap();
@@ -6809,14 +6806,14 @@ fn assert_cross_realm_relation_snapshot_disclosure<'a>(
             .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
         };
         let signed = store
-            .issue_realm_state_snapshot_for_account(&realm_id, &creator, &station, &sign)
+            .issue_realm_state_snapshot_for_account(realm_id, &creator, &station, &sign)
             .await
             .unwrap()
             .unwrap();
         let reopened = PgAuthorityCommitStore { pool: pool.clone() };
         assert_eq!(
             reopened
-                .issued_realm_state_snapshot(&realm_id, &creator, &signed.snapshot_id, &station)
+                .issued_realm_state_snapshot(realm_id, &creator, &signed.snapshot_id, &station)
                 .await
                 .unwrap(),
             Some(signed.clone())
@@ -6827,10 +6824,10 @@ fn assert_cross_realm_relation_snapshot_disclosure<'a>(
             EventKind::MemberState,
             serde_json::json!({"member_id":actor,"membership":"leave"}),
         );
-        let leave = source_if_human(&pool, leave).await;
+        let leave = source_if_human(pool, leave).await;
         uow.commit_event(leave).await.unwrap();
         let withdrawn = reopened
-            .issued_realm_state_snapshot(&realm_id, &creator, &signed.snapshot_id, &station)
+            .issued_realm_state_snapshot(realm_id, &creator, &signed.snapshot_id, &station)
             .await
             .unwrap_err();
         assert!(
@@ -6839,7 +6836,7 @@ fn assert_cross_realm_relation_snapshot_disclosure<'a>(
         );
         assert_eq!(
             relation_snapshot_rows(
-                &account_snapshot_material(&pool, &realm_id, &creator)
+                &account_snapshot_material(pool, realm_id, &creator)
                     .await
                     .unwrap()
                     .unwrap()
@@ -6851,7 +6848,7 @@ fn assert_cross_realm_relation_snapshot_disclosure<'a>(
         .bind::<Text, _>(relation_id.as_str()).execute(&mut conn).await.unwrap();
         drop(conn);
         assert!(
-            account_snapshot_material(&pool, &realm_id, &creator)
+            account_snapshot_material(pool, realm_id, &creator)
                 .await
                 .is_err()
         );
@@ -7222,6 +7219,10 @@ async fn circle_create_and_self_join_write_same_cut_current() {
     ));
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
+)]
 async fn assert_circle_window_dependencies(
     pool: &coland_storage_postgres::PgPool,
     store: &PgAuthorityCommitStore,
@@ -7378,13 +7379,13 @@ fn invite_capability_fixture(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = InviteCapabilityFixture> + '_>> {
     Box::pin(async move {
         human_profile::admit(
-            &pool,
+            pool,
             &arkret_wire::DidCoreId::new("ak:did_core:web:bootstrap-station.example").unwrap(),
             "bootstrap-actor",
         )
         .await;
         let store = PgAuthorityCommitStore { pool: pool.clone() };
-        let unit = unit(&pool).await;
+        let unit = unit(pool).await;
         let at = unit.transactions[0].commit.committed_at;
         store
             .admit_ordinary_realm_bootstrap_unit(&unit, at)
@@ -7392,16 +7393,16 @@ fn invite_capability_fixture(
             .unwrap();
         let station = unit.transactions[0].expected_authority.service_id.clone();
         let member = accepted_pcr_account::accepted_pcr_account(
-            &pool,
+            pool,
             device_authorization_history::did_web_station(&station),
         )
         .await
         .as_account_id()
         .expect("accepted PCR has an Account")
         .clone();
-        let stranger = human_profile::admit(&pool, &station, "message-stranger").await;
+        let stranger = human_profile::admit(pool, &station, "message-stranger").await;
         let bob = invite_account("bob.example", "bob-station.example");
-        inject_joined_member(&pool, &unit, &member).await;
+        inject_joined_member(pool, &unit, &member).await;
         let tail = bootstrap_tail(&unit);
         InviteCapabilityFixture {
             unit,
@@ -7430,16 +7431,16 @@ fn assert_invite_initial_capability_denials<'a>(
         let uow = PgEventCommitUnitOfWork::new(pool.clone());
         for actor in [&member, &stranger] {
             let denied = realm_event_request_as(
-                &tail,
+                tail,
                 actor,
                 arkret_wire::EventKind::InviteCreate,
-                invite_create_payload(&bob, '4', at),
+                invite_create_payload(bob, '4', at),
             );
-            let denied = source_if_human(&pool, denied).await;
+            let denied = source_if_human(pool, denied).await;
             assert_refused_with_zero_writes(
                 &uow,
                 &store,
-                &pool,
+                pool,
                 &denied,
                 coland_storage::ConflictCode::CapabilityDenied,
             )
@@ -7464,13 +7465,13 @@ fn assert_invite_sequenced_revocation<'a>(
         let realm_id = &unit.transactions[0].event.realm_id;
         let store = PgAuthorityCommitStore { pool: pool.clone() };
         let uow = PgEventCommitUnitOfWork::new(pool.clone());
-        let root_event_ref = realm_root_authority_event_ref(&pool, &realm_id).await;
+        let root_event_ref = realm_root_authority_event_ref(pool, realm_id).await;
         let grant = invite_grant_request(
-            &pool,
-            &tail,
-            &unit,
+            pool,
+            tail,
+            unit,
             &root_event_ref,
-            &member,
+            member,
             &["ak.invite.create"],
         )
         .await;
@@ -7483,14 +7484,14 @@ fn assert_invite_sequenced_revocation<'a>(
         // refused by the evaluator at its own cut.
         let prepared = realm_event_request_as(
             &grant,
-            &member,
+            member,
             arkret_wire::EventKind::InviteCreate,
-            invite_create_payload(&bob, '5', at),
+            invite_create_payload(bob, '5', at),
         );
-        let prepared = source_if_human(&pool, prepared).await;
+        let prepared = source_if_human(pool, prepared).await;
         let revoke = realm_event_request_as(
             &grant,
-            &creator_account(&unit),
+            &creator_account(unit),
             arkret_wire::EventKind::CapabilityRevoke,
             serde_json::json!({
                 "grant_id": grant_id,
@@ -7500,23 +7501,23 @@ fn assert_invite_sequenced_revocation<'a>(
                 }
             }),
         );
-        let revoke = source_if_human(&pool, revoke).await;
+        let revoke = source_if_human(pool, revoke).await;
         uow.commit_event(revoke.clone()).await.unwrap();
         assert_refused_with_zero_writes(
             &uow,
             &store,
-            &pool,
+            pool,
             &prepared,
             coland_storage::ConflictCode::TemporarilyUnavailable,
         )
         .await;
         let resequenced = realm_event_request_as(
             &revoke,
-            &member,
+            member,
             arkret_wire::EventKind::InviteCreate,
-            invite_create_payload(&bob, '5', at),
+            invite_create_payload(bob, '5', at),
         );
-        let resequenced = source_if_human(&pool, resequenced).await;
+        let resequenced = source_if_human(pool, resequenced).await;
         assert_eq!(
             resequenced.authority_commit.event,
             prepared.authority_commit.event
@@ -7524,7 +7525,7 @@ fn assert_invite_sequenced_revocation<'a>(
         assert_refused_with_zero_writes(
             &uow,
             &store,
-            &pool,
+            pool,
             &resequenced,
             coland_storage::ConflictCode::CapabilityDenied,
         )
@@ -7546,17 +7547,17 @@ fn assert_invite_racing_revocation<'a>(
         let realm_id = &unit.transactions[0].event.realm_id;
         let store = PgAuthorityCommitStore { pool: pool.clone() };
         let uow = PgEventCommitUnitOfWork::new(pool.clone());
-        let root_event_ref = realm_root_authority_event_ref(&pool, realm_id).await;
+        let root_event_ref = realm_root_authority_event_ref(pool, realm_id).await;
         // Racing a fresh grant's revoke against a create on one head leaves one
         // winner; whichever order commits, the create never survives a revoke
         // that precedes it.
         // A distinct grant body: the first grant's exact Event is already committed.
         let regrant = invite_grant_request(
-            &pool,
-            &revoke,
-            &unit,
+            pool,
+            revoke,
+            unit,
             &root_event_ref,
-            &member,
+            member,
             &["ak.invite.create", "ak.invite.revoke"],
         )
         .await;
@@ -7565,14 +7566,14 @@ fn assert_invite_racing_revocation<'a>(
             arkret_wire::GrantId::from_event_id(&regrant.authority_commit.event.event_id);
         let racing_create = realm_event_request_as(
             &regrant,
-            &member,
+            member,
             arkret_wire::EventKind::InviteCreate,
-            invite_create_payload(&bob, '6', at),
+            invite_create_payload(bob, '6', at),
         );
-        let racing_create = source_if_human(&pool, racing_create).await;
+        let racing_create = source_if_human(pool, racing_create).await;
         let racing_revoke = realm_event_request_as(
             &regrant,
-            &creator_account(&unit),
+            &creator_account(unit),
             arkret_wire::EventKind::CapabilityRevoke,
             serde_json::json!({
                 "grant_id": regrant_id,
@@ -7582,7 +7583,7 @@ fn assert_invite_racing_revocation<'a>(
                 }
             }),
         );
-        let racing_revoke = source_if_human(&pool, racing_revoke).await;
+        let racing_revoke = source_if_human(pool, racing_revoke).await;
         let create_uow = PgEventCommitUnitOfWork::new(pool.clone());
         let revoke_uow = PgEventCommitUnitOfWork::new(pool.clone());
         let (create_result, revoke_result) = tokio::join!(
@@ -7597,14 +7598,14 @@ fn assert_invite_racing_revocation<'a>(
                 );
                 let after = realm_event_request_as(
                     &racing_create,
-                    &creator_account(&unit),
+                    &creator_account(unit),
                     arkret_wire::EventKind::CapabilityRevoke,
                     serde_json::to_value(&racing_revoke.authority_commit.event.payload).unwrap(),
                 );
-                let after = source_if_human(&pool, after).await;
-                let after = source_request(&pool, after).await;
+                let after = source_if_human(pool, after).await;
+                let after = source_request(pool, after).await;
                 uow.commit_event(after).await.unwrap();
-                assert_eq!(invite_families(&pool, &realm_id).await.lifecycle.len(), 1);
+                assert_eq!(invite_families(pool, realm_id).await.lifecycle.len(), 1);
             }
             (Err(error), Ok(_)) => {
                 assert_eq!(
@@ -7613,20 +7614,20 @@ fn assert_invite_racing_revocation<'a>(
                 );
                 let after = realm_event_request_as(
                     &racing_revoke,
-                    &member,
+                    member,
                     arkret_wire::EventKind::InviteCreate,
-                    invite_create_payload(&bob, '6', at),
+                    invite_create_payload(bob, '6', at),
                 );
-                let after = source_if_human(&pool, after).await;
+                let after = source_if_human(pool, after).await;
                 assert_refused_with_zero_writes(
                     &uow,
                     &store,
-                    &pool,
+                    pool,
                     &after,
                     coland_storage::ConflictCode::CapabilityDenied,
                 )
                 .await;
-                assert!(invite_families(&pool, &realm_id).await.lifecycle.is_empty());
+                assert!(invite_families(pool, realm_id).await.lifecycle.is_empty());
             }
             (create, revoke) => panic!(
                 "expected exactly one winner: create ok={} revoke ok={}",
@@ -8252,13 +8253,13 @@ fn message_revision_fixture(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = MessageRevisionFixture> + '_>> {
     Box::pin(async move {
         human_profile::admit(
-            &pool,
+            pool,
             &arkret_wire::DidCoreId::new("ak:did_core:web:bootstrap-station.example").unwrap(),
             "bootstrap-actor",
         )
         .await;
         let store = PgAuthorityCommitStore { pool: pool.clone() };
-        let unit = unit_with_plaintext_service(&pool).await;
+        let unit = unit_with_plaintext_service(pool).await;
         let at = unit.transactions[0].commit.committed_at;
         store
             .admit_ordinary_realm_bootstrap_unit(&unit, at)
@@ -8270,10 +8271,10 @@ fn message_revision_fixture(
         let strand_id =
             arkret_wire::StrandId::from_event_id(&strand.authority_commit.event.event_id);
         let default = set_default_strand_request(&strand, &strand_id, None);
-        let default = source_if_human(&pool, default).await;
+        let default = source_if_human(pool, default).await;
         uow.commit_event(default.clone()).await.unwrap();
         let created = message_create_request(&default, &strand_id, "hello");
-        let created = source_if_human(&pool, created).await;
+        let created = source_if_human(pool, created).await;
         uow.commit_event(created.clone()).await.unwrap();
         MessageRevisionFixture {
             unit,
@@ -8298,14 +8299,14 @@ fn assert_message_revision_carriers<'a>(
 
         // The author's revise replaces the create carrier at its own Commit.
         let revised = realm_event_request_as(
-            &created,
+            created,
             &creator,
             arkret_wire::EventKind::MessageRevise,
             plain_revision(&message_id, "hello, edited"),
         );
-        let revised = source_if_human(&pool, revised).await;
+        let revised = source_if_human(pool, revised).await;
         uow.commit_event(revised.clone()).await.unwrap();
-        let families = message_families(&pool, &realm_id).await;
+        let families = message_families(pool, realm_id).await;
         assert_eq!(
             families.revisions,
             vec![(
@@ -8315,7 +8316,7 @@ fn assert_message_revision_carriers<'a>(
             )]
         );
         let snapshot = store
-            .realm_state_snapshot_material(&realm_id)
+            .realm_state_snapshot_material(realm_id)
             .await
             .unwrap()
             .unwrap();
@@ -8334,16 +8335,16 @@ fn assert_message_revision_carriers<'a>(
         // A revise built on the create's head cannot commit on it once the
         // author's revise took that position.
         let stale = realm_event_request_as(
-            &created,
+            created,
             &creator,
             arkret_wire::EventKind::MessageRevise,
             plain_revision(&message_id, "stale edit"),
         );
-        let stale = source_if_human(&pool, stale).await;
+        let stale = source_if_human(pool, stale).await;
         assert_message_write_refused(
             &uow,
             &store,
-            &pool,
+            pool,
             &stale,
             Some(coland_storage::ConflictCode::TemporarilyUnavailable),
         )
@@ -8367,10 +8368,10 @@ fn assert_message_revision_carriers<'a>(
                 arkret_wire::EventKind::MessageRevise,
                 payload,
             );
-            let refused = source_if_human(&pool, refused).await;
-            let before = message_families(&pool, &realm_id).await;
+            let refused = source_if_human(pool, refused).await;
+            let before = message_families(pool, realm_id).await;
             assert!(uow.commit_event(refused.clone()).await.is_err());
-            assert_eq!(message_families(&pool, &realm_id).await, before);
+            assert_eq!(message_families(pool, realm_id).await, before);
         }
 
         let markdown_payload = serde_json::json!({
@@ -8383,10 +8384,10 @@ fn assert_message_revision_carriers<'a>(
             arkret_wire::EventKind::MessageRevise,
             markdown_payload.clone(),
         );
-        let revised = source_if_human(&pool, revised).await;
+        let revised = source_if_human(pool, revised).await;
         uow.commit_event(revised.clone()).await.unwrap();
         assert_eq!(
-            message_families(&pool, &realm_id).await.revisions,
+            message_families(pool, realm_id).await.revisions,
             vec![(
                 message_id.to_string(),
                 revised.authority_commit.commit.commit_id.to_string(),
@@ -8412,7 +8413,7 @@ fn assert_message_revision_editor_grants<'a>(
         let uow = PgEventCommitUnitOfWork::new(pool.clone());
         let station = unit.transactions[0].expected_authority.service_id.clone();
         let (member, membership_head) =
-            admit_joined_human(&pool, &uow, &revised, &unit, "message-member", 'a').await;
+            admit_joined_human(pool, &uow, revised, unit, "message-member", 'a').await;
         let stranger = invite_account(
             "stranger.example",
             &station.as_str()["ak:did_core:web:".len()..],
@@ -8424,11 +8425,11 @@ fn assert_message_revision_editor_grants<'a>(
                 arkret_wire::EventKind::MessageRevise,
                 plain_revision(&message_id, "not yours"),
             );
-            let foreign = source_if_human(&pool, foreign).await;
+            let foreign = source_if_human(pool, foreign).await;
             assert_message_write_refused(
                 &uow,
                 &store,
-                &pool,
+                pool,
                 &foreign,
                 Some(coland_storage::ConflictCode::CapabilityDenied),
             )
@@ -8437,11 +8438,11 @@ fn assert_message_revision_editor_grants<'a>(
 
         // `.own` authorizes only the author: the member's grant of it is no
         // edit right over the creator's Message.
-        let root_event_ref = realm_root_authority_event_ref(&pool, &realm_id).await;
+        let root_event_ref = realm_root_authority_event_ref(pool, realm_id).await;
         let own = invite_grant_request(
-            &pool,
+            pool,
             &membership_head,
-            &unit,
+            unit,
             &root_event_ref,
             &member,
             &["ak.message.revise.own"],
@@ -8454,11 +8455,11 @@ fn assert_message_revision_editor_grants<'a>(
             arkret_wire::EventKind::MessageRevise,
             plain_revision(&message_id, "own is not others"),
         );
-        let foreign = source_if_human(&pool, foreign).await;
+        let foreign = source_if_human(pool, foreign).await;
         assert_message_write_refused(
             &uow,
             &store,
-            &pool,
+            pool,
             &foreign,
             Some(coland_storage::ConflictCode::CapabilityDenied),
         )
@@ -8466,9 +8467,9 @@ fn assert_message_revision_editor_grants<'a>(
 
         // The unqualified action is an edit right over any Message.
         let broad = invite_grant_request(
-            &pool,
+            pool,
             &own,
-            &unit,
+            unit,
             &root_event_ref,
             &member,
             &["ak.message.revise"],
@@ -8481,10 +8482,10 @@ fn assert_message_revision_editor_grants<'a>(
             arkret_wire::EventKind::MessageRevise,
             plain_revision(&message_id, "moderated"),
         );
-        let moderated = source_if_human(&pool, moderated).await;
+        let moderated = source_if_human(pool, moderated).await;
         uow.commit_event(moderated.clone()).await.unwrap();
         assert_eq!(
-            message_families(&pool, &realm_id).await.revisions,
+            message_families(pool, realm_id).await.revisions,
             vec![(
                 message_id.to_string(),
                 moderated.authority_commit.commit.commit_id.to_string(),
@@ -8518,11 +8519,11 @@ fn assert_message_revision_window_and_redaction<'a>(
         // `ak.message.revise.own` under a 15-minute edit window edits its own
         // Message inside the window and is `failed_precondition` once it closed.
         let (author, author_join_head) =
-            admit_joined_human(&pool, &uow, &moderated, &unit, "message-author", 'b').await;
+            admit_joined_human(pool, &uow, moderated, unit, "message-author", 'b').await;
         let mut windowed = invite_grant_request(
-            &pool,
+            pool,
             &author_join_head,
-            &unit,
+            unit,
             &root_event_ref,
             &author,
             &["ak.message.create", "ak.message.revise.own"],
@@ -8542,7 +8543,7 @@ fn assert_message_revision_window_and_redaction<'a>(
             arkret_wire::EventKind::CapabilityGrant,
             payload,
         );
-        windowed = source_if_human(&pool, windowed).await;
+        windowed = source_if_human(pool, windowed).await;
         uow.commit_event(windowed.clone()).await.unwrap();
         let authored = realm_event_request_as(
             &windowed,
@@ -8554,7 +8555,7 @@ fn assert_message_revision_window_and_redaction<'a>(
                 "content": {"kind": "ak.content.text", "body": "member draft", "format": "plain"}
             }),
         );
-        let authored = source_if_human(&pool, authored).await;
+        let authored = source_if_human(pool, authored).await;
         uow.commit_event(authored.clone()).await.unwrap();
         let authored_id =
             arkret_wire::MessageId::from_event_id(&authored.authority_commit.event.event_id);
@@ -8564,7 +8565,7 @@ fn assert_message_revision_window_and_redaction<'a>(
             arkret_wire::EventKind::MessageRevise,
             plain_revision(&authored_id, "member final"),
         );
-        let own_edit = source_if_human(&pool, own_edit).await;
+        let own_edit = source_if_human(pool, own_edit).await;
         uow.commit_event(own_edit.clone()).await.unwrap();
         let late_edit = realm_event_request_as(
             &own_edit,
@@ -8572,14 +8573,14 @@ fn assert_message_revision_window_and_redaction<'a>(
             arkret_wire::EventKind::MessageRevise,
             plain_revision(&authored_id, "member too late"),
         );
-        let mut late_edit = source_if_human(&pool, late_edit).await;
+        let mut late_edit = source_if_human(pool, late_edit).await;
         // The window closes 15 minutes after creation plus the registered
         // temporal tolerance (`constraint-schema.md` §16.1).
         late_edit.authority_commit.commit.committed_at += chrono::TimeDelta::minutes(21);
         assert_message_write_refused(
             &uow,
             &store,
-            &pool,
+            pool,
             &late_edit,
             Some(coland_storage::ConflictCode::FailedPrecondition),
         )
@@ -8592,7 +8593,7 @@ fn assert_message_revision_window_and_redaction<'a>(
             arkret_wire::EventKind::MessageRedact,
             serde_json::json!({ "message_id": message_id }),
         );
-        let redaction = source_if_human(&pool, redaction).await;
+        let redaction = source_if_human(pool, redaction).await;
         uow.commit_event(redaction.clone()).await.unwrap();
         let after_redaction = realm_event_request_as(
             &redaction,
@@ -8600,11 +8601,11 @@ fn assert_message_revision_window_and_redaction<'a>(
             arkret_wire::EventKind::MessageRevise,
             plain_revision(&message_id, "too late"),
         );
-        let after_redaction = source_if_human(&pool, after_redaction).await;
+        let after_redaction = source_if_human(pool, after_redaction).await;
         assert_message_write_refused(
             &uow,
             &store,
-            &pool,
+            pool,
             &after_redaction,
             Some(coland_storage::ConflictCode::FailedPrecondition),
         )
@@ -8831,7 +8832,7 @@ async fn admitted_message_discussion(
     EventCommitRequest,
     arkret_wire::StrandId,
 ) {
-    let unit = unit_with_plaintext_service(&pool).await;
+    let unit = unit_with_plaintext_service(pool).await;
     let creator = creator_account(&unit);
     assert_eq!(
         human_profile::admit(pool, &creator.station_id, "bootstrap-actor").await,
@@ -9056,10 +9057,10 @@ async fn replies_and_direct_mentions_require_accepted_visible_full_accounts() {
     .await
     .unwrap();
     let (unit, head, strand_id) = &*setup;
-    let creator = creator_account(&unit);
+    let creator = creator_account(unit);
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let target = message_create_request(&head, &strand_id, "target");
+    let target = message_create_request(head, strand_id, "target");
     let target = source_if_human(&pool, target).await;
     uow.commit_event(target.clone()).await.unwrap();
     let message_id = arkret_wire::MessageId::from_event_id(&target.authority_commit.event.event_id);
@@ -9122,12 +9123,12 @@ async fn replies_and_direct_mentions_require_accepted_visible_full_accounts() {
     );
     drop(conn);
     let (late_member, joined) =
-        admit_joined_account(&pool, &uow, &reply, &unit, account_without_profile, 'c').await;
+        admit_joined_account(&pool, &uow, &reply, unit, account_without_profile, 'c').await;
     let root = realm_root_authority_event_ref(&pool, &head.authority_commit.event.realm_id).await;
     let grant = invite_grant_request(
         &pool,
         &joined,
-        &unit,
+        unit,
         &root,
         &late_member,
         &["ak.message.create"],

@@ -1,5 +1,9 @@
 use super::{PersistenceResult, Value, async_trait};
 #[async_trait]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Storage operations bind the complete protocol authoring and authority context."
+)]
 pub trait AppletStore: Send + Sync {
     /// Internal exact-candidate lookup for current Account lock planning.
     async fn configuration_review_account(
@@ -371,15 +375,43 @@ pub struct AppletConfigurationIngress {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AppletConfigurationIngressSource {
     LocalSession,
-    Peer {
-        source_service_id: arkret_wire::DidCoreId,
-        signature_input: String,
-        signature: String,
-        content_digest: String,
-        verified_key_digest: [u8; 32],
-        method: String,
-        target_uri: String,
-        authority: String,
-        signed_headers: std::collections::BTreeMap<String, String>,
-    },
+    Peer(Box<AppletConfigurationPeerSource>),
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AppletConfigurationPeerSource {
+    pub source_service_id: arkret_wire::DidCoreId,
+    pub signature_input: String,
+    pub signature: String,
+    pub content_digest: String,
+    pub verified_key_digest: [u8; 32],
+    pub method: String,
+    pub target_uri: String,
+    pub authority: String,
+    pub signed_headers: std::collections::BTreeMap<String, String>,
+}
+
+#[cfg(test)]
+mod ingress_serialization_tests {
+    use super::AppletConfigurationIngressSource;
+
+    #[test]
+    fn peer_ingress_preserves_the_flat_metadata_carrier() {
+        let original = serde_json::json!({
+            "kind": "peer",
+            "source_service_id": "ak:did_core:web:peer.example",
+            "signature_input": "signature-input",
+            "signature": "signature",
+            "content_digest": "digest",
+            "verified_key_digest": vec![0; 32],
+            "method": "POST",
+            "target_uri": "https://station.example/_arkret/",
+            "authority": "station.example",
+            "signed_headers": {"arkret-operation": "operation"}
+        });
+        let source: AppletConfigurationIngressSource =
+            serde_json::from_value(original.clone()).unwrap();
+        assert!(matches!(source, AppletConfigurationIngressSource::Peer(_)));
+        assert_eq!(serde_json::to_value(source).unwrap(), original);
+    }
 }

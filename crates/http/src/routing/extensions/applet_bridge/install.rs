@@ -299,17 +299,17 @@ pub(super) async fn register_package_install(
         &effective_scope,
     )
     .await?;
-    if let Some(existing) = &existing_installation {
-        if existing.idempotency_key == idempotency_key {
-            if existing.install_body_digest.as_str() == body_digest {
-                res.status_code(StatusCode::OK);
-                return Ok(existing.install_response.clone());
-            }
-            return Err(AppError::conflict(
-                "Idempotency-Key was already used with a different applet install body",
-            )
-            .with_wire_code("duplicate_conflict"));
+    if let Some(existing) = &existing_installation
+        && existing.idempotency_key == idempotency_key
+    {
+        if existing.install_body_digest.as_str() == body_digest {
+            res.status_code(StatusCode::OK);
+            return Ok(existing.install_response.clone());
         }
+        return Err(AppError::conflict(
+            "Idempotency-Key was already used with a different applet install body",
+        )
+        .with_wire_code("duplicate_conflict"));
     }
     let expected_installation = existing_installation
         .as_ref()

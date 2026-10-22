@@ -220,12 +220,6 @@ pub(super) fn ensure_not_revoked(record: &AppletRecord) -> Result<(), AppError> 
     Ok(())
 }
 
-pub(super) fn query_value(req: &Request, key: &str) -> Option<String> {
-    req.query::<String>(key)
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-}
-
 pub(super) fn idempotency_key(req: &Request) -> Option<String> {
     req.headers()
         .get("Idempotency-Key")

@@ -319,46 +319,6 @@ fn historical_key(
     })
 }
 
-/// Validate every original vote against the registered creation operation.
-/// This proves no voting eligibility, approval requirement or consumed nonce.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn validate_operation_candidate(
-    methods: &[coland_storage::ApprovalHistoricalMethod],
-    digest: &arkret_wire::Hash,
-    operation: &str,
-    action: CapabilityActionId,
-    realm: &arkret_wire::RealmId,
-    initiator: &ActorId,
-    at: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<()> {
-    for method in methods {
-        let vote = &method.signature;
-        vote.validate()
-            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        if matches!(
-            vote.input.approval_context,
-            arkret_wire::ApprovalContext::ListWip { .. }
-        ) {
-            return Err(error(
-                "signature_invalid",
-                "creation has no List WIP carrier",
-            ));
-        }
-        let key = historical_key(method, "signature_invalid")?;
-        if let Some(control) = method.native_control.as_ref() {
-            arkret_identity::principal_control::verify_native_control_operation_approval(
-                control, vote, digest, operation, action, realm, initiator, at,
-            )
-        } else {
-            arkret_signatures::approval_signature::verify_operation_approval_signature(
-                vote, digest, operation, action, realm, initiator, at, &key,
-            )
-        }
-        .map_err(|detail| error("signature_invalid", detail))?;
-    }
-    Ok(())
-}
-
 // The predicate describes the original managed target, not the approving
 // Account. Trusted native/current facts are prepared at the accepting cut.
 // Keep this structural proof work out of the generic async qualification poll

@@ -84,10 +84,7 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
         .insert(id.to_string(), native.package.clone());
     let install = boxed_step(|| factory.prepare_install(&id, "realm-authority-admission")).await;
     let outcome = boxed_step(|| commit_install_http(&factory.fixture, &install)).await;
-    let coland_storage::AppletAdmissionRequest::Install(body) = &install.input.candidate.request
-    else {
-        panic!("real installation request required");
-    };
+    let coland_storage::AppletAdmissionRequest::Install(body) = &install.input.candidate.request;
     let package = &body.applet_package;
     let basis = &body.authoring_request_basis;
     let registration = &basis.registration_event.event_id;

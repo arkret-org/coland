@@ -332,10 +332,17 @@ pub(crate) async fn admit_forwarded_mls(
     } else {
         None
     };
-    if let Some(context) = native_request.as_ref() {
-        if let Some(original) = context.replay(state).await? {
-            return match original {arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(outcome)=>Ok(outcome),_=>Err(ServiceError::internal("native MLS stored an incompatible outcome"))};
-        }
+    if let Some(context) = native_request.as_ref()
+        && let Some(original) = context.replay(state).await?
+    {
+        return match original {
+            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(
+                outcome,
+            ) => Ok(outcome),
+            _ => Err(ServiceError::internal(
+                "native MLS stored an incompatible outcome",
+            )),
+        };
     }
     if let Some(outcome) = super::authority_self_event_unit::exact_replay(state, event).await? {
         if native {

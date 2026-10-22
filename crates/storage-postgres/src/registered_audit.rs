@@ -460,39 +460,38 @@ pub(crate) async fn read_visibility_in_connection(
             }
         }
     }
-    if let ScopeRef::Circle { circle_id, .. } = &event.scope_ref {
-        if !crate::circle_current_results::effective_member_in_connection(
+    if let ScopeRef::Circle { circle_id, .. } = &event.scope_ref
+        && !crate::circle_current_results::effective_member_in_connection(
             conn,
             &event.realm_id,
             circle_id,
             &event.actor_id,
         )
         .await?
+    {
+        let explicit = cut.effective_grants(chrono::Utc::now()).any(|(_, grant)| {
+            grant
+                .resources
+                .iter()
+                .any(|selector| selector.circle_id.as_ref() == Some(circle_id))
+                && coland_storage::grant_names_target(
+                    grant,
+                    &[CapabilityActionId::CircleAudit.as_str()],
+                    &resource,
+                )
+        });
+        let actions = [CapabilityActionId::CircleAudit.as_str()];
+        let markers = read_approval_markers_in_connection(conn, request).await?;
+        if !explicit
+            || (expected_generation.is_some()
+                && !matches!(
+                    bounded.evaluate_with_approvals(&actions, &resource, &facts, &markers),
+                    coland_storage::GrantEvaluation::Allowed(_)
+                ))
         {
-            let explicit = cut.effective_grants(chrono::Utc::now()).any(|(_, grant)| {
-                grant
-                    .resources
-                    .iter()
-                    .any(|selector| selector.circle_id.as_ref() == Some(circle_id))
-                    && coland_storage::grant_names_target(
-                        grant,
-                        &[CapabilityActionId::CircleAudit.as_str()],
-                        &resource,
-                    )
-            });
-            let actions = [CapabilityActionId::CircleAudit.as_str()];
-            let markers = read_approval_markers_in_connection(conn, request).await?;
-            if !explicit
-                || (expected_generation.is_some()
-                    && !matches!(
-                        bounded.evaluate_with_approvals(&actions, &resource, &facts, &markers),
-                        coland_storage::GrantEvaluation::Allowed(_)
-                    ))
-            {
-                return Err(PersistenceError::NotFound(
-                    "Circle audit is not visible".to_owned(),
-                ));
-            }
+            return Err(PersistenceError::NotFound(
+                "Circle audit is not visible".to_owned(),
+            ));
         }
     }
     Ok(())
@@ -734,28 +733,27 @@ pub(crate) async fn begin_in_connection(
                 None,
             )
             .await?;
-            if let ScopeRef::Circle { circle_id, .. } = &first.event.scope_ref {
-                if !crate::circle_current_results::effective_member_in_connection(
+            if let ScopeRef::Circle { circle_id, .. } = &first.event.scope_ref
+                && !crate::circle_current_results::effective_member_in_connection(
                     conn,
                     &first.event.realm_id,
                     circle_id,
                     &first.event.actor_id,
                 )
                 .await?
-                {
-                    accepted_actions.push((
-                        0,
+            {
+                accepted_actions.push((
+                    0,
+                    CapabilityActionId::CircleAudit,
+                    action_in_connection(
+                        conn,
+                        &first.event,
+                        &first.commit,
+                        batch.event_approvals.as_ref(),
                         CapabilityActionId::CircleAudit,
-                        action_in_connection(
-                            conn,
-                            &first.event,
-                            &first.commit,
-                            batch.event_approvals.as_ref(),
-                            CapabilityActionId::CircleAudit,
-                        )
-                        .await?,
-                    ));
-                }
+                    )
+                    .await?,
+                ));
             }
             accepted_actions.push((
                 0,
@@ -994,12 +992,14 @@ pub(crate) async fn retain_forward_in_connection(
                 .into());
             }
         }
-        if row.outcome.is_none() && value.is_some() {
+        if row.outcome.is_none()
+            && let Some(value) = value
+        {
             sql_query(
                 "UPDATE registered_audit_forward_units SET outcome=$2 WHERE business_event_id=$1",
             )
             .bind::<Text, _>(first.as_str())
-            .bind::<Jsonb, _>(value.unwrap())
+            .bind::<Jsonb, _>(value)
             .execute(&mut *conn)
             .await?;
         }

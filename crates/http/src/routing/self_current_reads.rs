@@ -751,7 +751,7 @@ pub(super) async fn peer_strand_watch_audit_read(
             );
         }
     };
-    let Some(expires_at) = chrono::DateTime::from_timestamp(signature.expires as i64, 0) else {
+    let Some(expires_at) = chrono::DateTime::from_timestamp(signature.expires, 0) else {
         return crate::error::render_error_code(
             ErrorCode::SignatureWindowInvalid,
             res,
@@ -769,7 +769,7 @@ pub(super) async fn peer_strand_watch_audit_read(
         .await
     {
         Ok(guard) => guard,
-        Err(error) => return render_service_error(res, error.into()),
+        Err(error) => return render_service_error(res, error),
     };
     if let Ok(response) = coland_http::result::guarded_json_ok(outcome, Some(guard)) {
         salvo::Scribe::render(response, res);

@@ -160,17 +160,16 @@ pub(crate) async fn for_join(
     verified: Option<&VerifiedCallParticipant>,
 ) -> PersistenceResult<CallParticipantSigningKey> {
     let (key, history) = original(conn, &event.realm_id, call, commit, kid, verified).await?;
-    if let Some(verified) = verified {
-        if verified
+    if let Some(verified) = verified
+        && verified
             .signing_key_for(event)
             .map_err(unavailable)?
             .public_key_b64u
             != key.public_key_b64u
-        {
-            return Err(unavailable(
-                "accepted key differs from original native method",
-            ));
-        }
+    {
+        return Err(unavailable(
+            "accepted key differs from original native method",
+        ));
     }
     let issuer = arkret_wire::project_did_to_core_id(
         &arkret_identity::verification_method_did(kid.as_str()).map_err(unavailable)?,

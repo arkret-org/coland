@@ -1,4 +1,5 @@
 // The production Savfox consumer uses real Realm Device reads and publication.
+#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
 async fn verify_bot_consumer(
     fixture: &Fixture,
     edge: Arc<arkret_bridge_runtime::ArkretEdge>,

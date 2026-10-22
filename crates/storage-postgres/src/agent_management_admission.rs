@@ -534,6 +534,10 @@ pub(crate) async fn require_content_snapshot_in_connection(
 
 /// Evaluate each concrete source against policy facts proved at the caller's
 /// transaction cut. This does not load or retain authority across requests.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Policy evaluation requires the full controller, Agent, operation and resource context."
+)]
 pub(crate) fn require_content_policy(
     policies: &[Policy],
     realm: &RealmId,

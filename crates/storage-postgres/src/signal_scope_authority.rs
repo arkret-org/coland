@@ -994,16 +994,28 @@ fn product_member_effective(scope: &ScopeRef, parent: &Cut, scoped: &Cut, actor:
             .is_some_and(|revision| scoped.circle_parent_joins.get(&key) == Some(revision))
 }
 
+struct ProductAuthorityCuts<'a> {
+    historical_parent: &'a Cut,
+    current_parent: &'a Cut,
+    historical_scope: &'a Cut,
+    current_scope: &'a Cut,
+    current_realm_head: &'a arkret_wire::CommitStreamHead,
+    current_scope_head: &'a arkret_wire::CommitStreamHead,
+}
+
 async fn product_material(
     conn: &mut AsyncPgConnection,
     query: &SignalScopeAuthorityQuery<'_>,
-    historical_parent: &Cut,
-    current_parent: &Cut,
-    historical_scope: &Cut,
-    current_scope: &Cut,
-    current_realm_head: &arkret_wire::CommitStreamHead,
-    current_scope_head: &arkret_wire::CommitStreamHead,
+    cuts: ProductAuthorityCuts<'_>,
 ) -> PersistenceResult<Option<Box<arkret_models_collaboration::SignalProductAuthority>>> {
+    let ProductAuthorityCuts {
+        historical_parent,
+        current_parent,
+        historical_scope,
+        current_scope,
+        current_realm_head,
+        current_scope_head,
+    } = cuts;
     use arkret_models_collaboration::{SignalAgentProductAuthority, SignalProductAuthority};
     let realm = query.scope.realm_id();
     let mut owned = None;
@@ -1459,12 +1471,14 @@ async fn read_in_connection(
         product_material(
             conn,
             &query,
-            &parent_historical,
-            &parent,
-            &historical,
-            &current,
-            &realm_rows.head,
-            &current_rows.head,
+            ProductAuthorityCuts {
+                historical_parent: &parent_historical,
+                current_parent: &parent,
+                historical_scope: &historical,
+                current_scope: &current,
+                current_realm_head: &realm_rows.head,
+                current_scope_head: &current_rows.head,
+            },
         )
         .await
         .unwrap_or_else(|error| {

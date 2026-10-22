@@ -143,7 +143,7 @@ async fn pair(
         vec![business, audit],
         RegisteredAuditCommit::Pair {
             request: Box::new(request),
-            approvals: [None, None],
+            approvals: Box::new([None, None]),
         },
     )
 }

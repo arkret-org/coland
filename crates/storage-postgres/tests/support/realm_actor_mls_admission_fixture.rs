@@ -106,7 +106,7 @@ pub(super) async fn keypackage_admission(
     child: &GrantId,
     group: &mut arkret_mls::ArkretMlsGroup,
 ) {
-    use diesel_async::{RunQueryDsl as _, SimpleAsyncConnection as _};
+    use diesel_async::SimpleAsyncConnection as _;
     let original = fixture
         .state
         .test_persistence()
@@ -550,6 +550,7 @@ fn admission_signed_claim(
     body
 }
 
+#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
 async fn admission_native_last_resort(
     fixture: &Fixture,
     package: &AppletPackage,

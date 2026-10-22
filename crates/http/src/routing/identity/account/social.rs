@@ -10,8 +10,7 @@ pub(crate) use direct::{direct_binding_matches_projection, direct_pair_key};
 mod contact_write;
 
 pub(crate) use contact_write::{
-    canonical_contact_digest, contact_assertion_signer, contact_delivery_address,
-    contact_detached_jws, local_direction_current, local_requester_current_proof,
+    contact_assertion_signer, contact_delivery_address, contact_detached_jws,
     materialize_contact_completions, validate_request_receipt_cryptography,
     verify_contact_service_signature_bytes, verify_contact_service_signature_bytes_at,
 };

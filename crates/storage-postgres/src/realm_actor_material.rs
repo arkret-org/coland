@@ -186,14 +186,14 @@ pub(crate) async fn read(
             // Preserve the current native identity authenticated for this request.
             // An installation-time SQL cache cannot override a verified rotation.
             arkret_identity::validate_verification_method_relationship(
-                &document,
+                document,
                 verification_method,
                 &did,
                 arkret_identity::DidVerificationRelationship::AssertionMethod,
             )
             .map_err(|_| hidden())?;
             let key =
-                arkret_identity::public_key_material_from_document(&document, verification_method)
+                arkret_identity::public_key_material_from_document(document, verification_method)
                     .map_err(|_| hidden())?;
             if &key.ed25519_bytes().map_err(|_| hidden())? != public_key {
                 return Err(hidden());

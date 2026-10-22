@@ -102,35 +102,37 @@ pub(super) async fn peer_submit(req: &mut Request, depot: &mut Depot, res: &mut 
         let ingress = Ingress {
             requester_account_id: request.requester_account_id,
             request: request.request,
-            source: AppletConfigurationIngressSource::Peer {
-                source_service_id: source.parse().map_err(unavailable)?,
-                signature_input: header("signature-input")?,
-                signature: header("signature")?,
-                content_digest: header("content-digest")?,
-                verified_key_digest: key,
-                method: req.method().as_str().to_owned(),
-                target_uri: crate::routing::federation::signature_target_uri(req, state),
-                authority: crate::routing::federation::signature_authority(req, state),
-                signed_headers: [
-                    "source-service-id",
-                    "destination-service-id",
-                    "source-trust-domain",
-                    "destination-trust-domain",
-                    "content-digest",
-                    "destination-service-endpoint-digest",
-                    "idempotency-key",
-                    "content-type",
-                    "arkret-operation",
-                ]
-                .into_iter()
-                .filter_map(|name| {
-                    req.headers()
-                        .get(name)
-                        .and_then(|value| value.to_str().ok())
-                        .map(|value| (name.to_owned(), value.to_owned()))
-                })
-                .collect(),
-            },
+            source: AppletConfigurationIngressSource::Peer(Box::new(
+                coland_storage::AppletConfigurationPeerSource {
+                    source_service_id: source.parse().map_err(unavailable)?,
+                    signature_input: header("signature-input")?,
+                    signature: header("signature")?,
+                    content_digest: header("content-digest")?,
+                    verified_key_digest: key,
+                    method: req.method().as_str().to_owned(),
+                    target_uri: crate::routing::federation::signature_target_uri(req, state),
+                    authority: crate::routing::federation::signature_authority(req, state),
+                    signed_headers: [
+                        "source-service-id",
+                        "destination-service-id",
+                        "source-trust-domain",
+                        "destination-trust-domain",
+                        "content-digest",
+                        "destination-service-endpoint-digest",
+                        "idempotency-key",
+                        "content-type",
+                        "arkret-operation",
+                    ]
+                    .into_iter()
+                    .filter_map(|name| {
+                        req.headers()
+                            .get(name)
+                            .and_then(|value| value.to_str().ok())
+                            .map(|value| (name.to_owned(), value.to_owned()))
+                    })
+                    .collect(),
+                },
+            )),
         };
         govern(state, &applet, &ingress).await
     }

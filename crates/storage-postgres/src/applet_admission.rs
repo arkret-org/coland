@@ -234,10 +234,10 @@ pub(crate) fn validate_input(
         for event in &events {
             event.validate_for_submit_structural().map_err(rejected)?;
         }
-        return Ok(ValidatedAppletUnit {
+        Ok(ValidatedAppletUnit {
             events,
             portal_realm: basis.effective_scope.realm_id().clone(),
-        });
+        })
     }
 }
 
@@ -255,15 +255,7 @@ struct CompletionRow {
     #[diesel(sql_type=Jsonb)]
     response_body: Value,
 }
-#[derive(QueryableByName)]
-struct PreviewRow {
-    #[diesel(sql_type=Text)]
-    request_digest: String,
-    #[diesel(sql_type=Jsonb)]
-    signed_request: Value,
-    #[diesel(sql_type=Timestamptz)]
-    expires_at: chrono::DateTime<chrono::Utc>,
-}
+
 pub(crate) async fn admit_authoring_unit(
     pool: &PgPool,
     mut input: AppletAuthoringUnitWrite,
@@ -312,18 +304,7 @@ async fn accepted_pair(
     }
     Ok((e, c))
 }
-async fn stream_head(
-    conn: &mut AsyncPgConnection,
-    realm: &RealmId,
-) -> PersistenceResult<Option<CommitStreamHead>> {
-    stream_head_for(
-        conn,
-        &CommitStreamRef::Realm {
-            realm_id: realm.clone(),
-        },
-    )
-    .await
-}
+
 async fn stream_head_for(
     conn: &mut AsyncPgConnection,
     stream: &CommitStreamRef,

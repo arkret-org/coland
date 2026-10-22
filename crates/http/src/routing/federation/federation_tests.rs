@@ -10,7 +10,7 @@ fn trust_domain(value: &str) -> arkret_identifiers::TrustDomainId {
 
 fn federation_headers() -> FederationTrustHeaders {
     FederationTrustHeaders {
-        source_trust_domain: trust_domain("ak:trust_domain:peer.example"),
+        _source_trust_domain: trust_domain("ak:trust_domain:peer.example"),
         destination_trust_domain: trust_domain("ak:trust_domain:coland.local"),
     }
 }

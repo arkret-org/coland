@@ -198,7 +198,7 @@ impl ProjectionState {
             }
         };
         self.set_facet(
-            &operation.realm_id.to_string(),
+            operation.realm_id.as_ref(),
             FacetRef::new(facet::SCOPE_READ_RECEIPT_POLICY, subject),
             operation.payload.clone(),
         );

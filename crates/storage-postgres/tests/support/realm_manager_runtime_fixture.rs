@@ -123,6 +123,7 @@ async fn freeze_manager_revoke_request(
 }
 
 // Same Applet, two Services, complete durable custody retained in a shared backend.
+#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
 async fn run_manager_runtime_transfer(
     factory: &AppletAuthoringFactory,
     previous: &NativeService,
@@ -344,7 +345,7 @@ async fn run_manager_runtime_transfer(
             .unwrap();
     let offer =
         serde_json::from_slice(&arkret_canonical::canonical_json_bytes(&offer).unwrap()).unwrap();
-    let proposal = boxed_step(|| previous_runtime.management_control_proposal(&offer))
+    let proposal = boxed_step(|| previous_runtime.management_control_transcript(&offer))
         .await
         .unwrap();
     let proposal =
@@ -352,7 +353,7 @@ async fn run_manager_runtime_transfer(
             .unwrap();
     let cold_receiver = ManagedDeviceRuntime::new(make_edge()).unwrap();
     let signature =
-        boxed_step(|| cold_receiver.accept_management_control_proposal(&plan, &proposal))
+        boxed_step(|| cold_receiver.sign_management_control_transcript(&plan, &proposal))
             .await
             .unwrap();
     let accepted_control =

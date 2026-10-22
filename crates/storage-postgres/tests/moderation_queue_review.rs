@@ -315,7 +315,7 @@ fn circle_review_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output
         let view = queue.management_view_for_actor(&actor, None).await.unwrap();
         assert_eq!(view.items.len(), 1);
         assert_eq!(
-            serde_json::to_value(&view.items[0].status).unwrap(),
+            serde_json::to_value(view.items[0].status).unwrap(),
             serde_json::json!("submitted")
         );
         let wrong_target = scenario_future(|| {
@@ -348,7 +348,7 @@ fn circle_review_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output
             vec![denied.authority_commit.event.clone()]
         );
         assert_eq!(
-            serde_json::to_value(&view.items[0].status).unwrap(),
+            serde_json::to_value(view.items[0].status).unwrap(),
             serde_json::json!("resolved")
         );
         let lift_payload = serde_json::json!({"target_ref":circle,"decision_ref":denied.authority_commit.event.event_id,
@@ -387,7 +387,7 @@ fn circle_review_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output
         let view = queue.management_view_for_actor(&actor, None).await.unwrap();
         assert!(view.pending_review_events.is_empty());
         assert_eq!(
-            serde_json::to_value(&view.items[0].status).unwrap(),
+            serde_json::to_value(view.items[0].status).unwrap(),
             serde_json::json!("resolved")
         );
     })

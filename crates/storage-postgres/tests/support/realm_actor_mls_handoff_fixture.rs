@@ -36,6 +36,7 @@ async fn admission_authorize_recipient(
         .unwrap()
 }
 
+#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
 async fn admission_add_boundary_recipient(
     fixture: &Fixture,
     package: &AppletPackage,
@@ -479,6 +480,7 @@ async fn admission_native_mls_writer_expiry(
     assert_eq!(group.epoch(), current.epoch);
 }
 
+#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
 pub(super) fn admission_native_scope_event(
     package: &AppletPackage,
     candidate: &RealmActorCreatePayload,

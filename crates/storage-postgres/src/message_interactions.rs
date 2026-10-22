@@ -26,7 +26,6 @@ struct AcceptedRow {
 /// Profile classification is optional display data, never authorization proof.
 /// The ingress producer guard independently authenticates and classifies the
 /// principal; closed Applet authoring retains its dedicated accepted-fact cut.
-
 pub(crate) async fn require_message_actor(
     conn: &mut AsyncPgConnection,
     event: &Event,

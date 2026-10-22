@@ -409,10 +409,10 @@ pub(crate) async fn prepare_private_invite(
 ) -> Result<Option<coland_storage::PreparedPrivateInviteDelivery>, AppError> {
     let prepared =
         prepare_native_invite(state, &request.holder_account_id, &request.command).await?;
-    Ok(prepared
+    prepared
         .map(|p| p.bind_proxy(request))
         .transpose()
-        .map_err(|e| AppError::param_invalid(e.to_string()))?)
+        .map_err(|e| AppError::param_invalid(e.to_string()))
 }
 pub(crate) async fn prepare_native_invite(
     state: &AppState,

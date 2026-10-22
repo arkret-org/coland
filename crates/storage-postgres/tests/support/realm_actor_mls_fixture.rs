@@ -57,6 +57,10 @@ pub(super) fn signed_event(
     signed_event_at(package, actor, scope, kind, payload, grant, signer, at)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
+)]
 pub(super) fn signed_event_at(
     package: &AppletPackage,
     actor: ActorId,
@@ -801,7 +805,7 @@ async fn genesis(
             },"governance_binding":binding,
             "created_at":arkret_canonical::format_timestamp_canonical(at)
         }),
-        Some(&child),
+        Some(child),
         &signer,
         at,
     );
@@ -814,7 +818,7 @@ async fn genesis(
     let (status, value) = boxed_step(|| {
         device_post(
             fixture,
-            &authority,
+            authority,
             "/_arkret/self/events",
             ServiceOperationId::SelfEventsCommandSubmitV1,
             json!(SelfAuthoritySubmitRequest::Event(
@@ -1292,8 +1296,8 @@ async fn claim_remote_with_lifetime(
     );
     assert_eq!(value["accepted"], 1);
     let command = claim_request_with_lifetime(
-        &authority,
-        &recipient,
+        authority,
+        recipient,
         &upload.keypackages[0].keypackage_ref,
         lifetime,
     );
@@ -1321,7 +1325,7 @@ async fn claim_remote_with_lifetime(
     let (status, _) = boxed_step(|| {
         device_post(
             fixture,
-            &authority,
+            authority,
             "/_arkret/self/keys/keypackages/claim",
             ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
             json!(invalid),
@@ -1342,7 +1346,7 @@ async fn claim_remote_with_lifetime(
     let (status, value) = boxed_step(|| {
         device_post(
             fixture,
-            &authority,
+            authority,
             "/_arkret/self/keys/keypackages/claim",
             ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
             json!(command),
@@ -1388,7 +1392,7 @@ async fn claim_remote_with_lifetime(
     let (status, replay) = boxed_step(|| {
         device_post(
             fixture,
-            &authority,
+            authority,
             "/_arkret/self/keys/keypackages/claim",
             ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
             json!(command),
@@ -1413,6 +1417,10 @@ async fn claim_remote_with_lifetime(
     (recipient_identity, claim)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
+)]
 async fn commit_add(
     fixture: &Fixture,
     package: &AppletPackage,
@@ -1461,7 +1469,7 @@ async fn commit_add(
         scope.clone(),
         EventKind::MlsCommit,
         json!(payload),
-        Some(&child),
+        Some(child),
         &signer,
     );
     let at = event.created_at;
@@ -1505,7 +1513,7 @@ async fn commit_add(
     let (status, value) = boxed_step(|| {
         device_post(
             fixture,
-            &authority,
+            authority,
             "/_arkret/self/events",
             ServiceOperationId::SelfEventsCommandSubmitV1,
             json!(submission),
@@ -2309,7 +2317,10 @@ pub(super) async fn human_rotates_out_runtime(
     )
     .unwrap();
     let removed = group
-        .remove_members_by_actor_with_governance_binding(&[device.actor_id.clone()], &binding)
+        .remove_members_by_actor_with_governance_binding(
+            std::slice::from_ref(&device.actor_id),
+            &binding,
+        )
         .unwrap();
     assert_eq!(removed.removed_actors, vec![device.actor_id.clone()]);
     let event = fixture.admin_event(

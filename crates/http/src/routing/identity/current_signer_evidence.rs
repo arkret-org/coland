@@ -91,49 +91,47 @@ async fn native_self_query(
     let mut views = Vec::new();
     for selector in &body.queries {
         let mut resolved = None;
-        if let Some(reference) = selector.committed_event_ref() {
-            if let Ok(coland_storage::MemberCommittedEventRead::Read(view)) = state
+        if let Some(reference) = selector.committed_event_ref()
+            && let Ok(coland_storage::MemberCommittedEventRead::Read(view)) = state
                 .authority_commits()
                 .committed_event_for_member(&reference.event_id, &actor, &state.service_core_id())
                 .await
+        {
+            let Some(view) = (*view)
+                .into_effective_scope(&device.metadata.effective_scope)
+                .map_err(|_| AppError::not_found("signer key unavailable"))?
+            else {
+                return Err(AppError::not_found("signer key unavailable"));
+            };
+            let commit = view.commit();
+            if let arkret_wire::CommittedEventView::Full(_) = &view
+                && commit.realm_id == body.realm_id
+                && commit.event_ref == reference.event_id
+                && commit.commit_id == reference.commit_id
+                && commit.stream_ref == reference.stream_ref
+                && commit.stream_position == reference.stream_position
             {
-                let Some(view) = (*view)
-                    .into_effective_scope(&device.metadata.effective_scope)
+                // Signed metadata cannot substitute for the original
+                // resource's authoritative scope, including mixed batches.
+                if view
+                    .disclosure_scope()
                     .map_err(|_| AppError::not_found("signer key unavailable"))?
-                else {
+                    != device.metadata.effective_scope
+                {
                     return Err(AppError::not_found("signer key unavailable"));
-                };
-                let commit = view.commit();
-                if let arkret_wire::CommittedEventView::Full(_) = &view {
-                    if commit.realm_id == body.realm_id
-                        && commit.event_ref == reference.event_id
-                        && commit.commit_id == reference.commit_id
-                        && commit.stream_ref == reference.stream_ref
-                        && commit.stream_position == reference.stream_position
-                    {
-                        // Signed metadata cannot substitute for the original
-                        // resource's authoritative scope, including mixed batches.
-                        if view
-                            .disclosure_scope()
-                            .map_err(|_| AppError::not_found("signer key unavailable"))?
-                            != device.metadata.effective_scope
-                        {
-                            return Err(AppError::not_found("signer key unavailable"));
-                        }
-                        resolved = state
-                            .authority_commits()
-                            .historical_producer_signer_key(&body.realm_id, selector)
-                            .await
-                            .ok()
-                            .flatten();
-                        if resolved.is_some()
-                            && !views
-                                .iter()
-                                .any(|v: &arkret_wire::CommittedEventView| v.commit() == commit)
-                        {
-                            views.push(view);
-                        }
-                    }
+                }
+                resolved = state
+                    .authority_commits()
+                    .historical_producer_signer_key(&body.realm_id, selector)
+                    .await
+                    .ok()
+                    .flatten();
+                if resolved.is_some()
+                    && !views
+                        .iter()
+                        .any(|v: &arkret_wire::CommittedEventView| v.commit() == commit)
+                {
+                    views.push(view);
                 }
             }
         }

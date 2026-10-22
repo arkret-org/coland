@@ -136,7 +136,7 @@ async fn postgres_agent_participation_ceiling_reads_accepted_governance_and_refu
     .await;
     let scope = format!("realm:{}", discussion.realm_id());
     let rows = store
-        .ceilings_for_scope_keys(&[scope.clone()])
+        .ceilings_for_scope_keys(std::slice::from_ref(&scope))
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -905,6 +905,10 @@ fn fixture_idempotency_record(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
+)]
 fn franking_event_request(
     stream: &mut FixtureCommitStream,
     settlement: FixtureCommitSettlement,
@@ -1561,7 +1565,7 @@ async fn postgres_franking_nonce_ledger_case() {
                               replay_nonce: &str,
                               consumed_at: chrono::DateTime<chrono::Utc>| {
         let mut payload =
-            ordinary_realm::report_payload(&realm_id, target_event_id.as_str(), &reporter);
+            ordinary_realm::report_payload(&realm_id, target_event_id.as_str(), reporter);
         let mut receipt = fixture.proof_payload.clone();
         receipt.replay_nonce = replay_nonce.to_owned();
         receipt.signature = arkret_canonical::base64url_encode(
@@ -1574,7 +1578,7 @@ async fn postgres_franking_nonce_ledger_case() {
         let event = ordinary_realm::next_request(
             head,
             arkret_wire::EventKind::SelfModerationReport,
-            &reporter,
+            reporter,
             payload,
             consumed_at,
         );

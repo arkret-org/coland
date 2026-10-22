@@ -833,10 +833,10 @@ pub(crate) async fn request_in_connection(
         Some(row) => material_accounts(row, caller, &[])?,
         None => caller.as_account_id().cloned().into_iter().collect(),
     };
-    if let Some(account) = crate::applet_configuration::review_account(conn, request).await? {
-        if !accounts.contains(&account) {
-            accounts.push(account);
-        }
+    if let Some(account) = crate::applet_configuration::review_account(conn, request).await?
+        && !accounts.contains(&account)
+    {
+        accounts.push(account);
     }
     require_current_accounts(conn, realm, &accounts, current).await?;
     // Consumed exact receipts have no new qualification participants.

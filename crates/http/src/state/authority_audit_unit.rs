@@ -149,8 +149,7 @@ async fn commit(
                 state
                     .authority_commits()
                     .prepare_service_signer_fact(event, guard, at)
-                    .await?
-                    .into(),
+                    .await?,
             ),
             _ => None,
         });
@@ -254,7 +253,7 @@ async fn commit(
         (
             RegisteredAuditCommit::Pair {
                 request: Box::new(pair.clone()),
-                approvals,
+                approvals: Box::new(approvals),
             },
             None,
         )

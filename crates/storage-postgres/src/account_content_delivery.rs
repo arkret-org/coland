@@ -1060,6 +1060,10 @@ async fn delivery_source_in_connection(
     crate::realm_authorization_cut::owned_source_in_connection(conn, realm, actor, at, lock).await
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Policy evaluation binds the complete delivery authority, operation and resource cut."
+)]
 async fn require_delivery_policy_in_connection(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
@@ -1382,6 +1386,10 @@ async fn acquire_realm_actor_material(
     Ok(Some(guard))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Private delivery credentials bind the original target, operation and expiration."
+)]
 async fn validate_private_delivery_credentials(
     held: &mut DeliveryGuard,
     account: &AccountId,
@@ -1571,7 +1579,7 @@ async fn acquire_remote_watch_delivery(
     }
     outcome
         .validate_for_generation(request, authority.generation)
-        .map_err(|error| unavailable(&error.to_string()))?;
+        .map_err(|error| unavailable(error))?;
     let mut held = Box::new(DeliveryGuard {
         connection: Some(crate::pg_conn(pool).await?),
         runtime: tokio::runtime::Handle::current(),
@@ -1606,16 +1614,16 @@ async fn acquire_remote_watch_delivery(
             ));
         }
     }
-    if let Some((request, outcome, _)) = audited {
-        if authority.service_id == *station {
-            crate::registered_audit::read_visibility_in_connection(
-                held.connection(),
-                request,
-                station,
-                Some(outcome.audit_commit.governance_generation),
-            )
-            .await?;
-        }
+    if let Some((request, outcome, _)) = audited
+        && authority.service_id == *station
+    {
+        crate::registered_audit::read_visibility_in_connection(
+            held.connection(),
+            request,
+            station,
+            Some(outcome.audit_commit.governance_generation),
+        )
+        .await?;
     }
     let actor = ActorId::account(account.clone());
     #[derive(QueryableByName)]
@@ -1722,9 +1730,11 @@ async fn acquire_remote_watch_delivery(
             ));
         }
     }
-    let mut facts = coland_storage::OperationFacts::default();
-    facts.strand_id = Some(request.strand_id.to_string());
-    facts.object_kind = Some("strand".to_owned());
+    let mut facts = coland_storage::OperationFacts {
+        strand_id: Some(request.strand_id.to_string()),
+        object_kind: Some("strand".to_owned()),
+        ..Default::default()
+    };
     if let arkret_wire::CommitStreamRef::Circle { circle_id, .. } = &head.stream_ref {
         facts.circle_id = Some(circle_id.to_string());
     }
@@ -2055,17 +2065,26 @@ async fn revalidate_committed_events_in_connection(
     Ok(())
 }
 
+struct DeliveryAuthority<'a> {
+    account: &'a AccountId,
+    station: &'a DidCoreId,
+    actor: ActorId,
+}
+
 // Build the physical native reply time proof under the original held cut.
 async fn native_reply_time_proof_in_connection(
     conn: &mut AsyncPgConnection,
-    account: &AccountId,
-    station: &DidCoreId,
+    authority: DeliveryAuthority<'_>,
     input: &coland_storage::AccountContentDeliveryInput,
-    actor: ActorId,
     realms: &std::collections::BTreeSet<arkret_wire::RealmId>,
     native_human_pcrs: &std::collections::BTreeMap<AccountId, arkret_wire::RealmId>,
     reply: NativeReplyContext<'_>,
 ) -> PersistenceResult<NativeReplyTimeProof> {
+    let DeliveryAuthority {
+        account,
+        station,
+        actor,
+    } = authority;
     let realm = &reply.source.event.realm_id;
     if realms.len() != 1
         || !realms.contains(realm)
@@ -2223,14 +2242,17 @@ struct QueuedContentFacts {
 // Preserve queued material checks on the caller's existing transaction cut.
 async fn revalidate_projection_inputs_in_connection(
     conn: &mut AsyncPgConnection,
-    account: &AccountId,
-    station: &DidCoreId,
-    actor: ActorId,
+    authority: DeliveryAuthority<'_>,
     realms: &std::collections::BTreeSet<arkret_wire::RealmId>,
     input: &mut coland_storage::AccountContentDeliveryInput,
     facts: &mut QueuedContentFacts,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
+    let DeliveryAuthority {
+        account,
+        station,
+        actor,
+    } = authority;
     let QueuedContentFacts {
         object_sources,
         native_projection_reads,
@@ -2693,14 +2715,17 @@ async fn revalidate_projection_inputs_in_connection(
 // Preserve queued material checks on the caller's existing transaction cut.
 async fn revalidate_content_inputs_in_connection(
     conn: &mut AsyncPgConnection,
-    account: &AccountId,
-    station: &DidCoreId,
-    actor: ActorId,
+    authority: DeliveryAuthority<'_>,
     realms: &std::collections::BTreeSet<arkret_wire::RealmId>,
     input: &mut coland_storage::AccountContentDeliveryInput,
     facts: &mut QueuedContentFacts,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
+    let DeliveryAuthority {
+        account,
+        station,
+        actor,
+    } = authority;
     let QueuedContentFacts {
         object_sources,
         native_projection_reads: _,
@@ -3078,8 +3103,8 @@ async fn revalidate_content_inputs_in_connection(
         &mut *conn,
         account,
         actor.clone(),
-        &realms,
-        &input,
+        realms,
+        input,
         at,
     ))
     .await?;
@@ -3323,9 +3348,11 @@ async fn acquire_owned_delivery_guard(
     let mut queued = QueuedContentFacts::default();
     Box::pin(revalidate_projection_inputs_in_connection(
         guard.connection(),
-        account,
-        station,
-        actor.clone(),
+        DeliveryAuthority {
+            account,
+            station,
+            actor: actor.clone(),
+        },
         &realms,
         &mut input,
         &mut queued,
@@ -3340,9 +3367,11 @@ async fn acquire_owned_delivery_guard(
     })?;
     Box::pin(revalidate_content_inputs_in_connection(
         guard.connection(),
-        account,
-        station,
-        actor.clone(),
+        DeliveryAuthority {
+            account,
+            station,
+            actor: actor.clone(),
+        },
         &realms,
         &mut input,
         &mut queued,
@@ -3365,7 +3394,7 @@ async fn acquire_owned_delivery_guard(
         blob_scope_operations,
         blob_source_actions,
     } = queued;
-    if reply.is_some() {
+    if let Some(reply) = &reply {
         for row in &input.committed_events {
             let CommittedEventView::Full(full) = row else {
                 return Err(unavailable("native reply body source is withheld"));
@@ -3387,7 +3416,7 @@ async fn acquire_owned_delivery_guard(
                 || current.author != full.event.actor_id
                 || current.created_at != full.event.created_at
                 || current.scope_ref != full.event.scope_ref
-                || current.strand_id != reply.as_ref().expect("native context").strand.clone()
+                || current.strand_id != reply.strand.clone()
                 || crate::message_revision_current_results::message_is_redacted(
                     guard.connection(),
                     &full.event.realm_id,
@@ -3402,7 +3431,7 @@ async fn acquire_owned_delivery_guard(
             Box::pin(require_owned_content_source_in_connection(
                 guard.connection(),
                 &full.event,
-                reply.as_ref().expect("native context").controller,
+                reply.controller,
                 account,
                 at,
                 CapabilityActionId::ObjectReadContent,
@@ -3441,18 +3470,17 @@ async fn acquire_owned_delivery_guard(
         station,
     ))
     .await?;
-    if let Some((_, details)) = &input.agent_session_scope {
-        if details.get("controller_principal_id")
+    if let Some((_, details)) = &input.agent_session_scope
+        && (details.get("controller_principal_id")
             != Some(&serde_json::json!(
                 evidence.accepted_binding().controller_account.principal_id
             ))
             || details.get("agent_key_authorization_ref")
-                != Some(&serde_json::json!(endpoint.authorization_ref.event_id))
-        {
-            return Err(unavailable(
-                "session scope differs from the current controller or key",
-            ));
-        }
+                != Some(&serde_json::json!(endpoint.authorization_ref.event_id)))
+    {
+        return Err(unavailable(
+            "session scope differs from the current controller or key",
+        ));
     }
     let mut clock = DeliveryClockProof {
         checked_at: at,
@@ -3594,16 +3622,15 @@ async fn acquire_owned_delivery_guard(
                 "current owned controller differs from private scope custody",
             ));
         }
-        if let Some((_, details)) = &clock.session_scope {
-            if details.get("controller_principal_id")
+        if let Some((_, details)) = &clock.session_scope
+            && (details.get("controller_principal_id")
                 != Some(&serde_json::json!(controller_account_id.principal_id))
                 || details.get("agent_key_authorization_ref")
-                    != Some(&serde_json::json!(endpoint.authorization_ref.event_id))
-            {
-                return Err(unavailable(
-                    "session scope differs from the current controller or key",
-                ));
-            }
+                    != Some(&serde_json::json!(endpoint.authorization_ref.event_id)))
+        {
+            return Err(unavailable(
+                "session scope differs from the current controller or key",
+            ));
         }
         let accountability = sql_query("SELECT value FROM identity_accountability_current_results WHERE subject_id=$1 AND issuer_id=$2 ORDER BY realm_id,scope_set_digest FOR SHARE")
             .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(controller_account_id.principal_id.as_str())
@@ -3721,10 +3748,12 @@ async fn acquire_owned_delivery_guard(
     if let Some(reply) = reply {
         let proof = Box::pin(native_reply_time_proof_in_connection(
             guard.connection(),
-            account,
-            station,
+            DeliveryAuthority {
+                account,
+                station,
+                actor: actor.clone(),
+            },
             &input,
-            actor.clone(),
             &realms,
             &native_human_pcrs,
             reply,

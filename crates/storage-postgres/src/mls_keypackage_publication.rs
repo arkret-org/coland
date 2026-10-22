@@ -272,17 +272,16 @@ pub(crate) async fn require_native_publication(
     if body.mls_group_id.is_none() && body.strand_id.is_none() {
         return Err(denied("publication has no original signed resource target"));
     }
-    if let Some(group) = &body.mls_group_id {
-        if *group
+    if let Some(group) = &body.mls_group_id
+        && *group
             != guard
                 .effective_scope
                 .canonical_mls_group_id()
                 .map_err(denied)?
-        {
-            return Err(denied(
-                "signed group differs from the actual publication scope",
-            ));
-        }
+    {
+        return Err(denied(
+            "signed group differs from the actual publication scope",
+        ));
     }
     if let Some(strand) = &body.strand_id {
         let actual = crate::strand_current_results::locked_active_strand_scope(

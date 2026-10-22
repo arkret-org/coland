@@ -301,17 +301,16 @@ async fn guard_snapshot_revisions(
                     )
                     .await?;
                 }
-                if let Some(old) = old {
-                    if old.source_stream_ref != source
+                if let Some(old) = old
+                    && (old.source_stream_ref != source
                         || old.current_stream_position > incoming_position
                         || (old.current_stream_position == incoming_position
                             && (old.current_commit_id != revision.commit_id.as_str()
-                                || old.value != *value))
-                    {
-                        return Err(malformed(
-                            "Call snapshot regresses its source, revision or exact effective value",
-                        ));
-                    }
+                                || old.value != *value)))
+                {
+                    return Err(malformed(
+                        "Call snapshot regresses its source, revision or exact effective value",
+                    ));
                 }
             }
             S::AgentSidecarExchangeControls {
@@ -702,6 +701,10 @@ async fn upsert_member_state(
 /// Compare the exact locally retained original and its materialized axis.
 /// An unavailable original remains the authenticated Snapshot trust boundary;
 /// ordinary consumption never scans or replays the accepted history.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Verification binds the complete retained current identity, stream and revision."
+)]
 async fn verify_retained_call_projection(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,

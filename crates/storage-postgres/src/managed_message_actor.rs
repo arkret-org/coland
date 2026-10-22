@@ -99,6 +99,11 @@ pub(crate) fn prepare_applet_producer_in_connection<'a>(
     })
 }
 
+type QualifiedAppletProducer = (
+    arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact,
+    Vec<crate::approval_admission::QualifiedApproval>,
+);
+
 pub(crate) fn require_applet_producer_in_connection<'a>(
     conn: &'a mut AsyncPgConnection,
     event: &'a Event,
@@ -106,15 +111,7 @@ pub(crate) fn require_applet_producer_in_connection<'a>(
     commit: &'a arkret_wire::RealmCommit,
     prepared: Option<&'a coland_storage::EventApprovalCommit>,
 ) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<
-                Output = PersistenceResult<(
-                    arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact,
-                    Vec<crate::approval_admission::QualifiedApproval>,
-                )>,
-            > + Send
-            + 'a,
-    >,
+    Box<dyn std::future::Future<Output = PersistenceResult<QualifiedAppletProducer>> + Send + 'a>,
 > {
     crate::boxed_future(|| async move {
         if matches!(
@@ -675,10 +672,10 @@ pub(crate) async fn evaluate_producer_grant(
             "approval_required: Applet producer grant approval is not satisfied".into(),
         ));
     }
-    if let coland_storage::GrantEvaluation::Allowed(mut satisfied) = evaluation {
-        if let Some(satisfied) = satisfied.pop() {
-            return Ok((accepted, satisfied.reservations));
-        }
+    if let coland_storage::GrantEvaluation::Allowed(mut satisfied) = evaluation
+        && let Some(satisfied) = satisfied.pop()
+    {
+        return Ok((accepted, satisfied.reservations));
     }
     Err(denied(
         "Applet producer grant constraints do not permit this action",

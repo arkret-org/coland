@@ -1,5 +1,5 @@
 //! Native Realm Device source carried through the accepting transaction.
-use arkret_wire::{ActorId, AppletId, DidCoreId, Event};
+use arkret_wire::{ActorId, AppletId, Event};
 use coland_storage::{AppletManagedDeviceScopeGuard, PersistenceError, PersistenceResult};
 #[derive(Clone, Copy)]
 pub(crate) enum Source<'a> {
@@ -23,12 +23,7 @@ impl<'a> Source<'a> {
     pub(crate) fn applet(self) -> &'a AppletId {
         &self.guard().authority.applet_id
     }
-    pub(crate) fn service(self) -> &'a DidCoreId {
-        &self.guard().authority.source_service_id
-    }
-    pub(crate) fn document(self) -> &'a arkret_identity::DidDocument {
-        &self.guard().service_did_document
-    }
+
     pub(crate) fn ensure_event(
         self,
         event: &Event,

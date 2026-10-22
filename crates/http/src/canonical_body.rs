@@ -213,12 +213,10 @@ impl Handler for CanonicalJsonBodyLimitMiddleware {
             };
             // Representation integrity precedes JSON parsing for the closed MIMI
             // provider surface. Transport encoding/byte guards already ran.
-            if mimi_provider {
-                if let Err(error) = mimi_content_preflight(req, &payload) {
-                    error.write(req, depot, res).await;
-                    ctrl.skip_rest();
-                    return;
-                }
+            if mimi_provider && let Err(error) = mimi_content_preflight(req, &payload) {
+                error.write(req, depot, res).await;
+                ctrl.skip_rest();
+                return;
             }
             let class = WireBodyClass::NonStreamingJsonOperation {
                 max_canonical_body_bytes: operation_canonical_body_limit(&method, &path),

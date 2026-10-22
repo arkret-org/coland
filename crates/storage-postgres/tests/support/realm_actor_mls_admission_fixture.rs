@@ -1740,10 +1740,15 @@ async fn admission_read_material_and_snapshot_guards(
         )
     })
     .await;
-    assert_eq!(expired.status_code, Some(StatusCode::FORBIDDEN));
+    assert_eq!(expired.status_code, Some(StatusCode::NOT_FOUND));
     let problem: Value = expired.take_json().await.unwrap();
+    assert_eq!(problem["type"], "https://arkret.org/problems/not_found");
     assert!(problem.get("group_info_bytes_b64").is_none());
     assert!(problem.get("ratchet_tree_bytes_b64").is_none());
+    assert_eq!(
+        boxed_step(|| admission_read_footprint(fixture)).await,
+        before
+    );
     let deadline = arkret_canonical::normalize_timestamp_canonical(
         chrono::Utc::now() + chrono::Duration::seconds(30),
     );
@@ -1792,13 +1797,45 @@ async fn admission_read_material_and_snapshot_guards(
         boxed_step(|| admission_read_footprint(fixture)).await,
         before
     );
-    for reference in [None, Some(&snapshot.snapshot_id)] {
+    for (reference, expected_status, expected_type) in [
+        (
+            None,
+            StatusCode::NOT_FOUND,
+            "https://arkret.org/problems/not_found",
+        ),
+        (
+            Some(&snapshot.snapshot_id),
+            StatusCode::FORBIDDEN,
+            "https://arkret.org/problems/capability_denied",
+        ),
+    ] {
         let mut response =
             boxed_step(|| admission_snapshot_response(fixture, authority, reference)).await;
-        assert_eq!(response.status_code, Some(StatusCode::FORBIDDEN));
+        assert_eq!(response.status_code, Some(expected_status));
         let problem: Value = response.take_json().await.unwrap();
-        assert!(problem.get("current_state_entries").is_none());
+        assert_eq!(problem["type"], expected_type);
+        for field in [
+            "snapshot_id",
+            "realm_id",
+            "governance_generation",
+            "purpose",
+            "history_basis",
+            "visible_stream_heads",
+            "current_state_entries",
+            "retention_and_history_floor",
+            "created_at",
+            "signature",
+        ] {
+            assert!(
+                problem.get(field).is_none(),
+                "refused snapshot exposed {field}"
+            );
+        }
     }
+    assert_eq!(
+        boxed_step(|| admission_read_footprint(fixture)).await,
+        before
+    );
     let restored = boxed_step(|| {
         admission_read_parent(fixture, package, &candidate.actor_id, &template, None)
     })

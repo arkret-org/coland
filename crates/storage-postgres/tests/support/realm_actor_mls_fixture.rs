@@ -784,7 +784,8 @@ async fn genesis(
     let info = boxed_step(|| public_material(fixture, info)).await;
     let tree = boxed_step(|| public_material(fixture, tree)).await;
     eprintln!("native MLS: public material ready");
-    let genesis = signed_event(
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let genesis = signed_event_at(
         package,
         candidate.actor_id.clone(),
         scope.clone(),
@@ -797,10 +798,16 @@ async fn genesis(
                 "endpoint":{"kind":"device","device_id":device},
                 "authorization_event_ref":authority.authorization_ref.event_id
             },"governance_binding":binding,
-            "created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())
+            "created_at":arkret_canonical::format_timestamp_canonical(at)
         }),
         Some(&child),
         &signer,
+        at,
+    );
+    assert_eq!(genesis.created_at, at);
+    assert_eq!(
+        genesis.payload["created_at"],
+        json!(arkret_canonical::format_timestamp_canonical(at))
     );
     eprintln!("native MLS: submitting Genesis");
     let (status, value) = boxed_step(|| {
@@ -810,7 +817,7 @@ async fn genesis(
             "/_arkret/self/events",
             ServiceOperationId::SelfEventsCommandSubmitV1,
             json!(SelfAuthoritySubmitRequest::Event(
-                arkret_wire::EventAdmissionSubmission::new(genesis)
+                arkret_wire::EventAdmissionSubmission::new(genesis.clone())
             )),
         )
     })
@@ -820,6 +827,15 @@ async fn genesis(
         StatusCode::OK,
         "Realm Device actual MLS Genesis: {value}"
     );
+    let original = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&genesis.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(original.event, genesis);
     group
         .install_local_creator_binding(
             candidate.actor_id.clone(),

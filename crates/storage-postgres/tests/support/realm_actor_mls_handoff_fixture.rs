@@ -639,6 +639,82 @@ async fn admission_scope_genesis(
     assert_eq!(original.event, event);
 }
 
+async fn admission_join_human_circle(fixture: &Fixture, circle: &ScopeRef) {
+    use diesel_async::RunQueryDsl as _;
+    #[derive(diesel::QueryableByName)]
+    struct Current {
+        #[diesel(sql_type = diesel::sql_types::Jsonb)]
+        value: Value,
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        effective: bool,
+    }
+    let ScopeRef::Circle { circle_id, .. } = circle else {
+        panic!("claim target must join its exact Circle")
+    };
+    let actor = ActorId::account(fixture.pcr.history.account.clone());
+    let parent =
+        super::ordinary_realm::parent_membership_revision(&fixture.pool, &fixture.realm, &actor)
+            .await;
+    let join = fixture.admin_event(
+        EventKind::CircleMemberState,
+        circle.clone(),
+        json!({"circle_id":circle_id,"member_id":actor,"membership":"join",
+            "parent_membership_revision":parent}),
+    );
+    boxed_step(|| submit_human_event(fixture, join.clone())).await;
+    let accepted = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&join.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(accepted.event, join);
+    assert_eq!(accepted.commit.event_ref, join.event_id);
+    assert_eq!(
+        accepted.commit.stream_ref,
+        arkret_wire::CommitStreamRef::Circle {
+            realm_id: fixture.realm.clone(),
+            circle_id: circle_id.clone(),
+        }
+    );
+    let mut connection = fixture.pool.get().await.unwrap();
+    let current = diesel::sql_query(
+        "SELECT to_jsonb(m) AS value, \
+         circle_member_parent_join_current(realm_id,member_id,value) AS effective \
+         FROM circle_member_state_current_results m \
+         WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3",
+    )
+    .bind::<diesel::sql_types::Text, _>(fixture.realm.as_str())
+    .bind::<diesel::sql_types::Text, _>(circle_id.as_str())
+    .bind::<diesel::sql_types::Text, _>(actor.to_string())
+    .get_result::<Current>(&mut connection)
+    .await
+    .unwrap();
+    assert!(current.effective);
+    assert_eq!(current.value["membership"], "join");
+    let expected = arkret_wire::CircleMemberStateCurrent {
+        membership: arkret_wire::MembershipState::Join,
+        parent_membership_revision: Some(serde_json::from_value(parent).unwrap()),
+        effective_at: join.created_at,
+    };
+    expected.validate().unwrap();
+    assert_eq!(current.value["value"], json!(expected));
+    assert_eq!(
+        current.value["current_commit_id"],
+        json!(accepted.commit.commit_id)
+    );
+    assert_eq!(
+        current.value["current_stream_position"],
+        json!(accepted.commit.stream_position)
+    );
+    assert_eq!(
+        current.value["source_stream_ref"],
+        json!(accepted.commit.stream_ref)
+    );
+}
+
 pub(super) async fn admission_circle_claim_after_realm_fence(
     fixture: &Fixture,
     package: &AppletPackage,
@@ -651,6 +727,7 @@ pub(super) async fn admission_circle_claim_after_realm_fence(
     let realm = ScopeRef::Realm {
         realm_id: fixture.realm.clone(),
     };
+    boxed_step(|| admission_join_human_circle(fixture, circle)).await;
     for scope in [&realm, circle] {
         boxed_step(|| admission_scope_genesis(fixture, package, candidate, authority, scope)).await;
     }

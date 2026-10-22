@@ -724,25 +724,6 @@ pub(super) async fn admission_circle_claim_after_realm_fence(
     realm_refs: &[GrantId],
 ) {
     assert!(matches!(circle, ScopeRef::Circle { .. }));
-    // Creating a Circle does not join its creator. The ordinary recipient must
-    // have an accepted membership in the same Circle as the native requester.
-    let ScopeRef::Circle { circle_id, .. } = circle else { unreachable!() };
-    let recipient = ActorId::account(fixture.pcr.history.account.clone());
-    let parent = ordinary_realm::parent_membership_revision(
-        &fixture.pool, &fixture.realm, &recipient,
-    ).await;
-    let join = fixture.admin_event(
-        EventKind::CircleMemberState,
-        circle.clone(),
-        json!({"circle_id":circle_id,"member_id":recipient,"membership":"join","parent_membership_revision":parent}),
-    );
-    let (status, value) = fixture.admin_post(
-        "/_arkret/self/events",
-        ServiceOperationId::SelfEventsCommandSubmitV1.as_str(),
-        &json!(SelfAuthoritySubmitRequest::Event(arkret_wire::EventAdmissionSubmission::new(join))),
-        None,
-    ).await;
-    assert_eq!(status, StatusCode::OK, "ordinary recipient joins the exact Circle: {value}");
     let realm = ScopeRef::Realm {
         realm_id: fixture.realm.clone(),
     };

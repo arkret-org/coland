@@ -178,14 +178,53 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
     let request = authority_admission_create(&outside, &signer);
     let (status, value) =
         boxed_step(|| authority_admission_send(&factory.fixture, package, &request)).await;
-    assert_eq!(status, StatusCode::OK, "Ghost DID host is independent of Service host: {value}");
-    let accepted = factory.fixture.state.test_persistence().authority_commits()
-        .committed_event(match &request {
-            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(submission) => &submission.event.event_id,
-            _ => unreachable!(),
-        }).await.unwrap().unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Ghost DID host is independent of Service host: {value}"
+    );
+    let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+        submission,
+    ) = &request
+    else {
+        unreachable!()
+    };
+    let accepted = factory
+        .fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&submission.event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(accepted.event, submission.event);
+    assert_eq!(accepted.commit.event_ref, submission.event.event_id);
     assert_eq!(accepted.event.payload["actor_id"], json!(outside.actor_id));
     boxed_step(|| private_material(&factory.fixture, &outside, &accepted.commit)).await;
+    let before = boxed_step(|| native_business_footprint(&factory.fixture)).await;
+    let (status, replay) =
+        boxed_step(|| authority_admission_send(&factory.fixture, package, &request)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "independently hosted Ghost exact retry: {replay}"
+    );
+    let replay: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome =
+        serde_json::from_value(replay).unwrap();
+    replay.validate_for_request(&request).unwrap();
+    let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(
+        arkret_wire::AuthoritySubmitOutcome::Accepted { commit, .. },
+    ) = replay
+    else {
+        panic!("independently hosted Ghost retry must recover its original Commit")
+    };
+    assert_eq!(commit, accepted.commit);
+    assert_eq!(
+        boxed_step(|| native_business_footprint(&factory.fixture)).await,
+        before,
+        "independent DID hosting must not duplicate the accepted creation or its effects"
+    );
 
     let (accepted_candidate, signer) =
         authority_admission_candidate(package, &factory.fixture, registration, &ghost_grant, false);
@@ -261,7 +300,11 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(creations.len(), 4);
-    assert!(creations.iter().any(|record| record.event.payload["actor_id"] == json!(outside.actor_id)));
+    assert!(
+        creations
+            .iter()
+            .any(|record| record.event.payload["actor_id"] == json!(outside.actor_id))
+    );
     for actor in actors {
         assert!(
             creations

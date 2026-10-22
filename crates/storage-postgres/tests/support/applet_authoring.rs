@@ -8104,6 +8104,12 @@ mod realm_native_fixture {
         drop(recovered);
         let revoke_operation = "retire-runtime-device";
         let revoke_reason = Some("runtime_device_retired".to_owned());
+        if circle {
+            // The dense Circle setup uses the same real API bucket as revocation.
+            // Start response-loss injection in a fresh configured window so the
+            // admitted original reaches the persistence failure under test.
+            tokio::time::sleep(factory.fixture.state.config().rate_limiter.window).await;
+        }
         lost_receipt.store(true, std::sync::atomic::Ordering::SeqCst);
         let failure =
             boxed_step(|| devices.revoke_device(&device, revoke_operation, revoke_reason.clone()))

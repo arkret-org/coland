@@ -302,13 +302,39 @@ async fn realm_review_voter_permission(fixture: &Fixture) -> arkret_wire::GrantI
     id
 }
 
-async fn realm_review_policy(fixture: &Fixture, operations: &[&str]) {
+fn realm_review_installation_target(
+    context: &RealmReviewFixture,
+    candidate: &RealmActorCreatePayload,
+) -> arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget {
+    let effective_scope: ScopeRef =
+        serde_json::from_value(context.installation["effective_scope"].clone()).unwrap();
+    assert_eq!(effective_scope, candidate.creation_scope);
+    assert_eq!(context.registration.scope_ref, effective_scope);
+    assert_eq!(
+        context.registration.payload["applet_id"],
+        json!(context.package.applet_id)
+    );
+    assert_eq!(
+        context.registration.payload["service_id"],
+        json!(context.package.service_id)
+    );
+    arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::Installation {
+        applet_id: context.package.applet_id.clone(),
+        effective_scope,
+    }
+}
+
+async fn realm_review_policy(
+    fixture: &Fixture,
+    operations: &[&str],
+    target: arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget,
+) {
     let id = format!("ak:policy:{}", uuid::Uuid::now_v7());
     let account = ActorId::account(fixture.pcr.history.account.clone());
     let event = fixture.admin_event(EventKind::PolicySet, ScopeRef::Realm { realm_id:fixture.realm.clone() }, json!({
         "policy_id":id,"expected_revision":null,"value":{"schema":"ak.schema.policy.v1","id":id,"realm_id":fixture.realm,
         "policy_kind":"applet","default_effect":"allow","created_by":account,"created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),
-        "rules":[{"rule_id":"current_realm_review","kind":"applet","effect":"require_review","applet_target":{"kind":"all"},"applet_operations":operations,
+        "rules":[{"rule_id":"current_realm_review","kind":"applet","effect":"require_review","applet_target":target,"applet_operations":operations,
             "review_requirement":{"approver_actor_ids":[account],"threshold":1,"max_age_seconds":3600}}]}
     }));
     boxed_step(|| realm_review_admin_event(fixture, event)).await;
@@ -538,7 +564,14 @@ async fn realm_review_creation_case(pool: PgPool, bot: bool) {
     );
     assert_eq!(boxed_step(|| realm_review_footprint(fixture)).await, before);
     let reviewed_operations = [if bot { "create_bot" } else { "map_ghost" }];
-    boxed_step(|| realm_review_policy(fixture, &reviewed_operations)).await;
+    boxed_step(|| {
+        realm_review_policy(
+            fixture,
+            &reviewed_operations,
+            arkret_models_collaboration::governance::operation_wire::AppletPolicyTarget::All {},
+        )
+    })
+    .await;
     boxed_step(|| realm_review_governance(fixture, action.as_str())).await;
     let before = boxed_step(|| realm_review_footprint(fixture)).await;
     let (status, problem) = boxed_step(|| realm_review_service_submit(&context, &event, &[])).await;
@@ -985,7 +1018,14 @@ async fn realm_review_join_case(pool: PgPool) {
     let fixture = &context.factory.fixture;
     let (candidate, _, device) = boxed_step(|| realm_review_current_actor(&context)).await;
     let event = realm_review_join_event(&context, &candidate, &device);
-    boxed_step(|| realm_review_policy(fixture, &["join"])).await;
+    boxed_step(|| {
+        realm_review_policy(
+            fixture,
+            &["join"],
+            realm_review_installation_target(&context, &candidate),
+        )
+    })
+    .await;
     let before = boxed_step(|| realm_review_footprint(fixture)).await;
     let (status, problem) =
         boxed_step(|| realm_review_device_submit(&context, &candidate, &device, &event, vec![]))
@@ -1254,7 +1294,14 @@ async fn realm_review_profile_case(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    boxed_step(|| realm_review_policy(fixture, &["publish"])).await;
+    boxed_step(|| {
+        realm_review_policy(
+            fixture,
+            &["publish"],
+            realm_review_installation_target(&context, &candidate),
+        )
+    })
+    .await;
     let make_public = |current: &coland_storage::CommittedEventRecord| {
         realm_review_profile_update(
             &context,

@@ -223,6 +223,8 @@ async fn admission_add_boundary_recipient(
         commit: original.commit,
     };
     group.install_accepted_commit(&original, &current).unwrap();
+    boxed_step(|| obligation_install_native_roster(fixture, source, &[79; 32], &original, group))
+        .await;
     (identity, welcome, original, claim)
 }
 
@@ -583,19 +585,29 @@ async fn admission_scope_genesis(
     let (info, tree) = group.public_group_state_bytes().unwrap();
     let info = boxed_step(|| public_material(fixture, info)).await;
     let tree = boxed_step(|| public_material(fixture, tree)).await;
-    let event = admission_native_scope_event(
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let event = signed_event_at(
         package,
-        candidate,
-        authority,
-        scope,
+        candidate.actor_id.clone(),
+        scope.clone(),
         EventKind::MlsGenesis,
         json!({
         "cipher_suite":"MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519","group_info_ref":info,"ratchet_tree_ref":tree,
         "creator_leaf_authority":{"leaf_signature_key_b64u":arkret_canonical::base64url_encode(key.verifying_key().as_bytes()),
             "endpoint":{"kind":"device","device_id":authority.device_id},"authorization_event_ref":authority.authorization_ref.event_id},
-        "governance_binding":binding,"created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}),
-        &child,
-        &[98; 32],
+        "governance_binding":binding,"created_at":arkret_canonical::format_timestamp_canonical(at)}),
+        Some(&child),
+        &Ed25519PayloadSigner::new(
+            key,
+            authority.native_did.clone(),
+            DidUrl::new(format!("{}#{}", authority.native_did, authority.device_id)).unwrap(),
+        ),
+        at,
+    );
+    assert_eq!(event.created_at, at);
+    assert_eq!(
+        event.payload["created_at"],
+        json!(arkret_canonical::format_timestamp_canonical(at))
     );
     let request = SelfAuthoritySubmitRequest::Event(arkret_wire::EventAdmissionSubmission::new(
         event.clone(),
@@ -616,16 +628,15 @@ async fn admission_scope_genesis(
         StatusCode::OK,
         "real independently scoped native Genesis: {value}"
     );
-    assert!(
-        fixture
-            .state
-            .test_persistence()
-            .authority_commits()
-            .committed_event(&event.event_id)
-            .await
-            .unwrap()
-            .is_some()
-    );
+    let original = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(original.event, event);
 }
 
 pub(super) async fn admission_circle_claim_after_realm_fence(

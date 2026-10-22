@@ -44,8 +44,13 @@ fn deactivation_never_sends_principal_to_legacy_gateway() {
             listener.set_nonblocking(true).unwrap();
             // Raw deployment input for the retired URL must not re-enable a
             // transport after its config fields and producer have been removed.
+            let fixture = test_config();
             let stable_notary_seed = [86; 32];
             let values = std::collections::BTreeMap::from([
+                (
+                    "COLAND_TRUST_DOMAIN".to_owned(),
+                    fixture.trust_domain.to_string(),
+                ),
                 (
                     "COLAND_NOTARY_SIGNING_KEY".to_owned(),
                     arkret_canonical::base64url_encode(stable_notary_seed),
@@ -67,7 +72,7 @@ fn deactivation_never_sends_principal_to_legacy_gateway() {
                 "retain the production startup key gate"
             );
             assert_eq!(parsed.notary_signing_key_seed, Some(stable_notary_seed));
-            let fixture = test_config();
+            assert_eq!(parsed.trust_domain, fixture.trust_domain);
             let state = coland_test_support::app_state(AppConfig {
                 public_base_url: fixture.public_base_url,
                 object_storage: fixture.object_storage,

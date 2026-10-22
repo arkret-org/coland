@@ -54,6 +54,19 @@ pub(super) fn signed_event(
     signer: &Ed25519PayloadSigner,
 ) -> Event {
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    signed_event_at(package, actor, scope, kind, payload, grant, signer, at)
+}
+
+pub(super) fn signed_event_at(
+    package: &AppletPackage,
+    actor: ActorId,
+    scope: ScopeRef,
+    kind: EventKind,
+    payload: Value,
+    grant: Option<&GrantId>,
+    signer: &Ed25519PayloadSigner,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Event {
     let mut event =
         arkret_wire::test_support::raw_event_for_actor_at(kind.as_str(), scope, actor, payload, at)
             .unwrap();

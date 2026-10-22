@@ -774,6 +774,8 @@ async fn admission_native_last_resort(
         commit: original.commit,
     };
     group.install_accepted_commit(&original, &current).unwrap();
+    boxed_step(|| obligation_install_native_roster(fixture, source, &[79; 32], &original, group))
+        .await;
     let mut joined = Box::new(
         arkret_mls::ArkretMlsGroup::join_from_verified_welcome_delivery(
             identity, &welcome, &original,
@@ -1236,6 +1238,10 @@ async fn admission_accepted_self_update(
         commit: accepted.commit,
     };
     group.install_accepted_commit(&original, &current).unwrap();
+    boxed_step(|| {
+        obligation_install_native_roster(fixture, authority, &[79; 32], &original, group)
+    })
+    .await;
     assert_eq!(group.epoch(), current.epoch + 1);
     let next = groups
         .current(&candidate.creation_scope)

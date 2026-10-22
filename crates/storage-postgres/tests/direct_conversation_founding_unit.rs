@@ -4689,6 +4689,31 @@ async fn participant_authority_scenario() {
             .await;
             assert_eq!(refused(&request).await, code);
         }
+        // A complete, genuinely accepted pair MLS state is still insufficient
+        // for a Signal until the single participant confirmation is accepted.
+        let signal_before = dc_footprint(&pool, &realm_id).await;
+        let signal_at = head.commit.committed_at + chrono::TimeDelta::seconds(1);
+        assert!(
+            store
+                .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+                    include_product_authority: false,
+                    product_agent: None,
+                    scope: &arkret_wire::ScopeRef::Realm {
+                        realm_id: realm_id.clone(),
+                    },
+                    authority_commit_id: &head.commit.commit_id,
+                    parent_realm_authority_commit_id: None,
+                    sender: &peer,
+                    signal_class: arkret_wire::SignalClass::Session,
+                    sent_at: signal_at,
+                    at: signal_at,
+                })
+                .await
+                .unwrap()
+                .is_none(),
+            "accepted Genesis and pair MLS cannot manufacture a binding"
+        );
+        assert_eq!(dc_footprint(&pool, &realm_id).await, signal_before);
         let accepted_binding = boxed_source(|| {
             sourced_cited(
                 &pair,
@@ -5061,6 +5086,31 @@ async fn participant_authority_scenario() {
         })
         .await;
         uow.commit_event(leave.clone()).await.unwrap();
+        let signal_before = dc_footprint(&pool, &realm_id).await;
+        let signal_at = leave.authority_commit.commit.committed_at + chrono::TimeDelta::seconds(1);
+        assert!(
+            store
+                .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
+                    include_product_authority: false,
+                    product_agent: None,
+                    scope: &arkret_wire::ScopeRef::Realm {
+                        realm_id: realm_id.clone(),
+                    },
+                    // The original declared cut was joined. Its current
+                    // accepted successor must still fence the departed peer.
+                    authority_commit_id: &head.commit.commit_id,
+                    parent_realm_authority_commit_id: None,
+                    sender: &peer,
+                    signal_class: arkret_wire::SignalClass::Session,
+                    sent_at: signal_at,
+                    at: signal_at,
+                })
+                .await
+                .unwrap()
+                .is_none(),
+            "an accepted binding cannot bypass current participant leave"
+        );
+        assert_eq!(dc_footprint(&pool, &realm_id).await, signal_before);
         assert_eq!(
             binding_current_row(&pool, &realm_id).await,
             original_binding,

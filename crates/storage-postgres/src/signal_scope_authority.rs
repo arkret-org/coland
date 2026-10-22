@@ -348,6 +348,7 @@ impl Cut {
                     genesis_present = true;
                     let genesis: arkret_models_collaboration::events_payloads::realm::RealmGenesis =
                         serde_json::from_value(value.clone()).map_err(unavailable)?;
+                    genesis.validate().map_err(unavailable)?;
                     cut.direct=genesis.purpose == arkret_models_collaboration::events_payloads::realm::RealmPurpose::DirectConversation;
                 }
                 S::RealmAuthorityRoot => {
@@ -474,8 +475,12 @@ impl Cut {
                 _ => {}
             }
         }
+        // Direct's accepted Genesis fixes its baseline without an ordinary
+        // policy-bundle row (contact-and-direct-conversation.md section 6.2).
         if matches!(stream, CommitStreamRef::Realm { .. })
-            && (!genesis_present || cut.snapshot_root_generation.is_none() || cut.policy.is_none())
+            && (!genesis_present
+                || cut.snapshot_root_generation.is_none()
+                || (!cut.direct && cut.policy.is_none()))
         {
             return Err(unavailable("snapshot omits Realm authority rows"));
         }
@@ -1566,6 +1571,163 @@ mod typed_replay_tests {
             arkret_wire::DidUrl::new("did:web:mls-bump-station.example#authority").unwrap(),
             at(),
         )
+    }
+
+    // Exercise the production snapshot fold with SDK-typed, mutually consistent
+    // Genesis/root rows. These are parser semantics, not acceptance or signer
+    // verification tests; public store and live Signal tests cover those gates.
+    fn scope_snapshot(direct: bool, with_policy: bool) -> arkret_wire::RealmStateSnapshot {
+        use arkret_models_collaboration::events_payloads::realm::RealmPurpose;
+        let create_ref = EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0x61; 32]);
+        let realm = RealmId::from_event_id(&create_ref);
+        let stream = CommitStreamRef::Realm {
+            realm_id: realm.clone(),
+        };
+        let station =
+            arkret_wire::DidCoreId::new("ak:did_core:web:signal-station.example").unwrap();
+        let controller = event(EventKind::MemberState, json!({})).actor_id;
+        let mut genesis =
+            arkret_models_collaboration::objects::direct_conversation::direct_conversation_realm_create_payload(
+                arkret_wire::GenesisSalt::new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+                    .unwrap(),
+                arkret_wire::TrustDomainId::new("ak:trust_domain:signal.example").unwrap(),
+                station,
+                at(),
+            )
+            .unwrap()
+            .object;
+        if !direct {
+            genesis.purpose = RealmPurpose::Collaboration;
+        }
+        genesis.validate().unwrap();
+        let head = arkret_wire::CommitStreamHead {
+            stream_ref: stream.clone(),
+            commit_id: RealmCommitId::from_digest([0x62; 32]),
+            stream_position: 0,
+        };
+        let row = |selector, value| arkret_wire::TypedCurrentRow::Value {
+            selector,
+            source_stream_ref: stream.clone(),
+            revision: arkret_wire::CurrentRevision {
+                commit_id: head.commit_id.clone(),
+                stream_position: head.stream_position,
+            },
+            value,
+        };
+        let root = arkret_wire::RealmAuthorityRootValue {
+            controller_actor_id: controller,
+            controller_epoch: 0,
+            authority_generation: 0,
+            authority_event_ref: create_ref,
+        };
+        let mut entries = vec![
+            row(
+                arkret_wire::CurrentSelector::RealmAuthorityRoot,
+                serde_json::to_value(root).unwrap(),
+            ),
+            row(
+                arkret_wire::CurrentSelector::RealmGenesis,
+                serde_json::to_value(genesis).unwrap(),
+            ),
+        ];
+        if with_policy {
+            entries.push(row(
+                arkret_wire::CurrentSelector::RealmPolicyBundle,
+                serde_json::to_value(RealmPolicyBundlePayload::new(1)).unwrap(),
+            ));
+        }
+        let material = coland_storage::RealmStateSnapshotMaterial {
+            purpose: arkret_wire::RealmSnapshotPurpose::FullRecovery,
+            history_basis: None,
+            realm_id: realm,
+            governance_generation: 0,
+            visible_stream_heads: vec![head],
+            current_state_entries: entries,
+            retention_and_history_floor: arkret_wire::RetentionAndHistoryFloor {
+                history_access: arkret_wire::HistoryAccess::SinceJoin,
+                stream_floors: vec![arkret_wire::StreamHistoryFloor {
+                    stream_ref: stream,
+                    oldest_position: 0,
+                }],
+            },
+        };
+        coland_services::authority_commit::build_signed_realm_state_snapshot(
+            &material,
+            arkret_wire::DidUrl::new("did:web:signal-station.example#authority").unwrap(),
+            &ed25519_dalek::SigningKey::from_bytes(&[0x63; 32]),
+            at(),
+        )
+        .unwrap()
+    }
+
+    fn snapshot_cut(snapshot: &arkret_wire::RealmStateSnapshot) -> PersistenceResult<Cut> {
+        let head = &snapshot.visible_stream_heads[0];
+        Cut::from_snapshot(snapshot, &head.stream_ref, head)
+    }
+
+    #[test]
+    fn direct_snapshot_uses_validated_genesis_without_ordinary_policy_bundle() {
+        let snapshot = scope_snapshot(true, false);
+        let cut = snapshot_cut(&snapshot).unwrap();
+        assert!(cut.direct);
+        assert!(cut.policy.is_none());
+        assert_eq!(cut.snapshot_root_generation, Some(0));
+        assert_eq!(
+            cut.snapshot_root_controller,
+            Some(event(EventKind::MemberState, json!({})).actor_id)
+        );
+        assert!(!cut.bound, "reading Genesis does not manufacture a binding");
+        assert!(
+            cut.members.is_empty(),
+            "reading Genesis does not join anyone"
+        );
+    }
+
+    #[test]
+    fn ordinary_snapshot_still_requires_its_policy_bundle() {
+        assert!(snapshot_cut(&scope_snapshot(false, false)).is_err());
+        let cut = snapshot_cut(&scope_snapshot(false, true)).unwrap();
+        assert!(!cut.direct);
+        assert_eq!(cut.policy.unwrap().policy_revision, 1);
+    }
+
+    #[test]
+    fn direct_snapshot_requires_genesis_root_and_exact_covered_revision() {
+        for removed in [
+            arkret_wire::CurrentSelector::RealmGenesis,
+            arkret_wire::CurrentSelector::RealmAuthorityRoot,
+        ] {
+            let mut snapshot = scope_snapshot(true, false);
+            snapshot.current_state_entries.retain(|row| {
+                let arkret_wire::TypedCurrentRow::Value { selector, .. } = row;
+                selector != &removed
+            });
+            assert!(snapshot_cut(&snapshot).is_err(), "missing {removed:?}");
+        }
+        let mut snapshot = scope_snapshot(true, false);
+        let arkret_wire::TypedCurrentRow::Value { revision, .. } =
+            &mut snapshot.current_state_entries[1];
+        revision.commit_id = RealmCommitId::from_digest([0x64; 32]);
+        assert!(snapshot_cut(&snapshot).is_err());
+    }
+
+    #[test]
+    fn direct_snapshot_cannot_infer_profile_from_missing_or_malformed_genesis() {
+        for replacement in [json!("ak.schema.unregistered.v1"), serde_json::Value::Null] {
+            let mut snapshot = scope_snapshot(true, false);
+            let arkret_wire::TypedCurrentRow::Value { value, .. } =
+                &mut snapshot.current_state_entries[1];
+            value["schema"] = replacement;
+            assert!(snapshot_cut(&snapshot).is_err());
+        }
+        let mut snapshot = scope_snapshot(true, false);
+        let arkret_wire::TypedCurrentRow::Value { value, .. } =
+            &mut snapshot.current_state_entries[1];
+        value["purpose"] = serde_json::to_value(
+            arkret_models_collaboration::events_payloads::realm::RealmPurpose::PrincipalControl,
+        )
+        .unwrap();
+        assert!(snapshot_cut(&snapshot).is_err());
     }
 
     #[test]

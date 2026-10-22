@@ -333,8 +333,9 @@ impl Fixture {
         )
         .unwrap();
         if kind == EventKind::CircleCreate {
-            event.payload.get_mut("object").unwrap()["created_at"] =
-                serde_json::to_value(event.created_at).unwrap();
+            event.payload.get_mut("object").unwrap()["created_at"] = json!(
+                arkret_canonical::format_timestamp_canonical(event.created_at)
+            );
         }
         self.sign_admin(event)
     }
@@ -1558,7 +1559,7 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
                 let record = json!({
                     "applet_id":package.applet_id,"target_station_id":body.authoring_request_basis.target_station_id,"owner_actor_id":registration.actor_id,
                     "portal_realm_id":body.authoring_request_basis.effective_scope.realm_id(),"effective_scope":body.authoring_request_basis.effective_scope,
-                    "capabilities":actions,"package":package,"ghost_actors_allowed":true,"status":"installed","registered_at":frozen.accepted_at,"revoked_at":null,
+                    "capabilities":actions,"package":package,"ghost_actors_allowed":true,"status":"installed","registered_at":arkret_canonical::format_timestamp_canonical(frozen.accepted_at),"revoked_at":null,
                     "idempotency_key":frozen.idempotency_key,"install_body_digest":frozen.canonical_request_hash,"install_id":outcome.install_id,"install_response":outcome,
                     "registration_event":registration,"capability_grant_events":grants,
                     "install_execution":{"idempotency_key":frozen.idempotency_key,"body_hash":frozen.canonical_request_hash,"submitted_plan_digest":body.plan_digest,
@@ -3054,7 +3055,7 @@ mod realm_native_fixture {
             "creation_authorization_ref":grant,
             "initial_resolution":{"did":document.id,"method_history_head":head,"version_id":inception.version_id},
             "method_history_evidence":evidence,"control_method_kid":method,
-            "expires_at":at + chrono::Duration::minutes(5),
+            "expires_at":arkret_canonical::format_timestamp_canonical(at + chrono::Duration::minutes(5)),
             "external_ref":{"protocol":"matrix","instance_id":"chat.example","external_id":"external-user"},
             "recovery":{"kind":"manager_native","enabled":true}
         });
@@ -3142,7 +3143,7 @@ mod realm_native_fixture {
             "expected_device_generation_revision":revision,"expected_generation":1,"new_generation":2,
             "replaces_recovery_ref":null,"next_resolution":resolution,
             "method_history_evidence":{"log_entries":entries,"witness_records":[]},
-            "next_control_method_kid":next_method,"expires_at":at + chrono::Duration::minutes(5)
+            "next_control_method_kid":next_method,"expires_at":arkret_canonical::format_timestamp_canonical(at + chrono::Duration::minutes(5))
         });
         let transcript:RealmActorRecoveryAcceptanceTranscript=serde_json::from_value(json!({"applet_id":creation.applet_id,"service_id":creation.service_id,"payload_without_control_signature":value})).unwrap();
         value["control_signature"] = json!(
@@ -3592,7 +3593,7 @@ mod realm_native_fixture {
             let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
             let payload: DeviceRevokePayload = serde_json::from_value(json!({
                 "device_id":device,"revoked_by":candidate.actor_id.signing_principal_id(),
-                "revoked_at":at,"reason":format!("revoke_{index}")
+                "revoked_at":arkret_canonical::format_timestamp_canonical(at),"reason":format!("revoke_{index}")
             }))
             .unwrap();
             let intent =

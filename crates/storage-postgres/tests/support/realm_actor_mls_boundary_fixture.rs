@@ -26,7 +26,9 @@ pub(super) async fn prepare_boundary_current_source(
         "state":"active","created_by":ActorId::account(fixture.pcr.history.account.clone()),
         "created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())
     }}));
-    event.payload.get_mut("object").unwrap()["created_at"] = json!(event.created_at);
+    event.payload.get_mut("object").unwrap()["created_at"] = json!(
+        arkret_canonical::format_timestamp_canonical(event.created_at)
+    );
     event = fixture.sign_admin(event);
     let source = event.event_id.clone();
     let strand = arkret_wire::StrandId::from_event_id(&source);
@@ -1485,7 +1487,7 @@ async fn boundary_terminal_human_revoke(
     let backup = |series: &arkret_wire::BackupSeriesId| {
         let mut backup: KeyBackup = serde_json::from_value(json!({
             "backup_id":format!("ak:backup:{}",uuid::Uuid::now_v7()),"actor_id":ActorId::account(account.clone()),
-            "backup_kind":"secret_storage","backup_version":"kb_1","created_at":at,"series_id":series,"series_seq":0,
+            "backup_kind":"secret_storage","backup_version":"kb_1","created_at":arkret_canonical::format_timestamp_canonical(at),"series_id":series,"series_seq":0,
             "encryption":{"recipient_method":"secret_storage_key","recipient_key_ref":"source-history-fixture-key","aead":{"name":"xchacha20_poly1305","nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
             "domain_separation":{"subdomain":"secret_storage"},"contents":[{"item_kind":"recovery_key_share","secret_id":"device-source-history"}],
             "ciphertext":"AAAA","ciphertext_digest":arkret_canonical::sha256_digest([0,0,0]),
@@ -1577,7 +1579,7 @@ async fn boundary_terminal_human_revoke(
         })
         .await
         .unwrap();
-    let revoke = sign_as_other(fixture.admin_event(EventKind::DeviceRevoke,ScopeRef::Realm {realm_id:stream.realm_id().clone()},json!({"device_id":device,"revoked_by":authorizer,"revoked_at":at,"reason":"security_rotation"})));
+    let revoke = sign_as_other(fixture.admin_event(EventKind::DeviceRevoke,ScopeRef::Realm {realm_id:stream.realm_id().clone()},json!({"device_id":device,"revoked_by":authorizer,"revoked_at":arkret_canonical::format_timestamp_canonical(at),"reason":"security_rotation"})));
     let transaction = coland_services::authority_commit::AuthorityCommitApplication::new(
         coland_services::persistence::PersistenceHandle::from_shared(
             fixture.state.test_persistence(),

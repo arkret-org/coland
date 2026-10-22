@@ -60,7 +60,13 @@ async fn admission_add_boundary_recipient(
     .unwrap();
     let upload = admission_upload(&identity, recipient, seed, false);
     let reference = boxed_step(|| admission_native_upload(fixture, recipient, seed, &upload)).await;
-    let mut request = admission_signed_claim(fixture, recipient, &reference, false);
+    let mut request = admission_signed_claim(
+        source,
+        recipient,
+        &candidate.creation_scope,
+        &reference,
+        false,
+    );
     request.expires_at =
         arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now() + lifetime);
     let input = keypackage_claim_authorization_signing_bytes(
@@ -69,7 +75,7 @@ async fn admission_add_boundary_recipient(
         &request.requester_authorization,
     )
     .unwrap();
-    let PeerKeyPackageRequesterAuthorization::Device {
+    let PeerKeyPackageRequesterAuthorization::RealmDevice {
         verification_method,
         signature,
         ..
@@ -78,19 +84,19 @@ async fn admission_add_boundary_recipient(
         unreachable!()
     };
     *signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
-        &fixture.pcr.history.founding_device_signing_seed,
+        &[79; 32],
         verification_method.as_str(),
         &input,
     )
     .unwrap();
     request.validate_shape().unwrap();
     let (status, value) = boxed_step(|| {
-        account_request(
+        device_post(
             fixture,
-            reqwest::Method::POST,
+            source,
             "/_arkret/self/keys/keypackages/claim",
             ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
-            Some(json!(request)),
+            json!(request),
         )
     })
     .await;
@@ -100,6 +106,7 @@ async fn admission_add_boundary_recipient(
         "real signed recipient claim: {value}"
     );
     let claim: KeyPackagesClaimOutcome = serde_json::from_value(value).unwrap();
+    assert_eq!(claim.claim_receipt.request, request.unsigned_request());
     assert_eq!(claim.claims.len(), 1);
     assert_eq!(claim.claims[0].actor_id, recipient.actor_id);
     assert_eq!(

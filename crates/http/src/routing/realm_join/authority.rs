@@ -91,17 +91,6 @@ pub(crate) async fn insert_historical_method_key(
     Ok(())
 }
 
-/// Resolve the key of one more authority signature method, such as the method
-/// of a `RealmCommit` verified against an already verified chain.
-pub(crate) async fn insert_method_key(
-    state: &AppState,
-    keys: &mut RealmAuthorityKeyMap,
-    method: &DidUrl,
-) -> Result<(), AppError> {
-    keys.insert(method, method_key(state, method).await?);
-    Ok(())
-}
-
 pub(crate) async fn verified_keys(
     state: &AppState,
     bundle: &RealmAuthorityBundle,

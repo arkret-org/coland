@@ -102,10 +102,19 @@ pub(crate) async fn records_in_connection(
     let rows = sql_query("SELECT r.value,e.envelope,c.commit_json FROM consent_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE r.holder_account_id=$1 AND r.realm_id=$2 ORDER BY r.peer_id")
                 .bind::<Jsonb,_>(serde_json::to_value(holder).map_err(corrupt)?)
                 .bind::<Text,_>(realm.as_str()).get_results::<Row>(&mut *conn).await?;
-    rows.into_iter()
+    let records = rows
+        .into_iter()
         .map(record)
-        .collect::<PersistenceResult<Vec<_>>>()
-        .map_err(Into::into)
+        .collect::<PersistenceResult<Vec<_>>>()?;
+    if records.iter().any(|record| {
+        record.event.actor_id.as_account_id() != Some(holder) || record.event.realm_id != *realm
+    }) {
+        return Err(rejected(
+            ConflictCode::TemporarilyUnavailable,
+            "holder Consent source differs from its accepted namespace",
+        ));
+    }
+    Ok(records)
 }
 
 async fn admit(
@@ -156,6 +165,9 @@ async fn admit(
             "Consent holder is not an Account",
         )
     })?;
+    // Missing or misplaced current material cannot prove never_written.
+    // This uses the same accepted namespace check under the held PCR lock.
+    records_in_connection(conn, holder, &event.realm_id).await?;
     let holder_json = serde_json::to_value(holder).map_err(corrupt)?;
     let payload = serde_json::to_value(&event.payload).map_err(corrupt)?;
     let replacement: ConsentReplacePayload = serde_json::from_value(payload)
@@ -570,10 +582,30 @@ impl ConsentCurrentStore for PgConsentCurrentStore {
             {
                 return Ok(None);
             }
+            // The same PCR lock serializes this fresh gate with replacement.
+            // An unrelated scope update must not invalidate a historical source.
+            let current = records_in_connection(conn, &write.holder, &authority.realm_id).await?;
+            if !current.iter().any(|record| {
+                record.permits(
+                    &write.peer,
+                    arkret_wire::ConsentScope::Invite,
+                    chrono::Utc::now(),
+                )
+            }) {
+                return Ok(None);
+            }
             crate::accounts::compare_account_data_in_transaction(
-                conn, &write.record, write.expected_revision, None,
-            ).await.map(Some).map_err(PgTransactionError::from)
-        }).await.map_err(PgTransactionError::into_persistence)
+                conn,
+                &write.record,
+                write.expected_revision,
+                None,
+            )
+            .await
+            .map(Some)
+            .map_err(PgTransactionError::from)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
     }
     async fn list(&self, holder: &AccountId) -> PersistenceResult<Vec<ConsentCurrentRecord>> {
         let mut conn = pg_conn(&self.pool)

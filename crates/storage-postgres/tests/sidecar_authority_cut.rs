@@ -3022,9 +3022,32 @@ async fn case_sidecar_snapshot_lists_and_scans_keep_private_stream_coordinates()
         assert_eq!(frozen.committed_events.len(), 1);
         assert_eq!(frozen.committed_events[0].commit(), &next.authority_commit.commit);
         let basis = frozen.window.window_start_basis.unwrap();
-        assert_eq!(basis.snapshot_ref, issued.snapshot_id);
+        issued.require_full_recovery().unwrap();
+        assert_ne!(basis.snapshot_ref, issued.snapshot_id);
+        let history = store
+            .issued_realm_state_snapshot(&realm, controller, &basis.snapshot_ref, &station)
+            .await
+            .unwrap()
+            .expect("the window must retain its exact independently signed history original");
+        assert_eq!(history.snapshot_id, basis.snapshot_ref);
+        assert_eq!(history.realm_id, realm);
+        assert_eq!(history.governance_generation, frozen.governance_generation);
+        assert_eq!(history.purpose, arkret_wire::RealmSnapshotPurpose::StreamHistory);
+        history.validate_purpose().unwrap();
+        assert!(history.require_full_recovery().is_err());
+        assert!(store
+            .issued_realm_state_snapshot(&realm, &foreign, &basis.snapshot_ref, &station)
+            .await
+            .unwrap()
+            .is_none());
+        let signed_basis = history.history_basis.as_ref().unwrap();
+        assert_eq!(&signed_basis.account_id, controller);
+        assert_eq!(signed_basis.stream_ref, stream);
+        assert_eq!(signed_basis.anchor_position, attach.authority_commit.commit.stream_position);
+        assert_eq!(signed_basis.anchor_commit_ref, attach.authority_commit.commit.commit_id);
         assert_eq!(basis.anchor_commit_ref, attach.authority_commit.commit.commit_id);
         let refs = basis.accepted_dependency_refs.as_ref().unwrap();
+        assert_eq!(signed_basis.accepted_dependency_refs.as_slice(), refs.as_slice());
         assert_eq!(refs.len(), 2);
         let member = unit.transactions.iter().find(|row|row.event.kind == EventKind::MemberState).unwrap();
         for accepted in [&create.authority_commit, member] {
@@ -3946,8 +3969,10 @@ async fn case_encrypted_agent_join_rechecks_claimability_and_writes_nothing_on_r
         "endpoint_verification_method='did:web:wrong-agent.example#runtime-1'",
     ].into_iter().map(str::to_owned).collect::<Vec<_>>();
     mutations.push(format!(
-        "owner_account_id='{}'::jsonb",
-        serde_json::to_string(&agent).unwrap().replace('\'', "''")
+        "owner_actor_id='{}'::jsonb",
+        serde_json::to_string(&arkret_wire::ActorId::account(agent.clone()))
+            .unwrap()
+            .replace('\'', "''")
     ));
     for mutation in mutations {
         let mut conn = pool.get().await.unwrap();

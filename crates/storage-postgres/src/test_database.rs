@@ -284,6 +284,14 @@ async fn reset(connection: &mut AsyncPgConnection) {
         DROP FUNCTION IF EXISTS public.fail_native_keypackage_claim();
         DROP TRIGGER IF EXISTS fail_native_keypackage_revoke ON public.mls_key_packages;
         DROP FUNCTION IF EXISTS public.fail_native_keypackage_revoke();
+        DROP TRIGGER IF EXISTS reject_departing_current ON public.member_state_current_results;
+        DROP FUNCTION IF EXISTS public.reject_departing_current();
+        DROP TRIGGER IF EXISTS reject_terminal_intent ON public.federation_outbox;
+        DROP FUNCTION IF EXISTS public.reject_terminal_intent();
+        DROP TRIGGER IF EXISTS reject_terminal_fence ON public.realm_bootstrap_current_results;
+        DROP FUNCTION IF EXISTS public.reject_terminal_fence();
+        DROP TRIGGER IF EXISTS fail_receipt_response ON public.idempotency_keys;
+        DROP FUNCTION IF EXISTS public.fail_receipt_response();
         END $native_faults$",
     )
     .await;
@@ -949,6 +957,58 @@ mod tests {
             total, 0,
             "slot {slot} was not emptied before the next holder saw it"
         );
+    }
+
+    #[tokio::test]
+    async fn reset_clears_abandoned_http_faults_and_preserves_production_triggers() {
+        use diesel_async::RunQueryDsl;
+
+        #[derive(diesel::QueryableByName)]
+        struct TriggerDefinitions {
+            #[diesel(sql_type = diesel::sql_types::Jsonb)]
+            value: serde_json::Value,
+        }
+        let leased = super::TestDatabase::lease().await;
+        let mut connection = super::connect(leased.url()).await;
+        let production = "SELECT coalesce(jsonb_agg(jsonb_build_object('table',c.relname,'name',t.tgname,'definition',pg_get_triggerdef(t.oid)) ORDER BY c.relname,t.tgname),'[]'::jsonb) AS value FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND NOT t.tgisinternal";
+        let before = diesel::sql_query(production)
+            .get_result::<TriggerDefinitions>(&mut connection)
+            .await
+            .unwrap()
+            .value;
+        assert!(!before.as_array().unwrap().is_empty());
+        super::execute(
+            &mut connection,
+            "DO $owned_faults$ BEGIN
+            CREATE FUNCTION public.reject_departing_current() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+            CREATE TRIGGER reject_departing_current BEFORE UPDATE ON public.member_state_current_results FOR EACH ROW EXECUTE FUNCTION public.reject_departing_current();
+            CREATE FUNCTION public.reject_terminal_intent() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+            CREATE TRIGGER reject_terminal_intent BEFORE INSERT ON public.federation_outbox FOR EACH ROW EXECUTE FUNCTION public.reject_terminal_intent();
+            CREATE FUNCTION public.reject_terminal_fence() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+            CREATE TRIGGER reject_terminal_fence BEFORE INSERT OR UPDATE ON public.realm_bootstrap_current_results FOR EACH ROW EXECUTE FUNCTION public.reject_terminal_fence();
+            CREATE FUNCTION public.fail_receipt_response() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+            CREATE TRIGGER fail_receipt_response BEFORE INSERT ON public.idempotency_keys FOR EACH ROW EXECUTE FUNCTION public.fail_receipt_response();
+            END $owned_faults$",
+        )
+        .await;
+        super::reset(&mut connection).await;
+        let after = diesel::sql_query(production)
+            .get_result::<TriggerDefinitions>(&mut connection)
+            .await
+            .unwrap()
+            .value;
+        assert_eq!(after, before, "slot reset changed production triggers");
+
+        #[derive(diesel::QueryableByName)]
+        struct FaultFunctions {
+            #[diesel(sql_type = diesel::sql_types::BigInt)]
+            total: i64,
+        }
+        let remaining = diesel::sql_query("SELECT count(*) AS total FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public' AND p.proname IN ('reject_departing_current','reject_terminal_intent','reject_terminal_fence','fail_receipt_response')")
+            .get_result::<FaultFunctions>(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(remaining.total, 0, "abandoned HTTP faults survived reset");
     }
 
     /// The synchronous entry point must work from inside a test runtime, which

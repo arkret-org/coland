@@ -204,11 +204,11 @@ async fn verify_verdict(
     realm: &arkret_wire::RealmId,
     service: &arkret_wire::DidCoreId,
     generation: u64,
+    signed_at: chrono::DateTime<Utc>,
     method: &DidUrl,
     jws: &str,
     bytes: &[u8],
 ) -> Result<(), AppError> {
-    use arkret_identity::RealmAuthorityKeyDirectory;
     if service == &state.service_core_id() {
         let current = state
             .authority_commits()
@@ -228,14 +228,7 @@ async fn verify_verdict(
                 "verdict signer differs from the owning Station",
             ));
         }
-        let mut keys = arkret_identity::RealmAuthorityKeyMap::new();
-        super::realm_join::insert_method_key(state, &mut keys, method).await?;
-        let key = keys
-            .public_key(method)
-            .ok_or_else(|| unavailable("owning Station key is unavailable"))?;
-        return Ed25519DetachedJwsVerifier::new()
-            .verify_detached_jws(jws, bytes, &key)
-            .map_err(unavailable);
+        return verify_verdict_signature(state, service, signed_at, method, jws, bytes).await;
     }
     let located =
         super::realm_join::resolve_verified_authority_of_service(state, realm, service).await?;
@@ -251,14 +244,7 @@ async fn verify_verdict(
             "verdict signer is not current holder authority",
         ));
     }
-    let mut keys = located.keys.clone();
-    super::realm_join::insert_method_key(state, &mut keys, method).await?;
-    let key = keys
-        .public_key(method)
-        .ok_or_else(|| unavailable("current authority key is unavailable"))?;
-    Ed25519DetachedJwsVerifier::new()
-        .verify_detached_jws(jws, bytes, &key)
-        .map_err(unavailable)?;
+    verify_verdict_signature(state, service, signed_at, method, jws, bytes).await?;
     if located.authority.current_service_id() != &state.service_core_id() {
         state
             .authority_commits()
@@ -299,6 +285,7 @@ pub(crate) async fn read_current_for_holder(
         &realm,
         &service,
         outcome.governance_generation,
+        outcome.evaluated_at,
         &outcome.proof.verification_method,
         &outcome.proof.jws,
         &outcome.signature_input().map_err(invalid)?,
@@ -446,6 +433,7 @@ pub(crate) async fn fresh_admission(
             &origin.pcr_realm_id,
             located.authority.current_service_id(),
             outcome.authority_generation,
+            outcome.evaluated_at,
             &DidUrl::new(outcome.proof.verification_method.clone()).map_err(invalid)?,
             &outcome.proof.jws,
             &outcome.signature_input().map_err(invalid)?,
@@ -553,6 +541,7 @@ pub(crate) async fn fresh_admission(
         &realm,
         &service,
         outcome.authority_generation,
+        outcome.evaluated_at,
         &DidUrl::new(outcome.proof.verification_method.clone()).map_err(invalid)?,
         &outcome.proof.jws,
         &outcome.signature_input().map_err(invalid)?,
@@ -809,4 +798,108 @@ pub(crate) async fn delivery_for_device(
             outcome,
         })
     }))
+}
+
+async fn verify_verdict_signature(
+    state: &AppState,
+    service: &arkret_wire::DidCoreId,
+    signed_at: chrono::DateTime<Utc>,
+    method: &DidUrl,
+    jws: &str,
+    bytes: &[u8],
+) -> Result<(), AppError> {
+    // The independently located authority chooses the source. A signature's
+    // method only selects its exact assertion key within that native history.
+    let resolution =
+        super::identity::agents::evidence::fetch_service_resolution(state, service, None)
+            .await
+            .map_err(|error| {
+                unavailable(format!("verdict signer history is unavailable: {error:?}"))
+            })?;
+    let document =
+        arkret_identity::authenticated_service_document_at(&resolution, service, signed_at)
+            .map_err(unavailable)?;
+    arkret_identity::validate_verification_method_relationship(
+        &document,
+        method,
+        &document.id,
+        arkret_identity::DidVerificationRelationship::AssertionMethod,
+    )
+    .map_err(unavailable)?;
+    let key = arkret_identity::public_key_material_from_document(&document, method)
+        .map_err(unavailable)?;
+    Ed25519DetachedJwsVerifier::new()
+        .verify_detached_jws(jws, bytes, &key)
+        .map_err(unavailable)
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn verdict_signature_uses_registered_native_history_and_exact_assertion_method() {
+        use coland_test_support::AppStateTestExt as _;
+        let (external, pool) =
+            coland_test_support::app_state_with_pool(coland_test_support::app_config());
+        let mut config = crate::config::AppConfig::test_default();
+        config.public_base_url = external.config().public_base_url.clone();
+        let state = AppState::new_with_service_identity(
+            config,
+            coland_storage_postgres::Db { pool: None },
+            external.test_persistence(),
+            external.service_identity_state().as_ref().clone(),
+            external.service_resolution_commitment().as_ref().clone(),
+            external.notary_signing_key().to_bytes(),
+        );
+        let service = state.service_core_id();
+        let method = method(&state).unwrap();
+        let at = Utc::now();
+        let bytes = b"exact outstanding consent read";
+        let jws = sign_ed25519_detached_jws(state.notary_signing_key().as_ref(), bytes).unwrap();
+        verify_verdict_signature(&state, &service, at, &method, &jws, bytes)
+            .await
+            .unwrap();
+        assert!(
+            verify_verdict_signature(&state, &service, at, &method, &jws, b"another read")
+                .await
+                .is_err()
+        );
+        let other_method = DidUrl::new("did:web:foreign.example#assertion").unwrap();
+        assert!(
+            verify_verdict_signature(&state, &service, at, &other_method, &jws, bytes)
+                .await
+                .is_err()
+        );
+        let absent_method = DidUrl::new(format!("{}#absent", state.service_did())).unwrap();
+        assert!(
+            verify_verdict_signature(&state, &service, at, &absent_method, &jws, bytes)
+                .await
+                .is_err()
+        );
+        let before_inception = chrono::DateTime::parse_from_rfc3339("2025-12-31T23:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(
+            verify_verdict_signature(&state, &service, before_inception, &method, &jws, bytes)
+                .await
+                .is_err()
+        );
+        use diesel_async::RunQueryDsl as _;
+        let mut conn = pool.get().await.unwrap();
+        assert_eq!(
+            diesel::sql_query("DELETE FROM webvh_log_events WHERE did=$1")
+                .bind::<diesel::sql_types::Text, _>(state.service_did().as_str())
+                .execute(&mut conn)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            verify_verdict_signature(&state, &service, at, &method, &jws, bytes)
+                .await
+                .is_err(),
+            "a current registration document cannot replace missing native history"
+        );
+    }
 }

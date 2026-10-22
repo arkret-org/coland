@@ -438,7 +438,7 @@ async fn seed_snapshot_families(conn: &mut AsyncPgConnection, first: i64, last: 
          INSERT INTO realm_set_default_strand_current_results(realm_id,current_commit_id,current_stream_position,value,updated_at)
          SELECT {realm},{commit},0,jsonb_build_object('default_strand_id','strand'),now() FROM generate_series({first},{last}) r;
          INSERT INTO direct_conversation_binding_current_results(realm_id,pair_key,current_commit_id,current_stream_position,value,updated_at)
-         SELECT {realm},'pair-' || r,{commit},1,jsonb_build_object('binding_event_ref','event','binding','{{}}'::jsonb),now() FROM generate_series({first},{last}) r;"
+         SELECT {realm},'pair-' || r,'capacity-' || r || '-1',1,jsonb_build_object('binding_event_ref','event','binding','{{}}'::jsonb),now() FROM generate_series({first},{last}) r;"
     )).await.unwrap();
 }
 

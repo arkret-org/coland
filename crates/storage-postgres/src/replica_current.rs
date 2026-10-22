@@ -2330,7 +2330,7 @@ mod tests {
                 commit_id: head.commit_id.clone(),
                 stream_position: 7,
             },
-            value: serde_json::to_value(current).unwrap(),
+            value: serde_json::to_value(&current).unwrap(),
         };
         for mutation in 0..5 {
             let mut bad = complete.clone();

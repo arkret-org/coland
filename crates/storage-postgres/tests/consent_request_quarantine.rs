@@ -73,8 +73,7 @@ fn input(
     }
 }
 
-#[tokio::test]
-async fn consent_request_quarantine_charges_and_writes_in_one_cut_or_nothing() {
+async fn holder_fixture() -> (TestDatabase, PgPool, AccountId) {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let fixture = pcr_genesis::PcrGenesisFixture::new(
@@ -94,8 +93,6 @@ async fn consent_request_quarantine_charges_and_writes_in_one_cut_or_nothing() {
         ))
         .await
         .unwrap();
-    let first = account("consent-request-first");
-    let second = account("consent-request-second");
     let accounts = PgAccountStore { pool: pool.clone() };
     accounts
         .put(&AccountRecord {
@@ -110,6 +107,14 @@ async fn consent_request_quarantine_charges_and_writes_in_one_cut_or_nothing() {
         })
         .await
         .unwrap();
+    (database, pool, holder)
+}
+
+#[tokio::test]
+async fn consent_request_quarantine_charges_and_writes_in_one_cut_or_nothing() {
+    let (_database, pool, holder) = holder_fixture().await;
+    let first = account("consent-request-first");
+    let second = account("consent-request-second");
     let store = PgConsentRequestQuarantineStore { pool: pool.clone() };
     let first_input = input(&holder, &first, ConsentRequestScope::VideoCall);
     let outcome = store.admit(first_input).await.unwrap();
@@ -195,6 +200,73 @@ async fn consent_request_quarantine_charges_and_writes_in_one_cut_or_nothing() {
                 &account("consent-request-missing"),
                 &second,
                 ConsentRequestScope::Presence
+            ))
+            .await
+            .unwrap(),
+        ConsentRequestQuarantineOutcome::Dropped
+    ));
+    assert_eq!(count(&pool, "ledger").await, 1);
+    assert_eq!(count(&pool, "changes").await, 2);
+}
+
+#[tokio::test]
+async fn quarantine_dedup_keeps_station_accounts_distinct_without_changing_principal_quota() {
+    let (_database, pool, holder) = holder_fixture().await;
+    let first = account("consent-request-shared-principal");
+    let other = AccountId::new(
+        first.principal_id.clone(),
+        DidCoreId::new("ak:did_core:web:other-station.example").unwrap(),
+    );
+    let store = PgConsentRequestQuarantineStore { pool: pool.clone() };
+    for (requester, revision) in [(&first, 1), (&other, 2)] {
+        let ConsentRequestQuarantineOutcome::Queued(row) = store
+            .admit(input(&holder, requester, ConsentRequestScope::VideoCall))
+            .await
+            .unwrap()
+        else {
+            panic!("a different exact source must retain its own pending entry")
+        };
+        assert_eq!(row.revision, revision);
+        assert!(matches!(
+            store
+                .admit(input(&holder, requester, ConsentRequestScope::VideoCall))
+                .await
+                .unwrap(),
+            ConsentRequestQuarantineOutcome::AlreadyPending
+        ));
+    }
+    let row = PgAccountDataStore { pool: pool.clone() }
+        .get(
+            &arkret_wire::ActorId::account(holder.clone()).to_string(),
+            AccountDataKey::ACCOUNT_HOLDER_QUARANTINE,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let cell: HolderQuarantine = serde_json::from_value(row.payload).unwrap();
+    let pending: Vec<_> = cell
+        .entries_for(HolderQuarantineSurfaceKind::ConsentRequest)
+        .collect();
+    assert_eq!(pending.len(), 2);
+    for requester in [&first, &other] {
+        assert!(
+            pending.iter().any(|entry| entry.source_peer_actor_id
+                == arkret_wire::ActorId::account(requester.clone()))
+        );
+    }
+    assert!(
+        pending
+            .iter()
+            .all(|entry| entry.source_peer_principal_id == first.principal_id)
+    );
+    assert_eq!(count(&pool, "ledger").await, 1);
+    assert_eq!(count(&pool, "changes").await, 2);
+    assert!(matches!(
+        store
+            .admit(input(
+                &holder,
+                &account("consent-request-new-principal"),
+                ConsentRequestScope::VideoCall
             ))
             .await
             .unwrap(),

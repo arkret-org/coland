@@ -3841,6 +3841,8 @@ mod tests {
         assert_eq!(snapshot.created_at.timestamp_subsec_micros(), 456_000);
         let identity = RealmSnapshotIdentityBody {
             realm_id: &snapshot.realm_id,
+            purpose: snapshot.purpose,
+            history_basis: snapshot.history_basis.as_ref(),
             governance_generation: snapshot.governance_generation,
             visible_stream_heads: &snapshot.visible_stream_heads,
             current_state_entries: &snapshot.current_state_entries,

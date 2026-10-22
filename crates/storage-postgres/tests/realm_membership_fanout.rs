@@ -5171,7 +5171,7 @@ fn recipient_roster_witness(
         agent_id: None,
         agent_verification_method: None,
         keypackage: "AQ".to_owned(),
-        capabilities: vec!["ak.content.v1".to_owned()],
+        capabilities: vec![arkret_models_crypto::ARKRET_CONTENT_V1.to_owned()],
         device_authorize_event_id: Some(authorization_event_ref.clone()),
         agent_key_authorize_event_id: None,
         expires_at: at + chrono::Duration::hours(1),
@@ -5184,9 +5184,10 @@ fn recipient_roster_witness(
         "intended_realm_id": delivery.realm_id,
         "mls_group_id": delivery.effective_scope.canonical_mls_group_id().unwrap(),
         "claim_purpose": "realm_membership",
+        "requester_account_id": commit.authority_commit.event.actor_id.as_account_id().unwrap(),
         "target_account_id": delivery.recipient_actor_id.as_account_id().unwrap(),
         "target_device_ids": [record.device_id.as_ref().unwrap()],
-        "required_capabilities": ["ak.content.v1"],
+        "required_capabilities": [arkret_models_crypto::ARKRET_CONTENT_V1],
         "expires_at": arkret_canonical::format_timestamp_canonical(at + chrono::Duration::hours(1)),
     }))
     .unwrap();

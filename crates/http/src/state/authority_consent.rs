@@ -137,8 +137,10 @@ pub(crate) async fn submit_mimi_forward(
     }
     super::authority_producer_validation::verify_mimi_binding_producer(state, &request.event)
         .await?;
-    super::authority_pcr::submit_from_host(state, request).await?;
-    Ok(())
+    super::authority_pcr::require_accepted(
+        super::authority_pcr::submit_from_host(state, request).await?,
+    )
+    .map(|_| ())
 }
 
 fn validate_submission(request: &EventAdmissionSubmission) -> ServiceResult<()> {

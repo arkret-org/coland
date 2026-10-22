@@ -839,7 +839,9 @@ pub(crate) async fn request_in_connection(
         }
     }
     require_current_accounts(conn, realm, &accounts, current).await?;
-    if caller.as_account_id().is_some() {
+    // Consumed exact receipts have no new qualification participants.
+    // Fresh requests and unconsumed work still require an active caller.
+    if caller.as_account_id().is_some() && !accounts.is_empty() {
         require_active_caller(caller, current)?;
     }
     crate::realm_authorization_cut::lock_realm_authorization_cut(conn, realm).await?;

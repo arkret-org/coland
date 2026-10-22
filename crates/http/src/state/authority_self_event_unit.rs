@@ -134,6 +134,7 @@ fn decided_at_commit_cut(kind: &arkret_wire::EventKind) -> bool {
             | arkret_wire::EventKind::RealmLink
             | arkret_wire::EventKind::RealmSetDefaultStrand
             | arkret_wire::EventKind::RealmJoinRule
+            | arkret_wire::EventKind::RealmHistoryAccess
             | arkret_wire::EventKind::SelfModerationReport
             | arkret_wire::EventKind::ModerationDecision
             | arkret_wire::EventKind::ModerationDecisionLift
@@ -883,10 +884,11 @@ mod claim_privacy_tests {
     use super::*;
 
     #[test]
-    fn relationship_and_join_rule_admission_use_the_durable_current_cut() {
+    fn relationship_and_scope_policy_admission_use_the_durable_current_cut() {
         for kind in [
             arkret_wire::EventKind::RealmLink,
             arkret_wire::EventKind::RealmJoinRule,
+            arkret_wire::EventKind::RealmHistoryAccess,
         ] {
             assert!(decided_at_commit_cut(&kind));
         }

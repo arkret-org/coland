@@ -811,7 +811,7 @@ async fn revoke_install_inner(
                 "Applet revoke cannot apply its local fence before every Event step is committed",
             ));
         }
-        let local_outcome = crate::boxed_future(|| {
+        crate::boxed_future(|| {
             revoke_applet_record_after_admin_gate(
                 state,
                 &session.actor,
@@ -821,20 +821,6 @@ async fn revoke_install_inner(
             )
         })
         .await?;
-        for bot_actor_id in local_outcome.bot_actor_ids {
-            outcome
-                .revoked_refs
-                .push(AppletRevokeEffectRef::TypedResource(
-                    applet_revoke_local_ref(bot_actor_id)?,
-                ));
-        }
-        for ghost_actor_id in local_outcome.ghost_actor_ids {
-            outcome
-                .revoked_refs
-                .push(AppletRevokeEffectRef::TypedResource(
-                    applet_revoke_local_ref(ghost_actor_id)?,
-                ));
-        }
         let step = outcome
             .steps
             .iter_mut()

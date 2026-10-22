@@ -13,7 +13,7 @@ pub(super) async fn revoke_applet_record_after_admin_gate(
     applet_id: &str,
     service_id: &str,
     effective_scope: &arkret_wire::ScopeRef,
-) -> Result<super::types::AppletRevokeRecordOutcome, AppError> {
+) -> Result<(), AppError> {
     revoke_applet_record_inner(state, actor, applet_id, service_id, effective_scope).await
 }
 
@@ -23,7 +23,7 @@ async fn revoke_applet_record_inner(
     applet_id: &str,
     service_id: &str,
     effective_scope: &arkret_wire::ScopeRef,
-) -> Result<super::types::AppletRevokeRecordOutcome, AppError> {
+) -> Result<(), AppError> {
     let mut attempts = 0_u8;
     let (record, globally_fenced) = loop {
         let current = applet_record(state, applet_id, service_id, effective_scope)
@@ -51,11 +51,9 @@ async fn revoke_applet_record_inner(
             );
         }
     };
-    let now = record
-        .revoked_at
-        .as_ref()
-        .cloned()
-        .ok_or_else(|| AppError::internal("revoked Applet has no revoked_at"))?;
+    if record.revoked_at.is_none() {
+        return Err(AppError::internal("revoked Applet has no revoked_at"));
+    }
     crate::routing::append_audit_log(
         state,
         Some(actor),
@@ -69,21 +67,7 @@ async fn revoke_applet_record_inner(
         "accepted",
     )
     .await;
-    Ok(super::types::AppletRevokeRecordOutcome {
-        applet_id: record.applet_id.clone(),
-        status: "revoked".to_owned(),
-        revoked_at: now,
-        bot_actor_ids: record
-            .bots
-            .iter()
-            .map(|bot| bot.bot_actor_id.signing_principal_id().to_string())
-            .collect(),
-        ghost_actor_ids: record
-            .ghosts
-            .iter()
-            .map(|ghost| ghost.ghost_actor_id.signing_principal_id().to_string())
-            .collect(),
-    })
+    Ok(())
 }
 
 pub(super) fn ghost_provision_authorization_ref(record: &AppletRecord) -> Result<String, AppError> {

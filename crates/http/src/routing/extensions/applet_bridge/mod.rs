@@ -24,4 +24,4 @@ pub(in crate::routing::extensions) use endpoints::protocol_router;
 pub(crate) use management_review::prepare_event_current;
 pub(crate) use signature::{verify_self_control_service, verify_self_service_grant_read};
 pub(crate) use types::registration_epoch_evidence_from_event;
-pub use types::{AppletRecord, AppletRevokeRecordOutcome, GhostActorRecord};
+pub use types::{AppletRecord, GhostActorRecord};

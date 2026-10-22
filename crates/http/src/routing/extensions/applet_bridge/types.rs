@@ -422,16 +422,6 @@ fn applet_lifecycle_mirrors_match(
     }
 }
 
-#[derive(salvo::oapi::ToSchema, Clone, Debug, Serialize, Deserialize)]
-pub struct AppletRevokeRecordOutcome {
-    pub applet_id: AppletId,
-    pub status: String,
-    #[serde(with = "arkret_canonical::serde_helpers::canonical_timestamp")]
-    pub revoked_at: chrono::DateTime<chrono::Utc>,
-    pub bot_actor_ids: Vec<String>,
-    pub ghost_actor_ids: Vec<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use arkret_wire::{DidUrl, EventId, ProducerEventProof};

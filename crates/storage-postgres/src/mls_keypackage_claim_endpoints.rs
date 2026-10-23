@@ -160,6 +160,126 @@ async fn original(
         .await?
         .ok_or_else(|| denied("claim endpoint original is not accepted"))
 }
+
+/// A local source Station must verify its participant at the held cut rather
+/// than treating its own transport signature as a remote source attestation.
+pub(crate) async fn require_local_requester_signature(
+    conn: &mut AsyncPgConnection,
+    request: &PeerKeyPackagesClaimRequestBody,
+) -> PersistenceResult<()> {
+    let (method, signature, key) = match &request.requester_authorization {
+        PeerKeyPackageRequesterAuthorization::Device {
+            verification_method,
+            requester_device_id,
+            device_authorize_event_id,
+            signature,
+            ..
+        } => {
+            let account = request
+                .requester_account_id
+                .as_ref()
+                .ok_or_else(|| denied("Device requester Account is absent"))?;
+            let full = original(conn, device_authorize_event_id).await?;
+            let payload: DeviceAuthorizePayload =
+                serde_json::from_value(serde_json::to_value(&full.event.payload).map_err(denied)?)
+                    .map_err(denied)?;
+            payload.validate_wire_constraints().map_err(denied)?;
+            let (controller, fragment) = verification_method
+                .as_str()
+                .rsplit_once('#')
+                .ok_or_else(|| denied("Device method has no fragment"))?;
+            let principal = arkret_wire::Did::new(controller)
+                .and_then(|did| arkret_wire::project_did_to_core_id(&did))
+                .map_err(denied)?;
+            if full.event.kind != EventKind::DeviceAuthorize
+                || full.event.actor_id != ActorId::account(account.clone())
+                || payload.device_id != *requester_device_id
+                || fragment != requester_device_id.as_str()
+                || principal != account.principal_id
+                || account.station_id != request.service_binding.source_id
+            {
+                return Err(denied(
+                    "Device requester differs from its accepted authorization",
+                ));
+            }
+            let multibase = payload
+                .device_public_key_did
+                .as_str()
+                .strip_prefix("did:key:")
+                .ok_or_else(|| denied("Device key is not did:key"))?;
+            let key = arkret_canonical::decode_ed25519_multibase(multibase).map_err(denied)?;
+            (verification_method, signature, key)
+        }
+        PeerKeyPackageRequesterAuthorization::Agent {
+            verification_method,
+            requester_agent_id,
+            agent_key_authorize_event_id,
+            signature,
+            ..
+        } => {
+            let full = original(conn, agent_key_authorize_event_id).await?;
+            let payload: AgentKeyAuthorizePayload =
+                serde_json::from_value(serde_json::to_value(&full.event.payload).map_err(denied)?)
+                    .map_err(denied)?;
+            if full.event.kind != EventKind::AgentKeyAuthorize
+                || payload.agent_id != *requester_agent_id
+                || payload.verification_method != *verification_method
+                || payload.public_key.algorithm.as_str() != "Ed25519"
+            {
+                return Err(denied(
+                    "Agent requester differs from its accepted authorization",
+                ));
+            }
+            let key: [u8; 32] = arkret_canonical::base64url_decode(payload.public_key.key.as_str())
+                .map_err(denied)?
+                .try_into()
+                .map_err(|_| denied("Agent key is not Ed25519"))?;
+            (verification_method, signature, key)
+        }
+        PeerKeyPackageRequesterAuthorization::RealmDevice {
+            verification_method,
+            requester_device_id,
+            device_authorize_event_id,
+            signature,
+            ..
+        } => {
+            let actor = request
+                .requester_actor_id
+                .as_ref()
+                .ok_or_else(|| denied("Realm requester Actor is absent"))?;
+            let authority = crate::realm_actor_device_authority::current_in_connection(
+                conn,
+                actor,
+                requester_device_id,
+                Utc::now(),
+            )
+            .await
+            .map_err(crate::PgTransactionError::into_persistence)?
+            .ok_or_else(|| denied("Realm requester Device is unavailable"))?;
+            if authority.authorization_ref.event_id != *device_authorize_event_id
+                || authority.governance_service_id != request.service_binding.source_id
+                || verification_method.as_str()
+                    != format!("{}#{}", authority.native_did, authority.device_id)
+            {
+                return Err(denied("Realm requester differs from its accepted Device"));
+            }
+            (verification_method, signature, authority.public_key)
+        }
+    };
+    let input = arkret_models_crypto::keypackage_claim_authorization_signing_bytes(
+        &request.unsigned_request(),
+        &request.service_binding,
+        &request.requester_authorization,
+    )
+    .map_err(denied)?;
+    arkret_signatures::keypackages::verify_keypackage_signing_input(
+        &key,
+        method.as_str(),
+        &input,
+        signature,
+    )
+    .map_err(denied)
+}
 fn reference(full: &arkret_wire::CommittedEventFullView) -> CommittedEventRef {
     CommittedEventRef {
         event_id: full.event.event_id.clone(),

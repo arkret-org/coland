@@ -1265,7 +1265,7 @@ async fn configuration_handoff_resume(
         resumed_delivery.context.as_ref().unwrap().material.governance_generation,
         manifest.governance_generation + 1
     );
-    let arkret_models_integration::RealmActorMaterialResult::Event { event, commit, .. } =
+    let arkret_models_integration::RealmActorMaterial::Event { event, commit, .. } =
         &resumed_delivery.context.as_ref().unwrap().material.result
     else {
         panic!("creation material required")

@@ -26,77 +26,20 @@ pub(super) async fn mimi_provider_directory(
 #[endpoint(
     operation_id = "ak.open.mimi.exchange.request_key_material",
     summary = "Request MIMI key material",
+    request_body = arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
     tags("mimi")
 )]
 #[tracing::instrument(skip_all, fields(op = "ak.open.mimi.exchange.request_key_material.v1"))]
 pub(super) async fn mimi_key_material(
-    body: JsonBody<MimiKeyMaterialRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<MimiKeyMaterialOutcome> {
+) -> coland_http::result::GuardedJsonResult<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome>
+{
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let typed = body.into_inner();
-    let body = typed_body_value(&typed, "mimi key material")?;
-    let source_provider = verify_mimi_source_service_signature(state, req, None).await?;
-    if typed.requester_id.as_str() != source_provider {
-        return Err(AppError::capability_denied(
-            "MIMI key-material requester must be the attested source service",
-        ));
-    }
-    if let Some(message) = unsupported_mimi_draft(&body) {
-        return Err(AppError::param_invalid(message).with_reason_code("mimi_draft_unsupported"));
-    }
-    verify_mimi_key_material_request_proofs(state, &typed).await?;
-    let target = typed.strand_id.as_str();
-    let realm_id = typed.realm_id.as_ref().ok_or_else(|| {
-        AppError::param_invalid("MIMI key-material claim requires realm_id")
-            .with_wire_code("claim_failed")
-    })?;
-    let group_id = typed.mls_group_id.as_deref().ok_or_else(|| {
-        AppError::param_invalid("MIMI key-material claim requires mls_group_id")
-            .with_wire_code("claim_failed")
-    })?;
-    let claimed = crate::routing::mls::claim_mimi_keypackage(
-        state,
-        &typed.requester_id,
-        &typed.device_id,
-        realm_id.as_str(),
-        group_id,
-    )
-    .await?
-    .ok_or_else(|| crate::app_error!(ClaimFailed, "KeyPackage claim failed"))?;
-    let claimed_device = claimed
-        .device_id
-        .as_deref()
-        .ok_or_else(|| AppError::internal("claimed MIMI KeyPackage does not carry a device_id"))?;
-    let keypackage = MimiKeyPackage {
-        device_id: arkret_wire::DeviceId::new(claimed_device.to_owned())
-            .map_err(|error| AppError::internal(format!("claimed device_id: {error}")))?,
-        keypackage_ref: Some(
-            arkret_wire::NonEmptyString::new(claimed.keypackage_ref.clone())
-                .map_err(|error| AppError::internal(format!("claimed KeyPackage ref: {error}")))?,
-        ),
-        mls_keypackage: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
-            &claimed.key_package_bytes,
-        ))
-        .map_err(|error| AppError::internal(format!("claimed KeyPackage bytes: {error}")))?,
-    };
-    let _receipt = mimi_receipt(
-        state,
-        arkret_wire::ServiceOperationId::OPEN_MIMI_EXCHANGE_REQUEST_KEY_MATERIAL_V1,
-        &body,
-        json!({
-            "target": target,
-            "keypackage_claim_lifecycle": "single_use_required",
-            "keypackage_ref": claimed.keypackage_ref,
-        }),
-    );
-    json_ok(MimiKeyMaterialOutcome {
-        keypackages: Some(vec![keypackage]),
-        group_info: None,
-        failures: None,
-        signature: None,
-    })
+    let room = arkret_wire::MimiRoomUri::new(mimi_required_header(req, "mimi-room-uri")?)
+        .map_err(|_| mimi_signature_error_invalid("MIMI-Room-URI is invalid"))?;
+    verify_mimi_key_material_source_signature(state, req, room.as_str()).await?;
+    crate::routing::mls::mimi_claim_keypackage(depot, req, &room).await
 }
 
 #[endpoint(
@@ -670,35 +613,6 @@ async fn verify_mimi_operation_proof(
         AppError::param_invalid(format!("{label} proof JWS verification failed"))
             .with_reason_code(arkret_wire::ReasonCode::PROOF_INVALID)
     })
-}
-
-/// Verify every proof carried by a MIMI key-material request.
-///
-/// `proofs` is `#[serde(default)]` on the wire, so an empty vector is a valid
-/// request and this is a no-op for it. The originator is the mandatory
-/// `requester_id` field.
-async fn verify_mimi_key_material_request_proofs(
-    state: &AppState,
-    body: &MimiKeyMaterialRequestBody,
-) -> Result<(), AppError> {
-    let issuer = body.requester_id.to_string();
-    for proof in &body.proofs {
-        let binding = body.proof_binding_bytes(proof).map_err(|error| {
-            AppError::param_invalid(format!(
-                "MIMI key material request proof binding is invalid: {error}"
-            ))
-            .with_reason_code(arkret_wire::ReasonCode::PROOF_INVALID)
-        })?;
-        verify_mimi_operation_proof(
-            state,
-            &binding,
-            proof,
-            MimiProofSigner::DidController(issuer.as_str()),
-            "MIMI key material request",
-        )
-        .await?;
-    }
-    Ok(())
 }
 
 /// Verify every proof carried by a MIMI consent request.
@@ -2888,41 +2802,6 @@ mod consent_proof_tests {
         StrandId::from_event_id(&event_id)
     }
 
-    fn key_material_request(
-        state: &AppState,
-        requester_id: &DidCoreId,
-        method: &arkret_wire::DidUrl,
-    ) -> MimiKeyMaterialRequestBody {
-        MimiKeyMaterialRequestBody {
-            requester_id: requester_id.clone(),
-            strand_id: fixture_strand_id(),
-            device_id: DeviceId::new("ak:device:01964137-0000-7000-8000-000000000901".to_owned())
-                .unwrap(),
-            mimi_room_uri: None,
-            realm_id: None,
-            mls_group_id: None,
-            epoch: None,
-            proofs: vec![unsigned_request_proof(state, method)],
-        }
-    }
-
-    fn signed_key_material_request(
-        state: &AppState,
-        requester_id: &DidCoreId,
-        method: &arkret_wire::DidUrl,
-        signing_key: &ed25519_dalek::SigningKey,
-    ) -> MimiKeyMaterialRequestBody {
-        let mut body = key_material_request(state, requester_id, method);
-        body.proofs[0].payload_digest = body.payload_digest().unwrap();
-        let proof = body.proofs[0].clone();
-        let binding = body
-            .unsigned_proof_binding_bytes(&proof.unsigned())
-            .unwrap();
-        body.proofs[0].jws =
-            arkret_signatures::jws::sign_jws_ed25519(&binding, signing_key).unwrap();
-        body
-    }
-
     fn request_consent_request(
         state: &AppState,
         requester_id: &DidCoreId,
@@ -3079,12 +2958,6 @@ mod consent_proof_tests {
         let (signing_key, requester_id, method) =
             did_key_originator("mimi-request-family-positive");
 
-        verify_mimi_key_material_request_proofs(
-            &state,
-            &signed_key_material_request(&state, &requester_id, &method, &signing_key),
-        )
-        .await
-        .expect("key material request proof");
         verify_mimi_request_consent_proofs(
             &state,
             &signed_request_consent_request(&state, &requester_id, &method, &signing_key),
@@ -3105,17 +2978,10 @@ mod consent_proof_tests {
     async fn request_families_bind_distinct_proof_contexts() {
         let state = state();
         let (signing_key, requester_id, method) = did_key_originator("mimi-context-separation");
-        let key_material =
-            signed_key_material_request(&state, &requester_id, &method, &signing_key);
         let consent = signed_request_consent_request(&state, &requester_id, &method, &signing_key);
         let query = signed_identifier_query_request(&state, &requester_id, &method, &signing_key);
 
         let contexts = [
-            binding_context(
-                &key_material
-                    .proof_binding_bytes(&key_material.proofs[0])
-                    .unwrap(),
-            ),
             binding_context(&consent.proof_binding_bytes(&consent.proofs[0]).unwrap()),
             binding_context(&query.proof_binding_bytes(&query.proofs[0]).unwrap()),
         ];
@@ -3132,21 +2998,20 @@ mod consent_proof_tests {
     // `payload_digest` is re-pointed at the destination body so the SDK digest
     // check cannot be what rejects it. The only remaining difference is the
     // per-family context baked into the signed transcript.
-    #[tokio::test]
-    async fn key_material_rejects_a_consent_request_context_proof() {
+    #[test]
+    fn native_key_material_rejects_retired_mimi_request_carriers() {
         let state = state();
-        let (signing_key, requester_id, method) = did_key_originator("mimi-cross-family-consent");
-        let consent = signed_request_consent_request(&state, &requester_id, &method, &signing_key);
-
-        let mut key_material = key_material_request(&state, &requester_id, &method);
-        let mut replayed = consent.proofs[0].clone();
-        replayed.payload_digest = key_material.payload_digest().unwrap();
-        key_material.proofs = vec![replayed];
-
-        let error = verify_mimi_key_material_request_proofs(&state, &key_material)
-            .await
-            .expect_err("a consent-request context proof must not verify as key material");
-        assert_rejected_proof(&error);
+        let (key, requester, method) = did_key_originator("retired-mimi-claim-carrier");
+        let consent = signed_request_consent_request(&state, &requester, &method, &key);
+        assert!(
+            serde_json::from_value::<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>(
+                serde_json::to_value(consent).unwrap()
+            )
+            .is_err()
+        );
+        assert!(serde_json::from_value::<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>(json!({
+            "requester_id": requester, "strand_id": fixture_strand_id(), "device_id":"ak:device:01964137-0000-7000-8000-000000000901"
+        })).is_err());
     }
 
     #[tokio::test]
@@ -3167,29 +3032,28 @@ mod consent_proof_tests {
     }
 
     #[tokio::test]
-    async fn identifier_query_rejects_a_key_material_context_proof() {
+    async fn identifier_query_rejects_a_consent_context_proof() {
         let state = state();
         let (signing_key, requester_id, method) =
-            did_key_originator("mimi-cross-family-key-material");
-        let key_material =
-            signed_key_material_request(&state, &requester_id, &method, &signing_key);
+            did_key_originator("mimi-cross-family-consent-to-query");
 
+        let consent = signed_request_consent_request(&state, &requester_id, &method, &signing_key);
         let mut query = identifier_query_request(&state, &requester_id, &method);
-        let mut replayed = key_material.proofs[0].clone();
+        let mut replayed = consent.proofs[0].clone();
         replayed.payload_digest = query.payload_digest().unwrap();
         query.proofs = vec![replayed];
 
         let error = verify_mimi_identifier_query_proofs(&state, &query, requester_id.as_str())
             .await
-            .expect_err("a key-material context proof must not verify as an identifier query");
+            .expect_err("a consent context proof must not verify as an identifier query");
         assert_rejected_proof(&error);
     }
 
     #[tokio::test]
-    async fn key_material_rejects_a_proof_outside_the_replay_window() {
+    async fn identifier_query_rejects_a_proof_outside_the_replay_window() {
         let state = state();
         let (signing_key, requester_id, method) = did_key_originator("mimi-replay-window");
-        let mut body = key_material_request(&state, &requester_id, &method);
+        let mut body = identifier_query_request(&state, &requester_id, &method);
         body.proofs[0].created_at =
             now() - Duration::seconds(MIMI_OPERATION_PROOF_WINDOW_SECONDS + 1);
         body.proofs[0].payload_digest = body.payload_digest().unwrap();
@@ -3200,24 +3064,19 @@ mod consent_proof_tests {
         body.proofs[0].jws =
             arkret_signatures::jws::sign_jws_ed25519(&binding, &signing_key).unwrap();
 
-        let error = verify_mimi_key_material_request_proofs(&state, &body)
+        let error = verify_mimi_identifier_query_proofs(&state, &body, requester_id.as_str())
             .await
             .expect_err("a proof older than the replay window must fail closed");
         assert_rejected_proof(&error);
     }
 
     #[tokio::test]
-    async fn request_family_proofs_stay_optional_on_the_wire() {
+    async fn identifier_query_proofs_stay_optional_on_the_wire() {
         let state = state();
         let (_signing_key, requester_id, method) = did_key_originator("mimi-optional-proofs");
-        let mut key_material = key_material_request(&state, &requester_id, &method);
-        key_material.proofs.clear();
         let mut query = identifier_query_request(&state, &requester_id, &method);
         query.proofs.clear();
 
-        verify_mimi_key_material_request_proofs(&state, &key_material)
-            .await
-            .expect("key material proofs are serde-default and may be absent");
         verify_mimi_identifier_query_proofs(&state, &query, requester_id.as_str())
             .await
             .expect("identifier query proofs are serde-default and may be absent");

@@ -46,7 +46,7 @@ pub(super) async fn preview_token_matches_policy(
         .preview_policy_digest
         .as_deref()
         .map(str::to_owned)
-        .or_else(|| canonical_value_digest(policy));
+        .or_else(|| arkret_canonical::canonical_sha256(policy).ok());
     if claim
         .get("preview_policy_digest")
         .and_then(Value::as_str)
@@ -227,12 +227,6 @@ pub(super) fn policy_array_contains(policy: &Value, field: &str, expected: &str)
         .and_then(Value::as_array)
         .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(expected)))
 }
-
-// Converged to the single crate-root canonical-digest helper (delegates
-// to SDK `canonical_sha256`); re-exported so directory call sites keep
-// referencing `canonical_value_digest`.
-#[cfg(test)]
-pub(super) use crate::canonical_value_digest;
 
 #[cfg(test)]
 mod tests {

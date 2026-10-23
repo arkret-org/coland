@@ -45,8 +45,6 @@ use serde_json::Value;
 use serde_json::json;
 
 #[cfg(test)]
-use super::now;
-#[cfg(test)]
 use super::projection::retention_tombstone_for_event;
 #[cfg(test)]
 use super::realm_allows_plaintext_service_for_data_class;
@@ -134,8 +132,6 @@ pub(in crate::routing::events) use endpoints::router;
 
 #[cfg(test)]
 mod inception;
-#[cfg(test)]
-use inception::canonical_value_digest;
 #[cfg(test)]
 use inception::resolve_event_root_anchor_method;
 

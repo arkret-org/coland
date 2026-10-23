@@ -1,5 +1,4 @@
 use super::*;
-pub(super) use crate::canonical_value_digest;
 
 const DID_INCEPTION_REF_ROLE: &str = "did_inception";
 

@@ -330,6 +330,8 @@ pub struct MlsWelcomeClaimBinding {
 /// acceptance inputs only; the target still has its own independent guard.
 #[derive(Clone)]
 pub struct MlsKeyPackageClaimAdmission {
+    /// A signed MIMI transport locator; it never changes native claim identity.
+    pub mimi_room_uri: Option<arkret_wire::MimiRoomUri>,
     /// Exact verified issuing Station history frozen with a Realm target claim.
     pub claim_issuer_resolution: Option<arkret_models_identity::AuthenticatedServiceResolution>,
     pub request: arkret_models_crypto::PeerKeyPackagesClaimRequestBody,

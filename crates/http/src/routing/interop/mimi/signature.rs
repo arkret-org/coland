@@ -12,6 +12,23 @@ pub(super) async fn verify_mimi_source_service_signature(
     req: &mut Request,
     room_uri: Option<&str>,
 ) -> Result<String, AppError> {
+    verify_mimi_provider_signature(state, req, room_uri, false).await
+}
+
+pub(super) async fn verify_mimi_key_material_source_signature(
+    state: &AppState,
+    req: &mut Request,
+    room_uri: &str,
+) -> Result<String, AppError> {
+    verify_mimi_provider_signature(state, req, Some(room_uri), true).await
+}
+
+async fn verify_mimi_provider_signature(
+    state: &AppState,
+    req: &mut Request,
+    room_uri: Option<&str>,
+    native_claim: bool,
+) -> Result<String, AppError> {
     let signature_present =
         req.headers().get("signature").is_some() && req.headers().get("signature-input").is_some();
     if !signature_present {
@@ -37,9 +54,13 @@ pub(super) async fn verify_mimi_source_service_signature(
         ));
     }
     let provider_id = mimi_required_header(req, "provider-id")?;
-    if !provider_id.starts_with("mimi://") {
+    if if native_claim {
+        provider_id != source_id.as_str()
+    } else {
+        !provider_id.starts_with("mimi://")
+    } {
         return Err(mimi_signature_error_invalid(
-            "Provider-ID must be a MIMI provider URI",
+            "Provider-ID must identify the registered provider or exact native source Station",
         ));
     }
     let signed_room_uri = match room_uri {
@@ -60,13 +81,21 @@ pub(super) async fn verify_mimi_source_service_signature(
     let verification_method = mimi_validate_signature_input(&signature_input, &source_id)?;
     let target_uri = crate::routing::federation::signature_target_uri(req, state);
     let authority = crate::routing::federation::signature_authority(req, state);
-    let applicable_conditionals = signed_room_uri
-        .as_ref()
-        .map(|_| &["mimi-room-uri"][..])
-        .unwrap_or_default();
+    let mut applicable_conditionals = Vec::new();
+    if signed_room_uri.is_some() {
+        applicable_conditionals.push("mimi-room-uri");
+    }
+    if native_claim {
+        mimi_required_header(req, "idempotency-key")?;
+        applicable_conditionals.push("idempotency-key");
+        for component in ["source-trust-domain", "destination-trust-domain"] {
+            mimi_required_header(req, component)?;
+            applicable_conditionals.push(component);
+        }
+    }
     let policy = SignatureVerificationPolicy::for_scenario(
         HttpSignatureScenario::MimiProviderV1,
-        applicable_conditionals,
+        &applicable_conditionals,
     )
     .map_err(|error| mimi_verification_error(HttpMessageVerificationError::Policy(error)))?;
     let verifying_key = mimi_resolve_verifying_key(state, &verification_method)?;

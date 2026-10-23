@@ -58,7 +58,7 @@ async fn durable_completion_retries_real_signed_delivery_before_ack() {
     assert_eq!(expected.source_id, fixture.state.service_core_id());
     let context = expected.context.clone().unwrap();
     context.validate().unwrap();
-    let arkret_models_integration::RealmActorMaterialResult::Event {
+    let arkret_models_integration::RealmActorMaterial::Event {
         event,
         commit,
         producer_signer_fact,
@@ -369,7 +369,7 @@ async fn failing_completion_prefix_does_not_starve_a_later_accepted_creation() {
             arkret_wire::DetachedSignatureContext::RealmActorMaterial,
             &arkret_signatures::PublicKeyMaterial::Ed25519Raw { bytes:key.to_bytes().to_vec() },
         ).unwrap();
-        let arkret_models_integration::RealmActorMaterialResult::Event {event,commit,..}=&body.authoring_context.material.result else { panic!("real accepted creation result") };
+        let arkret_models_integration::RealmActorMaterial::Event {event,commit,..}=&body.authoring_context.material.result else { panic!("real accepted creation result") };
         assert_eq!(commit.event_ref,event.event_id);
         assert_eq!(event.kind,arkret_wire::EventKind::RealmActorCreate);
         *delivered.lock().unwrap().entry(event.event_id.to_string()).or_default()+=1;

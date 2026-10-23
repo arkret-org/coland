@@ -65,6 +65,147 @@ fn matches_scope(
     Ok(())
 }
 
+fn claim_participants(
+    request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+) -> PersistenceResult<(ActorId, ActorId)> {
+    let requester = match (
+        &request.requester_account_id,
+        &request.requester_authorization,
+    ) {
+        (Some(account), PeerKeyPackageRequesterAuthorization::Device { .. }) => {
+            ActorId::account(account.clone())
+        }
+        (
+            None,
+            PeerKeyPackageRequesterAuthorization::Agent {
+                requester_agent_id, ..
+            },
+        ) => ActorId::account(arkret_wire::AccountId::new(
+            requester_agent_id.clone(),
+            request.service_binding.source_id.clone(),
+        )),
+        (None, PeerKeyPackageRequesterAuthorization::RealmDevice { .. }) => request
+            .requester_actor_id
+            .clone()
+            .ok_or_else(|| denied("Realm requester is absent"))?,
+        _ => return Err(denied("claim requester routing branch is incomplete")),
+    };
+    let target = match (
+        &request.target_account_id,
+        &request.target_agent_id,
+        &request.target_actor_id,
+    ) {
+        (Some(account), None, None) => ActorId::account(account.clone()),
+        (None, Some(agent), None) => ActorId::account(arkret_wire::AccountId::new(
+            agent.clone(),
+            request.service_binding.destination_id.clone(),
+        )),
+        (None, None, Some(actor)) => actor.clone(),
+        _ => return Err(denied("claim target routing branch is incomplete")),
+    };
+    Ok((requester, target))
+}
+
+/// Follow the native sorted endpoint lock order, including the room Realm.
+/// Preparing all endpoints before locking avoids room/PCR lock inversion.
+pub(crate) async fn lock_mimi_cut(
+    conn: &mut AsyncPgConnection,
+    request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    room: &arkret_wire::MimiRoomUri,
+    outcome: &arkret_models_crypto::PeerKeyPackagesClaimOutcome,
+) -> PersistenceResult<()> {
+    let counterparts = crate::boxed_future(|| {
+        crate::mls_keypackage_claim_endpoints::prepare(
+            conn,
+            outcome,
+            Some(request),
+            &request.service_binding.destination_id,
+            &[],
+        )
+    })
+    .await?;
+    let mut realms = counterparts
+        .iter()
+        .map(|endpoint| endpoint.realm().clone())
+        .collect::<Vec<_>>();
+    realms.push(request.intended_realm_id.clone());
+    realms.sort();
+    realms.dedup();
+    for realm in realms {
+        crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &realm).await?;
+        crate::realm_management_archive::require_unfrozen(conn, &realm).await?;
+    }
+    require_mimi_room(conn, request, room).await?;
+    for endpoint in &counterparts {
+        crate::boxed_future(|| endpoint.require_current(conn)).await?;
+    }
+    if request.service_binding.source_id == request.service_binding.destination_id {
+        crate::boxed_future(|| {
+            crate::mls_keypackage_claim_endpoints::require_local_requester_signature(conn, request)
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// Resolve the signed room locator at the same current cut as native claim CAS.
+/// It is an additional selector constraint, never a second claim identity.
+pub(crate) async fn require_mimi_room(
+    conn: &mut AsyncPgConnection,
+    request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    room: &arkret_wire::MimiRoomUri,
+) -> PersistenceResult<ScopeRef> {
+    use arkret_models_collaboration::events_payloads::mimi::{
+        MimiRoomBindingPayload, MimiRoomBindingStatus,
+    };
+    request.validate_shape().map_err(denied)?;
+    if request.last_resort_allowed == Some(true)
+        || !request
+            .required_capabilities
+            .iter()
+            .any(|capability| capability.as_str() == "mimi.content.v1")
+    {
+        return Err(denied("MIMI requires ordinary single-use content packages"));
+    }
+    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &request.intended_realm_id)
+        .await?;
+    crate::realm_management_archive::require_unfrozen(conn, &request.intended_realm_id).await?;
+    let row = sql_query("SELECT value AS payload FROM mimi_room_binding_current_results WHERE mimi_room_uri=$1 AND realm_id=$2 FOR SHARE")
+        .bind::<Text,_>(room.as_str()).bind::<Text,_>(request.intended_realm_id.as_str())
+        .get_result::<JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+        .ok_or_else(|| denied("current MIMI room is unavailable"))?;
+    let binding: MimiRoomBindingPayload = serde_json::from_value(row.payload).map_err(denied)?;
+    binding.validate_shape().map_err(denied)?;
+    if binding.mimi_room_uri != *room
+        || binding.binding_scope.realm_id != request.intended_realm_id
+        || binding.status != MimiRoomBindingStatus::Accepted
+        || binding.mls_group_id.as_ref() != Some(&request.mls_group_id)
+        || request
+            .strand_id
+            .as_ref()
+            .is_some_and(|strand| strand != &binding.binding_scope.strand_id)
+    {
+        return Err(denied("MIMI room differs from the native claim target"));
+    }
+    let scope = crate::strand_current_results::locked_active_strand_scope(
+        conn,
+        &request.intended_realm_id,
+        &binding.binding_scope.strand_id,
+    )
+    .await?;
+    matches_scope(request, &scope)?;
+    crate::mls_keypackage_publication::require_existing_group(conn, &scope).await?;
+    if Utc::now() >= request.expires_at {
+        return Err(denied("fresh MIMI claim expired"));
+    }
+    if request.claim_purpose == PeerKeyPackageClaimPurpose::RealmMembership {
+        let (requester, target) = claim_participants(request)?;
+        member(conn, &scope, &requester).await?;
+        member(conn, &scope, &target).await?;
+    }
+    Ok(scope)
+}
+
 async fn member(
     conn: &mut AsyncPgConnection,
     scope: &ScopeRef,
@@ -246,6 +387,17 @@ pub(crate) async fn require_admission(
             "claim admission differs from the exact signed command",
         ));
     }
+    if let Some(room) = &admission.mimi_room_uri {
+        let outcome: arkret_models_crypto::PeerKeyPackagesClaimOutcome = serde_json::from_value(
+            attempt
+                .ledger
+                .outcome
+                .clone()
+                .ok_or_else(|| denied("claim outcome missing"))?,
+        )
+        .map_err(denied)?;
+        crate::boxed_future(|| lock_mimi_cut(conn, request, room, &outcome)).await?;
+    }
     let mut endpoints = Vec::new();
     if let Some((source, _)) = &admission.requester {
         endpoints.push(source);
@@ -363,41 +515,7 @@ pub(crate) async fn require_admission(
         })
         .await?;
     }
-    let requester = match (
-        &request.requester_account_id,
-        &request.requester_authorization,
-    ) {
-        (Some(account), PeerKeyPackageRequesterAuthorization::Device { .. }) => {
-            ActorId::account(account.clone())
-        }
-        (
-            None,
-            PeerKeyPackageRequesterAuthorization::Agent {
-                requester_agent_id, ..
-            },
-        ) => ActorId::account(arkret_wire::AccountId::new(
-            requester_agent_id.clone(),
-            request.service_binding.source_id.clone(),
-        )),
-        (None, PeerKeyPackageRequesterAuthorization::RealmDevice { .. }) => request
-            .requester_actor_id
-            .clone()
-            .ok_or_else(|| denied("Realm requester is absent"))?,
-        _ => return Err(denied("claim requester routing branch is incomplete")),
-    };
-    let target = match (
-        &request.target_account_id,
-        &request.target_agent_id,
-        &request.target_actor_id,
-    ) {
-        (Some(account), None, None) => ActorId::account(account.clone()),
-        (None, Some(agent), None) => ActorId::account(arkret_wire::AccountId::new(
-            agent.clone(),
-            request.service_binding.destination_id.clone(),
-        )),
-        (None, None, Some(actor)) => actor.clone(),
-        _ => return Err(denied("claim target routing branch is incomplete")),
-    };
+    let (requester, target) = claim_participants(request)?;
     // Managed Device scopes are actual existing Realm/Circle scopes. Direct
     // founding without their current installation never becomes a shortcut.
     if request.claim_purpose == PeerKeyPackageClaimPurpose::RealmMembership || !endpoints.is_empty()

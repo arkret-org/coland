@@ -49,7 +49,7 @@ use coland_domain::reducer::mls::KeyPackageTrustBinding;
 use coland_http::error::AppError;
 use coland_http::result::{GuardedJsonResult, JsonResult, guarded_json_ok, json_ok};
 use coland_services::events::{
-    ClaimMlsKeyPackageCommand, ClaimMlsKeyPackageTarget, MlsKeyPackageState as MlsKeyPackageRow,
+    MlsKeyPackageState as MlsKeyPackageRow,
     PeerKeyPackageClaimCommand as PeerKeyPackageClaimAttempt,
     PeerKeyPackageClaimLedgerState as PeerKeyPackageClaimLedgerRecord,
     PeerKeyPackageClaimLedgerWriteResult,
@@ -952,6 +952,14 @@ async fn peer_claim_keypackage(
     req: &mut Request,
 ) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryOutcome> {
     let Json(outcome) = peer_claim_keypackage_inner(depot, req).await?;
+    guard_native_claim_command_outcome(depot, req, outcome).await
+}
+
+async fn guard_native_claim_command_outcome(
+    depot: &mut Depot,
+    req: &mut Request,
+    outcome: PeerKeyPackagesClaimQueryOutcome,
+) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryOutcome> {
     let command = req
         .parse_json::<PeerKeyPackagesClaimRequestBody>()
         .await
@@ -978,8 +986,35 @@ async fn peer_claim_keypackage_inner(
     depot: &mut Depot,
     req: &mut Request,
 ) -> JsonResult<PeerKeyPackagesClaimQueryOutcome> {
+    peer_claim_keypackage_with_room(depot, req, None).await
+}
+
+pub(crate) async fn mimi_claim_keypackage(
+    depot: &mut Depot,
+    req: &mut Request,
+    room: &arkret_wire::MimiRoomUri,
+) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryOutcome> {
+    let Json(outcome) = peer_claim_keypackage_with_room(depot, req, Some(room)).await?;
+    guard_native_claim_command_outcome(depot, req, outcome).await
+}
+
+async fn peer_claim_keypackage_with_room(
+    depot: &mut Depot,
+    req: &mut Request,
+    mimi_room: Option<&arkret_wire::MimiRoomUri>,
+) -> JsonResult<PeerKeyPackagesClaimQueryOutcome> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let (body, authorization) = verify_peer_claim_source_attestation(state, req).await?;
+    let (body, authorization) =
+        verify_peer_claim_source_attestation(state, req, mimi_room.is_some()).await?;
+    if mimi_room.is_some()
+        && (body.last_resort_allowed == Some(true)
+            || !body
+                .required_capabilities
+                .iter()
+                .any(|value| value.as_str() == "mimi.content.v1"))
+    {
+        return Err(peer_claim_failed());
+    }
     let digest = arkret_wire::Hash::new(
         arkret_canonical::canonical_sha256(&body)
             .map_err(|error| AppError::internal(error.to_string()))?,
@@ -1001,7 +1036,9 @@ async fn peer_claim_keypackage_inner(
     {
         return query_claim_ledger(state, query, source_id).await;
     }
-    let execution = claim_keypackage_at_destination(state, &body, authorization, None).await;
+    let execution =
+        claim_keypackage_at_destination_with_room(state, &body, authorization, None, mimi_room)
+            .await;
     match execution {
         Ok(_) => query_claim_ledger(state, query, source_id).await,
         Err(error) => {
@@ -1025,6 +1062,17 @@ async fn claim_keypackage_at_destination(
     body: &PeerKeyPackagesClaimRequestBody,
     authorization: VerifiedClaimAuthorization,
     native_requester: Option<&(coland_storage::AppletManagedDeviceScopeGuard, DateTime<Utc>)>,
+) -> JsonResult<PeerKeyPackagesClaimOutcome> {
+    claim_keypackage_at_destination_with_room(state, body, authorization, native_requester, None)
+        .await
+}
+
+async fn claim_keypackage_at_destination_with_room(
+    state: &AppState,
+    body: &PeerKeyPackagesClaimRequestBody,
+    authorization: VerifiedClaimAuthorization,
+    native_requester: Option<&(coland_storage::AppletManagedDeviceScopeGuard, DateTime<Utc>)>,
+    mimi_room: Option<&arkret_wire::MimiRoomUri>,
 ) -> JsonResult<PeerKeyPackagesClaimOutcome> {
     let target_principal_id = body
         .unsigned_request()
@@ -1291,6 +1339,7 @@ async fn claim_keypackage_at_destination(
             .mls_key_packages()
             .claim_peer_key_package(PeerKeyPackageClaimAttempt {
                 admission: Some(&coland_storage::MlsKeyPackageClaimAdmission {
+                    mimi_room_uri: mimi_room.cloned(),
                     request: body.clone(),
                     claim_issuer_resolution: if body.target_actor_id.is_some() {
                         Some(crate::routing::system::service_resolution::current_authenticated_service_resolution(state).await?)
@@ -1363,7 +1412,7 @@ async fn peer_query_keypackage_claim_inner(
     crate::routing::events::peer::validate_peer_request(state, req, true).await?;
     body.validate_shape()
         .map_err(|error| peer_claim_schema_violation(error.to_string()))?;
-    let transport = peer_claim_transport_binding(state, req)?;
+    let transport = peer_claim_transport_binding(state, req, false)?;
     let source_id = transport.source_id.as_str().to_owned();
     query_claim_ledger(state, body, source_id).await
 }
@@ -1583,6 +1632,7 @@ impl VerifiedClaimAuthorization {
 async fn verify_peer_claim_source_attestation(
     state: &AppState,
     req: &mut Request,
+    local_mimi: bool,
 ) -> Result<(PeerKeyPackagesClaimRequestBody, VerifiedClaimAuthorization), AppError> {
     // Authenticate before any target lookup to preserve opaque peer admission.
     crate::routing::events::peer::validate_peer_request(state, req, true).await?;
@@ -1598,7 +1648,7 @@ async fn verify_peer_claim_source_attestation(
                 AppError::json_invalid("invalid peer KeyPackage claim request body")
             }
         })?;
-    let transport = peer_claim_transport_binding(state, req)?;
+    let transport = peer_claim_transport_binding(state, req, local_mimi)?;
     if body.service_binding.source_id != transport.source_id
         || body.service_binding.destination_id != transport.destination_id
     {
@@ -1641,6 +1691,7 @@ async fn verify_peer_claim_source_attestation(
 fn peer_claim_transport_binding(
     state: &AppState,
     req: &Request,
+    local_mimi: bool,
 ) -> Result<PeerClaimHttpTransportBinding, AppError> {
     let source_id = arkret_wire::DidCoreId::new(peer_required_header(req, "source-service-id")?)
         .map_err(|_| peer_claim_schema_violation("source-service-id must be a core_id"))?;
@@ -1657,7 +1708,7 @@ fn peer_claim_transport_binding(
     .map_err(|_| peer_claim_schema_violation("destination-trust-domain is invalid"))?;
     let local_trust_domain = state.config().trust_domain.clone();
     if destination_id.as_str() != state.service_id()
-        || source_id == destination_id
+        || (source_id == destination_id && !local_mimi)
         || source_trust_domain != local_trust_domain
         || destination_trust_domain != local_trust_domain
     {
@@ -4731,97 +4782,6 @@ pub(crate) async fn has_claimable_realm_membership_keypackage(
                     &required_capabilities,
                 )
         })
-}
-
-/// Claim the exact single-use KeyPackage requested through the MIMI facade.
-/// The MIMI adapter deliberately delegates the state transition to the same
-/// durable CAS used by the native KeyPackage lifecycle.
-pub(crate) async fn claim_mimi_keypackage(
-    state: &AppState,
-    principal: &arkret_wire::DidCoreId,
-    device_id: &arkret_wire::DeviceId,
-    realm_id: &str,
-    group_id: &str,
-) -> Result<Option<MlsKeyPackageRow>, AppError> {
-    let target_device_ids = BTreeSet::from([device_id.to_string()]);
-    let trust_selector = current_keypackage_claim_trust_selector(
-        state,
-        principal,
-        &target_device_ids,
-        Some(realm_id),
-    )
-    .await?;
-    let now_secs = now().timestamp();
-    let candidate_ids = state
-        .projections()
-        .mls_key_package_records()
-        .iter()
-        .filter(|record| ordinary_keypackage_is_available(record))
-        .filter(|record| {
-            keypackage_matches_claim(
-                record,
-                principal.as_str(),
-                &target_device_ids,
-                &trust_selector,
-                now_secs,
-                &BTreeSet::from(["mimi.content.v1".to_owned()]),
-            )
-        })
-        .map(|record| (record.created_at, record.id.clone()))
-        .collect::<BTreeSet<_>>();
-
-    for (_, candidate_id) in candidate_ids {
-        let Some(candidate) = state
-            .mls_key_packages()
-            .key_package(&candidate_id)
-            .await
-            .map_err(|error| AppError::internal(format!("MIMI KeyPackage lookup: {error}")))?
-        else {
-            continue;
-        };
-        let binding = trust_binding_from_keypackage(&candidate)?;
-        let device_revocation_gate = if binding.device_authorize_event_id.is_some() {
-            let Some(candidate_device_id) = candidate.device_id.as_deref() else {
-                continue;
-            };
-            keypackage_device_revocation_gate(
-                state,
-                &candidate.actor_id,
-                candidate_device_id,
-                binding.device_authorize_event_id.as_deref(),
-            )
-            .await?
-        } else {
-            None
-        };
-        let claimed = state
-            .mls_key_packages()
-            .claim_key_package(ClaimMlsKeyPackageCommand {
-                applet_device_scope_guard: None,
-                id: &candidate_id,
-                target: ClaimMlsKeyPackageTarget::Group(group_id),
-                intended_realm_id: Some(realm_id),
-                device_authorize_event_id: binding.device_authorize_event_id.as_deref(),
-                agent_key_authorize_event_id: binding.agent_key_authorize_event_id.as_deref(),
-                device_revocation_gate: device_revocation_gate.as_ref(),
-                claimed_at: now_secs,
-                claim_expires_at_unix_ms: Some(
-                    (now() + chrono::Duration::minutes(10)).timestamp_millis(),
-                ),
-            })
-            .await
-            .map_err(|error| AppError::internal(format!("MIMI KeyPackage claim: {error}")))?;
-        if let Some(claimed) = claimed {
-            state.projections().mark_key_package_claimed(
-                &candidate_id,
-                group_id.to_owned(),
-                now_secs,
-                claimed.claim_expires_at_unix_ms,
-            );
-            return Ok(Some(claimed));
-        }
-    }
-    Ok(None)
 }
 
 fn ordinary_keypackage_is_available(keypackage: &MlsKeyPackageRow) -> bool {

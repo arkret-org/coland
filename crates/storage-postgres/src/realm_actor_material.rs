@@ -333,7 +333,7 @@ pub(crate) async fn read(
             }
             (
                 RealmActorMaterialPurpose::Current,
-                RealmActorMaterialResult::Current { entries },
+                RealmActorMaterial::Current { entries },
             )
         }
         RealmActorMaterialRequest::Event { target, .. } => {
@@ -354,7 +354,7 @@ pub(crate) async fn read(
                 .ok_or_else(|| unavailable("private producer original absent"))?;
             (
                 RealmActorMaterialPurpose::Event,
-                RealmActorMaterialResult::Event {
+                RealmActorMaterial::Event {
                     event,
                     commit,
                     producer_signer_fact,
@@ -390,7 +390,7 @@ pub(crate) async fn read(
             }
             (
                 RealmActorMaterialPurpose::Outcome,
-                RealmActorMaterialResult::Outcome {
+                RealmActorMaterial::Outcome {
                     target_request_digest: target_request_digest.clone(),
                     outcome,
                 },

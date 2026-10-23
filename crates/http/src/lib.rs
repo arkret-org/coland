@@ -62,11 +62,6 @@ pub use routing::{
 };
 
 #[cfg(test)]
-pub(crate) fn canonical_value_digest(value: &serde_json::Value) -> Option<String> {
-    arkret_canonical::canonical_sha256(value).ok()
-}
-
-#[cfg(test)]
 pub(crate) fn test_actor_id(did: &arkret_identifiers::Did) -> arkret_identifiers::DidCoreId {
     arkret_identifiers::project_did_to_core_id(did)
         .expect("test did must project to an Actor core_id")

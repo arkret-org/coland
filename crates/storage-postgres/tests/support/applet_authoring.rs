@@ -2722,7 +2722,7 @@ mod realm_native_fixture {
             &key,
         )
         .unwrap();
-        let RealmActorMaterialResult::Current { entries } = material.result else {
+        let RealmActorMaterial::Current { entries } = material.result else {
             panic!("current material required");
         };
         let RealmActorMaterialCurrentEntry::Present { source_ref, .. } = &entries[0] else {
@@ -3769,7 +3769,7 @@ mod realm_native_fixture {
                 "revoke pending material: {response}"
             );
             let material: RealmActorMaterialOutcome = serde_json::from_value(response).unwrap();
-            let RealmActorMaterialResult::Outcome { outcome, .. } = material.result else {
+            let RealmActorMaterial::Outcome { outcome, .. } = material.result else {
                 panic!("outcome required")
             };
             assert!(matches!(
@@ -3830,7 +3830,7 @@ mod realm_native_fixture {
             let (_, response) =
                 boxed_step(|| revoke_material(fixture, candidate, creation, digest)).await;
             let material: RealmActorMaterialOutcome = serde_json::from_value(response).unwrap();
-            let RealmActorMaterialResult::Outcome { outcome: read, .. } = material.result else {
+            let RealmActorMaterial::Outcome { outcome: read, .. } = material.result else {
                 unreachable!()
             };
             assert_eq!(json!(read), json!(terminal));
@@ -3914,7 +3914,7 @@ mod realm_native_fixture {
         let material: RealmActorMaterialOutcome = serde_json::from_value(response).unwrap();
         assert!(matches!(
             material.result,
-            RealmActorMaterialResult::Outcome {
+            RealmActorMaterial::Outcome {
                 outcome: RealmActorOperationOutcome::DeviceRevoke {
                     state: RealmActorDeviceRevokeState::Accepted,
                     decided_at: Some(_),
@@ -4139,7 +4139,7 @@ mod realm_native_fixture {
         let historical_delivery = prepare_configuration_completion(fixture, &completion)
             .await
             .unwrap();
-        let RealmActorMaterialResult::Event { event, commit, .. } = &historical_delivery
+        let RealmActorMaterial::Event { event, commit, .. } = &historical_delivery
             .context
             .as_ref()
             .unwrap()
@@ -5386,7 +5386,7 @@ mod realm_native_fixture {
             },
         )
         .unwrap();
-        let RealmActorMaterialResult::Current { entries } = &material.result else {
+        let RealmActorMaterial::Current { entries } = &material.result else {
             panic!("current required")
         };
         let RealmActorMaterialCurrentEntry::Present { row, source_ref } = &entries[0] else {
@@ -5427,7 +5427,7 @@ mod realm_native_fixture {
                 chrono::Utc::now(),
             )
             .unwrap();
-        let RealmActorMaterialResult::Event { event, .. } = material.result else {
+        let RealmActorMaterial::Event { event, .. } = material.result else {
             panic!("original required")
         };
         assert_eq!(&event, enable);
@@ -6532,7 +6532,7 @@ mod realm_native_fixture {
                 .installed_managed_authoring(&candidate.creation_scope, &actor)
                 .unwrap()
                 .unwrap();
-            let RealmActorMaterialResult::Event {
+            let RealmActorMaterial::Event {
                 commit: creation, ..
             } = &original.authoring_context.material.result
             else {

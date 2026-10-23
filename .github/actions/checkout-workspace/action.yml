@@ -4,48 +4,71 @@ inputs:
   token:
     description: Token for dependency repositories.
     required: true
+  frozen:
+    description: Use the committed release source set instead of current main.
+    default: "false"
 runs:
   using: composite
   steps:
+    - name: Resolve dependency revisions
+      id: revisions
+      shell: bash
+      env:
+        SOURCE_FILE: ${{ github.action_path }}/../../../.ci/release-sources.json
+        FROZEN: ${{ inputs.frozen }}
+      run: |
+        node <<'JS'
+        const fs = require('node:fs');
+        const revisions = JSON.parse(fs.readFileSync(process.env.SOURCE_FILE, 'utf8'));
+        const names = ['sdk', 'floria', 'spec', 'garth', 'bridges', 'savfox'];
+        if (Object.keys(revisions).length !== names.length ||
+            names.some(name => !/^[0-9a-f]{40}$/.test(revisions[name]))) {
+          throw new Error('Invalid release dependency source set');
+        }
+        for (const name of names) {
+          const ref = process.env.FROZEN === 'true' ? revisions[name] : 'main';
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${ref}\n`);
+        }
+        JS
     - name: Checkout Arkret Rust SDK
       uses: actions/checkout@v6
       with:
         repository: ${{ github.repository_owner }}/arkret-rust-sdk
         path: arkret-org/arkret-rust-sdk
-        ref: db0f5b44dec117b6b316690650efd0adb3a0f990
+        ref: ${{ steps.revisions.outputs.sdk }}
         token: ${{ inputs.token }}
     - name: Checkout Floria contracts workspace
       uses: actions/checkout@v6
       with:
         repository: ${{ github.repository_owner }}/floria
         path: arkret-org/floria
-        ref: 9d9ee6e5ebfef35bae56d9d79a8a23157486bccb
+        ref: ${{ steps.revisions.outputs.floria }}
         token: ${{ inputs.token }}
     - name: Checkout Arkret Spec
       uses: actions/checkout@v6
       with:
         repository: ${{ github.repository_owner }}/arkret-spec
         path: arkret-org/arkret-spec
-        ref: 8ae6fd0f14c630310a524e38b950b191918295e3
+        ref: ${{ steps.revisions.outputs.spec }}
         token: ${{ inputs.token }}
     - name: Checkout Garth
       uses: actions/checkout@v6
       with:
         repository: ${{ github.repository_owner }}/garth
         path: arkret-org/garth
-        ref: 8cfc6775b84528ff75c1ce37e6f879bfb1bfaf33
+        ref: ${{ steps.revisions.outputs.garth }}
         token: ${{ inputs.token }}
     - name: Checkout bridge runtime workspace
       uses: actions/checkout@v6
       with:
         repository: ${{ github.repository_owner }}/bridges
         path: arkret-org/bridges
-        ref: c3f9d8e51eddf63690fa083a493125dafdc86dae
+        ref: ${{ steps.revisions.outputs.bridges }}
         token: ${{ inputs.token }}
     - name: Checkout Savfox gateway workspace
       uses: actions/checkout@v6
       with:
         repository: savfox-ai/savfox
         path: savfox-ai/savfox
-        ref: 2992fcaeb755755a5f3b25179604c11ed23dbf06
+        ref: ${{ steps.revisions.outputs.savfox }}
         token: ${{ inputs.token }}

@@ -4071,7 +4071,7 @@ mod tests {
 mod account_authority_keyset_tests {
     use super::*;
 
-    /// Uses the existing outbox TLS fixture and the actual operator CA input.
+    /// Uses the canonical run-scoped TLS fixture and actual operator CA input.
     /// The development network policy permits loopback, but never disables
     /// certificate identity verification. No global environment is mutated.
     #[tokio::test]
@@ -4079,18 +4079,7 @@ mod account_authority_keyset_tests {
         use std::io::{Read, Write};
         use std::sync::Arc;
 
-        let expected_ca = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/outbox-test-ca.pem")
-            .canonicalize()
-            .unwrap();
-        let configured_ca = std::env::var_os("SSL_CERT_FILE")
-            .and_then(|path| std::path::Path::new(&path).canonicalize().ok());
-        assert_eq!(
-            configured_ca.as_deref(),
-            Some(expected_ca.as_path()),
-            "run with SSL_CERT_FILE={}",
-            expected_ca.display()
-        );
+        coland_test_support::native_tls::require_trust_store();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -4103,25 +4092,7 @@ mod account_authority_keyset_tests {
             "x": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
         }]})
         .to_string();
-        let tls = Arc::new(
-            rustls::ServerConfig::builder_with_provider(Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![rustls::pki_types::CertificateDer::from(
-                    include_bytes!("../tests/fixtures/outbox-test-cert.der").to_vec(),
-                )],
-                rustls::pki_types::PrivateKeyDer::Pkcs8(
-                    rustls::pki_types::PrivatePkcs8KeyDer::from(
-                        include_bytes!("../tests/fixtures/outbox-test-key.der").to_vec(),
-                    ),
-                ),
-            )
-            .unwrap(),
-        );
+        let tls = Arc::new(coland_test_support::native_tls::server_config());
         // First connection has the wrong DNS identity and must fail its TLS
         // handshake; the next two are real discovery and keyset HTTP reads.
         let peer = std::thread::spawn(move || {

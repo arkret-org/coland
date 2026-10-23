@@ -1,3 +1,5 @@
+DROP TABLE IF EXISTS public.service_registration_receipts;
+DROP TABLE IF EXISTS public.principal_resolution_current_results;
 DROP TABLE IF EXISTS public.applet_grant_registration_sources;
 DROP TABLE IF EXISTS public.contact_round_closures;
 DROP TABLE IF EXISTS public.contact_scope_intervals;

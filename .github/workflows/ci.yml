@@ -336,6 +336,17 @@ jobs:
         with:
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
+      - name: Checkout canonical native test runner
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/cotest
+          path: arkret-org/cotest
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -355,7 +366,7 @@ jobs:
       # contracts. They fail without `DATABASE_URL`, so a missing database
       # breaks the build instead of emptying the suite.
       - name: Storage contract and durable-plane tests
-        run: cargo test --locked -p coland-storage-postgres
+        run: python ../cotest/scripts/run-native-rust-tests.py cargo test --locked -p coland-storage-postgres
         working-directory: arkret-org/coland
 
   postgres-http-api:

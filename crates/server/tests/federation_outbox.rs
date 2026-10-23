@@ -330,25 +330,6 @@ impl MockResponse {
     }
 }
 
-/// The mock peer's leaf chains only to the checked-in loopback test CA, and
-/// the egress client trusts exactly the operator store named by
-/// `SSL_CERT_FILE`. Without it every TLS handshake fails and each case would
-/// surface as an opaque mock-peer timeout, so name the missing precondition.
-fn require_outbox_test_trust_store() {
-    let expected = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/outbox-test-ca.pem")
-        .canonicalize()
-        .expect("checked-in outbox test CA");
-    let configured = std::env::var_os("SSL_CERT_FILE")
-        .and_then(|path| std::path::Path::new(&path).canonicalize().ok());
-    assert_eq!(
-        configured.as_deref(),
-        Some(expected.as_path()),
-        "federation_outbox dials a TLS loopback peer; run it with SSL_CERT_FILE={}",
-        expected.display()
-    );
-}
-
 fn spawn_mock_peer() -> (String, mpsc::Receiver<String>) {
     spawn_mock_peer_with_status("200 OK", STORED_OUTCOME.as_bytes())
 }
@@ -363,25 +344,10 @@ fn spawn_mock_peer_with_status(
 /// Serve one canned reply per entry, in order, then stop. Multi-response tests
 /// (retry, resubmission) need more than the single-shot peer.
 fn spawn_mock_peer_responses(responses: Vec<MockResponse>) -> (String, mpsc::Receiver<String>) {
-    require_outbox_test_trust_store();
+    coland_test_support::native_tls::require_trust_store();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("https://{}", listener.local_addr().unwrap());
-    let certificate = rustls::pki_types::CertificateDer::from(
-        include_bytes!("fixtures/outbox-test-cert.der").to_vec(),
-    );
-    let private_key =
-        rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
-            include_bytes!("fixtures/outbox-test-key.der").to_vec(),
-        ));
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let tls = Arc::new(
-        rustls::ServerConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(vec![certificate], private_key)
-            .unwrap(),
-    );
+    let tls = Arc::new(coland_test_support::native_tls::server_config());
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         for response in responses {

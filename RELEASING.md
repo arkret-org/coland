@@ -4,7 +4,9 @@ Pushing a `v*` tag builds and publishes a GitHub Release after every required
 build succeeds. `workflow_dispatch` builds the same artifacts without publishing
 a release; use it before tagging. Existing source versions are not changed.
 
-Sibling checkout revisions in the workflow are part of the release source set.
+Sibling checkout revisions in `.ci/release-sources.json` define the release source set.
+Native releases and tagged Docker builds use this same frozen set; ordinary CI
+and main Docker builds check current sibling main branches.
 Before tagging, update those pins to a compatible tested set and commit any
 required Cargo.lock changes. Do not replace pinned revisions with `main`. Each
 archive includes `build-info.json` with the source commits and lockfile hash,

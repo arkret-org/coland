@@ -36,6 +36,7 @@ futures-util.workspace = true
 parking_lot.workspace = true
 rand_chacha = "0.10.0"
 rand_core = "0.10.1"
+rustls.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 coland-domain = { version = "0.3.0", path = "../domain" }

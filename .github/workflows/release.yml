@@ -50,48 +50,11 @@ jobs:
         uses: actions/checkout@v6
         with:
           path: arkret-org/coland
-      - name: Checkout arkret-rust-sdk
-        uses: actions/checkout@v6
+      - name: Checkout frozen release dependencies
+        uses: ./arkret-org/coland/.github/actions/checkout-workspace
         with:
-          repository: ${{ github.repository_owner }}/arkret-rust-sdk
-          path: arkret-org/arkret-rust-sdk
-          ref: db0f5b44dec117b6b316690650efd0adb3a0f990
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-      - name: Checkout floria
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/floria
-          path: arkret-org/floria
-          ref: 9d9ee6e5ebfef35bae56d9d79a8a23157486bccb
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-      - name: Checkout arkret-spec
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/arkret-spec
-          path: arkret-org/arkret-spec
-          ref: 8ae6fd0f14c630310a524e38b950b191918295e3
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-      - name: Checkout garth
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/garth
-          path: arkret-org/garth
-          ref: 8cfc6775b84528ff75c1ce37e6f879bfb1bfaf33
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-      - name: Checkout bridges
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.repository_owner }}/bridges
-          path: arkret-org/bridges
-          ref: c3f9d8e51eddf63690fa083a493125dafdc86dae
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-      - name: Checkout savfox
-        uses: actions/checkout@v6
-        with:
-          repository: savfox-ai/savfox
-          path: savfox-ai/savfox
-          ref: 2992fcaeb755755a5f3b25179604c11ed23dbf06
-          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+          frozen: "true"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"

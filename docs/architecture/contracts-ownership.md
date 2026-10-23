@@ -75,5 +75,9 @@
 | `admin::service_routes` | `AdminServiceRouteQuarantine` | local contract | Coland、Codmin | Codmin 经 `AdminServiceRouteDetail.quarantine` 内嵌字段消费；未命中 spec wire 类型 |
 | `admin::service_routes` | `AdminServiceRouteDetail` | local contract | Coland、Codmin | `GET /_coland/admin/service-routes/{service_id}/{service_kind}` 详情投影；字段复用 SDK 类型，整体未命中 spec wire 类型 |
 
+| `account_projection` | `AccountProjectionRequestBody`, `AccountLocalpartsBaseUrlError` | local contract/helper | Coland、Coauth | Deployment-private Account Authority projection of an already verified binding; fields reuse SDK identifiers. The URL helper error is not a wire model. |
+| `agent_session_authority` | `AgentSessionAuthorityRequest`, `AgentSessionAuthorityOutcome` | local contract | Coland、Coauth | Deployment-private source-snapshot binding; SDK-owned scope and identity types are reused. This projection cannot independently authorize an Arkret operation. |
+| `admin::queries` | `CapabilityGrantExactCurrentRow` | SDK re-export | Coland、Codmin | Original SDK public name behind `CapabilitySummary`; no local definition. |
+
 若以后出现同名或等价的规范类型，必须先在 `arkret-rust-sdk` 实现，并用规范固定样例做
 canonical JSON 字节对比，再从本表和 `coland-contracts` 删除相应本地契约。

@@ -571,6 +571,41 @@ pub(super) fn agent_projection_from_record(
     }
 }
 
+/// Display metadata comes from the accepted PCR profile, never the mutable
+/// pairing record. In particular a later pairing save cannot restore an old avatar.
+pub(super) async fn accepted_agent_projection(
+    state: &AppState,
+    record: &AgentPrincipalRecord,
+    runtime_state: AgentRuntimeState,
+) -> Result<AgentProjection, AppError> {
+    let mut projection = agent_projection_from_record(record, runtime_state);
+    projection.display_name = None;
+    projection.avatar_blob_ref = None;
+    let account = arkret_wire::AccountId::new(projection.agent_id.clone(), state.service_core_id());
+    if let Some(result) = state
+        .persistence()
+        .current_actor_profile(&account)
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("accepted Agent profile is unavailable: {error}"))
+        })?
+    {
+        if result.event.actor_id != arkret_wire::ActorId::account(account)
+            || result.event.realm_id.as_str() != record.principal_control_realm_id
+            || result.commit.event_ref != result.event.event_id
+            || result.commit.realm_id != result.event.realm_id
+            || result.profile.actor_kind != arkret_wire::ActorKind::Agent
+        {
+            return Err(AppError::internal(
+                "accepted Agent profile binding is invalid",
+            ));
+        }
+        projection.display_name = Some(result.profile.display_name);
+        projection.avatar_blob_ref = result.profile.avatar_blob_ref;
+    }
+    Ok(projection)
+}
+
 /// Build the spec `agent_view` (`agent-operations.schema.json#/$defs/agent_view`)
 /// from a persisted record: `{agent: <agent_projection>, status, grants[], key_state}`.
 /// The `agent`/`status` pair is required. `grants` defaults empty here — the
@@ -613,7 +648,7 @@ pub(super) async fn agent_view_from_record(
         !active_authorizations.is_empty(),
         chrono::Utc::now(),
     );
-    let agent = agent_projection_from_record(record, runtime_state);
+    let agent = accepted_agent_projection(state, record, runtime_state).await?;
     let controller_account_id =
         crate::routing::identity::agent_pcr::agent_controller_account(state, record).await?;
     let mut key_state = agent_key_state_from_record(

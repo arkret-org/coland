@@ -973,7 +973,7 @@ pub(super) async fn list_agents(
         record.state = projected_agent_lifecycle(record.state, lifecycle)?;
         let runtime_state =
             agent_runtime_state_from_record(&record, !keys.is_empty(), chrono::Utc::now());
-        agents.push(agent_projection_from_record(&record, runtime_state));
+        agents.push(accepted_agent_projection(state, &record, runtime_state).await?);
     }
     // spec `agent_list` = `{agents: [agent_projection], next_cursor?, has_more}`.
     json_ok(AgentList {

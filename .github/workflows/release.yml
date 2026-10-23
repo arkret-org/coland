@@ -90,7 +90,7 @@ jobs:
         with:
           repository: savfox-ai/savfox
           path: savfox-ai/savfox
-          ref: 30718f036341f22acb7cca1e35accee069a5d74a
+          ref: 2992fcaeb755755a5f3b25179604c11ed23dbf06
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
       - uses: actions/setup-python@v6
         with:

@@ -23,7 +23,8 @@ use arkret_models_collaboration::events_payloads::redaction::{
 use arkret_models_collaboration::exact_current_results::CanonicalEventDot;
 use coland_storage::{ConflictCode, PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::RunQueryDsl;
 
 use crate::message_revision_current_results::{
     locked_message_target, message_is_redacted, require_active_discussion_strand,

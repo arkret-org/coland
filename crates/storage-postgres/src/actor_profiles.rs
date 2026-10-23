@@ -28,8 +28,9 @@ use coland_storage::{
     IdentityAccountabilityRecord, PersistenceError, PersistenceResult,
 };
 use diesel::sql_types::{BigInt, Binary, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 use crate::pcr_device_status_fold::PcrDeviceLifecycle;
@@ -1069,9 +1070,7 @@ impl coland_storage::ActorProfileStore for PgActorProfileStore {
         &self,
         account: &AccountId,
     ) -> PersistenceResult<Option<ActorProfileResultRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT a.value,e.envelope,c.commit_json \
              FROM principal_resolutions p \
@@ -1082,7 +1081,7 @@ impl coland_storage::ActorProfileStore for PgActorProfileStore {
         )
         .bind::<Text, _>(account.principal_id.as_str())
         .bind::<Text, _>(account.station_id.as_str())
-        .get_result::<ProfileResultRow>(&mut *conn)
+        .get_result::<ProfileResultRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -1097,16 +1096,14 @@ impl coland_storage::ActorProfileStore for PgActorProfileStore {
         subject_id: &DidCoreId,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<bool> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT value FROM identity_accountability_current_results \
              WHERE subject_id=$1 AND issuer_id=$2",
         )
         .bind::<Text, _>(subject_id.as_str())
         .bind::<Text, _>(issuer_id.as_str())
-        .get_results::<AccountabilityRow>(&mut *conn)
+        .get_results::<AccountabilityRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         for row in rows {

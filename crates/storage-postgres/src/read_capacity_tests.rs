@@ -9,7 +9,8 @@
 //! table fails the matrix outright.
 
 use diesel::sql_types::{Array, BigInt, Json, Text};
-use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
+use diesel_async::SimpleAsyncConnection;
+use horme::RunQueryDsl;
 use serde_json::Value;
 
 use crate::{AsyncPgConnection, QueryableByName, pg_conn, sql_query};

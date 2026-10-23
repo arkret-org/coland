@@ -109,14 +109,12 @@ impl SpaceContainerProjectionStore for PgSpaceContainerProjectionStore {
         &self,
         container_space_id: &str,
     ) -> PersistenceResult<Option<SpaceContainerProjectionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {SPACE_CONTAINER_PROJECTION_COLUMNS} FROM projection_spaces WHERE id = $1"
         ))
         .bind::<Binary, _>(token_bytes("space", container_space_id))
-        .get_result::<SpaceContainerProjectionRow>(&mut *conn)
+        .get_result::<SpaceContainerProjectionRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(SpaceContainerProjectionRecord::from))
@@ -191,15 +189,13 @@ impl SpaceContainerProjectionStore for PgSpaceContainerProjectionStore {
         &self,
         realm_id: &str,
     ) -> PersistenceResult<Vec<SpaceContainerProjectionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {SPACE_CONTAINER_PROJECTION_COLUMNS} FROM projection_spaces \
              WHERE realm_id = $1 ORDER BY pk"
         ))
         .bind::<Text, _>(realm_id)
-        .load::<SpaceContainerProjectionRow>(&mut *conn)
+        .load::<SpaceContainerProjectionRow>(&mut conn)
         .await
         .map(|rows| {
             rows.into_iter()
@@ -210,13 +206,11 @@ impl SpaceContainerProjectionStore for PgSpaceContainerProjectionStore {
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<SpaceContainerProjectionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {SPACE_CONTAINER_PROJECTION_COLUMNS} FROM projection_spaces ORDER BY pk"
         ))
-        .load::<SpaceContainerProjectionRow>(&mut *conn)
+        .load::<SpaceContainerProjectionRow>(&mut conn)
         .await
         .map(|rows| {
             rows.into_iter()
@@ -227,12 +221,10 @@ impl SpaceContainerProjectionStore for PgSpaceContainerProjectionStore {
     }
 
     async fn delete(&self, container_space_id: &str) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM projection_spaces WHERE id = $1")
             .bind::<Binary, _>(token_bytes("space", container_space_id))
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|_| ())
             .map_err(PersistenceError::database)
@@ -313,14 +305,12 @@ const STRAND_PROJECTION_COLUMNS: &str = "id AS strand_id, realm_id, scope_circle
 #[async_trait]
 impl StrandProjectionStore for PgStrandProjectionStore {
     async fn get(&self, strand_id: &str) -> PersistenceResult<Option<StrandProjectionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {STRAND_PROJECTION_COLUMNS} FROM projection_strands WHERE id = $1"
         ))
         .bind::<Binary, _>(token_bytes("strand", strand_id))
-        .get_result::<StrandProjectionRow>(&mut *conn)
+        .get_result::<StrandProjectionRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(StrandProjectionRecord::from))
@@ -389,40 +379,34 @@ impl StrandProjectionStore for PgStrandProjectionStore {
         &self,
         realm_id: &str,
     ) -> PersistenceResult<Vec<StrandProjectionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {STRAND_PROJECTION_COLUMNS} FROM projection_strands \
              WHERE realm_id = $1 ORDER BY pk"
         ))
         .bind::<Text, _>(realm_id)
-        .load::<StrandProjectionRow>(&mut *conn)
+        .load::<StrandProjectionRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(StrandProjectionRecord::from).collect())
         .map_err(PersistenceError::database)
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<StrandProjectionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {STRAND_PROJECTION_COLUMNS} FROM projection_strands ORDER BY pk"
         ))
-        .load::<StrandProjectionRow>(&mut *conn)
+        .load::<StrandProjectionRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(StrandProjectionRecord::from).collect())
         .map_err(PersistenceError::database)
     }
 
     async fn delete(&self, strand_id: &str) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM projection_strands WHERE id = $1")
             .bind::<Binary, _>(token_bytes("strand", strand_id))
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|_| ())
             .map_err(PersistenceError::database)
@@ -507,14 +491,12 @@ const MORPH_PROJECTION_COLUMNS: &str = "id AS morph_id, realm_id, scope_circle_i
 #[async_trait]
 impl MorphProjectionStore for PgMorphProjectionStore {
     async fn get(&self, morph_id: &str) -> PersistenceResult<Option<MorphProjectionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {MORPH_PROJECTION_COLUMNS} FROM projection_morphs WHERE id = $1"
         ))
         .bind::<Binary, _>(token_bytes("morph", morph_id))
-        .get_result::<MorphProjectionRow>(&mut *conn)
+        .get_result::<MorphProjectionRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(MorphProjectionRecord::from))
@@ -583,40 +565,34 @@ impl MorphProjectionStore for PgMorphProjectionStore {
         &self,
         realm_id: &str,
     ) -> PersistenceResult<Vec<MorphProjectionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {MORPH_PROJECTION_COLUMNS} FROM projection_morphs \
              WHERE realm_id = $1 ORDER BY pk"
         ))
         .bind::<Text, _>(realm_id)
-        .load::<MorphProjectionRow>(&mut *conn)
+        .load::<MorphProjectionRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(MorphProjectionRecord::from).collect())
         .map_err(PersistenceError::database)
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<MorphProjectionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {MORPH_PROJECTION_COLUMNS} FROM projection_morphs ORDER BY pk"
         ))
-        .load::<MorphProjectionRow>(&mut *conn)
+        .load::<MorphProjectionRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(MorphProjectionRecord::from).collect())
         .map_err(PersistenceError::database)
     }
 
     async fn delete(&self, morph_id: &str) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM projection_morphs WHERE id = $1")
             .bind::<Binary, _>(token_bytes("morph", morph_id))
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|_| ())
             .map_err(PersistenceError::database)
@@ -837,11 +813,9 @@ impl ProjectionEventStore for PgProjectionEventStore {
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<ProjectionEventRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!("{PROJECTION_EVENT_SELECT} ORDER BY projected.pk"))
-            .load::<ProjectionEventRow>(&mut *conn)
+            .load::<ProjectionEventRow>(&mut conn)
             .await
             .map(|rows| rows.into_iter().map(ProjectionEventRecord::from).collect())
             .map_err(PersistenceError::database)
@@ -851,23 +825,19 @@ impl ProjectionEventStore for PgProjectionEventStore {
         &self,
         event_kind: &str,
     ) -> PersistenceResult<Vec<ProjectionEventRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "{PROJECTION_EVENT_SELECT} WHERE projected.event_kind = $1 ORDER BY projected.pk"
         ))
         .bind::<Text, _>(event_kind)
-        .load::<ProjectionEventRow>(&mut *conn)
+        .load::<ProjectionEventRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(ProjectionEventRecord::from).collect())
         .map_err(PersistenceError::database)
     }
 
     async fn get(&self, event_id: &str) -> PersistenceResult<Option<ProjectionEventRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let event_id = ids::parse_event_id(event_id).ok_or_else(|| {
             PersistenceError::SchemaViolation(format!(
                 "malformed projection Event id: {event_id:?}"
@@ -875,7 +845,7 @@ impl ProjectionEventStore for PgProjectionEventStore {
         })?;
         sql_query(format!("{PROJECTION_EVENT_SELECT} WHERE parent.id = $1"))
             .bind::<diesel::sql_types::Binary, _>(event_id.to_vec())
-            .get_result::<ProjectionEventRow>(&mut *conn)
+            .get_result::<ProjectionEventRow>(&mut conn)
             .await
             .optional()
             .map(|row| row.map(ProjectionEventRecord::from))
@@ -886,15 +856,13 @@ impl ProjectionEventStore for PgProjectionEventStore {
         &self,
         operation_id: &str,
     ) -> PersistenceResult<Option<ProjectionEventRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "{PROJECTION_EVENT_SELECT} WHERE projected.operation_id = $1 \
              ORDER BY projected.pk DESC LIMIT 1"
         ))
         .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(operation_id))
-        .get_result::<ProjectionEventRow>(&mut *conn)
+        .get_result::<ProjectionEventRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(ProjectionEventRecord::from))
@@ -905,16 +873,14 @@ impl ProjectionEventStore for PgProjectionEventStore {
         &self,
         realm_id: &str,
     ) -> PersistenceResult<Vec<ProjectionEventRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "{PROJECTION_EVENT_SELECT} \
              WHERE projected.realm_pk = (SELECT pk FROM canonical_realms WHERE wire_id = $1) \
              ORDER BY projected.pk"
         ))
         .bind::<Text, _>(realm_id)
-        .load::<ProjectionEventRow>(&mut *conn)
+        .load::<ProjectionEventRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(ProjectionEventRecord::from).collect())
         .map_err(PersistenceError::database)
@@ -924,9 +890,7 @@ impl ProjectionEventStore for PgProjectionEventStore {
         &self,
         actor_id: &str,
     ) -> PersistenceResult<Vec<ProjectionEventRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "{PROJECTION_EVENT_SELECT} \
              WHERE projected.sender_id = $1 OR projected.payload ->> 'sender' = $1 \
@@ -935,7 +899,7 @@ impl ProjectionEventStore for PgProjectionEventStore {
              ORDER BY projected.pk"
         ))
         .bind::<Text, _>(actor_id)
-        .load::<ProjectionEventRow>(&mut *conn)
+        .load::<ProjectionEventRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(ProjectionEventRecord::from).collect())
         .map_err(PersistenceError::database)
@@ -1045,14 +1009,12 @@ impl From<CircleMemberProjectionRow> for CircleMemberProjectionRecord {
 #[async_trait]
 impl CircleProjectionStore for PgCircleProjectionStore {
     async fn get(&self, circle_id: &str) -> PersistenceResult<Option<CircleProjectionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {CIRCLE_PROJECTION_COLUMNS} FROM projection_circles WHERE id = $1"
         ))
         .bind::<Binary, _>(token_bytes("circle", circle_id))
-        .get_result::<CircleProjectionRow>(&mut *conn)
+        .get_result::<CircleProjectionRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(CircleProjectionRecord::from))
@@ -1114,40 +1076,34 @@ impl CircleProjectionStore for PgCircleProjectionStore {
         &self,
         realm_id: &str,
     ) -> PersistenceResult<Vec<CircleProjectionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {CIRCLE_PROJECTION_COLUMNS} FROM projection_circles \
              WHERE realm_id = $1 ORDER BY pk"
         ))
         .bind::<Text, _>(realm_id)
-        .load::<CircleProjectionRow>(&mut *conn)
+        .load::<CircleProjectionRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(CircleProjectionRecord::from).collect())
         .map_err(PersistenceError::database)
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<CircleProjectionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {CIRCLE_PROJECTION_COLUMNS} FROM projection_circles ORDER BY pk"
         ))
-        .load::<CircleProjectionRow>(&mut *conn)
+        .load::<CircleProjectionRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(CircleProjectionRecord::from).collect())
         .map_err(PersistenceError::database)
     }
 
     async fn delete(&self, circle_id: &str) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM projection_circles WHERE id = $1")
             .bind::<Binary, _>(token_bytes("circle", circle_id))
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|_| ())
             .map_err(PersistenceError::database)
@@ -1197,15 +1153,13 @@ impl CircleProjectionStore for PgCircleProjectionStore {
     }
 
     async fn snapshot_all_members(&self) -> PersistenceResult<Vec<CircleMemberProjectionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT c.id AS circle_id, m.actor_id, m.state, m.invited_at, m.joined_at, m.updated_at \
              FROM projection_circle_members m JOIN projection_circles c ON c.pk = m.circle_pk \
              ORDER BY m.pk",
         )
-        .load::<CircleMemberProjectionRow>(&mut *conn)
+        .load::<CircleMemberProjectionRow>(&mut conn)
         .await
         .map(|rows| {
             rows.into_iter()
@@ -1287,14 +1241,12 @@ impl From<RealmMetaRow> for RealmMetaRecord {
 #[async_trait]
 impl RealmMetaStore for PgRealmMetaStore {
     async fn get(&self, realm_id: &str) -> PersistenceResult<Option<RealmMetaRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {REALM_META_COLUMNS} FROM realm_meta WHERE realm_id = $1"
         ))
         .bind::<Text, _>(realm_id)
-        .get_result::<RealmMetaRow>(&mut *conn)
+        .get_result::<RealmMetaRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(RealmMetaRecord::from))
@@ -1312,9 +1264,7 @@ impl RealmMetaStore for PgRealmMetaStore {
                     "cannot encode plaintext_visible_service_classes: {error}"
                 ))
             })?;
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "INSERT INTO realm_meta \
              (realm_id, owner, deleted, discoverability, history_access, \
@@ -1353,20 +1303,18 @@ impl RealmMetaStore for PgRealmMetaStore {
         .bind::<Bool, _>(record.minimal_metadata_realm)
         .bind::<Timestamptz, _>(record.created_at)
         .bind::<Timestamptz, _>(record.updated_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)
     }
 
     async fn list(&self) -> PersistenceResult<Vec<(String, RealmMetaRecord)>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {REALM_META_COLUMNS} FROM realm_meta ORDER BY realm_id"
         ))
-        .load::<RealmMetaRow>(&mut *conn)
+        .load::<RealmMetaRow>(&mut conn)
         .await
         .map(|rows| {
             rows.into_iter()
@@ -1380,12 +1328,10 @@ impl RealmMetaStore for PgRealmMetaStore {
     }
 
     async fn delete(&self, realm_id: &str) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM realm_meta WHERE realm_id = $1")
             .bind::<Text, _>(realm_id)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|_| ())
             .map_err(PersistenceError::database)

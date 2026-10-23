@@ -3,8 +3,9 @@
 //! disconnected clients recover through the durable standard sync path.
 
 use diesel::sql_types::{Text, Uuid};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 
 use super::{PgPool, pg_conn};
 
@@ -49,11 +50,11 @@ pub async fn load_event_notification(
     pool: &PgPool,
     id: uuid::Uuid,
 ) -> anyhow::Result<Option<String>> {
-    let mut conn = pg_conn(pool).await?;
+    let mut conn = crate::pg_db(pool);
     Ok(
         sql_query("SELECT payload FROM event_notification_relay WHERE id = $1")
             .bind::<Uuid, _>(id)
-            .get_result::<PayloadRow>(&mut *conn)
+            .get_result::<PayloadRow>(&mut conn)
             .await
             .optional()?
             .map(|row| row.payload),

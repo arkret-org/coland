@@ -8,7 +8,8 @@ use coland_storage::{
     DirectConversationDurableState, ForeignDirectMlsInput, PersistenceError, PersistenceResult,
 };
 use diesel::sql_types::{BigInt, Bool, Jsonb, Nullable, Text};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::RunQueryDsl;
 
 use crate::{OptionalExtension, QueryableByName};
 

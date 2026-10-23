@@ -6,8 +6,9 @@ use arkret_models_identity::{ActorProfile, AppletInteractionIntent, AppletIntera
 use arkret_wire::{CurrentRevision, Event, EventKind, RealmCommit, ScopeRef};
 use coland_storage::{AppletManagedDeviceScopeGuard, PersistenceError, PersistenceResult};
 use diesel::sql_types::{Array, Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::{Value, json};
 
 fn denied(detail: impl std::fmt::Display) -> PersistenceError {

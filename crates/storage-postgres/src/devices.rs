@@ -178,15 +178,13 @@ impl DeviceMessageStore for PgDeviceMessageStore {
         request_digest: &str,
         items: &[DeviceMessageIntentRecord],
     ) -> PersistenceResult<DeviceMessageBatchInspection> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let existing_request = sql_query(
             "SELECT request_digest, outcome FROM device_message_txns \
              WHERE key = $1 AND expires_at > NOW()",
         )
         .bind::<Text, _>(request_key)
-        .get_result::<DeviceMessageTxnRow>(&mut *conn)
+        .get_result::<DeviceMessageTxnRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -218,7 +216,7 @@ impl DeviceMessageStore for PgDeviceMessageStore {
                  WHERE message_key = $1 AND expires_at > NOW()",
             )
             .bind::<Text, _>(&item.message_key)
-            .get_result::<DeviceMessageIntentRow>(&mut *conn)
+            .get_result::<DeviceMessageIntentRow>(&mut conn)
             .await
             .optional()
             .map_err(PersistenceError::database)?;
@@ -534,9 +532,7 @@ impl DeviceMessageStore for PgDeviceMessageStore {
         recipient: &str,
         device_id: &str,
     ) -> PersistenceResult<Option<i64>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT lost_through AS max_seq \
              FROM device_message_lost_watermarks \
@@ -544,7 +540,7 @@ impl DeviceMessageStore for PgDeviceMessageStore {
         )
         .bind::<Text, _>(recipient)
         .bind::<Text, _>(device_id)
-        .get_result::<MaxSeqRow>(&mut *conn)
+        .get_result::<MaxSeqRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.and_then(|row| row.max_seq))
@@ -563,16 +559,14 @@ impl DeviceInventoryStore for PgDeviceInventoryStore {
         actor: &str,
         device_id: &str,
     ) -> PersistenceResult<Option<DeviceInventoryRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT actor_id AS actor, device_id, payload, verification_state, created_at, updated_at, revoked_at \
              FROM devices WHERE actor_id = $1 AND device_id = $2 AND revoked_at IS NULL",
         )
             .bind::<Text, _>(actor)
             .bind::<Text, _>(device_id)
-            .get_result::<DeviceRow>(&mut *conn).await
+            .get_result::<DeviceRow>(&mut conn).await
             .optional()
             .map(|row| row.map(DeviceInventoryRecord::from))
             .map_err(PersistenceError::database)
@@ -593,13 +587,11 @@ impl DeviceInventoryStore for PgDeviceInventoryStore {
         if let Some(value) = record.last_key_upload_at {
             object.insert("last_key_upload_at".into(), serde_json::json!(value));
         }
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("INSERT INTO devices(id,actor_id,device_id,payload,verification_state,created_at,updated_at) VALUES($1,$2,$3,$4,'unverified',$5,$5) ON CONFLICT(actor_id,device_id) DO UPDATE SET payload=devices.payload || EXCLUDED.payload,updated_at=GREATEST(devices.updated_at,EXCLUDED.updated_at)")
             .bind::<sql_types::Uuid,_>(Uuid::now_v7()).bind::<Text,_>(&record.actor)
             .bind::<Text,_>(&record.device_id).bind::<Jsonb,_>(payload).bind::<Timestamptz,_>(record.updated_at)
-            .execute(&mut *conn).await.map_err(PersistenceError::database)?;
+            .execute(&mut conn).await.map_err(PersistenceError::database)?;
         Ok(())
     }
 
@@ -608,11 +600,9 @@ impl DeviceInventoryStore for PgDeviceInventoryStore {
         actor: &str,
         revoked_at: chrono::DateTime<Utc>,
     ) -> PersistenceResult<usize> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("UPDATE devices SET revoked_at=$2,updated_at=GREATEST(updated_at,$2) WHERE actor_id=$1 AND revoked_at IS NULL")
-            .bind::<Text,_>(actor).bind::<Timestamptz,_>(revoked_at).execute(&mut *conn).await.map_err(PersistenceError::database)
+            .bind::<Text,_>(actor).bind::<Timestamptz,_>(revoked_at).execute(&mut conn).await.map_err(PersistenceError::database)
     }
 
     async fn put_if_absent(&self, record: &DeviceInventoryRecord) -> PersistenceResult<bool> {
@@ -623,9 +613,7 @@ impl DeviceInventoryStore for PgDeviceInventoryStore {
                 "device placeholder cannot carry authorization".into(),
             ));
         }
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "INSERT INTO devices (id, actor_id, device_id, payload, verification_state, created_at, updated_at, revoked_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
@@ -639,22 +627,20 @@ impl DeviceInventoryStore for PgDeviceInventoryStore {
         .bind::<Timestamptz, _>(record.created_at)
         .bind::<Timestamptz, _>(record.updated_at)
         .bind::<Nullable<Timestamptz>, _>(record.revoked_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|affected| affected > 0)
         .map_err(PersistenceError::database)
     }
 
     async fn list_for_actor(&self, actor: &str) -> PersistenceResult<Vec<DeviceInventoryRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT actor_id AS actor, device_id, payload, verification_state, created_at, updated_at, revoked_at \
              FROM devices WHERE actor_id = $1 AND revoked_at IS NULL ORDER BY device_id",
         )
         .bind::<Text, _>(actor)
-        .load::<DeviceRow>(&mut *conn).await
+        .load::<DeviceRow>(&mut conn).await
         .map_err(PersistenceError::database)?;
         Ok(rows.into_iter().map(DeviceInventoryRecord::from).collect())
     }
@@ -663,28 +649,24 @@ impl DeviceInventoryStore for PgDeviceInventoryStore {
         &self,
         actor: &str,
     ) -> PersistenceResult<Vec<DeviceInventoryRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT actor_id AS actor, device_id, payload, verification_state, created_at, updated_at, revoked_at \
              FROM devices WHERE actor_id = $1 ORDER BY device_id",
         )
         .bind::<Text, _>(actor)
-        .load::<DeviceRow>(&mut *conn).await
+        .load::<DeviceRow>(&mut conn).await
         .map_err(PersistenceError::database)?;
         Ok(rows.into_iter().map(DeviceInventoryRecord::from).collect())
     }
 
     async fn list(&self) -> PersistenceResult<Vec<DeviceInventoryRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT actor_id AS actor, device_id, payload, verification_state, created_at, updated_at, revoked_at \
              FROM devices WHERE revoked_at IS NULL ORDER BY actor_id, device_id",
         )
-        .load::<DeviceRow>(&mut *conn).await
+        .load::<DeviceRow>(&mut conn).await
         .map_err(PersistenceError::database)?;
         Ok(rows.into_iter().map(DeviceInventoryRecord::from).collect())
     }

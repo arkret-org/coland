@@ -6,7 +6,7 @@
 mod ordinary_realm;
 use coland_storage::EventCommitUnitOfWork;
 use diesel::sql_types::{BigInt, Text};
-use diesel_async::RunQueryDsl;
+use horme::RunQueryDsl;
 use ordinary_realm::{next_request, open_discussion};
 use serde_json::{Value, json};
 

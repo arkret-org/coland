@@ -3,9 +3,10 @@ use coland_storage::{
     AgentDraftPendingIntentRecord, AgentDraftPendingIntentState, AgentDraftPendingIntentStore,
     PersistenceError, PersistenceResult,
 };
+use diesel::sql_query;
 use diesel::sql_types::{Binary, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 
 use crate::{PgPool, pg_conn};
 
@@ -477,7 +478,6 @@ impl AgentDraftPendingIntentStore for PgAgentDraftPendingIntentStore {
 mod tests {
     use coland_storage::SyncCursorStore;
     use diesel::sql_types::BigInt;
-    use diesel_async::RunQueryDsl;
 
     use super::*;
 

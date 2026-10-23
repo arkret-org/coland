@@ -4,9 +4,9 @@
 
 use arkret_event_draft::EventPayloadExt as _;
 use coland_storage::{PersistenceError, PersistenceResult};
-use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Binary, Bool, Jsonb, Text, Timestamptz};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
 #[derive(diesel::QueryableByName)]

@@ -24,8 +24,8 @@ use coland_storage::{
     RecoveryPolicyPublicationWrite, RecoveryPolicyRecord,
 };
 use diesel::sql_types::{Binary, Integer, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::RunQueryDsl;
+use diesel::{QueryableByName, sql_query};
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 use crate::pcr_device_status_fold::PcrDeviceLifecycle;

@@ -5,9 +5,10 @@ use std::collections::BTreeMap;
 use arkret_models_collaboration::authority_commit::PcrPrivateHandoffManifest;
 use arkret_wire::{AccountId, ActorId, Hash, RealmId};
 use coland_storage::{PersistenceError, PersistenceResult};
+use diesel::sql_query;
 use diesel::sql_types::{BigInt, Jsonb, Text};
-use diesel::{OptionalExtension as _, sql_query};
-use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection as _, AsyncPgConnection};
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::{Value, json};
 
 use crate::{PgAuthorityCommitStore, PgTransactionError, pg_conn};

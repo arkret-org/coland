@@ -12,7 +12,8 @@ use arkret_wire::{ActorId, CommittedEventRef, Event, EventKind, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{Jsonb, Text};
 use diesel::{QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::RunQueryDsl;
 use serde_json::{Value, json};
 
 fn invalid(error: impl std::fmt::Display) -> PersistenceError {

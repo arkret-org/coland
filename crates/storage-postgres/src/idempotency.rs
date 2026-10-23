@@ -182,9 +182,7 @@ impl IdempotencyStore for PgIdempotencyStore {
         operation_id: &str,
         idempotency_key: &str,
     ) -> PersistenceResult<Option<IdempotencyRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let actor_key = actor_key(authenticated_actor)?;
         Ok(sql_query(
             "SELECT authenticated_actor, operation_id, idempotency_key, request_hash, response_status, \
@@ -194,7 +192,7 @@ impl IdempotencyStore for PgIdempotencyStore {
         .bind::<Text, _>(&actor_key)
         .bind::<Text, _>(operation_id)
         .bind::<Text, _>(idempotency_key)
-        .get_result::<IdempotencyRow>(&mut *conn)
+        .get_result::<IdempotencyRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -220,9 +218,7 @@ impl IdempotencyStore for PgIdempotencyStore {
         {
             return Ok(false);
         }
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let actor_key = actor_key(&expected.authenticated_actor)?;
         sql_query(
             "UPDATE idempotency_keys SET request_hash = $9, response_status = $10, \
@@ -244,19 +240,17 @@ impl IdempotencyStore for PgIdempotencyStore {
         .bind::<Jsonb, _>(&completed.response_body)
         .bind::<Timestamptz, _>(completed.created_at)
         .bind::<Timestamptz, _>(completed.expires_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|affected| affected == 1)
         .map_err(PersistenceError::database)
     }
 
     async fn prune_expired(&self, now: chrono::DateTime<Utc>) -> PersistenceResult<usize> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM idempotency_keys WHERE expires_at <= $1")
             .bind::<Timestamptz, _>(now)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map_err(PersistenceError::database)
     }

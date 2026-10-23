@@ -14,8 +14,9 @@ use coland_storage::{
     CommitStreamProjection, PersistenceError, PersistenceResult, ProjectionState, ServerHlc,
 };
 use diesel::sql_types::{BigInt, Bool, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension as _, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 
 fn unavailable(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!(

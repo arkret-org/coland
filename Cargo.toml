@@ -44,6 +44,7 @@ todo = "deny"
 unimplemented = "deny"
 
 [workspace.dependencies]
+horme = { version = "0.4.0", features = ["postgres"] }
 anyhow = "1.0.104"
 arc-swap = "1.9.2"
 arkret = { version = "0.3.0", path = "../arkret-rust-sdk/crates/sdk", default-features = false }

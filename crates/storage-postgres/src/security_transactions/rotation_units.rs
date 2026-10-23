@@ -16,8 +16,8 @@ use coland_storage::{
     RotationUploadCommitWrite, SecurityTransactionRecord,
 };
 use diesel::sql_types::{BigInt, Jsonb, Nullable, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::RunQueryDsl;
+use diesel::{QueryableByName, sql_query};
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 use super::{

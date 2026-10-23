@@ -8,9 +8,10 @@ use arkret_models_collaboration::governance::grant_constraint::{
 use arkret_models_integration::AppletRegistrationPayload;
 use arkret_wire::{ActorId, Event, EventKind, GrantId};
 use coland_storage::{AppletEventProducerGuard, PersistenceError, PersistenceResult};
+use diesel::sql_query;
 use diesel::sql_types::{Jsonb, Text};
-use diesel::{OptionalExtension as _, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
 use crate::capability_grant_current_results::{

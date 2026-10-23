@@ -6,8 +6,9 @@ use arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManif
 use arkret_wire::{Hash, RealmId};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{Array, BigInt, Jsonb, Text};
-use diesel::{OptionalExtension as _, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::{AsyncConnection as _, AsyncPgConnection};
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::{Value, json};
 
 use crate::{PgAuthorityCommitStore, PgTransactionError, pg_conn};

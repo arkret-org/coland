@@ -2,8 +2,9 @@
 use arkret_wire::{ActorId, DidCoreId, EventId, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{Binary, Jsonb};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 
 #[derive(QueryableByName)]
 struct CommitRow {

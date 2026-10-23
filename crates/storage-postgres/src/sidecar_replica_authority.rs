@@ -2,9 +2,9 @@
 //! It never opens a stream on the basis of a Circle or parent Realm join alone.
 use arkret_wire::{CommitStreamRef, DidCoreId, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
+use diesel::QueryableByName;
 use diesel::sql_types::Jsonb;
-use diesel::{OptionalExtension, QueryableByName};
-use diesel_async::RunQueryDsl;
+use horme::{OptionalExtension, RunQueryDsl};
 
 #[derive(QueryableByName)]
 struct Owner {

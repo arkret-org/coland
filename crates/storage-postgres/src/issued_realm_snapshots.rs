@@ -13,27 +13,28 @@ use super::{
 /// SQLSTATE 40001 aborts the whole snapshot-cut transaction. It can arise
 /// from a governing-row change or concurrent refresh of an unchanged issued
 /// object, so it does not establish that a handoff occurred.
-pub(crate) fn snapshot_cut_error(error: diesel::result::Error) -> PersistenceError {
+pub(crate) fn snapshot_cut_error(error: impl Into<horme::Error>) -> PersistenceError {
     use diesel::result::{DatabaseErrorKind, Error};
-    match error {
-        Error::DatabaseError(DatabaseErrorKind::SerializationFailure, info) => {
-            PersistenceError::Conflict(format!(
-                "{}: the snapshot transaction lost a concurrent write race: {}",
-                coland_storage::ConflictCode::TemporarilyUnavailable.as_str(),
-                info.message(),
-            ))
-        }
+    match error.into() {
+        horme::Error::Query(Error::DatabaseError(
+            DatabaseErrorKind::SerializationFailure,
+            info,
+        )) => PersistenceError::Conflict(format!(
+            "{}: the snapshot transaction lost a concurrent write race: {}",
+            coland_storage::ConflictCode::TemporarilyUnavailable.as_str(),
+            info.message(),
+        )),
         other => PersistenceError::database(other),
     }
 }
 
-fn snapshot_write_error(stage: &'static str, error: diesel::result::Error) -> PersistenceError {
+fn snapshot_write_error(stage: &'static str, error: horme::Error) -> PersistenceError {
     if matches!(
         &error,
-        diesel::result::Error::DatabaseError(
+        horme::Error::Query(diesel::result::Error::DatabaseError(
             diesel::result::DatabaseErrorKind::SerializationFailure,
             _,
-        )
+        ))
     ) {
         tracing::warn!(
             operation_stage = stage,
@@ -2741,7 +2742,7 @@ mod tests {
         .bind::<Text, _>(handoff.realm_id.as_str())
         .bind::<Jsonb, _>(serde_json::to_value(&handoff).unwrap())
         .bind::<Timestamptz, _>(handoff.created_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .unwrap();
         assert!(

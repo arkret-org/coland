@@ -59,7 +59,8 @@ use std::sync::{Mutex, OnceLock};
 use diesel::sql_types::Text;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::pooled_connection::deadpool::Pool;
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection, AsyncPgConnection};
+use horme::RunQueryDsl;
 
 use crate::db::{Db, PgPool};
 
@@ -905,7 +906,7 @@ mod tests {
     /// never observe rows written under a previous one.
     #[tokio::test]
     async fn concurrent_leases_are_isolated_and_reset_between_holders() {
-        use diesel_async::RunQueryDsl;
+        use horme::RunQueryDsl;
 
         #[derive(diesel::QueryableByName)]
         struct CountRow {
@@ -961,7 +962,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_clears_abandoned_http_faults_and_preserves_production_triggers() {
-        use diesel_async::RunQueryDsl;
+        use horme::RunQueryDsl;
 
         #[derive(diesel::QueryableByName)]
         struct TriggerDefinitions {

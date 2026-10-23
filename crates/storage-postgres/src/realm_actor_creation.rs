@@ -185,8 +185,8 @@ pub(crate) async fn joined_memberships(
     service: &arkret_wire::DidCoreId,
 ) -> Result<Vec<arkret_wire::CommittedEventFullView>, PgTransactionError> {
     use diesel::sql_types::{Jsonb, Text};
-    use diesel::{OptionalExtension, QueryableByName, sql_query};
-    use diesel_async::RunQueryDsl;
+    use diesel::{QueryableByName, sql_query};
+    use horme::{OptionalExtension, RunQueryDsl};
     #[derive(QueryableByName)]
     struct Row {
         #[diesel(sql_type=Jsonb)]
@@ -236,7 +236,6 @@ pub(crate) async fn inventory(
 ) -> Result<Vec<arkret_wire::CommittedEventFullView>, PgTransactionError> {
     use diesel::sql_types::{Jsonb, Text};
     use diesel::{QueryableByName, sql_query};
-    use diesel_async::RunQueryDsl;
     #[derive(QueryableByName)]
     struct Row {
         #[diesel(sql_type=Jsonb)]
@@ -290,3 +289,4 @@ pub(crate) async fn inventory(
     }
     Ok(result)
 }
+use horme::RunQueryDsl;

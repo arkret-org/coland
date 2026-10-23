@@ -3,8 +3,9 @@ use arkret_models_collaboration::events_payloads::call::*;
 use arkret_wire::{CallId, CommitStreamRef, Event, EventKind, RealmCommit, ScopeRef};
 use coland_storage::{ConflictCode, PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 
 fn invalid(detail: &str) -> PersistenceError {
     PersistenceError::SchemaViolation(detail.to_owned())

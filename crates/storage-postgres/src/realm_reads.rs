@@ -6,7 +6,8 @@ use coland_storage::{
 };
 use diesel::sql_query;
 use diesel::sql_types::{BigInt, Jsonb, Text};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::RunQueryDsl;
 
 fn unavailable(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!("revision_unavailable: {detail}"))

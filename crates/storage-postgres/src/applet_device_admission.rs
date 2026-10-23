@@ -11,8 +11,9 @@ use arkret_models_collaboration::governance::operation_wire::{
 use arkret_wire::{ActorId, CapabilityActionId, Event, EventKind, GrantId, PolicyEffect, ScopeRef};
 use coland_storage::{AppletManagedDeviceScopeGuard, PersistenceError, PersistenceResult};
 use diesel::sql_types::{Jsonb, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::{Value, json};
 
 use crate::capability_grant_current_results::{CapabilityGrantCurrentResultReadRow, decode_row};

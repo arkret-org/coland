@@ -37,7 +37,7 @@ async fn insert_policy(pool: &crate::PgPool, policy: &Value) {
         .bind::<Text,_>(PRINCIPAL).bind::<Text,_>(STATION).bind::<crate::Integer,_>(typed.version as i32)
         .bind::<Jsonb,_>(serde_json::to_value(&acceptance_basis).unwrap())
         .bind::<Nullable<Timestamptz>,_>(typed.expires_at).bind::<Timestamptz,_>(typed.issued_at)
-        .bind::<Jsonb,_>(policy.clone()).execute(&mut *conn).await.unwrap();
+        .bind::<Jsonb,_>(policy.clone()).execute(&mut conn).await.unwrap();
     sql_query("INSERT INTO policy_current_results(realm_id,policy_id,current_commit_id,current_stream_position,current_event_id,value,updated_at) VALUES($1,$2,$3,1,$4,$5,$6)")
         .bind::<Text,_>(wire::RealmId::from_event_id(&wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, arkret_canonical::sha256_bytes(b"recovery-policy-realm"))).as_str())
         .bind::<Text,_>(typed.policy_id.as_str())
@@ -45,7 +45,7 @@ async fn insert_policy(pool: &crate::PgPool, policy: &Value) {
         .bind::<Text,_>(wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, arkret_canonical::sha256_bytes(b"recovery-policy-event")).as_str())
         .bind::<Jsonb,_>(policy)
         .bind::<Timestamptz,_>(typed.issued_at)
-        .execute(&mut *conn).await.unwrap();
+        .execute(&mut conn).await.unwrap();
 }
 
 impl Fixture {
@@ -394,7 +394,7 @@ impl Fixture {
         let mut conn = pg_conn(&self.store.pool).await.unwrap();
         sql_query("SELECT jsonb_build_object('remaining',a.remaining_bytes,'request',e.request_digest,'holder',e.holder,'consumed',e.consumed_at IS NOT NULL,'session_state',s.state) AS payload FROM key_backup_unlock_authorities a JOIN key_backup_unlock_entries e USING(authority_id) JOIN recovery_sessions s ON s.id=$2 WHERE a.authority_id=$1")
             .bind::<Text,_>(SESSION).bind::<sql_types::Uuid,_>(ids::typed_uuid_part_expect_internal(SESSION))
-            .get_result::<JsonPayloadRow>(&mut *conn).await.unwrap().payload
+            .get_result::<JsonPayloadRow>(&mut conn).await.unwrap().payload
     }
 }
 

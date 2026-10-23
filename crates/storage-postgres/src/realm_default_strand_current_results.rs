@@ -1,9 +1,9 @@
 //! The Realm's single default Strand pointer, written at its covering Commit.
 
 use coland_storage::{PersistenceError, PersistenceResult};
-use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
 #[derive(diesel::QueryableByName)]
@@ -58,7 +58,7 @@ pub(crate) async fn read_current(
     pool: &crate::PgPool,
     realm_id: &arkret_wire::RealmId,
 ) -> PersistenceResult<Option<arkret_wire::TypedCurrentRow>> {
-    let mut conn = crate::pg_conn(pool).await?;
+    let mut conn = crate::pg_db(pool);
     let source = crate::object_projection_reads::current_source_sql(
         "r",
         "jsonb_build_object('kind','realm_set_default_strand')",
@@ -69,7 +69,7 @@ pub(crate) async fn read_current(
          FROM realm_set_default_strand_current_results r WHERE r.realm_id=$1"
     ))
     .bind::<Text, _>(realm_id.as_str())
-    .get_result::<ProvedCurrentRow>(&mut *conn)
+    .get_result::<ProvedCurrentRow>(&mut conn)
     .await
     .optional()
     .map_err(PersistenceError::database)?;

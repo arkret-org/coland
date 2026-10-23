@@ -170,27 +170,23 @@ impl SignalRelayStore for PgSignalRelayStore {
     }
 
     async fn list_for_realm(&self, realm_id: &str) -> PersistenceResult<Vec<SignalRelayRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(format!(
             "SELECT {SIGNAL_RELAY_COLUMNS} FROM signal_relay \
              WHERE realm_id = $1 AND expires_at > NOW() \
              ORDER BY position ASC"
         ))
         .bind::<Text, _>(realm_id)
-        .load::<SignalRelayRow>(&mut *conn)
+        .load::<SignalRelayRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter().map(SignalRelayRecord::try_from).collect()
     }
 
     async fn prune_expired(&self) -> PersistenceResult<usize> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM signal_relay WHERE expires_at <= NOW()")
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map_err(PersistenceError::database)
     }
@@ -201,9 +197,7 @@ impl SignalRelayStore for PgSignalRelayStore {
         device: &str,
         realm_id: &str,
     ) -> PersistenceResult<u64> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT delivered_through FROM signal_relay_watermark \
              WHERE actor_id = $1 AND device_id = $2 AND realm_id = $3",
@@ -211,7 +205,7 @@ impl SignalRelayStore for PgSignalRelayStore {
         .bind::<Text, _>(actor)
         .bind::<Text, _>(device)
         .bind::<Text, _>(realm_id)
-        .get_result::<SignalRelayWatermarkRow>(&mut *conn)
+        .get_result::<SignalRelayWatermarkRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -225,9 +219,7 @@ impl SignalRelayStore for PgSignalRelayStore {
         realm_id: &str,
         position: u64,
     ) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "INSERT INTO signal_relay_watermark \
              (actor_id, device_id, realm_id, delivered_through, updated_at) \
@@ -240,7 +232,7 @@ impl SignalRelayStore for PgSignalRelayStore {
         .bind::<Text, _>(device)
         .bind::<Text, _>(realm_id)
         .bind::<BigInt, _>(position as i64)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)

@@ -24,9 +24,10 @@ use coland_storage::{
     PersistenceError, PersistenceResult,
 };
 use diesel::sql_types::{BigInt, Binary, Integer, Jsonb, Nullable, Text, Timestamptz};
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection, AsyncPgConnection};
+use horme::RunQueryDsl;
 
-use crate::{OptionalExtension, PgPool, QueryableByName, async_trait, ids, pg_conn, sql_query};
+use crate::{OptionalExtension, PgPool, QueryableByName, async_trait, ids, sql_query};
 
 pub struct PgMlsGroupCurrentStore {
     pub pool: PgPool,
@@ -1094,7 +1095,7 @@ pub(crate) async fn require_native_welcome_target(
     .get_result::<HistoryAccessRow>(&mut *conn)
     .await
     .map_err(|error| match error {
-        diesel::result::Error::DatabaseError(_, ref info)
+        horme::Error::Query(diesel::result::Error::DatabaseError(_, ref info))
             if info.message().contains("could not obtain lock") =>
         {
             PersistenceError::Conflict(
@@ -1603,13 +1604,13 @@ impl MlsGroupCurrentStore for PgMlsGroupCurrentStore {
         effective_scope: &ScopeRef,
     ) -> PersistenceResult<Option<MlsGroupCurrentRecord>> {
         let key = scope_key(effective_scope)?;
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT realm_id,current_commit_id,current_stream_position,value,public_state \
              FROM mls_group_current_results WHERE scope_key=$1",
         )
         .bind::<Text, _>(key)
-        .get_result::<GroupRow>(&mut *conn)
+        .get_result::<GroupRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -1621,14 +1622,14 @@ impl MlsGroupCurrentStore for PgMlsGroupCurrentStore {
         &self,
         realm_id: &arkret_wire::RealmId,
     ) -> PersistenceResult<Vec<MlsGroupCurrentRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT realm_id,current_commit_id,current_stream_position,value,public_state \
              FROM mls_group_current_results WHERE realm_id=$1 \
              ORDER BY (value->'effective_scope'->>'kind') <> 'realm', scope_key",
         )
         .bind::<Text, _>(realm_id.as_str())
-        .load::<GroupRow>(&mut *conn)
+        .load::<GroupRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()
@@ -1638,7 +1639,7 @@ impl MlsGroupCurrentStore for PgMlsGroupCurrentStore {
 
     #[cfg(any(test, feature = "test-support"))]
     async fn seed_test_current(&self, record: &MlsGroupCurrentRecord) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let key = scope_key(&record.value.effective_scope)?;
         let group_id = record
             .value
@@ -1661,7 +1662,7 @@ impl MlsGroupCurrentStore for PgMlsGroupCurrentStore {
         .bind::<BigInt, _>(position(record.current_stream_position)?)
         .bind::<Jsonb, _>(serde_json::to_value(&record.value).map_err(PersistenceError::database)?)
         .bind::<Binary, _>(&record.public_state)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         Ok(())

@@ -42,15 +42,13 @@ impl From<PolicyDocumentRow> for PolicyDocumentRecord {
 #[async_trait]
 impl PolicyDocumentStore for PgPolicyDocumentStore {
     async fn get(&self, policy_id: &str) -> PersistenceResult<Option<PolicyDocumentRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT id AS policy_id, owner_id AS owner, scope, subject_ref, policy_kind, document, active, updated_at \
              FROM policy_documents WHERE id = $1",
         )
         .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(policy_id))
-        .get_result::<PolicyDocumentRow>(&mut *conn).await
+        .get_result::<PolicyDocumentRow>(&mut conn).await
         .optional()
         .map(|row| row.map(PolicyDocumentRecord::from))
         .map_err(PersistenceError::database)
@@ -96,7 +94,7 @@ impl PolicyDocumentStore for PgPolicyDocumentStore {
         .bind::<Nullable<Text>, _>(&verification_method)
         .bind::<Bool, _>(record.active)
         .bind::<Timestamptz, _>(record.updated_at)
-        .execute(&mut *conn).await
+        .execute(&mut conn).await
         .map(|_| ())
         .map_err(PersistenceError::database)
     }
@@ -107,7 +105,7 @@ impl PolicyDocumentStore for PgPolicyDocumentStore {
             .map_err(PersistenceError::database)?;
         sql_query("DELETE FROM policy_documents WHERE id = $1")
             .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(policy_id))
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|n| n > 0)
             .map_err(PersistenceError::database)
@@ -122,7 +120,7 @@ impl PolicyDocumentStore for PgPolicyDocumentStore {
              FROM policy_documents WHERE owner_id = $1 ORDER BY updated_at ASC, id ASC",
         )
         .bind::<Text, _>(owner)
-        .load::<PolicyDocumentRow>(&mut *conn).await
+        .load::<PolicyDocumentRow>(&mut conn).await
         .map(|rows| rows.into_iter().map(PolicyDocumentRecord::from).collect())
         .map_err(PersistenceError::database)
     }
@@ -135,7 +133,7 @@ impl PolicyDocumentStore for PgPolicyDocumentStore {
             "SELECT id AS policy_id, owner_id AS owner, scope, subject_ref, policy_kind, document, active, updated_at \
              FROM policy_documents ORDER BY updated_at ASC, id ASC",
         )
-        .load::<PolicyDocumentRow>(&mut *conn).await
+        .load::<PolicyDocumentRow>(&mut conn).await
         .map(|rows| rows.into_iter().map(PolicyDocumentRecord::from).collect())
         .map_err(PersistenceError::database)
     }

@@ -344,7 +344,7 @@ struct Count {
 async fn count(pool: &PgPool, query: &str) -> i64 {
     let mut conn = pg_conn(pool).await.unwrap();
     sql_query(query)
-        .get_result::<Count>(&mut *conn)
+        .get_result::<Count>(&mut conn)
         .await
         .unwrap()
         .count

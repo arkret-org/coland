@@ -2,9 +2,10 @@
 
 use arkret_wire::{AccountId, ActorId, CommitStreamHead, DidCoreId, RealmCommit, RealmId};
 use coland_storage::{PersistenceError, PersistenceResult};
+use diesel::sql_query;
 use diesel::sql_types::{BigInt, Bool, Jsonb, Text};
-use diesel::{OptionalExtension as _, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 
 pub(crate) struct PrivateAuthorityCut {
     pub realm_id: RealmId,

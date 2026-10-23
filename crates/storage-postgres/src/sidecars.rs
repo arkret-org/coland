@@ -183,11 +183,11 @@ impl SidecarStore for PgSidecarStore {
     }
 
     async fn get(&self, sidecar_id: &str) -> PersistenceResult<Option<AgentSidecarRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let id = sidecar_id_bytes(sidecar_id);
         sql_query(format!("{SIDECAR_SELECT} WHERE id=$1"))
             .bind::<Binary, _>(id)
-            .get_result::<SidecarRow>(&mut *conn)
+            .get_result::<SidecarRow>(&mut conn)
             .await
             .optional()
             .map_err(PersistenceError::database)?
@@ -200,7 +200,7 @@ impl SidecarStore for PgSidecarStore {
         realm_id: &str,
         controller_account_id: &arkret_wire::AccountId,
     ) -> PersistenceResult<Option<AgentSidecarRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "{SIDECAR_SELECT} WHERE realm_id=$1 AND controller_account_id=$2"
         ))
@@ -212,7 +212,7 @@ impl SidecarStore for PgSidecarStore {
                 ))
             })?,
         )
-        .get_result::<SidecarRow>(&mut *conn)
+        .get_result::<SidecarRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -225,7 +225,7 @@ impl SidecarStore for PgSidecarStore {
         controller_account_id: &arkret_wire::AccountId,
         realm_id: Option<&str>,
     ) -> PersistenceResult<Vec<AgentSidecarRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "{SIDECAR_SELECT} WHERE controller_account_id=$1 AND ($2 IS NULL OR realm_id=$2) ORDER BY created_at,pk"
         ))
@@ -233,7 +233,7 @@ impl SidecarStore for PgSidecarStore {
             PersistenceError::SchemaViolation(format!("Sidecar controller account is not serializable: {error}"))
         })?)
             .bind::<Nullable<Text>, _>(realm_id)
-        .load::<SidecarRow>(&mut *conn)
+        .load::<SidecarRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()
@@ -242,9 +242,9 @@ impl SidecarStore for PgSidecarStore {
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<AgentSidecarRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!("{SIDECAR_SELECT} ORDER BY created_at,pk"))
-            .load::<SidecarRow>(&mut *conn)
+            .load::<SidecarRow>(&mut conn)
             .await
             .map_err(PersistenceError::database)?
             .into_iter()
@@ -293,14 +293,14 @@ impl SidecarStore for PgSidecarStore {
         sidecar_id: &str,
         normalized_context_ref_digest: &str,
     ) -> PersistenceResult<Option<AgentSidecarContextRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let sidecar_id = sidecar_id_bytes(sidecar_id);
         sql_query(format!(
             "{CONTEXT_SELECT} WHERE s.id=$1 AND c.normalized_context_ref_digest=$2 ORDER BY c.version DESC LIMIT 1"
         ))
         .bind::<Binary, _>(sidecar_id)
         .bind::<Text, _>(normalized_context_ref_digest)
-        .get_result::<SidecarContextRow>(&mut *conn)
+        .get_result::<SidecarContextRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(AgentSidecarContextRecord::from))

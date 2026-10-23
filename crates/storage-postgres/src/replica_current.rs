@@ -21,9 +21,9 @@
 //! them and never reads them.
 
 use coland_storage::{PersistenceError, PersistenceResult};
-use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
 /// Every table a member Station projects a replica Realm into.
@@ -2675,7 +2675,7 @@ mod tests {
         }
     }
     use diesel::sql_types::Text;
-    use diesel_async::RunQueryDsl;
+    use horme::RunQueryDsl;
     use serde_json::json;
 
     use super::*;

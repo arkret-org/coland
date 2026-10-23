@@ -3,7 +3,8 @@ use arkret_wire::{DidCoreId, RealmCommitAuthorityRef, RealmId};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel::{QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::RunQueryDsl;
 use serde_json::Value;
 
 #[derive(QueryableByName)]

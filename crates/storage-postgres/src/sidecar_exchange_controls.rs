@@ -7,9 +7,9 @@ use arkret_models_collaboration::events_payloads::sidecar::AgentSidecarExchangeC
 use arkret_models_collaboration::exact_current_results::CanonicalEventDot;
 use arkret_wire::{CommitStreamRef, Event, EventKind, RealmCommit, ScopeRef};
 use coland_storage::{ConflictCode, PersistenceError, PersistenceResult};
-use diesel::OptionalExtension;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 
 #[derive(diesel::QueryableByName)]
 struct Current {

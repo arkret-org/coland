@@ -128,14 +128,12 @@ impl crate::key_backup::PgKeyBackupStore {
     }
 
     pub(crate) async fn read_unlock(&self, id: &str) -> PersistenceResult<Option<Value>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         Ok(sql_query(
             "SELECT challenge AS payload FROM key_backup_unlock_authorities WHERE authority_id=$1",
         )
         .bind::<Text, _>(id)
-        .get_result::<JsonPayloadRow>(&mut *conn)
+        .get_result::<JsonPayloadRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?

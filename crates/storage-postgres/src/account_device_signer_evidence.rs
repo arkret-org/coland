@@ -12,8 +12,9 @@ use coland_storage::{
     AccountDeviceSignerEvidenceStore, ConflictCode, ForwardedProducerDeviceEvidence,
 };
 use diesel::sql_types::{Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 use crate::pcr_device_status_reader::confirmed_pcr_device_status_cut_in_connection;
@@ -232,13 +233,13 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
         let Some(digest) = commit.producer_signer_fact_digest.as_ref() else {
             return Ok(None);
         };
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query("SELECT evidence_json,authorization_commit_id FROM account_device_signer_evidence WHERE principal_id=$1 AND station_id=$2 AND device_id=$3 AND evidence_json #>> '{device_projection_attestation,attestation,event_authorization,event_id}'=$4")
             .bind::<Text,_>(producer.account_id.principal_id.as_str())
             .bind::<Text,_>(producer.account_id.station_id.as_str())
             .bind::<Text,_>(producer.device_id.as_str())
             .bind::<Text,_>(event.event_id.as_str())
-            .load::<ArchiveRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+            .load::<ArchiveRow>(&mut conn).await.map_err(PersistenceError::database)?;
         for row in rows {
             let evidence: arkret_models_identity::ForwardAccountDeviceSignerEvidence =
                 serde_json::from_value(row.evidence_json).map_err(PersistenceError::database)?;
@@ -277,11 +278,11 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
         device: &DeviceId,
         reference: &SignerEvidenceRef,
     ) -> PersistenceResult<Option<arkret_models_identity::ForwardAccountDeviceSignerEvidence>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query("SELECT evidence_json,authorization_commit_id FROM account_device_signer_evidence WHERE evidence_ref=$1 AND principal_id=$2 AND station_id=$3 AND device_id=$4")
             .bind::<Text,_>(reference.as_ref()).bind::<Text,_>(account.principal_id.as_str())
             .bind::<Text,_>(account.station_id.as_str()).bind::<Text,_>(device.as_str())
-            .get_result::<ArchiveRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+            .get_result::<ArchiveRow>(&mut conn).await.optional().map_err(PersistenceError::database)?;
         row.map(|row| {
             let evidence: arkret_models_identity::ForwardAccountDeviceSignerEvidence =
                 serde_json::from_value(row.evidence_json).map_err(PersistenceError::database)?;
@@ -617,7 +618,7 @@ impl PgAccountDeviceSignerEvidenceArchive {
         let reference_text = reference_json.as_str().ok_or_else(|| {
             PersistenceError::SchemaViolation("signer evidence ref is not a string".into())
         })?;
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT evidence_json,authorization_commit_id FROM account_device_signer_evidence \
              WHERE evidence_ref=$1 AND principal_id=$2 AND station_id=$3 AND device_id=$4",
@@ -626,7 +627,7 @@ impl PgAccountDeviceSignerEvidenceArchive {
         .bind::<Text, _>(account.principal_id.as_str())
         .bind::<Text, _>(account.station_id.as_str())
         .bind::<Text, _>(device.as_str())
-        .get_result::<ArchiveRow>(&mut *conn)
+        .get_result::<ArchiveRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;

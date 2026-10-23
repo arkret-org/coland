@@ -6,9 +6,10 @@ use coland_storage::{
     AccountDataCasResult, AccountDataRecord, NewSourceAdmission, PersistenceError,
     PersistenceResult, PreparedPrivateInviteDelivery,
 };
+use diesel::sql_query;
 use diesel::sql_types::{BigInt, Bool, Jsonb, Text};
-use diesel::{OptionalExtension as _, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::{Value, json};
 fn invalid(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::SchemaViolation(format!("private Invite admission: {detail}"))

@@ -4,8 +4,8 @@ use arkret_models_identity::AgentProducerEvidence;
 use arkret_wire::{Event, RequestId};
 use chrono::{DateTime, Utc};
 use diesel::sql_types::{BigInt, Binary, Jsonb, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::RunQueryDsl;
+use diesel::{QueryableByName, sql_query};
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 use crate::{AsyncPgConnection, PersistenceError, PersistenceResult};

@@ -18,8 +18,8 @@ use coland_storage::{
     AuthorityCommitWriteOutcome, ConflictCode, PersistenceError,
 };
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::RunQueryDsl;
+use diesel::{QueryableByName, sql_query};
+use horme::{OptionalExtension, RunQueryDsl};
 
 use crate::actor_profiles::{PcrSelfEventCut, corrupt, rejected, verify_pcr_self_event};
 use crate::{AsyncPgConnection, PgTransactionError};

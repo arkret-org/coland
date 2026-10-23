@@ -89,16 +89,14 @@ impl From<WebvhLogRow> for WebvhLogRecord {
 #[async_trait]
 impl WebvhStore for PgWebvhStore {
     async fn get_document(&self, did: &str) -> PersistenceResult<Option<WebvhDocumentRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT id AS did, did_document, key_log_head, seq, method_evidence, \
              fetched_at, expires_at, updated_at \
              FROM webvh_documents WHERE id = $1",
         )
         .bind::<Text, _>(did)
-        .get_result::<WebvhDocumentRow>(&mut *conn)
+        .get_result::<WebvhDocumentRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(WebvhDocumentRecord::from))
@@ -110,9 +108,7 @@ impl WebvhStore for PgWebvhStore {
         local_id: &str,
         expected_log_url: &str,
     ) -> PersistenceResult<Option<WebvhDocumentRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         #[derive(QueryableByName)]
         struct Candidate {
             #[diesel(sql_type=Text)]
@@ -123,7 +119,7 @@ impl WebvhStore for PgWebvhStore {
         // Select by the native hosting URL, never by the latest cache write.
         // Load only identifiers until the unique hosted identity is established.
         let candidates = sql_query("SELECT id AS did FROM webvh_documents WHERE right(id, char_length($1) + 7) = ':webvh:' || $1")
-            .bind::<Text,_>(local_id).load::<Candidate>(&mut *conn).await.map_err(PersistenceError::database)?;
+            .bind::<Text,_>(local_id).load::<Candidate>(&mut conn).await.map_err(PersistenceError::database)?;
         let mut hosted = None;
         for candidate in candidates {
             let matches = arkret_wire::Did::new(candidate.did.clone())
@@ -147,7 +143,7 @@ impl WebvhStore for PgWebvhStore {
              WHERE id=$1",
         )
         .bind::<Text, _>(hosted)
-        .get_result::<WebvhDocumentRow>(&mut *conn)
+        .get_result::<WebvhDocumentRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(WebvhDocumentRecord::from))
@@ -155,9 +151,7 @@ impl WebvhStore for PgWebvhStore {
     }
 
     async fn put_document(&self, record: WebvhDocumentRecord) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         // Writes are ingestion: stamp freshness evidence with "now"
         // (`fetched_at = now`, `expires_at = now + high-risk baseline TTL`).
         let (fetched_at, expires_at) = webvh_freshness_on_put();
@@ -183,16 +177,14 @@ impl WebvhStore for PgWebvhStore {
         .bind::<Timestamptz, _>(fetched_at)
         .bind::<Timestamptz, _>(expires_at)
         .bind::<Timestamptz, _>(record.updated_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)
     }
 
     async fn append_log_event(&self, event: WebvhLogRecord) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "INSERT INTO webvh_log_events \
              (id, did, seq, operation, created_at) \
@@ -204,22 +196,20 @@ impl WebvhStore for PgWebvhStore {
         .bind::<BigInt, _>(event.seq as i64)
         .bind::<Jsonb, _>(&event.operation)
         .bind::<Timestamptz, _>(event.created_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)
     }
 
     async fn list_log_events(&self, did: &str) -> PersistenceResult<Vec<WebvhLogRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT id AS event_digest, did, seq, operation, created_at \
              FROM webvh_log_events WHERE (did = $1 OR (did LIKE 'did:webvh:%' AND $1 LIKE 'did:webvh:%' AND split_part(did, ':', 3) = split_part($1, ':', 3))) ORDER BY seq ASC, id ASC",
         )
         .bind::<Text, _>(did)
-        .load::<WebvhLogRow>(&mut *conn)
+        .load::<WebvhLogRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(WebvhLogRecord::from).collect())
         .map_err(PersistenceError::database)
@@ -434,16 +424,14 @@ impl WebvhStore for PgWebvhStore {
     ) -> PersistenceResult<
         Option<arkret_models_identity::service_identity::ServiceRegistrationOutcome>,
     > {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT outcome FROM service_identity_registrations \
              WHERE service_kind = $1 AND public_base_url = $2",
         )
         .bind::<Text, _>(key.service_kind().as_str())
         .bind::<Text, _>(key.public_base_url().as_str())
-        .get_result::<ServiceRegistrationRow>(&mut *conn)
+        .get_result::<ServiceRegistrationRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?

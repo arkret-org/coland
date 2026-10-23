@@ -1,7 +1,7 @@
 use super::{
     HandleClaimEvidenceRecord, Jsonb, MemberIdentityEventRecord, MemberIdentityStore,
     MemberIdentitySubjectKey, Nullable, PersistenceError, PersistenceResult, PgPool,
-    QueryableByName, RunQueryDsl, Text, Timestamptz, Value, async_trait, pg_conn, sql_query,
+    QueryableByName, RunQueryDsl, Text, Timestamptz, Value, async_trait, sql_query,
 };
 
 /// Reads accepted Event/Commit facts for identity hydration and stores local
@@ -65,9 +65,7 @@ const HANDLE_CLAIM_COLUMNS: &str = "digest, subject_id, issuer_id, audience, \
 #[async_trait]
 impl MemberIdentityStore for PgMemberIdentityStore {
     async fn snapshot_events(&self) -> PersistenceResult<Vec<MemberIdentityEventRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT c.commit_json->>'event_ref' AS event_id,e.envelope AS raw_event \
              FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk \
@@ -75,7 +73,7 @@ impl MemberIdentityStore for PgMemberIdentityStore {
                AND c.realm_id=e.realm_id AND c.stream_ref->>'kind'='realm' \
                AND c.stream_ref->>'realm_id'=e.realm_id ORDER BY c.commit_json->>'event_ref'",
         )
-        .load::<AcceptedIdentityRow>(&mut *conn)
+        .load::<AcceptedIdentityRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()
@@ -116,9 +114,7 @@ impl MemberIdentityStore for PgMemberIdentityStore {
     }
 
     async fn put_handle_claim(&self, record: &HandleClaimEvidenceRecord) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "INSERT INTO member_identity_handle_claims \
              (digest, subject_id, issuer_id, audience, status, revocation_digest, \
@@ -144,7 +140,7 @@ impl MemberIdentityStore for PgMemberIdentityStore {
         .bind::<Nullable<Text>, _>(&record.visibility)
         .bind::<Nullable<Timestamptz>, _>(record.expires_at)
         .bind::<Jsonb, _>(&record.envelope)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)
@@ -154,25 +150,21 @@ impl MemberIdentityStore for PgMemberIdentityStore {
         &self,
         subject_id: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<usize> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM member_identity_handle_claims WHERE subject_id = $1")
             .bind::<Text, _>(subject_id)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map_err(PersistenceError::database)
     }
 
     async fn snapshot_handle_claims(&self) -> PersistenceResult<Vec<HandleClaimEvidenceRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {HANDLE_CLAIM_COLUMNS} FROM member_identity_handle_claims \
              ORDER BY subject_id, digest"
         ))
-        .load::<HandleClaimRow>(&mut *conn)
+        .load::<HandleClaimRow>(&mut conn)
         .await
         .map(|rows| {
             rows.into_iter()

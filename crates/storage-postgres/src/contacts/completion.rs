@@ -10,8 +10,9 @@ use coland_storage::{
     PersistenceResult,
 };
 use diesel::sql_types::{BigInt, Integer, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::{AsyncConnection, AsyncPgConnection};
+use horme::{OptionalExtension, RunQueryDsl};
 
 use crate::{PgPool, PgTransactionError, pg_conn};
 
@@ -69,14 +70,14 @@ pub(super) async fn lookup(
     key: &str,
     request_hash: &str,
 ) -> PersistenceResult<Option<ContactCompletionState>> {
-    let mut conn = pg_conn(pool).await?;
+    let mut conn = crate::pg_db(pool);
     let row = sql_query(format!(
         "SELECT {COLUMNS} FROM contact_completion_intents \
          WHERE binding->'authenticated_actor'=$1 AND binding->>'idempotency_key'=$2"
     ))
     .bind::<Jsonb, _>(serde_json::to_value(actor).map_err(invalid)?)
     .bind::<Text, _>(key)
-    .get_result::<CompletionRow>(&mut *conn)
+    .get_result::<CompletionRow>(&mut conn)
     .await
     .optional()
     .map_err(PersistenceError::database)?;
@@ -105,7 +106,7 @@ pub(super) async fn confirmed(
     limit: u16,
     after: Option<&Hash>,
 ) -> PersistenceResult<Vec<CommittedContactCompletionIntent>> {
-    let mut conn = pg_conn(pool).await?;
+    let mut conn = crate::pg_db(pool);
     let rows = sql_query(format!(
         "SELECT {COLUMNS} FROM contact_completion_intents \
          WHERE committed_ref IS NOT NULL AND intent IS NOT NULL AND result IS NULL \
@@ -113,7 +114,7 @@ pub(super) async fn confirmed(
     ))
     .bind::<BigInt, _>(i64::from(limit))
     .bind::<Nullable<Text>, _>(after.map(Hash::as_str))
-    .load::<CompletionRow>(&mut *conn)
+    .load::<CompletionRow>(&mut conn)
     .await
     .map_err(PersistenceError::database)?;
     rows.into_iter()

@@ -7,8 +7,9 @@ use coland_storage::{
     AppletManagedDeviceScopeGuard, MlsKeyPackageRow, PersistenceError, PersistenceResult,
 };
 use diesel::sql_types::{BigInt, Jsonb, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::{Value, json};
 
 fn denied(detail: impl std::fmt::Display) -> PersistenceError {

@@ -106,10 +106,10 @@ impl WebsocketAuthStore for PgWebsocketAuthStore {
     }
 
     async fn release_connection(&self, connection_id: &str) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM websocket_connection_leases WHERE connection_id=$1")
             .bind::<Text, _>(connection_id)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map_err(PersistenceError::database)?;
         Ok(())
@@ -118,9 +118,7 @@ impl WebsocketAuthStore for PgWebsocketAuthStore {
         &self,
         record: &WebsocketAuthChallengeRecord,
     ) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let inserted = sql_query(
             "INSERT INTO websocket_auth_challenges (connection_id, nonce, canonical_origin, \
              canonical_base_url, issued_at, expires_at, consumed, retain_until) \
@@ -133,7 +131,7 @@ impl WebsocketAuthStore for PgWebsocketAuthStore {
         .bind::<Timestamptz, _>(record.issued_at)
         .bind::<Timestamptz, _>(record.expires_at)
         .bind::<Timestamptz, _>(record.retain_until)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         if inserted == 0 {
@@ -149,9 +147,7 @@ impl WebsocketAuthStore for PgWebsocketAuthStore {
         connection_id: &str,
         nonce: &str,
     ) -> PersistenceResult<Option<WebsocketAuthChallengeRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT connection_id, nonce, canonical_origin, canonical_base_url, issued_at, \
              expires_at, consumed, retain_until FROM websocket_auth_challenges \
@@ -159,7 +155,7 @@ impl WebsocketAuthStore for PgWebsocketAuthStore {
         )
         .bind::<Text, _>(connection_id)
         .bind::<Text, _>(nonce)
-        .get_result::<WebsocketChallengeRow>(&mut *conn)
+        .get_result::<WebsocketChallengeRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -173,9 +169,7 @@ impl WebsocketAuthStore for PgWebsocketAuthStore {
         jti: &str,
         proof_context: &str,
     ) -> PersistenceResult<bool> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT EXISTS(SELECT 1 FROM websocket_auth_replay_ledger \
              WHERE cnf_jkt = $1 AND jti = $2 AND proof_context = $3) AS present",
@@ -183,7 +177,7 @@ impl WebsocketAuthStore for PgWebsocketAuthStore {
         .bind::<Text, _>(cnf_jkt)
         .bind::<Text, _>(jti)
         .bind::<Text, _>(proof_context)
-        .get_result::<ExistsRow>(&mut *conn)
+        .get_result::<ExistsRow>(&mut conn)
         .await
         .map(|row| row.present)
         .map_err(PersistenceError::database)
@@ -245,23 +239,21 @@ impl WebsocketAuthStore for PgWebsocketAuthStore {
     }
 
     async fn prune_expired(&self, now: chrono::DateTime<Utc>) -> PersistenceResult<usize> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let challenges =
             sql_query("DELETE FROM websocket_auth_challenges WHERE retain_until <= $1")
                 .bind::<Timestamptz, _>(now)
-                .execute(&mut *conn)
+                .execute(&mut conn)
                 .await
                 .map_err(PersistenceError::database)?;
         let ledger = sql_query("DELETE FROM websocket_auth_replay_ledger WHERE retain_until <= $1")
             .bind::<Timestamptz, _>(now)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map_err(PersistenceError::database)?;
         let leases = sql_query("DELETE FROM websocket_connection_leases WHERE expires_at <= $1")
             .bind::<Timestamptz, _>(now)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map_err(PersistenceError::database)?;
         Ok(challenges + ledger + leases)

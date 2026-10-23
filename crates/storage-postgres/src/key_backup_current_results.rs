@@ -10,8 +10,9 @@ use arkret_models_crypto::{
 };
 use arkret_wire::{AccountId, ActorId, CommitStreamRef, DeviceId, Event, RealmCommit};
 use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 use crate::{

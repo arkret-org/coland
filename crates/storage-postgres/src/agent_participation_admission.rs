@@ -6,8 +6,9 @@ use arkret_models_collaboration::governance::agent_participation::{
 use arkret_wire::{DidCoreId, Event, EventKind, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{Array, Jsonb, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 #[derive(QueryableByName)]

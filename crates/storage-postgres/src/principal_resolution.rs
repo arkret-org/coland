@@ -5,8 +5,8 @@ use coland_storage::{
     PrincipalResolutionStore, validate_principal_resolution_record,
 };
 use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::RunQueryDsl;
+use diesel::{QueryableByName, sql_query};
+use horme::{OptionalExtension, RunQueryDsl};
 
 use crate::{PgPool, async_trait, pg_conn};
 
@@ -108,9 +108,7 @@ impl PgPrincipalResolutionStore {
         &self,
         account_id: &AccountId,
     ) -> PersistenceResult<Option<PrincipalResolutionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT p.principal_id, p.station_id, p.pcr_realm_id, \
                     genesis.event_json AS genesis_event, current.event_json AS current_event, \
@@ -128,7 +126,7 @@ impl PgPrincipalResolutionStore {
         )
         .bind::<Text, _>(account_id.principal_id.as_str())
         .bind::<Text, _>(account_id.station_id.as_str())
-        .get_result::<CurrentRow>(&mut *conn)
+        .get_result::<CurrentRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -140,9 +138,7 @@ impl PgPrincipalResolutionStore {
         &self,
         pcr_realm_id: &RealmId,
     ) -> PersistenceResult<Option<PrincipalResolutionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT p.principal_id, p.station_id, p.pcr_realm_id, \
                     genesis.event_json AS genesis_event, current.event_json AS current_event, \
@@ -159,7 +155,7 @@ impl PgPrincipalResolutionStore {
              WHERE p.pcr_realm_id = $1",
         )
         .bind::<Text, _>(pcr_realm_id.as_str())
-        .get_result::<CurrentRow>(&mut *conn)
+        .get_result::<CurrentRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -197,11 +193,12 @@ impl PgPrincipalResolutionStore {
             .into_boxed()
             .bind::<Text, _>(realm_id.as_str()),
         };
-        let Some(row) = query
-            .get_result::<GenesisAnchorRow>(&mut *conn)
-            .await
-            .optional()
-            .map_err(PersistenceError::database)?
+        let Some(row) =
+            diesel_async::RunQueryDsl::get_result::<GenesisAnchorRow>(query, &mut *conn)
+                .await
+                .map_err(horme::Error::from)
+                .optional()
+                .map_err(PersistenceError::database)?
         else {
             return Ok(IndexRebuild::NoAnchor);
         };
@@ -341,9 +338,7 @@ impl PrincipalResolutionStore for PgPrincipalResolutionStore {
             .map_err(|error| PersistenceError::Internal(error.to_string()))?;
         let current_event = serde_json::to_value(&next.current_event)
             .map_err(|error| PersistenceError::Internal(error.to_string()))?;
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let applied = if let Some(expected) = expected_current_event_ref {
             if expected == next.current_event.event_id.as_str() {
                 return Err(PersistenceError::SchemaViolation(
@@ -382,7 +377,7 @@ impl PrincipalResolutionStore for PgPrincipalResolutionStore {
             .bind::<Timestamptz, _>(next.projection.updated_at)
             .bind::<Text, _>(&next.projection.method_history_head)
             .bind::<Jsonb, _>(&current_event)
-            .get_result::<AppliedRow>(&mut *conn)
+            .get_result::<AppliedRow>(&mut conn)
             .await
             .map_err(PersistenceError::database)?
             .applied
@@ -416,7 +411,7 @@ impl PrincipalResolutionStore for PgPrincipalResolutionStore {
             .bind::<Timestamptz, _>(next.projection.updated_at)
             .bind::<Text, _>(&next.projection.method_history_head)
             .bind::<Jsonb, _>(&genesis_event)
-            .get_result::<AppliedRow>(&mut *conn)
+            .get_result::<AppliedRow>(&mut conn)
             .await
             .map_err(PersistenceError::database)?
             .applied
@@ -437,9 +432,7 @@ impl PrincipalResolutionStore for PgPrincipalResolutionStore {
         after_event_ref: Option<&str>,
         limit: usize,
     ) -> PersistenceResult<Vec<Event>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         if let Some(after) = after_event_ref {
             let exists = sql_query(
                 "SELECT EXISTS(SELECT 1 FROM principal_resolution_events \
@@ -448,7 +441,7 @@ impl PrincipalResolutionStore for PgPrincipalResolutionStore {
             .bind::<Text, _>(account_id.principal_id.as_str())
             .bind::<Text, _>(account_id.station_id.as_str())
             .bind::<Text, _>(after)
-            .get_result::<AppliedRow>(&mut *conn)
+            .get_result::<AppliedRow>(&mut conn)
             .await
             .map_err(PersistenceError::database)?
             .applied;
@@ -485,7 +478,7 @@ impl PrincipalResolutionStore for PgPrincipalResolutionStore {
         .bind::<Text, _>(account_id.station_id.as_str())
         .bind::<Nullable<Text>, _>(after_event_ref)
         .bind::<BigInt, _>(i64::try_from(limit).unwrap_or(i64::MAX))
-        .load::<EventRow>(&mut *conn)
+        .load::<EventRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()

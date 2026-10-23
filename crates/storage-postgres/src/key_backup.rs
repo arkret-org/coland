@@ -50,9 +50,13 @@ const DELETE_CHALLENGE_COLUMNS: &str = "challenge_id, principal_id, station_id, 
 /// [`PersistenceError::Conflict`] so the receive path can reject the loser of
 /// the race with the §7.6 `series_seq_not_monotonic` wire code instead of a
 /// generic 5xx. Every other diesel error stays a `Database` error.
-fn map_key_backup_put_error(error: diesel::result::Error) -> PersistenceError {
+fn map_key_backup_put_error(error: horme::Error) -> PersistenceError {
     use diesel::result::{DatabaseErrorKind, Error as DieselError};
-    if let DieselError::DatabaseError(DatabaseErrorKind::UniqueViolation, info) = &error {
+    if let horme::Error::Query(DieselError::DatabaseError(
+        DatabaseErrorKind::UniqueViolation,
+        info,
+    )) = &error
+    {
         let constraint = info.constraint_name().unwrap_or_default();
         if constraint.is_empty() || constraint == "key_backups_series_seq_key" {
             return PersistenceError::Conflict(format!(
@@ -354,18 +358,16 @@ impl KeyBackupStore for PgKeyBackupStore {
     }
 
     async fn get(&self, backup_id: &str) -> PersistenceResult<Option<Value>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         // last_accessed_at side-effect on read is informational; failure here
         // must not crash the get path.
         let _ = sql_query("UPDATE key_backups SET last_accessed_at = NOW() WHERE id = $1")
             .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(backup_id))
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await;
         sql_query("SELECT payload FROM key_backups WHERE id = $1")
             .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(backup_id))
-            .get_result::<JsonPayloadRow>(&mut *conn)
+            .get_result::<JsonPayloadRow>(&mut conn)
             .await
             .optional()
             .map(|row| row.map(|r| r.payload))
@@ -373,23 +375,19 @@ impl KeyBackupStore for PgKeyBackupStore {
     }
 
     async fn delete(&self, backup_id: &str) -> PersistenceResult<bool> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM key_backups WHERE id = $1")
             .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(backup_id))
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|n| n > 0)
             .map_err(PersistenceError::database)
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<Value>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("SELECT payload FROM key_backups ORDER BY created_at ASC, id ASC")
-            .load::<JsonPayloadRow>(&mut *conn)
+            .load::<JsonPayloadRow>(&mut conn)
             .await
             .map(|rows| rows.into_iter().map(|r| r.payload).collect())
             .map_err(PersistenceError::database)
@@ -399,14 +397,12 @@ impl KeyBackupStore for PgKeyBackupStore {
         let actor_id = serde_json::from_str::<arkret_wire::ActorId>(actor_id)
             .map_err(|_| PersistenceError::database("key backup actor selector is invalid"))?
             .to_string();
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT payload FROM key_backups WHERE actor_id = $1 ORDER BY created_at ASC, id ASC",
         )
         .bind::<Text, _>(actor_id)
-        .load::<JsonPayloadRow>(&mut *conn)
+        .load::<JsonPayloadRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(|r| r.payload).collect())
         .map_err(PersistenceError::database)
@@ -425,9 +421,7 @@ impl KeyBackupStore for PgKeyBackupStore {
         record: KeyBackupDeleteChallengeRecord,
         now: chrono::DateTime<Utc>,
     ) -> PersistenceResult<KeyBackupDeleteChallengeRecord> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         // The row is unique on `(principal_id, station_id, backup_id, request_id)`, and the
         // `DO UPDATE ... WHERE` guard only replaces it once the held challenge
         // is consumed or expired. So this statement mints a challenge exactly
@@ -445,7 +439,7 @@ impl KeyBackupStore for PgKeyBackupStore {
         .bind::<Timestamptz, _>(record.issued_at)
         .bind::<Timestamptz, _>(record.expires_at)
         .bind::<Timestamptz, _>(now)
-        .get_result::<KeyBackupDeleteChallengeRow>(&mut *conn)
+        .get_result::<KeyBackupDeleteChallengeRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -464,7 +458,7 @@ impl KeyBackupStore for PgKeyBackupStore {
         .bind::<Text, _>(&record.account_id.station_id)
         .bind::<Text, _>(&record.backup_id)
         .bind::<Text, _>(&record.request_id)
-        .get_result::<KeyBackupDeleteChallengeRow>(&mut *conn)
+        .get_result::<KeyBackupDeleteChallengeRow>(&mut conn)
         .await
         .map(KeyBackupDeleteChallengeRecord::from)
         .map_err(PersistenceError::database)
@@ -474,14 +468,12 @@ impl KeyBackupStore for PgKeyBackupStore {
         &self,
         challenge_id: &str,
     ) -> PersistenceResult<Option<KeyBackupDeleteChallengeRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {DELETE_CHALLENGE_COLUMNS} FROM key_backup_delete_challenges              WHERE challenge_id = $1"
         ))
         .bind::<Text, _>(challenge_id)
-        .get_result::<KeyBackupDeleteChallengeRow>(&mut *conn)
+        .get_result::<KeyBackupDeleteChallengeRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(KeyBackupDeleteChallengeRecord::from))
@@ -550,12 +542,10 @@ impl KeyBackupStore for PgKeyBackupStore {
         &self,
         now: chrono::DateTime<Utc>,
     ) -> PersistenceResult<usize> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM key_backup_delete_challenges WHERE expires_at <= $1")
             .bind::<Timestamptz, _>(now)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map_err(PersistenceError::database)
     }

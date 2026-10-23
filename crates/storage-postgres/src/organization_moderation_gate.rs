@@ -10,9 +10,9 @@ use arkret_models_collaboration::{
     RealmOrganizationStatus, SignatureMaterial,
 };
 use coland_storage::{PersistenceError, PersistenceResult, RealmOrganizationProofCommit};
-use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Binary, Jsonb, Text, Timestamptz};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
 #[derive(diesel::QueryableByName)]

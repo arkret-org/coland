@@ -13,9 +13,10 @@ use coland_storage::{
     AuthorityCommitWriteOutcome, EventBatchCommitRequest, EventCommitOutcome, EventCommitRequest,
     EventCommitUnitOfWork, PersistenceError, PersistenceResult, ids,
 };
+use diesel::sql_query;
 use diesel::sql_types::{Array, BigInt, Binary, Bool, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, sql_query};
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection, AsyncPgConnection};
+use horme::{OptionalExtension, RunQueryDsl};
 
 use crate::agent_draft_pending_intents::{
     AgentDraftConsumptionLock, lock_agent_draft_consumption_source, mark_agent_draft_consumed,
@@ -3950,7 +3951,7 @@ mod agent_draft_consumption_tests {
         PersistenceError, SyncCursorStore,
     };
     use diesel::sql_types::{Binary, Jsonb, Text};
-    use diesel_async::{AsyncConnection, RunQueryDsl};
+    use diesel_async::AsyncConnection;
 
     use super::*;
     use crate::agent_draft_pending_intents::commit_agent_draft_pending_intent_in_connection;

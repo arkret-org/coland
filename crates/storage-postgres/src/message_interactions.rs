@@ -9,9 +9,9 @@ use arkret_models_collaboration::events_payloads::poll::PollContentBlock;
 use arkret_models_collaboration::poll::{PollPartition, VerifiedPollResponse};
 use arkret_wire::{CommittedEventRef, Event, EventId, EventKind, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
-use diesel::OptionalExtension as _;
 use diesel::sql_types::{Binary, Jsonb, Text};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
 #[derive(diesel::QueryableByName)]

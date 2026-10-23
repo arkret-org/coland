@@ -50,7 +50,7 @@ impl PublicationEvidenceStore for PgPublicationEvidenceStore {
         }
         let committed_ref =
             serde_json::to_value(&record.committed_ref).map_err(PersistenceError::database)?;
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "INSERT INTO publication_evidence (event_id,committed_ref,accepted_at) \
              VALUES ($1,$2,$3) ON CONFLICT (event_id) DO NOTHING",
@@ -58,14 +58,14 @@ impl PublicationEvidenceStore for PgPublicationEvidenceStore {
         .bind::<Text, _>(record.event_id.as_str())
         .bind::<Jsonb, _>(committed_ref)
         .bind::<super::Timestamptz, _>(record.accepted_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         let row = sql_query(format!(
             "SELECT {COLUMNS} FROM publication_evidence WHERE event_id=$1"
         ))
         .bind::<Text, _>(record.event_id.as_str())
-        .get_result::<PublicationEvidenceRow>(&mut *conn)
+        .get_result::<PublicationEvidenceRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         PublicationEvidenceRecord::try_from(row)
@@ -80,7 +80,7 @@ impl PublicationEvidenceStore for PgPublicationEvidenceStore {
             "SELECT {COLUMNS} FROM publication_evidence WHERE event_id=$1"
         ))
         .bind::<Text, _>(event_id.as_str())
-        .get_result::<PublicationEvidenceRow>(&mut *conn)
+        .get_result::<PublicationEvidenceRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -104,7 +104,7 @@ impl PublicationEvidenceStore for PgPublicationEvidenceStore {
             "SELECT {COLUMNS} FROM publication_evidence WHERE event_id=ANY($1)"
         ))
         .bind::<diesel::sql_types::Array<Text>, _>(values)
-        .load::<PublicationEvidenceRow>(&mut *conn)
+        .load::<PublicationEvidenceRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         let mut by_id = std::collections::BTreeMap::new();

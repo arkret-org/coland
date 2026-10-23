@@ -18,7 +18,8 @@ use coland_storage::{
     SignalScopeAuthority, SignalScopeAuthorityQuery, evaluate_grants,
 };
 use diesel::sql_types::{Jsonb, Nullable, Text};
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection, AsyncPgConnection};
+use horme::RunQueryDsl;
 
 use crate::capability_grant_current_results::RealmAuthorityRootCurrent;
 use crate::{OptionalExtension, PgPool, PgTransactionError, pg_conn};

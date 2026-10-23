@@ -4,7 +4,7 @@ use arkret_wire::{CurrentRevision, RealmCommitId, RelationState};
 use super::{
     AsyncPgConnection, BigInt, Jsonb, OptionalExtension, PersistenceError, PersistenceResult,
     PgPool, QueryableByName, RelationCurrentResultRecord, RelationCurrentResultStore, RunQueryDsl,
-    Text, async_trait, pg_conn, sql_query,
+    Text, async_trait, sql_query,
 };
 
 pub struct PgRelationCurrentResultStore {
@@ -223,7 +223,7 @@ async fn endpoint_home(
     };
     sql_query(query)
         .bind::<Text, _>(endpoint)
-        .get_result::<EndpointHomeRow>(&mut *conn)
+        .get_result::<EndpointHomeRow>(conn)
         .await
         .optional()
         .map_err(PersistenceError::database)
@@ -330,13 +330,13 @@ pub(crate) async fn require_relation_value_scope_in_connection(
 #[async_trait]
 impl RelationCurrentResultStore for PgRelationCurrentResultStore {
     async fn snapshot_all(&self) -> PersistenceResult<Vec<RelationCurrentResultRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT realm_id,domain_key,domain,relation_id,state,current_commit_id,\
              current_stream_position,value FROM relation_current_results \
              ORDER BY realm_id ASC,domain_key ASC",
         )
-        .load::<RelationCurrentResultReadRow>(&mut *conn)
+        .load::<RelationCurrentResultReadRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter().map(decode_row).collect()

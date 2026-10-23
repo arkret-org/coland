@@ -165,9 +165,36 @@ pub(crate) fn build_pool(url: &str, tuning: PoolTuning) -> anyhow::Result<PgPool
 
 #[cfg(test)]
 mod wait_bound_tests {
-    use diesel_async::RunQueryDsl;
+    use horme::RunQueryDsl;
 
     use super::*;
+
+    #[tokio::test]
+    async fn ordinary_handles_return_single_pool_lease() {
+        let url =
+            std::env::var("COLAND_TEST_DATABASE_URL").expect("isolated test database required");
+        let pool = build_pool(
+            &url,
+            PoolTuning {
+                max_size: Some(1),
+                acquire_timeout_seconds: Some(1),
+            },
+        )
+        .unwrap();
+        let mut first = crate::pg_db(&pool);
+        let mut second = crate::pg_db(&pool);
+        assert_eq!(pool.status().size, 0);
+        diesel::sql_query("SELECT 1")
+            .execute(&mut first)
+            .await
+            .unwrap();
+        assert_eq!(pool.status().available, 1);
+        diesel::sql_query("SELECT 1")
+            .execute(&mut second)
+            .await
+            .unwrap();
+        assert_eq!(pool.status().available, 1);
+    }
 
     #[tokio::test]
     async fn checkout_deadline_covers_exhaustion_and_handshake() {

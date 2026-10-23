@@ -7,7 +7,8 @@ use arkret_models_collaboration::governance::circle::{
 use arkret_wire::{ActorId, CircleId, RealmId};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{Bool, Jsonb, Nullable, Text};
-use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection as _, AsyncPgConnection};
+use horme::RunQueryDsl;
 use sha2::{Digest, Sha256};
 
 use crate::{PgPool, PgTransactionError, pg_conn};

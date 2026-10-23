@@ -1,7 +1,7 @@
 use arkret_wire::AccountId;
 use arkret_wire::receive_policy::EffectiveNewSourceQuota;
-use diesel::OptionalExtension as _;
 use diesel_async::AsyncConnection;
+use horme::OptionalExtension as _;
 
 use super::{
     BigInt, InviteNewSourceLedgerStore, NewSourceAdmission, PersistenceError, PersistenceResult,
@@ -90,9 +90,7 @@ impl InviteNewSourceLedgerStore for PgInviteNewSourceLedgerStore {
     }
 
     async fn delete_for_holder(&self, holder: &AccountId) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "WITH holder AS (SELECT pk FROM accounts WHERE principal_id=$1 AND station_id=$2), \
              erased_ledger AS (DELETE FROM invite_new_source_ledgers WHERE account_pk IN (SELECT pk FROM holder)) \
@@ -100,7 +98,7 @@ impl InviteNewSourceLedgerStore for PgInviteNewSourceLedgerStore {
         )
         .bind::<Text, _>(holder.principal_id.as_str())
         .bind::<Text, _>(holder.station_id.as_str())
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)
@@ -117,7 +115,7 @@ impl InviteNewSourceLedgerStore for PgInviteNewSourceLedgerStore {
         )
         .bind::<Text, _>(holder.principal_id.as_str())
         .bind::<Text, _>(holder.station_id.as_str())
-        .get_result::<SeenRow>(&mut *conn)
+        .get_result::<SeenRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         Ok(usize::try_from(row.seen).unwrap_or(usize::MAX))

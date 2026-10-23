@@ -5,8 +5,8 @@ use arkret_wire::{
     AccountId, CommitStreamRef, DeviceId, Event, EventKind, RealmCommit, RealmCommitId,
 };
 use diesel::sql_types::{BigInt, Jsonb, Nullable, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::RunQueryDsl;
+use diesel::{QueryableByName, sql_query};
+use horme::{OptionalExtension, RunQueryDsl};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

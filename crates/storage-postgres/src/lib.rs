@@ -16,9 +16,10 @@ pub(crate) use coland_storage::*;
 pub(crate) use diesel::sql_types::{
     Array, BigInt, Binary, Bool, Integer, Jsonb, Nullable, Text, Timestamptz,
 };
-pub(crate) use diesel::{OptionalExtension, QueryableByName, sql_query, sql_types};
+pub(crate) use diesel::{QueryableByName, sql_query, sql_types};
 pub(crate) use diesel_async::pooled_connection::deadpool::Object;
-pub(crate) use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+pub(crate) use diesel_async::{AsyncConnection, AsyncPgConnection};
+use horme::{OptionalExtension, RunQueryDsl};
 pub(crate) use serde_json::Value;
 pub(crate) use uuid::Uuid;
 
@@ -321,6 +322,30 @@ pub(crate) async fn pg_conn(pool: &PgPool) -> PersistenceResult<Object<AsyncPgCo
     .map_err(|error| PersistenceError::Internal(format!("database pool error: {error}")))
 }
 
+/// Construct a query provider without checking out a connection.
+pub(crate) fn pg_db(pool: &PgPool) -> PgQueries {
+    PgQueries(horme::Db::new(pool.clone()))
+}
+
+pub(crate) struct PgQueries(horme::Db<PgPool>);
+
+impl horme::GetConnection for PgQueries {
+    type Connection = AsyncPgConnection;
+    type Lease<'a> = Object<AsyncPgConnection>;
+
+    async fn get_mut_conn(&mut self) -> horme::Result<Self::Lease<'_>> {
+        let budget = self
+            .0
+            .pool()
+            .timeouts()
+            .wait
+            .unwrap_or(std::time::Duration::from_secs(5));
+        tokio::time::timeout(budget, self.0.get_mut_conn())
+            .await
+            .map_err(|error| horme::Error::Acquire(Box::new(error)))?
+    }
+}
+
 pub(crate) fn json_string_array(value: Value) -> Vec<String> {
     match value {
         Value::Array(values) => values
@@ -354,6 +379,15 @@ impl From<PersistenceError> for PgTransactionError {
 impl From<diesel::result::Error> for PgTransactionError {
     fn from(error: diesel::result::Error) -> Self {
         Self::Diesel(error)
+    }
+}
+
+impl From<horme::Error> for PgTransactionError {
+    fn from(error: horme::Error) -> Self {
+        match error {
+            horme::Error::Query(error) => Self::Diesel(error),
+            horme::Error::Acquire(error) => Self::Storage(PersistenceError::database(error)),
+        }
     }
 }
 

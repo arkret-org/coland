@@ -17,8 +17,8 @@ use coland_storage::{
     AuthorizationOperation, OperationFacts, PersistenceError, PersistenceResult,
 };
 use diesel::sql_types::{Jsonb, Text};
-use diesel::{OptionalExtension as _, QueryableByName, sql_query};
-use diesel_async::RunQueryDsl;
+use diesel::{QueryableByName, sql_query};
+use horme::{OptionalExtension as _, RunQueryDsl};
 
 use crate::capability_grant_current_results::{
     CapabilityGrantCurrentResultReadRow, RealmAuthorityRootCurrent, RealmAuthorityRootReadRow,

@@ -7,7 +7,8 @@ use coland_storage::{
 };
 use diesel::sql_types::{Jsonb, Text, Timestamptz};
 use diesel::{QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::RunQueryDsl;
 
 use crate::realm_authorization_cut::RealmAuthorizationCut;
 

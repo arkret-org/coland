@@ -2,9 +2,9 @@
 
 use arkret_event_draft::EventPayloadExt;
 use arkret_models_collaboration::events_payloads::realm::RealmPurpose;
-use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 
 use crate::{PersistenceError, PersistenceResult};
 

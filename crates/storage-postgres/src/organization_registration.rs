@@ -153,7 +153,7 @@ impl OrganizationRegistrationStore for PgOrganizationRegistrationStore {
         let record = OrganizationRegistrationChallengeRecord::prepared(challenge);
         let value = serde_json::to_value(&record)
             .map_err(|error| PersistenceError::Internal(error.to_string()))?;
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let inserted = sql_query(
             "INSERT INTO organization_registration_challenges \
              (challenge_id, organization_id, record, expires_at, created_at) \
@@ -164,7 +164,7 @@ impl OrganizationRegistrationStore for PgOrganizationRegistrationStore {
         .bind::<Jsonb, _>(&value)
         .bind::<Timestamptz, _>(record.challenge.expires_at)
         .bind::<Timestamptz, _>(record.challenge.created_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         if inserted == 0 {

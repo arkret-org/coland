@@ -295,9 +295,9 @@ impl ModerationStore for PgModerationStore {
     }
 
     async fn report_count(&self) -> PersistenceResult<u64> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let count = sql_query("SELECT COUNT(*) AS count FROM moderation_report_current_results")
-            .get_result::<CountRow>(&mut *conn)
+            .get_result::<CountRow>(&mut conn)
             .await
             .map_err(PersistenceError::database)?
             .count;

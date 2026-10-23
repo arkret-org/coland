@@ -18,7 +18,8 @@ use coland_storage::{
     ObjectCurrentSnapshot, ObjectCurrentSnapshotStore, PersistenceError, PersistenceResult,
 };
 use diesel::sql_types::{Jsonb, Text};
-use diesel_async::{AsyncConnection, RunQueryDsl};
+use diesel_async::AsyncConnection;
+use horme::RunQueryDsl;
 use serde_json::Value;
 
 use crate::{PgPool, PgTransactionError};
@@ -947,7 +948,7 @@ pub(crate) async fn visible_strand_scope_for_actor(
     .map_err(PgTransactionError::into_persistence)
 }
 
-use diesel::OptionalExtension as _;
+use horme::OptionalExtension as _;
 
 #[cfg(test)]
 mod tests {

@@ -7,8 +7,9 @@ use coland_storage::{
     ServiceRouteStore, ServiceRouteStoredKey,
 };
 use diesel::sql_types::{BigInt, Bool, Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 
 use crate::{PgPool, PgTransactionError, async_trait, pg_conn};
 
@@ -123,9 +124,7 @@ impl ServiceRouteStore for PgServiceRouteStore {
         let (after_service_id, after_service_kind) = after
             .map(|key| (key.service_id.as_str(), key.service_kind.as_str()))
             .unwrap_or(("", ""));
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT service_id, service_kind FROM (\
              SELECT service_id, service_kind FROM service_method_states UNION \
@@ -137,7 +136,7 @@ impl ServiceRouteStore for PgServiceRouteStore {
         .bind::<Text, _>(after_service_id)
         .bind::<Text, _>(after_service_kind)
         .bind::<BigInt, _>(i64::try_from(limit.clamp(1, 256)).unwrap_or(256))
-        .load::<RouteKeyRow>(&mut *conn)
+        .load::<RouteKeyRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()
@@ -156,13 +155,11 @@ impl ServiceRouteStore for PgServiceRouteStore {
         service_kind: &str,
         limit: usize,
     ) -> PersistenceResult<Vec<ServiceResolutionForkEvidence>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query("SELECT service_id,service_kind,version_id,accepted_digest,conflicting_digest,evidence,quarantined_at FROM service_resolution_fork_quarantine WHERE service_id=$1 AND service_kind=$2 ORDER BY quarantined_at DESC LIMIT $3")
             .bind::<Text,_>(service_id.as_str()).bind::<Text,_>(service_kind)
             .bind::<BigInt,_>(i64::try_from(limit.clamp(1, 256)).unwrap_or(256))
-            .load::<QuarantineRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+            .load::<QuarantineRow>(&mut conn).await.map_err(PersistenceError::database)?;
         rows.into_iter()
             .map(|row| {
                 Ok(ServiceResolutionForkEvidence {
@@ -185,12 +182,10 @@ impl ServiceRouteStore for PgServiceRouteStore {
         service_id: &DidCoreId,
         service_kind: &str,
     ) -> PersistenceResult<Option<ServiceMethodState>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("SELECT method_state AS value FROM service_method_states WHERE service_id=$1 AND service_kind=$2")
             .bind::<Text,_>(service_id.as_str()).bind::<Text,_>(service_kind)
-            .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+            .get_result::<JsonRow>(&mut conn).await.optional().map_err(PersistenceError::database)?
             .map(|row| decode(row.value)).transpose()
     }
 
@@ -199,13 +194,11 @@ impl ServiceRouteStore for PgServiceRouteStore {
         evidence: ServiceResolutionForkEvidence,
     ) -> PersistenceResult<()> {
         let value = encode(&evidence.evidence)?;
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("INSERT INTO service_resolution_fork_quarantine(service_id,service_kind,version_id,accepted_digest,conflicting_digest,evidence,quarantined_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
             .bind::<Text,_>(evidence.service_id.as_str()).bind::<Text,_>(&evidence.service_kind).bind::<Text,_>(&evidence.version_id)
             .bind::<Text,_>(evidence.accepted_digest.as_str()).bind::<Text,_>(evidence.conflicting_digest.as_str()).bind::<Jsonb,_>(&value).bind::<Timestamptz,_>(evidence.quarantined_at)
-            .execute(&mut *conn).await.map_err(PersistenceError::database)?;
+            .execute(&mut conn).await.map_err(PersistenceError::database)?;
         Ok(())
     }
 
@@ -214,11 +207,9 @@ impl ServiceRouteStore for PgServiceRouteStore {
         service_id: &DidCoreId,
         service_kind: &str,
     ) -> PersistenceResult<bool> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         Ok(sql_query("SELECT EXISTS(SELECT 1 FROM service_resolution_fork_quarantine WHERE service_id=$1 AND service_kind=$2) AS found")
-            .bind::<Text,_>(service_id.as_str()).bind::<Text,_>(service_kind).get_result::<ExistsRow>(&mut *conn).await.map_err(PersistenceError::database)?.found)
+            .bind::<Text,_>(service_id.as_str()).bind::<Text,_>(service_kind).get_result::<ExistsRow>(&mut conn).await.map_err(PersistenceError::database)?.found)
     }
 
     async fn route_cache(
@@ -226,15 +217,13 @@ impl ServiceRouteStore for PgServiceRouteStore {
         service_id: &DidCoreId,
         service_kind: &str,
     ) -> PersistenceResult<Option<VerifiedServiceRoute>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         // The route cache is a replaceable performance cache that MAY vanish at
         // any time (service-surface.md section 2.6), so a row this build can no
         // longer decode is a cache miss, not a persistence fault. The accepted
         // method-state floor lives in its own table and is never derived here.
         Ok(sql_query("SELECT entry AS value FROM service_route_cache WHERE service_id=$1 AND service_kind=$2")
-            .bind::<Text,_>(service_id.as_str()).bind::<Text,_>(service_kind).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+            .bind::<Text,_>(service_id.as_str()).bind::<Text,_>(service_kind).get_result::<JsonRow>(&mut conn).await.optional().map_err(PersistenceError::database)?
             .and_then(|row| decode::<VerifiedServiceRoute>(row.value).ok()))
     }
 
@@ -243,13 +232,11 @@ impl ServiceRouteStore for PgServiceRouteStore {
         service_id: &DidCoreId,
         service_kind: &str,
     ) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM service_route_cache WHERE service_id=$1 AND service_kind=$2")
             .bind::<Text, _>(service_id.as_str())
             .bind::<Text, _>(service_kind)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map_err(PersistenceError::database)?;
         Ok(())

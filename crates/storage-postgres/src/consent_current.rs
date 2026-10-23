@@ -10,8 +10,9 @@ use coland_storage::{
     ConsentCurrentRecord, ConsentCurrentStore, PersistenceError, PersistenceResult,
 };
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 use crate::actor_profiles::{

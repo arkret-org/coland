@@ -2,7 +2,8 @@
 
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Bool, Jsonb, Text, Timestamptz};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::RunQueryDsl;
 
 #[derive(diesel::QueryableByName)]
 struct ReplicaLifecycle {

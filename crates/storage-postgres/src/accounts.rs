@@ -46,15 +46,13 @@ impl AccountStore for PgAccountStore {
         &self,
         account_id: &arkret_wire::AccountId,
     ) -> PersistenceResult<Option<AccountRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(account_with_primary_localpart_select(
             "WHERE a.station_id = $1 AND a.principal_id = $2",
         ))
         .bind::<Text, _>(account_id.station_id.as_str())
         .bind::<Text, _>(account_id.principal_id.as_str())
-        .get_result::<AccountRow>(&mut *conn)
+        .get_result::<AccountRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -62,12 +60,10 @@ impl AccountStore for PgAccountStore {
     }
 
     async fn get_by_pk(&self, account_pk: AccountPk) -> PersistenceResult<Option<AccountRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(account_with_primary_localpart_select("WHERE a.pk = $1"))
             .bind::<BigInt, _>(account_pk.get())
-            .get_result::<AccountRow>(&mut *conn)
+            .get_result::<AccountRow>(&mut conn)
             .await
             .optional()
             .map_err(PersistenceError::database)?;
@@ -75,9 +71,7 @@ impl AccountStore for PgAccountStore {
     }
 
     async fn put(&self, record: &AccountRecord) -> PersistenceResult<AccountPk> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let payload = serde_json::json!({
             "bio": record.bio,
             "avatar_blob_ref": record.avatar_blob_ref,
@@ -96,14 +90,14 @@ impl AccountStore for PgAccountStore {
         .bind::<Jsonb, _>(&payload)
         .bind::<Timestamptz, _>(record.created_at)
         .bind::<sql_types::Binary, _>(rand::random::<[u8;32]>().to_vec())
-        .get_result::<AccountIdRow>(&mut *conn)
+        .get_result::<AccountIdRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
 
         if record.localpart.trim().is_empty() {
             sql_query("DELETE FROM account_localparts WHERE account_pk = $1")
                 .bind::<BigInt, _>(row.pk)
-                .execute(&mut *conn)
+                .execute(&mut conn)
                 .await
                 .map_err(PersistenceError::database)?;
         } else {
@@ -113,7 +107,7 @@ impl AccountStore for PgAccountStore {
             )
             .bind::<BigInt, _>(row.pk)
             .bind::<Text, _>(&record.localpart)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map_err(PersistenceError::database)?;
             let assigned = sql_query(
@@ -129,7 +123,7 @@ impl AccountStore for PgAccountStore {
             .bind::<BigInt, _>(row.pk)
             .bind::<Text, _>(&record.localpart)
             .bind::<Timestamptz, _>(record.created_at)
-            .get_result::<LocalpartOnlyRow>(&mut *conn)
+            .get_result::<LocalpartOnlyRow>(&mut conn)
             .await
             .optional()
             .map_err(PersistenceError::database)?;
@@ -145,26 +139,22 @@ impl AccountStore for PgAccountStore {
     }
 
     async fn list(&self) -> PersistenceResult<Vec<AccountRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(account_with_primary_localpart_select(
             "ORDER BY a.station_id, a.principal_id",
         ))
-        .load::<AccountRow>(&mut *conn)
+        .load::<AccountRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter().map(AccountRecord::try_from).collect()
     }
 
     async fn delete(&self, account_id: &arkret_wire::AccountId) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM accounts WHERE station_id = $1 AND principal_id = $2")
             .bind::<Text, _>(account_id.station_id.as_str())
             .bind::<Text, _>(account_id.principal_id.as_str())
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|_| ())
             .map_err(PersistenceError::database)
@@ -179,16 +169,14 @@ impl AccountLocalpartStore for PgAccountLocalpartStore {
         &self,
         account_pk: AccountPk,
     ) -> PersistenceResult<Vec<AccountLocalpartRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT lp.id, lp.account_pk, lp.localpart, lp.is_primary, lp.created_at, lp.updated_at \
              FROM account_localparts lp WHERE lp.account_pk = $1 \
              ORDER BY lp.is_primary DESC, lp.localpart ASC",
         )
         .bind::<BigInt, _>(account_pk.get())
-        .load::<AccountLocalpartRow>(&mut *conn)
+        .load::<AccountLocalpartRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()
@@ -197,15 +185,13 @@ impl AccountLocalpartStore for PgAccountLocalpartStore {
     }
 
     async fn owner_of(&self, localpart: &str) -> PersistenceResult<Option<AccountLocalpartRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT lp.id, lp.account_pk, lp.localpart, lp.is_primary, lp.created_at, lp.updated_at \
              FROM account_localparts lp WHERE lp.localpart = $1",
         )
         .bind::<Text, _>(localpart)
-        .get_result::<AccountLocalpartRow>(&mut *conn)
+        .get_result::<AccountLocalpartRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -218,13 +204,11 @@ impl AccountLocalpartStore for PgAccountLocalpartStore {
         localpart: &str,
         primary: bool,
     ) -> PersistenceResult<AccountLocalpartRecord> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let existing_owner =
             sql_query("SELECT account_pk AS pk FROM account_localparts WHERE localpart = $1")
                 .bind::<Text, _>(localpart)
-                .get_result::<AccountIdRow>(&mut *conn)
+                .get_result::<AccountIdRow>(&mut conn)
                 .await
                 .optional()
                 .map_err(PersistenceError::database)?;
@@ -239,7 +223,7 @@ impl AccountLocalpartStore for PgAccountLocalpartStore {
                  WHERE account_pk = $1",
             )
             .bind::<BigInt, _>(account_pk.get())
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map_err(PersistenceError::database)?;
         }
@@ -258,7 +242,7 @@ impl AccountLocalpartStore for PgAccountLocalpartStore {
         .bind::<BigInt, _>(account_pk.get())
         .bind::<Text, _>(localpart)
         .bind::<Bool, _>(primary)
-        .get_result::<AccountLocalpartRow>(&mut *conn)
+        .get_result::<AccountLocalpartRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -269,9 +253,7 @@ impl AccountLocalpartStore for PgAccountLocalpartStore {
     }
 
     async fn remove(&self, account_pk: AccountPk, localpart: &str) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "WITH inspected AS MATERIALIZED ( \
                  SELECT account_pk FROM account_localparts WHERE localpart = $2 \
@@ -287,7 +269,7 @@ impl AccountLocalpartStore for PgAccountLocalpartStore {
         )
         .bind::<BigInt, _>(account_pk.get())
         .bind::<Text, _>(localpart)
-        .get_result::<LocalpartRemovalOutcomeRow>(&mut *conn)
+        .get_result::<LocalpartRemovalOutcomeRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         match row.outcome.as_str() {
@@ -302,12 +284,10 @@ impl AccountLocalpartStore for PgAccountLocalpartStore {
     }
 
     async fn clear_for_account(&self, account_pk: AccountPk) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM account_localparts WHERE account_pk = $1")
             .bind::<BigInt, _>(account_pk.get())
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|_| ())
             .map_err(PersistenceError::database)
@@ -323,9 +303,7 @@ impl AccountLifecycleStore for PgAccountLifecycleStore {
         account_pk: AccountPk,
         record: &AccountLifecycleRecord,
     ) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         // Active public push handoff transactions hold FOR SHARE on this
         // account row. Take the conflicting lock before changing lifecycle
         // state, so an in-flight active intent or receipt cannot straddle a
@@ -354,7 +332,7 @@ impl AccountLifecycleStore for PgAccountLifecycleStore {
                 .map_err(|error| PersistenceError::database(format!("changed_by JSON: {error}")))?,
         )
         .bind::<Timestamptz, _>(record.changed_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         if written != 1 {
@@ -366,12 +344,10 @@ impl AccountLifecycleStore for PgAccountLifecycleStore {
     }
 
     async fn delete(&self, account_pk: AccountPk) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM account_lifecycle WHERE account_pk = $1")
             .bind::<BigInt, _>(account_pk.get())
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|_| ())
             .map_err(PersistenceError::database)
@@ -380,9 +356,7 @@ impl AccountLifecycleStore for PgAccountLifecycleStore {
     async fn snapshot_all(
         &self,
     ) -> PersistenceResult<Vec<(arkret_wire::AccountId, AccountLifecycleRecord)>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT a.principal_id, a.station_id, l.state, l.reason, \
                     l.changed_by, l.changed_at \
@@ -390,7 +364,7 @@ impl AccountLifecycleStore for PgAccountLifecycleStore {
              JOIN accounts a ON a.pk = l.account_pk \
              ORDER BY a.station_id, a.principal_id",
         )
-        .load::<AccountLifecycleRow>(&mut *conn)
+        .load::<AccountLifecycleRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()
@@ -425,16 +399,14 @@ impl AccountDataStore for PgAccountDataStore {
         actor: &str,
         account_data_key: &str,
     ) -> PersistenceResult<Option<AccountDataRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT actor_id AS actor, account_data_key, revision, payload, tombstone, updated_at \
              FROM account_datas WHERE actor_id = $1 AND account_data_key = $2 AND account_data_source_current(actor_id,account_data_key)",
         )
         .bind::<Text, _>(actor)
         .bind::<Text, _>(account_data_key)
-        .get_result::<AccountDataRow>(&mut *conn)
+        .get_result::<AccountDataRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(AccountDataRecord::from))
@@ -465,16 +437,14 @@ impl AccountDataStore for PgAccountDataStore {
     }
 
     async fn list_for_actor(&self, actor: &str) -> PersistenceResult<Vec<AccountDataRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT actor_id AS actor, account_data_key, revision, payload, tombstone, updated_at \
              FROM account_datas WHERE actor_id = $1 AND tombstone = FALSE AND account_data_source_current(actor_id,account_data_key) \
              ORDER BY account_data_key",
         )
         .bind::<Text, _>(actor)
-        .load::<AccountDataRow>(&mut *conn)
+        .load::<AccountDataRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(AccountDataRecord::from).collect())
         .map_err(PersistenceError::database)
@@ -490,16 +460,14 @@ impl AccountDataStore for PgAccountDataStore {
                 "account_data change position exceeds i64 storage range".to_owned(),
             )
         })?;
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT position, actor_id AS actor, account_data_key, revision, payload, tombstone, updated_at \
              FROM account_data_changes WHERE actor_id = $1 AND position > $2 AND account_data_source_current(actor_id,account_data_key) ORDER BY position",
         )
         .bind::<Text, _>(actor)
         .bind::<BigInt, _>(position)
-        .load::<AccountDataChangeRow>(&mut *conn)
+        .load::<AccountDataChangeRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()
@@ -508,9 +476,7 @@ impl AccountDataStore for PgAccountDataStore {
     }
 
     async fn latest_change_position(&self, actor: &str) -> PersistenceResult<u64> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT COALESCE(latest_position, 0) AS position \
              FROM account_data_change_retention WHERE actor_id = $1 \
@@ -519,7 +485,7 @@ impl AccountDataStore for PgAccountDataStore {
              ) LIMIT 1",
         )
         .bind::<Text, _>(actor)
-        .get_result::<AccountDataPositionRow>(&mut *conn)
+        .get_result::<AccountDataPositionRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         u64::try_from(row.position).map_err(|_| {
@@ -531,9 +497,7 @@ impl AccountDataStore for PgAccountDataStore {
         &self,
         actor: &str,
     ) -> PersistenceResult<(Vec<AccountDataRecord>, u64)> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "WITH current_position AS ( \
                  SELECT COALESCE(latest_position, 0) AS position \
@@ -551,7 +515,7 @@ impl AccountDataStore for PgAccountDataStore {
              ORDER BY live_rows.account_data_key",
         )
         .bind::<Text, _>(actor)
-        .load::<AccountDataSnapshotRow>(&mut *conn)
+        .load::<AccountDataSnapshotRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         let position = rows.as_slice().first().map_or(0, |row| row.position);
@@ -575,9 +539,7 @@ impl AccountDataStore for PgAccountDataStore {
                 "account_data change position exceeds i64 storage range".to_owned(),
             )
         })?;
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT COALESCE(retained_through_position, 0) AS position \
              FROM account_data_change_retention WHERE actor_id = $1 \
@@ -586,7 +548,7 @@ impl AccountDataStore for PgAccountDataStore {
              ) LIMIT 1",
         )
         .bind::<Text, _>(actor)
-        .get_result::<AccountDataPositionRow>(&mut *conn)
+        .get_result::<AccountDataPositionRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         Ok(position >= row.position)
@@ -596,9 +558,7 @@ impl AccountDataStore for PgAccountDataStore {
         &self,
         cutoff: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<u64> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "WITH deleted AS ( \
                  DELETE FROM account_data_changes WHERE updated_at < $1 \
@@ -620,7 +580,7 @@ impl AccountDataStore for PgAccountDataStore {
              CROSS JOIN (SELECT COUNT(*) FROM retention) AS retention_count",
         )
         .bind::<Timestamptz, _>(cutoff)
-        .get_result::<AccountDataPositionRow>(&mut *conn)
+        .get_result::<AccountDataPositionRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         u64::try_from(row.position).map_err(|_| {

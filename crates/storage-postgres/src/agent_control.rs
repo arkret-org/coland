@@ -23,8 +23,8 @@ use coland_storage::{
     ConflictCode, PersistenceError,
 };
 use diesel::sql_types::{Binary, Jsonb, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::RunQueryDsl;
+use diesel::{QueryableByName, sql_query};
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 use crate::actor_profiles::{

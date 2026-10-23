@@ -3,7 +3,8 @@ use arkret_wire::{AccountId, RealmId};
 use coland_storage::PersistenceResult;
 use diesel::sql_query;
 use diesel::sql_types::{Jsonb, Text};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::RunQueryDsl;
 pub(crate) async fn mark_pending(
     conn: &mut AsyncPgConnection,
     holder: &AccountId,
@@ -17,9 +18,9 @@ pub(crate) async fn mark_pending(
 use arkret_models_collaboration::consent_private::ConsentPrivateEffectsPublishRequest;
 use arkret_wire::DidCoreId;
 use coland_storage::{PersistenceError, PrivateEffectsPublication};
-use diesel::OptionalExtension as _;
 use diesel::sql_types::BigInt;
 use diesel_async::AsyncConnection as _;
+use horme::OptionalExtension as _;
 
 use crate::{PgPool, PgTransactionError, pg_conn};
 #[derive(diesel::QueryableByName)]

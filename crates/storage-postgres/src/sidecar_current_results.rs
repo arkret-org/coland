@@ -5,9 +5,10 @@ use arkret_models_collaboration::events_payloads::sidecar::SidecarContextAttachP
 use arkret_models_collaboration::sidecar_operations::SidecarContextRef;
 use arkret_wire::{CommitStreamRef, Event, EventKind, RealmCommit, ScopeRef, SidecarId};
 use coland_storage::{ConflictCode, PersistenceError, PersistenceResult};
+use diesel::sql_query;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension as _, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::{Value, json};
 
 #[derive(diesel::QueryableByName)]

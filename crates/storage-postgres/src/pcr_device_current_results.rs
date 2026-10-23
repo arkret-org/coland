@@ -5,8 +5,8 @@ use arkret_models_collaboration::events_payloads::{
 };
 use arkret_wire::{AccountId, ActorId, CommitStreamRef, Event, EventKind, RealmCommit};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::RunQueryDsl;
+use diesel::{QueryableByName, sql_query};
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::{Value, json};
 
 use crate::{AsyncPgConnection, PersistenceError, PersistenceResult};

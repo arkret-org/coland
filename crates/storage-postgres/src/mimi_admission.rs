@@ -1,8 +1,8 @@
 //! Independent MIMI service authorship and attribution, rechecked before writes.
 use coland_storage::{PersistenceError, PersistenceResult, SelfProducerCommitGuard};
-use diesel::OptionalExtension as _;
 use diesel::sql_types::{Jsonb, Text};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
 #[derive(diesel::QueryableByName)]

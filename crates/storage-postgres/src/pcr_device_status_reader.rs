@@ -4,8 +4,9 @@
 use arkret_models_crypto::{SecurityRotationRevokeCommandDecision, SecurityTransactionStep};
 use arkret_wire::{AccountId, DeviceId};
 use diesel::sql_types::{BigInt, Jsonb, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 use crate::pcr_device_revocation_proposals::{

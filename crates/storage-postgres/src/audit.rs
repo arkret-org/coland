@@ -55,25 +55,21 @@ impl AuditStore for PgAuditStore {
     }
 
     async fn list_for_actor(&self, actor: &str) -> PersistenceResult<Vec<Value>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT payload FROM audit_logs WHERE actor_id = $1 ORDER BY created_at ASC, id ASC",
         )
         .bind::<Text, _>(actor)
-        .load::<JsonPayloadRow>(&mut *conn)
+        .load::<JsonPayloadRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(|row| row.payload).collect())
         .map_err(PersistenceError::database)
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<Value>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("SELECT payload FROM audit_logs ORDER BY created_at ASC, id ASC")
-            .load::<JsonPayloadRow>(&mut *conn)
+            .load::<JsonPayloadRow>(&mut conn)
             .await
             .map(|rows| rows.into_iter().map(|row| row.payload).collect())
             .map_err(PersistenceError::database)

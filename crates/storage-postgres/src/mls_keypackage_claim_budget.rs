@@ -1,8 +1,9 @@
 use arkret_models_crypto::{PeerKeyPackageRequesterAuthorization, PeerKeyPackagesClaimRequestBody};
 use coland_storage::{PeerKeyPackageClaimRateDecision, PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 
 use crate::{PgPool, PgTransactionError, pg_conn};
 
@@ -163,9 +164,9 @@ pub(crate) async fn record_attempt(
 }
 
 pub(crate) async fn prune(pool: &PgPool) -> PersistenceResult<usize> {
-    let mut conn = pg_conn(pool).await.map_err(PersistenceError::database)?;
+    let mut conn = crate::pg_db(pool);
     sql_query("DELETE FROM keypackage_claim_attempts t WHERE expires_at<=clock_timestamp() AND NOT EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.source_id=t.source_id AND s.claim_request_id=t.claim_request_id)")
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map_err(PersistenceError::database)
 }

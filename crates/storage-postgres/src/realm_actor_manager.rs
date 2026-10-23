@@ -6,7 +6,7 @@ use coland_storage::{
 };
 use diesel::sql_types::{Jsonb, Text};
 use diesel::{QueryableByName, sql_query};
-use diesel_async::RunQueryDsl;
+use horme::RunQueryDsl;
 use serde_json::{Value, json};
 
 use crate::realm_actor_control::current_source;

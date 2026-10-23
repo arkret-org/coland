@@ -76,9 +76,7 @@ impl RecoveryPolicyStore for PgRecoveryPolicyStore {
         &self,
         policy_id: &str,
     ) -> PersistenceResult<Option<RecoveryPolicyRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT id AS policy_id, principal_id, station_id, version, acceptance_basis, trust_domain, supersedes, \
                     expires_at, issued_at, verification_method, raw_payload, accepted_at \
@@ -89,7 +87,7 @@ impl RecoveryPolicyStore for PgRecoveryPolicyStore {
              WHERE p.id = $1",
         )
         .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(policy_id))
-        .get_result::<RecoveryPolicyRow>(&mut *conn)
+        .get_result::<RecoveryPolicyRow>(&mut conn)
         .await
         .optional().map_err(PersistenceError::database)?
         .map(RecoveryPolicyRecord::try_from)
@@ -100,9 +98,7 @@ impl RecoveryPolicyStore for PgRecoveryPolicyStore {
         &self,
         account_id: &arkret_wire::AccountId,
     ) -> PersistenceResult<Option<RecoveryPolicyRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT id AS policy_id, principal_id, station_id, version, acceptance_basis, trust_domain, supersedes, \
                     expires_at, issued_at, verification_method, raw_payload, accepted_at \
@@ -115,7 +111,7 @@ impl RecoveryPolicyStore for PgRecoveryPolicyStore {
         )
         .bind::<Text, _>(&account_id.principal_id)
         .bind::<Text, _>(&account_id.station_id)
-        .get_result::<RecoveryPolicyRow>(&mut *conn)
+        .get_result::<RecoveryPolicyRow>(&mut conn)
         .await
         .optional().map_err(PersistenceError::database)?
         .map(RecoveryPolicyRecord::try_from)
@@ -126,9 +122,7 @@ impl RecoveryPolicyStore for PgRecoveryPolicyStore {
         &self,
         account_id: &arkret_wire::AccountId,
     ) -> PersistenceResult<Vec<RecoveryPolicyRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT id AS policy_id, principal_id, station_id, version, acceptance_basis, trust_domain, supersedes, \
                     expires_at, issued_at, verification_method, raw_payload, accepted_at \
@@ -137,7 +131,7 @@ impl RecoveryPolicyStore for PgRecoveryPolicyStore {
         )
         .bind::<Text, _>(&account_id.principal_id)
         .bind::<Text, _>(&account_id.station_id)
-        .get_results::<RecoveryPolicyRow>(&mut *conn)
+        .get_results::<RecoveryPolicyRow>(&mut conn)
         .await.map_err(PersistenceError::database)?;
         rows.into_iter()
             .map(RecoveryPolicyRecord::try_from)
@@ -356,15 +350,13 @@ impl RecoverySessionStore for PgRecoverySessionStore {
         &self,
         recovery_session_id: &str,
     ) -> PersistenceResult<Option<RecoverySessionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {RECOVERY_SESSION_COLUMNS} FROM recovery_sessions \
              WHERE id = $1"
         ))
         .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(recovery_session_id))
-        .get_result::<RecoverySessionRow>(&mut *conn)
+        .get_result::<RecoverySessionRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -376,15 +368,13 @@ impl RecoverySessionStore for PgRecoverySessionStore {
         &self,
         session_grant_id: &str,
     ) -> PersistenceResult<Option<RecoverySessionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {RECOVERY_SESSION_COLUMNS} FROM recovery_sessions \
              WHERE session_grant_id = $1 ORDER BY created_at DESC LIMIT 1"
         ))
         .bind::<Text, _>(session_grant_id)
-        .get_result::<RecoverySessionRow>(&mut *conn)
+        .get_result::<RecoverySessionRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -397,16 +387,14 @@ impl RecoverySessionStore for PgRecoverySessionStore {
         session_grant_id: &str,
         request_id: &str,
     ) -> PersistenceResult<Option<RecoverySessionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {RECOVERY_SESSION_COLUMNS} FROM recovery_sessions \
              WHERE session_grant_id = $1 AND request_id = $2 LIMIT 1"
         ))
         .bind::<Text, _>(session_grant_id)
         .bind::<Text, _>(request_id)
-        .get_result::<RecoverySessionRow>(&mut *conn)
+        .get_result::<RecoverySessionRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?

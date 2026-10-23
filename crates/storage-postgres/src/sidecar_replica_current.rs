@@ -1,9 +1,9 @@
 //! Install source-signed Sidecar current values without replaying admission.
 use arkret_wire::{CommitStreamRef, CurrentSelector, RealmId, TypedCurrentRow};
 use coland_storage::{PersistenceError, PersistenceResult};
+use diesel::QueryableByName;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName};
-use diesel_async::RunQueryDsl;
+use horme::{OptionalExtension, RunQueryDsl};
 
 #[derive(QueryableByName)]
 struct Covered {

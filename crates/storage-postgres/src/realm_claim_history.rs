@@ -2,8 +2,9 @@
 use arkret_models_identity::AuthenticatedServiceResolution;
 use coland_storage::{PeerKeyPackageClaimAttempt, PersistenceError, PersistenceResult};
 use diesel::sql_types::{Jsonb, Nullable, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 fn invalid(detail: impl std::fmt::Display) -> PersistenceError {

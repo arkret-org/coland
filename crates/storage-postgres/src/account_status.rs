@@ -251,7 +251,7 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
         account_authority_id: &str,
         account_id: &arkret_wire::AccountId,
     ) -> PersistenceResult<Option<AccountStatusRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT record, receipt FROM account_status_replica_records \
              WHERE account_authority_id = $1 AND account_id = $2 \
@@ -259,7 +259,7 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
         )
         .bind::<Text, _>(account_authority_id)
         .bind::<Jsonb, _>(encode_account_id(account_id)?)
-        .get_result::<RecordRow>(&mut *conn)
+        .get_result::<RecordRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -274,7 +274,7 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
         from_status_seq: u64,
         limit: u16,
     ) -> PersistenceResult<Vec<AccountStatusRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT record, receipt FROM account_status_replica_records \
              WHERE account_authority_id = $1 AND account_id = $2 AND status_seq >= $3 \
@@ -288,21 +288,21 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
             )
         })?)
         .bind::<BigInt, _>(i64::from(limit))
-        .load::<RecordRow>(&mut *conn)
+        .load::<RecordRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter().map(|row| decode_record(&row)).collect()
     }
 
     async fn erasure_pending(&self, limit: u16) -> PersistenceResult<Vec<AccountStatusRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT record, receipt FROM account_status_replica_records \
              WHERE record #>> '{status}' = 'erasure_pending' \
              ORDER BY accepted_at, account_authority_id, account_id, status_seq LIMIT $1",
         )
         .bind::<BigInt, _>(i64::from(limit))
-        .load::<RecordRow>(&mut *conn)
+        .load::<RecordRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter().map(|row| decode_record(&row)).collect()
@@ -314,7 +314,7 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
         account_id: &arkret_wire::AccountId,
         status_seq: u64,
     ) -> PersistenceResult<Option<AccountStatusReceipt>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT record, receipt FROM account_status_replica_records \
              WHERE account_authority_id = $1 AND account_id = $2 AND status_seq = $3",
@@ -326,7 +326,7 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
                 "account-status sequence exceeds PostgreSQL bigint".to_owned(),
             )
         })?)
-        .get_result::<RecordRow>(&mut *conn)
+        .get_result::<RecordRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -525,7 +525,7 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
         account_id: &arkret_wire::AccountId,
         limit: usize,
     ) -> PersistenceResult<Vec<arkret_wire::DidCoreId>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT DISTINCT service_id FROM account_status_affected_services \
              WHERE account_id = $1 ORDER BY service_id LIMIT $2",
@@ -536,7 +536,7 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
                 "account-status affected-service read limit exceeds PostgreSQL bigint".to_owned(),
             )
         })?)
-        .load::<AffectedServiceRow>(&mut *conn)
+        .load::<AffectedServiceRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()

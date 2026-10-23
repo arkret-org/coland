@@ -5,9 +5,10 @@ use coland_storage::{
     AppletWidgetInstallSelector, AppletWidgetTokenGateSelector, AppletWidgetTokenInvalidation,
     AppletWidgetTokenRecord, PersistenceError, PersistenceResult,
 };
+use diesel::sql_query;
 use diesel::sql_types::{Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension as _, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
 #[derive(diesel::QueryableByName)]

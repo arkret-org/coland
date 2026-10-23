@@ -18,9 +18,7 @@ impl HandleReleaseStore for PgHandleReleaseStore {
         localpart: &str,
         released_at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "INSERT INTO handle_releases (localpart, released_at) \
              VALUES ($1, $2) \
@@ -28,7 +26,7 @@ impl HandleReleaseStore for PgHandleReleaseStore {
         )
         .bind::<Text, _>(localpart)
         .bind::<Timestamptz, _>(released_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)
@@ -37,11 +35,9 @@ impl HandleReleaseStore for PgHandleReleaseStore {
     async fn snapshot_all(
         &self,
     ) -> PersistenceResult<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("SELECT localpart, released_at FROM handle_releases ORDER BY localpart")
-            .load::<HandleReleaseRow>(&mut *conn)
+            .load::<HandleReleaseRow>(&mut conn)
             .await
             .map(|rows| {
                 rows.into_iter()
@@ -64,15 +60,13 @@ pub struct PgRetentionPolicyStore {
 #[async_trait]
 impl RetentionPolicyStore for PgRetentionPolicyStore {
     async fn get(&self, realm_id: &str) -> PersistenceResult<Option<RetentionPolicyRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT realm_id, ttl_seconds, updated_by, updated_at \
              FROM retention_policies WHERE realm_id = $1",
         )
         .bind::<Text, _>(realm_id)
-        .get_result::<RetentionPolicyRow>(&mut *conn)
+        .get_result::<RetentionPolicyRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(RetentionPolicyRecord::from))
@@ -80,9 +74,7 @@ impl RetentionPolicyStore for PgRetentionPolicyStore {
     }
 
     async fn put(&self, record: &RetentionPolicyRecord) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "INSERT INTO retention_policies (realm_id, ttl_seconds, updated_by, updated_at) \
              VALUES ($1, $2, $3, $4) \
@@ -95,21 +87,19 @@ impl RetentionPolicyStore for PgRetentionPolicyStore {
         .bind::<BigInt, _>(record.ttl_seconds)
         .bind::<Jsonb, _>(&record.updated_by)
         .bind::<Timestamptz, _>(record.updated_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<RetentionPolicyRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT realm_id, ttl_seconds, updated_by, updated_at \
              FROM retention_policies ORDER BY realm_id",
         )
-        .load::<RetentionPolicyRow>(&mut *conn)
+        .load::<RetentionPolicyRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(RetentionPolicyRecord::from).collect())
         .map_err(PersistenceError::database)
@@ -142,15 +132,13 @@ pub struct PgRetentionTombstoneStore {
 #[async_trait]
 impl RetentionTombstoneStore for PgRetentionTombstoneStore {
     async fn get(&self, event_id: &str) -> PersistenceResult<Option<RetentionTombstoneRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT event_id, realm_id, reason, policy_ttl_seconds, expired_at, tombstoned_at, sealed \
              FROM retention_tombstones WHERE event_id = $1",
         )
         .bind::<Binary, _>(ids::event_token_part_or_schema_violation(event_id, "event")?.to_vec())
-        .get_result::<RetentionTombstoneRow>(&mut *conn)
+        .get_result::<RetentionTombstoneRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(RetentionTombstoneRecord::from))
@@ -233,14 +221,12 @@ impl RetentionTombstoneStore for PgRetentionTombstoneStore {
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<RetentionTombstoneRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT event_id, realm_id, reason, policy_ttl_seconds, expired_at, tombstoned_at, sealed \
              FROM retention_tombstones ORDER BY event_id",
         )
-        .load::<RetentionTombstoneRow>(&mut *conn)
+        .load::<RetentionTombstoneRow>(&mut conn)
         .await
         .map(|rows| {
             rows.into_iter()
@@ -289,9 +275,7 @@ pub struct PgOrganizationStore {
 #[async_trait]
 impl OrganizationStore for PgOrganizationStore {
     async fn get(&self, organization_id: &str) -> PersistenceResult<Option<OrganizationRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT organization_id, handle, display_name, source_refs, \
                     policy_revision, verified, members, member_count, created_by, created_at, \
@@ -299,7 +283,7 @@ impl OrganizationStore for PgOrganizationStore {
              FROM organizations WHERE organization_id = $1",
         )
         .bind::<Text, _>(organization_id)
-        .get_result::<OrganizationRow>(&mut *conn)
+        .get_result::<OrganizationRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(OrganizationRecord::from))
@@ -307,9 +291,7 @@ impl OrganizationStore for PgOrganizationStore {
     }
 
     async fn put(&self, record: &OrganizationRecord) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let members = serde_json::to_value(record.members.iter().collect::<Vec<_>>())
             .unwrap_or_else(|_| Value::Array(Vec::new()));
         let member_count = i64::try_from(record.member_count).unwrap_or(i64::MAX);
@@ -342,23 +324,21 @@ impl OrganizationStore for PgOrganizationStore {
         .bind::<Jsonb, _>(Value::String(record.created_by.to_string()))
         .bind::<Timestamptz, _>(record.created_at)
         .bind::<Timestamptz, _>(record.updated_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)
     }
 
     async fn list(&self) -> PersistenceResult<Vec<OrganizationRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT organization_id, handle, display_name, source_refs, \
                     policy_revision, verified, members, member_count, created_by, created_at, \
                     updated_at \
              FROM organizations ORDER BY organization_id",
         )
-        .load::<OrganizationRow>(&mut *conn)
+        .load::<OrganizationRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(OrganizationRecord::from).collect())
         .map_err(PersistenceError::database)
@@ -426,9 +406,7 @@ impl RealmOrganizationStore for PgRealmOrganizationStore {
         realm_id: &str,
         organization_id: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "INSERT INTO realm_owning_organizations (realm_id, organization_id, linked_at) \
              VALUES ($1, $2, NOW()) \
@@ -436,7 +414,7 @@ impl RealmOrganizationStore for PgRealmOrganizationStore {
         )
         .bind::<Text, _>(realm_id)
         .bind::<Text, _>(organization_id)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)
@@ -445,14 +423,12 @@ impl RealmOrganizationStore for PgRealmOrganizationStore {
     async fn snapshot_all(
         &self,
     ) -> PersistenceResult<Vec<(String, BTreeSet<arkret_wire::DidCoreId>)>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT realm_id, organization_id FROM realm_owning_organizations \
              ORDER BY realm_id, organization_id",
         )
-        .load::<RealmOrganizationRow>(&mut *conn)
+        .load::<RealmOrganizationRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         let mut out = BTreeMap::<String, BTreeSet<arkret_wire::DidCoreId>>::new();
@@ -513,9 +489,7 @@ impl RealmOrganizationStatementStore for PgRealmOrganizationStatementStore {
         }).await.map_err(crate::PgTransactionError::into_persistence)
     }
     async fn put(&self, record: &RealmOrganizationStatementRecord) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let control_scopes = serde_json::to_value(&record.control_scopes)
             .unwrap_or_else(|_| Value::Array(Vec::new()));
         sql_query(
@@ -555,16 +529,14 @@ impl RealmOrganizationStatementStore for PgRealmOrganizationStatementStore {
         .bind::<Nullable<Text>, _>(&record.delegation_ref)
         .bind::<Text, _>(&record.issuer_role)
         .bind::<Timestamptz, _>(record.updated_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<RealmOrganizationStatementRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT realm_id, organization_id, relationship, statement_id, status, control_scopes, \
                     issued_at, not_before, expires_at, supersedes_statement_id, \
@@ -573,7 +545,7 @@ impl RealmOrganizationStatementStore for PgRealmOrganizationStatementStore {
              FROM realm_organizations \
              ORDER BY realm_id, organization_id, relationship",
         )
-        .load::<RealmOrganizationStatementRow>(&mut *conn)
+        .load::<RealmOrganizationStatementRow>(&mut conn)
         .await
         .map(|rows| {
             rows.into_iter()

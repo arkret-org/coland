@@ -8,8 +8,9 @@ use arkret_signatures::media::VerifiedCallParticipant;
 use arkret_wire::{CallId, DidUrl, Event, RealmCommit, RealmId};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{Jsonb, Nullable, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 
 fn unavailable(e: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!(

@@ -19,8 +19,9 @@ use arkret_wire::{
 };
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Binary, Jsonb, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 use crate::capability_grant_current_results::{CapabilityGrantCurrentResultReadRow, decode_row};

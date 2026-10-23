@@ -282,9 +282,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
             .target_keypackage_ref
             .as_ref()
             .map(|value| value.as_str());
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         // A Device belongs to the complete Account or Realm Actor, whereas an
         // Agent has its own principal and stores its package under its controller.
         // An exact-reference command cannot fall back to another package.
@@ -304,7 +302,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
         .bind::<Nullable<Jsonb>,_>(owner)
         .bind::<diesel::sql_types::Array<Text>,_>(devices)
         .bind::<Nullable<Text>,_>(reference)
-        .load::<MlsKeyPackagePgRow>(&mut *conn).await.map_err(PersistenceError::database)?
+        .load::<MlsKeyPackagePgRow>(&mut conn).await.map_err(PersistenceError::database)?
         .into_iter().map(validated_keypackage_row).collect()
     }
     async fn put(&self, record: &MlsKeyPackageRow) -> PersistenceResult<bool> {
@@ -333,9 +331,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
     }
 
     async fn get(&self, id: &str) -> PersistenceResult<Option<MlsKeyPackageRow>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
              "SELECT id, keypackage_ref, keypackage_digest, owner_actor_id, effective_scope, actor_id, device_id, endpoint_verification_method, \
              key_package_bytes, capabilities, capabilities_digest, \
@@ -345,7 +341,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
              FROM mls_key_packages WHERE id = $1",
         )
         .bind::<Text, _>(id)
-        .get_result::<MlsKeyPackagePgRow>(&mut *conn)
+        .get_result::<MlsKeyPackagePgRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -357,9 +353,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
         &self,
         keypackage_ref: &str,
     ) -> PersistenceResult<Option<MlsKeyPackageRow>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
              "SELECT id, keypackage_ref, keypackage_digest, owner_actor_id, effective_scope, actor_id, device_id, endpoint_verification_method, \
              key_package_bytes, capabilities, capabilities_digest, \
@@ -369,7 +363,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
              FROM mls_key_packages WHERE keypackage_ref = $1",
         )
         .bind::<Text, _>(keypackage_ref)
-        .get_result::<MlsKeyPackagePgRow>(&mut *conn)
+        .get_result::<MlsKeyPackagePgRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -1102,9 +1096,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<MlsKeyPackageRow>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
              "SELECT id, keypackage_ref, keypackage_digest, owner_actor_id, effective_scope, actor_id, device_id, endpoint_verification_method, \
              key_package_bytes, capabilities, capabilities_digest, \
@@ -1113,7 +1105,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
              claim_expires_at_unix_ms, consumed_at, created_at \
              FROM mls_key_packages ORDER BY created_at ASC, id ASC",
         )
-        .load::<MlsKeyPackagePgRow>(&mut *conn)
+        .load::<MlsKeyPackagePgRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()
@@ -1128,9 +1120,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
         if matches!(mls_group_id, "revoked" | "retired") {
             return Ok(Vec::new());
         }
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
              "SELECT id, keypackage_ref, keypackage_digest, owner_actor_id, effective_scope, actor_id, device_id, endpoint_verification_method, \
              key_package_bytes, capabilities, capabilities_digest, \
@@ -1141,7 +1131,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
              ORDER BY claimed_at ASC NULLS FIRST, id ASC",
         )
         .bind::<Text, _>(mls_group_id)
-        .load::<MlsKeyPackagePgRow>(&mut *conn)
+        .load::<MlsKeyPackagePgRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()
@@ -1153,7 +1143,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
 async fn insert_peer_claim(
     conn: &mut diesel_async::AsyncPgConnection,
     record: &PeerKeyPackageClaimLedgerRecord,
-) -> Result<usize, diesel::result::Error> {
+) -> Result<usize, horme::Error> {
     sql_query(
         "INSERT INTO peer_keypackage_claims \
          (source_id, claim_request_id, request_digest, key_package_use, keypackage_id, outcome, terminal_receipt, consume_receipt, claim_expires_at_unix_ms, expires_at, state, updated_at) \
@@ -1179,7 +1169,7 @@ async fn insert_peer_claim(
 async fn insert_peer_claim_strict(
     conn: &mut diesel_async::AsyncPgConnection,
     record: &PeerKeyPackageClaimLedgerRecord,
-) -> Result<(), diesel::result::Error> {
+) -> Result<(), horme::Error> {
     sql_query(
         "INSERT INTO peer_keypackage_claims \
          (source_id, claim_request_id, request_digest, key_package_use, keypackage_id, outcome, terminal_receipt, consume_receipt, claim_expires_at_unix_ms, expires_at, state, updated_at) \

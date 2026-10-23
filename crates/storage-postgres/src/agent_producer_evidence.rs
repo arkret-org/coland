@@ -4,7 +4,8 @@ use arkret_wire::{Event, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_query;
 use diesel::sql_types::{Jsonb, Text};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::RunQueryDsl;
 
 pub(crate) async fn retain_in_connection(
     conn: &mut AsyncPgConnection,

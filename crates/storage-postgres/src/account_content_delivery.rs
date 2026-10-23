@@ -3,8 +3,9 @@ use arkret_models_collaboration::governance::operation_wire::AgentPolicyOperatio
 use arkret_wire::{AccountId, ActorId, CapabilityActionId, CommittedEventView, DidCoreId};
 use coland_storage::{AccountContentDeliveryGuard, PersistenceError, PersistenceResult};
 use diesel::sql_types::Text;
-use diesel::{OptionalExtension as _, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 
 type Connection = diesel_async::pooled_connection::deadpool::Object<AsyncPgConnection>;
 

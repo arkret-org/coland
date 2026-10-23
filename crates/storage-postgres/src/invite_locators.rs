@@ -144,12 +144,10 @@ impl InviteLocatorStore for PgInviteLocatorStore {
         locator_id: &str,
         now: chrono::DateTime<Utc>,
     ) -> PersistenceResult<Option<InviteLocatorRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query("UPDATE invite_locators SET revoked_at = COALESCE(revoked_at, $3) WHERE locator_id = $1 AND subject_id = $2 AND consumed_at IS NULL RETURNING record_payload, one_time_use, revoked_at, consumed_at")
             .bind::<Text, _>(locator_id).bind::<Text, _>(subject_id).bind::<Timestamptz, _>(now)
-            .get_result::<LocatorRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+            .get_result::<LocatorRow>(&mut conn).await.optional().map_err(PersistenceError::database)?;
         row.map(decode).transpose()
     }
 }

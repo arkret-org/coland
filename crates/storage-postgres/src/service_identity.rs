@@ -2,7 +2,7 @@ use arkret_identity::service_identity::StoredDidCoreIdentity;
 
 use super::{
     Jsonb, OptionalExtension, PersistenceError, PersistenceResult, PgPool, QueryableByName,
-    RunQueryDsl, SINGLETON_ID, ServiceIdentityStore, Text, Value, async_trait, pg_conn, sql_query,
+    RunQueryDsl, SINGLETON_ID, ServiceIdentityStore, Text, Value, async_trait, sql_query,
 };
 pub struct PgServiceIdentityStore {
     pub pool: PgPool,
@@ -28,12 +28,10 @@ impl TryFrom<ServiceIdentityRow> for StoredDidCoreIdentity {
 #[async_trait]
 impl ServiceIdentityStore for PgServiceIdentityStore {
     async fn get(&self) -> PersistenceResult<Option<StoredDidCoreIdentity>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("SELECT identity FROM service_identity WHERE id = $1")
             .bind::<Text, _>(SINGLETON_ID)
-            .get_result::<ServiceIdentityRow>(&mut *conn)
+            .get_result::<ServiceIdentityRow>(&mut conn)
             .await
             .optional()
             .map_err(PersistenceError::database)?
@@ -47,16 +45,14 @@ impl ServiceIdentityStore for PgServiceIdentityStore {
             .map_err(|error| PersistenceError::Internal(error.to_string()))?;
         let value = serde_json::to_value(&identity)
             .map_err(|error| PersistenceError::Internal(error.to_string()))?;
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "INSERT INTO service_identity (id, identity) VALUES ($1, $2) \
              ON CONFLICT (id) DO UPDATE SET identity = EXCLUDED.identity",
         )
         .bind::<Text, _>(SINGLETON_ID)
         .bind::<Jsonb, _>(&value)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)

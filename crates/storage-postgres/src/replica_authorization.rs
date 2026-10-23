@@ -10,9 +10,9 @@ use arkret_models_collaboration::governance::grant_constraint::{
 };
 use arkret_wire::{ActorId, CurrentSelector, GrantId, RealmId, ScopeRef, TypedCurrentRow};
 use coland_storage::{AuthorizationOperation, OperationFacts, PersistenceError, PersistenceResult};
-use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 
 fn invalid(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::SchemaViolation(format!("replica authorization row: {detail}"))
@@ -302,7 +302,7 @@ pub(crate) async fn verified_head(
     conn: &mut AsyncPgConnection,
     stream: &arkret_wire::CommitStreamRef,
 ) -> PersistenceResult<Option<arkret_wire::CommitStreamHead>> {
-    use diesel::OptionalExtension as _;
+    use horme::OptionalExtension as _;
     diesel::sql_query("SELECT head_commit_id,head_stream_position FROM replica_authorization_cuts WHERE realm_id=$1 AND source_stream_ref=$2")
         .bind::<Text, _>(stream.realm_id().as_str()).bind::<Jsonb, _>(serde_json::to_value(stream).map_err(invalid)?)
         .get_result::<CutRow>(conn).await.optional().map_err(PersistenceError::database)?.map(|row| Ok(arkret_wire::CommitStreamHead { stream_ref:stream.clone(), commit_id:row.head_commit_id.parse().map_err(invalid)?, stream_position:u64::try_from(row.head_stream_position).map_err(invalid)? })).transpose()

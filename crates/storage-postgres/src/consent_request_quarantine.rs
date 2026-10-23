@@ -12,9 +12,10 @@ use coland_storage::{
     ConsentRequestQuarantineOutcome, ConsentRequestQuarantineStore, PersistenceError,
     PersistenceResult,
 };
+use diesel::sql_query;
 use diesel::sql_types::{BigInt, Bool, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension as _, sql_query};
-use diesel_async::{AsyncConnection, RunQueryDsl};
+use diesel_async::AsyncConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::{Value, json};
 
 use crate::accounts::compare_account_data_in_transaction;

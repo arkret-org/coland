@@ -370,16 +370,14 @@ impl AppletStore for PgAppletStore {
         applet_id: &str,
         target_station_id: &str,
     ) -> PersistenceResult<Option<Value>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT record FROM applet_managed_identities \
              WHERE applet_id = $1 AND target_station_id = $2",
         )
         .bind::<Text, _>(applet_id)
         .bind::<Text, _>(target_station_id)
-        .get_result::<AppletRegistrationRow>(&mut *conn)
+        .get_result::<AppletRegistrationRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(Value::from))
@@ -392,16 +390,14 @@ impl AppletStore for PgAppletStore {
         service_id: &str,
         effective_scope_key: &str,
     ) -> PersistenceResult<Option<Value>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(applet_registration_select_sql(
             "WHERE applet_id = $1 AND effective_scope_key = $2 AND service_id = $3",
         ))
         .bind::<Text, _>(applet_id)
         .bind::<Text, _>(effective_scope_key)
         .bind::<Text, _>(service_id)
-        .get_result::<AppletRegistrationRow>(&mut *conn)
+        .get_result::<AppletRegistrationRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(Value::from))
@@ -579,13 +575,11 @@ impl AppletStore for PgAppletStore {
     }
 
     async fn list(&self) -> PersistenceResult<Vec<Value>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(applet_registration_select_sql(
             "ORDER BY record->>'registered_at', applet_id, effective_scope_key",
         ))
-        .load::<AppletRegistrationRow>(&mut *conn)
+        .load::<AppletRegistrationRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(Value::from).collect())
         .map_err(PersistenceError::database)
@@ -596,9 +590,7 @@ impl AppletStore for PgAppletStore {
         record: AppletTransactionReplayRecord,
     ) -> PersistenceResult<AppletTransactionReplayBegin> {
         validate_delivery_binding(&record)?;
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let inserted = sql_query(
             "INSERT INTO applet_transactions \
              (applet_id, source_id, idempotency_key, delivery_authentication_record, \
@@ -615,7 +607,7 @@ impl AppletStore for PgAppletStore {
         .bind::<Nullable<Jsonb>, _>(&record.outcome)
         .bind::<Timestamptz, _>(record.received_at)
         .bind::<Nullable<Timestamptz>, _>(record.completed_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         if inserted == 1 {
@@ -625,7 +617,7 @@ impl AppletStore for PgAppletStore {
             .bind::<Text, _>(record.applet_id.as_str())
             .bind::<Text, _>(&record.source_id)
             .bind::<Text, _>(&record.idempotency_key)
-            .get_result::<AppletTransactionReplayRow>(&mut *conn)
+            .get_result::<AppletTransactionReplayRow>(&mut conn)
             .await
             .optional()
             .map_err(PersistenceError::database)?
@@ -655,9 +647,7 @@ impl AppletStore for PgAppletStore {
         idempotency_key: &str,
         outcome: Value,
     ) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "UPDATE applet_transactions \
              SET outcome = $4, completed_at = NOW() \
@@ -667,7 +657,7 @@ impl AppletStore for PgAppletStore {
         .bind::<Text, _>(source_id)
         .bind::<Text, _>(idempotency_key)
         .bind::<Jsonb, _>(&outcome)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map_err(PersistenceError::database)
         .and_then(|updated| {
@@ -741,15 +731,13 @@ impl AppletStore for PgAppletStore {
         &self,
         subject_key: &str,
     ) -> PersistenceResult<Option<AppletAuthoringPreviewRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT subject_key, basis_digest, request_digest, signed_request, issued_at, expires_at \
              FROM applet_authoring_previews WHERE subject_key = $1 AND status = 'current'",
         )
         .bind::<Text, _>(subject_key)
-        .get_result::<AppletAuthoringPreviewRow>(&mut *conn)
+        .get_result::<AppletAuthoringPreviewRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(AppletAuthoringPreviewRecord::from))

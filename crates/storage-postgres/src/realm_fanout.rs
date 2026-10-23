@@ -36,9 +36,10 @@ use coland_storage::{
     FederationOutboxRecord, PersistenceError, PersistenceResult, RealmFanoutAuthorityWitness,
     RealmFanoutBinding, RealmFanoutOutboxInput, ids,
 };
+use diesel::sql_query;
 use diesel::sql_types::{BigInt, Binary, Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension as _, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
 use crate::PgTransactionError;

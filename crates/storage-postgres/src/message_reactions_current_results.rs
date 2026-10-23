@@ -21,9 +21,9 @@ use arkret_models_collaboration::events_payloads::reaction::{
 };
 use arkret_models_collaboration::exact_current_results::CanonicalEventDot;
 use coland_storage::{ConflictCode, PersistenceError, PersistenceResult};
-use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
 #[derive(diesel::QueryableByName)]

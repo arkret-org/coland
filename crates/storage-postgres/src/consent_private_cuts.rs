@@ -1,9 +1,10 @@
 //! Durable reject-only high water for verified private proxy responses.
 use arkret_models_collaboration::consent_private::*;
 use coland_storage::{PersistenceError, PersistenceResult};
+use diesel::sql_query;
 use diesel::sql_types::{BigInt, Jsonb, Text};
-use diesel::{OptionalExtension as _, sql_query};
-use diesel_async::{AsyncConnection as _, RunQueryDsl};
+use diesel_async::AsyncConnection as _;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::{Value, json};
 
 use crate::{PgConsentCurrentStore, PgTransactionError, pg_conn};

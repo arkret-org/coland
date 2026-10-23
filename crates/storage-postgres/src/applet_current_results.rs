@@ -4,9 +4,10 @@
 use arkret_models_integration::AppletRegistrationPayload;
 use arkret_wire::{Event, EventKind, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
+use diesel::sql_query;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension as _, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 
 // Both operands have already been decoded as the closed SDK registration
 // payload. Its controller proof authenticates a snapshot but is not a security

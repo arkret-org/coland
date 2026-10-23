@@ -2,6 +2,7 @@
 use arkret_models_collaboration::events_payloads::PolicyActionDocument;
 use arkret_wire::CapabilityActionId;
 use coland_storage::{PersistenceError, PersistenceResult};
+use horme::RunQueryDsl;
 
 pub(crate) fn require_registered_carrier(action: CapabilityActionId) -> PersistenceResult<()> {
     let descriptor = arkret_schema::capability_action_descriptor(action);
@@ -101,9 +102,8 @@ pub(crate) async fn current_operation_quorum(
     facts: &coland_storage::OperationFacts,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<Option<u64>> {
-    use diesel::OptionalExtension;
     use diesel::sql_types::Text;
-    use diesel_async::RunQueryDsl;
+    use horme::{OptionalExtension, RunQueryDsl};
     let rows=diesel::sql_query("SELECT subject_kind,subject_id,value FROM policy_action_current_results WHERE realm_id=$1 ORDER BY subject_kind,subject_id,action_key")
         .bind::<Text,_>(realm.as_str()).load::<ConfigRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut matched = Vec::new();
@@ -198,7 +198,6 @@ async fn scope_contains(
 ) -> PersistenceResult<bool> {
     use arkret_wire::ResourceSelectorKind;
     use diesel::sql_types::Text;
-    use diesel_async::RunQueryDsl;
     if target.realm_id.as_ref().is_some_and(|id| id != realm) {
         return Ok(false);
     }

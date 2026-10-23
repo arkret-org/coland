@@ -124,11 +124,9 @@ impl SyncCursorStore for PgSyncCursorStore {
         retention::freeze(&self.pool).await
     }
     async fn account_global_watermark(&self) -> PersistenceResult<i64> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("SELECT revision FROM account_global_clock WHERE singleton")
-            .get_result::<SummaryWatermarkRow>(&mut *conn)
+            .get_result::<SummaryWatermarkRow>(&mut conn)
             .await
             .map(|row| row.revision)
             .map_err(PersistenceError::database)
@@ -139,9 +137,7 @@ impl SyncCursorStore for PgSyncCursorStore {
         channel: &str,
         watermark: i64,
     ) -> PersistenceResult<i64> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT COALESCE(MAX(channel_position), 0)::bigint AS revision \
              FROM account_global_versions \
@@ -150,7 +146,7 @@ impl SyncCursorStore for PgSyncCursorStore {
         .bind::<Text, _>(actor_key)
         .bind::<Text, _>(channel)
         .bind::<BigInt, _>(watermark)
-        .get_result::<SummaryWatermarkRow>(&mut *conn)
+        .get_result::<SummaryWatermarkRow>(&mut conn)
         .await
         .map(|row| row.revision)
         .map_err(PersistenceError::database)
@@ -203,11 +199,9 @@ impl SyncCursorStore for PgSyncCursorStore {
     }
 
     async fn account_summary_watermark(&self) -> PersistenceResult<i64> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("SELECT revision FROM account_summary_clock WHERE singleton")
-            .get_result::<SummaryWatermarkRow>(&mut *conn)
+            .get_result::<SummaryWatermarkRow>(&mut conn)
             .await
             .map(|row| row.revision)
             .map_err(PersistenceError::database)
@@ -329,12 +323,10 @@ impl SyncCursorStore for PgSyncCursorStore {
     }
 
     async fn delete(&self, handle: &str) -> PersistenceResult<bool> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM sync_cursor_handles WHERE id = $1")
             .bind::<Text, _>(handle)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|rows| rows > 0)
             .map_err(PersistenceError::database)
@@ -383,16 +375,14 @@ impl SyncCursorStore for PgSyncCursorStore {
         &self,
         now: chrono::DateTime<Utc>,
     ) -> PersistenceResult<Vec<CursorRevocation>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT cursor_digest, account_id, device_id, session_id, scope, reason_code, revoked_at, expires_at \
              FROM sync_cursor_revocations WHERE expires_at > $1 \
              ORDER BY revoked_at ASC",
         )
         .bind::<Timestamptz, _>(now)
-        .load::<CursorRevocationRow>(&mut *conn)
+        .load::<CursorRevocationRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         Ok(rows.into_iter().map(CursorRevocation::from).collect())

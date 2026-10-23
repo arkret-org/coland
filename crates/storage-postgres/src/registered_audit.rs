@@ -15,9 +15,10 @@ use coland_storage::{
     AuthorityCommitTransaction, EventBatchCommitRequest, PersistenceError, PersistenceResult,
     RegisteredAuditCommit, RegisteredAuditOutcome, RegisteredAuditResult, SelfExactCurrentRead,
 };
+use diesel::sql_query;
 use diesel::sql_types::{Binary, Jsonb, Text};
-use diesel::{OptionalExtension, sql_query};
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection, AsyncPgConnection};
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 use crate::PgTransactionError;

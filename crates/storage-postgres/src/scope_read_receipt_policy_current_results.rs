@@ -5,7 +5,8 @@ use arkret_models_collaboration::events_payloads::ScopeReadReceiptPolicyCurrent;
 use arkret_wire::{CurrentRevision, CurrentSelector, Event, EventKind, RealmCommit, ScopeRef};
 use chrono::{DateTime, Utc};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::RunQueryDsl;
 
 use crate::{PersistenceError, PersistenceResult};
 

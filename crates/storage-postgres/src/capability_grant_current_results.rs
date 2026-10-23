@@ -1545,14 +1545,14 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
         realm_id: &RealmId,
         grant_id: &GrantId,
     ) -> PersistenceResult<Option<CapabilityGrantCurrentResultRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value \
              FROM capability_grant_current_results WHERE realm_id=$1 AND grant_id=$2",
         )
         .bind::<Text, _>(realm_id.as_str())
         .bind::<Text, _>(grant_id.as_str())
-        .get_result::<CapabilityGrantCurrentResultReadRow>(&mut *conn)
+        .get_result::<CapabilityGrantCurrentResultReadRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -1564,13 +1564,13 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
         &self,
         realm_id: &RealmId,
     ) -> PersistenceResult<Vec<CapabilityGrantCurrentResultRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value \
              FROM capability_grant_current_results WHERE realm_id=$1 ORDER BY grant_id ASC",
         )
         .bind::<Text, _>(realm_id.as_str())
-        .load::<CapabilityGrantCurrentResultReadRow>(&mut *conn)
+        .load::<CapabilityGrantCurrentResultReadRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()
@@ -1579,12 +1579,12 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<CapabilityGrantCurrentResultRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value \
              FROM capability_grant_current_results ORDER BY realm_id ASC,grant_id ASC",
         )
-        .load::<CapabilityGrantCurrentResultReadRow>(&mut *conn)
+        .load::<CapabilityGrantCurrentResultReadRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()
@@ -1597,14 +1597,14 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
         subject: &ActorId,
     ) -> PersistenceResult<Vec<CapabilityGrantCurrentResultRecord>> {
         let subject = serde_json::to_value(subject).map_err(PersistenceError::database)?;
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value \
              FROM capability_grant_current_results WHERE status='active' AND value->'subject'=$1 \
              ORDER BY realm_id ASC,grant_id ASC",
         )
         .bind::<Jsonb, _>(&subject)
-        .load::<CapabilityGrantCurrentResultReadRow>(&mut *conn)
+        .load::<CapabilityGrantCurrentResultReadRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()
@@ -1665,7 +1665,7 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
             format!("fixture-root-commit:{realm_id}").as_bytes(),
         ));
         let controller = serde_json::to_value(controller).map_err(PersistenceError::database)?;
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "INSERT INTO realm_authority_root_current_results \
              (realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref,\
@@ -1677,7 +1677,7 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
         .bind::<Jsonb, _>(&controller)
         .bind::<Text, _>(authority_event_ref.as_str())
         .bind::<Text, _>(commit_id.as_str())
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         Ok(())
@@ -1688,13 +1688,13 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
         &self,
         grant: &coland_storage::TestCapabilityGrant,
     ) -> PersistenceResult<GrantId> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let root = sql_query(
             "SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,\
              authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1",
         )
         .bind::<Text, _>(grant.realm_id.as_str())
-        .get_result::<RealmAuthorityRootReadRow>(&mut *conn)
+        .get_result::<RealmAuthorityRootReadRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)
         .and_then(decode_authority_root)?;
@@ -1751,7 +1751,7 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
         .bind::<Text, _>(commit_id.as_str())
         .bind::<Jsonb, _>(&stream_ref)
         .bind::<Jsonb, _>(&value)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         Ok(grant_id)
@@ -1764,7 +1764,7 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
         grant_id: &GrantId,
         status: CapabilityGrantCurrentStatus,
     ) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "UPDATE capability_grant_current_results \
              SET status=$3,value=jsonb_set(value,'{status}',to_jsonb($3::text)) \
@@ -1773,7 +1773,7 @@ impl CapabilityGrantCurrentResultStore for PgCapabilityGrantCurrentResultStore {
         .bind::<Text, _>(realm_id.as_str())
         .bind::<Text, _>(grant_id.as_str())
         .bind::<Text, _>(status.as_str())
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         Ok(())

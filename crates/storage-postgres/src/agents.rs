@@ -200,9 +200,7 @@ impl AgentParticipationStore for PgAgentParticipationStore {
     }
 
     async fn list_selections(&self, agent_id: &str) -> PersistenceResult<Vec<Value>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT agent_id, scope_kind, scope_key, realm_id, scope, version, reply_message, \
              reaction_add, reaction_remove, accept_third_party_mention, act_on_behalf \
@@ -210,7 +208,7 @@ impl AgentParticipationStore for PgAgentParticipationStore {
              WHERE agent_id = $1 ORDER BY scope_key",
         )
         .bind::<Text, _>(agent_id)
-        .load::<AgentParticipationRow>(&mut *conn)
+        .load::<AgentParticipationRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(Value::from).collect())
         .map_err(PersistenceError::database)
@@ -409,13 +407,11 @@ impl AgentStore for PgAgentStore {
             #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Jsonb>)]
             scope_custody_ref: Option<Value>,
         }
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("UPDATE agent_pairing_receipts SET activation_state = 'cancelled' WHERE authorize_event_ref = $1 AND activation_state = 'awaiting_source_commit' AND expires_at <= NOW()")
-            .bind::<Text,_>(event_id).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+            .bind::<Text,_>(event_id).execute(&mut conn).await.map_err(PersistenceError::database)?;
         let row = sql_query("SELECT agent_id, controller_principal_id, request_digest, authorize_event_ref, activation_state, scope_custody_ref, pairing_request_id, approval_request_id, runtime_key_binding_digest FROM agent_pairing_receipts WHERE authorize_event_ref = $1")
-            .bind::<Text,_>(event_id).get_result::<Receipt>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+            .bind::<Text,_>(event_id).get_result::<Receipt>(&mut conn).await.optional().map_err(PersistenceError::database)?;
         row.map(|row| {
             let activation_state = match row.activation_state.as_str() {
                 "awaiting_source_commit" => arkret_models_collaboration::agent_operations::AgentKeyPairActivationState::AwaitingSourceCommit,
@@ -476,25 +472,21 @@ impl AgentStore for PgAgentStore {
         after_id: &str,
         limit: usize,
     ) -> PersistenceResult<Vec<AgentPrincipalRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = agent_principals::table
             .filter(agent_principals::id.gt(after_id))
             .filter(agent_principals::approval_request_id.is_not_null())
             .order(agent_principals::id.asc())
             .limit(limit.min(128) as i64)
             .select(AgentPrincipalRow::as_select())
-            .load::<AgentPrincipalRow>(&mut *conn)
+            .load::<AgentPrincipalRow>(&mut conn)
             .await
             .map_err(PersistenceError::database)?;
         rows.into_iter().map(TryInto::try_into).collect()
     }
 
     async fn put(&self, principal: AgentPrincipalRecord) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let principal = AgentPrincipalRow::try_from(principal)?;
         let agent_id = principal.id.clone();
         let upsert = diesel::insert_into(agent_principals::table)
@@ -515,7 +507,7 @@ impl AgentStore for PgAgentStore {
                         .eq(&principal.controller_authorization_ref),
                 ),
         )
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         if affected == 1 {
@@ -528,13 +520,11 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn get(&self, agent_id: &str) -> PersistenceResult<Option<AgentPrincipalRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let record = agent_principals::table
             .find(agent_id)
             .select(AgentPrincipalRow::as_select())
-            .first::<AgentPrincipalRow>(&mut *conn)
+            .first::<AgentPrincipalRow>(&mut conn)
             .await
             .optional()
             .map_err(PersistenceError::database)?;
@@ -545,13 +535,11 @@ impl AgentStore for PgAgentStore {
         &self,
         pairing_request_id: &str,
     ) -> PersistenceResult<Option<AgentPrincipalRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let record = agent_principals::table
             .filter(agent_principals::pairing_request_id.eq(pairing_request_id))
             .select(AgentPrincipalRow::as_select())
-            .first::<AgentPrincipalRow>(&mut *conn)
+            .first::<AgentPrincipalRow>(&mut conn)
             .await
             .optional()
             .map_err(PersistenceError::database)?;
@@ -562,14 +550,12 @@ impl AgentStore for PgAgentStore {
         &self,
         controller_principal_id: &str,
     ) -> PersistenceResult<Vec<AgentPrincipalRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let records = agent_principals::table
             .filter(agent_principals::controller_principal_id.eq(controller_principal_id))
             .order(agent_principals::created_at.asc())
             .select(AgentPrincipalRow::as_select())
-            .load::<AgentPrincipalRow>(&mut *conn)
+            .load::<AgentPrincipalRow>(&mut conn)
             .await
             .map_err(PersistenceError::database)?;
         records.into_iter().map(TryInto::try_into).collect()
@@ -581,9 +567,7 @@ impl AgentStore for PgAgentStore {
         state: arkret_models_collaboration::agent_operations::AgentLifecycleState,
         changed_at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<bool> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let state = serde_json::to_value(state)
             .map_err(PersistenceError::database)?
             .as_str()
@@ -599,7 +583,7 @@ impl AgentStore for PgAgentStore {
                 agent_principals::state_changed_at.eq(changed_at),
                 agent_principals::updated_at.eq(changed_at),
             ))
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map_err(PersistenceError::database)?;
         Ok(updated > 0)
@@ -725,9 +709,7 @@ impl AgentStore for PgAgentStore {
         &self,
         intent: &AgentPairingCommitIntent,
     ) -> PersistenceResult<Option<AgentPrincipalRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         if intent.scope_custody_ref.is_none() {
             return Err(PersistenceError::SchemaViolation(
                 "Agent pairing lacks verifier-private scope custody".into(),
@@ -771,7 +753,7 @@ impl AgentStore for PgAgentStore {
             agent_principals::updated_at.eq(Utc::now()),
         ))
         .returning(AgentPrincipalRow::as_returning())
-        .get_result::<AgentPrincipalRow>(&mut *conn)
+        .get_result::<AgentPrincipalRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -783,9 +765,7 @@ impl AgentStore for PgAgentStore {
         agent_id: &str,
         approval_request_id: &str,
     ) -> PersistenceResult<bool> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         diesel::update(
             agent_principals::table
                 .filter(agent_principals::id.eq(agent_id))
@@ -797,7 +777,7 @@ impl AgentStore for PgAgentStore {
             agent_principals::approval_notification_id.eq(None::<Uuid>),
             agent_principals::updated_at.eq(Utc::now()),
         ))
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|rows| rows == 1)
         .map_err(PersistenceError::database)
@@ -807,9 +787,7 @@ impl AgentStore for PgAgentStore {
         &self,
         write: &AgentRuntimeApprovalWrite,
     ) -> PersistenceResult<Option<AgentPrincipalRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let approval_notification_id =
             ids::typed_uuid_part_expect_internal(&write.approval_notification_id);
         let runtime_key_request =
@@ -867,7 +845,7 @@ impl AgentStore for PgAgentStore {
             agent_principals::updated_at.eq(Utc::now()),
         ))
         .returning(AgentPrincipalRow::as_returning())
-        .get_result::<AgentPrincipalRow>(&mut *conn)
+        .get_result::<AgentPrincipalRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;

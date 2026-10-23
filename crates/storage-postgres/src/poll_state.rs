@@ -9,9 +9,9 @@ use arkret_models_collaboration::events_payloads::poll::PollContentBlock;
 use arkret_models_collaboration::poll::{PollPartition, VerifiedPollResponse};
 use arkret_wire::{CommittedEventRef, Event, EventId, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
-use diesel::OptionalExtension;
 use diesel::sql_types::{BigInt, Binary, Jsonb, Text};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 fn refusal(reason: &str) -> PersistenceError {

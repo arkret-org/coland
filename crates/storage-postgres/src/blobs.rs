@@ -52,9 +52,7 @@ pub(crate) async fn put_blob_if_absent_in_connection(
 #[async_trait]
 impl BlobStore for PgBlobStore {
     async fn get(&self, blob_ref: &str) -> PersistenceResult<Option<BlobRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT sha256, size_bytes, storage_backend, storage_key, media_type, filename, \
              realm_id, NULLIF(payload->'encryption', 'null'::jsonb) AS encryption, \
@@ -63,7 +61,7 @@ impl BlobStore for PgBlobStore {
              FROM blobs WHERE id = $1",
         )
         .bind::<Text, _>(blob_ref)
-        .get_result::<BlobRow>(&mut *conn)
+        .get_result::<BlobRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)
@@ -136,21 +134,17 @@ impl BlobStore for PgBlobStore {
     }
 
     async fn delete(&self, blob_ref: &str) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM blobs WHERE id = $1")
             .bind::<Text, _>(blob_ref)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|_| ())
             .map_err(PersistenceError::database)
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<BlobRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT sha256, size_bytes, storage_backend, storage_key, media_type, filename, \
              realm_id, NULLIF(payload->'encryption', 'null'::jsonb) AS encryption, \
@@ -158,7 +152,7 @@ impl BlobStore for PgBlobStore {
              uploaded_by AS uploaded_by, created_at \
              FROM blobs ORDER BY created_at ASC, id ASC",
         )
-        .load::<BlobRow>(&mut *conn)
+        .load::<BlobRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)
         .and_then(|rows| rows.into_iter().map(BlobRecord::try_from).collect())

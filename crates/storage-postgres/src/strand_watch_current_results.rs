@@ -5,9 +5,10 @@ use arkret_wire::{
     RealmId, ScopeRef, StrandId,
 };
 use coland_storage::{PersistenceError, PersistenceResult};
+use diesel::sql_query;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::{Value, json};
 
 pub(crate) const WATCH_HISTORY_SQL: &str = "SELECT EXISTS(SELECT 1 FROM canonical_events WHERE realm_id=$1 AND kind='ak.strand.watch.set' AND state='committed' AND envelope->'payload'->>'strand_id'=$2 AND envelope->'payload'->'watcher_actor_id'=$3::jsonb AND envelope->>'event_id'<>$4) AS present";

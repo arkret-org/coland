@@ -3,9 +3,9 @@
 use arkret_models_collaboration::events_payloads::moderation::FrankingProof;
 use arkret_wire::{ActorId, Event, EventId, EventKind, RealmId, ScopeRef};
 use coland_storage::{PersistenceError, PersistenceResult};
-use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Binary, Jsonb, Nullable, SmallInt, Text, Timestamptz};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 
 fn invalid(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!("signature_invalid: franking proof: {detail}"))

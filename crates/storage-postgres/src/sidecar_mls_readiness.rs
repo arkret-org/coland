@@ -1,8 +1,8 @@
 //! Endpoint readiness consumes formal delivery/claim evidence at the read cut.
 use arkret_wire::{ActorId, EventId, MlsWelcomeDelivery, MlsWelcomeRecipientEndpoint, ScopeRef};
+use diesel::QueryableByName;
 use diesel::sql_types::{Binary, Jsonb, Text};
-use diesel::{OptionalExtension, QueryableByName};
-use diesel_async::RunQueryDsl;
+use horme::{OptionalExtension, RunQueryDsl};
 
 #[derive(QueryableByName)]
 struct Evidence {

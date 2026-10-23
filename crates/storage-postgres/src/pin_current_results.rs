@@ -5,9 +5,9 @@ use arkret_models_collaboration::objects::productivity::{
 };
 use arkret_wire::{CommitStreamRef, EventKind, PinScope, ScopeRef};
 use coland_storage::{PersistenceError, PersistenceResult};
-use diesel::OptionalExtension;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 #[derive(diesel::QueryableByName)]

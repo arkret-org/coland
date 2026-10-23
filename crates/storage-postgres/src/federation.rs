@@ -192,7 +192,7 @@ impl FederationOutboxStore for PgFederationOutboxStore {
             #[diesel(sql_type = Text)]
             peer_id: String,
         }
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let peers = sql_query(
             "SELECT DISTINCT o.peer_id FROM federation_outbox o \
             JOIN event_federation_outbox link ON link.outbox_id=o.id \
@@ -201,7 +201,7 @@ impl FederationOutboxStore for PgFederationOutboxStore {
             AND (o.state='delivered' OR o.attempts>0) ORDER BY o.peer_id",
         )
         .bind::<Text, _>(actor.to_string())
-        .load::<Peer>(&mut *conn)
+        .load::<Peer>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         peers
@@ -226,7 +226,7 @@ impl FederationOutboxStore for PgFederationOutboxStore {
             #[diesel(sql_type = Timestamptz)]
             received_at: chrono::DateTime<chrono::Utc>,
         }
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT response_body->'package' AS package,created_at AS received_at \
             FROM idempotency_keys WHERE operation_id='coland://internal/idempotency' \
@@ -249,7 +249,7 @@ impl FederationOutboxStore for PgFederationOutboxStore {
             serde_json::to_value(ActorId::service(receipt.issuer_id.clone()))
                 .map_err(PersistenceError::database)?,
         )
-        .load::<Feedback>(&mut *conn)
+        .load::<Feedback>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()
@@ -266,14 +266,14 @@ impl FederationOutboxStore for PgFederationOutboxStore {
         &self,
         receipt_id: &str,
     ) -> PersistenceResult<Vec<FederationOutboxRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {OUTBOX_COLUMNS} FROM federation_outbox \
             WHERE endpoint='/_arkret/peer/erasure-receipts' \
               AND payload_json::jsonb#>>'{{package,receipt,receipt_id}}'=$1 ORDER BY peer_id"
         ))
         .bind::<Text, _>(receipt_id)
-        .load::<FederationOutboxRow>(&mut *conn)
+        .load::<FederationOutboxRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()
@@ -291,7 +291,7 @@ impl FederationOutboxStore for PgFederationOutboxStore {
             peer_id: String,
         }
         let realms: Vec<_> = realm_ids.iter().map(|id| id.as_str().to_owned()).collect();
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let peers = sql_query(
             "SELECT DISTINCT o.peer_id FROM federation_outbox o \
              JOIN event_federation_outbox link ON link.outbox_id=o.id \
@@ -301,7 +301,7 @@ impl FederationOutboxStore for PgFederationOutboxStore {
                AND (o.state='delivered' OR o.attempts>0) ORDER BY o.peer_id",
         )
         .bind::<sql_types::Array<Text>, _>(realms)
-        .load::<Peer>(&mut *conn)
+        .load::<Peer>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         peers
@@ -326,9 +326,7 @@ impl FederationOutboxStore for PgFederationOutboxStore {
         &self,
         claim: &FederationOutboxClaim,
     ) -> PersistenceResult<Vec<FederationOutboxRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         // Select-and-own in one statement. `FOR UPDATE SKIP LOCKED` is what
         // keeps two replicas off the same row; an expired `leased` row is
         // reclaimable so a crashed worker never strands its batch.
@@ -360,7 +358,7 @@ impl FederationOutboxStore for PgFederationOutboxStore {
         .bind::<Text, _>(&claim.lease_owner)
         .bind::<Text, _>(&claim.lease_token)
         .bind::<BigInt, _>(claim.lease_duration_secs)
-        .load::<FederationOutboxRow>(&mut *conn)
+        .load::<FederationOutboxRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         let mut records = rows
@@ -456,9 +454,7 @@ impl FederationOutboxStore for PgFederationOutboxStore {
         current_policy_version: &str,
         limit: usize,
     ) -> PersistenceResult<Vec<FederationOutboxRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(format!(
             "SELECT {OUTBOX_COLUMNS} FROM federation_outbox \
              WHERE state = 'policy_suppressed' \
@@ -467,7 +463,7 @@ impl FederationOutboxStore for PgFederationOutboxStore {
         ))
         .bind::<Text, _>(current_policy_version)
         .bind::<BigInt, _>(limit as i64)
-        .load::<FederationOutboxRow>(&mut *conn)
+        .load::<FederationOutboxRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()
@@ -480,9 +476,7 @@ impl FederationOutboxStore for PgFederationOutboxStore {
         id: &str,
         resolution: &FederationOutboxPolicyResolution,
     ) -> PersistenceResult<bool> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let updated = match resolution {
             FederationOutboxPolicyResolution::Release { next_attempt_at } => {
                 sql_query(
@@ -493,7 +487,7 @@ impl FederationOutboxStore for PgFederationOutboxStore {
                 )
                 .bind::<Text, _>(id)
                 .bind::<BigInt, _>(*next_attempt_at)
-                .execute(&mut *conn)
+                .execute(&mut conn)
                 .await
             }
             FederationOutboxPolicyResolution::Repin { policy_version } => {
@@ -503,7 +497,7 @@ impl FederationOutboxStore for PgFederationOutboxStore {
                 )
                 .bind::<Text, _>(id)
                 .bind::<Text, _>(policy_version)
-                .execute(&mut *conn)
+                .execute(&mut conn)
                 .await
             }
         }
@@ -512,14 +506,12 @@ impl FederationOutboxStore for PgFederationOutboxStore {
     }
 
     async fn get(&self, id: &str) -> PersistenceResult<Option<FederationOutboxRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {OUTBOX_COLUMNS} FROM federation_outbox WHERE id = $1"
         ))
         .bind::<Text, _>(id)
-        .get_result::<FederationOutboxRow>(&mut *conn)
+        .get_result::<FederationOutboxRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -528,13 +520,11 @@ impl FederationOutboxStore for PgFederationOutboxStore {
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<FederationOutboxRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(format!(
             "SELECT {OUTBOX_COLUMNS} FROM federation_outbox ORDER BY created_at ASC, id ASC"
         ))
-        .load::<FederationOutboxRow>(&mut *conn)
+        .load::<FederationOutboxRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()
@@ -547,16 +537,14 @@ impl FederationOutboxStore for PgFederationOutboxStore {
         state: FederationOutboxState,
         limit: usize,
     ) -> PersistenceResult<Vec<FederationOutboxRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(format!(
             "SELECT {OUTBOX_COLUMNS} FROM federation_outbox WHERE state = $1 \
              ORDER BY created_at DESC, id DESC LIMIT $2"
         ))
         .bind::<Text, _>(state.as_str())
         .bind::<BigInt, _>(limit as i64)
-        .load::<FederationOutboxRow>(&mut *conn)
+        .load::<FederationOutboxRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()
@@ -565,14 +553,12 @@ impl FederationOutboxStore for PgFederationOutboxStore {
     }
 
     async fn state_depth(&self) -> PersistenceResult<Vec<FederationOutboxStateDepth>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT state, peer_id, COUNT(*) AS depth, MIN(created_at) AS oldest_created_at \
              FROM federation_outbox GROUP BY state, peer_id ORDER BY state ASC, peer_id ASC",
         )
-        .load::<FederationOutboxStateDepthRow>(&mut *conn)
+        .load::<FederationOutboxStateDepthRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()
@@ -596,14 +582,12 @@ impl FederationOutboxStore for PgFederationOutboxStore {
         &self,
         id: &str,
     ) -> PersistenceResult<Option<FederationOutboxDeadLetterRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {DEAD_LETTER_COLUMNS} FROM federation_outbox_dead_letter WHERE id = $1"
         ))
         .bind::<Text, _>(id)
-        .get_result::<FederationOutboxDeadLetterRow>(&mut *conn)
+        .get_result::<FederationOutboxDeadLetterRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -614,14 +598,12 @@ impl FederationOutboxStore for PgFederationOutboxStore {
     async fn dead_letters_snapshot(
         &self,
     ) -> PersistenceResult<Vec<FederationOutboxDeadLetterRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(format!(
             "SELECT {DEAD_LETTER_COLUMNS} FROM federation_outbox_dead_letter \
              ORDER BY failed_at ASC, id ASC"
         ))
-        .load::<FederationOutboxDeadLetterRow>(&mut *conn)
+        .load::<FederationOutboxDeadLetterRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()
@@ -743,13 +725,11 @@ impl FederationOperationsStore for PgFederationOperationsStore {
     }
 
     async fn contains(&self, operation_id: &str) -> PersistenceResult<bool> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let operation_id_uuid = ids::typed_uuid_part_expect_internal(operation_id);
         sql_query("SELECT EXISTS(SELECT 1 FROM federation_operations WHERE id = $1) AS present")
             .bind::<sql_types::Uuid, _>(operation_id_uuid)
-            .get_result::<ExistsRow>(&mut *conn)
+            .get_result::<ExistsRow>(&mut conn)
             .await
             .map(|row| row.present)
             .map_err(PersistenceError::database)
@@ -759,15 +739,13 @@ impl FederationOperationsStore for PgFederationOperationsStore {
         &self,
         realm_id: &str,
     ) -> PersistenceResult<Vec<ProjectedEventOperation>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows: Vec<JsonPayloadRow> = sql_query(
             "SELECT payload FROM federation_operations \
              WHERE realm_id = $1 ORDER BY created_at ASC, id ASC",
         )
         .bind::<Text, _>(realm_id)
-        .load::<JsonPayloadRow>(&mut *conn)
+        .load::<JsonPayloadRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()
@@ -780,14 +758,12 @@ impl FederationOperationsStore for PgFederationOperationsStore {
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<ProjectedEventOperation>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows: Vec<JsonPayloadRow> = sql_query(
             "SELECT payload FROM federation_operations \
              ORDER BY created_at ASC, id ASC",
         )
-        .load::<JsonPayloadRow>(&mut *conn)
+        .load::<JsonPayloadRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()

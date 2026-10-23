@@ -1,6 +1,6 @@
 use diesel::sql_types::{Jsonb, Text};
 use diesel::{QueryableByName, sql_query};
-use diesel_async::RunQueryDsl;
+use horme::RunQueryDsl;
 use serde_json::Value;
 
 use super::{PgPool, pg_conn};
@@ -20,7 +20,7 @@ pub async fn load_settings_overrides(
         .await
         .map_err(coland_storage::PersistenceError::database)?;
     let rows = sql_query("SELECT key, value FROM server_settings")
-        .get_results::<SettingRow>(&mut *conn)
+        .get_results::<SettingRow>(&mut conn)
         .await
         .map_err(coland_storage::PersistenceError::database)?;
     Ok(rows.into_iter().map(|row| (row.key, row.value)).collect())
@@ -46,7 +46,7 @@ pub async fn store_settings_override(
     .bind::<Text, _>(key)
     .bind::<Jsonb, _>(value)
     .bind::<Text, _>(updated_by)
-    .execute(&mut *conn)
+    .execute(&mut conn)
     .await
     .map(|_| ())
     .map_err(coland_storage::PersistenceError::database)

@@ -3,8 +3,9 @@ use arkret_models_integration::*;
 use arkret_wire::{ActorId, CommitStreamRef, CurrentSelector, RealmCommit, TypedCurrentRow};
 use coland_storage::{PersistenceError, PersistenceResult, RealmActorMaterialCaller};
 use diesel::sql_types::{Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::{Value, json};
 
 #[derive(QueryableByName)]

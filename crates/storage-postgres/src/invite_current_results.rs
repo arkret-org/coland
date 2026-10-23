@@ -37,9 +37,9 @@ use arkret_models_collaboration::governance::third_party_invite::{
 };
 use arkret_wire::{AccountId, ActorId, EventKind, InviteId, InviteState, SecurityClass};
 use coland_storage::{ConflictCode, PersistenceError, PersistenceResult};
-use diesel::OptionalExtension as _;
 use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
 use crate::realm_authorization_cut::{

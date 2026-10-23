@@ -2937,11 +2937,11 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             Ok(arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(parsed)) if parsed == *submission => {},
             _ => return Err(invalid("ordinary Realm bootstrap exact body differs")),
         }
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let existing = sql_query("SELECT idempotency_key,exact_request_body,commits_json FROM ordinary_realm_bootstrap_units WHERE realm_id=$1 OR idempotency_key=$2")
             .bind::<Text,_>(submission.events[0].event.realm_id.as_str())
             .bind::<Text,_>(submission.idempotency_key.as_uuid().to_string())
-            .load::<OrdinaryBootstrapUnitRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+            .load::<OrdinaryBootstrapUnitRow>(&mut conn).await.map_err(PersistenceError::database)?;
         if existing.is_empty() {
             return Ok(None);
         }
@@ -4595,12 +4595,12 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             #[diesel(sql_type = Text)]
             realm_id: String,
         }
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT realm_id FROM replica_stream_anchors \
              WHERE anchor_commit_id IS NULL ORDER BY realm_id",
         )
-        .load::<RealmRow>(&mut *conn)
+        .load::<RealmRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()
@@ -4631,13 +4631,13 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         stream_ref: &arkret_wire::CommitStreamRef,
     ) -> PersistenceResult<Option<arkret_wire::RealmCommit>> {
         let key = stream_key(stream_ref)?;
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT commit_json FROM realm_commits \
              WHERE stream_key = $1 ORDER BY stream_position DESC LIMIT 1",
         )
         .bind::<Text, _>(key)
-        .get_result::<CommitRow>(&mut *conn)
+        .get_result::<CommitRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -4737,7 +4737,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         member: &arkret_wire::ActorId,
         service_id: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<bool> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT EXISTS (\
                 SELECT 1 FROM realm_authorities a \
@@ -4754,7 +4754,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .bind::<Text, _>(realm_id.as_str())
         .bind::<Text, _>(service_id.as_str())
         .bind::<Text, _>(member.to_string())
-        .get_result::<PresenceRow>(&mut *conn)
+        .get_result::<PresenceRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         Ok(row.present)
@@ -4870,7 +4870,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         agent: &arkret_wire::ActorId,
         controller: &arkret_wire::AccountId,
     ) -> PersistenceResult<bool> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let controller_actor = arkret_wire::ActorId::account(controller.clone());
         let controller_value =
             serde_json::to_value(controller).map_err(PersistenceError::database)?;
@@ -4904,7 +4904,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .bind::<Text, _>(agent.to_string())
         .bind::<Text, _>(controller_actor.to_string())
         .bind::<Jsonb, _>(controller_value)
-        .get_result::<PresenceRow>(&mut *conn)
+        .get_result::<PresenceRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         Ok(row.present)
@@ -4939,7 +4939,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             #[diesel(sql_type = Jsonb)]
             value: Value,
         }
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT b.value FROM realm_bootstrap_current_results b \
              WHERE b.realm_id = $1 AND b.result_family = 'realm_plaintext_visible_services' \
@@ -4957,7 +4957,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .bind::<Text, _>(stream_key(&arkret_wire::CommitStreamRef::Realm {
             realm_id: realm_id.clone(),
         })?)
-        .get_result::<ValueRow>(&mut *conn)
+        .get_result::<ValueRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -5007,7 +5007,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         }
         let token = ids::parse_event_id(event.event_id.as_str())
             .ok_or_else(|| invalid("invalid Event token"))?;
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         // Freeze the parent cut before sending the original own Circle leave.
         // Its old canonical join may already be effective-invalid after a
         // parent rejoin; that does not authorize content, but the new exact
@@ -5047,7 +5047,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
          .bind::<Timestamptz,_>(at).bind::<Jsonb,_>(serde_json::to_value(event).map_err(PersistenceError::database)?)
          .bind::<Bool,_>(own_circle_leave).bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.actor_id.to_string())
          .bind::<Text,_>(stream_key(&arkret_wire::CommitStreamRef::Realm { realm_id: event.realm_id.clone() })?)
-         .execute(&mut *conn).await.map_err(PersistenceError::database)?;
+         .execute(&mut conn).await.map_err(PersistenceError::database)?;
         if written != 1 {
             return Err(forward_original_conflict(
                 "forward intent differs from its queued original",
@@ -5088,12 +5088,12 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             #[diesel(sql_type=Jsonb)]
             body: Value,
         }
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let frozen = sql_query("UPDATE authority_forward_attempts f SET peer_request_json=CASE WHEN f.peer_request_json IS NULL OR f.status='rejected' THEN $2 ELSE f.peer_request_json END,status='forwarding',reason_code=NULL,attempted_at=$3 FROM canonical_events e WHERE f.event_pk=e.pk AND e.id=$1 AND f.original_submission_json=$4 AND e.envelope=$5 AND f.accepted_commit_json IS NULL RETURNING f.peer_request_json AS body")
             .bind::<Binary,_>(token.to_vec()).bind::<Jsonb,_>(serde_json::to_value(request).map_err(PersistenceError::database)?)
             .bind::<Timestamptz,_>(at).bind::<Jsonb,_>(serde_json::to_value(&original).map_err(PersistenceError::database)?)
             .bind::<Jsonb,_>(serde_json::to_value(event).map_err(PersistenceError::database)?)
-            .get_result::<Frozen>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+            .get_result::<Frozen>(&mut conn).await.optional().map_err(PersistenceError::database)?
             .ok_or_else(|| forward_original_conflict("frozen peer request has no exact unacknowledged original"))?;
         Ok(Box::new(decode_json(frozen.body, "frozen peer request")?))
     }
@@ -5131,7 +5131,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         }
         let token = ids::parse_event_id(event.event_id.as_str())
             .ok_or_else(|| invalid("invalid Event token"))?;
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let written = sql_query(
             "UPDATE authority_forward_attempts f SET accepted_commit_json=$2,status='forwarding',reason_code=NULL,attempted_at=$3 \
              FROM canonical_events e WHERE f.event_pk=e.pk AND e.id=$1 AND e.envelope=$4 \
@@ -5139,7 +5139,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                AND (f.accepted_commit_json IS NULL OR f.accepted_commit_json=$2)"
         ).bind::<Binary,_>(token.to_vec()).bind::<Jsonb,_>(serde_json::to_value(commit).map_err(PersistenceError::database)?)
          .bind::<Timestamptz,_>(at).bind::<Jsonb,_>(serde_json::to_value(event).map_err(PersistenceError::database)?)
-         .execute(&mut *conn).await.map_err(PersistenceError::database)?;
+         .execute(&mut conn).await.map_err(PersistenceError::database)?;
         if written != 1 {
             return Err(forward_original_conflict(
                 "forward acceptance differs from its frozen original",
@@ -5160,7 +5160,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         }
         let token = ids::parse_event_id(event_id.as_str())
             .ok_or_else(|| invalid("Event id is not a canonical Event token"))?;
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let written = sql_query(
             "INSERT INTO authority_forward_attempts (event_pk,status,reason_code,attempted_at) \
              SELECT pk,$2,$3,$4 FROM canonical_events WHERE id=$1 \
@@ -5173,7 +5173,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .bind::<Text, _>(status.as_str())
         .bind::<Nullable<Text>, _>(reason_code)
         .bind::<Timestamptz, _>(attempted_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         if written != 1 {
@@ -5279,7 +5279,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     ) -> PersistenceResult<Option<QueuedEventRecord>> {
         let token = ids::parse_event_id(event_id.as_str())
             .ok_or_else(|| invalid("Event id is not a canonical Event token"))?;
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT e.envelope, e.state, e.received_at, e.rejection_reason, c.commit_json, \
                     f.status AS forward_status, f.reason_code AS forward_reason_code, \
@@ -5290,7 +5290,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
              WHERE e.id = $1",
         )
         .bind::<Binary, _>(token.to_vec())
-        .get_result::<EventRow>(&mut *conn)
+        .get_result::<EventRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -5507,13 +5507,13 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         stream_ref: &arkret_wire::CommitStreamRef,
     ) -> PersistenceResult<Option<arkret_wire::CommitStreamHead>> {
         let key = stream_key(stream_ref)?;
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT stream_ref, stream_position, commit_id FROM realm_commits \
              WHERE stream_key = $1 ORDER BY stream_position DESC LIMIT 1",
         )
         .bind::<Text, _>(key)
-        .get_result::<HeadRow>(&mut *conn)
+        .get_result::<HeadRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -5533,14 +5533,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     ) -> PersistenceResult<Option<coland_storage::CommittedEventRecord>> {
         let token = ids::parse_event_id(event_id.as_str())
             .ok_or_else(|| invalid("committed Event lookup has malformed Event id"))?;
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT c.commit_json, e.envelope FROM realm_commits c \
              JOIN canonical_events e ON e.pk = c.event_pk \
              WHERE e.id = $1",
         )
         .bind::<Binary, _>(token.to_vec())
-        .get_result::<CommitStreamRow>(&mut *conn)
+        .get_result::<CommitStreamRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -5561,14 +5561,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         &self,
         commit_id: &arkret_wire::RealmCommitId,
     ) -> PersistenceResult<Option<coland_storage::CommittedEventRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT c.commit_json, e.envelope FROM realm_commits c \
              JOIN canonical_events e ON e.pk = c.event_pk \
              WHERE c.commit_id = $1",
         )
         .bind::<Text, _>(commit_id.as_str())
-        .get_result::<CommitStreamRow>(&mut *conn)
+        .get_result::<CommitStreamRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -5589,13 +5589,13 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         &self,
         room_uri: &arkret_wire::MimiRoomUri,
     ) -> PersistenceResult<Option<coland_storage::MimiRoomBindingCurrentRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT mimi_room_uri,realm_id,current_commit_id,current_stream_position,current_event_id,value \
              FROM mimi_room_binding_current_results WHERE mimi_room_uri=$1",
         )
         .bind::<Text, _>(room_uri.as_str())
-        .get_result::<MimiRoomBindingCurrentRow>(&mut *conn)
+        .get_result::<MimiRoomBindingCurrentRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -6333,13 +6333,13 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         &self,
         realm_id: &arkret_wire::RealmId,
     ) -> PersistenceResult<Vec<arkret_wire::RealmAuthorityHandoff>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT handoff_json FROM realm_authority_handoffs WHERE realm_id = $1 \
              ORDER BY to_generation ASC",
         )
         .bind::<Text, _>(realm_id.as_str())
-        .load::<HandoffRow>(&mut *conn)
+        .load::<HandoffRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()
@@ -6351,7 +6351,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         &self,
         realm_id: &arkret_wire::RealmId,
     ) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT snapshot_json FROM realm_state_snapshots snapshot WHERE realm_id = $1 \
              AND NOT EXISTS (SELECT 1 FROM realm_state_snapshot_issuances issued \
@@ -6359,7 +6359,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
              ORDER BY governance_generation DESC, created_at DESC LIMIT 1",
         )
         .bind::<Text, _>(realm_id.as_str())
-        .get_result::<SnapshotRow>(&mut *conn)
+        .get_result::<SnapshotRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;

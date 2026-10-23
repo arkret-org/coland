@@ -3,8 +3,9 @@ use arkret_models_integration::*;
 use arkret_wire::{ActorId, CommittedEventRef, CurrentRevision, Event, EventKind, RealmCommit};
 use coland_storage::{AppletEventProducerGuard, AuthorityCommitTransaction, PersistenceError};
 use diesel::sql_types::{BigInt, Binary, Jsonb, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::{Value, json};
 
 use crate::PgTransactionError;

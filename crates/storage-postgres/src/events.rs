@@ -247,7 +247,7 @@ impl EventStore for PgEventStore {
         &self,
         event_id: &str,
     ) -> PersistenceResult<Vec<FederationOutboxRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let event_id = ids::parse_event_id(event_id).ok_or_else(|| {
             PersistenceError::SchemaViolation(format!("malformed canonical Event id: {event_id:?}"))
         })?;
@@ -259,7 +259,7 @@ impl EventStore for PgEventStore {
              WHERE event.id = $1 ORDER BY outbox.created_at ASC, outbox.id ASC"
         ))
         .bind::<Binary, _>(event_id.to_vec())
-        .load::<FederationOutboxRow>(&mut *conn)
+        .load::<FederationOutboxRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()
@@ -305,7 +305,7 @@ impl EventStore for PgEventStore {
         trust_domain_id: &str,
         pair_key: &str,
     ) -> PersistenceResult<Option<DirectConversationFoundingSlotRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT founder_id, trust_domain_id, pair_key, founding_unit_digest, realm_id, \
                     main_strand_id, authorization_basis, event_ids, idempotency_key, accepted_at \
@@ -315,7 +315,7 @@ impl EventStore for PgEventStore {
         .bind::<Text, _>(founder_id)
         .bind::<Text, _>(trust_domain_id)
         .bind::<Text, _>(pair_key)
-        .get_result::<DirectConversationFoundingSlotRow>(&mut *conn)
+        .get_result::<DirectConversationFoundingSlotRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -440,7 +440,7 @@ impl EventStore for PgEventStore {
             #[diesel(sql_type = Text)]
             create_event_id: String,
         }
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT account_authority_id, account_subject, principal_id, station_id, realm_id, \
                     create_event_id FROM identity_anchor_account_slots \
@@ -448,7 +448,7 @@ impl EventStore for PgEventStore {
         )
         .bind::<Text, _>(account_id.principal_id.as_str())
         .bind::<Text, _>(account_id.station_id.as_str())
-        .load::<AccountSlotRow>(&mut *conn)
+        .load::<AccountSlotRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         match rows.as_slice() {
@@ -470,7 +470,7 @@ impl EventStore for PgEventStore {
     }
 
     async fn get(&self, event_id: &str) -> PersistenceResult<Option<CanonicalEventRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let event_id = ids::parse_event_id(event_id).ok_or_else(|| {
             PersistenceError::SchemaViolation(format!("malformed canonical Event id: {event_id:?}"))
         })?;
@@ -478,7 +478,7 @@ impl EventStore for PgEventStore {
             "SELECT {EVENT_COLUMNS} FROM canonical_events WHERE id = $1 AND state = 'committed'"
         ))
         .bind::<Binary, _>(event_id.to_vec())
-        .get_result::<CanonicalEventRow>(&mut *conn)
+        .get_result::<CanonicalEventRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -486,7 +486,7 @@ impl EventStore for PgEventStore {
     }
 
     async fn contains(&self, event_id: &str) -> PersistenceResult<bool> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let event_id = ids::parse_event_id(event_id).ok_or_else(|| {
             PersistenceError::SchemaViolation(format!("malformed canonical Event id: {event_id:?}"))
         })?;
@@ -494,20 +494,20 @@ impl EventStore for PgEventStore {
             "SELECT EXISTS(SELECT 1 FROM canonical_events WHERE id = $1 AND state = 'committed') AS present",
         )
         .bind::<Binary, _>(event_id.to_vec())
-        .get_result::<ExistsRow>(&mut *conn)
+        .get_result::<ExistsRow>(&mut conn)
         .await
         .map(|row| row.present)
         .map_err(PersistenceError::database)
     }
 
     async fn list_for_actor(&self, actor_id: &str) -> PersistenceResult<Vec<CanonicalEventRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(format!(
             "SELECT {EVENT_COLUMNS} FROM canonical_events WHERE actor_id = $1 AND state = 'committed' \
              ORDER BY received_at ASC, id ASC"
         ))
         .bind::<Text, _>(actor_id)
-        .load::<CanonicalEventRow>(&mut *conn)
+        .load::<CanonicalEventRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         decode_events(rows)
@@ -519,7 +519,7 @@ impl EventStore for PgEventStore {
         received_by: &arkret_identifiers::DidCoreId,
         target_event_id: &str,
     ) -> PersistenceResult<Vec<CanonicalEventRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(format!(
             "SELECT {EVENT_COLUMNS} FROM canonical_events \
              WHERE realm_id = $1 AND actor_id = $2 AND kind = $3 AND state = 'committed' \
@@ -532,33 +532,33 @@ impl EventStore for PgEventStore {
         .bind::<Text, _>(arkret_wire::ActorId::service(received_by.clone()).to_string())
         .bind::<Text, _>(arkret_wire::EventKind::ModerationFrankingProof.as_str())
         .bind::<Text, _>(target_event_id)
-        .load::<CanonicalEventRow>(&mut *conn)
+        .load::<CanonicalEventRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         decode_events(rows)
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<CanonicalEventRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(format!(
             "SELECT {EVENT_COLUMNS} FROM canonical_events WHERE state = 'committed' \
              ORDER BY received_at ASC, id ASC"
         ))
-        .load::<CanonicalEventRow>(&mut *conn)
+        .load::<CanonicalEventRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         decode_events(rows)
     }
 
     async fn realm_event_stats(&self, realm_id: &str) -> PersistenceResult<RealmEventStats> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT COUNT(*)::bigint AS event_count, \
                     COALESCE(SUM(OCTET_LENGTH(canonical_bytes)), 0)::bigint AS canonical_bytes \
              FROM canonical_events WHERE realm_id = $1 AND state = 'committed'",
         )
         .bind::<Text, _>(realm_id)
-        .get_result::<RealmEventStatsRow>(&mut *conn)
+        .get_result::<RealmEventStatsRow>(&mut conn)
         .await
         .map(|row| RealmEventStats {
             count: row.event_count.max(0) as u64,
@@ -571,13 +571,13 @@ impl EventStore for PgEventStore {
         &self,
         realm_id: &str,
     ) -> PersistenceResult<Vec<CanonicalEventRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(format!(
             "SELECT {EVENT_COLUMNS} FROM canonical_events WHERE realm_id = $1 AND state = 'committed' \
              ORDER BY received_at DESC, id DESC"
         ))
         .bind::<Text, _>(realm_id)
-        .load::<CanonicalEventRow>(&mut *conn)
+        .load::<CanonicalEventRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         decode_events(rows)
@@ -629,12 +629,12 @@ impl From<MessageRow> for MessageRecord {
 #[async_trait]
 impl MessageStore for PgMessageStore {
     async fn get(&self, event_id: &str) -> PersistenceResult<Option<MessageRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {MESSAGE_COLUMNS} FROM messages WHERE event_id = $1"
         ))
         .bind::<Text, _>(event_id)
-        .get_result::<MessageRow>(&mut *conn)
+        .get_result::<MessageRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(MessageRecord::from))
@@ -642,7 +642,7 @@ impl MessageStore for PgMessageStore {
     }
 
     async fn put(&self, record: &MessageRecord) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "INSERT INTO messages \
              (event_id, message_id, realm_id, sender, thread_id, content, encrypted, created_at) \
@@ -656,7 +656,7 @@ impl MessageStore for PgMessageStore {
         .bind::<Jsonb, _>(&record.content)
         .bind::<Bool, _>(record.encrypted)
         .bind::<Timestamptz, _>(record.created_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)
@@ -667,14 +667,14 @@ impl MessageStore for PgMessageStore {
         realm_id: &str,
         limit: usize,
     ) -> PersistenceResult<Vec<MessageRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {MESSAGE_COLUMNS} FROM messages WHERE realm_id = $1 \
              ORDER BY created_at DESC, pk DESC LIMIT $2"
         ))
         .bind::<Text, _>(realm_id)
         .bind::<BigInt, _>(limit as i64)
-        .load::<MessageRow>(&mut *conn)
+        .load::<MessageRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(MessageRecord::from).collect())
         .map_err(PersistenceError::database)
@@ -685,24 +685,24 @@ impl MessageStore for PgMessageStore {
         thread_id: &str,
         limit: usize,
     ) -> PersistenceResult<Vec<MessageRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {MESSAGE_COLUMNS} FROM messages WHERE thread_id = $1 \
              ORDER BY created_at ASC, pk ASC LIMIT $2"
         ))
         .bind::<Text, _>(thread_id)
         .bind::<BigInt, _>(limit as i64)
-        .load::<MessageRow>(&mut *conn)
+        .load::<MessageRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(MessageRecord::from).collect())
         .map_err(PersistenceError::database)
     }
 
     async fn delete(&self, event_id: &str) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM messages WHERE event_id = $1")
             .bind::<Text, _>(event_id)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|_| ())
             .map_err(PersistenceError::database)

@@ -13,15 +13,13 @@ pub struct PgSessionStore {
 #[async_trait]
 impl SessionStore for PgSessionStore {
     async fn get(&self, token: &str) -> PersistenceResult<Option<SessionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT id AS token_hash, account_pk, actor_id AS actor, device_id, audience, session_public_key, payload, expires_at, created_at, revoked_at \
              FROM sessions WHERE id = $1",
         )
         .bind::<Text, _>(token)
-        .get_result::<SessionRow>(&mut *conn)
+        .get_result::<SessionRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -79,12 +77,10 @@ impl SessionStore for PgSessionStore {
         &self,
         token: &str,
     ) -> PersistenceResult<Option<coland_storage::DeviceRevocationGateSelector>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query("SELECT payload FROM sessions WHERE id=$1")
             .bind::<Text, _>(token)
-            .get_result::<crate::JsonPayloadRow>(&mut *conn)
+            .get_result::<crate::JsonPayloadRow>(&mut conn)
             .await
             .optional()
             .map_err(PersistenceError::database)?;
@@ -99,36 +95,30 @@ impl SessionStore for PgSessionStore {
     }
 
     async fn delete(&self, token: &str) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM sessions WHERE id = $1")
             .bind::<Text, _>(token)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|_| ())
             .map_err(PersistenceError::database)
     }
 
     async fn cleanup_expired(&self) -> PersistenceResult<usize> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM sessions WHERE expires_at <= NOW()")
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map_err(PersistenceError::database)
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<SessionRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT id AS token_hash, account_pk, actor_id AS actor, device_id, audience, session_public_key, payload, expires_at, created_at, revoked_at \
              FROM sessions",
         )
-        .load::<SessionRow>(&mut *conn)
+        .load::<SessionRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()

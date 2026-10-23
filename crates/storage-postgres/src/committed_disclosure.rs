@@ -52,7 +52,7 @@ pub(crate) async fn accepted_full_event_in_connection(
     conn: &mut AsyncPgConnection,
     event_id: &arkret_wire::EventId,
 ) -> PersistenceResult<Option<CommittedEventFullView>> {
-    use diesel::OptionalExtension;
+    use horme::OptionalExtension;
     #[derive(QueryableByName)]
     struct Pair {
         #[diesel(sql_type = diesel::sql_types::Jsonb)]

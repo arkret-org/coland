@@ -7,8 +7,9 @@ use arkret_models_identity::AuthenticatedServiceResolution;
 use arkret_wire::{DidCoreId, RealmId};
 use coland_storage::{PersistenceError, PersistenceResult, RealmKeyPackageClaimSource};
 use diesel::sql_types::{Jsonb, Nullable, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::{Value, json};
 
 fn invalid(detail: impl std::fmt::Display) -> PersistenceError {

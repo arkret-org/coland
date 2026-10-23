@@ -9,8 +9,9 @@ use coland_storage::{
     PersistenceError,
 };
 use diesel::sql_types::{Binary, Jsonb, Text};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::{Value, json};
 
 use crate::PgTransactionError;

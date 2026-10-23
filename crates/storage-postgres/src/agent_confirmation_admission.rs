@@ -5,8 +5,9 @@ use arkret_models_collaboration::events_payloads::agent::{
 use arkret_wire::{AccountId, ActorId, Event, EventKind, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 
 #[derive(QueryableByName)]
 struct Confirmation {

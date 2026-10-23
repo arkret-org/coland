@@ -6,8 +6,9 @@ use coland_storage::{
     PersistenceResult, classify_device_revocation_transition, selector_comparison_status,
 };
 use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::{AsyncConnection, AsyncPgConnection};
+use horme::{OptionalExtension, RunQueryDsl};
 
 use crate::{PgPool, PgTransactionError, async_trait, pg_conn};
 
@@ -171,13 +172,13 @@ impl DeviceRevocationStore for PgDeviceRevocationStore {
         &self,
         selector: &DeviceRevocationGateSelector,
     ) -> PersistenceResult<DeviceRevocationGateStatus> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT selector, committed_ref, committed_at FROM device_revocation_targets \
              WHERE selector = $1 ORDER BY committed_at DESC LIMIT 1",
         )
         .bind::<Jsonb, _>(serde_json::to_value(selector).map_err(PersistenceError::database)?)
-        .get_result::<TargetRow>(&mut *conn)
+        .get_result::<TargetRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -194,13 +195,13 @@ impl DeviceRevocationStore for PgDeviceRevocationStore {
         &self,
         selector: &DeviceRevocationGateSelector,
     ) -> PersistenceResult<Vec<DeviceRevocationTargetRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT selector, committed_ref, committed_at FROM device_revocation_targets \
              WHERE selector = $1 ORDER BY committed_at",
         )
         .bind::<Jsonb, _>(serde_json::to_value(selector).map_err(PersistenceError::database)?)
-        .load::<TargetRow>(&mut *conn)
+        .load::<TargetRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()
@@ -212,13 +213,13 @@ impl DeviceRevocationStore for PgDeviceRevocationStore {
         &self,
         event_id: &arkret_wire::EventId,
     ) -> PersistenceResult<Option<DeviceRevocationTargetRecord>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT selector, committed_ref, committed_at FROM device_revocation_targets \
              WHERE event_id = $1",
         )
         .bind::<Text, _>(event_id.as_str())
-        .get_result::<TargetRow>(&mut *conn)
+        .get_result::<TargetRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?
@@ -353,7 +354,7 @@ impl DeviceRevocationStore for PgDeviceRevocationStore {
         &self,
         limit: usize,
     ) -> PersistenceResult<Vec<DeviceRevocationCleanupIntent>> {
-        let mut conn = pg_conn(&self.pool).await?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT committed_ref,selector,created_at,material_cleanup_completed_at,mls_obligation_completed_at \
              FROM device_revocation_cleanup_intents \
@@ -361,7 +362,7 @@ impl DeviceRevocationStore for PgDeviceRevocationStore {
              ORDER BY created_at LIMIT $1",
         )
         .bind::<BigInt, _>(i64::try_from(limit).unwrap_or(i64::MAX))
-        .load::<CleanupRow>(&mut *conn)
+        .load::<CleanupRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()
@@ -422,14 +423,14 @@ async fn complete(
         column,
         "material_cleanup_completed_at" | "mls_obligation_completed_at"
     ));
-    let mut conn = pg_conn(pool).await?;
+    let mut conn = crate::pg_db(pool);
     sql_query(format!(
         "UPDATE device_revocation_cleanup_intents SET {column}=COALESCE({column},$2) \
          WHERE event_id=$1 AND {column} IS NULL"
     ))
     .bind::<Text, _>(event_id.as_str())
     .bind::<Timestamptz, _>(completed_at)
-    .execute(&mut *conn)
+    .execute(&mut conn)
     .await
     .map(|rows| rows == 1)
     .map_err(PersistenceError::database)

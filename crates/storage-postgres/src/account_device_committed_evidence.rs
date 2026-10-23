@@ -8,8 +8,9 @@ use arkret_models_identity::AccountDeviceSignerEvidence;
 use arkret_wire::{DidCoreId, DidKey, Event, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncPgConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
 fn rejected(message: impl std::fmt::Display) -> PersistenceError {

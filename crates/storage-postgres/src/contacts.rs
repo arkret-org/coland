@@ -95,15 +95,13 @@ impl ContactVerifiedMirrorStore for PgContactVerifiedMirrorStore {
         target_holder_principal_id: &str,
         request_event_id: &str,
     ) -> PersistenceResult<Option<ContactVerifiedMirrorRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(format!(
             "SELECT {CONTACT_VERIFIED_MIRROR_COLUMNS} FROM contact_verified_mirrors WHERE target_holder_principal_id = $1 AND request_event_id = $2"
         ))
         .bind::<Text, _>(target_holder_principal_id)
         .bind::<Text, _>(request_event_id)
-        .get_result::<ContactVerifiedMirrorRow>(&mut *conn)
+        .get_result::<ContactVerifiedMirrorRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -111,9 +109,7 @@ impl ContactVerifiedMirrorStore for PgContactVerifiedMirrorStore {
     }
 
     async fn put_verified(&self, record: &ContactVerifiedMirrorRecord) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let source_receipt = serde_json::to_value(&record.source_receipt).map_err(|error| {
             PersistenceError::SchemaViolation(format!(
                 "Contact request receipt encode failed: {error}"
@@ -135,7 +131,7 @@ impl ContactVerifiedMirrorStore for PgContactVerifiedMirrorStore {
         .bind::<Jsonb, _>(&source_receipt)
         .bind::<Text, _>(&record.issuer_id)
         .bind::<Timestamptz, _>(record.verified_at)
-        .get_result::<ContactVerifiedMirrorRow>(&mut *conn)
+        .get_result::<ContactVerifiedMirrorRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -482,9 +478,7 @@ impl ContactStore for PgContactStore {
         requester_id: &ActorId,
         target_id: &ActorId,
     ) -> PersistenceResult<Option<ContactRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(format!(
             "SELECT {CONTACT_COLUMNS} FROM contacts \
              WHERE requester_id = $1 AND target_id = $2 \
@@ -492,7 +486,7 @@ impl ContactStore for PgContactStore {
         ))
         .bind::<Text, _>(requester_id.to_string())
         .bind::<Text, _>(target_id.to_string())
-        .get_result::<ContactRow>(&mut *conn)
+        .get_result::<ContactRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -502,9 +496,7 @@ impl ContactStore for PgContactStore {
     }
 
     async fn put(&self, record: &ContactRecord) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let request_slot_states =
             encode_contact_json(&record.request_slot_states, "request_slot_states")?;
         let request_receipts = encode_contact_json(&record.request_receipts, "request_receipts")?;
@@ -564,7 +556,7 @@ impl ContactStore for PgContactStore {
         .bind::<Nullable<Jsonb>, _>(record.peer_service_resolution.as_ref())
         .bind::<Timestamptz, _>(record.created_at)
         .bind::<Timestamptz, _>(record.updated_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)
@@ -599,29 +591,25 @@ impl ContactStore for PgContactStore {
     }
 
     async fn list_for_actor(&self, actor_id: &ActorId) -> PersistenceResult<Vec<ContactRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(format!(
             "SELECT {CONTACT_COLUMNS} FROM contacts \
              WHERE requester_id = $1 OR target_id = $1 \
              ORDER BY created_at ASC, requester_id ASC, target_id ASC"
         ))
         .bind::<Text, _>(actor_id.to_string())
-        .get_results::<ContactRow>(&mut *conn)
+        .get_results::<ContactRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         decode_contact_rows(rows).await
     }
 
     async fn delete(&self, requester_id: &ActorId, target_id: &ActorId) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query("DELETE FROM contacts WHERE requester_id = $1 AND target_id = $2")
             .bind::<Text, _>(requester_id.to_string())
             .bind::<Text, _>(target_id.to_string())
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
             .map(|_| ())
             .map_err(PersistenceError::database)
@@ -681,16 +669,14 @@ impl MimiConsentCorrelationStore for PgMimiConsentCorrelationStore {
         &self,
         consent_id: &str,
     ) -> PersistenceResult<Option<MimiConsentCorrelationRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT consent_id, requester_actor_id, holder_account_id, purpose, strand_id, \
               source_id, source_class, created_at, expires_at \
              FROM mimi_consent_correlations WHERE consent_id = $1",
         )
         .bind::<Text, _>(consent_id)
-        .get_result::<MimiConsentCorrelationRow>(&mut *conn)
+        .get_result::<MimiConsentCorrelationRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -711,19 +697,17 @@ impl MimiConsentCorrelationStore for PgMimiConsentCorrelationStore {
             #[diesel(sql_type=Jsonb)]
             submission: Value,
         }
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let original = serde_json::to_value(submission).map_err(PersistenceError::database)?;
         if allow_new {
             sql_query("INSERT INTO mimi_consent_decision_attempts(consent_id,decision,event_id,submission) VALUES($1,$2,$3,$4) ON CONFLICT(consent_id) DO NOTHING")
-                .bind::<Text,_>(consent_id).bind::<Text,_>(decision).bind::<Text,_>(submission.event.event_id.as_str()).bind::<Jsonb,_>(&original).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+                .bind::<Text,_>(consent_id).bind::<Text,_>(decision).bind::<Text,_>(submission.event.event_id.as_str()).bind::<Jsonb,_>(&original).execute(&mut conn).await.map_err(PersistenceError::database)?;
         }
         let old = sql_query(
             "SELECT decision,submission FROM mimi_consent_decision_attempts WHERE consent_id=$1",
         )
         .bind::<Text, _>(consent_id)
-        .get_result::<Attempt>(&mut *conn)
+        .get_result::<Attempt>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -737,9 +721,7 @@ impl MimiConsentCorrelationStore for PgMimiConsentCorrelationStore {
     }
 
     async fn put(&self, record: &MimiConsentCorrelationRecord) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "INSERT INTO mimi_consent_correlations \
              (consent_id, requester_actor_id, holder_account_id, purpose, strand_id, \
@@ -756,7 +738,7 @@ impl MimiConsentCorrelationStore for PgMimiConsentCorrelationStore {
         .bind::<Text, _>(record.source_class.as_str())
         .bind::<Timestamptz, _>(record.created_at)
         .bind::<Nullable<Timestamptz>, _>(record.expires_at)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)
@@ -837,9 +819,7 @@ impl InviteReceivePolicyStore for PgInviteReceivePolicyStore {
     ) -> PersistenceResult<
         Option<arkret_models_collaboration::governance::invite_addressing::InviteReceivePolicy>,
     > {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let row = sql_query(
             "SELECT a.principal_id, a.station_id, p.policy_payload FROM invite_receive_policies p \
              JOIN accounts a ON a.pk = p.account_pk \
@@ -847,7 +827,7 @@ impl InviteReceivePolicyStore for PgInviteReceivePolicyStore {
         )
         .bind::<Text, _>(account_id.principal_id.as_str())
         .bind::<Text, _>(account_id.station_id.as_str())
-        .get_result::<InviteReceivePolicyRow>(&mut *conn)
+        .get_result::<InviteReceivePolicyRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -875,14 +855,12 @@ impl InviteReceivePolicyStore for PgInviteReceivePolicyStore {
             arkret_models_collaboration::governance::invite_addressing::InviteReceivePolicy,
         )>,
     > {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT a.principal_id, a.station_id, p.policy_payload FROM invite_receive_policies p \
              JOIN accounts a ON a.pk = p.account_pk",
         )
-        .get_results::<InviteReceivePolicyRow>(&mut *conn)
+        .get_results::<InviteReceivePolicyRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?;
         rows.into_iter()

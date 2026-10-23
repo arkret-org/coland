@@ -7,8 +7,9 @@ use arkret_models_integration::{
 use arkret_wire::{ActorId, CommittedEventRef, DeviceId, Event, RealmCommit};
 use coland_storage::{AppletManagedDeviceAuthority, PersistenceError, PersistenceResult};
 use diesel::sql_types::{Jsonb, Text, Timestamptz};
-use diesel::{OptionalExtension, QueryableByName, sql_query};
-use diesel_async::{AsyncConnection, RunQueryDsl};
+use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncConnection;
+use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::{Value, json};
 
 use crate::{AsyncPgConnection, PgPool, PgTransactionError, pg_conn};

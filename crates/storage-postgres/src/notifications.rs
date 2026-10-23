@@ -15,8 +15,8 @@ use coland_storage::{
     AccountNotificationDeltaWrite, AccountPk, NotificationFanoutBasis, NotificationStrandScope,
     RecipientNotificationRecord, StoredAccountNotificationDelta,
 };
-use diesel::OptionalExtension as _;
 use diesel_async::AsyncConnection as _;
+use horme::OptionalExtension as _;
 
 use super::{
     BigInt, Jsonb, NotificationStore, Nullable, PersistenceError, PersistenceResult, PgPool,
@@ -437,9 +437,7 @@ impl NotificationStore for PgNotificationStore {
         &self,
         record: AccountNotificationDeltaWrite,
     ) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         if record.delta.id.as_str().trim().is_empty() {
             return Err(PersistenceError::SchemaViolation(
                 "account notification delta id is empty".to_owned(),
@@ -486,7 +484,7 @@ impl NotificationStore for PgNotificationStore {
         .bind::<Text, _>(&record.source_account_artifact_id)
         .bind::<Text, _>(&action)
         .bind::<Nullable<Jsonb>, _>(data)
-        .execute(&mut *conn)
+        .execute(&mut conn)
         .await
         .map(|_| ())
         .map_err(PersistenceError::database)
@@ -496,9 +494,7 @@ impl NotificationStore for PgNotificationStore {
         &self,
         recipient_id: &str,
     ) -> PersistenceResult<Vec<RecipientNotificationRecord>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT id AS notification_id, projection_id, recipient_actor_id, realm_id, source_event_id, \
              controller_account_pk, recipient_id, source_account_artifact_kind, \
@@ -511,7 +507,7 @@ impl NotificationStore for PgNotificationStore {
              ORDER BY created_at DESC",
         )
         .bind::<Text, _>(recipient_id)
-        .load::<NotificationRow>(&mut *conn)
+        .load::<NotificationRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()
@@ -525,9 +521,7 @@ impl NotificationStore for PgNotificationStore {
         recipient_id: &str,
         after_position: Option<i64>,
     ) -> PersistenceResult<Vec<StoredAccountNotificationDelta>> {
-        let mut conn = pg_conn(&self.pool)
-            .await
-            .map_err(PersistenceError::database)?;
+        let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT id AS notification_id, projection_id, recipient_actor_id, realm_id, source_event_id, \
              controller_account_pk, recipient_id, source_account_artifact_kind, \
@@ -542,7 +536,7 @@ impl NotificationStore for PgNotificationStore {
         .bind::<BigInt, _>(controller_account_pk.get())
         .bind::<Text, _>(recipient_id)
         .bind::<Nullable<BigInt>, _>(after_position)
-        .load::<NotificationRow>(&mut *conn)
+        .load::<NotificationRow>(&mut conn)
         .await
         .map_err(PersistenceError::database)?
         .into_iter()

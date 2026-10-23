@@ -231,6 +231,8 @@ pub enum ConflictCode {
     /// The device is not authorized at the admission instant, or its
     /// forwarded authorization evidence has expired.
     DeviceUnauthorized,
+    /// A native DID successor fails its accepted method boundary.
+    DidMethodSuccessorInvalid,
     /// The same identity already exists with different canonical bytes.
     DuplicateConflict,
     /// An encrypted application Event freezes an MLS epoch or group state
@@ -396,7 +398,7 @@ pub enum ConflictCode {
 
 impl ConflictCode {
     /// Every registered code, in the order the variants are declared.
-    pub const ALL: [Self; 87] = [
+    pub const ALL: [Self; 88] = [
         Self::ApprovalNonceReused,
         Self::ApprovalRequired,
         Self::AppletRevoked,
@@ -410,6 +412,7 @@ impl ConflictCode {
         Self::DeviceRevocationPending,
         Self::DeviceRevoked,
         Self::DeviceUnauthorized,
+        Self::DidMethodSuccessorInvalid,
         Self::DuplicateConflict,
         Self::EpochMismatch,
         Self::EpochUpdateRequired,
@@ -521,6 +524,7 @@ impl ConflictCode {
             Self::EventHashCollision => "event_hash_collision",
             Self::EventIdDigestMismatch => "event_id_digest_mismatch",
             Self::EventNotAccepted => "event_not_accepted",
+            Self::DidMethodSuccessorInvalid => "did_method_successor_invalid",
             Self::FailedPrecondition => "failed_precondition",
             Self::StrandNotActive => arkret_wire::ReasonCode::STRAND_NOT_ACTIVE,
             Self::StrandNotArchived => arkret_wire::ReasonCode::STRAND_NOT_ARCHIVED,

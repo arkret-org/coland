@@ -1217,6 +1217,7 @@ async fn verify_invite_commit(
         &mut located.keys,
         &delivery.invite_commit.signature.verification_method,
         delivery.invite_commit.signature.created_at,
+        &located.bundle,
     )
     .await
     .map_err(|error| unavailable(format!("invite_commit signing key is unavailable: {error}")))?;

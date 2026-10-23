@@ -1412,7 +1412,7 @@ pub(crate) async fn human_realm_in_connection(
     conn: &mut AsyncPgConnection,
     account: &arkret_wire::AccountId,
 ) -> PersistenceResult<RealmId> {
-    let row = sql_query("SELECT r.pcr_realm_id FROM principal_resolutions r JOIN pcr_genesis_units g ON g.realm_id=r.pcr_realm_id AND g.principal_id=r.principal_id AND g.station_id=r.station_id WHERE r.principal_id=$1 AND r.station_id=$2")
+    let row = sql_query("SELECT r.pcr_realm_id FROM principal_resolution_current_results r JOIN pcr_genesis_units g ON g.realm_id=r.pcr_realm_id AND g.principal_id=r.principal_id AND g.station_id=r.station_id WHERE r.principal_id=$1 AND r.station_id=$2")
         .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
         .get_result::<HumanRealmRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(|| unavailable("ordinary Morph caller has no accepted human registration anchor"))?;
@@ -1440,8 +1440,8 @@ pub(crate) async fn require_accepted_human_pcr_in_connection(
     };
     // Positive closed human registration evidence, not an absent Agent row or
     // a non-authoritative Actor Profile classification.
-    let row = sql_query("SELECT g.exact_request_body,g.result_json,r.pcr_realm_id,r.genesis_event_id,r.current_event_id,r.projection FROM pcr_genesis_units g \
-        JOIN principal_resolutions r ON r.principal_id=g.principal_id AND r.station_id=g.station_id AND r.pcr_realm_id=g.realm_id \
+    let row = sql_query("SELECT g.exact_request_body,g.result_json,r.pcr_realm_id,r.genesis_event_id,r.value->>'resolution_event_ref' AS current_event_id,r.value AS projection FROM pcr_genesis_units g \
+        JOIN principal_resolution_current_results r ON r.principal_id=g.principal_id AND r.station_id=g.station_id AND r.pcr_realm_id=g.realm_id \
         WHERE g.principal_id=$1 AND g.station_id=$2 FOR SHARE OF g,r")
         .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
         .get_result::<HumanGenesisRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?

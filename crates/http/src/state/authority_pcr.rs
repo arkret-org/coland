@@ -59,9 +59,14 @@ pub(crate) async fn commit(
     }
     if !matches!(
         event.kind,
-        EventKind::ConsentReplace | EventKind::RealmGovernanceStationChange
+        EventKind::ConsentReplace
+            | EventKind::RealmGovernanceStationChange
+            | EventKind::IdentityResolutionUpdate
     ) {
         return Err(unavailable("registered native unit is not connected"));
+    }
+    if event.kind == EventKind::IdentityResolutionUpdate {
+        return super::authority_resolution::commit(state, request).await;
     }
     if matches!(event.kind, EventKind::ConsentReplace) {
         let (status, record) = match super::authority_consent::commit(state, request).await? {
@@ -131,7 +136,9 @@ pub(crate) async fn submit_self(
     };
     if !matches!(
         event.kind,
-        EventKind::ConsentReplace | EventKind::RealmGovernanceStationChange
+        EventKind::ConsentReplace
+            | EventKind::RealmGovernanceStationChange
+            | EventKind::IdentityResolutionUpdate
     ) {
         return Ok(None);
     }

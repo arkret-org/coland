@@ -14,6 +14,9 @@ mod historical_control_source;
 mod sql_fault_matrix;
 mod support;
 
+#[path = "support/principal_resolution_update.rs"]
+mod principal_resolution_update;
+
 use arkret_models_collaboration::events_payloads::{
     DeviceAuthorizePayload, device_authorize_payload_digest,
 };
@@ -869,7 +872,7 @@ async fn reused_genesis_realm_or_idempotency_key_is_a_zero_write_duplicate_confl
 }
 
 #[tokio::test]
-async fn evicted_principal_resolution_index_is_rebuilt_from_the_genesis_anchor() {
+async fn current_principal_survives_index_eviction_and_refuses_missing_typed_current() {
     use coland_storage::{CurrentPrincipalRead, PrincipalResolutionStore};
 
     let (pool, station) = contract_store().await;
@@ -907,24 +910,107 @@ async fn evicted_principal_resolution_index_is_rebuilt_from_the_genesis_anchor()
     assert_eq!(evicted, 1);
     drop(conn);
 
-    // The current read rebuilds the evicted row from the immutable genesis
-    // anchor and answers exactly what it answered before eviction.
+    // Typed current remains authoritative without rebuilding a query index.
     assert_eq!(
         resolutions.current_principal(&account).await.unwrap(),
         initial
     );
-    assert_eq!(unit_footprint(&pool, &accepted).await, ACCEPTED_FOOTPRINT);
+    assert_eq!(
+        unit_footprint(&pool, &accepted).await,
+        GenesisFootprint {
+            principal_resolutions: 0,
+            ..ACCEPTED_FOOTPRINT
+        }
+    );
     let record = resolutions
         .for_realm(&result.pcr_realm_id)
         .await
         .unwrap()
-        .expect("the rebuilt row is found by its PCR");
+        .expect("typed current is found by its PCR");
     assert_eq!(record.account_id, account);
     assert_eq!(
         record.genesis_event.event_id,
         accepted.transactions[0].event.event_id
     );
     assert_eq!(record.current_event.event_id, record.genesis_event.event_id);
+
+    let devices = PgDeviceRevocationStore { pool: pool.clone() };
+    let device_id = accepted.transactions[1]
+        .event
+        .payload
+        .get("device_id")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let device_at = accepted.transactions[1].commit.committed_at + chrono::Duration::seconds(1);
+    assert_eq!(
+        devices.pcr_device_generation(&account).await.unwrap(),
+        Some(coland_storage::PcrDeviceGeneration {
+            current_device_generation_ref: 1
+        })
+    );
+    assert_eq!(
+        devices
+            .pcr_device_admission(&account, &device_id, device_at)
+            .await
+            .unwrap(),
+        arkret_wire::DeviceRevocationAdmissionDecision::Allow
+    );
+    assert_eq!(
+        resolutions.registered_genesis(&account).await.unwrap(),
+        Some(accepted.transactions[0].event.clone())
+    );
+
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query(
+        "DELETE FROM principal_resolution_current_results WHERE principal_id=$1 AND station_id=$2",
+    )
+    .bind::<Text, _>(account.principal_id.as_str())
+    .bind::<Text, _>(account.station_id.as_str())
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    assert_eq!(
+        resolutions.current_principal(&account).await.unwrap(),
+        CurrentPrincipalRead::Unavailable,
+        "accepted genesis alone cannot replace missing typed current"
+    );
+
+    // Device authority has its own immutable origin and accepted family currents.
+    assert_eq!(
+        devices
+            .pcr_device_admission(&account, &device_id, device_at)
+            .await
+            .unwrap(),
+        arkret_wire::DeviceRevocationAdmissionDecision::Allow
+    );
+    assert_eq!(
+        resolutions.registered_genesis(&account).await.unwrap(),
+        Some(accepted.transactions[0].event.clone())
+    );
+
+    assert!(matches!(
+        resolutions
+            .compare_and_set(None, record.clone())
+            .await
+            .unwrap(),
+        coland_storage::PrincipalResolutionCasResult::Applied(_)
+    ));
+    assert_eq!(
+        resolutions
+            .compare_and_set(None, record.clone())
+            .await
+            .unwrap(),
+        coland_storage::PrincipalResolutionCasResult::Conflict(Some(record))
+    );
+    assert_eq!(
+        resolutions.current_principal(&account).await.unwrap(),
+        CurrentPrincipalRead::Unavailable,
+        "repairing a query index cannot establish typed current"
+    );
 
     // An account without an accepted genesis anchor stays missing.
     let stranger = arkret_wire::AccountId::new(
@@ -6553,4 +6639,59 @@ async fn agent_key_and_lifecycle_commit_only_through_the_control_unit() {
         0
     );
     assert_eq!(terminal.status, "deactivated");
+}
+
+#[tokio::test]
+async fn genesis_resolution_uses_event_time_when_station_acceptance_is_later() {
+    use coland_storage::{CurrentPrincipalRead, PrincipalResolutionStore};
+    let (pool, station) = contract_store().await;
+    let mut accepted = unit(station);
+    let mut previous = None;
+    for tx in &mut accepted.transactions {
+        tx.commit.committed_at += chrono::TimeDelta::seconds(30);
+        tx.commit.previous_commit_ref = previous.clone();
+        let identity =
+            arkret_canonical::canonical::unsigned_value(&tx.commit, &["commit_id", "signature"])
+                .unwrap();
+        tx.commit.commit_id = RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
+            arkret_canonical::canonical_json_bytes(&identity).unwrap(),
+        ));
+        tx.commit.signature = arkret_signatures::detached_object::sign_detached_object(
+            &arkret_canonical::canonical::unsigned_value(&tx.commit, &["signature"]).unwrap(),
+            DetachedSignatureContext::RealmCommit,
+            tx.commit.signature.verification_method.clone(),
+            tx.commit.committed_at,
+            &SigningKey::from_bytes(&device_history_fixture::STATION_AUTHORITY_SEED),
+        )
+        .unwrap();
+        previous = Some(tx.commit.commit_id.clone());
+    }
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let PcrGenesisCommitOutcome::Committed(result) = store
+        .admit_pcr_genesis_unit(&accepted, accepted.transactions[1].commit.committed_at)
+        .await
+        .unwrap()
+    else {
+        panic!("genesis must commit")
+    };
+    assert_ne!(
+        accepted.transactions[0].event.created_at,
+        result.commits[0].committed_at
+    );
+    assert_eq!(
+        result.resolution.updated_at,
+        accepted.transactions[0].event.created_at
+    );
+    let account = arkret_wire::AccountId::new(
+        result.principal_id.clone(),
+        accepted.submission.account_authority_id.clone(),
+    );
+    let read = coland_storage_postgres::PgPrincipalResolutionStore { pool };
+    assert_eq!(
+        read.current_principal(&account).await.unwrap(),
+        CurrentPrincipalRead::Ready {
+            pcr_realm_id: result.pcr_realm_id,
+            projection: result.resolution
+        }
+    );
 }

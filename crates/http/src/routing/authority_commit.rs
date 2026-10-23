@@ -270,6 +270,13 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                     detail,
                 );
             }
+            Some(coland_storage::ConflictCode::DidMethodSuccessorInvalid) => {
+                return crate::error::render_error_code(
+                    arkret_wire::ErrorCode::DidMethodSuccessorInvalid,
+                    res,
+                    detail,
+                );
+            }
             Some(coland_storage::ConflictCode::FailedPrecondition) => {
                 return crate::error::render_error_code(
                     arkret_wire::ErrorCode::FailedPrecondition,

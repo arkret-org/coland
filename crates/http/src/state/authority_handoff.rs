@@ -151,6 +151,7 @@ pub(crate) async fn install(
         &mut keys,
         &request.snapshot.signature.verification_method,
         request.snapshot.signature.created_at,
+        &request.authority_bundle,
     )
     .await
     .map_err(|error| key_unavailable(error.message))?;
@@ -182,6 +183,7 @@ pub(crate) async fn install(
             &mut keys,
             &full.commit.signature.verification_method,
             full.commit.signature.created_at,
+            &request.authority_bundle,
         )
         .await
         .map_err(|error| key_unavailable(error.message))?;

@@ -184,6 +184,26 @@ struct FaultWebvhStore {
 
 #[async_trait]
 impl WebvhStore for FaultWebvhStore {
+    async fn service_registration_receipts(
+        &self,
+        service_id: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Vec<arkret_models_identity::service_identity::ServiceRegistrationReceipt>>
+    {
+        self.inner
+            .webvh()
+            .service_registration_receipts(service_id)
+            .await
+    }
+    async fn retain_service_registration_receipts(
+        &self,
+        receipts: Vec<arkret_models_identity::service_identity::ServiceRegistrationReceipt>,
+    ) -> PersistenceResult<()> {
+        self.inner
+            .webvh()
+            .retain_service_registration_receipts(receipts)
+            .await
+    }
+
     async fn get_document(&self, did: &str) -> PersistenceResult<Option<WebvhDocumentRecord>> {
         self.inner.webvh().get_document(did).await
     }

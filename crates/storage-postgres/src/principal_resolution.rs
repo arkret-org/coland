@@ -1,333 +1,170 @@
-use arkret_models_identity::PrincipalResolutionProjection;
-use arkret_wire::{AccountId, DidCoreId, Event, RealmId};
+//! Accepted resolution reads and a separately rebuildable query index.
+use arkret_wire::{AccountId, Event, RealmId};
 use coland_storage::{
     PersistenceError, PersistenceResult, PrincipalResolutionCasResult, PrincipalResolutionRecord,
     PrincipalResolutionStore, validate_principal_resolution_record,
 };
 use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
 use diesel::{QueryableByName, sql_query};
+use diesel_async::AsyncConnection;
 use horme::{OptionalExtension, RunQueryDsl};
 
-use crate::{PgPool, async_trait, pg_conn};
+use crate::{PgPool, PgTransactionError, async_trait, pg_conn};
 
 pub struct PgPrincipalResolutionStore {
     pub pool: PgPool,
 }
-
-#[derive(QueryableByName)]
-struct CurrentRow {
-    #[diesel(sql_type = Text)]
-    principal_id: DidCoreId,
-    #[diesel(sql_type = Text)]
-    station_id: DidCoreId,
-    #[diesel(sql_type = Text)]
-    pcr_realm_id: String,
-    #[diesel(sql_type = Jsonb)]
-    genesis_event: serde_json::Value,
-    #[diesel(sql_type = Jsonb)]
-    current_event: serde_json::Value,
-    #[diesel(sql_type = Jsonb)]
-    projection: serde_json::Value,
-}
-
 #[derive(QueryableByName)]
 struct AppliedRow {
     #[diesel(sql_type = diesel::sql_types::Bool)]
     applied: bool,
 }
-
 #[derive(QueryableByName)]
 struct EventRow {
     #[diesel(sql_type = Jsonb)]
     event_json: serde_json::Value,
 }
 
-#[derive(QueryableByName)]
-struct GenesisAnchorRow {
-    #[diesel(sql_type = Text)]
-    principal_id: DidCoreId,
-    #[diesel(sql_type = Text)]
-    station_id: DidCoreId,
-    #[diesel(sql_type = Text)]
-    realm_id: String,
-    #[diesel(sql_type = Jsonb)]
-    result_json: serde_json::Value,
-}
-
-#[derive(QueryableByName)]
-struct EnvelopeRow {
-    #[diesel(sql_type = Jsonb)]
-    envelope: serde_json::Value,
-}
-
-#[derive(QueryableByName)]
-struct CountRow {
-    #[diesel(sql_type = BigInt)]
-    count: i64,
-}
-
-/// Which immutable creation anchor to rebuild the index row from.
-enum GenesisAnchor<'a> {
-    Account(&'a AccountId),
-    Realm(&'a RealmId),
-}
-
-/// Outcome of rebuilding one missing index row from durable PCR lineage.
-enum IndexRebuild {
-    /// The account has no accepted human PCR genesis on this Station.
-    NoAnchor,
-    /// The row is present again.
-    Present,
-    /// An accepted `ak.identity.resolution.update` succeeds the genesis, so
-    /// the initial resolution is not the current one and cannot stand in for it.
-    CurrentUndecided,
-}
-
-impl TryFrom<CurrentRow> for PrincipalResolutionRecord {
-    type Error = PersistenceError;
-
-    fn try_from(row: CurrentRow) -> Result<Self, Self::Error> {
-        let record = Self {
-            account_id: AccountId::new(row.principal_id, row.station_id),
-            pcr_realm_id: RealmId::new(row.pcr_realm_id)
-                .map_err(|error| PersistenceError::Internal(error.to_string()))?,
-            genesis_event: serde_json::from_value(row.genesis_event)
-                .map_err(|error| PersistenceError::Internal(error.to_string()))?,
-            current_event: serde_json::from_value(row.current_event)
-                .map_err(|error| PersistenceError::Internal(error.to_string()))?,
-            projection: serde_json::from_value::<PrincipalResolutionProjection>(row.projection)
-                .map_err(|error| PersistenceError::Internal(error.to_string()))?,
-        };
-        validate_principal_resolution_record(&record)?;
-        Ok(record)
-    }
-}
-
 impl PgPrincipalResolutionStore {
     async fn load_by_account_id(
         &self,
-        account_id: &AccountId,
+        account: &AccountId,
     ) -> PersistenceResult<Option<PrincipalResolutionRecord>> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query(
-            "SELECT p.principal_id, p.station_id, p.pcr_realm_id, \
-                    genesis.event_json AS genesis_event, current.event_json AS current_event, \
-                    p.projection \
-             FROM principal_resolutions p \
-             JOIN principal_resolution_events genesis \
-               ON genesis.principal_id = p.principal_id \
-              AND genesis.station_id = p.station_id \
-              AND genesis.event_id = p.genesis_event_id \
-             JOIN principal_resolution_events current \
-               ON current.principal_id = p.principal_id \
-              AND current.station_id = p.station_id \
-              AND current.event_id = p.current_event_id \
-             WHERE p.principal_id = $1 AND p.station_id = $2",
-        )
-        .bind::<Text, _>(account_id.principal_id.as_str())
-        .bind::<Text, _>(account_id.station_id.as_str())
-        .get_result::<CurrentRow>(&mut conn)
-        .await
-        .optional()
-        .map_err(PersistenceError::database)?
-        .map(PrincipalResolutionRecord::try_from)
-        .transpose()
-    }
-
-    async fn load_for_realm(
-        &self,
-        pcr_realm_id: &RealmId,
-    ) -> PersistenceResult<Option<PrincipalResolutionRecord>> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query(
-            "SELECT p.principal_id, p.station_id, p.pcr_realm_id, \
-                    genesis.event_json AS genesis_event, current.event_json AS current_event, \
-                    p.projection \
-             FROM principal_resolutions p \
-             JOIN principal_resolution_events genesis \
-               ON genesis.principal_id = p.principal_id \
-              AND genesis.station_id = p.station_id \
-              AND genesis.event_id = p.genesis_event_id \
-             JOIN principal_resolution_events current \
-               ON current.principal_id = p.principal_id \
-              AND current.station_id = p.station_id \
-              AND current.event_id = p.current_event_id \
-             WHERE p.pcr_realm_id = $1",
-        )
-        .bind::<Text, _>(pcr_realm_id.as_str())
-        .get_result::<CurrentRow>(&mut conn)
-        .await
-        .optional()
-        .map_err(PersistenceError::database)?
-        .map(PrincipalResolutionRecord::try_from)
-        .transpose()
-    }
-}
-
-impl PgPrincipalResolutionStore {
-    /// Rebuild the replaceable index row of one human PCR from its immutable
-    /// creation anchor: the accepted genesis unit, its committed
-    /// `ak.realm.create` and the initial resolution it committed in the same
-    /// transaction (`identity-did.md` §4.2.3, derived cache recovery). An
-    /// accepted resolution successor leaves the row missing: its current
-    /// projection needs the method-verified successor, never the genesis.
-    async fn rebuild_from_genesis_anchor(
-        &self,
-        anchor: GenesisAnchor<'_>,
-    ) -> PersistenceResult<IndexRebuild> {
-        let mut conn = pg_conn(&self.pool)
+        let mut conn = pg_conn(&self.pool).await?;
+        crate::principal_resolution_unit::current_in_connection(&mut conn, Some(account), None)
             .await
-            .map_err(PersistenceError::database)?;
-        let query = match anchor {
-            GenesisAnchor::Account(account_id) => sql_query(
-                "SELECT principal_id, station_id, realm_id, result_json FROM pcr_genesis_units \
-                 WHERE principal_id = $1 AND station_id = $2 AND result_json <> '{}'::jsonb",
-            )
-            .into_boxed()
-            .bind::<Text, _>(account_id.principal_id.as_str())
-            .bind::<Text, _>(account_id.station_id.as_str()),
-            GenesisAnchor::Realm(realm_id) => sql_query(
-                "SELECT principal_id, station_id, realm_id, result_json FROM pcr_genesis_units \
-                 WHERE realm_id = $1 AND result_json <> '{}'::jsonb",
-            )
-            .into_boxed()
-            .bind::<Text, _>(realm_id.as_str()),
-        };
-        let Some(row) =
-            diesel_async::RunQueryDsl::get_result::<GenesisAnchorRow>(query, &mut *conn)
-                .await
-                .map_err(horme::Error::from)
-                .optional()
-                .map_err(PersistenceError::database)?
-        else {
-            return Ok(IndexRebuild::NoAnchor);
-        };
-        let result = serde_json::from_value::<
-            arkret_models_collaboration::principal_operations::PcrGenesisAdmissionOutcome,
-        >(row.result_json)
-        .map_err(|error| {
-            PersistenceError::Internal(format!("stored PCR genesis result is invalid: {error}"))
-        })?;
-        let pcr_realm_id = RealmId::new(row.realm_id)
-            .map_err(|error| PersistenceError::Internal(error.to_string()))?;
-        let successors = sql_query(
-            "SELECT count(*) AS count FROM canonical_events e \
-             JOIN realm_commits c ON c.event_pk = e.pk \
-             WHERE e.realm_id = $1 AND e.kind = $2 AND e.state = 'committed'",
-        )
-        .bind::<Text, _>(pcr_realm_id.as_str())
-        .bind::<Text, _>(arkret_wire::EventKind::IdentityResolutionUpdate.as_str())
-        .get_result::<CountRow>(&mut *conn)
-        .await
-        .map_err(PersistenceError::database)?
-        .count;
-        if successors > 0 {
-            return Ok(IndexRebuild::CurrentUndecided);
-        }
-        let genesis_event_id = &result.commits[0].event_ref;
-        let token = crate::ids::parse_event_id(genesis_event_id.as_str()).ok_or_else(|| {
-            PersistenceError::Internal("stored PCR genesis Event id is not canonical".to_owned())
-        })?;
-        let envelope = sql_query(
-            "SELECT e.envelope FROM canonical_events e JOIN realm_commits c ON c.event_pk = e.pk \
-             WHERE e.id = $1 AND e.realm_id = $2 AND e.state = 'committed'",
-        )
-        .bind::<diesel::sql_types::Binary, _>(token.to_vec())
-        .bind::<Text, _>(pcr_realm_id.as_str())
-        .get_result::<EnvelopeRow>(&mut *conn)
-        .await
-        .optional()
-        .map_err(PersistenceError::database)?
-        .ok_or_else(|| {
-            PersistenceError::Internal("accepted PCR genesis has no committed Event".to_owned())
-        })?
-        .envelope;
-        let genesis_event = serde_json::from_value::<Event>(envelope)
-            .map_err(|error| PersistenceError::Internal(error.to_string()))?;
-        drop(conn);
-        let record = PrincipalResolutionRecord {
-            account_id: AccountId::new(row.principal_id, row.station_id),
-            pcr_realm_id,
-            current_event: genesis_event.clone(),
-            genesis_event,
-            projection: result.resolution,
-        };
-        match self.compare_and_set(None, record).await? {
-            PrincipalResolutionCasResult::Applied(_) => Ok(IndexRebuild::Present),
-            PrincipalResolutionCasResult::Conflict(Some(_)) => Ok(IndexRebuild::Present),
-            PrincipalResolutionCasResult::Conflict(None) => Err(PersistenceError::Conflict(
-                "principal resolution index rebuild lost its genesis row".to_owned(),
-            )),
-        }
+            .map(|r| r.map(|r| r.0))
+            .map_err(PgTransactionError::into_persistence)
     }
-
-    /// The index row for `account_id`, rebuilt from the account's immutable
-    /// creation anchor when it was evicted.
-    async fn indexed_by_account_id(
+    // CAS repairs a replaceable index; its conflict result must read that index,
+    // while every authority-facing read above remains on typed current.
+    async fn load_index(
         &self,
-        account_id: &AccountId,
-    ) -> PersistenceResult<Result<Option<PrincipalResolutionRecord>, IndexRebuild>> {
-        if let Some(record) = self.load_by_account_id(account_id).await? {
-            return Ok(Ok(Some(record)));
+        account: &AccountId,
+    ) -> PersistenceResult<Option<PrincipalResolutionRecord>> {
+        #[derive(diesel::QueryableByName)]
+        struct IndexRow {
+            #[diesel(sql_type = Text)]
+            pcr_realm_id: String,
+            #[diesel(sql_type = Jsonb)]
+            genesis_event: serde_json::Value,
+            #[diesel(sql_type = Jsonb)]
+            current_event: serde_json::Value,
+            #[diesel(sql_type = Jsonb)]
+            projection: serde_json::Value,
         }
-        match self
-            .rebuild_from_genesis_anchor(GenesisAnchor::Account(account_id))
-            .await?
-        {
-            IndexRebuild::Present => Ok(Ok(self.load_by_account_id(account_id).await?)),
-            IndexRebuild::NoAnchor => Ok(Ok(None)),
-            undecided @ IndexRebuild::CurrentUndecided => Ok(Err(undecided)),
-        }
+        let mut conn = crate::pg_db(&self.pool);
+        let row = sql_query("SELECT p.pcr_realm_id,g.event_json AS genesis_event,e.event_json AS current_event,p.projection FROM principal_resolutions p JOIN principal_resolution_events g ON g.principal_id=p.principal_id AND g.station_id=p.station_id AND g.event_id=p.genesis_event_id JOIN principal_resolution_events e ON e.principal_id=p.principal_id AND e.station_id=p.station_id AND e.event_id=p.current_event_id WHERE p.principal_id=$1 AND p.station_id=$2")
+            .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
+            .get_result::<IndexRow>(&mut conn).await.optional().map_err(PersistenceError::database)?;
+        row.map(|row| {
+            let record = PrincipalResolutionRecord {
+                account_id: account.clone(),
+                pcr_realm_id: row
+                    .pcr_realm_id
+                    .parse()
+                    .map_err(|e| PersistenceError::SchemaViolation(format!("{e}")))?,
+                genesis_event: serde_json::from_value(row.genesis_event)
+                    .map_err(PersistenceError::database)?,
+                current_event: serde_json::from_value(row.current_event)
+                    .map_err(PersistenceError::database)?,
+                projection: serde_json::from_value(row.projection)
+                    .map_err(PersistenceError::database)?,
+            };
+            validate_principal_resolution_record(&record)?;
+            Ok(record)
+        })
+        .transpose()
     }
-}
-
-fn current_undecided() -> PersistenceError {
-    PersistenceError::Internal(
-        "the PCR identity resolution current is not available from its creation anchor".to_owned(),
-    )
 }
 
 #[async_trait]
 impl PrincipalResolutionStore for PgPrincipalResolutionStore {
+    async fn admit_update(
+        &self,
+        write: coland_storage::PrincipalResolutionUpdateWrite,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+        write
+            .transaction
+            .validate()
+            .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            crate::principal_resolution_unit::admit_in_connection(conn, &write).await
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+    async fn registered_genesis(&self, account: &AccountId) -> PersistenceResult<Option<Event>> {
+        #[derive(QueryableByName)]
+        struct Origin {
+            #[diesel(sql_type = Text)]
+            realm_id: String,
+            #[diesel(sql_type = diesel::sql_types::Binary)]
+            exact_request_body: Vec<u8>,
+            #[diesel(sql_type = Jsonb)]
+            result_json: serde_json::Value,
+        }
+        let mut conn = pg_conn(&self.pool).await?;
+        let row = sql_query("SELECT realm_id,exact_request_body,result_json FROM pcr_genesis_units WHERE principal_id=$1 AND station_id=$2 AND result_json<>'{}'::jsonb")
+            .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
+            .get_result::<Origin>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+        let Some(row) = row else { return Ok(None) };
+        let realm = row.realm_id.parse().map_err(PersistenceError::database)?;
+        let governance =
+            crate::pcr_private_authority::accepted_governance(&mut conn, &realm).await?;
+        let input: arkret_models_collaboration::principal_operations::PcrGenesisAdmissionInput =
+            serde_json::from_slice(&row.exact_request_body).map_err(PersistenceError::database)?;
+        let outcome: arkret_models_collaboration::principal_operations::PcrGenesisAdmissionOutcome =
+            serde_json::from_value(row.result_json).map_err(PersistenceError::database)?;
+        outcome
+            .validate_against(&input)
+            .map_err(PersistenceError::database)?;
+        if governance != arkret_wire::GenesisGovernance::Human(account.clone())
+            || input.genesis_unit.create().realm_id != realm
+        {
+            return Err(PersistenceError::SchemaViolation(
+                "accepted Human creation differs from Account".into(),
+            ));
+        }
+        Ok(Some(input.genesis_unit.create().clone()))
+    }
     async fn current_principal(
         &self,
-        account_id: &AccountId,
+        account: &AccountId,
     ) -> PersistenceResult<coland_storage::CurrentPrincipalRead> {
-        Ok(match self.indexed_by_account_id(account_id).await? {
-            Ok(Some(record)) => coland_storage::CurrentPrincipalRead::Ready {
+        if let Some(record) = self.load_by_account_id(account).await? {
+            return Ok(coland_storage::CurrentPrincipalRead::Ready {
                 pcr_realm_id: record.pcr_realm_id,
                 projection: record.projection,
-            },
-            Ok(None) => coland_storage::CurrentPrincipalRead::Missing,
-            Err(_) => coland_storage::CurrentPrincipalRead::Unavailable,
+            });
+        }
+        let mut conn = crate::pg_db(&self.pool);
+        let known=sql_query("SELECT EXISTS(SELECT 1 FROM pcr_genesis_units WHERE principal_id=$1 AND station_id=$2 AND result_json<>'{}'::jsonb) OR EXISTS(SELECT 1 FROM principal_resolution_current_results WHERE principal_id=$1 AND station_id=$2) AS applied")
+            .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
+            .get_result::<AppliedRow>(&mut conn).await.map_err(PersistenceError::database)?.applied;
+        Ok(if known {
+            coland_storage::CurrentPrincipalRead::Unavailable
+        } else {
+            coland_storage::CurrentPrincipalRead::Missing
         })
     }
     async fn by_account_id(
         &self,
-        account_id: &AccountId,
+        account: &AccountId,
     ) -> PersistenceResult<Option<PrincipalResolutionRecord>> {
-        self.indexed_by_account_id(account_id)
-            .await?
-            .map_err(|_| current_undecided())
+        self.load_by_account_id(account).await
     }
-
     async fn for_realm(
         &self,
-        pcr_realm_id: &RealmId,
+        realm: &RealmId,
     ) -> PersistenceResult<Option<PrincipalResolutionRecord>> {
-        if let Some(record) = self.load_for_realm(pcr_realm_id).await? {
-            return Ok(Some(record));
-        }
-        match self
-            .rebuild_from_genesis_anchor(GenesisAnchor::Realm(pcr_realm_id))
-            .await?
-        {
-            IndexRebuild::Present => self.load_for_realm(pcr_realm_id).await,
-            IndexRebuild::NoAnchor => Ok(None),
-            IndexRebuild::CurrentUndecided => Err(current_undecided()),
-        }
+        let mut conn = pg_conn(&self.pool).await?;
+        crate::principal_resolution_unit::current_in_connection(&mut conn, None, Some(realm))
+            .await
+            .map(|r| r.map(|r| r.0))
+            .map_err(PgTransactionError::into_persistence)
     }
-
     async fn compare_and_set(
         &self,
         expected_current_event_ref: Option<&str>,
@@ -421,71 +258,45 @@ impl PrincipalResolutionStore for PgPrincipalResolutionStore {
             Ok(PrincipalResolutionCasResult::Applied(next))
         } else {
             Ok(PrincipalResolutionCasResult::Conflict(
-                self.load_by_account_id(&next.account_id).await?,
+                self.load_index(&next.account_id).await?,
             ))
         }
     }
 
     async fn history_newest_first(
         &self,
-        account_id: &AccountId,
-        after_event_ref: Option<&str>,
+        account: &AccountId,
+        after: Option<&str>,
         limit: usize,
     ) -> PersistenceResult<Vec<Event>> {
         let mut conn = crate::pg_db(&self.pool);
-        if let Some(after) = after_event_ref {
-            let exists = sql_query(
-                "SELECT EXISTS(SELECT 1 FROM principal_resolution_events \
-                  WHERE principal_id = $1 AND station_id = $2 AND event_id = $3) AS applied",
-            )
-            .bind::<Text, _>(account_id.principal_id.as_str())
-            .bind::<Text, _>(account_id.station_id.as_str())
-            .bind::<Text, _>(after)
-            .get_result::<AppliedRow>(&mut conn)
-            .await
-            .map_err(PersistenceError::database)?
-            .applied;
-            if !exists {
-                return Err(PersistenceError::NotFound(format!(
-                    "principal resolution history cursor {after}"
-                )));
+        let rows=sql_query("WITH RECURSIVE chain AS ( \
+            SELECT c.commit_json,e.envelope AS event_json,0::bigint AS depth \
+            FROM principal_resolution_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.stream_position=r.current_stream_position AND c.realm_id=r.pcr_realm_id \
+            JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE r.principal_id=$1 AND r.station_id=$2 \
+            UNION ALL \
+            SELECT c.commit_json,e.envelope,chain.depth+1 FROM chain \
+            JOIN realm_commits c ON c.commit_id=chain.event_json #>> '{payload,expected_revision,commit_id}' \
+              AND c.stream_position=(chain.event_json #>> '{payload,expected_revision,stream_position}')::bigint \
+              AND c.realm_id=chain.event_json->>'realm_id' \
+            JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' AND e.envelope->'actor_id'=chain.event_json->'actor_id' \
+              AND e.kind IN ('ak.realm.create','ak.identity.resolution.update') \
+            WHERE chain.event_json->>'kind'='ak.identity.resolution.update' \
+        ) SELECT event_json FROM chain WHERE $3::text IS NULL OR depth>(SELECT depth FROM chain WHERE event_json->>'event_id'=$3) ORDER BY depth LIMIT $4")
+            .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
+            .bind::<Nullable<Text>,_>(after).bind::<BigInt,_>(i64::try_from(limit).unwrap_or(i64::MAX))
+            .load::<EventRow>(&mut conn).await.map_err(PersistenceError::database)?;
+        if after.is_some() && rows.is_empty() {
+            // Genesis is a legitimate exclusive ancestor with no predecessor.
+            let record = self.load_by_account_id(account).await?;
+            if record.as_ref().map(|r| r.genesis_event.event_id.as_str()) != after {
+                return Err(PersistenceError::NotFound(
+                    "resolution history ancestor unknown".into(),
+                ));
             }
         }
-
-        let rows = sql_query(
-            "WITH RECURSIVE chain AS ( \
-               SELECT event.event_json, event.previous_event_id, 0::bigint AS depth \
-                 FROM principal_resolution_events event \
-                 JOIN principal_resolutions current \
-                   ON current.principal_id = event.principal_id \
-                  AND current.station_id = event.station_id \
-                WHERE event.principal_id = $1 AND event.station_id = $2 \
-                  AND event.event_id = COALESCE($3, current.current_event_id) \
-               UNION ALL \
-               SELECT predecessor.event_json, predecessor.previous_event_id, chain.depth + 1 \
-                 FROM chain \
-                 JOIN principal_resolution_events predecessor \
-                   ON predecessor.principal_id = $1 \
-                  AND predecessor.station_id = $2 \
-                  AND predecessor.event_id = chain.previous_event_id \
-             ) \
-             SELECT event_json FROM chain \
-              WHERE $3 IS NULL OR depth > 0 \
-              ORDER BY depth ASC \
-              LIMIT $4",
-        )
-        .bind::<Text, _>(account_id.principal_id.as_str())
-        .bind::<Text, _>(account_id.station_id.as_str())
-        .bind::<Nullable<Text>, _>(after_event_ref)
-        .bind::<BigInt, _>(i64::try_from(limit).unwrap_or(i64::MAX))
-        .load::<EventRow>(&mut conn)
-        .await
-        .map_err(PersistenceError::database)?;
         rows.into_iter()
-            .map(|row| {
-                serde_json::from_value(row.event_json)
-                    .map_err(|error| PersistenceError::Internal(error.to_string()))
-            })
+            .map(|row| serde_json::from_value(row.event_json).map_err(PersistenceError::database))
             .collect()
     }
 }

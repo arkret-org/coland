@@ -9,6 +9,98 @@ use super::{
 pub struct PgWebvhStore {
     pub pool: PgPool,
 }
+
+async fn retain_service_receipt_in_connection(
+    conn: &mut super::AsyncPgConnection,
+    receipt: &arkret_models_identity::service_identity::ServiceRegistrationReceipt,
+) -> Result<(), PgTransactionError> {
+    let inserted=sql_query("INSERT INTO service_registration_receipts AS r(service_id,version_id,event_digest,receipt,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(service_id,version_id) DO UPDATE SET receipt=EXCLUDED.receipt WHERE r.event_digest=EXCLUDED.event_digest AND r.receipt=EXCLUDED.receipt")
+        .bind::<Text,_>(receipt.service_id.as_str()).bind::<Text,_>(&receipt.version_id).bind::<Text,_>(&receipt.log_head_digest)
+        .bind::<Jsonb,_>(serde_json::to_value(receipt).map_err(PersistenceError::database)?)
+        .bind::<Timestamptz,_>(receipt.issued_at).execute(conn).await?;
+    if inserted != 1 {
+        return Err(PersistenceError::Conflict(
+            "duplicate_conflict: native service receipt differs from retained original".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+pub(crate) async fn commit_service_mapping_in_connection(
+    conn: &mut super::AsyncPgConnection,
+    stored: &arkret_identity::service_identity::StoredDidCoreIdentity,
+    replace: bool,
+) -> Result<(), PgTransactionError> {
+    stored.validate().map_err(PersistenceError::database)?;
+    stored
+        .did_document
+        .validate_for(&stored.identity.registration_key)
+        .map_err(PersistenceError::database)?;
+    if stored.registration_receipt.provider_id != stored.identity.service_id {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: only the owning Provider can migrate its registration mapping"
+                .into(),
+        )
+        .into());
+    }
+    arkret_signatures::service_identity::verify_registration_receipt_proof(
+        &stored.registration_receipt,
+        &stored.did_document,
+    )
+    .map_err(PersistenceError::database)?;
+    let key = &stored.identity.registration_key;
+    sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind::<Text, _>(stored.identity.service_id.as_str())
+        .execute(&mut *conn)
+        .await?;
+    let head=sql_query("SELECT id AS event_digest,did,seq,operation,created_at FROM webvh_log_events WHERE split_part(did,':',3)=split_part($1,':',3) ORDER BY seq DESC LIMIT 1")
+        .bind::<Text,_>(stored.identity.did.as_str()).get_result::<WebvhLogRow>(&mut *conn).await?;
+    if head.event_digest != stored.registration_receipt.log_head_digest
+        || head.operation.get("state")
+            != Some(
+                &serde_json::to_value(&stored.did_document).map_err(PersistenceError::database)?,
+            )
+    {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: registration mapping differs from the accepted native head"
+                .into(),
+        )
+        .into());
+    }
+    retain_service_receipt_in_connection(conn, &stored.registration_receipt).await?;
+    let kind = key.service_kind().as_str();
+    let base = key.public_base_url().as_str();
+    sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind::<Text, _>(format!("service-registration:{kind}:{base}"))
+        .execute(&mut *conn)
+        .await?;
+    let existing=sql_query("SELECT outcome FROM service_identity_registrations WHERE service_kind=$1 AND public_base_url=$2 FOR UPDATE")
+        .bind::<Text,_>(kind).bind::<Text,_>(base).get_result::<ServiceRegistrationRow>(&mut *conn).await.optional()?;
+    if let Some(existing) = existing {
+        let existing = decode_registration_outcome(existing.outcome)?;
+        if existing.registration_receipt.service_id != stored.identity.service_id {
+            return Err(PersistenceError::Conflict(
+                "failed_precondition: registration target belongs to another service".into(),
+            )
+            .into());
+        }
+        if !replace {
+            return Ok(());
+        }
+    }
+    let outcome = arkret_models_identity::service_identity::ServiceRegistrationOutcome {
+        did_document: stored.did_document.clone(),
+        registration_receipt: stored.registration_receipt.clone(),
+        created: false,
+    };
+    sql_query("INSERT INTO service_identity_registrations(service_kind,public_base_url,service_id,version_id,inception_digest,outcome,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$7) ON CONFLICT(service_kind,public_base_url) DO UPDATE SET version_id=EXCLUDED.version_id,inception_digest=EXCLUDED.inception_digest,outcome=EXCLUDED.outcome,updated_at=EXCLUDED.updated_at")
+        .bind::<Text,_>(kind).bind::<Text,_>(base).bind::<Text,_>(stored.identity.service_id.as_str())
+        .bind::<Text,_>(&stored.identity.version_id).bind::<Text,_>(&stored.registration_receipt.log_head_digest)
+        .bind::<Jsonb,_>(serde_json::to_value(outcome).map_err(PersistenceError::database)?)
+        .bind::<Timestamptz,_>(stored.stored_at).execute(conn).await?;
+    Ok(())
+}
 #[derive(QueryableByName)]
 struct WebvhDocumentRow {
     #[diesel(sql_type = Text)]
@@ -88,12 +180,55 @@ impl From<WebvhLogRow> for WebvhLogRecord {
 }
 #[async_trait]
 impl WebvhStore for PgWebvhStore {
+    async fn retain_service_registration_receipts(
+        &self,
+        receipts: Vec<arkret_models_identity::service_identity::ServiceRegistrationReceipt>,
+    ) -> PersistenceResult<()> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_,PgTransactionError,_>(async move |conn| {
+            for receipt in receipts {
+                let entry=sql_query("SELECT id AS event_digest,did,seq,operation,created_at FROM webvh_log_events WHERE id=$1")
+                    .bind::<Text,_>(&receipt.log_head_digest).get_result::<WebvhLogRow>(&mut *conn).await?;
+                let document: arkret_models_identity::service_identity::ServiceDidDocument=serde_json::from_value(entry.operation["state"].clone()).map_err(PersistenceError::database)?;
+                receipt.validate_for(&receipt.registration_key,&arkret_wire::project_did_to_core_id(&document.id).map_err(PersistenceError::database)?,&document.id).map_err(PersistenceError::database)?;
+                document.validate_for(&receipt.registration_key).map_err(PersistenceError::database)?;
+                arkret_signatures::service_identity::verify_registration_receipt_proof(&receipt,&document).map_err(PersistenceError::database)?;
+                retain_service_receipt_in_connection(conn,&receipt).await?;
+            }
+            Ok(())
+        }).await.map_err(PgTransactionError::into_persistence)
+    }
+    async fn service_registration_receipts(
+        &self,
+        service_id: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Vec<arkret_models_identity::service_identity::ServiceRegistrationReceipt>>
+    {
+        #[derive(QueryableByName)]
+        struct Receipt {
+            #[diesel(sql_type=Jsonb)]
+            receipt: Value,
+        }
+        let mut conn = crate::pg_db(&self.pool);
+        sql_query("SELECT r.receipt FROM service_registration_receipts r JOIN webvh_log_events e ON e.id=r.event_digest WHERE r.service_id=$1 ORDER BY e.seq")
+            .bind::<Text,_>(service_id.as_str()).load::<Receipt>(&mut conn).await.map_err(PersistenceError::database)?
+            .into_iter().map(|row|serde_json::from_value(row.receipt).map_err(PersistenceError::database)).collect()
+    }
     async fn get_document(&self, did: &str) -> PersistenceResult<Option<WebvhDocumentRecord>> {
         let mut conn = crate::pg_db(&self.pool);
         sql_query(
-            "SELECT id AS did, did_document, key_log_head, seq, method_evidence, \
+            "WITH head AS ( \
+                SELECT operation #>> '{state,id}' AS did, seq, id AS event_digest, operation->'state' AS state FROM webvh_log_events \
+                WHERE did LIKE 'did:webvh:%' AND $1 LIKE 'did:webvh:%' \
+                  AND split_part(did, ':', 3) = split_part($1, ':', 3) \
+                  AND EXISTS (SELECT 1 FROM webvh_log_events alias \
+                              WHERE alias.operation #>> '{state,id}' = $1) \
+                ORDER BY seq DESC LIMIT 1 \
+             ) SELECT id AS did, did_document, key_log_head, seq, method_evidence, \
              fetched_at, expires_at, updated_at \
-             FROM webvh_documents WHERE id = $1",
+             FROM webvh_documents WHERE id = COALESCE((SELECT did FROM head), $1) \
+               AND (NOT EXISTS (SELECT 1 FROM head) OR \
+                    (seq = (SELECT seq FROM head) AND key_log_head = (SELECT event_digest FROM head) \
+                     AND did_document = (SELECT state FROM head)))",
         )
         .bind::<Text, _>(did)
         .get_result::<WebvhDocumentRow>(&mut conn)
@@ -115,39 +250,38 @@ impl WebvhStore for PgWebvhStore {
             did: String,
         }
         let expected = url::Url::parse(expected_log_url).map_err(PersistenceError::database)?;
-        // The resolution cache also contains foreign DIDs with this local name.
-        // Select by the native hosting URL, never by the latest cache write.
+        // Only subjects of retained native entries establish hosting aliases.
+        // Neither a resolution-cache row nor alsoKnownAs grants a hosting URL.
         // Load only identifiers until the unique hosted identity is established.
-        let candidates = sql_query("SELECT id AS did FROM webvh_documents WHERE right(id, char_length($1) + 7) = ':webvh:' || $1")
+        let candidates = sql_query("SELECT DISTINCT operation #>> '{state,id}' AS did FROM webvh_log_events WHERE right(operation #>> '{state,id}', char_length($1) + 7) = ':webvh:' || $1")
             .bind::<Text,_>(local_id).load::<Candidate>(&mut conn).await.map_err(PersistenceError::database)?;
         let mut hosted = None;
+        let mut hosted_core = None;
         for candidate in candidates {
             let matches = arkret_wire::Did::new(candidate.did.clone())
                 .ok()
                 .and_then(|did| arkret_identity::DidWebvhResolver::log_url(&did).ok())
                 .and_then(|url| url::Url::parse(&url).ok())
                 .is_some_and(|url| url == expected);
-            if matches && hosted.replace(candidate.did).is_some() {
-                return Err(PersistenceError::Conflict(
-                    "ambiguous local DID hosting".into(),
-                ));
+            if matches {
+                let did = arkret_wire::Did::new(&candidate.did)
+                    .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+                let core = arkret_wire::project_did_to_core_id(&did)
+                    .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+                if hosted_core.as_ref().is_some_and(|prior| prior != &core) {
+                    return Err(PersistenceError::Conflict(
+                        "ambiguous local DID hosting".into(),
+                    ));
+                }
+                hosted_core = Some(core);
+                hosted = Some(candidate.did);
             }
         }
         let Some(hosted) = hosted else {
             return Ok(None);
         };
-        sql_query(
-            "SELECT id AS did, did_document, key_log_head, seq, method_evidence, \
-             fetched_at, expires_at, updated_at \
-             FROM webvh_documents \
-             WHERE id=$1",
-        )
-        .bind::<Text, _>(hosted)
-        .get_result::<WebvhDocumentRow>(&mut conn)
-        .await
-        .optional()
-        .map(|row| row.map(WebvhDocumentRecord::from))
-        .map_err(PersistenceError::database)
+        drop(conn);
+        self.get_document(&hosted).await
     }
 
     async fn put_document(&self, record: WebvhDocumentRecord) -> PersistenceResult<()> {
@@ -254,11 +388,10 @@ impl WebvhStore for PgWebvhStore {
                 .next
                 .validate()
                 .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-            if transition.expected.identity.did.as_str() != event.did
+            if arkret_wire::project_did_to_core_id(&transition.expected.identity.did).ok()
+                != arkret_wire::project_did_to_core_id(&transition.next.identity.did).ok()
                 || transition.next.identity.did.as_str() != event.did
                 || transition.expected.identity.service_id != transition.next.identity.service_id
-                || transition.expected.identity.registration_key
-                    != transition.next.identity.registration_key
                 || transition.next.identity.version_id
                     != event
                         .operation
@@ -292,9 +425,11 @@ impl WebvhStore for PgWebvhStore {
                 let _ = lock.ok;
 
                 let current = sql_query(
-                    "SELECT id AS did, did_document, key_log_head, seq, method_evidence, \
+                    "WITH head AS (SELECT operation #>> '{state,id}' AS did FROM webvh_log_events \
+                     WHERE (did=$1 OR (did LIKE 'did:webvh:%' AND $1 LIKE 'did:webvh:%' AND split_part(did, ':', 3)=split_part($1, ':', 3))) ORDER BY seq DESC LIMIT 1) \
+                     SELECT id AS did, did_document, key_log_head, seq, method_evidence, \
                      fetched_at, expires_at, updated_at \
-                     FROM webvh_documents WHERE (id = $1 OR (id LIKE 'did:webvh:%' AND $1 LIKE 'did:webvh:%' AND split_part(id, ':', 3) = split_part($1, ':', 3))) ORDER BY seq DESC LIMIT 1 FOR UPDATE",
+                     FROM webvh_documents WHERE id=COALESCE((SELECT did FROM head),$1) FOR UPDATE",
                 )
                 .bind::<Text, _>(&event.did)
                 .get_result::<WebvhDocumentRow>(&mut *conn)
@@ -351,6 +486,7 @@ impl WebvhStore for PgWebvhStore {
                         document.seq.max(0) as u64 == head.seq.max(0) as u64
                             && document.key_log_head.as_deref()
                                 == Some(head.event_digest.as_str())
+                            && head.operation.get("state") == Some(&document.did_document)
                     }
                     _ => false,
                 };
@@ -404,6 +540,13 @@ impl WebvhStore for PgWebvhStore {
                 .execute(&mut *conn)
                 .await.map_err(PersistenceError::database)?;
                 if let Some((expected, next)) = identity_values {
+                    let before: arkret_identity::service_identity::StoredDidCoreIdentity=serde_json::from_value(expected.clone()).map_err(PersistenceError::database)?;
+                    let after: arkret_identity::service_identity::StoredDidCoreIdentity=serde_json::from_value(next.clone()).map_err(PersistenceError::database)?;
+                    retain_service_receipt_in_connection(conn,&after.registration_receipt).await?;
+                    if before.identity.registration_key!=after.identity.registration_key {
+                        commit_service_mapping_in_connection(conn,&after,true).await?;
+                    }
+
                     let updated = sql_query("UPDATE service_identity SET identity=$2 WHERE id='self' AND identity=$1")
                         .bind::<Jsonb, _>(expected)
                         .bind::<Jsonb, _>(next)
@@ -587,6 +730,7 @@ impl WebvhStore for PgWebvhStore {
                 .execute(&mut *conn)
                 .await.map_err(PersistenceError::database)?;
 
+                retain_service_receipt_in_connection(conn,&outcome.registration_receipt).await?;
                 Ok(ServiceRegistrationCommitOutcome::Created(outcome))
             },
         )
@@ -645,7 +789,12 @@ impl PgWebvhStore {
             events.push(WebvhLogRecord {
                 event_digest: arkret_canonical::canonical_sha256(raw)
                     .map_err(|e| invalid(e.to_string()))?,
-                did: document.did.clone(),
+                did: entry
+                    .state
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| invalid("native entry omits its original DID".into()))?
+                    .to_owned(),
                 seq: index as u64 + 1,
                 operation: raw.clone(),
                 created_at: entry.version_time,
@@ -667,16 +816,16 @@ impl PgWebvhStore {
             let lock = sql_query("SELECT 1 AS ok FROM (SELECT pg_advisory_xact_lock(hashtextextended($1, 0))) AS held")
                 .bind::<Text,_>(core.as_str()).get_result::<WebvhCommitLockRow>(&mut *conn).await.map_err(PersistenceError::database)?;
             let _ = lock.ok;
-            let current = sql_query("SELECT id AS did,did_document,key_log_head,seq,method_evidence,fetched_at,expires_at,updated_at FROM webvh_documents WHERE (id=$1 OR (id LIKE 'did:webvh:%' AND split_part(id, ':', 3)=split_part($1, ':', 3))) ORDER BY seq DESC LIMIT 1 FOR UPDATE")
+            let current = sql_query("WITH head AS (SELECT operation #>> '{state,id}' AS did FROM webvh_log_events WHERE (did=$1 OR (did LIKE 'did:webvh:%' AND split_part(did, ':', 3)=split_part($1, ':', 3))) ORDER BY seq DESC LIMIT 1) SELECT id AS did,did_document,key_log_head,seq,method_evidence,fetched_at,expires_at,updated_at FROM webvh_documents WHERE id=COALESCE((SELECT did FROM head),$1) FOR UPDATE")
                 .bind::<Text,_>(&document.did).get_result::<WebvhDocumentRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
             if current.as_ref().and_then(|row|row.key_log_head.as_ref()) != expected_current_head.as_ref()
                 || current.as_ref().is_some_and(|row| {
                     let prior = usize::try_from(row.seq).ok().and_then(|seq|seq.checked_sub(1)).and_then(|index|events.get(index));
-                    row.did != document.did || !prior.is_some_and(|prior|prior.event_digest.as_str()==row.key_log_head.as_deref().unwrap_or_default() && prior.operation.get("state")==Some(&row.did_document))
+                    !prior.is_some_and(|prior|prior.event_digest.as_str()==row.key_log_head.as_deref().unwrap_or_default() && prior.operation.get("state")==Some(&row.did_document))
                 }) {
                 return Ok(WebvhLogCommitOutcome::Conflict);
             }
-            let existing = sql_query("SELECT id AS event_digest,did,seq,operation,created_at FROM webvh_log_events WHERE did=$1 ORDER BY seq ASC,id ASC FOR UPDATE")
+            let existing = sql_query("SELECT id AS event_digest,did,seq,operation,created_at FROM webvh_log_events WHERE (did=$1 OR (did LIKE 'did:webvh:%' AND split_part(did, ':', 3)=split_part($1, ':', 3))) ORDER BY seq ASC,id ASC FOR UPDATE")
                 .bind::<Text,_>(&document.did).load::<WebvhLogRow>(&mut *conn).await.map_err(PersistenceError::database)?;
             if existing.len() > events.len() || existing.iter().zip(&events).any(|(old,new)|old.seq != new.seq as i64 || old.event_digest != new.event_digest || old.operation != new.operation) {
                 return Ok(WebvhLogCommitOutcome::Conflict);

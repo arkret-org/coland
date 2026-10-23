@@ -365,6 +365,14 @@ pub(crate) async fn admit_agent_pcr_genesis_in_connection(
             "the Agent account already has a Principal Control Realm",
         ));
     }
+    crate::principal_resolution_unit::initialize_in_connection(
+        conn,
+        &agent,
+        event,
+        commit,
+        &resolution,
+    )
+    .await?;
     crate::accounts::create_agent_holder_account_in_connection(conn, &agent, commit.committed_at)
         .await?;
     crate::agent_producer_signer_keys::retain_self_outcome_in_connection(

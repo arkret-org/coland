@@ -57,8 +57,8 @@ async fn require_pcr(
         return Ok(());
     }
     let row = sql_query(
-        "SELECT pcr_realm_id FROM principal_resolutions \
-         WHERE principal_id=$1 AND station_id=$2 FOR SHARE",
+        "SELECT realm_id AS pcr_realm_id FROM pcr_genesis_units \
+         WHERE principal_id=$1 AND station_id=$2 AND result_json<>'{}'::jsonb FOR SHARE",
     )
     .bind::<Text, _>(account.principal_id.as_str())
     .bind::<Text, _>(account.station_id.as_str())
@@ -66,7 +66,7 @@ async fn require_pcr(
     .await
     .optional()
     .map_err(PersistenceError::database)?
-    .ok_or_else(|| invalid("PCR device authority has no accepted principal resolution"))?;
+    .ok_or_else(|| invalid("PCR device authority has no accepted PCR creation anchor"))?;
     if row.pcr_realm_id != event.realm_id.as_str() {
         return Err(invalid("device authority Event is outside its PCR"));
     }

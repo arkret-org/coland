@@ -380,6 +380,7 @@ async fn prepare_or_replicate_one(
             &mut located.keys,
             &commit.signature.verification_method,
             commit.signature.created_at,
+            &located.bundle,
         )
         .await
         .map_err(|error| temporarily_unavailable(format!("RealmCommit signing key: {error}")))?;

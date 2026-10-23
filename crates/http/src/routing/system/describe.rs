@@ -258,7 +258,7 @@ fn service_identity_health(state: &DidCoreIdentityState) -> Value {
             "computed_key": computed_key,
             "last_verified_at": identity.last_verified_at,
             "retry_at": null,
-            "next_action": "run `coland service-identity migrate-base` after verifying the computed registration key",
+            "next_action": "restore the stored public base URL, or stop serving and run coland service-identity migrate-base --from OLD_URL --to NEW_URL --preflight before applying the signed migration",
         }),
         DidCoreIdentityState::Conflict {
             stored_service_id,
@@ -347,10 +347,17 @@ fn unsupported_profiles_from_limits(
 }
 
 pub(crate) fn build_server_description(state: &AppState) -> ServiceDescribe {
+    // Configuration drift keeps serving the accepted identity. Discovery must
+    // confirm its signed endpoint, rather than advertise an unsigned new base.
+    let mut description_config = state.config().clone();
+    if let Some(identity) = state.service_identity_state().identity() {
+        description_config.public_base_url =
+            identity.registration_key.public_base_url().to_string();
+    }
     let mut description = describe(
         state.service_resolution_commitment().as_ref(),
         state.jobs().storage_mode(),
-        state.config(),
+        &description_config,
     );
     description.receive_policy_constraints = state.config().receive_policy_constraints.clone();
     // Advertise the LIVE rate-limit ceilings (from the runtime overlay, which

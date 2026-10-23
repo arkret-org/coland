@@ -405,6 +405,29 @@ async fn founder_disclosure_covers_every_accepted_cut_of_disclosed_kinds() {
             .is_err()
     );
 
+    // A private PCR current must refuse the entire ordinary cut, even if a
+    // privileged storage fault places it in a collaboration Realm.
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("INSERT INTO principal_resolution_current_results (principal_id,station_id,pcr_realm_id,genesis_event_id,current_commit_id,current_stream_position,value,updated_at) VALUES ('ak:did_core:web:private-snapshot.example',$1,$2,$3,$4,0,'{\"private_marker\":true}'::jsonb,now())")
+        .bind::<Text,_>(creator.station_id.as_str())
+        .bind::<Text,_>(realm_id.as_str())
+        .bind::<Text,_>(unit.transactions[0].event.event_id.as_str())
+        .bind::<Text,_>(unit.transactions[0].commit.commit_id.as_str())
+        .execute(&mut conn).await.unwrap();
+    let error = account_snapshot_material(&pool, &realm_id, &creator)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("outside the disclosure subset"),
+        "{error}"
+    );
+    diesel::sql_query("DELETE FROM principal_resolution_current_results WHERE pcr_realm_id=$1")
+        .bind::<Text, _>(realm_id.as_str())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
         "INSERT INTO relation_current_results \

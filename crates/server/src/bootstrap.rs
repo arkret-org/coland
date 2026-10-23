@@ -5,6 +5,8 @@
 //! signing and control secrets remain in a durable SDK `KeyStore`. Configuration
 //! never supplies or pins the resulting DID.
 
+pub mod public_base;
+
 use std::sync::Arc;
 
 use arkret_http_client::{Auth, Client, ClientBuilder};
@@ -244,6 +246,13 @@ async fn resolve_service_identity(
     // recoverable bundle before any public head can advance.
     ensure_identity_bundle(persistence, bundle_backend, &stored).await?;
 
+    if stored.identity.registration_key != configured_key {
+        return Ok(DidCoreIdentityState::RegistrationKeyDrift {
+            stored_key: stored.identity.registration_key.clone(),
+            identity: stored.identity,
+            computed_key: configured_key,
+        });
+    }
     let stored = ensure_account_authority_authorization(
         persistence,
         config,
@@ -257,13 +266,6 @@ async fn resolve_service_identity(
     let stored = ensure_service_assertion_signer(persistence, config, key_store, stored).await?;
     ensure_identity_bundle(persistence, bundle_backend, &stored).await?;
 
-    if stored.identity.registration_key != configured_key {
-        return Ok(DidCoreIdentityState::RegistrationKeyDrift {
-            stored_key: stored.identity.registration_key.clone(),
-            identity: stored.identity,
-            computed_key: configured_key,
-        });
-    }
     Ok(DidCoreIdentityState::Ready {
         identity: stored.identity,
     })
@@ -768,17 +770,35 @@ async fn ensure_identity_bundle(
         .webvh_history(stored.identity.did.as_str())
         .await
         .map_err(|error| anyhow::anyhow!("reading service WebVH history failed: {error}"))?;
-    let prior_bundle = backend
-        .load(&stored.identity.registration_key)
-        .map_err(|error| {
-            anyhow::anyhow!("loading prior service identity bundle failed: {error}")
-        })?;
-    if let Some(bundle) = &prior_bundle {
-        validate_bundle_receipt_signatures(bundle)?;
+    let mut prior_receipts = persistence
+        .service_registration_receipts(&stored.identity.service_id)
+        .await?;
+    let mut visited = Vec::new();
+    for entry in history.iter().rev() {
+        let document: arkret_models_identity::service_identity::ServiceDidDocument =
+            serde_json::from_value(entry.operation["state"].clone())?;
+        let endpoint = document
+            .service
+            .iter()
+            .find(|e| e.service_kind == *stored.identity.registration_key.service_kind())
+            .ok_or_else(|| anyhow::anyhow!("service history omits its registered endpoint"))?;
+        let key = ServiceRegistrationKey::new(
+            stored.identity.registration_key.service_kind().clone(),
+            endpoint.service_endpoint.clone(),
+        )?;
+        if visited.contains(&key) {
+            continue;
+        }
+        visited.push(key.clone());
+        if let Some(bundle) = backend.load(&key)? {
+            bundle.validate()?;
+            validate_bundle_receipt_signatures(&bundle)?;
+            if bundle.identity.identity.service_id != stored.identity.service_id {
+                anyhow::bail!("prior registration bundle belongs to another service")
+            }
+            prior_receipts.extend(bundle.receipt_chains);
+        }
     }
-    let prior_receipts = prior_bundle
-        .map(|bundle| bundle.receipt_chains)
-        .unwrap_or_default();
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let mut receipts = Vec::with_capacity(history.len());
     for entry in &history {
@@ -857,7 +877,7 @@ async fn restore_identity_bundle(
         serde_json::from_value(inception_value.clone())
             .map_err(|error| anyhow::anyhow!("identity bundle inception is malformed: {error}"))?;
     let request = ServiceRegistrationEnsureRequestBody::new(
-        registration_key.clone(),
+        bundle.receipt_chains[0].registration_key.clone(),
         inception.clone(),
         uuid::Uuid::now_v7().to_string(),
         None,
@@ -904,7 +924,7 @@ async fn restore_identity_bundle(
         created_at: now,
     };
     match persistence
-        .commit_service_registration(registration_key, outcome, document, event)
+        .commit_service_registration(request.registration_key()?, outcome, document, event)
         .await
         .map_err(|error| anyhow::anyhow!("restoring service registration failed: {error}"))?
     {
@@ -972,6 +992,9 @@ async fn restore_identity_bundle(
         previous_digest = event_digest;
     }
     validate_stored_service_identity(persistence, config, key_store, &bundle.identity).await?;
+    persistence
+        .retain_service_registration_receipts(bundle.receipt_chains.clone())
+        .await?;
     persist_stored_identity(persistence, bundle.identity).await
 }
 
@@ -1020,6 +1043,13 @@ fn validate_bundle_key_custody(
         key_store,
         &next_control_key_ref(&stored.identity.control_key_ref)?,
     )?;
+    let after_next =
+        next_control_key_ref(&next_control_key_ref(&stored.identity.control_key_ref)?)?;
+    if key_store.load(after_next.as_str()).is_ok() {
+        anyhow::bail!(
+            "service_identity_bundle_stale: bundle predates the durable accepted control-key floor"
+        );
+    }
     Ok(())
 }
 
@@ -1880,8 +1910,34 @@ async fn publish_service_document_successor(
     state: Value,
     signer_successor: Option<(&DidCoreIdentityKeyRef, &[u8; 32])>,
 ) -> anyhow::Result<StoredDidCoreIdentity> {
-    let did = stored.identity.did.clone();
-    let entries = persistence.webvh_history(did.as_str()).await?;
+    publish_service_document_successor_impl(
+        persistence,
+        config,
+        key_store,
+        stored,
+        state,
+        signer_successor,
+        None,
+    )
+    .await
+}
+
+async fn publish_service_document_successor_impl(
+    persistence: &PersistenceHandle,
+    config: &AppConfig,
+    key_store: Option<&dyn KeyStore>,
+    stored: StoredDidCoreIdentity,
+    state: Value,
+    signer_successor: Option<(&DidCoreIdentityKeyRef, &[u8; 32])>,
+    registration_successor: Option<ServiceRegistrationKey>,
+) -> anyhow::Result<StoredDidCoreIdentity> {
+    let predecessor_did = stored.identity.did.clone();
+    let did: Did = state
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("service successor omits DID"))?
+        .parse()?;
+    let entries = persistence.webvh_history(predecessor_did.as_str()).await?;
     let head = entries
         .last()
         .ok_or_else(|| anyhow::anyhow!("service DID has no native history"))?;
@@ -1911,17 +1967,40 @@ async fn publish_service_document_successor(
         .map(|entry| entry.operation.clone())
         .collect();
     let version_time = next_webvh_version_time(&head.operation)?;
-    let rotation = arkret_signatures::webvh::prepare_service_rotation(
-        &arkret_signatures::webvh::ServiceRotationInput {
-            did: did.as_str(),
-            previous_entries: &previous_entries,
-            state: &state,
-            current_update_seed: &signing_seed,
-            next_update_public_key_multibase: &following_public_key,
-            version_time,
-        },
-    )
-    .map_err(|error| anyhow::anyhow!("building the Station DID successor failed: {error}"))?;
+    let (log_entry, version_id, current_update_public_key_multibase) = if did == predecessor_did {
+        let rotation = arkret_signatures::webvh::prepare_service_rotation(
+            &arkret_signatures::webvh::ServiceRotationInput {
+                did: did.as_str(),
+                previous_entries: &previous_entries,
+                state: &state,
+                current_update_seed: &signing_seed,
+                next_update_public_key_multibase: &following_public_key,
+                version_time,
+            },
+        )?;
+        (
+            rotation.log_entry,
+            rotation.version_id,
+            rotation.current_update_public_key_multibase,
+        )
+    } else {
+        let relocation = arkret_signatures::webvh::prepare_webvh_relocation(
+            &arkret_signatures::webvh::WebvhRelocationInput {
+                current_did: predecessor_did.as_str(),
+                target_did: did.as_str(),
+                previous_entries: &previous_entries,
+                state: &state,
+                current_update_seed: &signing_seed,
+                next_update_public_key_multibase: &following_public_key,
+                version_time,
+            },
+        )?;
+        (
+            relocation.log_entry,
+            relocation.version_id,
+            relocation.current_update_public_key_multibase,
+        )
+    };
 
     // Re-validate the extended chain with the same checks this deployment
     // applies to a successor submitted by anyone else. A locally built entry
@@ -1929,17 +2008,17 @@ async fn publish_service_document_successor(
     let candidate: Vec<WebvhLogEntry> = previous_entries
         .iter()
         .cloned()
-        .chain(std::iter::once(rotation.log_entry.clone()))
+        .chain(std::iter::once(log_entry.clone()))
         .map(WebvhLogEntry::new)
         .collect();
-    verify_webvh_log_proof(&rotation.log_entry)
+    verify_webvh_log_proof(&log_entry)
         .map_err(|message| anyhow::anyhow!("Station DID successor proof is invalid: {message}"))?;
     validate_log_chain(&candidate)?;
     verify_log_subject(did.as_str(), &candidate)?;
     validate_witness_policy_for_log(&candidate)?;
     validate_rotation_authorization_for_log(&candidate)?;
 
-    let event_digest = arkret_canonical::canonical_sha256(&rotation.log_entry)
+    let event_digest = arkret_canonical::canonical_sha256(&log_entry)
         .map_err(|error| anyhow::anyhow!("Station DID successor digest failed: {error}"))?;
     let seq = u64::try_from(entries.len())
         .ok()
@@ -1959,7 +2038,7 @@ async fn publish_service_document_successor(
         method_evidence: json!({
             "mode": "self_hosted_service_rotation",
             "reason": "service_document_update",
-            "version_id": rotation.version_id,
+            "version_id": version_id,
             "self_provisioned": true,
         }),
         fetched_at: now,
@@ -1967,6 +2046,15 @@ async fn publish_service_document_successor(
         updated_at: now,
     };
     let mut updated = stored.clone();
+    updated.identity.did = did.clone();
+    if let Some(key) = registration_successor {
+        updated.identity.registration_key = key.clone();
+        updated.registration_receipt.registration_key = key;
+    }
+    updated.registration_receipt.did = did.clone();
+    updated.registration_receipt.proof.verification_method =
+        arkret_wire::DidUrl::new(format!("{did}#notary-key")).map_err(anyhow::Error::msg)?;
+
     let signing_seed = if let Some((next_ref, next_seed)) = signer_successor {
         if !updated.identity.signing_key_refs.contains(next_ref) {
             updated.identity.signing_key_refs.push(next_ref.clone());
@@ -1982,14 +2070,14 @@ async fn publish_service_document_successor(
     };
     updated.registration_receipt = reissue_registration_receipt(
         &updated,
-        &rotation.version_id,
+        &version_id,
         &event_digest,
-        &rotation.current_update_public_key_multibase,
+        &current_update_public_key_multibase,
         &signing_seed,
         now,
     )?;
     updated.identity.control_key_ref = signing_control_ref;
-    updated.identity.version_id = rotation.version_id.clone();
+    updated.identity.version_id = version_id.clone();
     updated.identity.last_verified_at = now;
     updated.did_document = serde_json::from_value(state).map_err(|error| {
         anyhow::anyhow!("the rotated Station DID document is not a service document: {error}")
@@ -2001,7 +2089,7 @@ async fn publish_service_document_successor(
         event_digest,
         did: did.to_string(),
         seq,
-        operation: rotation.log_entry.clone(),
+        operation: log_entry.clone(),
         created_at: now,
     };
     match persistence
@@ -2025,7 +2113,7 @@ async fn publish_service_document_successor(
             )
         }
     }
-    promote_matching_control_candidate(key_store, &following_control_ref, &rotation.log_entry)?;
+    promote_matching_control_candidate(key_store, &following_control_ref, &log_entry)?;
     tracing::info!(
         did = %did,
         version_id = %updated.identity.version_id,
@@ -2344,6 +2432,7 @@ mod tests {
     use coland_storage_postgres::test_database::TestDatabase;
 
     use super::*;
+    include!("bootstrap/public_base_tests.rs");
 
     #[derive(Default)]
     struct TestKeyStore {
@@ -3048,12 +3137,6 @@ mod tests {
         )
         .await
         .expect("first provisioning");
-        let before_rotation = persistence_store
-            .service_identity()
-            .get()
-            .await
-            .unwrap()
-            .unwrap();
         let authority_key = arkret_canonical::multibase::ed25519_pubkey_to_did_key_multibase(
             &SigningKey::from_bytes(&[0x5b; 32])
                 .verifying_key()
@@ -3074,14 +3157,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // Model a stop after the WebVH CAS but before the canonical next key
-        // and singleton identity update became durable.
+        // Model a stop after the atomic database cut but before promotion of
+        // the canonical next control key from its retained candidate.
         let canonical_next = next_control_key_ref(&committed.identity.control_key_ref).unwrap();
         key_store.delete(canonical_next.as_str()).unwrap();
-        persistence
-            .store_service_identity(before_rotation.clone())
-            .await
-            .unwrap();
 
         resolve_service_identity(&persistence, &config, Some(&key_store), None, false)
             .await
@@ -3140,11 +3219,62 @@ mod tests {
             public_base_url: "https://relocated.example/station/".into(),
             ..bootstrap_config()
         };
+        let drift = resolve_service_identity(&persistence, &changed, Some(&keys), None, false)
+            .await
+            .unwrap();
+        assert!(matches!(
+            drift,
+            DidCoreIdentityState::RegistrationKeyDrift { .. }
+        ));
+        assert_eq!(
+            persistence
+                .webvh_history(original.did.as_str())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        public_base::migrate_with_storage(
+            &persistence,
+            &bootstrap_config(),
+            &keys,
+            None,
+            &bootstrap_config().public_base_url,
+            &changed.public_base_url,
+            public_base::MigrationOptions {
+                preflight: true,
+                preserve_did_host: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            persistence
+                .webvh_history(original.did.as_str())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        public_base::migrate_with_storage(
+            &persistence,
+            &bootstrap_config(),
+            &keys,
+            None,
+            &bootstrap_config().public_base_url,
+            &changed.public_base_url,
+            public_base::MigrationOptions {
+                preflight: false,
+                preserve_did_host: false,
+            },
+        )
+        .await
+        .unwrap();
         let updated = resolve_service_identity(&persistence, &changed, Some(&keys), None, false)
             .await
             .unwrap();
         assert_eq!(updated.identity().unwrap().service_id, original.service_id);
-        assert_eq!(updated.identity().unwrap().did, original.did);
+        assert_ne!(updated.identity().unwrap().did, original.did);
         assert_ne!(updated.identity().unwrap().version_id, original.version_id);
         let stored = store.service_identity().get().await.unwrap().unwrap();
         let doc = serde_json::to_value(&stored.did_document).unwrap();
@@ -3173,6 +3303,20 @@ mod tests {
             public_base_url: "https://final.example/".into(),
             ..bootstrap_config()
         };
+        public_base::migrate_with_storage(
+            &persistence,
+            &changed,
+            &keys,
+            None,
+            &changed.public_base_url,
+            &next.public_base_url,
+            public_base::MigrationOptions {
+                preflight: false,
+                preserve_did_host: false,
+            },
+        )
+        .await
+        .unwrap();
         resolve_service_identity(&persistence, &next, Some(&keys), None, false)
             .await
             .unwrap();
@@ -3729,7 +3873,7 @@ mod tests {
         bundle_backend
             .delete(&registration_key(&config).unwrap())
             .unwrap();
-        let missing_history = resolve_service_identity(
+        resolve_service_identity(
             &persistence,
             &config,
             Some(&key_store),
@@ -3737,13 +3881,12 @@ mod tests {
             false,
         )
         .await
-        .expect_err("a missing historical receipt cannot be minted with the current signer");
-        assert!(
-            missing_history
-                .to_string()
-                .contains("service_identity_historical_receipt_missing"),
-            "{missing_history}"
-        );
+        .expect("durable accepted receipts rebuild a missing bundle");
+        let rebuilt = bundle_backend
+            .load(&registration_key(&config).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebuilt.receipt_chains, valid_bundle.receipt_chains);
         std::fs::remove_dir_all(bundle_dir).unwrap();
     }
 

@@ -56,9 +56,34 @@ pub enum CurrentPrincipalRead {
     },
 }
 
+/// Complete native evidence prepared before, and reverified within, the PCR cut.
+#[derive(Clone, Debug)]
+pub struct PrincipalResolutionUpdateWrite {
+    pub transaction: crate::AuthorityCommitTransaction,
+    pub log_entries: Vec<serde_json::Value>,
+    pub witness_records: Vec<serde_json::Value>,
+}
+
 /// Durable, rebuildable read index over one PCR's committed resolution Events.
 #[async_trait]
 pub trait PrincipalResolutionStore: Send + Sync {
+    async fn admit_update(
+        &self,
+        _write: PrincipalResolutionUpdateWrite,
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+        Err(super::PersistenceError::Conflict(
+            "temporarily_unavailable: PCR resolution admission unavailable".into(),
+        ))
+    }
+    /// Immutable accepted Human creation, independent of resolution current.
+    async fn registered_genesis(
+        &self,
+        _account_id: &AccountId,
+    ) -> PersistenceResult<Option<Event>> {
+        Err(super::PersistenceError::Conflict(
+            "temporarily_unavailable: accepted Human creation unavailable".into(),
+        ))
+    }
     async fn current_principal(
         &self,
         account_id: &AccountId,

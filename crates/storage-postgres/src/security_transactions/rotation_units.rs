@@ -741,7 +741,7 @@ pub(super) async fn commit_rotation_local_commit_in_connection(
     let cut =
         active_authorizer_cut(conn, account, &artifact.device_id, &realm_id, accepted_at).await?;
     let account_did = sql_query(
-        "SELECT projection->>'did' AS did FROM principal_resolutions \
+        "SELECT value->>'did' AS did FROM principal_resolution_current_results \
          WHERE principal_id=$1 AND station_id=$2 AND pcr_realm_id=$3",
     )
     .bind::<Text, _>(account.principal_id.as_str())

@@ -406,6 +406,7 @@ pub(super) async fn submit_peer_direct_conversation_founding(
                 &mut located.keys,
                 &commit.signature.verification_method,
                 commit.signature.created_at,
+                &located.bundle,
             )
             .await
             .map_err(|error| {

@@ -136,7 +136,7 @@ pub(crate) async fn project_revoke_proposal_in_connection(
         .as_account_id()
         .ok_or_else(|| invalid("revoke proposal actor is not an Account"))?;
     let principal = sql_query(
-        "SELECT pcr_realm_id FROM principal_resolutions WHERE principal_id=$1 AND station_id=$2 FOR SHARE",
+        "SELECT realm_id AS pcr_realm_id FROM pcr_genesis_units WHERE principal_id=$1 AND station_id=$2 AND result_json<>'{}'::jsonb FOR SHARE",
     )
     .bind::<Text, _>(account.principal_id.as_str())
     .bind::<Text, _>(account.station_id.as_str())
@@ -144,7 +144,7 @@ pub(crate) async fn project_revoke_proposal_in_connection(
     .await
     .optional()
     .map_err(PersistenceError::database)?
-    .ok_or_else(|| invalid("revoke proposal has no accepted PCR resolution"))?;
+    .ok_or_else(|| invalid("revoke proposal has no accepted PCR creation anchor"))?;
     if principal.pcr_realm_id != event.realm_id.as_str() {
         return Err(invalid("revoke proposal is outside its PCR"));
     }
@@ -202,17 +202,17 @@ pub(crate) async fn confirmed_pcr_device_cut_in_connection(
     device_id: &DeviceId,
 ) -> PersistenceResult<Option<ConfirmedPcrDeviceCut>> {
     let row = sql_query(
-        "SELECT p.pcr_realm_id, h.commit_id AS head_commit_id, \
+        "SELECT p.realm_id AS pcr_realm_id, h.commit_id AS head_commit_id, \
            g.current_commit_id AS generation_commit_id, \
                g.current_stream_position AS generation_stream_position, g.value AS generation_value, \
            (SELECT c.commit_id FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE c.realm_id=p.pcr_realm_id AND \
+            WHERE c.realm_id=p.realm_id AND \
               (e.kind='ak.device.reanchor' OR \
                (e.kind='ak.device.authorize' AND \
                 e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
             ORDER BY c.stream_position DESC LIMIT 1) AS latest_generation_commit_id, \
                (SELECT c.stream_position FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE c.realm_id=p.pcr_realm_id AND \
+            WHERE c.realm_id=p.realm_id AND \
               (e.kind='ak.device.reanchor' OR \
                (e.kind='ak.device.authorize' AND \
                 e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
@@ -222,51 +222,51 @@ pub(crate) async fn confirmed_pcr_device_cut_in_connection(
                       THEN e.envelope->'payload'->'new_device_generation' \
                           ELSE e.envelope->'payload'->'authorized_generation_ref' END) \
             FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE c.realm_id=p.pcr_realm_id AND \
+            WHERE c.realm_id=p.realm_id AND \
               (e.kind='ak.device.reanchor' OR \
                (e.kind='ak.device.authorize' AND \
                 e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
             ORDER BY c.stream_position DESC LIMIT 1) AS expected_generation_value, \
            a.current_commit_id AS authorization_commit_id, a.current_stream_position AS authorization_stream_position, a.value AS authorization_value, \
            (SELECT c.commit_id FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE c.realm_id=p.pcr_realm_id AND e.kind='ak.device.authorize' \
+            WHERE c.realm_id=p.realm_id AND e.kind='ak.device.authorize' \
               AND e.envelope->'payload'->>'device_id'=$3 \
             ORDER BY c.stream_position DESC LIMIT 1) AS latest_authorization_commit_id, \
            (SELECT c.stream_position FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE c.realm_id=p.pcr_realm_id AND e.kind='ak.device.authorize' \
+            WHERE c.realm_id=p.realm_id AND e.kind='ak.device.authorize' \
               AND e.envelope->'payload'->>'device_id'=$3 \
             ORDER BY c.stream_position DESC LIMIT 1) AS latest_authorization_stream_position, \
            (SELECT ((e.envelope->'payload') - 'device_id'::text) || \
                     jsonb_build_object('device_authorize_event_id',e.envelope->>'event_id') \
             FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE c.realm_id=p.pcr_realm_id AND e.kind='ak.device.authorize' \
+            WHERE c.realm_id=p.realm_id AND e.kind='ak.device.authorize' \
               AND e.envelope->'payload'->>'device_id'=$3 \
             ORDER BY c.stream_position DESC LIMIT 1) AS expected_authorization_value, \
            (SELECT count(*) FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE c.realm_id=p.pcr_realm_id AND e.kind='ak.device.revoke' \
+            WHERE c.realm_id=p.realm_id AND e.kind='ak.device.revoke' \
               AND e.envelope->'payload'->>'device_id'=$3) AS accepted_count, \
            (SELECT count(*) FROM pcr_device_revocation_proposals r \
-            WHERE r.realm_id=p.pcr_realm_id AND r.device_id=$3) AS projected_count, \
+            WHERE r.realm_id=p.realm_id AND r.device_id=$3) AS projected_count, \
            (SELECT count(*) FROM pcr_device_revocation_proposals r \
             JOIN realm_commits c ON c.commit_id=r.commit_id \
             JOIN canonical_events e ON e.pk=c.event_pk \
-            WHERE r.realm_id=p.pcr_realm_id AND r.device_id=$3 \
+            WHERE r.realm_id=p.realm_id AND r.device_id=$3 \
               AND c.realm_id=r.realm_id AND c.stream_position=r.stream_position \
               AND e.kind='ak.device.revoke' AND e.envelope->>'event_id'=r.event_id \
               AND e.envelope->'payload'=r.payload) AS matched_count, \
            (SELECT coalesce(jsonb_agg(jsonb_build_object('tag_id',r.tag_id,'value',r.payload) \
                    ORDER BY r.tag_id),'[]'::jsonb) \
             FROM pcr_device_revocation_proposals r \
-            WHERE r.realm_id=p.pcr_realm_id AND r.device_id=$3) AS proposals \
-         FROM principal_resolutions p \
+            WHERE r.realm_id=p.realm_id AND r.device_id=$3) AS proposals \
+         FROM pcr_genesis_units p \
          JOIN LATERAL (SELECT commit_id FROM realm_commits \
-                       WHERE realm_id=p.pcr_realm_id \
-                         AND stream_ref=jsonb_build_object('kind','realm','realm_id',p.pcr_realm_id) \
+                       WHERE realm_id=p.realm_id \
+                         AND stream_ref=jsonb_build_object('kind','realm','realm_id',p.realm_id) \
                        ORDER BY stream_position DESC LIMIT 1) h ON TRUE \
-         LEFT JOIN pcr_device_generation_current_results g ON g.realm_id=p.pcr_realm_id \
+         LEFT JOIN pcr_device_generation_current_results g ON g.realm_id=p.realm_id \
          LEFT JOIN pcr_device_authorization_current_results a \
-           ON a.realm_id=p.pcr_realm_id AND a.device_id=$3 \
-         WHERE p.principal_id=$1 AND p.station_id=$2",
+           ON a.realm_id=p.realm_id AND a.device_id=$3 \
+         WHERE p.principal_id=$1 AND p.station_id=$2 AND p.result_json<>'{}'::jsonb",
     )
     .bind::<Text, _>(account.principal_id.as_str())
     .bind::<Text, _>(account.station_id.as_str())

@@ -5,6 +5,21 @@ use super::{
 /// `submit_did_operation` writes a document and appends a log entry.
 #[async_trait]
 pub trait WebvhStore: Send + Sync {
+    async fn retain_service_registration_receipts(
+        &self,
+        _receipts: Vec<arkret_models_identity::service_identity::ServiceRegistrationReceipt>,
+    ) -> PersistenceResult<()> {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: service receipt retention unavailable".into(),
+        ))
+    }
+    async fn service_registration_receipts(
+        &self,
+        _service_id: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<Vec<arkret_models_identity::service_identity::ServiceRegistrationReceipt>>
+    {
+        Ok(Vec::new())
+    }
     async fn get_document(&self, did: &str) -> PersistenceResult<Option<WebvhDocumentRecord>>;
     async fn get_embedded_webvh_document_by_local_id(
         &self,

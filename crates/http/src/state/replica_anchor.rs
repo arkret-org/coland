@@ -784,6 +784,7 @@ async fn ensure_historical_method_key(
             &mut located.keys,
             &signature.verification_method,
             signature.created_at,
+            &located.bundle,
         )
         .await
         .map_err(|error| error.message)?;

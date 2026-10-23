@@ -262,13 +262,13 @@ pub(crate) async fn confirmed_pcr_generation(
                g.current_commit_id AS generation_commit_id, \
                g.current_stream_position AS generation_stream_position, g.value AS generation_value, \
                (SELECT c.commit_id FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-                WHERE c.realm_id=p.pcr_realm_id AND \
+                WHERE c.realm_id=p.realm_id AND \
                   (e.kind='ak.device.reanchor' OR \
                    (e.kind='ak.device.authorize' AND \
                     e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
                 ORDER BY c.stream_position DESC LIMIT 1) AS latest_generation_commit_id, \
                (SELECT c.stream_position FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-                WHERE c.realm_id=p.pcr_realm_id AND \
+                WHERE c.realm_id=p.realm_id AND \
                   (e.kind='ak.device.reanchor' OR \
                    (e.kind='ak.device.authorize' AND \
                     e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
@@ -278,18 +278,18 @@ pub(crate) async fn confirmed_pcr_generation(
                           THEN e.envelope->'payload'->'new_device_generation' \
                           ELSE e.envelope->'payload'->'authorized_generation_ref' END) \
                 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-                WHERE c.realm_id=p.pcr_realm_id AND \
+                WHERE c.realm_id=p.realm_id AND \
                   (e.kind='ak.device.reanchor' OR \
                    (e.kind='ak.device.authorize' AND \
                     e.envelope->'payload'->>'authorization_binding_kind'='registration_anchor')) \
                 ORDER BY c.stream_position DESC LIMIT 1) AS expected_generation_value \
-             FROM principal_resolutions p \
+             FROM pcr_genesis_units p \
              JOIN LATERAL (SELECT commit_id FROM realm_commits \
-                           WHERE realm_id=p.pcr_realm_id \
-                             AND stream_ref=jsonb_build_object('kind','realm','realm_id',p.pcr_realm_id) \
+                           WHERE realm_id=p.realm_id \
+                             AND stream_ref=jsonb_build_object('kind','realm','realm_id',p.realm_id) \
                            ORDER BY stream_position DESC LIMIT 1) h ON TRUE \
-             LEFT JOIN pcr_device_generation_current_results g ON g.realm_id=p.pcr_realm_id \
-             WHERE p.principal_id=$1 AND p.station_id=$2",
+             LEFT JOIN pcr_device_generation_current_results g ON g.realm_id=p.realm_id \
+             WHERE p.principal_id=$1 AND p.station_id=$2 AND p.result_json<>'{}'::jsonb",
         )
         .bind::<Text, _>(account.principal_id.as_str())
         .bind::<Text, _>(account.station_id.as_str())

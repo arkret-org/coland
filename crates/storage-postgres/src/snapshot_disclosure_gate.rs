@@ -164,6 +164,8 @@ const AUDITED_FAMILIES: &[&str] = &[
     "agent_interaction_current_results",
     "agent_key_current_results",
     "key_backup_active_series_current_results",
+    // Principal resolution is private PCR state, never ordinary Realm disclosure.
+    "principal_resolution_current_results",
     "pcr_device_generation_current_results",
     "pcr_device_authorization_current_results",
     // Ordinary scope Profiles are shared; PCR identity remains private.
@@ -1233,6 +1235,7 @@ async fn disclosure_facts_in_connection(
             OR EXISTS(SELECT 1 FROM agent_status_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM agent_key_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM key_backup_active_series_current_results WHERE realm_id=$1) \
+            OR EXISTS(SELECT 1 FROM principal_resolution_current_results WHERE pcr_realm_id=$1) \
             OR EXISTS(SELECT 1 FROM pcr_device_generation_current_results WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM actor_profile_current_results p WHERE p.realm_id=$1 AND NOT EXISTS(SELECT 1 FROM realm_bootstrap_current_results g WHERE g.realm_id=$1 AND g.result_family='realm_genesis' AND g.value->>'purpose'='collaboration')) \
             OR EXISTS(SELECT 1 FROM agent_pcr_genesis_declaration_current_results WHERE realm_id=$1) \

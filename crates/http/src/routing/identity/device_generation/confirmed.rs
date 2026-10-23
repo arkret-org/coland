@@ -263,18 +263,16 @@ pub(crate) async fn load_confirmed_device_history(
             "device inventory belongs to a different Station Account",
         ));
     }
-    let Some(binding) = state
+    let Some(genesis) = state
         .persistence()
-        .principal_resolution_by_account_id(account)
+        .registered_principal_genesis(account)
         .await
         .map_err(unavailable)?
     else {
         return Ok(None);
     };
-    let genesis = &binding.genesis_event;
-    if binding.account_id != *account
-        || genesis.realm_id != binding.pcr_realm_id
-        || genesis.actor_id != ActorId::account(account.clone())
+    let genesis = &genesis;
+    if genesis.actor_id != ActorId::account(account.clone())
         || genesis.kind != EventKind::RealmCreate
     {
         return Err(invalid(
@@ -293,7 +291,7 @@ pub(crate) async fn load_confirmed_device_history(
         ));
     }
     verify_registered_genesis(state, account, genesis, &create).await?;
-    let realm_id = binding.pcr_realm_id.clone();
+    let realm_id = genesis.realm_id.clone();
     let stream_ref = CommitStreamRef::Realm {
         realm_id: realm_id.clone(),
     };

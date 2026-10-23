@@ -1388,16 +1388,30 @@ async fn read_principal_resolution_audit(
         .map_err(|error| {
             AppError::internal(format!("load principal resolution history: {error}"))
         })?;
+    if full_history.first().map(|e| &e.event_id) != Some(&record.current_event.event_id) {
+        return Err(crate::app_error!(
+            TemporarilyUnavailable,
+            "resolution audit current changed during read"
+        ));
+    }
     let cursor_position = if let Some(cursor) = body.after_resolution_event_ref.as_ref() {
-        let position = full_history
-            .iter()
-            .position(|event| event.event_id == *cursor)
-            .filter(|position| *position > 0)
-            .ok_or_else(|| {
+        if cursor == &record.current_event.event_id {
+            return Err(
+                AppError::param_invalid("resolution history ancestor is unknown")
+                    .with_reason_code("resolution_history_ancestor_unknown"),
+            );
+        }
+        state
+            .persistence()
+            .principal_resolution_history(&body.account_id, Some(cursor.as_str()), 1)
+            .await
+            .map_err(|_| {
                 AppError::param_invalid("resolution history ancestor is unknown")
                     .with_reason_code("resolution_history_ancestor_unknown")
             })?;
-        Some(position)
+        full_history
+            .iter()
+            .position(|event| event.event_id == *cursor)
     } else {
         None
     };
@@ -1413,7 +1427,7 @@ async fn read_principal_resolution_audit(
         .cloned()
         .collect::<Vec<_>>();
     let requested_depth = usize::from(body.history_depth.unwrap_or(0));
-    let predecessor_resolution_events = available_predecessors
+    let mut predecessor_resolution_events = available_predecessors
         .iter()
         .take(requested_depth)
         .cloned()
@@ -1423,11 +1437,68 @@ async fn read_principal_resolution_audit(
     // bounded segment reaches genesis (which is carried separately) or the
     // caller's exclusive ancestor cursor.
     let history_complete = predecessor_resolution_events.len() == available_predecessors.len();
-    let next_audit_cursor = (!history_complete).then(|| {
-        available_predecessors[predecessor_resolution_events.len()]
-            .event_id
-            .clone()
-    });
+    let next_audit_cursor = if !history_complete {
+        let oldest = predecessor_resolution_events
+            .last()
+            .unwrap_or(&record.current_event);
+        let next = &available_predecessors[predecessor_resolution_events.len()];
+        let payload: arkret_models_identity::PrincipalResolutionUpdatePayload =
+            serde_json::from_value(
+                serde_json::to_value(&oldest.payload)
+                    .map_err(|e| AppError::internal(e.to_string()))?,
+            )
+            .map_err(|e| AppError::internal(e.to_string()))?;
+        let accepted = state
+            .persistence()
+            .committed_event(&next.event_id)
+            .await
+            .map_err(|e| AppError::internal(e.to_string()))?
+            .ok_or_else(|| AppError::internal("audit predecessor Commit missing"))?;
+        if accepted.commit.commit_id != payload.expected_revision.commit_id
+            || accepted.commit.stream_position != payload.expected_revision.stream_position
+            || accepted.commit.realm_id != record.pcr_realm_id
+            || next.actor_id.as_account_id() != Some(&record.account_id)
+        {
+            return Err(AppError::internal(
+                "audit cursor does not bind the signed source revision",
+            ));
+        }
+        Some(next.event_id.clone())
+    } else {
+        None
+    };
+    predecessor_resolution_events.reverse();
+    let (mut method_history_evidence, _) =
+        crate::routing::system::principal_resolution::principal_method_history_evidence(
+            state,
+            &record.projection,
+            false,
+        )
+        .await?;
+    let initial: arkret_models_identity::ResolutionCommitment = serde_json::from_value(
+        record
+            .genesis_event
+            .payload
+            .get("object")
+            .and_then(|o| o.get("initial_resolution"))
+            .cloned()
+            .ok_or_else(|| AppError::internal("audit genesis initial resolution missing"))?,
+    )
+    .map_err(|e| AppError::internal(e.to_string()))?;
+    match &mut method_history_evidence {
+        arkret_models_identity::ResolutionMethodHistoryEvidence::WebvhLog { boundary, .. }
+        | arkret_models_identity::ResolutionMethodHistoryEvidence::DidWebDocument {
+            boundary,
+            ..
+        }
+        | arkret_models_identity::ResolutionMethodHistoryEvidence::DidKeyExpansion {
+            boundary,
+            ..
+        } => {
+            boundary.from_method_history_head = initial.method_history_head;
+            boundary.from_version_id = initial.version_id;
+        }
+    }
 
     let principal_genesis_commit = state
         .persistence()
@@ -1471,10 +1542,10 @@ async fn read_principal_resolution_audit(
         history_complete,
         current_resolution_commit,
         next_audit_cursor,
-        method_history_evidence: None,
+        method_history_evidence: Some(method_history_evidence),
     };
     evidence
-        .validate_history_continuation()
+        .validate()
         .map_err(|error| AppError::internal(error.to_string()))?;
     json_ok(evidence)
 }

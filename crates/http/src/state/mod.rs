@@ -26,6 +26,7 @@ mod authority_mls_unit;
 pub(crate) mod authority_pcr;
 mod authority_port;
 mod authority_producer_validation;
+mod authority_resolution;
 mod authority_self_event_unit;
 mod authority_sidecar_unit;
 pub(crate) use authority_sidecar_unit::commit_sidecar_ensure_unit;

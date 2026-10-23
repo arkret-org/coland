@@ -117,24 +117,38 @@ pub(crate) async fn resolved_peer_route(
         .await
     {
         Ok(route) => route,
-        Err(coland_services::ServiceError::NotFound(_)) => {
-            // Configuration and endpoint discovery supply only a candidate
-            // locator. The expected identity comes from the business target;
-            // the shared resolver independently verifies the native DID evidence,
-            // full method history, anti-rollback floor and Describe binding.
+        Err(initial_error) => {
+            if !state
+                .persistence()
+                .stored_service_route_quarantine(&core, service_kind, 1)
+                .await
+                .map_err(|error| error.to_string())?
+                .is_empty()
+            {
+                return Err(initial_error.to_string());
+            }
+            // An accepted DID's former host may be offline after relocation.
+            // A newly configured locator is still only a candidate: the same
+            // resolver verifies native history, current state, the durable
+            // anti-rollback/quarantine floor and Describe before publishing it.
             let endpoint = peer_url_for_service_id(state, service_id)
-                .ok_or_else(|| "verified service route unavailable".to_owned())?;
+                .ok_or_else(|| initial_error.to_string())?;
             let carrier = configured_peer_resolution_carrier(&endpoint, &core)?;
-            resolver
+            if let Err(candidate_error) = resolver
                 .resolve_carrier(&carrier, &core, service_kind, now)
                 .await
-                .map_err(|error| error.to_string())?;
+            {
+                return Err(match initial_error {
+                    coland_services::ServiceError::NotFound(_) => candidate_error,
+                    original => original,
+                }
+                .to_string());
+            }
             resolver
                 .resolve_route(&core, service_kind, now, false)
                 .await
                 .map_err(|error| error.to_string())?
         }
-        Err(error) => return Err(error.to_string()),
     };
     route
         .require_trust_domain(peer_trust_domain_for_service_id(state, service_id).as_deref())

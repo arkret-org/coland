@@ -35,6 +35,7 @@ async fn historical_method_key(
     state: &AppState,
     method: &DidUrl,
     signed_at: DateTime<Utc>,
+    bundle: &RealmAuthorityBundle,
 ) -> Result<PublicKeyMaterial, AppError> {
     let did_text = method.as_str().split('#').next().unwrap_or_default();
     let did = Did::new(did_text.to_owned()).map_err(unavailable)?;
@@ -46,18 +47,30 @@ async fn historical_method_key(
             "mutable DID method has no authenticated historical authority key",
         ));
     }
-    // Fetch and verify the complete method-native history, including witness
-    // thresholds, before selecting the entry effective at the signature time.
-    let resolver = crate::state::did_resolver_chain::build_coland_did_resolver(state.config());
-    let history = resolver
-        .fetch_verified_webvh_history(&did)
-        .await
-        .map_err(unavailable)?;
-    let point =
-        arkret_signatures::webvh::validate_webvh_history_at(&did, &history.raw_entries, signed_at)
+    let service = arkret_wire::project_did_to_core_id(&did).map_err(unavailable)?;
+    let document: arkret_identity::DidDocument = if service == bundle.current_service_id {
+        // The nonce-bound bundle already carries complete portable native
+        // evidence. Reverify it and select the original method at signed_at;
+        // an old DID URL must not become a new network dependency after moving.
+        let resolution: arkret_models_identity::AuthenticatedServiceResolution =
+            serde_json::from_value(bundle.current_route_record.clone()).map_err(unavailable)?;
+        arkret_identity::authenticated_service_document_at(&resolution, &service, signed_at)
+            .map_err(unavailable)?
+    } else {
+        // Other historical governors keep their independent native verifier.
+        let resolver = crate::state::did_resolver_chain::build_coland_did_resolver(state.config());
+        let history = resolver
+            .fetch_verified_webvh_history(&did)
+            .await
             .map_err(unavailable)?;
-    let document: arkret_identity::DidDocument =
-        serde_json::from_value(point.document).map_err(unavailable)?;
+        let point = arkret_signatures::webvh::validate_webvh_history_at(
+            &did,
+            &history.raw_entries,
+            signed_at,
+        )
+        .map_err(unavailable)?;
+        serde_json::from_value(point.document).map_err(unavailable)?
+    };
     if document.id != did {
         return Err(unavailable("historical authority DID document id mismatch"));
     }
@@ -82,11 +95,12 @@ pub(crate) async fn insert_historical_method_key(
     keys: &mut RealmAuthorityKeyMap,
     method: &DidUrl,
     signed_at: DateTime<Utc>,
+    bundle: &RealmAuthorityBundle,
 ) -> Result<(), AppError> {
     keys.insert_at(
         method,
         signed_at,
-        historical_method_key(state, method, signed_at).await?,
+        historical_method_key(state, method, signed_at, bundle).await?,
     );
     Ok(())
 }
@@ -111,7 +125,7 @@ pub(crate) async fn verified_keys(
     let mut keys = RealmAuthorityKeyMap::new();
     for (method, times) in methods {
         for signed_at in times {
-            insert_historical_method_key(state, &mut keys, &method, signed_at).await?;
+            insert_historical_method_key(state, &mut keys, &method, signed_at, bundle).await?;
         }
     }
     Ok(keys)

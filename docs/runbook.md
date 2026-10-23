@@ -1,5 +1,51 @@
 # coland runbook
 
+## Move a self-hosted Station public base
+
+Keep the PostgreSQL database, durable KeyStore, identity bundle directory and
+trust domain. Stop the business listener before applying the cut. Prepare TLS
+and routing for the target HTTPS origin. Changing `COLAND_PUBLIC_BASE_URL` alone
+reports registration-key drift and does not authorize an identity successor.
+Using the existing deployment configuration and credentials, run:
+
+```sh
+coland service-identity migrate-base --from https://old.example/ --to https://new.example/ --preflight
+coland service-identity migrate-base --from https://old.example/ --to https://new.example/
+```
+
+To move only the service endpoint while retaining its DID hosting location,
+add `--preserve-did-host` to both commands. Keep the original DID metadata
+routes available; this mode signs an endpoint successor without relocating the
+DID. Both modes retain the same service core and require the control key.
+
+Preflight verifies the stored native head and possession of its precommitted
+next control key and prints public target material without writing a successor.
+Apply signs a same-core WebVH successor, changes the Station endpoint and native
+DID host, and atomically updates native history, registration mapping, receipt
+and runtime identity. Complete signed receipt history is durable in Postgres.
+Configure the target public base and start the listener with the same custody.
+Confirm Describe and authenticated service resolution against native history;
+peers refresh through normal endpoint discovery and the existing verifier.
+No PCR governor, Account or Realm is moved.
+
+A failed database cut leaves the old accepted identity current. A bundle-write
+failure after an accepted cut can be repaired by repeating the exact command;
+it reports `already_current` without signing another version. Do not restore an
+older bundle over a newer accepted key floor. Returning to an earlier origin
+requires another signed successor.
+
+During transition, the old origin may serve retained canonical `did.jsonl`
+history from the same durable store. Registration-key drift continues serving
+the accepted identity; Describe advertises its signed current endpoint. Drift
+alone does not retire a listener. After consumers discover the target, retire
+the old business entry explicitly through listener or reverse-proxy routing.
+Keep DID metadata routes available for every user identity still rooted there.
+When proxying those routes, preserve the original HTTP Host so native hosting
+can select the exact accepted URL independently of the business base.
+Only each owner can sign its legal DID relocation; the service migration cannot
+sign for users. Retain immutable history and old registration mappings. The command requires the self-hosted Provider;
+an external Provider requires its own authenticated signed successor publication.
+
 On-call recipes for common coland incidents. Pair with the
 Prometheus alert rules in `examples/prometheus-alerts.yml`.
 

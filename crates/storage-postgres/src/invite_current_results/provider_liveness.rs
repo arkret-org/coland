@@ -173,7 +173,7 @@ pub(super) async fn acquire_provision_device(
         .await
         .map_err(PersistenceError::database)?;
     let principal = diesel::sql_query(
-        "SELECT pcr_realm_id,projection->>'did' AS did FROM principal_resolutions \
+        "SELECT pcr_realm_id,value->>'did' AS did FROM principal_resolution_current_results \
          WHERE principal_id=$1 AND station_id=$2",
     )
     .bind::<Text, _>(account.principal_id.as_str())
@@ -189,7 +189,7 @@ pub(super) async fn acquire_provision_device(
     let pcr = arkret_wire::RealmId::new(principal.pcr_realm_id).map_err(corrupt)?;
     lock_realm_authorization_cut(guard.connection(), &pcr).await?;
     let principal = diesel::sql_query(
-        "SELECT pcr_realm_id,projection->>'did' AS did FROM principal_resolutions \
+        "SELECT pcr_realm_id,value->>'did' AS did FROM principal_resolution_current_results \
          WHERE principal_id=$1 AND station_id=$2 FOR SHARE",
     )
     .bind::<Text, _>(account.principal_id.as_str())

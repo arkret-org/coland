@@ -1,4 +1,5 @@
 use arkret_identity::service_identity::StoredDidCoreIdentity;
+use diesel_async::AsyncConnection;
 
 use super::{
     Jsonb, OptionalExtension, PersistenceError, PersistenceResult, PgPool, QueryableByName,
@@ -45,16 +46,14 @@ impl ServiceIdentityStore for PgServiceIdentityStore {
             .map_err(|error| PersistenceError::Internal(error.to_string()))?;
         let value = serde_json::to_value(&identity)
             .map_err(|error| PersistenceError::Internal(error.to_string()))?;
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query(
-            "INSERT INTO service_identity (id, identity) VALUES ($1, $2) \
-             ON CONFLICT (id) DO UPDATE SET identity = EXCLUDED.identity",
-        )
-        .bind::<Text, _>(SINGLETON_ID)
-        .bind::<Jsonb, _>(&value)
-        .execute(&mut conn)
-        .await
-        .map(|_| ())
-        .map_err(PersistenceError::database)
+        let mut conn = crate::pg_conn(&self.pool).await?;
+        conn.transaction::<_,crate::PgTransactionError,_>(async move |conn| {
+            if identity.registration_receipt.provider_id==identity.identity.service_id {
+                crate::webvh::commit_service_mapping_in_connection(conn,&identity,false).await?;
+            }
+            sql_query("INSERT INTO service_identity (id,identity) VALUES($1,$2) ON CONFLICT(id) DO UPDATE SET identity=EXCLUDED.identity")
+                .bind::<Text,_>(SINGLETON_ID).bind::<Jsonb,_>(&value).execute(conn).await?;
+            Ok(())
+        }).await.map_err(crate::PgTransactionError::into_persistence)
     }
 }

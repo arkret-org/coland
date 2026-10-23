@@ -1834,6 +1834,7 @@ enum VerifiedPcrUnit {
     AgentPcrGenesis,
     AgentControl,
     Consent,
+    IdentityResolution,
     PcrGovernanceChange,
     Applet,
 }
@@ -1848,6 +1849,19 @@ pub(crate) async fn commit_verified_applet_in_connection(
         conn,
         transaction,
         VerifiedPcrUnit::Applet,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn commit_verified_resolution_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::IdentityResolution,
         None,
     )
     .await
@@ -1940,6 +1954,14 @@ async fn commit_transaction_with_device_guard_inner(
             | VerifiedPcrUnit::ManagedScopeProfile
     ) {
         return Err(PersistenceError::Conflict("realm_control_atomic_unit_required".into()).into());
+    }
+    if transaction.event.kind == arkret_wire::EventKind::IdentityResolutionUpdate
+        && verified_unit != VerifiedPcrUnit::IdentityResolution
+    {
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: identity resolution atomic unit required".into(),
+        )
+        .into());
     }
     let verified_pcr_device_unit = verified_unit == VerifiedPcrUnit::Device
         || (verified_unit == VerifiedPcrUnit::RealmActorDevice
@@ -3741,7 +3763,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     .clone(),
                 version_id: submission.did_version_id.clone(),
                 resolution_event_ref: unit.transactions[0].event.event_id.to_string(),
-                updated_at: commits[0].committed_at,
+                updated_at: unit.transactions[0].event.created_at,
             },
             commits,
         };
@@ -3872,6 +3894,11 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             if !resolution_inserted.present {
                 return Err(PersistenceError::Conflict("principal_resolution_already_exists".to_owned()).into());
             }
+            crate::principal_resolution_unit::initialize_in_connection(
+                conn,
+                &arkret_wire::AccountId::new(submission.principal_id.clone(),submission.account_authority_id.clone()),
+                &unit.transactions[0].event,&result.commits[0],&result.resolution,
+            ).await?;
             let device_inserted = sql_query(
                 "INSERT INTO devices \
                  (id,station_id,actor_id,device_id,device_key,verification_state,payload,created_at,updated_at) \

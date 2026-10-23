@@ -79,14 +79,8 @@ pub async fn active_device_revocation_gate_selector(
     let device_id = arkret_identifiers::DeviceId::new(device_id.to_owned())
         .map_err(|error| ServiceError::SchemaViolation(format!("device id is invalid: {error}")))?;
     let account = arkret_wire::AccountId::new(principal_id.clone(), station_id.clone());
-    // Every PCR read below selects the account's PCR through the replaceable
-    // principal resolution index. Reading it through the store first rebuilds
-    // an evicted row from the account's immutable creation anchor, so eviction
-    // never turns into a device refusal.
-    state
-        .persistence()
-        .principal_resolution_by_account_id(&account)
-        .await?;
+    // Device status is anchored in accepted PCR creation, independently of the
+    // replaceable resolution index and mutable resolution current.
     let generation = current_device_generation(state, principal_id.as_str())
         .await?
         .ok_or_else(|| generation_fenced("device generation is not active"))?;

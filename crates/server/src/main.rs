@@ -149,6 +149,35 @@ async fn run(raw_args: Vec<String>) -> anyhow::Result<()> {
         return run_healthcheck(&raw_args).await;
     }
 
+    if raw_args.get(1).map(String::as_str) == Some("service-identity")
+        && raw_args.get(2).map(String::as_str) == Some("migrate-base")
+    {
+        let values = coland::process_config::load(&raw_args)?;
+        let config = AppConfig::from_values(
+            &values,
+            StartupOverrides {
+                bind: None,
+                first_provisioning: false,
+            },
+        )?;
+        let from = arg_value(&raw_args, "--from").context("migrate-base requires --from URL")?;
+        let to = arg_value(&raw_args, "--to").context("migrate-base requires --to URL")?;
+        let db = Db::connect(config.database_url.as_deref(), Default::default()).await?;
+        let report = crate::bootstrap::public_base::migrate(
+            &config,
+            &db,
+            &from,
+            &to,
+            crate::bootstrap::public_base::MigrationOptions {
+                preflight: raw_args.iter().any(|arg| arg == "--preflight"),
+                preserve_did_host: raw_args.iter().any(|arg| arg == "--preserve-did-host"),
+            },
+        )
+        .await?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
     // Initialization has a large poll frame even when its future is boxed.
     // Complete that frame before entering synchronous router / OpenAPI schema
     // construction on the same default-size main-thread stack.

@@ -95,10 +95,17 @@ pub(super) async fn embedded_webvh_record_for_request(
         );
         return None;
     };
-    let expected_log_url = format!(
-        "{}/webvh/{local_id}/did.jsonl",
-        state.config().public_base_url.trim_end_matches('/')
-    );
+    let Some(expected_log_url) =
+        requested_webvh_log_url(req, &state.config().public_base_url, &local_id)
+    else {
+        render_error(
+            res,
+            StatusCode::BAD_REQUEST,
+            "param_invalid",
+            "invalid WebVH hosting URL",
+        );
+        return None;
+    };
     match state
         .dids()
         .embedded_document(&local_id, &expected_log_url)
@@ -125,6 +132,43 @@ pub(super) async fn embedded_webvh_record_for_request(
             None
         }
     }
+}
+
+// The business endpoint and DID host are independent. The ingress authority
+// selects a public locator only; the store still requires an accepted native
+// subject for that exact URL. Untrusted forwarded-host headers are not used.
+fn requested_webvh_log_url(req: &Request, configured_base: &str, local_id: &str) -> Option<String> {
+    let authority = req
+        .headers()
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .or_else(|| req.uri().authority().map(|a| a.as_str()));
+    let Some(authority) = authority else {
+        return Some(format!(
+            "{}/webvh/{local_id}/did.jsonl",
+            configured_base.trim_end_matches('/')
+        ));
+    };
+    let mut url = url::Url::parse(&format!("https://{authority}/")).ok()?;
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let path = req.uri().path();
+    let log_path = if let Some(prefix) = path.strip_suffix("/did.json") {
+        format!("{prefix}/did.jsonl")
+    } else if path.ends_with("/did.jsonl") {
+        path.to_owned()
+    } else {
+        return None;
+    };
+    url.set_path(&log_path);
+    Some(url.to_string())
 }
 
 pub(super) fn normalize_webvh_local_id(value: &str) -> Option<String> {

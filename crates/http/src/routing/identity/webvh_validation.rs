@@ -25,6 +25,10 @@ impl WebvhLogEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebvhValidationError {
+    SdkRejection {
+        code: ErrorCode,
+        reason: String,
+    },
     ChainBreak {
         at_index: usize,
         expected: String,
@@ -74,6 +78,7 @@ pub enum WebvhValidationError {
 impl WebvhValidationError {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::SdkRejection { code, .. } => code.as_str(),
             Self::ChainBreak { .. } => "webvh_chain_break",
             Self::ScidMismatch { .. } => "webvh_scid_mismatch",
             Self::WitnessSignatureInvalid { .. } => "webvh_witness_proof_invalid",
@@ -90,6 +95,7 @@ impl WebvhValidationError {
 
     pub fn http_status(&self) -> StatusCode {
         match self {
+            Self::SdkRejection { code, .. } => coland_http::error::error_http_status(*code),
             Self::WitnessSignatureInvalid { .. } | Self::RotationNotAuthorized { .. } => {
                 StatusCode::UNAUTHORIZED
             }
@@ -99,6 +105,7 @@ impl WebvhValidationError {
 
     pub fn message(&self) -> String {
         match self {
+            Self::SdkRejection { reason, .. } => reason.clone(),
             Self::ChainBreak {
                 at_index,
                 expected,
@@ -163,12 +170,28 @@ impl std::error::Error for WebvhValidationError {}
 impl From<WebvhValidationError> for AppError {
     fn from(error: WebvhValidationError) -> Self {
         let status = error.http_status();
-        let code = if status == StatusCode::UNAUTHORIZED {
-            ErrorCode::SignatureInvalid
-        } else {
-            ErrorCode::SchemaViolation
+        let code = match &error {
+            WebvhValidationError::SdkRejection { code, .. } => *code,
+            _ if status == StatusCode::UNAUTHORIZED => ErrorCode::SignatureInvalid,
+            _ => ErrorCode::SchemaViolation,
         };
         AppError::from_rejection(code, error.message()).with_rejection_code(error.code())
+    }
+}
+
+fn sdk_validation_error(
+    error: arkret_identity::IdentityError,
+    at_index: usize,
+) -> WebvhValidationError {
+    match error.error_code() {
+        Some(code) => WebvhValidationError::SdkRejection {
+            code,
+            reason: error.to_string(),
+        },
+        None => WebvhValidationError::MalformedEntry {
+            at_index,
+            reason: error.to_string(),
+        },
     }
 }
 
@@ -230,10 +253,7 @@ pub fn verify_log_and_witness_bytes(
             WebvhValidationError::WitnessSignatureInvalid { reason }
         }
         arkret_identity::DidWebvhWitnessValidationError::Log(error) => {
-            WebvhValidationError::MalformedEntry {
-                at_index: 0,
-                reason: error.to_string(),
-            }
+            sdk_validation_error(error, 0)
         }
     })
 }
@@ -246,12 +266,8 @@ fn verify_sdk_chain(log: &[WebvhLogEntry]) -> Result<(), WebvhValidationError> {
         return Err(WebvhValidationError::ResidualScidPlaceholder { at_index });
     }
     let did = did_from_log(log)?;
-    arkret_identity::verify_did_webvh_v1_chain(&did, &raw_log(log)).map_err(|error| {
-        WebvhValidationError::MalformedEntry {
-            at_index: 0,
-            reason: error.to_string(),
-        }
-    })?;
+    arkret_identity::verify_did_webvh_v1_chain(&did, &raw_log(log))
+        .map_err(|error| sdk_validation_error(error, 0))?;
     Ok(())
 }
 
@@ -306,10 +322,7 @@ pub fn verify_log_subject(did: &str, log: &[WebvhLogEntry]) -> Result<(), WebvhV
         .collect::<Vec<_>>();
     arkret_identity::verify_did_webvh_v1_chain(&did, &entries)
         .map(|_| ())
-        .map_err(|e| WebvhValidationError::MalformedEntry {
-            at_index: log.len().saturating_sub(1),
-            reason: e.to_string(),
-        })
+        .map_err(|error| sdk_validation_error(error, log.len().saturating_sub(1)))
 }
 
 /// Reject every entry that declares a witness policy.

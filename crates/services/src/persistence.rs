@@ -1447,6 +1447,17 @@ impl PersistenceHandle {
         Ok(())
     }
 
+    pub async fn registered_principal_genesis(
+        &self,
+        account_id: &arkret_wire::AccountId,
+    ) -> crate::ServiceResult<Option<arkret_wire::Event>> {
+        Ok(self
+            .persistence
+            .principal_resolutions()
+            .registered_genesis(account_id)
+            .await?)
+    }
+
     pub async fn principal_resolution_by_account_id(
         &self,
         account_id: &arkret_wire::AccountId,
@@ -1455,6 +1466,17 @@ impl PersistenceHandle {
             .persistence
             .principal_resolutions()
             .by_account_id(account_id)
+            .await?)
+    }
+
+    pub async fn admit_principal_resolution_update(
+        &self,
+        write: coland_storage::PrincipalResolutionUpdateWrite,
+    ) -> crate::ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
+        Ok(self
+            .persistence
+            .principal_resolutions()
+            .admit_update(write)
             .await?)
     }
 
@@ -1515,6 +1537,30 @@ impl PersistenceHandle {
             .persistence
             .webvh()
             .get_service_registration(key)
+            .await?)
+    }
+
+    pub async fn service_registration_receipts(
+        &self,
+        service_id: &arkret_wire::DidCoreId,
+    ) -> crate::ServiceResult<
+        Vec<arkret_models_identity::service_identity::ServiceRegistrationReceipt>,
+    > {
+        Ok(self
+            .persistence
+            .webvh()
+            .service_registration_receipts(service_id)
+            .await?)
+    }
+
+    pub async fn retain_service_registration_receipts(
+        &self,
+        receipts: Vec<arkret_models_identity::service_identity::ServiceRegistrationReceipt>,
+    ) -> crate::ServiceResult<()> {
+        Ok(self
+            .persistence
+            .webvh()
+            .retain_service_registration_receipts(receipts)
             .await?)
     }
 

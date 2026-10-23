@@ -101,19 +101,36 @@ pub(crate) async fn embedded_webvh_log(depot: &mut Depot, req: &mut Request, res
     let Some(record) = embedded_webvh_record_for_request(state, req, res).await else {
         return;
     };
-    let events = state
-        .dids()
-        .log_events(&record.did)
-        .await
-        .unwrap_or_default();
+    let events = match state.dids().log_events(&record.did).await {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::error!(%error, "failed to read hosted WebVH history");
+            render_error(
+                res,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "failed to read did log",
+            );
+            return;
+        }
+    };
     if events.is_empty() {
         render_error(res, StatusCode::NOT_FOUND, "not_found", "did log not found");
         return;
     }
-    let mut body = String::new();
+    let mut body = Vec::new();
     for event in events {
-        body.push_str(&serde_json::to_string(&event.operation).unwrap_or_else(|_| "{}".to_owned()));
-        body.push('\n');
+        let Ok(entry) = arkret_canonical::canonical_json_bytes(&event.operation) else {
+            render_error(
+                res,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "failed to encode did log",
+            );
+            return;
+        };
+        body.extend(entry);
+        body.push(b'\n');
     }
     res.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -123,7 +140,7 @@ pub(crate) async fn embedded_webvh_log(depot: &mut Depot, req: &mut Request, res
         header::CONTENT_LENGTH,
         body.len().to_string().parse().unwrap(),
     );
-    res.write_body(body.into_bytes()).ok();
+    res.write_body(body).ok();
 }
 
 #[salvo::oapi::endpoint(operation_id = "ak.root.identity.read.resolve", tags("identity"))]
@@ -434,14 +451,22 @@ pub(crate) async fn identity_submit_did_operation(
         .ok_or_else(|| AppError::param_invalid("operation.state is required"))?;
     ensure_webvh_document_id(&did, &document)?;
     let event_digest = did_log_event_digest(&operation)?;
-    let existing = state
-        .dids()
-        .document(&did)
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?;
     let events = state
         .dids()
         .log_events(&did)
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    // The submitted alias need not exist yet. Locate the predecessor through
+    // the accepted native head; the complete candidate chain below authorizes
+    // the new location, and the store repeats the head CAS under its core lock.
+    let predecessor_did = events
+        .last()
+        .and_then(|event| event.operation.pointer("/state/id"))
+        .and_then(Value::as_str)
+        .unwrap_or(&did);
+    let existing = state
+        .dids()
+        .document(predecessor_did)
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
     if let Some(existing_event) = events.iter().find(|event| {
@@ -585,6 +610,13 @@ pub(crate) async fn identity_submit_did_operation(
             );
         }
         WebvhLogCommitOutcome::Accepted => {}
+    }
+    for event in &events {
+        if let Some(alias) = event.operation.pointer("/state/id").and_then(Value::as_str)
+            && let Ok(alias) = Did::new(alias)
+        {
+            state.dids().discard_cached_document(&alias);
+        }
     }
     if let Err(error) = state.cache_resolved_did_document(document_record) {
         tracing::warn!(%error, "failed to cache submitted DID document");

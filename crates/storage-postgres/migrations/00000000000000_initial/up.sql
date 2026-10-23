@@ -3147,6 +3147,7 @@ ALTER TABLE ONLY public.webvh_log_events
 
 CREATE INDEX webvh_log_events_did_seq_idx ON public.webvh_log_events USING btree (did, seq);
 CREATE INDEX webvh_log_events_scid_seq_idx ON public.webvh_log_events ((split_part(did, ':', 3)), seq) WHERE did LIKE 'did:webvh:%';
+CREATE INDEX webvh_log_events_subject_idx ON public.webvh_log_events ((operation #>> '{state,id}'));
 CREATE INDEX webvh_documents_scid_seq_idx ON public.webvh_documents ((split_part(id, ':', 3)), seq DESC) WHERE id LIKE 'did:webvh:%';
 
 -- The deployment's own authoritative service identity (identity-did.md §3.7).
@@ -3170,6 +3171,18 @@ BEGIN
 END;
 $$;
 CREATE TRIGGER service_identity_device_station BEFORE INSERT OR UPDATE ON service_identity FOR EACH ROW EXECUTE FUNCTION bind_device_inventory_station();
+
+CREATE TABLE public.principal_resolution_current_results (
+    principal_id text NOT NULL CHECK (principal_id LIKE 'ak:did_core:%'),
+    station_id text NOT NULL CHECK (station_id LIKE 'ak:did_core:%'),
+    pcr_realm_id text UNIQUE NOT NULL CHECK (pcr_realm_id LIKE 'ak:realm:%'),
+    genesis_event_id text NOT NULL,
+    current_commit_id text NOT NULL REFERENCES public.realm_commits(commit_id),
+    current_stream_position bigint NOT NULL CHECK (current_stream_position >= 0),
+    value jsonb NOT NULL,
+    updated_at timestamptz NOT NULL,
+    PRIMARY KEY (principal_id, station_id)
+);
 
 -- Rebuildable owner-side PCR resolution projection. Canonical Events and
 -- current/history read index keyed by the public account authority pair.
@@ -3251,8 +3264,17 @@ CREATE TABLE public.service_identity_registrations (
     outcome jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT service_identity_registrations_pkey PRIMARY KEY (service_kind, public_base_url),
-    CONSTRAINT service_identity_registrations_service_id_key UNIQUE (service_id)
+    CONSTRAINT service_identity_registrations_pkey PRIMARY KEY (service_kind, public_base_url)
+);
+CREATE INDEX service_identity_registrations_service_idx ON public.service_identity_registrations(service_id);
+
+CREATE TABLE public.service_registration_receipts (
+    service_id text NOT NULL CHECK (service_id LIKE 'ak:did_core:%'),
+    version_id text NOT NULL,
+    event_digest text NOT NULL REFERENCES public.webvh_log_events(id),
+    receipt jsonb NOT NULL,
+    created_at timestamptz NOT NULL,
+    PRIMARY KEY (service_id, version_id)
 );
 
 CREATE TABLE public.event_federation_outbox (

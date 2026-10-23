@@ -57,7 +57,7 @@ pub(crate) async fn current_public_principal_resolution(
     }
 
     let (method_history_evidence, normalized_did_document) =
-        principal_method_history_evidence(state, &record.projection).await?;
+        principal_method_history_evidence(state, &record.projection, true).await?;
     let issued_at = chrono::Utc::now();
     let method_history_evidence_digest = Hash::new(
         arkret_canonical::canonical_sha256(&method_history_evidence).map_err(|error| {
@@ -108,9 +108,10 @@ pub(crate) async fn current_public_principal_resolution(
     Ok((evidence, normalized_did_document))
 }
 
-async fn principal_method_history_evidence(
+pub(crate) async fn principal_method_history_evidence(
     state: &AppState,
     projection: &PrincipalResolutionProjection,
+    require_current: bool,
 ) -> Result<(ResolutionMethodHistoryEvidence, DidDocument), AppError> {
     let did = Did::new(projection.did.to_string())
         .map_err(|error| AppError::internal(format!("stored principal did is invalid: {error}")))?;
@@ -138,7 +139,7 @@ async fn principal_method_history_evidence(
                         format!("current principal did:webvh history is unverifiable: {error}"),
                     )
                 })?;
-            if pinned.status != PinnedDidVersionStatus::Current {
+            if require_current && pinned.status != PinnedDidVersionStatus::Current {
                 return Err(crate::app_error!(
                     TemporarilyUnavailable,
                     "principal did:webvh commitment is not the current verified method head",

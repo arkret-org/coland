@@ -16,7 +16,8 @@ use uuid::Uuid;
 use super::now;
 use crate::state::AppState;
 const HEADER_SOURCE_SERVICE_ID: &str = "source-service-id";
-const CONTACT_CONTROL_OPERATION: &str = "ak.peer.contacts.command.submit.v1";
+const CONTACT_CONTROL_OPERATION: &str =
+    arkret_wire::ServiceOperationId::PEER_CONTACTS_COMMAND_SUBMIT_V1;
 const CONTACT_CURRENT_MAX_BYTES: usize = 2 * 1024 * 1024;
 fn event_digest_for_frozen_claim(event: &Event, claim: &Hash) -> Result<Hash, AppError> {
     let digest_suite = claim
@@ -2760,7 +2761,7 @@ fn normal_round(receipt: &RequestAcceptanceReceipt) -> Result<ContactRound, AppE
     })
 }
 #[salvo::oapi::endpoint(operation_id = "ak.peer.contacts.command.submit", tags("identity"))]
-#[tracing::instrument(skip_all, fields(op = "ak.peer.contacts.command.submit.v1"))]
+#[tracing::instrument(skip_all, fields(op = arkret_wire::ServiceOperationId::PEER_CONTACTS_COMMAND_SUBMIT_V1))]
 async fn peer_contacts_submit(
     depot: &mut Depot,
     req: &mut Request,

@@ -514,7 +514,8 @@ async fn read_at_cut(
                 strand_id: target.resource.strand_id.as_ref().map(ToString::to_string),
                 circle_id: circle.map(ToString::to_string),
                 track: track.clone(),
-                object_kind: (action == "ak.message.create").then(|| "message".to_owned()),
+                object_kind: (action == arkret_wire::CapabilityActionId::MESSAGE_CREATE)
+                    .then(|| "message".to_owned()),
                 ..Default::default()
             };
             let operation = coland_storage::AuthorizationOperation {

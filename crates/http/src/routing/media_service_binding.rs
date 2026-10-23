@@ -74,7 +74,7 @@ pub(crate) async fn resolve_issuer(
         };
     if !description_profiles
         .iter()
-        .any(|p| p == "ak.profile.media_service_binding.v1")
+        .any(|p| p == arkret_wire::ProfileId::MEDIA_SERVICE_BINDING_V1)
     {
         return Err(unavailable(
             "issuer does not advertise the media binding profile",

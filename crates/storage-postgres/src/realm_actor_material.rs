@@ -305,13 +305,19 @@ pub(crate) async fn read(
                     });
                 } else {
                     let (kind, device) = match selector {
-                        CurrentSelector::RealmActorDeviceAuthorization { device_id, .. } => {
-                            ("ak.device.authorize", Some(device_id.as_str()))
-                        }
+                        CurrentSelector::RealmActorDeviceAuthorization { device_id, .. } => (
+                            arkret_wire::event_kind_str::DEVICE_AUTHORIZE,
+                            Some(device_id.as_str()),
+                        ),
                         CurrentSelector::RealmActorDeviceRevocationProposals {
                             device_id, ..
-                        } => ("ak.device.revoke", Some(device_id.as_str())),
-                        CurrentSelector::RealmActorProfile { .. } => ("ak.profile.create", None),
+                        } => (
+                            arkret_wire::event_kind_str::DEVICE_REVOKE,
+                            Some(device_id.as_str()),
+                        ),
+                        CurrentSelector::RealmActorProfile { .. } => {
+                            (arkret_wire::event_kind_str::PROFILE_CREATE, None)
+                        }
                         _ => return Err(unavailable("mandatory private current is absent")),
                     };
                     let exists = sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE c.realm_id=$1 AND c.stream_ref=$2 AND e.state='committed' AND e.kind=$3 AND e.envelope->'actor_id'=$4 AND ($5::text IS NULL OR e.envelope#>>'{payload,device_id}'=$5))) AS value")

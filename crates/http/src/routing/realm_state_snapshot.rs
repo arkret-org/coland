@@ -155,9 +155,9 @@ pub(crate) async fn native_snapshot(
     };
     let realm_id = arkret_wire::RealmId::new(realm.to_owned()).map_err(|_| hidden())?;
     let operation = if reference.is_some() {
-        "ak.self.realm_state_snapshot.read.by_ref.v1"
+        arkret_wire::CapabilityActionId::SELF_REALM_STATE_SNAPSHOT_READ_BY_REF_V1
     } else {
-        "ak.self.realm_state_snapshot.read.manifest_head.v1"
+        arkret_wire::CapabilityActionId::SELF_REALM_STATE_SNAPSHOT_READ_MANIFEST_HEAD_V1
     };
     if device.operation.as_str() != operation
         || device.authority.governance_service_id != state.service_core_id()

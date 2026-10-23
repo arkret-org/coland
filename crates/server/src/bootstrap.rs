@@ -783,7 +783,7 @@ async fn ensure_identity_bundle(
             .find(|e| e.service_kind == *stored.identity.registration_key.service_kind())
             .ok_or_else(|| anyhow::anyhow!("service history omits its registered endpoint"))?;
         let key = ServiceRegistrationKey::new(
-            stored.identity.registration_key.service_kind().clone(),
+            *stored.identity.registration_key.service_kind(),
             endpoint.service_endpoint.clone(),
         )?;
         if visited.contains(&key) {

@@ -424,10 +424,10 @@ async fn require_applet_producer_inner(
     if let Some(candidate) = creation.as_ref() {
         let action = match candidate.actor_role {
             arkret_models_integration::RealmActorCreatePayloadActorRole::Bot => {
-                "ak.applet.bot.provision"
+                arkret_wire::CapabilityActionId::APPLET_BOT_PROVISION
             }
             arkret_models_integration::RealmActorCreatePayloadActorRole::Ghost => {
-                "ak.applet.ghost.provision"
+                arkret_wire::CapabilityActionId::APPLET_GHOST_PROVISION
             }
         };
         if !native_service {

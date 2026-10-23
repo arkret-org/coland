@@ -188,10 +188,10 @@ pub(super) async fn migrate_with_storage(
         anyhow::bail!("migration changes the service identity")
     }
     let key = ServiceRegistrationKey::new(ServiceKind::Station, to.clone())?;
-    if let Some(occupied) = persistence.service_registration(&key).await? {
-        if occupied.registration_receipt.service_id != stored.identity.service_id {
-            anyhow::bail!("target registration key belongs to another service identity")
-        }
+    if let Some(occupied) = persistence.service_registration(&key).await?
+        && occupied.registration_receipt.service_id != stored.identity.service_id
+    {
+        anyhow::bail!("target registration key belongs to another service identity")
     }
     let history = persistence
         .webvh_history(stored.identity.did.as_str())

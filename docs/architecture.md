@@ -21,6 +21,12 @@ in CI. `coland-http` may depend on deterministic domain logic and storage port
 contracts, but not on concrete storage adapters. Only
 `coland-storage-postgres` may depend on Diesel.
 
+Storage ports reuse backend-neutral local DTOs from `coland-contracts`.
+The PostgreSQL adapter may invoke deterministic `coland-domain` reducers while
+holding its transaction; this does not permit domain code to depend on the
+adapter. The layering gate continues to reject cycles and backend libraries
+in the domain, port, service, and HTTP layers.
+
 ## Event pipeline
 
 A successful `POST /_arkret/self/events` follows this path:

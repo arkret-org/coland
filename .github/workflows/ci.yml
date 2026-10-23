@@ -164,6 +164,7 @@ jobs:
           --shm-size=1g
     env:
       DATABASE_URL: postgres://coland:coland@localhost:5432/coland_ws
+      COLAND_TEST_DATABASE_URL: postgres://coland:coland@localhost:5432/coland_ws
       # Demand is `test threads * live AppStates per test`, not the thread
       # count: restart fixtures hold two leases at once and the deep-stack
       # runners give each test its own thread. A 12-thread local run peaks near
@@ -183,6 +184,18 @@ jobs:
         uses: ./arkret-org/coland/.github/actions/checkout-workspace
         with:
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+
+      - name: Checkout canonical native test runner
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/cotest
+          path: arkret-org/cotest
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+
+      - name: Install Python for native test isolation
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
       - name: Install Rust 1.98
         uses: dtolnay/rust-toolchain@master
@@ -209,7 +222,9 @@ jobs:
       - name: Test (whole workspace, real database)
         env:
           CARGO_TARGET_DIR: target/test
-        run: SSL_CERT_FILE="$PWD/crates/server/tests/fixtures/outbox-test-ca.pem" cargo +1.98 test --locked --workspace
+        # Each process receives its own client config and a run-scoped CA;
+        # the harness still verifies TLS and executes the entire workspace.
+        run: python ../cotest/scripts/run-native-rust-tests.py cargo +1.98 test --locked --workspace
         working-directory: arkret-org/coland
 
   migration-cycle:
@@ -309,6 +324,7 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgres://coland:coland@localhost:5432/coland_contracts
+      COLAND_TEST_DATABASE_URL: postgres://coland:coland@localhost:5432/coland_contracts
     steps:
       - name: Checkout coland
         uses: actions/checkout@v6

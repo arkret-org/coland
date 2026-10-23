@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 FROM rust:bookworm AS builder
+ARG TARGETARCH
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends jq \
@@ -22,7 +23,7 @@ WORKDIR /workspace/arkret-org/coland
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/workspace/cargo-target \
+    --mount=type=cache,id=coland-target-${TARGETARCH},target=/workspace/cargo-target \
     cargo build --locked --release --bin coland && \
     cargo build --locked --release -p coland-keystore-keygen && \
     target_dir="$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.target_directory')" && \

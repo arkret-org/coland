@@ -1,6 +1,12 @@
 # syntax=docker/dockerfile:1.7
 
-FROM --platform=$BUILDPLATFORM rust:bookworm AS builder
+FROM rust:bookworm AS builder
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends jq \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CARGO_TARGET_DIR=/workspace/cargo-target
 
 WORKDIR /workspace/arkret-org
 
@@ -16,11 +22,12 @@ WORKDIR /workspace/arkret-org/coland
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/workspace/arkret-org/coland/target \
+    --mount=type=cache,target=/workspace/cargo-target \
     cargo build --locked --release --bin coland && \
     cargo build --locked --release -p coland-keystore-keygen && \
-    cp target/release/coland /usr/local/bin/coland && \
-    cp target/release/coland-keystore-keygen /usr/local/bin/coland-keystore-keygen
+    target_dir="$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.target_directory')" && \
+    cp "$target_dir/release/coland" /usr/local/bin/coland && \
+    cp "$target_dir/release/coland-keystore-keygen" /usr/local/bin/coland-keystore-keygen
 
 FROM debian:bookworm-slim AS runtime
 

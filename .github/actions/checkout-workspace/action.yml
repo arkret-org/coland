@@ -12,34 +12,40 @@ runs:
       with:
         repository: ${{ github.repository_owner }}/arkret-rust-sdk
         path: arkret-org/arkret-rust-sdk
+        ref: db0f5b44dec117b6b316690650efd0adb3a0f990
         token: ${{ inputs.token }}
     - name: Checkout Floria contracts workspace
       uses: actions/checkout@v6
       with:
         repository: ${{ github.repository_owner }}/floria
         path: arkret-org/floria
+        ref: 9d9ee6e5ebfef35bae56d9d79a8a23157486bccb
         token: ${{ inputs.token }}
     - name: Checkout Arkret Spec
       uses: actions/checkout@v6
       with:
         repository: ${{ github.repository_owner }}/arkret-spec
         path: arkret-org/arkret-spec
+        ref: 8ae6fd0f14c630310a524e38b950b191918295e3
         token: ${{ inputs.token }}
     - name: Checkout Garth
       uses: actions/checkout@v6
       with:
         repository: ${{ github.repository_owner }}/garth
         path: arkret-org/garth
+        ref: 8cfc6775b84528ff75c1ce37e6f879bfb1bfaf33
         token: ${{ inputs.token }}
     - name: Checkout bridge runtime workspace
       uses: actions/checkout@v6
       with:
         repository: ${{ github.repository_owner }}/bridges
         path: arkret-org/bridges
+        ref: c3f9d8e51eddf63690fa083a493125dafdc86dae
         token: ${{ inputs.token }}
     - name: Checkout Savfox gateway workspace
       uses: actions/checkout@v6
       with:
         repository: savfox-ai/savfox
         path: savfox-ai/savfox
+        ref: 30718f036341f22acb7cca1e35accee069a5d74a
         token: ${{ inputs.token }}

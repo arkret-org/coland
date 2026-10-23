@@ -1009,7 +1009,8 @@ pub(super) async fn forward_self_mls(
     send_forward(state, governance, request, session).await
 }
 
-/// Assemble the same complete native unit for origin admission and transport.
+/// Build a native forwarding fixture from the production evidence helpers.
+#[cfg(feature = "test-support")]
 pub(crate) fn prepare_native_forward_request<'a>(
     state: &'a AppState,
     governance: &'a DidCoreId,
@@ -1018,6 +1019,7 @@ pub(crate) fn prepare_native_forward_request<'a>(
     crate::boxed_future(move || prepare_native_forward_request_inner(state, governance, submission))
 }
 
+#[cfg(feature = "test-support")]
 async fn prepare_native_forward_request_inner(
     state: &AppState,
     governance: &DidCoreId,

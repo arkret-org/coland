@@ -113,6 +113,11 @@ jobs:
         run: cargo +1.98 clippy --all-targets --locked -- -D warnings
         working-directory: arkret-org/coland
 
+      - name: Standalone HTTP feature surface
+        if: runner.os == 'Linux'
+        run: cargo +1.98 clippy --locked -p coland-http --lib --features conformance-harness -- -D warnings
+        working-directory: arkret-org/coland
+
       - name: KeyStore keygen Clippy
         run: cargo +1.98 clippy --locked -p coland-keystore-keygen --all-targets -- -D warnings
         working-directory: arkret-org/coland

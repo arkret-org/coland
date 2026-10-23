@@ -44,7 +44,7 @@ async fn authority_bundle_unknown_refuses_and_unavailable_remote_locator_fails_c
         ordinary_realm::bootstrap_unit(&format!("unknown-bundle-{}", uuid::Uuid::now_v7()));
     // A known remote governor is a locator: only its verified nonce-bound
     // original can succeed. An unavailable dependency is the registered 503,
-    // while an unknown Realm has the universal non-enumerating refusal.
+    // while an unknown Realm has the registered non-enumerating not_found.
     for (realm_id, status, code) in [
         (
             foreign.transactions[0].event.realm_id.clone(),
@@ -53,8 +53,8 @@ async fn authority_bundle_unknown_refuses_and_unavailable_remote_locator_fails_c
         ),
         (
             unknown.transactions[0].event.realm_id.clone(),
-            StatusCode::FORBIDDEN,
-            "capability_denied",
+            StatusCode::NOT_FOUND,
+            "not_found",
         ),
     ] {
         let request = arkret_wire::AuthorityBundleRequest {

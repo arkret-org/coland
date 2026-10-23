@@ -2,147 +2,153 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag (e.g. v0.1.0) for a manual release run"
-        required: true
-        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/release*.y*ml"
+      - ".ci/package-release.py"
+      - ".ci/configure-windows-openssl.ps1"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: arkret-org/coland
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            artifact: coland
-            archive: tar.gz
-          - os: ubuntu-latest
+            platform: linux
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            artifact: coland
-            archive: tar.gz
-            cross: true
-          - os: windows-latest
+            platform: linux
+          - os: windows-2025
             target: x86_64-pc-windows-msvc
-            artifact: coland.exe
-            archive: zip
-          - os: macos-latest
+            platform: windows
+          - os: macos-15
             target: aarch64-apple-darwin
-            artifact: coland
-            archive: tar.gz
-
+            platform: macos
     steps:
       - name: Checkout coland
         uses: actions/checkout@v6
         with:
           path: arkret-org/coland
-
-      - name: Checkout workspace dependencies
-        uses: ./arkret-org/coland/.github/actions/checkout-workspace
+      - name: Checkout arkret-rust-sdk
+        uses: actions/checkout@v6
         with:
+          repository: ${{ github.repository_owner }}/arkret-rust-sdk
+          path: arkret-org/arkret-rust-sdk
+          ref: db0f5b44dec117b6b316690650efd0adb3a0f990
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-
-      - name: Configure Windows OpenSSL
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/configure-windows-openssl.ps1
-        working-directory: arkret-org/coland
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Checkout floria
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/floria
+          path: arkret-org/floria
+          ref: 9d9ee6e5ebfef35bae56d9d79a8a23157486bccb
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+      - name: Checkout arkret-spec
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/arkret-spec
+          path: arkret-org/arkret-spec
+          ref: 8ae6fd0f14c630310a524e38b950b191918295e3
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+      - name: Checkout garth
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/garth
+          path: arkret-org/garth
+          ref: 8cfc6775b84528ff75c1ce37e6f879bfb1bfaf33
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+      - name: Checkout bridges
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/bridges
+          path: arkret-org/bridges
+          ref: c3f9d8e51eddf63690fa083a493125dafdc86dae
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+      - name: Checkout savfox
+        uses: actions/checkout@v6
+        with:
+          repository: savfox-ai/savfox
+          path: savfox-ai/savfox
+          ref: 30718f036341f22acb7cca1e35accee069a5d74a
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Install cross (linux/aarch64)
-        if: matrix.cross == true
-        run: cargo install cross --locked
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: arkret-org/coland -> target
-          key: ${{ matrix.target }}
-
-      - name: Build (cargo)
-        if: matrix.cross != true
-        run: cargo build --release --locked --target ${{ matrix.target }}
-        working-directory: arkret-org/coland
-
-      - name: Build (cross)
-        if: matrix.cross == true
-        run: cross build --release --locked --target ${{ matrix.target }}
-        working-directory: arkret-org/coland
-
-      - name: Stage artifact
-        shell: bash
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
-          set -euo pipefail
-          mkdir -p stage
-          cp "arkret-org/coland/target/${{ matrix.target }}/release/${{ matrix.artifact }}" "stage/${{ matrix.artifact }}"
-          cp arkret-org/coland/README.md arkret-org/coland/LICENSE stage/
-
-      - name: Archive (tar.gz)
-        if: matrix.archive == 'tar.gz'
-        shell: bash
-        run: |
-          set -euo pipefail
-          name="coland-${GITHUB_REF_NAME:-${{ inputs.tag }}}-${{ matrix.target }}"
-          tar -C stage -czf "${name}.tar.gz" .
-          sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
-
-      - name: Archive (zip)
-        if: matrix.archive == 'zip'
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev cmake ninja-build nasm
+      - name: Configure static Windows OpenSSL
+        if: runner.os == 'Windows'
         shell: pwsh
+        run: ./.ci/configure-windows-openssl.ps1
+      - name: Configure macOS OpenSSL
+        if: runner.os == 'macOS'
+        shell: bash
         run: |
-          $tag = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { '${{ inputs.tag }}' }
-          $name = "coland-$tag-${{ matrix.target }}"
-          Compress-Archive -Path stage\* -DestinationPath "$name.zip"
-          (Get-FileHash "$name.zip" -Algorithm SHA256).Hash + "  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
-
-      - name: Upload artifact
+          root=$(brew --prefix openssl@3)
+          echo "OPENSSL_DIR=$root" >> "$GITHUB_ENV"
+          echo "OPENSSL_STATIC=1" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: arkret-org/coland
+          key: release-${{ matrix.target }}
+      - name: Build release executables
+        run: cargo build --release --locked --target ${{ matrix.target }} -p coland --bins -p coland-keystore-keygen
+      - name: Package release
+        run: python .ci/package-release.py --target ${{ matrix.target }} --binary coland --binary coland-federation-outbox --binary coland-keystore-snapshot --binary coland-keystore-keygen
+      - name: Upload release assets
         uses: actions/upload-artifact@v4
         with:
-          name: coland-${{ matrix.target }}
-          path: |
-            coland-*.tar.gz
-            coland-*.tar.gz.sha256
-            coland-*.zip
-            coland-*.zip.sha256
+          name: release-${{ matrix.target }}
+          path: arkret-org/coland/release-assets/*
           if-no-files-found: error
 
   release:
-    name: Publish GitHub release
-    runs-on: ubuntu-latest
+    name: Publish GitHub Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v5
         with:
-          path: artifacts
-
-      - name: Collect release files
-        run: |
-          set -euo pipefail
-          mkdir -p release-assets
-          find artifacts -type f \( -name "*.tar.gz*" -o -name "*.zip*" \) -exec cp {} release-assets/ \;
-          ls -la release-assets
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+      - name: Verify release checksums
+        working-directory: release-assets
+        run: sha256sum --check ./*.sha256
+      - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name || inputs.tag }}
+          tag_name: ${{ github.ref_name }}
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
           files: release-assets/*

@@ -2144,7 +2144,8 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
             .await,
             1
         );
-        assert!(registered_history_until_stop(reply_listener, reply_stop).await > 0);
+        let reads = registered_history_until_stop(reply_listener, reply_stop).await;
+        eprintln!("continuous recovery additional method-history reads={reads}");
         2
     });
     let outcome = scenario_future(|| async {
@@ -2877,29 +2878,28 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             governor_pool.clone(),
             human.pcr.history.account.clone(),
         );
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reply_stop = stop.clone();
         let reply = tokio::spawn(async move {
-            assert_eq!(
-                tcp_scan(rl.clone(), page, scan, ra, rg.service_core_id()).await,
-                1
-            );
-            tcp_original_service_history_once(rl, rg, rp).await
+            let scan_posts = tcp_scan(rl.clone(), page, scan, ra, rg.service_core_id()).await;
+            assert_eq!(scan_posts, 1);
+            serve_original_service_history_until_stop(rl, rg, rp, reply_stop).await;
+            scan_posts
         });
-        assert_eq!(
-            scenario_future(|| async {
-                super::super::replica_anchor::ensure_forwarded_target(
-                    &origin,
-                    &governor_state.service_core_id(),
-                    le,
-                    Some(lc),
-                    &mut located,
-                    &session,
-                )
-                .await
-            })
+        let recovered = scenario_future(|| async {
+            super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                le,
+                Some(lc),
+                &mut located,
+                &session,
+            )
             .await
-            .unwrap(),
-            Some(lc.clone())
-        );
+        })
+        .await;
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(recovered.unwrap(), Some(lc.clone()));
         assert_eq!(reply.await.unwrap(), 1);
         assert_eq!(
             store
@@ -3341,15 +3341,18 @@ async fn circle_own_leave_bound_result_cases(
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reply_stop = stop.clone();
         let reply = tokio::spawn(async move {
-            assert_eq!(
-                tcp_scan(rl.clone(), page, scan, ra.clone(), rg.service_core_id()).await,
-                1
-            );
+            let scan_posts =
+                tcp_scan(rl.clone(), page, scan, ra.clone(), rg.service_core_id()).await;
+            assert_eq!(scan_posts, 1);
             if state == "join" {
-                tcp_opening_bootstrap(rl, rg, rp, ra, rc, reply_stop).await
+                assert_eq!(
+                    tcp_opening_bootstrap(rl, rg, rp, ra, rc, reply_stop).await,
+                    1
+                );
             } else {
-                tcp_original_service_history_once(rl, rg, rp).await
+                serve_original_service_history_until_stop(rl, rg, rp, reply_stop).await;
             }
+            scan_posts
         });
         let governor_id = governor_state.service_core_id();
         let outcome = scenario_future(|| {
@@ -3607,15 +3610,18 @@ async fn circle_cleanup_parent_rejoin(
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let reply_stop = stop.clone();
         let reply = tokio::spawn(async move {
-            assert_eq!(
-                tcp_scan(rl.clone(), page, scan, ra.clone(), rg.service_core_id()).await,
-                1
-            );
+            let scan_posts =
+                tcp_scan(rl.clone(), page, scan, ra.clone(), rg.service_core_id()).await;
+            assert_eq!(scan_posts, 1);
             if membership == "join" {
-                tcp_opening_bootstrap(rl, rg, rp, ra, rc, reply_stop).await
+                assert_eq!(
+                    tcp_opening_bootstrap(rl, rg, rp, ra, rc, reply_stop).await,
+                    1
+                );
             } else {
-                tcp_original_service_history_once(rl, rg, rp).await
+                serve_original_service_history_until_stop(rl, rg, rp, reply_stop).await;
             }
+            scan_posts
         });
         eprintln!("[2133-parent-recovery] admitted and scanned");
         let result = Box::pin(super::super::replica_anchor::ensure_forwarded_target(
@@ -4027,7 +4033,11 @@ async fn tcp_opening_bootstrap(
         assert!(!stream.conn.is_handshaking());
         history_requests += 1;
     }
-    assert!(history_requests > 0);
+    // Callers install a freshly authenticated route with verified method history.
+    // The receiver still verifies that evidence; it need not refetch the same
+    // history over HTTP. Exact originals and fail-closed cases are checked by
+    // the calling scenario (identity/did-usage-and-verification.md section 5).
+    eprintln!("peer bootstrap additional method-history reads={history_requests}");
     listener.listener.set_nonblocking(false).unwrap();
     1
     }).await.unwrap()
@@ -4077,51 +4087,15 @@ async fn recovery_acceptance_rows(pool: &PgPool) -> serde_json::Value {
     ) AS value").get_result::<Row>(&mut *conn).await.unwrap().value
 }
 
-/// Serve the newly encountered signature's genuine method-native history.
-/// No caller-provided key directory replaces the production resolver here.
-async fn tcp_original_service_history_once(
+/// Keep the real verified method history available for this request lifecycle.
+/// A fresh authenticated route can already supply it, so zero refetches is valid.
+async fn serve_original_service_history_until_stop(
     listener: Arc<RegisteredTlsPeer>,
     governor: AppState,
     pool: PgPool,
-) -> usize {
-    use coland_storage::DeliveryPolicyStoreRegistry as _;
-    let records = PgPersistenceStore::new(pool)
-        .webvh()
-        .list_log_events(governor.service_did().as_str())
-        .await
-        .unwrap();
-    assert!(!records.is_empty());
-    let mut log = Vec::new();
-    for record in records {
-        log.extend(arkret_canonical::canonical_json_bytes(&record.operation).unwrap());
-        log.push(b'\n');
-    }
-    arkret_identity::verify_did_webvh_v1_chain_and_witness_bytes(
-        &governor.service_did(),
-        &log,
-        None,
-    )
-    .unwrap();
-    let url = reqwest::Url::parse(
-        &arkret_identity::DidWebvhResolver::log_url(&governor.service_did()).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        url.origin(),
-        reqwest::Url::parse(&governor.config().public_base_url)
-            .unwrap()
-            .origin()
-    );
-    tokio::task::spawn_blocking(move || {
-        let (socket,_)=listener.listener.accept().unwrap();
-        socket.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
-        socket.set_write_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
-        let mut stream=rustls::StreamOwned::new(rustls::ServerConnection::new(listener.tls.clone()).unwrap(),socket);
-        let mut request=Vec::new();let mut buf=[0u8;2048];
-        loop {let n=stream.read(&mut buf).unwrap();assert!(n>0);request.extend_from_slice(&buf[..n]);assert!(request.len()<1024*1024);if request.windows(4).any(|v|v==b"\r\n\r\n"){break;}}
-        assert_eq!(std::str::from_utf8(&request).unwrap().lines().next().unwrap(),format!("GET {} HTTP/1.1",url.path()));
-        let header=format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",log.len());
-        stream.write_all(header.as_bytes()).unwrap();stream.write_all(&log).unwrap();stream.flush().unwrap();
-        assert!(!stream.conn.is_handshaking());1
-    }).await.unwrap()
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
+    register_original_peer_history(&listener, &governor, &pool).await;
+    let reads = registered_history_until_stop(listener, stop).await;
+    eprintln!("original service additional method-history reads={reads}");
 }

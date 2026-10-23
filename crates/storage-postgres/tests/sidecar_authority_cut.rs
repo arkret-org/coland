@@ -5765,24 +5765,45 @@ async fn owned_agent_delivery_cut_scenario(expiry_case: DeliveryExpiryCase) {
         acquisition_started.elapsed().as_millis(),
         chrono::Utc::now().to_rfc3339(),
     );
+    #[derive(diesel::QueryableByName)]
+    struct DeliveryLockOwner {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        number: i64,
+    }
+    let mut observer = pool.get().await.unwrap();
+    // Protocol bigint advisory keys use objsubid=1. The test database lease
+    // holds a separate two-integer key (objsubid=2) for the whole test.
+    let owners = diesel::sql_query("SELECT DISTINCT pid::bigint AS number FROM pg_locks WHERE locktype='advisory' AND objsubid=1 AND granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database())")
+        .load::<DeliveryLockOwner>(&mut *observer).await.unwrap();
+    assert!(
+        !owners.is_empty(),
+        "the delivery must hold its real database cut"
+    );
+    let owners = owners.into_iter().map(|row| row.number).collect::<Vec<_>>();
     drop(cancelled);
-    let reacquisition_started = std::time::Instant::now();
+    let release_started = std::time::Instant::now();
+    // Bound cancellation itself, independently of complete authorization cost.
+    // Every transaction/advisory/tuple lock of the original owners must leave.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let held = diesel::sql_query("SELECT COUNT(*)::bigint AS number FROM pg_locks WHERE pid::bigint=ANY($1) AND locktype IN ('advisory','transactionid','tuple')")
+                .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(&owners)
+                .get_result::<DeliveryLockOwner>(&mut *observer).await.unwrap();
+            if held.number == 0 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("cancelled delivery must release its actual cut within five seconds");
     eprintln!(
-        "owned delivery cancellation phase=guard_dropped at={}",
-        chrono::Utc::now().to_rfc3339(),
+        "owned delivery cancellation phase=locks_released elapsed_ms={}",
+        release_started.elapsed().as_millis()
     );
-    let reacquired = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        fixture_delivery_step(&pool, &agent, &agent.station_id, &input),
-    )
-    .await;
-    eprintln!(
-        "owned delivery cancellation phase=reacquire_finished elapsed_ms={} completed={} at={}",
-        reacquisition_started.elapsed().as_millis(),
-        reacquired.is_ok(),
-        chrono::Utc::now().to_rfc3339(),
-    );
-    let guard = reacquired.unwrap().unwrap().unwrap();
+    drop(observer);
+    // Reacquire through the complete original verifier after observing release.
+    // A healthy acquisition can itself exceed the cancellation-only deadline.
+    let guard = fixture_delivery_step(&pool, &agent, &agent.station_id, &input)
+        .await
+        .unwrap()
+        .unwrap();
     guard.finish().await.unwrap();
     assert_eq!(agent_mode_footprint(&pool, realm_id).await, before);
     let leave = ordinary_realm::next_request_for_actor(

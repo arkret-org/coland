@@ -1978,6 +1978,7 @@ mod revoke_saga_tests {
         });
         let plan: AppletRevokePlan = serde_json::from_value(json!({
             "applet_id": APPLET_ID,
+            "service_id": "ak:did_core:web:applet.example",
             "effective_scope": scope,
             "registration_epoch": format!("sha256:{}", "a".repeat(64)),
             "reason_code": "requested_by_admin",

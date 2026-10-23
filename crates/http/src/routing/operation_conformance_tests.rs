@@ -414,11 +414,11 @@ fn builtin_operation_conformance_vectors_cover_registry() {
             payload: json!({
                 "applet_id": "ak:applet:01904100-0000-7000-8000-aa55aa55aa55",
                 "service_id": "ak:did_core:web:applet.example",
+                "expected_revision": null,
                 "controller_principal_id": "ak:did_core:web:applet.example",
                 "base_url": "https://applet.example/runtime",
                 "protocols": ["http_custom"],
                 "namespaces": {
-                    "actors": [],
                     "realms": [{"exclusive": false, "pattern": "*"}],
                     "handles": []
                 },
@@ -479,9 +479,9 @@ fn builtin_operation_conformance_vectors_cover_registry() {
             payload: json!({
                 "applet_id": "ak:applet:01904100-0000-7000-8000-aa55aa55aa55",
                 "service_id": "ak:did_core:web:applet.example",
+                "expected_revision": null,
                 "controller_principal_id": "ak:did_core:web:applet.example",
                 "base_url": "https://applet.example/runtime",
-                "bot_actor_id": "ak:did_core:web:applet.bot.example",
                 "protocols": ["http_custom"],
                 "receive_events": true,
                 "receive_signals": false,

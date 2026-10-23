@@ -467,6 +467,10 @@ async fn run_manager_runtime_transfer(
     drop(edge);
     let edge = make_edge();
     let runtime = ManagedDeviceRuntime::new(edge.clone()).unwrap();
+    // Retained-custody setup spends the real API bucket on accepted originals
+    // and refusal probes. Pace the recovery phase by its configured window;
+    // keep the production limiter and every authority check enabled.
+    tokio::time::sleep(fixture.state.config().rate_limiter.window).await;
     eprintln!("manager runtime: cold exact receipt recovery and fresh custody operations");
     let receipt = boxed_step(|| runtime.complete_management_transfer(&plan))
         .await

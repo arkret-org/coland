@@ -5494,9 +5494,12 @@ mod realm_native_fixture {
             "native serving document: {}",
             fixture.state.service_did()
         );
-        let mut response = TestClient::get("http://server/webvh/service/did.jsonl")
-            .send(&service(fixture.state.clone()))
-            .await;
+        let mut response = TestClient::get(format!(
+            "{}/webvh/service/did.jsonl",
+            fixture.state.config().public_base_url.trim_end_matches('/')
+        ))
+        .send(&service(fixture.state.clone()))
+        .await;
         let status = response.status_code;
         assert_eq!(
             status,

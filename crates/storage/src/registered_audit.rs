@@ -4,7 +4,7 @@ use arkret_models_collaboration::authority_commit::{
     AuditPairedEventAcceptanceOutcome, AuditPairedEventUnitSubmission,
 };
 use arkret_models_collaboration::strand_watch_operations::{
-    WatchAuditReadOutcome, WatchAuditReadRequest,
+    WatchAuditReadRequestBody, WatchAuditReadResponseBody,
 };
 use arkret_wire::Event;
 
@@ -15,7 +15,7 @@ pub enum RegisteredAuditCommit {
         approvals: Box<[Option<crate::EventApprovalCommit>; 2]>,
     },
     WatchRead {
-        request: Box<WatchAuditReadRequest>,
+        request: Box<WatchAuditReadRequestBody>,
     },
 }
 
@@ -38,7 +38,7 @@ impl RegisteredAuditCommit {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RegisteredAuditOutcome {
     Pair(AuditPairedEventAcceptanceOutcome),
-    WatchRead(WatchAuditReadOutcome),
+    WatchRead(WatchAuditReadResponseBody),
 }
 
 #[derive(Clone, Debug)]

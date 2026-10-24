@@ -2,22 +2,22 @@ use std::collections::BTreeMap;
 
 use arkret_identifiers::DidCoreId;
 use arkret_models_collaboration::account_lifecycle::{
-    AccountStatusPropagationState, AccountStatusPublication, AccountStatusPublicationOutcome,
-    AccountStatusPublicationRequestBody, AccountStatusPublicationStatus,
-    AccountStatusReceiptedPublication, AccountStatusResolveOutcome,
-    AccountStatusResolveRequestBody,
+    AccountStatusPropagationState, AccountStatusPublication, AccountStatusPublicationRequestBody,
+    AccountStatusPublicationResponseBody, AccountStatusPublicationStatus,
+    AccountStatusReceiptedPublication, AccountStatusResolveRequestBody,
+    AccountStatusResolveResponseBody,
 };
 use arkret_models_collaboration::account_status::UnsignedAccountStatusReceipt;
 use arkret_models_collaboration::authority_commit::{
     DirectConversationFoundingMissingDependency, DirectConversationFoundingMissingDependencyList,
-    PeerAuthoritySubmitRequest, PeerRegisteredAtomicUnit,
+    PeerAuthoritySubmitRequestBody, PeerRegisteredAtomicUnit,
 };
 use arkret_models_collaboration::objects::direct_conversation::DirectConversationFoundingAuthorityEvidence;
 use arkret_models_collaboration::principal_operations::{
-    PcrGenesisAdmissionInput, PcrGenesisAdmissionOutcome,
+    PcrGenesisAdmissionInput, PcrGenesisAdmissionResponseBody,
 };
 use arkret_models_identity::service_identity::CanonicalServiceUrl;
-use arkret_wire::{SignalRelayOutcome, SignalRelayRequest};
+use arkret_wire::{SignalRelayRequestBody, SignalRelayResponseBody};
 #[cfg(test)]
 use chrono::DateTime;
 use chrono::{Duration, Utc};
@@ -51,7 +51,7 @@ pub(super) fn router() -> Router {
 pub(super) async fn admit_private_principal_genesis(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<PcrGenesisAdmissionOutcome> {
+) -> JsonResult<PcrGenesisAdmissionResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     authenticate_account_authority_private_request(state, req)?;
     let header_idempotency_key = required_header(req, "idempotency-key")?;
@@ -224,7 +224,7 @@ fn internal_channel_request_is_authentic(
 async fn peer_account_status_submit(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AccountStatusPublicationOutcome> {
+) -> JsonResult<AccountStatusPublicationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     validate_peer_request(state, req, true).await?;
     let source_id = source_id_from_request(req)?;
@@ -286,7 +286,7 @@ async fn peer_account_status_submit(
     }
 
     let append = append_validated_account_status_record(state, record).await?;
-    let (status, current, required_status_seq, receipt) = match append {
+    let (status, current, required_status_sequence, receipt) = match append {
         coland_storage::AccountStatusReplicaAppend::Accepted(receipt) => (
             AccountStatusPublicationStatus::Accepted,
             Some(record.clone()),
@@ -301,13 +301,13 @@ async fn peer_account_status_submit(
         ),
         coland_storage::AccountStatusReplicaAppend::DependencyMissing {
             current_record,
-            required_status_seq,
+            required_status_sequence,
         } => {
             let outcome = publication_outcome(
                 record,
                 AccountStatusPublicationStatus::DependencyMissing,
                 current_record.as_ref(),
-                Some(required_status_seq),
+                Some(required_status_sequence),
                 None,
             );
             return json_ok(outcome);
@@ -316,8 +316,8 @@ async fn peer_account_status_submit(
             return Err(crate::app_error!(
                 FailedPrecondition,
                 format!(
-                    "account-status record is stale; current status_seq is {}",
-                    current_record.status_seq
+                    "account-status record is stale; current status_sequence is {}",
+                    current_record.status_sequence
                 ),
             )
             .with_reason_code(arkret_wire::ReasonCode::ACCOUNT_STATUS_RECORD_STALE));
@@ -363,16 +363,16 @@ async fn peer_account_status_submit(
     }
     let (propagation_state, pending_destination_count) =
         enqueue_account_status_fanout(state, record, &receipt).await?;
-    let outcome = AccountStatusPublicationOutcome {
+    let outcome = AccountStatusPublicationResponseBody {
         status,
         account_status_record_id: record.account_status_record_id.clone(),
-        status_seq: record.status_seq,
+        status_sequence: record.status_sequence,
         account_id: record.account_id.clone(),
         current_account_status_record_id: current
             .as_ref()
             .map(|record| record.account_status_record_id.clone()),
-        current_status_seq: current.as_ref().map(|record| record.status_seq),
-        required_status_seq,
+        current_status_sequence: current.as_ref().map(|record| record.status_sequence),
+        required_status_sequence,
         barrier_cursor: None,
         propagation_state,
         pending_destination_count,
@@ -461,9 +461,9 @@ async fn refresh_current_account_status_inner(
         .await
         .map_err(|_| AppError::internal("Account lifecycle replica unavailable"))?;
     loop {
-        let from_status_seq = match expected.as_ref() {
+        let from_status_sequence = match expected.as_ref() {
             Some(head) => head
-                .status_seq
+                .status_sequence
                 .checked_add(1)
                 .ok_or_else(|| AppError::internal("Account lifecycle sequence overflow"))?,
             None => 1,
@@ -471,7 +471,7 @@ async fn refresh_current_account_status_inner(
         let request = AccountStatusResolveRequestBody {
             account_authority_id: authority.clone(),
             account_id: account.clone(),
-            from_status_seq,
+            from_status_sequence,
             limit: 128,
         };
         request
@@ -500,14 +500,14 @@ async fn refresh_current_account_status_inner(
                 "Account Authority current resolve refused",
             ));
         }
-        let outcome: AccountStatusResolveOutcome = serde_json::from_slice(&response.body)
+        let outcome: AccountStatusResolveResponseBody = serde_json::from_slice(&response.body)
             .map_err(|_| AppError::internal("Account Authority current resolve answer invalid"))?;
         if outcome
             .records
             .iter()
-            .any(|record| record.status_seq.checked_add(1).is_none())
+            .any(|record| record.status_sequence.checked_add(1).is_none())
             || request
-                .from_status_seq
+                .from_status_sequence
                 .checked_add(outcome.records.len() as u64)
                 .is_none()
         {
@@ -611,7 +611,7 @@ fn account_status_idempotency_is_pending(record: &coland_services::jobs::Idempot
 async fn peer_account_status_resolve(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AccountStatusResolveOutcome> {
+) -> JsonResult<AccountStatusResolveResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     validate_peer_request(state, req, true).await?;
     let source_id = source_id_from_request(req)?;
@@ -670,7 +670,7 @@ async fn peer_account_status_resolve(
         .resolve_account_status_records(
             request.account_authority_id.as_str(),
             &request.account_id,
-            request.from_status_seq,
+            request.from_status_sequence,
             fetch_limit,
         )
         .await
@@ -679,26 +679,26 @@ async fn peer_account_status_resolve(
         })?;
     let has_more = records.len() > usize::from(request.limit);
     records.truncate(usize::from(request.limit));
-    let next_status_seq = if has_more {
+    let next_status_sequence = if has_more {
         Some(
             records
                 .last()
                 .expect("positive resolve limit retains one row when has_more")
-                .status_seq
+                .status_sequence
                 .checked_add(1)
                 .ok_or_else(|| AppError::internal("account-status sequence overflow"))?,
         )
     } else {
         None
     };
-    // A current head can legitimately precede from_status_seq; that is an
+    // A current head can legitimately precede from_status_sequence; that is an
     // authorized empty freshness observation, not an unknown-account signal.
-    let outcome = AccountStatusResolveOutcome {
+    let outcome = AccountStatusResolveResponseBody {
         account_authority_id: request.account_authority_id.clone(),
         account_id: request.account_id.clone(),
         records,
         has_more,
-        next_status_seq,
+        next_status_sequence,
     };
     outcome.validate_for_request(&request).map_err(|error| {
         AppError::internal(format!("account-status resolve invariant: {error}"))
@@ -815,7 +815,7 @@ async fn enqueue_account_status_fanout(
                 "account-status:{}:{}",
                 record.account_authority_id, record.account_id,
             ),
-            i64::try_from(record.status_seq).map_err(|_| {
+            i64::try_from(record.status_sequence).map_err(|_| {
                 AppError::internal("account-status sequence exceeds outbox lane range")
             })?,
         )
@@ -848,18 +848,18 @@ fn publication_outcome(
     record: &arkret_models_collaboration::account_status::AccountStatusRecord,
     status: AccountStatusPublicationStatus,
     current: Option<&arkret_models_collaboration::account_status::AccountStatusRecord>,
-    required_status_seq: Option<u64>,
+    required_status_sequence: Option<u64>,
     receipt: Option<arkret_models_collaboration::account_status::AccountStatusReceipt>,
-) -> AccountStatusPublicationOutcome {
-    AccountStatusPublicationOutcome {
+) -> AccountStatusPublicationResponseBody {
+    AccountStatusPublicationResponseBody {
         status,
         account_status_record_id: record.account_status_record_id.clone(),
-        status_seq: record.status_seq,
+        status_sequence: record.status_sequence,
         account_id: record.account_id.clone(),
         current_account_status_record_id: current
             .map(|record| record.account_status_record_id.clone()),
-        current_status_seq: current.map(|record| record.status_seq),
-        required_status_seq,
+        current_status_sequence: current.map(|record| record.status_sequence),
+        required_status_sequence,
         barrier_cursor: None,
         propagation_state: AccountStatusPropagationState::NotRequired,
         pending_destination_count: None,
@@ -881,7 +881,7 @@ fn sign_account_status_receipt(
             .map_err(|error| AppError::internal(error.to_string()))?,
         account_authority_id: record.account_authority_id.clone(),
         account_id: record.account_id.clone(),
-        status_seq: record.status_seq,
+        status_sequence: record.status_sequence,
         receiver_id: DidCoreId::new(state.service_id().clone())
             .map_err(|error| AppError::internal(error.to_string()))?,
         accepted_at,
@@ -1057,7 +1057,10 @@ async fn validate_account_status_publication(
 
 #[salvo::oapi::endpoint(operation_id = "ak.peer.signal.command.relay", tags("events"))]
 #[tracing::instrument(skip_all, fields(op = "ak.peer.signal.command.relay.v1"))]
-async fn peer_signal_relay(depot: &mut Depot, req: &mut Request) -> JsonResult<SignalRelayOutcome> {
+async fn peer_signal_relay(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> JsonResult<SignalRelayResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     if req.headers().contains_key("idempotency-key") {
         return Err(schema_violation(
@@ -1086,7 +1089,7 @@ async fn peer_signal_relay(depot: &mut Depot, req: &mut Request) -> JsonResult<S
     }
     validate_peer_request(state, req, true).await?;
     validate_signal_signature_window(req)?;
-    let request = parse_json_body::<SignalRelayRequest>(
+    let request = parse_json_body::<SignalRelayRequestBody>(
         req,
         "invalid ak.peer.signal.command.relay.v1 request body",
     )
@@ -1110,7 +1113,7 @@ async fn peer_signal_relay(depot: &mut Depot, req: &mut Request) -> JsonResult<S
             );
         }
     }
-    json_ok(SignalRelayOutcome::ACCEPTED)
+    json_ok(SignalRelayResponseBody::ACCEPTED)
 }
 
 fn validate_signal_signature_window(req: &Request) -> Result<(), AppError> {
@@ -1130,7 +1133,7 @@ fn validate_signal_signature_window(req: &Request) -> Result<(), AppError> {
 
 /// Valid JSON outside the registered closed carrier is a schema failure;
 /// only malformed JSON uses the transport's `json_invalid` code.
-fn parse_peer_event_submission(body: &[u8]) -> Result<PeerAuthoritySubmitRequest, AppError> {
+fn parse_peer_event_submission(body: &[u8]) -> Result<PeerAuthoritySubmitRequestBody, AppError> {
     serde_json::from_slice(body).map_err(|error| match error.classify() {
         serde_json::error::Category::Data => {
             schema_violation("invalid ak.peer.events.command.submit.v1 closed request body")
@@ -1199,7 +1202,7 @@ async fn peer_events_submit(depot: &mut Depot, req: &mut Request, res: &mut Resp
     // duplicate Event before its evidence rule (device-lifecycle §8.2.2).
     let founding_missing_dependency =
         match &submission {
-            PeerAuthoritySubmitRequest::RegisteredAtomicUnit(request) => {
+            PeerAuthoritySubmitRequestBody::RegisteredAtomicUnit(request) => {
                 match &request.unit {
                     PeerRegisteredAtomicUnit::DirectConversationFounding(unit) => {
                         match &unit.founding_authority_evidence {
@@ -2028,7 +2031,7 @@ mod account_authority_identity_tests {
                 "ak:did_core:web:human.example".parse().unwrap(),
                 authority.clone(),
             ),
-            from_status_seq: 2,
+            from_status_sequence: 2,
             limit: 128,
         };
         let body = arkret_canonical::canonical_json_bytes(&request).unwrap();
@@ -2329,7 +2332,7 @@ mod account_status_refresh_http_pg_tests {
         }
 
         fn signed_record(&self, previous: Option<&AccountStatusRecord>) -> AccountStatusRecord {
-            let seq = previous.map_or(1, |record| record.status_seq + 1);
+            let sequence = previous.map_or(1, |record| record.status_sequence + 1);
             arkret_signatures::account_status::sign_account_status_record(
                 UnsignedAccountStatusRecord {
                     schema: SchemaId::ACCOUNT_STATUS_RECORD_V1.to_owned(),
@@ -2337,10 +2340,10 @@ mod account_status_refresh_http_pg_tests {
                     account_id: self.pcr.history.account.clone(),
                     principal_control_realm_id: self.pcr.unit.submission.pcr_realm_id.clone(),
                     binding_version: 1,
-                    status_seq: seq,
+                    status_sequence: sequence,
                     previous_account_status_record_id: previous
                         .map(|record| record.account_status_record_id.clone()),
-                    status: if seq % 2 == 1 {
+                    status: if sequence % 2 == 1 {
                         AccountStatus::Active
                     } else {
                         AccountStatus::SoftLoggedOut
@@ -2360,12 +2363,12 @@ mod account_status_refresh_http_pg_tests {
             &self,
             records: Vec<AccountStatusRecord>,
             has_more: bool,
-        ) -> AccountStatusResolveOutcome {
-            AccountStatusResolveOutcome {
+        ) -> AccountStatusResolveResponseBody {
+            AccountStatusResolveResponseBody {
                 account_authority_id: self.state.service_core_id(),
                 account_id: self.pcr.history.account.clone(),
-                next_status_seq: if has_more {
-                    Some(records.last().unwrap().status_seq + 1)
+                next_status_sequence: if has_more {
+                    Some(records.last().unwrap().status_sequence + 1)
                 } else {
                     None
                 },
@@ -2387,11 +2390,15 @@ mod account_status_refresh_http_pg_tests {
                 .unwrap()
         }
 
-        async fn receipt(&self, seq: u64) -> AccountStatusReceipt {
+        async fn receipt(&self, sequence: u64) -> AccountStatusReceipt {
             let receipt = self
                 .state
                 .persistence()
-                .account_status_receipt(self.state.service_id(), &self.pcr.history.account, seq)
+                .account_status_receipt(
+                    self.state.service_id(),
+                    &self.pcr.history.account,
+                    sequence,
+                )
                 .await
                 .unwrap()
                 .unwrap();
@@ -2412,7 +2419,7 @@ mod account_status_refresh_http_pg_tests {
             &mut self,
             pages: Vec<(
                 u64,
-                AccountStatusResolveOutcome,
+                AccountStatusResolveResponseBody,
                 Option<AccountStatusRecord>,
             )>,
         ) -> tokio::task::JoinHandle<Vec<AccountStatusReceipt>> {
@@ -2471,7 +2478,7 @@ mod account_status_refresh_http_pg_tests {
                     request.validate().unwrap();
                     assert_eq!(request.account_authority_id, state.service_core_id());
                     assert_eq!(request.account_id, answer.account_id);
-                    assert_eq!(request.from_status_seq, from);
+                    assert_eq!(request.from_status_sequence, from);
                     assert_eq!(request.limit, 128);
                     assert_eq!(
                         arkret_canonical::canonical_json_bytes(&request).unwrap(),

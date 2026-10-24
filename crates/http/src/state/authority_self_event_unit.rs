@@ -16,7 +16,9 @@
 //! `ak.self.moderation.command.report.v1` share it; every other kind stays
 //! closed at its caller.
 
-use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitOutcome, Event, EventAdmissionSubmission};
+use arkret_wire::{
+    AuthorityCommitStatus, AuthoritySubmitResponseBody, Event, EventAdmissionSubmission,
+};
 use chrono::Utc;
 use coland_services::identity::SessionIdentityState;
 use coland_services::{ServiceError, ServiceResult};
@@ -60,7 +62,7 @@ pub(crate) async fn refresh_direct_conversation_peer_claim(
             "temporarily_unavailable: peer claim read was refused".into(),
         ));
     }
-    let outcome: arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome =
+    let outcome: arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody =
         serde_json::from_slice(&response.body)
             .map_err(|_| ServiceError::internal("peer claim query response is invalid"))?;
     outcome
@@ -259,7 +261,7 @@ pub(super) async fn require_governance_change_eligibility(
 pub(super) async fn exact_replay(
     state: &AppState,
     event: &Event,
-) -> ServiceResult<Option<AuthoritySubmitOutcome>> {
+) -> ServiceResult<Option<AuthoritySubmitResponseBody>> {
     validate_replay_event_identity(event)?;
     let Some(existing) = state
         .authority_commits()
@@ -276,7 +278,7 @@ pub(super) async fn exact_replay(
     }
     if let Some(commit) = existing.committed {
         require_governance_change_eligibility(state, event).await?;
-        return Ok(Some(AuthoritySubmitOutcome::Accepted {
+        return Ok(Some(AuthoritySubmitResponseBody::Accepted {
             status: AuthorityCommitStatus::Duplicate,
             commit,
         }));
@@ -284,7 +286,7 @@ pub(super) async fn exact_replay(
     if event.kind == arkret_wire::EventKind::MlsCommit
         && existing.status == coland_storage::QueuedEventStatus::Rejected
     {
-        return Ok(Some(AuthoritySubmitOutcome::Rejected {
+        return Ok(Some(AuthoritySubmitResponseBody::Rejected {
             status: arkret_wire::AuthorityRejectionStatus::Rejected,
             reason_code: existing.rejection_reason.ok_or_else(|| {
                 ServiceError::Internal("durable MLS refusal has no reason".into())
@@ -304,7 +306,7 @@ pub(super) fn commit_event_unit<'a>(
     submission: &'a EventAdmissionSubmission,
     producer: AdmittedProducer,
     effects: SelfEventUnitEffects,
-) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitOutcome>> + Send + 'a {
+) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitResponseBody>> + Send + 'a {
     commit_event_unit_with_idempotency(state, submission, producer, effects, None)
 }
 
@@ -314,7 +316,7 @@ pub(super) fn commit_event_unit_with_idempotency<'a>(
     producer: AdmittedProducer,
     effects: SelfEventUnitEffects,
     idempotency: Option<coland_services::events::IdempotentResponse>,
-) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitOutcome>> + Send + 'a {
+) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitResponseBody>> + Send + 'a {
     Box::pin(async move {
         let claim = submission.event.kind == arkret_wire::EventKind::InviteClaim;
         let result = commit_event_unit_with_idempotency_impl(
@@ -360,7 +362,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
     producer: AdmittedProducer,
     effects: SelfEventUnitEffects,
     idempotency: Option<coland_services::events::IdempotentResponse>,
-) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitOutcome>> + Send + 'a {
+) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitResponseBody>> + Send + 'a {
     // Construct the large accepting state machine outside its caller's poll frame.
     Box::pin(async move {
         let event = &submission.event;
@@ -690,7 +692,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             return super::authority_direct_conversation::relay_direct_conversation_refusal(error);
         }
         if private_governance {
-            return Ok(AuthoritySubmitOutcome::Accepted {
+            return Ok(AuthoritySubmitResponseBody::Accepted {
                 status: AuthorityCommitStatus::Committed,
                 commit: transaction.commit,
             });
@@ -706,7 +708,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
         #[cfg(feature = "conformance-harness")]
         tracing::warn!(phase = "notifications_dispatched", kind = %event.kind.as_str(), "self Event execution boundary");
         if decided_at_cut && !poll_at_cut && event.kind != arkret_wire::EventKind::StrandCreate {
-            return Ok(AuthoritySubmitOutcome::Accepted {
+            return Ok(AuthoritySubmitResponseBody::Accepted {
                 status: AuthorityCommitStatus::Committed,
                 commit: transaction.commit,
             });
@@ -745,7 +747,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
                 }
             });
         }
-        Ok(AuthoritySubmitOutcome::Accepted {
+        Ok(AuthoritySubmitResponseBody::Accepted {
             status: AuthorityCommitStatus::Committed,
             commit: transaction.commit,
         })
@@ -756,14 +758,14 @@ fn commit_event_unit_with_idempotency_impl<'a>(
 /// `ak.self.moderation.report` Event (content-moderation.md §3.1/§3.3).
 ///
 /// The Station never authors, re-signs or injects guards into the Event; it
-/// only signs the covering RealmCommit. The report's typed current result and
+/// only signs the covering RealmCommit. The report's current state and
 /// any consumed franking nonce commit with it. Realm and Circle reports use
 /// their exact signed source stream; MIMI facade reports have their own ingress.
 pub(crate) async fn submit_self_moderation_report(
     state: &AppState,
     session: &SessionIdentityState,
     request: EventAdmissionSubmission,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     request
         .validate()
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
@@ -823,7 +825,7 @@ pub(crate) async fn submit_applet_event(
     state: &AppState,
     event: Event,
     service_did_document: arkret_identity::DidDocument,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     let submission = EventAdmissionSubmission {
         event,
         approval_signatures: None,
@@ -861,7 +863,7 @@ pub(crate) async fn submit_applet_event(
 pub(crate) async fn submit_mimi_binding_event(
     state: &AppState,
     submission: &EventAdmissionSubmission,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     if submission.event.kind != arkret_wire::EventKind::MimiRoomBinding {
         return Err(ServiceError::SchemaViolation(
             "MIMI binding ingress only accepts room bindings".into(),
@@ -912,9 +914,9 @@ mod claim_privacy_tests {
             group_info_ref: BlobRef::new(format!("ak:blob:sha256:{}", "1".repeat(64))).unwrap(),
             ratchet_tree_ref: BlobRef::new(format!("ak:blob:sha256:{}", "2".repeat(64))).unwrap(),
             creator_leaf_authority: MlsGenesisCreatorLeafAuthority {
-                leaf_signature_key_b64u: Base64UrlString::new(arkret_canonical::base64url_encode(
-                    [7; 32],
-                ))
+                leaf_signature_key_base64url: Base64UrlString::new(
+                    arkret_canonical::base64url_encode([7; 32]),
+                )
                 .unwrap(),
                 endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device {
                     device_id: DeviceId::new("ak:device:01904100-0000-7000-8000-000000000086")

@@ -5,7 +5,7 @@
 //! authority.
 
 use arkret_models_discovery::{
-    DirectoryRealmSearchOutcome, DirectoryResolveRealmRequestBody, DirectoryResourceKind,
+    DirectoryRealmSearchResponseBody, DirectoryResolveRealmRequestBody, DirectoryResourceKind,
     DirectorySearchRealmsRequestBody, PublicRealmDirectoryEntry, PublicRealmMetadata,
     ServiceDescribe, ServiceProtocolVersion,
 };
@@ -83,7 +83,7 @@ async fn directory_describe(depot: &mut Depot) -> JsonResult<ServiceDescribe> {
         ))],
         supported_features: Vec::new(),
         calendar_tzdb_versions: Vec::new(),
-        auth_metadata: arkret_models_discovery::service_description::AuthMetadata::minimal(),
+        authentication_metadata: arkret_models_discovery::service_description::AuthenticationMetadata::minimal(),
         limits: Default::default(),
         plaintext_visibility: arkret_models_discovery::service_description::PlaintextVisibility::none(),
         receive_policy_constraints: None,

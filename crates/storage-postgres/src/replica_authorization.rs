@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use arkret_models_collaboration::governance::grant_constraint::{
     AuthorityRootRef, CapabilityGrant, CapabilitySubject, IssuerAuthorityRef,
 };
-use arkret_wire::{ActorId, CurrentSelector, GrantId, RealmId, ScopeRef, TypedCurrentRow};
+use arkret_wire::{ActorId, CurrentSelector, CurrentState, GrantId, RealmId, ScopeRef};
 use coland_storage::{AuthorizationOperation, OperationFacts, PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel_async::AsyncPgConnection;
@@ -36,7 +36,7 @@ pub(crate) const CURRENT_REVISION_GUARD_SQL: &str = "SELECT EXISTS(SELECT 1 FROM
 pub(crate) async fn guard_current_rows(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
-    entries: &[TypedCurrentRow],
+    entries: &[CurrentState],
 ) -> PersistenceResult<()> {
     #[derive(diesel::QueryableByName)]
     struct Conflict {
@@ -62,10 +62,10 @@ pub(crate) async fn guard_current_rows(
 pub(crate) async fn save_row(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
-    entry: &TypedCurrentRow,
+    entry: &CurrentState,
     installed_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
-    let TypedCurrentRow::Value {
+    let CurrentState::Value {
         selector,
         source_stream_ref,
         revision,
@@ -134,7 +134,7 @@ pub(crate) fn intact_chain(
     }
     let valid = grants.get(id).is_some_and(|grant| {
         grant.realm_id.as_ref() == Some(realm)
-            && crate::capability_grant_current_results::grant_is_active_at(grant, at)
+            && crate::capability_grant_current_states::grant_is_active_at(grant, at)
             && !grant.issuer_authority_refs.is_empty()
             && !grant.authority_root_refs.is_empty()
             && grant.authority_root_refs.iter().all(|root| {
@@ -253,7 +253,7 @@ pub(crate) async fn scope_moderator(
         .ok_or_else(|| invalid("root controller epoch is absent"))?;
     let generation = root
         .get("authority_generation")
-        .and_then(serde_json::Value::as_u64)
+        .and_then(arkret_canonical::serde_helpers::parse_uint64_decimal_value)
         .ok_or_else(|| invalid("root generation is absent"))?;
     let target = match scope {
         ScopeRef::Realm { realm_id } if realm_id == realm => {
@@ -332,7 +332,7 @@ pub(crate) async fn exact_current_evidence(
     conn: &mut AsyncPgConnection,
     stream: &arkret_wire::CommitStreamRef,
     selectors: &[CurrentSelector],
-) -> PersistenceResult<Option<(arkret_wire::CommitStreamHead, Vec<TypedCurrentRow>)>> {
+) -> PersistenceResult<Option<(arkret_wire::CommitStreamHead, Vec<CurrentState>)>> {
     let realm = stream.realm_id();
     let Some(head) = verified_head(conn, stream).await? else {
         return Ok(None);
@@ -371,8 +371,8 @@ pub(crate) async fn exact_current_evidence(
         else {
             return Ok(None);
         };
-        let entry: TypedCurrentRow = serde_json::from_value(row.entry_json).map_err(invalid)?;
-        let TypedCurrentRow::Value {
+        let entry: CurrentState = serde_json::from_value(row.entry_json).map_err(invalid)?;
+        let CurrentState::Value {
             selector: found,
             source_stream_ref,
             revision,
@@ -396,7 +396,7 @@ pub(crate) async fn exact_current_evidence(
 pub(crate) async fn authorization_evidence(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
-) -> PersistenceResult<Option<Vec<TypedCurrentRow>>> {
+) -> PersistenceResult<Option<Vec<CurrentState>>> {
     let rows = diesel::sql_query(
         "SELECT selector,value FROM replica_authorization_rows WHERE realm_id=$1 \
          AND selector->>'kind' IN ('realm_authority_root','realm_policy_bundle','capability_grant') \
@@ -433,13 +433,13 @@ pub(crate) async fn direct_current_evidence(
     realm: &RealmId,
     pair_key: &arkret_wire::Hash,
     participants: &[ActorId; 2],
-) -> PersistenceResult<Option<(arkret_wire::CommitStreamHead, Vec<TypedCurrentRow>)>> {
+) -> PersistenceResult<Option<(arkret_wire::CommitStreamHead, Vec<CurrentState>)>> {
     let stream = arkret_wire::CommitStreamRef::Realm {
         realm_id: realm.clone(),
     };
     let mut members = diesel::sql_query(
         "SELECT member_id,current_commit_id,current_stream_position,value \
-         FROM member_state_current_results WHERE realm_id=$1 AND member_id IN ($2,$3) \
+         FROM member_state_current_states WHERE realm_id=$1 AND member_id IN ($2,$3) \
          ORDER BY member_id",
     )
     .bind::<Text, _>(realm.as_str())
@@ -455,7 +455,7 @@ pub(crate) async fn direct_current_evidence(
     // the complete joined roster. The existing membership index bounds it.
     let additional = diesel::sql_query(
         "SELECT member_id,current_commit_id,current_stream_position,value \
-         FROM member_state_current_results WHERE realm_id=$1 AND membership='join' \
+         FROM member_state_current_states WHERE realm_id=$1 AND membership='join' \
          AND member_id NOT IN ($2,$3) ORDER BY member_id LIMIT 1",
     )
     .bind::<Text, _>(realm.as_str())
@@ -486,7 +486,7 @@ pub(crate) async fn direct_current_evidence(
         return Ok(None);
     };
     for entry in &entries {
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             selector: found,
             revision,
             value,
@@ -497,7 +497,7 @@ pub(crate) async fn direct_current_evidence(
                 .iter()
                 .find(|member| member.member_id == actor_id.to_string())
                 .ok_or_else(|| invalid("selected member is outside the bounded roster"))?;
-            let _: arkret_wire::MemberStateCurrent =
+            let _: arkret_wire::MemberStateValue =
                 serde_json::from_value(value.clone()).map_err(invalid)?;
             if member.current_commit_id != revision.commit_id.as_str()
                 || u64::try_from(member.current_stream_position).ok()
@@ -551,7 +551,7 @@ mod direct_evidence_tests {
             .bind::<Text,_>(commit.as_str()).bind::<Text,_>(realm.as_str()).bind::<Text,_>(&key)
             .bind::<Jsonb,_>(serde_json::to_value(&stream).unwrap()).bind::<Timestamptz,_>(at)
             .execute(&mut *conn).await.unwrap();
-        let entry = |selector: CurrentSelector, value: serde_json::Value| TypedCurrentRow::Value {
+        let entry = |selector: CurrentSelector, value: serde_json::Value| CurrentState::Value {
             selector,
             source_stream_ref: stream.clone(),
             revision: arkret_wire::CurrentRevision {
@@ -594,7 +594,7 @@ mod direct_evidence_tests {
             )
             .await
             .unwrap();
-            diesel::sql_query("INSERT INTO member_state_current_results(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join',$3,0,$4,$5)")
+            diesel::sql_query("INSERT INTO member_state_current_states(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join',$3,0,$4,$5)")
                 .bind::<Text,_>(realm.as_str()).bind::<Text,_>(member.to_string()).bind::<Text,_>(commit.as_str())
                 .bind::<Jsonb,_>(&value).bind::<Timestamptz,_>(at).execute(&mut *conn).await.unwrap();
         }
@@ -653,7 +653,7 @@ mod direct_evidence_tests {
         assert!(advanced_cut.retains_resolver_facts(&original_cut));
         assert!(!original_cut.retains_resolver_facts(&advanced_cut));
         let mut replaced_cut = advanced_cut.clone();
-        let TypedCurrentRow::Value { revision, .. } = &mut replaced_cut.current_state_entries[0];
+        let CurrentState::Value { revision, .. } = &mut replaced_cut.current_state_entries[0];
         revision.commit_id = head.commit_id.clone();
         revision.stream_position = head.stream_position;
         assert!(!replaced_cut.retains_resolver_facts(&original_cut));
@@ -670,7 +670,7 @@ mod direct_evidence_tests {
         );
         let third = actor("charlie");
         let value = serde_json::json!({"membership":"join"});
-        diesel::sql_query("INSERT INTO member_state_current_results(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join',$3,0,$4,$5)")
+        diesel::sql_query("INSERT INTO member_state_current_states(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join',$3,0,$4,$5)")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(third.to_string()).bind::<Text,_>(commit.as_str())
             .bind::<Jsonb,_>(&value).bind::<Timestamptz,_>(at).execute(&mut *conn).await.unwrap();
         assert!(
@@ -697,7 +697,7 @@ mod direct_evidence_tests {
             .unwrap()
             .unwrap();
         assert_eq!(extended.len(), 5);
-        assert!(extended.iter().any(|entry| matches!(entry,TypedCurrentRow::Value { selector:CurrentSelector::MemberState { actor_id },.. } if actor_id==&third)));
+        assert!(extended.iter().any(|entry| matches!(entry,CurrentState::Value { selector:CurrentSelector::MemberState { actor_id },.. } if actor_id==&third)));
         let mut bad = entry(
             CurrentSelector::MemberState {
                 actor_id: pair[0].clone(),
@@ -705,7 +705,7 @@ mod direct_evidence_tests {
             serde_json::json!({"membership":"leave"}),
         );
         // A real successor has its own revision, even when testing a bad roster.
-        let TypedCurrentRow::Value { revision, .. } = &mut bad;
+        let CurrentState::Value { revision, .. } = &mut bad;
         revision.commit_id = head.commit_id.clone();
         revision.stream_position = 1;
         save_row(&mut conn, &realm, &bad, at).await.unwrap();
@@ -715,7 +715,7 @@ mod direct_evidence_tests {
                 .unwrap()
                 .is_none()
         );
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             source_stream_ref,
             value,
             ..
@@ -729,7 +729,7 @@ mod direct_evidence_tests {
         };
         // Foreign source injection is refused by the verified installation boundary.
         assert!(save_row(&mut conn, &realm, &bad, at).await.is_err());
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             source_stream_ref,
             revision,
             ..
@@ -780,7 +780,7 @@ pub(crate) async fn snapshot_current_evidence(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
     heads: &[arkret_wire::CommitStreamHead],
-) -> PersistenceResult<Vec<TypedCurrentRow>> {
+) -> PersistenceResult<Vec<CurrentState>> {
     let rows = diesel::sql_query(
         "SELECT jsonb_build_object('selector',selector,'source_stream_ref',source_stream_ref, \
          'revision',jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position), \
@@ -798,8 +798,8 @@ pub(crate) async fn snapshot_current_evidence(
     }
     let mut entries = Vec::new();
     for row in rows {
-        let entry: TypedCurrentRow = serde_json::from_value(row.entry_json).map_err(invalid)?;
-        let TypedCurrentRow::Value {
+        let entry: CurrentState = serde_json::from_value(row.entry_json).map_err(invalid)?;
+        let CurrentState::Value {
             source_stream_ref,
             revision,
             ..

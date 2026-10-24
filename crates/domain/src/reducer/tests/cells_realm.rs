@@ -630,7 +630,7 @@ fn realm_freeze_requires_explicit_unfreeze_and_preserves_archive() {
 }
 
 /// A valid receipt remains a durable fact. It is intentionally not parsed into
-/// or defaulted by the shared current-result reducer.
+/// or defaulted by the shared current-state reducer.
 fn valid_erasure_receipt_payload() -> Value {
     serde_json::json!({
         "receipt_id": "ak:receipt:019b5c20-0000-7000-8000-000000000030",
@@ -1404,7 +1404,7 @@ fn policy_bundle_revision_starts_at_one_and_advances_without_gaps() {
         apply_bundle(
             &mut state,
             realm_id,
-            serde_json::json!({"policy_revision": 2, "media_service_decrypts": true}),
+            serde_json::json!({"policy_revision": 2, "media_service_decryption_allowed": true}),
         ),
         ProjectionEffect::Rejected { reason }
             if reason == arkret_wire::ReasonCode::POLICY_REVISION_GAP
@@ -1413,7 +1413,7 @@ fn policy_bundle_revision_starts_at_one_and_advances_without_gaps() {
         apply_bundle(
             &mut state,
             realm_id,
-            serde_json::json!({"policy_revision": 1, "media_service_decrypts": true}),
+            serde_json::json!({"policy_revision": 1, "media_service_decryption_allowed": true}),
         ),
         ProjectionEffect::RealmPolicyBundleProjected { .. }
     ));
@@ -1421,7 +1421,7 @@ fn policy_bundle_revision_starts_at_one_and_advances_without_gaps() {
         apply_bundle(
             &mut state,
             realm_id,
-            serde_json::json!({"policy_revision": 1, "media_service_decrypts": false}),
+            serde_json::json!({"policy_revision": 1, "media_service_decryption_allowed": false}),
         ),
         ProjectionEffect::Rejected { reason }
             if reason == arkret_wire::ErrorCode::POLICY_REVISION_ROLLBACK
@@ -1430,7 +1430,7 @@ fn policy_bundle_revision_starts_at_one_and_advances_without_gaps() {
         apply_bundle(
             &mut state,
             realm_id,
-            serde_json::json!({"policy_revision": 3, "media_service_decrypts": false}),
+            serde_json::json!({"policy_revision": 3, "media_service_decryption_allowed": false}),
         ),
         ProjectionEffect::Rejected { reason }
             if reason == arkret_wire::ReasonCode::POLICY_REVISION_GAP
@@ -1439,7 +1439,7 @@ fn policy_bundle_revision_starts_at_one_and_advances_without_gaps() {
         apply_bundle(
             &mut state,
             realm_id,
-            serde_json::json!({"policy_revision": 2, "media_service_decrypts": false}),
+            serde_json::json!({"policy_revision": 2, "media_service_decryption_allowed": false}),
         ),
         ProjectionEffect::RealmPolicyBundleProjected { .. }
     ));
@@ -1691,7 +1691,7 @@ fn the_bundle_projects_every_registered_component() {
     let payload = serde_json::json!({
         "policy_revision": 1,
         "federation_policy": "restricted",
-        "media_service_decrypts": true,
+        "media_service_decryption_allowed": true,
         "join_policy": {"combinator": "all", "gates": [{
             "gate_id": "open",
             "kind": "principal_admission",
@@ -1703,11 +1703,11 @@ fn the_bundle_projects_every_registered_component() {
             "issuer_class": "domain_authority"
         }],
         "agent_participation": {"agent": {
-            "reply_message": true,
-            "reaction_add": false,
-            "reaction_remove": false,
-            "accept_third_party_mention": false,
-            "act_on_behalf": false
+            "message_creation_allowed": true,
+            "reaction_addition_allowed": false,
+            "reaction_removal_allowed": false,
+            "third_party_mention_delivery_allowed": false,
+            "acting_on_behalf_allowed": false
         }},
         "account_deactivation": {"member_action": "leave_all"},
         "preauth": {"consent_required": true},
@@ -1731,7 +1731,7 @@ fn the_bundle_projects_every_registered_component() {
         .expect("bundle projects");
     for component in [
         "federation_policy",
-        "media_service_decrypts",
+        "media_service_decryption_allowed",
         "join_policy",
         "handle_issuer_policies",
         "agent_participation",

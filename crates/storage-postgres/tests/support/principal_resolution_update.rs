@@ -40,7 +40,7 @@ async fn signed_resolution_cas_is_atomic_and_survives_cache_eviction_and_reopen(
             did: history.did.as_str(),
             local_id: &local,
             previous_entries: &entries,
-            version_time: time + chrono::TimeDelta::seconds(1),
+            version_created_at: time + chrono::TimeDelta::seconds(1),
             current_root_seed: &[71; 32],
             next_root_public_key_multibase: &next_key,
             state: &inception["state"],
@@ -74,7 +74,7 @@ async fn signed_resolution_cas_is_atomic_and_survives_cache_eviction_and_reopen(
             current_did: history.did.as_str(),
             target_did: &target,
             previous_entries: &entries,
-            version_time: time + chrono::TimeDelta::seconds(2),
+            version_created_at: time + chrono::TimeDelta::seconds(2),
             current_update_seed: &[72; 32],
             next_update_public_key_multibase: &next_key,
             state: &state,
@@ -88,7 +88,7 @@ async fn signed_resolution_cas_is_atomic_and_survives_cache_eviction_and_reopen(
             .append_log_event(coland_storage::WebvhLogRecord {
                 event_digest: arkret_canonical::canonical_sha256(entry).unwrap(),
                 did: entry["state"]["id"].as_str().unwrap().into(),
-                seq: index as u64 + 1,
+                sequence: index as u64 + 1,
                 operation: entry.clone(),
                 created_at: time + chrono::TimeDelta::seconds(index as i64),
             })
@@ -153,7 +153,7 @@ async fn signed_resolution_cas_is_atomic_and_survives_cache_eviction_and_reopen(
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query("CREATE OR REPLACE FUNCTION fail_resolution_current() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected resolution current failure'; END $$")
         .execute(&mut *conn).await.unwrap();
-    diesel::sql_query("CREATE TRIGGER fail_resolution_current BEFORE UPDATE ON principal_resolution_current_results FOR EACH ROW EXECUTE FUNCTION fail_resolution_current()")
+    diesel::sql_query("CREATE TRIGGER fail_resolution_current BEFORE UPDATE ON principal_resolution_current_states FOR EACH ROW EXECUTE FUNCTION fail_resolution_current()")
         .execute(&mut *conn).await.unwrap();
     drop(conn);
     assert!(resolutions.admit_update(first.clone()).await.is_err());
@@ -168,7 +168,7 @@ async fn signed_resolution_cas_is_atomic_and_survives_cache_eviction_and_reopen(
     );
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "DROP TRIGGER fail_resolution_current ON principal_resolution_current_results",
+        "DROP TRIGGER fail_resolution_current ON principal_resolution_current_states",
     )
     .execute(&mut *conn)
     .await
@@ -195,7 +195,7 @@ async fn signed_resolution_cas_is_atomic_and_survives_cache_eviction_and_reopen(
     );
     assert!(matches!(
         resolutions.admit_update(winner.clone()).await.unwrap(),
-        arkret_wire::AuthoritySubmitOutcome::Accepted {
+        arkret_wire::AuthoritySubmitResponseBody::Accepted {
             status: arkret_wire::AuthorityCommitStatus::Duplicate,
             ..
         }

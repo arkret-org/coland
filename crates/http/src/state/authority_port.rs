@@ -8,14 +8,15 @@
 //! authorization at the authority transaction cut.
 
 use arkret_models_collaboration::authority_commit::{
-    AggregateAcceptanceStatus, AuthorityHandoffRequest,
+    AggregateAcceptanceStatus, AuthorityRealmAuthorityHandoffRequestBody,
     DirectConversationFoundingAcceptanceOutcome, DirectConversationFoundingUnitSubmission,
     OrdinaryRealmBootstrapAcceptanceOutcome, OrdinaryRealmBootstrapUnitSubmission,
-    PeerAuthorityForwardEventRequest, PeerAuthorityForwardMlsRequest,
+    PeerAuthorityForwardEventRequestBody, PeerAuthorityForwardMlsRequestBody,
 };
 use arkret_wire::{
-    AuthorityBundleRequest, AuthoritySubmitOutcome, EventAdmissionSubmission, MlsCommitSubmission,
-    RealmAuthorityBundle, RealmAuthorityHandoff, StreamScanRequest,
+    AuthoritySubmitResponseBody, EventAdmissionSubmission, MlsCommitSubmission,
+    RealmAuthorityBundle, RealmAuthorityBundleRequestBody, RealmAuthorityHandoff,
+    StreamScanRequestBody,
 };
 use chrono::Utc;
 use coland_services::authority_commit::{AuthenticatedPeerContext, AuthorityProtocolPort};
@@ -34,13 +35,13 @@ enum SelfEventRoute {
     Consent,
     /// `ak.mls.genesis` and `ak.mls.commit`: the MLS public-transition unit.
     Mls,
-    /// Kinds with a guarded current-result authority cut in their source scope.
+    /// Kinds with a guarded current-state authority cut in their source scope.
     GuardedUnit,
 }
 
 /// Select the self Event unit for `kind` before any authority cut is read.
 ///
-/// Every other active standard kind has no current-result authority cut here
+/// Every other active standard kind has no current-state authority cut here
 /// and is refused with the universal `unsupported_event_kind`, never an
 /// internal failure, so the refusal is a stable wire code and nothing is
 /// written. A kind outside the registry cannot pass envelope validation; if
@@ -158,7 +159,7 @@ pub(super) fn refuse_actor_private_event(kind: &arkret_wire::EventKind) -> Servi
 pub(super) async fn refuse_unrouted_event(
     state: &AppState,
     event: &arkret_wire::Event,
-) -> ServiceResult<Option<AuthoritySubmitOutcome>> {
+) -> ServiceResult<Option<AuthoritySubmitResponseBody>> {
     match self_event_route(&event.kind) {
         Ok(_) => Ok(None),
         Err(unsupported @ ServiceError::UnsupportedEventKind(_)) => {
@@ -176,7 +177,7 @@ pub(super) async fn refuse_unrouted_event(
                     snapshot.current_state_entries.iter().any(|row| {
                         matches!(
                             row,
-                            arkret_wire::TypedCurrentRow::Value {
+                            arkret_wire::CurrentState::Value {
                                 selector: arkret_wire::CurrentSelector::RealmTombstone,
                                 ..
                             }
@@ -291,8 +292,8 @@ impl AuthorityProtocolPort for AppState {
         &self,
         metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
         authority: &coland_storage::AppletManagedDeviceAuthority,
-        request: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest,
-    ) -> ServiceResult<arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome>
+        request: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody,
+    ) -> ServiceResult<arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody>
     {
         super::authority_managed_device::submit(self, metadata, authority, request).await
     }
@@ -318,7 +319,7 @@ impl AuthorityProtocolPort for AppState {
     async fn submit_peer_audit_pair(
         &self,
         peer: &AuthenticatedPeerContext,
-        request: arkret_models_collaboration::authority_commit::PeerAuthorityForwardAtomicRequest,
+        request: arkret_models_collaboration::authority_commit::PeerAuthorityForwardAtomicRequestBody,
     ) -> ServiceResult<
         arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
     > {
@@ -529,7 +530,7 @@ impl AuthorityProtocolPort for AppState {
         &self,
         session: &SessionIdentityState,
         request: EventAdmissionSubmission,
-    ) -> ServiceResult<AuthoritySubmitOutcome> {
+    ) -> ServiceResult<AuthoritySubmitResponseBody> {
         request
             .validate()
             .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
@@ -555,7 +556,7 @@ impl AuthorityProtocolPort for AppState {
                     (arkret_wire::AuthorityCommitStatus::Duplicate, record)
                 }
             };
-            return Ok(AuthoritySubmitOutcome::Accepted {
+            return Ok(AuthoritySubmitResponseBody::Accepted {
                 status,
                 commit: record.commit,
             });
@@ -629,7 +630,7 @@ impl AuthorityProtocolPort for AppState {
         if let Some(original) = Box::pin(super::authority_forward::recover_forwarded_original(
             self,
             session,
-            &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+            &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
                 request.clone(),
             ),
         ))
@@ -766,7 +767,7 @@ impl AuthorityProtocolPort for AppState {
         &self,
         session: &SessionIdentityState,
         request: MlsCommitSubmission,
-    ) -> ServiceResult<AuthoritySubmitOutcome> {
+    ) -> ServiceResult<AuthoritySubmitResponseBody> {
         request
             .validate()
             .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
@@ -788,7 +789,7 @@ impl AuthorityProtocolPort for AppState {
         if let Some(original) = super::authority_forward::recover_forwarded_original(
             self,
             session,
-            &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::MlsCommit(
+            &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::MlsCommit(
                 request.clone(),
             ),
         )
@@ -819,8 +820,8 @@ impl AuthorityProtocolPort for AppState {
     async fn submit_peer_authority_forward_event(
         &self,
         peer: &coland_services::authority_commit::AuthenticatedPeerContext,
-        request: PeerAuthorityForwardEventRequest,
-    ) -> ServiceResult<AuthoritySubmitOutcome> {
+        request: PeerAuthorityForwardEventRequestBody,
+    ) -> ServiceResult<AuthoritySubmitResponseBody> {
         super::authority_forward::admit_forwarded_event(self, peer, request, crate::wire::now())
             .await
     }
@@ -828,17 +829,18 @@ impl AuthorityProtocolPort for AppState {
     async fn submit_peer_authority_forward_mls(
         &self,
         peer: &coland_services::authority_commit::AuthenticatedPeerContext,
-        request: PeerAuthorityForwardMlsRequest,
-    ) -> ServiceResult<AuthoritySubmitOutcome> {
+        request: PeerAuthorityForwardMlsRequestBody,
+    ) -> ServiceResult<AuthoritySubmitResponseBody> {
         super::authority_forward::admit_forwarded_mls(self, peer, request, crate::wire::now()).await
     }
 
     async fn submit_peer_committed_replication(
         &self,
         peer: &coland_services::authority_commit::AuthenticatedPeerContext,
-        request: arkret_models_collaboration::authority_commit::PeerCommittedReplicationRequest,
-    ) -> ServiceResult<arkret_models_collaboration::authority_commit::PeerCommittedReplicationOutcome>
-    {
+        request: arkret_models_collaboration::authority_commit::PeerCommittedReplicationRequestBody,
+    ) -> ServiceResult<
+        arkret_models_collaboration::authority_commit::PeerCommittedReplicationResponseBody,
+    > {
         super::committed_replication::receive(self, peer, request).await
     }
 
@@ -856,7 +858,7 @@ impl AuthorityProtocolPort for AppState {
     async fn scan_stream_for_account(
         &self,
         account: &arkret_wire::AccountId,
-        request: StreamScanRequest,
+        request: StreamScanRequestBody,
     ) -> ServiceResult<coland_storage::AccountStreamScan> {
         self.authority_commits()
             .scan_stream_for_account(&request, account, &self.service_core_id())
@@ -866,7 +868,7 @@ impl AuthorityProtocolPort for AppState {
     async fn scan_stream_for_peer(
         &self,
         peer: &coland_services::authority_commit::AuthenticatedPeerContext,
-        request: StreamScanRequest,
+        request: StreamScanRequestBody,
     ) -> ServiceResult<coland_storage::PeerStreamScan> {
         self.authority_commits()
             .scan_stream_for_peer(&request, &peer.source_service_id, &self.service_core_id())
@@ -877,7 +879,7 @@ impl AuthorityProtocolPort for AppState {
     /// remains a locator and never signs a replacement current assertion.
     async fn authority_bundle(
         &self,
-        request: AuthorityBundleRequest,
+        request: RealmAuthorityBundleRequestBody,
     ) -> ServiceResult<RealmAuthorityBundle> {
         crate::routing::realm_join::local_authority_bundle(self, &request.realm_id, &request.nonce)
             .await
@@ -893,7 +895,7 @@ impl AuthorityProtocolPort for AppState {
     async fn install_authority_handoff(
         &self,
         peer: &coland_services::authority_commit::AuthenticatedPeerContext,
-        request: AuthorityHandoffRequest,
+        request: AuthorityRealmAuthorityHandoffRequestBody,
     ) -> ServiceResult<RealmAuthorityHandoff> {
         super::authority_handoff::install(self, peer, request).await
     }

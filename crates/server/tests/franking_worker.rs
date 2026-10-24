@@ -66,7 +66,7 @@ async fn fixture() -> Fixture {
             fixture.history.founding_device_signing_seed,
         );
     }
-    let body = serde_json::to_vec(&arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(submission.clone())).unwrap();
+    let body = serde_json::to_vec(&arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(submission.clone())).unwrap();
     let unit = app
         .prepare_ordinary_realm_bootstrap_unit(
             submission,
@@ -169,7 +169,7 @@ async fn fixture() -> Fixture {
             "group_info_ref":format!("ak:blob:{}",arkret_canonical::sha256_digest(&group_info)),
             "ratchet_tree_ref":format!("ak:blob:{}",arkret_canonical::sha256_digest(&tree)),
             "creator_leaf_authority": arkret_models_collaboration::events_payloads::MlsGenesisCreatorLeafAuthority {
-                leaf_signature_key_b64u: leaves[0].signature_key.clone(),
+                leaf_signature_key_base64url: leaves[0].signature_key.clone(),
                 endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device {
                     device_id: fixture.history.founding_device_id.clone(),
                 },
@@ -299,7 +299,7 @@ struct Published {
 async fn published(f: &Fixture) -> Option<Published> {
     use diesel::OptionalExtension as _;
     let mut conn = f.pool.get().await.unwrap();
-    diesel::sql_query("SELECT p.value,e.envelope,c.commit_json FROM moderation_franking_proof_current_results p JOIN realm_commits c ON c.commit_id=p.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE p.realm_id=$1 AND p.target_event_id=$2")
+    diesel::sql_query("SELECT p.value,e.envelope,c.commit_json FROM moderation_franking_proof_current_states p JOIN realm_commits c ON c.commit_id=p.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE p.realm_id=$1 AND p.target_event_id=$2")
         .bind::<diesel::sql_types::Text,_>(f.target.realm_id.as_str())
         .bind::<diesel::sql_types::Text,_>(f.target.event_id.as_str())
         .get_result(&mut *conn).await.optional().unwrap()

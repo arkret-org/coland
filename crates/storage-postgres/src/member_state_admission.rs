@@ -15,7 +15,7 @@
 //! joined member holding an action that authorizes the kind at the same cut
 //! (the Realm root controller through its effective `ak.realm.owner`).
 //! Invite acceptance is decided with its Invite lifecycle by
-//! [`crate::invite_current_results`], which reuses this module's member row
+//! [`crate::invite_current_states`], which reuses this module's member row
 //! lock and Realm role check. Agent controller joins bind accepted ownership
 //! and the controller's exact joined generation. Circle and Strand scoped
 //! membership and join policies
@@ -87,7 +87,7 @@ async fn require_agent_membership_keypackage(
          JOIN canonical_events e ON e.id=kp.agent_key_authorize_event_id AND e.state='committed' \
            AND e.kind='ak.agent.key.authorize' \
          JOIN realm_commits c ON c.event_pk=e.pk AND c.realm_id=$1 \
-         JOIN agent_key_current_results k ON k.realm_id=$1 AND k.agent_id=$2 \
+         JOIN agent_key_current_states k ON k.realm_id=$1 AND k.agent_id=$2 \
            AND k.agent_key_id=e.envelope->'payload'->>'key_id' \
          JOIN realm_commits kc ON kc.commit_id=k.current_commit_id AND kc.realm_id=k.realm_id \
            AND kc.stream_position=k.current_stream_position \
@@ -293,7 +293,7 @@ async fn membership_at_cut(
     member: &arkret_wire::ActorId,
     lock: bool,
 ) -> PersistenceResult<String> {
-    let base = "SELECT m.membership FROM member_state_current_results m \
+    let base = "SELECT m.membership FROM member_state_current_states m \
          JOIN realm_commits c ON c.commit_id=m.current_commit_id \
          WHERE m.realm_id=$1 AND m.member_id=$2 \
            AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position \
@@ -342,7 +342,7 @@ pub(crate) async fn locked_membership_revision(
     .await?;
     let Some(row) = sql_query(
         "SELECT m.membership,m.current_commit_id,m.current_stream_position \
-         FROM member_state_current_results m \
+         FROM member_state_current_states m \
          JOIN realm_commits c ON c.commit_id=m.current_commit_id \
          WHERE m.realm_id=$1 AND m.member_id=$2 \
            AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position \
@@ -377,9 +377,9 @@ async fn realm_current_value(
     family: &str,
 ) -> PersistenceResult<Option<Value>> {
     Ok(sql_query(
-        "SELECT b.value FROM realm_bootstrap_current_results b \
+        "SELECT b.value FROM realm_bootstrap_current_states b \
          JOIN realm_commits c ON c.commit_id=b.current_commit_id \
-         WHERE b.realm_id=$1 AND b.result_family=$2 \
+         WHERE b.realm_id=$1 AND b.state_family=$2 \
            AND c.realm_id=b.realm_id AND c.stream_position=b.current_stream_position \
            AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=b.realm_id \
          FOR SHARE OF b",
@@ -399,7 +399,7 @@ async fn join_policy(
     realm_id: &arkret_wire::RealmId,
 ) -> PersistenceResult<Option<Value>> {
     Ok(sql_query(
-        "SELECT value FROM realm_policy_bundle_current_results WHERE realm_id=$1 FOR SHARE",
+        "SELECT value FROM realm_policy_bundle_current_states WHERE realm_id=$1 FOR SHARE",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<CurrentValueRow>(&mut *conn)
@@ -529,7 +529,7 @@ async fn check_agent_controller_join(
         ));
     }
     let current = sql_query(
-        "SELECT m.membership, e.envelope->>'event_id' AS event_id FROM member_state_current_results m \
+        "SELECT m.membership, e.envelope->>'event_id' AS event_id FROM member_state_current_states m \
          JOIN realm_commits c ON c.commit_id=m.current_commit_id \
          JOIN canonical_events e ON e.pk=c.event_pk \
          WHERE m.realm_id=$1 AND m.member_id=$2 \
@@ -553,7 +553,7 @@ async fn check_agent_controller_join(
     }
 
     let provisioning = sql_query(
-        "SELECT p.value FROM agent_provisioning_current_results p \
+        "SELECT p.value FROM agent_provisioning_current_states p \
          JOIN pcr_genesis_units g ON g.realm_id=p.realm_id \
          WHERE p.agent_id=$1 AND g.principal_id=$2 AND g.station_id=$3 FOR SHARE OF p",
     )
@@ -572,14 +572,14 @@ async fn check_agent_controller_join(
     if provisioning.controller_principal_id != controller.principal_id {
         return Err(capability_denied("writer did not provision the Agent"));
     }
-    crate::agent_current_results::lock_agent_producer_current(
+    crate::agent_current_states::lock_agent_producer_current(
         conn,
         &provisioning.principal_control_realm_id,
         &agent.principal_id,
     )
     .await?;
     let status = sql_query(
-        "SELECT value FROM agent_status_current_results \
+        "SELECT value FROM agent_status_current_states \
          WHERE realm_id=$1 AND agent_id=$2 FOR SHARE",
     )
     .bind::<Text, _>(provisioning.principal_control_realm_id.as_str())
@@ -592,7 +592,7 @@ async fn check_agent_controller_join(
         return Err(failed_precondition("Agent lifecycle is not active"));
     }
     let accountability = sql_query(
-        "SELECT value FROM identity_accountability_current_results \
+        "SELECT value FROM identity_accountability_current_states \
          WHERE subject_id=$1 AND issuer_id=$2 \
          ORDER BY realm_id,scope_set_digest FOR SHARE",
     )
@@ -617,7 +617,7 @@ async fn check_agent_controller_join(
     // Genesis installs active once; it does not complete DID binding. The same
     // verified ownership reader is used by first join, review and later current
     // reads, so default-allow policy cannot bypass the independent bootstrap.
-    crate::agent_interaction_current_results::owned_provenance_in_connection(
+    crate::agent_interaction_current_states::owned_provenance_in_connection(
         conn,
         agent,
         controller,
@@ -641,7 +641,7 @@ async fn check_agent_controller_join(
     // Joining changes the key-access revision. It does not install an MLS
     // leaf; the later Add must cover the new revision with its own claim.
     let mls_active = sql_query(
-        "SELECT EXISTS(SELECT 1 FROM mls_group_current_results \
+        "SELECT EXISTS(SELECT 1 FROM mls_group_current_states \
          WHERE realm_id=$1 AND value->'effective_scope'->>'kind'='realm') AS present",
     )
     .bind::<Text, _>(event.realm_id.as_str())

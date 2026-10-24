@@ -322,7 +322,8 @@ pub(crate) fn validate_mirror_receipt_cryptography(
         || receipt.recipient_id.as_str() != expected_service_id
         || !matches!(
             receipt.outcome,
-            PeerContactOutcome::Accepted | PeerContactOutcome::Duplicate
+            PeerContactAdmissionAttemptOutcome::Accepted
+                | PeerContactAdmissionAttemptOutcome::Duplicate
         )
     {
         return Err(super::super::events::peer::cross_domain_replay(format!(
@@ -345,7 +346,7 @@ fn sign_contact_mirror_receipt(
     state: &AppState,
     request: &PeerContactSubmitRequestBody,
     event: &Event,
-    outcome: PeerContactOutcome,
+    outcome: PeerContactAdmissionAttemptOutcome,
 ) -> Result<PeerContactMirrorReceipt, AppError> {
     let request_digest = Hash::new(
         canonical::canonical_sha256(request)
@@ -408,8 +409,8 @@ fn sign_contact_control_receipt(
     state: &AppState,
     request: &PeerContactSubmitRequestBody,
     request_kind: PeerContactControlKind,
-    outcome: PeerContactOutcome,
-    result_digest: Option<Hash>,
+    outcome: PeerContactAdmissionAttemptOutcome,
+    control_material_digest: Option<Hash>,
 ) -> Result<PeerContactControlReceipt, AppError> {
     let request_digest = Hash::new(
         canonical::canonical_sha256(request)
@@ -430,15 +431,15 @@ fn sign_contact_control_receipt(
         "request_kind": request_kind,
         "request_digest": request_digest,
         "outcome": outcome,
-        "result_digest": result_digest,
+        "control_material_digest": control_material_digest,
         "recipient_id": issuer,
         "received_at": arkret_canonical::format_timestamp_canonical(received_at),
         "issuer_id": issuer,
     });
-    if result_digest.is_none()
+    if control_material_digest.is_none()
         && let Value::Object(fields) = &mut signing_value
     {
-        fields.remove("result_digest");
+        fields.remove("control_material_digest");
     }
     let signing_bytes = canonical::canonical_json_bytes(&signing_value).map_err(|error| {
         AppError::internal(format!("Contact control receipt canonicalize: {error}"))
@@ -449,7 +450,7 @@ fn sign_contact_control_receipt(
         request_kind,
         request_digest,
         outcome,
-        result_digest,
+        control_material_digest,
         recipient_id: issuer.clone(),
         received_at,
         issuer_id: issuer,
@@ -564,7 +565,7 @@ async fn save_contact_cas(
 pub(crate) async fn reenqueue_deferred_contact_control(
     state: &AppState,
     request: &PeerContactSubmitRequestBody,
-    deferred: &arkret_models_collaboration::contact_operations::PeerContactControlDeferredOutcome,
+    deferred: &arkret_models_collaboration::contact_operations::PeerContactControlDeferredResponseBody,
     peer_id: &str,
 ) -> Result<(), AppError> {
     let expected_kind = match request {
@@ -578,10 +579,10 @@ pub(crate) async fn reenqueue_deferred_contact_control(
             ));
         }
     };
-    if deferred.status != PeerContactOutcome::Deferred
+    if deferred.status != PeerContactAdmissionAttemptOutcome::Deferred
         || deferred.request_kind != expected_kind
-        || deferred.control_receipt.outcome != PeerContactOutcome::Deferred
-        || deferred.control_receipt.result_digest.is_some()
+        || deferred.control_receipt.outcome != PeerContactAdmissionAttemptOutcome::Deferred
+        || deferred.control_receipt.control_material_digest.is_some()
     {
         return Err(super::super::events::peer::schema_violation(
             "deferred Contact control outcome has inconsistent status/kind",
@@ -1090,7 +1091,7 @@ async fn read_exact_control(
     state: &AppState,
     request: &PeerContactSubmitRequestBody,
     requester: &ContactPeer,
-) -> Result<Option<PeerContactSubmitOutcome>, AppError> {
+) -> Result<Option<PeerContactSubmitResponseBody>, AppError> {
     let (key, _) = peer_contact_delivery_address(request);
     let digest = contact_control_request_digest(request)?;
     let record = state
@@ -1117,7 +1118,7 @@ async fn read_exact_control(
 fn frozen_control_record(
     request: &PeerContactSubmitRequestBody,
     requester: &ContactPeer,
-    outcome: &PeerContactSubmitOutcome,
+    outcome: &PeerContactSubmitResponseBody,
 ) -> Result<coland_storage::IdempotencyRecord, AppError> {
     Ok(coland_storage::IdempotencyRecord {
         authenticated_actor: requester.contact_actor_id(),
@@ -1155,16 +1156,16 @@ fn deferred_current(
     state: &AppState,
     request: &PeerContactSubmitRequestBody,
     kind: PeerContactControlKind,
-) -> Result<PeerContactSubmitOutcome, AppError> {
-    Ok(PeerContactSubmitOutcome::ControlDeferred(
-        PeerContactControlDeferredOutcome {
-            status: PeerContactOutcome::Deferred,
+) -> Result<PeerContactSubmitResponseBody, AppError> {
+    Ok(PeerContactSubmitResponseBody::ControlDeferred(
+        PeerContactControlDeferredResponseBody {
+            status: PeerContactAdmissionAttemptOutcome::Deferred,
             request_kind: kind,
             control_receipt: sign_contact_control_receipt(
                 state,
                 request,
                 kind,
-                PeerContactOutcome::Deferred,
+                PeerContactAdmissionAttemptOutcome::Deferred,
                 None,
             )?,
             retry_after_ms: Some(30_000),
@@ -1175,7 +1176,7 @@ async fn handle_current_refresh(
     state: &AppState,
     request: &PeerContactSubmitRequestBody,
     source_id: &str,
-) -> Result<PeerContactSubmitOutcome, AppError> {
+) -> Result<PeerContactSubmitResponseBody, AppError> {
     let PeerContactSubmitRequestBody::CurrentRefresh {
         requester,
         trust_domain_id,
@@ -1317,18 +1318,19 @@ async fn handle_current_refresh(
     };
     material.validate_shape().map_err(contact_error)?;
     let digest = control_result_digest(request, "current_refresh", Some(&material), None, None)?;
-    let result =
-        PeerContactSubmitOutcome::Control(PeerContactControlSubmitOutcome::CurrentRefresh {
-            status: PeerContactOutcome::Accepted,
+    let result = PeerContactSubmitResponseBody::Control(
+        PeerContactControlSubmitResponseBody::CurrentRefresh {
+            status: PeerContactAdmissionAttemptOutcome::Accepted,
             control_receipt: sign_contact_control_receipt(
                 state,
                 request,
                 PeerContactControlKind::CurrentRefresh,
-                PeerContactOutcome::Accepted,
+                PeerContactAdmissionAttemptOutcome::Accepted,
                 Some(digest),
             )?,
             material,
-        });
+        },
+    );
     if canonical::canonical_json_bytes(&result)
         .map_err(contact_error)?
         .len()
@@ -1372,7 +1374,7 @@ fn verify_control_result(
         || receipt.request_digest != contact_control_request_digest(request)?
         || receipt.issuer_id.as_str() != peer_id
         || receipt.recipient_id.as_str() != peer_id
-        || receipt.result_digest != digest
+        || receipt.control_material_digest != digest
     {
         return Err(contact_error(
             "Contact control receipt does not bind exact request/result/source",
@@ -1407,7 +1409,7 @@ async fn install_current_response(
     if proof.holder != contact_address.recipient
         || proof.peer != *requester
         || proof.trust_domain_id != *trust_domain_id
-        || proof.fresh_until <= now()
+        || proof.cache_expires_at <= now()
         || proof.version < *known_version
         || initial_contact_round_id
             .as_ref()
@@ -1613,37 +1615,41 @@ async fn install_current_response(
 }
 pub(crate) async fn cache_contact_outcome_assertion_history(
     state: &AppState,
-    outcome: &PeerContactSubmitOutcome,
+    outcome: &PeerContactSubmitResponseBody,
 ) -> Result<(), AppError> {
     let mut signatures = Vec::new();
     match outcome {
-        PeerContactSubmitOutcome::Event(outcome) => {
+        PeerContactSubmitResponseBody::Event(outcome) => {
             signatures.push(&outcome.mirror_receipt.signature);
             if let Some(proof) = &outcome.current_proof {
                 signatures.push(&proof.signature);
             }
         }
-        PeerContactSubmitOutcome::Control(PeerContactControlSubmitOutcome::CurrentRefresh {
-            control_receipt,
-            material,
-            ..
-        }) => {
+        PeerContactSubmitResponseBody::Control(
+            PeerContactControlSubmitResponseBody::CurrentRefresh {
+                control_receipt,
+                material,
+                ..
+            },
+        ) => {
             signatures.push(&control_receipt.signature);
             signatures.push(&material.current_proof.signature);
         }
-        PeerContactSubmitOutcome::Control(PeerContactControlSubmitOutcome::GlareFinalize {
-            control_receipt,
-            glare_concurrency_attestation,
-            current_proof,
-            ..
-        }) => {
+        PeerContactSubmitResponseBody::Control(
+            PeerContactControlSubmitResponseBody::GlareFinalize {
+                control_receipt,
+                glare_concurrency_attestation,
+                current_proof,
+                ..
+            },
+        ) => {
             signatures.push(&control_receipt.signature);
             signatures.push(&glare_concurrency_attestation.signature);
             if let Some(proof) = current_proof {
                 signatures.push(&proof.signature);
             }
         }
-        PeerContactSubmitOutcome::ControlDeferred(outcome) => {
+        PeerContactSubmitResponseBody::ControlDeferred(outcome) => {
             signatures.push(&outcome.control_receipt.signature)
         }
     }
@@ -1652,22 +1658,25 @@ pub(crate) async fn cache_contact_outcome_assertion_history(
 pub(crate) async fn accept_outbound_contact_control_outcome(
     state: &AppState,
     request: &PeerContactSubmitRequestBody,
-    outcome: &PeerContactSubmitOutcome,
+    outcome: &PeerContactSubmitResponseBody,
     peer_id: &str,
 ) -> Result<(), AppError> {
     cache_contact_outcome_assertion_history(state, outcome).await?;
     match (request, outcome) {
         (
             PeerContactSubmitRequestBody::CurrentRefresh { .. },
-            PeerContactSubmitOutcome::Control(PeerContactControlSubmitOutcome::CurrentRefresh {
-                status,
-                control_receipt,
-                material,
-            }),
+            PeerContactSubmitResponseBody::Control(
+                PeerContactControlSubmitResponseBody::CurrentRefresh {
+                    status,
+                    control_receipt,
+                    material,
+                },
+            ),
         ) => {
             if !matches!(
                 status,
-                PeerContactOutcome::Accepted | PeerContactOutcome::Duplicate
+                PeerContactAdmissionAttemptOutcome::Accepted
+                    | PeerContactAdmissionAttemptOutcome::Duplicate
             ) || control_receipt.outcome != *status
             {
                 return Err(contact_error("current result status invalid"));
@@ -1753,16 +1762,19 @@ pub(crate) async fn accept_outbound_contact_control_outcome(
         }
         (
             PeerContactSubmitRequestBody::GlareFinalize { .. },
-            PeerContactSubmitOutcome::Control(PeerContactControlSubmitOutcome::GlareFinalize {
-                status,
-                control_receipt,
-                glare_concurrency_attestation,
-                current_proof,
-            }),
+            PeerContactSubmitResponseBody::Control(
+                PeerContactControlSubmitResponseBody::GlareFinalize {
+                    status,
+                    control_receipt,
+                    glare_concurrency_attestation,
+                    current_proof,
+                },
+            ),
         ) => {
             if !matches!(
                 status,
-                PeerContactOutcome::Accepted | PeerContactOutcome::Duplicate
+                PeerContactAdmissionAttemptOutcome::Accepted
+                    | PeerContactAdmissionAttemptOutcome::Duplicate
             ) || control_receipt.outcome != *status
             {
                 return Err(contact_error("glare result status invalid"));
@@ -1789,7 +1801,7 @@ pub(crate) async fn accept_outbound_contact_control_outcome(
             ))
             .await
         }
-        (_, PeerContactSubmitOutcome::ControlDeferred(deferred)) => {
+        (_, PeerContactSubmitResponseBody::ControlDeferred(deferred)) => {
             reenqueue_deferred_contact_control(state, request, deferred, peer_id).await
         }
         _ => Err(contact_error(
@@ -2000,7 +2012,7 @@ async fn handle_glare_finalize(
     state: &AppState,
     request: &PeerContactSubmitRequestBody,
     source_id: &str,
-) -> Result<PeerContactSubmitOutcome, AppError> {
+) -> Result<PeerContactSubmitResponseBody, AppError> {
     let PeerContactSubmitRequestBody::GlareFinalize {
         contact_round_id,
         contact_round,
@@ -2082,14 +2094,14 @@ async fn handle_glare_finalize(
         remote,
     ))
     .await?;
-    let result =
-        PeerContactSubmitOutcome::Control(PeerContactControlSubmitOutcome::GlareFinalize {
-            status: PeerContactOutcome::Accepted,
+    let result = PeerContactSubmitResponseBody::Control(
+        PeerContactControlSubmitResponseBody::GlareFinalize {
+            status: PeerContactAdmissionAttemptOutcome::Accepted,
             control_receipt: sign_contact_control_receipt(
                 state,
                 request,
                 PeerContactControlKind::GlareFinalize,
-                PeerContactOutcome::Accepted,
+                PeerContactAdmissionAttemptOutcome::Accepted,
                 Some(control_result_digest(
                     request,
                     "glare_finalize",
@@ -2100,7 +2112,8 @@ async fn handle_glare_finalize(
             )?,
             glare_concurrency_attestation: local,
             current_proof: Some(proof),
-        });
+        },
+    );
     let expected = record.updated_at;
     advance_contact_revision(&mut record, expected);
     if !state
@@ -2170,7 +2183,7 @@ async fn install_glare_response(
     .await?;
     if let Some(proof) = remote_proof {
         Box::pin(verify_current_proof(state, proof)).await?;
-        if proof.holder != *peer || proof.peer != *holder || proof.fresh_until <= now() {
+        if proof.holder != *peer || proof.peer != *holder || proof.cache_expires_at <= now() {
             return Err(contact_error(
                 "glare response current direction or freshness mismatch",
             ));
@@ -2382,7 +2395,7 @@ async fn apply_delivered_operation(
     state: &AppState,
     delivery: &PeerContactSubmitRequestBody,
     operation: &ContactOperationEvidence,
-    response: &mut PeerContactSubmitOutcome,
+    response: &mut PeerContactSubmitResponseBody,
 ) -> Result<(), AppError> {
     let holder = operation.holder();
     let peer = operation.peer();
@@ -2718,7 +2731,7 @@ async fn apply_delivered_operation(
         .map(|d| d.head_operation.holder().clone())
     {
         let proof = Box::pin(sign_direction_proof(state, &record.current_state, &local)).await?;
-        if let PeerContactSubmitOutcome::Event(result) = response {
+        if let PeerContactSubmitResponseBody::Event(result) = response {
             result.current_proof = Some(proof.clone());
         }
         replace_direction_proof(&mut record.current_state, proof)?;
@@ -2765,7 +2778,7 @@ fn normal_round(receipt: &RequestAcceptanceReceipt) -> Result<ContactRound, AppE
 async fn peer_contacts_submit(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<PeerContactSubmitOutcome> {
+) -> JsonResult<PeerContactSubmitResponseBody> {
     Box::pin(peer_contacts_submit_inner(depot, req)).await
 }
 
@@ -2773,7 +2786,7 @@ async fn peer_contacts_submit(
 async fn peer_contacts_submit_inner(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<PeerContactSubmitOutcome> {
+) -> JsonResult<PeerContactSubmitResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     super::super::events::peer::validate_peer_request(state, req, true).await?;
     let source_id = req
@@ -2930,11 +2943,11 @@ async fn peer_contacts_submit_inner(
                 state,
                 &delivery,
                 operation.event(),
-                PeerContactOutcome::Deferred,
+                PeerContactAdmissionAttemptOutcome::Deferred,
             )?;
-            let result = PeerContactSubmitOutcome::Event(PeerContactEventSubmitOutcome {
-                result_kind: ContactResultKind::Request,
-                status: PeerContactOutcome::Deferred,
+            let result = PeerContactSubmitResponseBody::Event(PeerContactEventSubmitResponseBody {
+                operation_kind: ContactResultKind::Request,
+                status: PeerContactAdmissionAttemptOutcome::Deferred,
                 mirror_receipt: mirror,
                 current_proof: None,
                 retry_after_ms: Some(30_000),
@@ -2958,21 +2971,21 @@ async fn peer_contacts_submit_inner(
     if matches!(operation, ContactOperationEvidence::Request { .. }) {
         Box::pin(persist_authenticated_observation(state, &operation)).await?;
     }
-    let result_kind = match &operation {
+    let operation_kind = match &operation {
         ContactOperationEvidence::Request { .. } => ContactResultKind::Request,
         ContactOperationEvidence::Response { .. } => ContactResultKind::Response,
         ContactOperationEvidence::Reject { .. } => ContactResultKind::Reject,
         ContactOperationEvidence::ScopeUpdate { .. } => ContactResultKind::ScopeUpdate,
         ContactOperationEvidence::Tombstone { .. } => ContactResultKind::Tombstone,
     };
-    let mut response = PeerContactSubmitOutcome::Event(PeerContactEventSubmitOutcome {
-        result_kind,
-        status: PeerContactOutcome::Accepted,
+    let mut response = PeerContactSubmitResponseBody::Event(PeerContactEventSubmitResponseBody {
+        operation_kind,
+        status: PeerContactAdmissionAttemptOutcome::Accepted,
         mirror_receipt: sign_contact_mirror_receipt(
             state,
             &delivery,
             operation.event(),
-            PeerContactOutcome::Accepted,
+            PeerContactAdmissionAttemptOutcome::Accepted,
         )?,
         current_proof: None,
         retry_after_ms: None,
@@ -2985,7 +2998,7 @@ async fn peer_contacts_submit_inner(
     ))
     .await?;
     if matches!(operation, ContactOperationEvidence::Request { .. }) {
-        if let PeerContactSubmitOutcome::Event(result) = &response {
+        if let PeerContactSubmitResponseBody::Event(result) = &response {
             Box::pin(persist_request_mirror_receipt(
                 state,
                 &operation.holder().contact_actor_id(),
@@ -3008,7 +3021,7 @@ async fn peer_contacts_submit_inner(
 pub(crate) async fn accept_outbound_contact_event_outcome(
     state: &AppState,
     request: &PeerContactSubmitRequestBody,
-    outcome: &PeerContactEventSubmitOutcome,
+    outcome: &PeerContactEventSubmitResponseBody,
     peer_id: &str,
 ) -> Result<(), AppError> {
     let operation = operation_from_carrier(request)?;
@@ -3021,7 +3034,7 @@ pub(crate) async fn accept_outbound_contact_event_outcome(
         ));
     }
     cache_contact_assertion_signatures(state, vec![&outcome.mirror_receipt.signature]).await?;
-    if outcome.status == PeerContactOutcome::Deferred {
+    if outcome.status == PeerContactAdmissionAttemptOutcome::Deferred {
         verify_contact_evidence_signature(
             state,
             peer_id,

@@ -5,7 +5,7 @@ use arkret_identifiers::{BlobRef, Did, DidCoreId, EventId, Hash};
 use arkret_models_collaboration::agent_operations::AgentLifecycleState;
 use arkret_models_collaboration::objects::account_status::AccountStatus;
 use arkret_models_identity::service_identity::{
-    ServiceRegistrationKey, ServiceRegistrationOutcome,
+    ServiceRegistrationKey, ServiceRegistrationResponseBody,
 };
 use arkret_models_identity::{DeviceSummaryVerificationSource, DeviceSummaryVerificationState};
 use arkret_wire::{AccountId, DidUrl, OpaqueLocalId, TrustDomainId};
@@ -139,7 +139,7 @@ pub struct AccountProfileState {
     pub principal_id: DidCoreId,
     pub localpart: String,
     pub display_name: Option<String>,
-    pub bio: Option<String>,
+    pub biography: Option<String>,
     pub avatar_blob_ref: Option<BlobRef>,
     pub created_at: DateTime<Utc>,
 }
@@ -2163,11 +2163,11 @@ impl IdentityService {
     pub fn account_registration_retry_after_ms(
         &self,
         actor_id: &str,
-        max_attempts: u32,
+        max_attempt_count: u32,
         window_seconds: u64,
         now: DateTime<Utc>,
     ) -> Option<u64> {
-        if max_attempts == 0 || window_seconds == 0 {
+        if max_attempt_count == 0 || window_seconds == 0 {
             return Some(0);
         }
         let window = chrono::Duration::seconds(window_seconds as i64);
@@ -2176,7 +2176,7 @@ impl IdentityService {
         if now.signed_duration_since(entry.0) >= window {
             *entry = (now, 0);
         }
-        if entry.1 >= max_attempts {
+        if entry.1 >= max_attempt_count {
             return Some(
                 window
                     .checked_sub(&now.signed_duration_since(entry.0))
@@ -2556,7 +2556,7 @@ pub fn select_did_webvh_state_at(
         ));
     }
     if history.entries.iter().any(|entry| {
-        entry.version_time <= at
+        entry.version_created_at <= at
             && entry.parameters.get("deactivated").and_then(Value::as_bool) == Some(true)
     }) {
         return Err(PinnedDidResolutionError::DeactivatedAt(at));
@@ -2565,7 +2565,7 @@ pub fn select_did_webvh_state_at(
         .entries
         .iter()
         .enumerate()
-        .filter(|(_, entry)| entry.version_time <= at)
+        .filter(|(_, entry)| entry.version_created_at <= at)
         .map(|(index, _)| index)
         .next_back()
         .ok_or(PinnedDidResolutionError::VersionTimeNotFound(at))?;
@@ -2599,8 +2599,8 @@ pub enum DidLogCommitResult {
 
 #[derive(Clone, Debug)]
 pub enum ServiceRegistrationCommitResult {
-    Created(ServiceRegistrationOutcome),
-    Existing(ServiceRegistrationOutcome),
+    Created(ServiceRegistrationResponseBody),
+    Existing(ServiceRegistrationResponseBody),
     Conflict,
 }
 
@@ -2623,11 +2623,11 @@ pub trait DidDocumentPort: Send + Sync {
     async fn service_registration(
         &self,
         key: &ServiceRegistrationKey,
-    ) -> ServiceResult<Option<ServiceRegistrationOutcome>>;
+    ) -> ServiceResult<Option<ServiceRegistrationResponseBody>>;
     async fn commit_service_registration(
         &self,
         key: ServiceRegistrationKey,
-        outcome: ServiceRegistrationOutcome,
+        outcome: ServiceRegistrationResponseBody,
         document: DidDocumentState,
         event: DidLogEvent,
     ) -> ServiceResult<ServiceRegistrationCommitResult>;
@@ -2998,7 +2998,7 @@ impl DidService {
                     "local DID history lookup failed: {error}"
                 ))
             })?;
-        local_events.sort_by_key(|event| event.seq);
+        local_events.sort_by_key(|event| event.sequence);
         let mut raw_entries = Vec::with_capacity(local_events.len());
         for (index, event) in local_events.iter().enumerate() {
             let expected_seq = index as u64 + 1;
@@ -3008,7 +3008,7 @@ impl DidService {
                 != arkret_wire::project_did_to_core_id(did).ok()
                 || event.operation.pointer("/state/id").and_then(Value::as_str)
                     != Some(event.did.as_str())
-                || event.seq != expected_seq
+                || event.sequence != expected_seq
             {
                 return Err(PinnedDidResolutionError::HistoryUnverifiable(
                     "local did:webvh log identity or sequence is inconsistent".to_owned(),
@@ -3086,14 +3086,14 @@ impl DidService {
     pub async fn service_registration(
         &self,
         key: &ServiceRegistrationKey,
-    ) -> ServiceResult<Option<ServiceRegistrationOutcome>> {
+    ) -> ServiceResult<Option<ServiceRegistrationResponseBody>> {
         self.documents.service_registration(key).await
     }
 
     pub async fn commit_service_registration(
         &self,
         key: ServiceRegistrationKey,
-        outcome: ServiceRegistrationOutcome,
+        outcome: ServiceRegistrationResponseBody,
         document: DidDocumentState,
         event: DidLogEvent,
     ) -> ServiceResult<ServiceRegistrationCommitResult> {
@@ -3106,7 +3106,7 @@ impl DidService {
         &self,
         trust_domain: &TrustDomainId,
         key: ServiceRegistrationKey,
-        outcome: ServiceRegistrationOutcome,
+        outcome: ServiceRegistrationResponseBody,
         document: DidDocumentState,
         event: DidLogEvent,
     ) -> ServiceResult<ServiceRegistrationCommitResult> {
@@ -3389,7 +3389,7 @@ mod tests {
             entries: vec![
                 arkret_identity::DidWebvhLogEntry {
                     version_id: "1-first".to_owned(),
-                    version_time: "2026-07-01T00:00:00Z".parse().unwrap(),
+                    version_created_at: "2026-07-01T00:00:00Z".parse().unwrap(),
                     parameters: serde_json::json!({
                         "method": "did:webvh:1.0",
                         "scid": "zFixture",
@@ -3400,7 +3400,7 @@ mod tests {
                 },
                 arkret_identity::DidWebvhLogEntry {
                     version_id: "2-second".to_owned(),
-                    version_time: "2026-07-02T00:00:00Z".parse().unwrap(),
+                    version_created_at: "2026-07-02T00:00:00Z".parse().unwrap(),
                     parameters: serde_json::json!({
                         "method": "did:webvh:1.0",
                         "scid": "zFixture",
@@ -3526,7 +3526,7 @@ mod tests {
                 principal_id: DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
                 localpart: "alice".to_owned(),
                 display_name: None,
-                bio: None,
+                biography: None,
                 avatar_blob_ref: None,
                 created_at: Utc::now(),
             }))
@@ -3671,7 +3671,7 @@ mod tests {
                 did: did.to_owned(),
                 did_document: serde_json::json!({"id": did}),
                 key_log_head: None,
-                seq: 1,
+                sequence: 1,
                 method_evidence: Value::Null,
                 fetched_at: now,
                 expires_at: now,
@@ -3702,14 +3702,14 @@ mod tests {
         async fn service_registration(
             &self,
             _key: &ServiceRegistrationKey,
-        ) -> ServiceResult<Option<ServiceRegistrationOutcome>> {
+        ) -> ServiceResult<Option<ServiceRegistrationResponseBody>> {
             Ok(None)
         }
 
         async fn commit_service_registration(
             &self,
             _key: ServiceRegistrationKey,
-            _outcome: ServiceRegistrationOutcome,
+            _outcome: ServiceRegistrationResponseBody,
             _document: DidDocumentState,
             _event: DidLogEvent,
         ) -> ServiceResult<ServiceRegistrationCommitResult> {
@@ -3793,7 +3793,7 @@ mod tests {
             did: did.to_string(),
             did_document: serde_json::to_value(document).unwrap(),
             key_log_head: None,
-            seq: 1,
+            sequence: 1,
             method_evidence: serde_json::json!({"mode": "verified-production-resolution"}),
             fetched_at: now,
             expires_at: now,
@@ -3802,7 +3802,7 @@ mod tests {
         let event = DidLogEvent {
             event_digest: arkret_canonical::sha256_digest(b"formal-test-material"),
             did: did.to_string(),
-            seq: 1,
+            sequence: 1,
             operation: serde_json::json!({"state": {"id": did}}),
             created_at: now,
         };

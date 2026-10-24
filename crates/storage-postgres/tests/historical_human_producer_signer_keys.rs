@@ -379,7 +379,7 @@ async fn peer_full_scan_carries_each_original_fact_and_never_repairs_missing_arc
     // Existing PG interval tests also use the actual joined Account's Station
     // as peer and issuer. This tests the genuine authorization/read port;
     // it is not an HTTP federation authentication or live cold-scan claim.
-    let request = arkret_wire::StreamScanRequest {
+    let request = arkret_wire::StreamScanRequestBody {
         realm_id: head.event.realm_id.clone(),
         stream_ref: head.commit.stream_ref.clone(),
         direction: arkret_wire::StreamScanDirection::After(None),
@@ -796,7 +796,7 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
 mod forward_retention {
     //! Real accepted source originals retained as non-authoritative forwarding
     //! witnesses. These PG ports do not establish peer HTTP authority verification.
-    use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+    use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
     use arkret_wire::{Did, EventAdmissionSubmission};
     use coland_storage::{AuthorityCommitStore, ForwardAttemptStatus, QueuedEventStatus};
     use coland_storage_postgres::test_database::TestDatabase;
@@ -815,7 +815,7 @@ mod forward_retention {
 
     async fn installed(pool: &PgPool) -> serde_json::Value {
         let mut conn = pool.get().await.unwrap();
-        sql_query("SELECT jsonb_build_object(        'commits',(SELECT count(*) FROM realm_commits),        'authorities',(SELECT count(*) FROM realm_authorities),        'anchors',(SELECT count(*) FROM replica_stream_anchors),'cuts',(SELECT count(*) FROM replica_authorization_cuts),'rows',(SELECT count(*) FROM replica_authorization_rows),'current_heads',(SELECT count(*) FROM current_result_heads),        'snapshots',(SELECT count(*) FROM realm_state_snapshots),        'members',(SELECT count(*) FROM member_state_current_results),        'facts',(SELECT count(*) FROM agent_producer_signer_keys),        'outbox',(SELECT count(*) FROM federation_outbox)) AS value")
+        sql_query("SELECT jsonb_build_object(        'commits',(SELECT count(*) FROM realm_commits),        'authorities',(SELECT count(*) FROM realm_authorities),        'anchors',(SELECT count(*) FROM replica_stream_anchors),'cuts',(SELECT count(*) FROM replica_authorization_cuts),'rows',(SELECT count(*) FROM replica_authorization_rows),'current_heads',(SELECT count(*) FROM current_state_heads),        'snapshots',(SELECT count(*) FROM realm_state_snapshots),        'members',(SELECT count(*) FROM member_state_current_states),        'facts',(SELECT count(*) FROM agent_producer_signer_keys),        'outbox',(SELECT count(*) FROM federation_outbox)) AS value")
             .get_result::<InstalledFootprint>(&mut *conn).await.unwrap().value
     }
 
@@ -851,7 +851,7 @@ mod forward_retention {
                 .unwrap();
             assert_eq!(original.event, transaction.event);
             assert_eq!(original.commit, transaction.commit);
-            let intent = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(
+            let intent = SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
                 original.event.clone(),
             ));
             store

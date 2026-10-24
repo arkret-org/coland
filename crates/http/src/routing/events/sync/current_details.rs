@@ -17,7 +17,7 @@ use arkret_models_collaboration::sync_frames::account_subscribe::{
     AccountFilter, AccountSubscribeFrame, AccountSubscribeFrameKind, AccountSubscribeRealms,
     RealmSyncEntry,
 };
-use arkret_models_collaboration::sync_frames::current_results::AccountCurrentView;
+use arkret_models_collaboration::sync_frames::current_states::AccountStateView;
 use arkret_models_collaboration::sync_frames::demand_sync::{
     ACCOUNT_SYNC_DEFAULT_WINDOW_LIMIT, ACCOUNT_SYNC_MAX_FRAME_BYTES, RealmDetailErrorCode,
     RealmDetailUnavailable,
@@ -72,7 +72,7 @@ fn realm_selection(filter: &AccountFilter, realm: &RealmId) -> RealmSelection {
 pub(super) async fn continuation_heads_covered(
     state: &AppState,
     account: &arkret_wire::AccountId,
-    body: &SyncRequestBody,
+    body: &AccountSubscribeParameters,
     after: &SyncCursor,
 ) -> coland_services::ServiceResult<bool> {
     let Some(filter) = body.filter.as_ref() else {
@@ -103,7 +103,7 @@ pub(super) async fn continuation_heads_covered(
 pub(super) async fn continuation_recoverable(
     state: &AppState,
     account: &arkret_wire::AccountId,
-    body: &SyncRequestBody,
+    body: &AccountSubscribeParameters,
     after: &SyncCursor,
 ) -> Result<bool, String> {
     let Some(filter) = body.filter.as_ref() else {
@@ -260,7 +260,7 @@ fn window_entry(
             arkret_models_collaboration::sync_frames::account_subscribe::RealmDetailBaseline {
                 snapshot_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
                 cut_revision,
-                coverage: arkret_models_collaboration::sync_frames::current_results::AccountCurrentCoverage {
+                coverage: arkret_models_collaboration::sync_frames::current_states::AccountCurrentCoverage {
                     realm_id: realm.clone(),
                     stream_heads: window.current_stream_heads.clone(),
                     complete_for_authorized_streams: true,
@@ -271,7 +271,7 @@ fn window_entry(
         streams: Some(windows),
         streams_limited: window.streams_limited.then_some(true),
         window_snapshot_cursor: Some(cursor.to_owned()),
-        current: Some(AccountCurrentView {
+        current: Some(AccountStateView {
             realm_id: realm.clone(),
             governance_generation: window.governance_generation,
             stream_heads: window.current_stream_heads,
@@ -408,7 +408,7 @@ async fn freeze(
 pub(super) async fn frame(
     state: &AppState,
     session: Option<&SessionIdentityState>,
-    body: &SyncRequestBody,
+    body: &AccountSubscribeParameters,
     after: &SyncCursor,
 ) -> Result<Option<AccountSubscribeFrame>, Box<arkret_wire::Problem>> {
     let Some(filter) = body.filter.as_ref() else {

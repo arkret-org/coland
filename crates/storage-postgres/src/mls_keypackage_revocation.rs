@@ -1,5 +1,5 @@
 //! Narrow own-Device cleanup, serialized with its original PCR authority.
-use arkret_models_crypto::{KeyPackagesRevokeOutcome, KeyPackagesRevokeRequestBody};
+use arkret_models_crypto::{KeyPackagesRevokeRequestBody, KeyPackagesRevokeResponseBody};
 use arkret_wire::ScopeRef;
 
 use super::*;
@@ -97,7 +97,7 @@ pub(crate) async fn revoke(
         if commit_at >= expires_at || commit_at >= authority.expires_at {
             return Err(denied("revoke authority expired while waiting for package locks").into());
         }
-        let mut outcome = KeyPackagesRevokeOutcome { revoked: vec![], failures: vec![] };
+        let mut outcome = KeyPackagesRevokeResponseBody { revoked: vec![], failures: vec![] };
         let mut records = vec![];
         for reference in &body.key_package_refs {
             let Some(row) = rows.remove(reference).flatten() else {

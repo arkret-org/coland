@@ -117,7 +117,7 @@ async fn grant_session(slug: &str, configure: impl FnOnce(&mut AppConfig)) -> Gr
             station_id: state.service_core_id(),
             localpart: format!("admin-dpop-{slug}"),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: chrono::Utc::now(),
         })

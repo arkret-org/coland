@@ -1,6 +1,6 @@
 use arkret_wire::{
     AccountId, ActorId, CircleId, CommitStreamHead, CommitStreamRef, CurrentRevision,
-    CurrentSelector, DidCoreId, EventId, RealmCommitId, RealmId, TypedCurrentRow,
+    CurrentSelector, CurrentState, DidCoreId, EventId, RealmCommitId, RealmId,
 };
 use diesel::sql_types::Jsonb;
 use serde_json::json;
@@ -28,8 +28,8 @@ fn entry(
     stream_position: u64,
     digest: u8,
     value: Value,
-) -> TypedCurrentRow {
-    TypedCurrentRow::Value {
+) -> CurrentState {
+    CurrentState::Value {
         selector,
         source_stream_ref,
         revision: CurrentRevision {
@@ -44,7 +44,7 @@ async fn install(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
     heads: &[CommitStreamHead],
-    entries: &[TypedCurrentRow],
+    entries: &[CurrentState],
 ) -> PersistenceResult<()> {
     install_snapshot_at_heads_in_connection(
         conn,
@@ -210,14 +210,14 @@ async fn circle_snapshot_replacement_keeps_selector_revision_monotonic() {
             .unwrap();
     }
     let circle_stored =
-        diesel::sql_query("SELECT value FROM circle_current_results WHERE circle_id=$1")
+        diesel::sql_query("SELECT value FROM circle_current_states WHERE circle_id=$1")
             .bind::<Text, _>(circle.as_str())
             .get_result::<StoredValue>(&mut conn)
             .await
             .unwrap()
             .value;
     let member_stored = diesel::sql_query(
-        "SELECT value FROM circle_member_state_current_results WHERE circle_id=$1 AND member_id=$2",
+        "SELECT value FROM circle_member_state_current_states WHERE circle_id=$1 AND member_id=$2",
     )
     .bind::<Text, _>(circle.as_str())
     .bind::<Text, _>(member.to_string())
@@ -254,14 +254,14 @@ async fn circle_snapshot_replacement_keeps_selector_revision_monotonic() {
         .await
         .unwrap();
     let circle_stored =
-        diesel::sql_query("SELECT value FROM circle_current_results WHERE circle_id=$1")
+        diesel::sql_query("SELECT value FROM circle_current_states WHERE circle_id=$1")
             .bind::<Text, _>(circle.as_str())
             .get_result::<StoredValue>(&mut conn)
             .await
             .unwrap()
             .value;
     let member_stored = diesel::sql_query(
-        "SELECT value FROM circle_member_state_current_results WHERE circle_id=$1 AND member_id=$2",
+        "SELECT value FROM circle_member_state_current_states WHERE circle_id=$1 AND member_id=$2",
     )
     .bind::<Text, _>(circle.as_str())
     .bind::<Text, _>(member.to_string())
@@ -342,22 +342,22 @@ async fn circle_member_event_writer_rejects_stale_and_forked_current() {
                 signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "3".repeat(64)))
                     .unwrap(),
                 created_at: at,
-                sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
+                signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
             },
         };
         (event, commit)
     };
     let original = make("join", 7, 7, &realm);
-    crate::circle_current_results::commit_in_connection(&mut conn, &original.0, &original.1)
+    crate::circle_current_states::commit_in_connection(&mut conn, &original.0, &original.1)
         .await
         .unwrap();
-    crate::circle_current_results::commit_in_connection(&mut conn, &original.0, &original.1)
+    crate::circle_current_states::commit_in_connection(&mut conn, &original.0, &original.1)
         .await
         .unwrap();
     for (membership, position, digest) in [("leave", 6, 6), ("join", 7, 8), ("leave", 7, 7)] {
         let candidate = make(membership, position, digest, &realm);
         assert!(matches!(
-            crate::circle_current_results::commit_in_connection(
+            crate::circle_current_states::commit_in_connection(
                 &mut conn,
                 &candidate.0,
                 &candidate.1,
@@ -372,7 +372,7 @@ async fn circle_member_event_writer_rejects_stale_and_forked_current() {
     ));
     let cross_realm = make("leave", 8, 9, &foreign);
     assert!(matches!(
-        crate::circle_current_results::commit_in_connection(
+        crate::circle_current_states::commit_in_connection(
             &mut conn,
             &cross_realm.0,
             &cross_realm.1,
@@ -381,11 +381,11 @@ async fn circle_member_event_writer_rejects_stale_and_forked_current() {
         Err(PersistenceError::Conflict(_))
     ));
     let next = make("leave", 8, 8, &realm);
-    crate::circle_current_results::commit_in_connection(&mut conn, &next.0, &next.1)
+    crate::circle_current_states::commit_in_connection(&mut conn, &next.0, &next.1)
         .await
         .unwrap();
     let stored = diesel::sql_query(
-        "SELECT value FROM circle_member_state_current_results WHERE circle_id=$1 AND member_id=$2",
+        "SELECT value FROM circle_member_state_current_states WHERE circle_id=$1 AND member_id=$2",
     )
     .bind::<Text, _>(circle.as_str())
     .bind::<Text, _>(actor.to_string())

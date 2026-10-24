@@ -49,9 +49,9 @@ async fn obligation_terminal_child(
         }
     }
     let signer = Ed25519PayloadSigner::new(
-        applet_service_signing_key(&package.webhook_auth.key_ref),
+        applet_service_signing_key(&package.webhook_signature_policy.key_ref),
         applet_service_did(package),
-        package.webhook_auth.key_ref.clone(),
+        package.webhook_signature_policy.key_ref.clone(),
     );
     let event = signed_event(
         package,
@@ -88,7 +88,7 @@ async fn obligation_terminal_child(
         StatusCode::OK,
         "real multi-parent terminal child: {value}"
     );
-    let outcome: AppletTransactionOutcome = serde_json::from_value(value).unwrap();
+    let outcome: AppletTransactionResponseBody = serde_json::from_value(value).unwrap();
     assert_eq!(outcome.status(), AppletTransactionStatus::Accepted);
     id
 }
@@ -97,7 +97,7 @@ async fn obligation_close_grant(fixture: &Fixture, grant: &GrantId) {
     let rows = fixture
         .state
         .test_persistence()
-        .capability_grant_current_results()
+        .capability_grant_current_states()
         .snapshot_for_realm(&fixture.realm)
         .await
         .unwrap();
@@ -129,7 +129,7 @@ async fn realm_device_multi_parent_shared_ancestor_quota(
     strand = fixture.sign_admin(strand);
     let strand_id = arkret_wire::StrandId::from_event_id(&strand.event_id);
     boxed_step(|| submit_human_event(fixture, strand)).await;
-    let quota: GrantConstraint = serde_json::from_value(json!({"constraint_kind":"quota","constraint_subkind":"rate","effect":"allow","max_operations":2,"period":"P1D","constraint_scope":"per_actor"})).unwrap();
+    let quota: GrantConstraint = serde_json::from_value(json!({"constraint_kind":"quota","constraint_subkind":"rate","effect":"allow","max_operation_count":2,"period":"P1D","constraint_scope":"per_actor"})).unwrap();
     let mut control = GrantConstraint::new(
         GrantConstraintKind::AuthorityControl,
         GrantConstraintEffect::Allow,
@@ -233,7 +233,7 @@ async fn realm_device_multi_parent_shared_ancestor_quota(
             authority,
             "/_arkret/self/events",
             ServiceOperationId::SelfEventsCommandSubmitV1,
-            json!(SelfAuthoritySubmitRequest::Event(
+            json!(SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(event)
             )),
         )
@@ -346,7 +346,7 @@ async fn obligation_mls_footprint(fixture: &Fixture) -> Value {
         "mls_key_packages",
         "mls_welcome_deliveries",
         "device_message_ack_tokens",
-        "mls_group_current_results",
+        "mls_group_current_states",
         "mls_consumed_proposal_provenance",
         "mls_welcome_provenance",
         "mls_add_authority_attestations",
@@ -852,7 +852,7 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
                 device_id: recipient.pcr.history.founding_device_id.clone(),
             },
             keypackage_claim_ref: draft.keypackage_claim_ref.clone(),
-            ciphertext_b64: draft.ciphertext_b64.clone(),
+            ciphertext_base64url: draft.ciphertext_base64url.clone(),
             producer_proof: arkret_signatures::detached_object::sign_detached_object(
                 &Value::Null,
                 arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
@@ -872,7 +872,7 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
         .unwrap();
         welcomes.push(welcome);
     }
-    let submission = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+    let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
         commit_event: event.clone(),
         welcomes,
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -1001,7 +1001,7 @@ async fn realm_device_prepared_claim_guard_crosses_actual_deadline(
         realms: vec![fixture.realm.clone()],
         keypackage_claims: vec![coland_storage::MlsKeyPackageClaimDelivery {
             operation: ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
-            outcome: PeerKeyPackagesClaimOutcome {
+            outcome: PeerKeyPackagesClaimResponseBody {
                 claim_request_id: outcome.claim_request_id.clone(),
                 claims: outcome.claims.clone(),
                 claim_receipt: outcome.claim_receipt.clone(),
@@ -1177,7 +1177,7 @@ async fn realm_device_owned_query_prepared_guard_crosses_deadline(
         StatusCode::OK,
         "actual Human claims the native recipient, no source/recipient substitution: {value}"
     );
-    let outcome: PeerKeyPackagesClaimOutcome = serde_json::from_value(value.clone()).unwrap();
+    let outcome: PeerKeyPackagesClaimResponseBody = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(outcome.claims.len(), 1);
     assert_eq!(outcome.claims[0].actor_id, authority.actor_id);
     assert_eq!(
@@ -1314,7 +1314,7 @@ async fn obligation_install_native_roster(
     group: &mut arkret_mls::ArkretMlsGroup,
 ) {
     use arkret_models_collaboration::mls_roster_authority::{
-        MlsMemberRosterAuthorityReadRequestBody, MlsSelfRosterAuthorityReadOutcome,
+        MlsMemberRosterAuthorityReadRequestBody, MlsSelfRosterAuthorityReadResponseBody,
     };
     let request = MlsMemberRosterAuthorityReadRequestBody {
         realm_id: accepted.event.realm_id.clone(),
@@ -1344,7 +1344,7 @@ async fn obligation_install_native_roster(
             StatusCode::OK,
             "actual native recipient roster: {value}"
         );
-        let page: MlsSelfRosterAuthorityReadOutcome = serde_json::from_value(value).unwrap();
+        let page: MlsSelfRosterAuthorityReadResponseBody = serde_json::from_value(value).unwrap();
         next.cursor = page.roster.next_cursor.clone();
         pages.push(page);
         if next.cursor.is_none() {
@@ -1550,7 +1550,7 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
         StatusCode::OK,
         "actual source Device claims the independent native recipient: {value}"
     );
-    let claim: KeyPackagesClaimOutcome = serde_json::from_value(value).unwrap();
+    let claim: KeyPackagesClaimResponseBody = serde_json::from_value(value).unwrap();
     assert_eq!(claim.claims.len(), 1);
     assert_eq!(claim.claims[0].actor_id, recipient_authority.actor_id);
     assert_eq!(claim.claims[0].device_id.as_ref(), Some(&recipient_device));
@@ -1616,7 +1616,7 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
             device_id: recipient_device.clone(),
         },
         keypackage_claim_ref: added.welcome.keypackage_claim_ref,
-        ciphertext_b64: added.welcome.ciphertext_b64,
+        ciphertext_base64url: added.welcome.ciphertext_base64url,
         producer_proof: arkret_signatures::detached_object::sign_detached_object(
             &Value::Null,
             arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
@@ -1634,7 +1634,7 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
         &key,
     )
     .unwrap();
-    let submission = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+    let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
         commit_event: event.clone(),
         welcomes: vec![welcome.clone()],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -1763,7 +1763,7 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
         signature: KeyOperationSignature {
             kid: arkret_wire::NonEmptyString::new(recipient_method.to_string()).unwrap(),
             signature_algorithm: None,
-            sig: arkret_wire::Base64UrlString::new("AA").unwrap(),
+            signature: arkret_wire::Base64UrlString::new("AA").unwrap(),
         },
     };
     let command = restored

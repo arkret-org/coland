@@ -47,12 +47,12 @@ pub trait WebvhStore: Send + Sync {
         &self,
         key: &arkret_models_identity::service_identity::ServiceRegistrationKey,
     ) -> PersistenceResult<
-        Option<arkret_models_identity::service_identity::ServiceRegistrationOutcome>,
+        Option<arkret_models_identity::service_identity::ServiceRegistrationResponseBody>,
     >;
     async fn commit_service_registration(
         &self,
         key: arkret_models_identity::service_identity::ServiceRegistrationKey,
-        outcome: arkret_models_identity::service_identity::ServiceRegistrationOutcome,
+        outcome: arkret_models_identity::service_identity::ServiceRegistrationResponseBody,
         document: WebvhDocumentRecord,
         event: WebvhLogRecord,
     ) -> PersistenceResult<ServiceRegistrationCommitOutcome>;
@@ -73,14 +73,14 @@ pub enum WebvhLogCommitOutcome {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServiceRegistrationCommitOutcome {
-    Created(arkret_models_identity::service_identity::ServiceRegistrationOutcome),
-    Existing(arkret_models_identity::service_identity::ServiceRegistrationOutcome),
+    Created(arkret_models_identity::service_identity::ServiceRegistrationResponseBody),
+    Existing(arkret_models_identity::service_identity::ServiceRegistrationResponseBody),
     Conflict,
 }
 #[doc(hidden)]
 pub fn decode_registration_outcome(
     value: Value,
-) -> PersistenceResult<arkret_models_identity::service_identity::ServiceRegistrationOutcome> {
+) -> PersistenceResult<arkret_models_identity::service_identity::ServiceRegistrationResponseBody> {
     serde_json::from_value(value).map_err(|error| {
         PersistenceError::Internal(format!(
             "stored service registration outcome is invalid: {error}"
@@ -89,15 +89,15 @@ pub fn decode_registration_outcome(
 }
 #[doc(hidden)]
 pub fn registration_as_existing(
-    mut outcome: arkret_models_identity::service_identity::ServiceRegistrationOutcome,
-) -> arkret_models_identity::service_identity::ServiceRegistrationOutcome {
+    mut outcome: arkret_models_identity::service_identity::ServiceRegistrationResponseBody,
+) -> arkret_models_identity::service_identity::ServiceRegistrationResponseBody {
     outcome.created = false;
     outcome
 }
 #[doc(hidden)]
 pub fn registrations_match(
-    left: &arkret_models_identity::service_identity::ServiceRegistrationOutcome,
-    right: &arkret_models_identity::service_identity::ServiceRegistrationOutcome,
+    left: &arkret_models_identity::service_identity::ServiceRegistrationResponseBody,
+    right: &arkret_models_identity::service_identity::ServiceRegistrationResponseBody,
 ) -> bool {
     left.registration_receipt.service_id == right.registration_receipt.service_id
         && left.registration_receipt.version_id == right.registration_receipt.version_id
@@ -107,14 +107,14 @@ pub fn registrations_match(
 }
 #[doc(hidden)]
 pub fn valid_new_service_registration_records(
-    outcome: &arkret_models_identity::service_identity::ServiceRegistrationOutcome,
+    outcome: &arkret_models_identity::service_identity::ServiceRegistrationResponseBody,
     document: &WebvhDocumentRecord,
     event: &WebvhLogRecord,
 ) -> bool {
     document.did == outcome.registration_receipt.did.as_str()
         && event.did == outcome.registration_receipt.did.as_str()
-        && document.seq == 1
-        && event.seq == 1
+        && document.sequence == 1
+        && event.sequence == 1
         && document.key_log_head.as_deref() == Some(event.event_digest.as_str())
         && outcome.registration_receipt.log_head_digest == event.event_digest
 }

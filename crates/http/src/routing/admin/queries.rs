@@ -491,9 +491,9 @@ pub(super) async fn admin_query_audit(
 
 /// Preserve every accepted subject branch and its exact durable revision.
 fn capability_summary(
-    record: &coland_storage::CapabilityGrantCurrentResultRecord,
+    record: &coland_storage::CapabilityGrantCurrentStateRecord,
 ) -> CapabilitySummary {
-    use arkret_models_collaboration::exact_current_results::{
+    use arkret_models_collaboration::exact_current_state::{
         CapabilityGrantExactCurrentSelector, CapabilityGrantExactCurrentSelectorKind,
     };
     CapabilitySummary {
@@ -583,7 +583,7 @@ pub(super) async fn admin_list_capabilities(
 
     let mut rows: Vec<CapabilitySummary> = state
         .persistence()
-        .all_capability_grant_current_results()
+        .all_capability_grant_current_states()
         .await
         .map_err(|error| AppError::internal(format!("capability grant read failed: {error}")))?
         .iter()
@@ -746,7 +746,7 @@ mod tests {
             principal_id: principal_id.clone(),
             localpart: "alice".to_owned(),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: chrono::Utc::now(),
         };

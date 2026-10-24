@@ -92,7 +92,7 @@ pub(crate) async fn admit_agent_provision_in_connection(
     // The controller PCR lock taken above serializes every provision of this
     // PCR, so a missing row here stays missing until this unit commits.
     let already = sql_query(
-        "SELECT TRUE AS present FROM agent_provisioning_current_results \
+        "SELECT TRUE AS present FROM agent_provisioning_current_states \
          WHERE realm_id=$1 AND agent_id=$2 FOR UPDATE",
     )
     .bind::<Text, _>(event.realm_id.as_str())
@@ -107,7 +107,7 @@ pub(crate) async fn admit_agent_provision_in_connection(
         ));
     }
     let claimed = sql_query(
-        "SELECT TRUE AS present FROM agent_pcr_genesis_declaration_current_results \
+        "SELECT TRUE AS present FROM agent_pcr_genesis_declaration_current_states \
          WHERE principal_control_realm_id=$1 FOR UPDATE",
     )
     .bind::<Text, _>(payload.principal_control_realm_id.as_str())
@@ -133,13 +133,13 @@ pub(crate) async fn admit_agent_provision_in_connection(
         .execute(&mut *conn)
         .await?;
     let reserved = sql_query(
-        "SELECT EXISTS(SELECT 1 FROM agent_provisioning_current_results p \
+        "SELECT EXISTS(SELECT 1 FROM agent_provisioning_current_states p \
          JOIN realm_commits c ON c.commit_id=p.current_commit_id \
            AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position \
          JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
          WHERE p.value->>'controller_principal_id'=$1 \
            AND e.envelope->'payload'->>'agent_slug'=$2 \
-           AND NOT EXISTS(SELECT 1 FROM agent_status_current_results s \
+           AND NOT EXISTS(SELECT 1 FROM agent_status_current_states s \
              JOIN realm_commits sc ON sc.commit_id=s.current_commit_id \
                AND sc.realm_id=s.realm_id AND sc.stream_position=s.current_stream_position \
              WHERE s.realm_id=p.value->>'principal_control_realm_id' \
@@ -184,7 +184,7 @@ pub(crate) async fn admit_agent_provision_in_connection(
 
     let position = position(commit)?;
     sql_query(
-        "INSERT INTO agent_provisioning_current_results \
+        "INSERT INTO agent_provisioning_current_states \
          (realm_id,agent_id,current_commit_id,current_stream_position,value,updated_at) \
          VALUES ($1,$2,$3,$4,$5,$6)",
     )
@@ -206,7 +206,7 @@ pub(crate) async fn admit_agent_provision_in_connection(
     )
     .await?;
     let selector_written = sql_query(
-        "INSERT INTO agent_selector_claim_current_results \
+        "INSERT INTO agent_selector_claim_current_states \
          (realm_id,controller_principal_id,agent_slug,current_commit_id,\
           current_stream_position,value,updated_at) \
          VALUES ($1,$2,$3,$4,$5,$6,$7) \
@@ -214,7 +214,7 @@ pub(crate) async fn admit_agent_provision_in_connection(
            current_commit_id=EXCLUDED.current_commit_id, \
            current_stream_position=EXCLUDED.current_stream_position, \
            value=EXCLUDED.value, updated_at=EXCLUDED.updated_at \
-         WHERE agent_selector_claim_current_results.current_stream_position\
+         WHERE agent_selector_claim_current_states.current_stream_position\
                <EXCLUDED.current_stream_position",
     )
     .bind::<Text, _>(event.realm_id.as_str())
@@ -234,7 +234,7 @@ pub(crate) async fn admit_agent_provision_in_connection(
     // The subject is unique across every controller PCR of this Station; a
     // concurrent claim from another controller PCR loses here.
     let declared = sql_query(
-        "INSERT INTO agent_pcr_genesis_declaration_current_results \
+        "INSERT INTO agent_pcr_genesis_declaration_current_states \
          (realm_id,principal_control_realm_id,current_commit_id,current_stream_position,\
           value,updated_at) \
          VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",
@@ -320,7 +320,7 @@ async fn read_declared_agent_provision(
     }
     let row = sql_query(format!(
         "SELECT d.realm_id,e.envelope,c.commit_json,c.commit_id,c.stream_position \
-         FROM agent_pcr_genesis_declaration_current_results d \
+         FROM agent_pcr_genesis_declaration_current_states d \
          JOIN realm_commits c ON c.commit_id=d.current_commit_id \
          JOIN canonical_events e ON e.pk=c.event_pk \
          WHERE d.principal_control_realm_id=$1 AND c.realm_id=d.realm_id AND c.stream_position=d.current_stream_position AND e.state='committed'{}",

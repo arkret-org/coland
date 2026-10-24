@@ -29,8 +29,8 @@ struct Disabled {
 fn deferred(
     at: chrono::DateTime<chrono::Utc>,
     disclosed_outcome: Option<DisclosedOutcome>,
-) -> InviteDeliveryOutcome {
-    InviteDeliveryOutcome {
+) -> InviteDeliveryResponseBody {
+    InviteDeliveryResponseBody {
         status: InviteDeliveryOutcomeStatus::Deferred,
         disclosed_outcome,
         received_at: Some(at),
@@ -86,7 +86,7 @@ pub(crate) async fn admit(
     prepared: &PreparedPrivateInviteDelivery,
     quota: &NewSourceQuotaConstraints,
     at: chrono::DateTime<chrono::Utc>,
-) -> Result<InviteDeliveryOutcome, crate::PgTransactionError> {
+) -> Result<InviteDeliveryResponseBody, crate::PgTransactionError> {
     let delivery = &body.delivery;
     delivery.validate_minimal().map_err(invalid)?;
     if &delivery.invite_address.account_id != holder {
@@ -200,7 +200,7 @@ pub(crate) async fn admit(
                 && existing.expires_at == entry.expires_at
                 && existing.expires_at > at
         }) {
-            return Ok(InviteDeliveryOutcome {
+            return Ok(InviteDeliveryResponseBody {
                 status: InviteDeliveryOutcomeStatus::Duplicate,
                 disclosed_outcome: decision.disclosed_outcome,
                 received_at: Some(at),
@@ -218,7 +218,7 @@ pub(crate) async fn admit(
             at,
         )
         .await?;
-        return Ok(InviteDeliveryOutcome {
+        return Ok(InviteDeliveryResponseBody {
             status: InviteDeliveryOutcomeStatus::Accepted,
             disclosed_outcome: decision.disclosed_outcome,
             received_at: Some(at),

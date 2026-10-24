@@ -22,12 +22,12 @@ use std::collections::BTreeMap;
 use arkret_identifiers::{EventId, Hash};
 use arkret_models_collaboration::events_payloads::consent::ConsentPeer;
 use arkret_models_collaboration::mimi_operations::{
-    MimiIdentifierQueryOutcome, MimiIdentifierQueryRequestBody, MimiNotifyOutcome,
-    MimiNotifyRequestBody, MimiProxyDownloadOutcome, MimiProxyDownloadRequestBody,
-    MimiReportAbuseOutcome, MimiReportAbuseRequestBody, MimiRequestConsentOutcome,
-    MimiRequestConsentRequestBody, MimiRoomUpdateOutcome, MimiRoomUpdateRequestBody,
-    MimiSubmitMessageOutcome, MimiSubmitMessageRequestBody, MimiUpdateConsentOutcome,
-    MimiUpdateConsentRequestBody,
+    MimiIdentifierQueryRequestBody, MimiIdentifierQueryResponseBody, MimiNotifyRequestBody,
+    MimiNotifyResponseBody, MimiProxyDownloadRequestBody, MimiProxyDownloadResponseBody,
+    MimiReportAbuseRequestBody, MimiReportAbuseResponseBody, MimiRequestConsentRequestBody,
+    MimiRequestConsentResponseBody, MimiRoomUpdateRequestBody, MimiRoomUpdateResponseBody,
+    MimiSubmitMessageRequestBody, MimiSubmitMessageResponseBody, MimiUpdateConsentRequestBody,
+    MimiUpdateConsentResponseBody,
 };
 use arkret_models_collaboration::objects::mimi::{
     MimiCiphertext, MimiConsentPurpose, MimiDelivery, MimiDeliveryStatus, MimiIdentifierMatch,

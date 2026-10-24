@@ -2,7 +2,7 @@
 
 use arkret_models_identity::service_identity::{
     CanonicalServiceUrl, ServiceRegistrationEnsureRequestBody, ServiceRegistrationKey,
-    ServiceRegistrationOutcome, ServiceRegistrationReceipt,
+    ServiceRegistrationReceipt, ServiceRegistrationResponseBody,
 };
 use arkret_wire::{DidCoreId, PayloadProof, ServiceKind, project_did_to_core_id, proof_kind};
 use coland_http::error::AppError;
@@ -29,7 +29,7 @@ pub(crate) async fn ensure(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<ServiceRegistrationEnsureRequestBody>,
-) -> JsonResult<ServiceRegistrationOutcome> {
+) -> JsonResult<ServiceRegistrationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     require_embedded_webvh_registration_bearer(state, req)?;
     let request = body.into_inner();
@@ -41,7 +41,7 @@ pub(crate) async fn ensure(
 
     let issued_at = chrono::Utc::now();
     let receipt = sign_registration_receipt(state, &key, &request, issued_at).await?;
-    let outcome = ServiceRegistrationOutcome {
+    let outcome = ServiceRegistrationResponseBody {
         did_document: request.inception_operation.state.clone(),
         registration_receipt: receipt,
         created: true,
@@ -58,7 +58,7 @@ pub(crate) async fn ensure(
         did: service_did.clone(),
         did_document: document_value,
         key_log_head: Some(event_digest.clone()),
-        seq: 1,
+        sequence: 1,
         method_evidence: json!({
             "mode": "service_registration_provider",
             "operation": arkret_wire::ServiceOperationId::ROOT_IDENTITY_SERVICE_REGISTRATION_COMMAND_ENSURE_V1,
@@ -85,7 +85,7 @@ pub(crate) async fn ensure(
     let event = DidLogEvent {
         event_digest,
         did: service_did,
-        seq: 1,
+        sequence: 1,
         operation,
         created_at: issued_at,
     };
@@ -122,7 +122,7 @@ pub(crate) async fn get(
     req: &mut Request,
     service_kind: QueryParam<String, true>,
     public_base_url: QueryParam<String, true>,
-) -> JsonResult<ServiceRegistrationOutcome> {
+) -> JsonResult<ServiceRegistrationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     require_embedded_webvh_registration_bearer(state, req)?;
     let service_kind =

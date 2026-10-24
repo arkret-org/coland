@@ -370,7 +370,7 @@ async fn call_current_handoff_scenario() {
                 "actor_id":watcher,"device_id":device,"focus_id":"handoff-media",
                 "participant_id":participant,"media":{"audio":true,"video":false,"screen":false},
                 "participant_binding":{"expires_at":arkret_canonical::format_timestamp_canonical(expires_at),
-                    "issuer_kid":issuer_kid,"sig":signature}
+                    "issuer_kid":issuer_kid,"signature":signature}
             }}}))).await;
     joined.verified_media_participant = arkret_signatures::media::VerifiedCallParticipant::verify(
         &joined.authority_commit.event,
@@ -414,9 +414,9 @@ async fn call_current_handoff_scenario() {
         .unwrap();
     eprintln!("[2133-handoff] issued original Snapshot");
     for payload in [
-        serde_json::json!({"expected_governance_generation":1,"expected_realm_stream_commit_id":tail.commit.commit_id,"new_governance_station_id":next}),
-        serde_json::json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":arkret_wire::RealmCommitId::from_digest([7;32]),"new_governance_station_id":next}),
-        serde_json::json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":tail.commit.commit_id,"new_governance_station_id":account.station_id}),
+        serde_json::json!({"expected_governance_generation":"1","expected_realm_stream_commit_id":tail.commit.commit_id,"new_governance_station_id":next}),
+        serde_json::json!({"expected_governance_generation":"0","expected_realm_stream_commit_id":arkret_wire::RealmCommitId::from_digest([7;32]),"new_governance_station_id":next}),
+        serde_json::json!({"expected_governance_generation":"0","expected_realm_stream_commit_id":tail.commit.commit_id,"new_governance_station_id":account.station_id}),
     ] {
         let bad = Box::pin(isolated_request(
             &fixture,
@@ -433,7 +433,7 @@ async fn call_current_handoff_scenario() {
         );
     }
     let change = Box::pin(isolated_request(&fixture,&pool,tail,EventKind::RealmGovernanceStationChange,
-        serde_json::json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":tail.commit.commit_id,"new_governance_station_id":next}))).await;
+        serde_json::json!({"expected_governance_generation":"0","expected_realm_stream_commit_id":tail.commit.commit_id,"new_governance_station_id":next}))).await;
     Box::pin(isolated_commit(&pool, change.clone()))
         .await
         .unwrap();
@@ -553,7 +553,7 @@ async fn call_current_handoff_scenario() {
     let installed = store.current_authority(&realm).await.unwrap().unwrap();
     assert_eq!(installed.generation, 1);
     assert_eq!(installed.service_id, next);
-    let scan = arkret_wire::StreamScanRequest {
+    let scan = arkret_wire::StreamScanRequestBody {
         realm_id: realm.clone(),
         stream_ref: arkret_wire::CommitStreamRef::Realm {
             realm_id: realm.clone(),
@@ -583,12 +583,12 @@ async fn call_current_handoff_scenario() {
                 watcher_actor_id: watcher.clone(),
             };
         match store.strand_watch_current_for_account(&query, &account, &next).await.unwrap() {
-            coland_storage::SelfExactCurrentRead::Answer(arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::Current { governance_generation, result, .. }) if index == 0 => {
+            coland_storage::SelfExactCurrentRead::Answer(arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentResponseBody::Current { governance_generation, current_state: result, .. }) if index == 0 => {
                 assert_eq!(governance_generation, 1);
                 assert_eq!(result.revision.commit_id, clear.authority_commit.commit.commit_id);
                 assert_eq!(serde_json::to_value(result.value).unwrap(), serde_json::Value::Null);
             },
-            coland_storage::SelfExactCurrentRead::Answer(arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::NeverWritten { governance_generation, .. }) if index == 1 => assert_eq!(governance_generation, 1),
+            coland_storage::SelfExactCurrentRead::Answer(arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentResponseBody::NeverWritten { governance_generation, .. }) if index == 1 => assert_eq!(governance_generation, 1),
             other => panic!("complete nonzero tenure must retain Watch presence: {other:?}"),
         }
     }
@@ -611,7 +611,7 @@ async fn call_current_handoff_scenario() {
         .current_state_entries
         .iter()
         .find_map(|row| match row {
-            arkret_wire::TypedCurrentRow::Value {
+            arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::CallRoster { call_id: actual },
                 value,
                 ..
@@ -666,7 +666,7 @@ async fn call_current_handoff_scenario() {
     );
     eprintln!("[2133-handoff] exact original old Snapshot retained");
     let mut replay = handoff.clone();
-    replay.new_authority_acceptance_signature.sig =
+    replay.new_authority_acceptance_signature.signature =
         arkret_wire::Base64UrlString::new("YmFk").unwrap();
     assert!(
         store
@@ -717,7 +717,7 @@ async fn call_current_handoff_scenario() {
         .current_state_entries
         .iter()
         .find_map(|row| match row {
-            arkret_wire::TypedCurrentRow::Value {
+            arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::CallRoster { call_id: actual },
                 value,
                 ..
@@ -734,7 +734,7 @@ async fn call_current_handoff_scenario() {
         .current_state_entries
         .iter()
         .find_map(|row| match row {
-            arkret_wire::TypedCurrentRow::Value {
+            arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::CallModeration { call_id: actual },
                 value,
                 ..

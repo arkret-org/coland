@@ -1,7 +1,7 @@
 //! Deliver frozen recipient Add proofs through the registered peer operation.
 
 use arkret_models_collaboration::mls_roster_authority::{
-    MlsAttestAddOutcome, MlsAttestAddRequestBody,
+    MlsAttestAddRequestBody, MlsAttestAddResponseBody,
 };
 
 use crate::state::AppState;
@@ -93,7 +93,7 @@ async fn deliver(state: &AppState, request: &MlsAttestAddRequestBody) -> Result<
                 response.status
             ));
         }
-        serde_json::from_slice::<MlsAttestAddOutcome>(&response.body)
+        serde_json::from_slice::<MlsAttestAddResponseBody>(&response.body)
             .map_err(|error| error.to_string())?
     };
     state

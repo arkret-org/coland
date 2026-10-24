@@ -28,7 +28,7 @@ pub(crate) async fn check_facade_producer_in_connection(
         attributed_actor,
         source_provider_id,
         reporter_authority,
-        submit_request,
+        submit_request_body,
         mapping_receipt,
         reporter_device_guard,
     } = guard
@@ -99,7 +99,7 @@ pub(crate) async fn check_facade_producer_in_connection(
         digest,
     )
     .map_err(|_| refused("Service Event signature invalid"))?;
-    let row = diesel::sql_query("SELECT b.value FROM mimi_room_binding_current_results b JOIN realm_commits c ON c.commit_id=b.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE b.mimi_room_uri=$1 AND b.realm_id=$2 AND b.current_event_id=$3 AND c.realm_id=b.realm_id AND c.stream_position=b.current_stream_position AND e.state='committed' AND c.commit_json->>'event_ref'=b.current_event_id AND e.envelope->'payload'=b.value FOR UPDATE OF b")
+    let row = diesel::sql_query("SELECT b.value FROM mimi_room_binding_current_states b JOIN realm_commits c ON c.commit_id=b.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE b.mimi_room_uri=$1 AND b.realm_id=$2 AND b.current_event_id=$3 AND c.realm_id=b.realm_id AND c.stream_position=b.current_stream_position AND e.state='committed' AND c.commit_json->>'event_ref'=b.current_event_id AND e.envelope->'payload'=b.value FOR UPDATE OF b")
         .bind::<Text,_>(room_uri.as_str()).bind::<Text,_>(event.realm_id.as_str())
         .bind::<Text,_>(binding_event_id.as_str()).get_result::<JsonRow>(&mut *conn).await
         .optional().map_err(PersistenceError::database)?.ok_or_else(|| refused("MIMI binding is no longer current"))?;
@@ -116,7 +116,7 @@ pub(crate) async fn check_facade_producer_in_connection(
     {
         return Err(refused("MIMI binding is not writable"));
     }
-    crate::moderation_report_current_results::ensure_scope_member(
+    crate::moderation_report_current_states::ensure_scope_member(
         conn,
         &event.realm_id,
         &event.scope_ref,
@@ -182,7 +182,7 @@ pub(crate) async fn check_facade_producer_in_connection(
                 "MIMI sender Station differs from authenticated provider",
             ));
         }
-        let request = submit_request
+        let request = submit_request_body
             .as_ref()
             .ok_or_else(|| refused("MIMI request guard missing"))?;
         let request_bytes =
@@ -206,8 +206,8 @@ pub(crate) async fn check_facade_producer_in_connection(
                     "mimi_mls_group_id_mismatch: group id differs from native scope".into(),
                 ));
             }
-            let key = crate::mls_group_current_results::scope_key(&event.scope_ref)?;
-            let current = crate::mls_group_current_results::locked_group(conn, &key)
+            let key = crate::mls_group_current_states::scope_key(&event.scope_ref)?;
+            let current = crate::mls_group_current_states::locked_group(conn, &key)
                 .await?
                 .ok_or_else(|| refused("native MLS current unavailable"))?;
             let mismatch = || {
@@ -215,7 +215,10 @@ pub(crate) async fn check_facade_producer_in_connection(
                     "mimi_governance_binding_mismatch: accepted MLS frontier differs".into(),
                 )
             };
-            if request.get("epoch").and_then(Value::as_u64) != Some(current.value.epoch)
+            if request
+                .get("epoch")
+                .and_then(arkret_canonical::serde_helpers::parse_uint64_decimal_value)
+                != Some(current.value.epoch)
                 || current.value.effective_scope != event.scope_ref
             {
                 return Err(mismatch());
@@ -278,13 +281,13 @@ pub(crate) async fn check_facade_producer_in_connection(
         for (reference, table, predicate, subject) in [
             (
                 &authority.room_binding_ref,
-                "mimi_room_binding_current_results",
+                "mimi_room_binding_current_states",
                 "mimi_room_uri",
                 room_uri.as_str().to_owned(),
             ),
             (
                 &authority.membership_ref,
-                "member_state_current_results",
+                "member_state_current_states",
                 "member_id",
                 attributed_actor.to_string(),
             ),

@@ -45,7 +45,7 @@ mod audience_mention_tests {
             "enabled": true,
             "allowed_audiences": ["strand_engaged"],
             "max_recipients": 5,
-            "quota": {"max_operations": 2, "period": "PT1H"}
+            "quota": {"max_operation_count": 2, "period": "PT1H"}
         });
 
         audience_mention_policy_allows(&policy, "strand_engaged", 5).unwrap();

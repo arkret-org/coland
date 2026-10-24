@@ -365,7 +365,7 @@ fn revalidate_transport(delivery: &FederationDeliveryRecord) -> Result<(), Strin
             .map_err(|error| format!("stored federation request is no longer valid: {error}"));
     }
     if delivery.endpoint == "/_arkret/peer/events" {
-        let body: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest =
+        let body: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody =
             serde_json::from_str(&delivery.payload_json)
                 .map_err(|error| format!("stored federation request no longer parses: {error}"))?;
         return body

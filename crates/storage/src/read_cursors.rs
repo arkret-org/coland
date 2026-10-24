@@ -1,4 +1,4 @@
-use arkret_models_collaboration::objects::read_receipts::{ReadCursor, ReadMarkerOutcome};
+use arkret_models_collaboration::objects::read_receipts::{ReadCursor, ReadMarkerResponseBody};
 use arkret_wire::{AccountId, DidCoreId, Event, RealmId};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -41,12 +41,12 @@ pub enum ReadCursorAdvanceOutcome {
     /// A new candidate was classified. `candidate_won` is false for an
     /// accepted loser, which leaves the durable winner untouched.
     Accepted {
-        marker: ReadMarkerOutcome,
+        marker: ReadMarkerResponseBody,
         candidate_won: bool,
     },
     /// The byte-identical Event was already accepted; its first outcome is
     /// returned without another write or device fanout.
-    Replayed(ReadMarkerOutcome),
+    Replayed(ReadMarkerResponseBody),
     /// A write-before condition failed; nothing was written.
     Refused(ReadCursorAdvanceRefusal),
 }
@@ -85,5 +85,5 @@ pub trait ReadCursorStore: Send + Sync {
         &self,
         owner: &AccountId,
         realm_id: Option<&RealmId>,
-    ) -> PersistenceResult<Vec<ReadMarkerOutcome>>;
+    ) -> PersistenceResult<Vec<ReadMarkerResponseBody>>;
 }

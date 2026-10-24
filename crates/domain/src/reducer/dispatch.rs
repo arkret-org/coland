@@ -907,10 +907,10 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 entry.owner,
-                arkret_wire::EventEffectOwnership::TypedResultWriter
+                arkret_wire::EventEffectOwnership::TypedStateWriter
             );
             assert!(matches!(entry.slot, super::CacheSlot::Shared(_)));
-            assert!(!kind.effect_descriptor().unwrap().result_families.is_empty());
+            assert!(!kind.effect_descriptor().unwrap().state_families.is_empty());
         }
     }
 
@@ -1111,9 +1111,9 @@ mod tests {
             let descriptor = kind.effect_descriptor().unwrap();
             assert_eq!(
                 descriptor.ownership,
-                super::EventEffectOwnership::TypedResultWriter
+                super::EventEffectOwnership::TypedStateWriter
             );
-            assert!(!descriptor.result_families.is_empty());
+            assert!(!descriptor.state_families.is_empty());
             assert!(!registry.contains_key(&kind));
             assert!(matches!(
                 state.apply_projected(&operation(&kind), &hlc),

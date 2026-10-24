@@ -65,7 +65,7 @@ pub struct RealmDirectoryEntry {
     pub category: Option<String>,
     pub realm_class: Option<String>,
     pub default_join_rule: Option<String>,
-    pub as_of: DateTime<Utc>,
+    pub evaluated_at: DateTime<Utc>,
     pub source_refs: Vec<String>,
     pub policy_revision: String,
     /// Caller-visible Directory data exists only after a verified direct
@@ -130,7 +130,7 @@ impl RealmDirectoryEntry {
             category: None,
             realm_class: None,
             default_join_rule: None,
-            as_of: DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+            evaluated_at: DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
                 .expect("current time is representable at millisecond precision"),
             source_refs: provenance.source_refs(),
             policy_revision: "local".to_owned(),
@@ -401,7 +401,7 @@ pub trait AppletPort: Send + Sync {
         _command: arkret_models_integration::AppletConfigurationCommand,
         _current: &coland_storage::ManagementReviewCurrent,
         _ingress: &coland_storage::AppletConfigurationIngress,
-    ) -> ServiceResult<arkret_models_integration::AppletConfigurationOutcome> {
+    ) -> ServiceResult<arkret_models_integration::AppletConfigurationResponseBody> {
         Err(crate::ServiceError::Internal(
             "configuration ledger unavailable".into(),
         ))
@@ -410,10 +410,10 @@ pub trait AppletPort: Send + Sync {
         &self,
         _governor: &arkret_wire::DidCoreId,
         _intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
-        _source: &arkret_models_integration::AppletConfigurationExecutionOutcome,
+        _source: &arkret_models_integration::AppletConfigurationExecutionResponseBody,
         _producer: &coland_storage::AppletEventProducerGuard,
         _current: &coland_storage::ManagementReviewCurrent,
-    ) -> ServiceResult<arkret_models_integration::AppletConfigurationOutcome> {
+    ) -> ServiceResult<arkret_models_integration::AppletConfigurationResponseBody> {
         Err(crate::ServiceError::Internal(
             "configuration ledger unavailable".into(),
         ))
@@ -1085,7 +1085,7 @@ impl EventQueryService {
         command: arkret_models_integration::AppletConfigurationCommand,
         current: &coland_storage::ManagementReviewCurrent,
         ingress: &coland_storage::AppletConfigurationIngress,
-    ) -> ServiceResult<arkret_models_integration::AppletConfigurationOutcome> {
+    ) -> ServiceResult<arkret_models_integration::AppletConfigurationResponseBody> {
         self.applets
             .configuration(governor, intent, command, current, ingress)
             .await
@@ -1094,10 +1094,10 @@ impl EventQueryService {
         &self,
         governor: &arkret_wire::DidCoreId,
         intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
-        source: &arkret_models_integration::AppletConfigurationExecutionOutcome,
+        source: &arkret_models_integration::AppletConfigurationExecutionResponseBody,
         producer: &coland_storage::AppletEventProducerGuard,
         current: &coland_storage::ManagementReviewCurrent,
-    ) -> ServiceResult<arkret_models_integration::AppletConfigurationOutcome> {
+    ) -> ServiceResult<arkret_models_integration::AppletConfigurationResponseBody> {
         self.applets
             .retain_configuration_source(governor, intent, source, producer, current)
             .await
@@ -1390,10 +1390,10 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
     async fn retain_realm_claim_source_result(
         &self,
         request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
-        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome,
+        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody,
         histories: &[arkret_models_identity::AuthenticatedServiceResolution],
         governor: &arkret_wire::DidCoreId,
-    ) -> ServiceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome>;
+    ) -> ServiceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody>;
     async fn prepare_realm_claim_source(
         &self,
         request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
@@ -1560,10 +1560,10 @@ impl MlsKeyPackageService {
     pub async fn retain_realm_claim_source_result(
         &self,
         request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
-        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome,
+        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody,
         histories: &[arkret_models_identity::AuthenticatedServiceResolution],
         governor: &arkret_wire::DidCoreId,
-    ) -> ServiceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome> {
+    ) -> ServiceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody> {
         self.key_packages
             .retain_realm_claim_source_result(request, result, histories, governor)
             .await
@@ -1999,7 +1999,8 @@ mod tests {
                     signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "3".repeat(64)))
                         .unwrap(),
                     created_at: now,
-                    sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
+                    signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned())
+                        .unwrap(),
                 },
             },
             producer_signer_fact: None,

@@ -14,7 +14,7 @@ use arkret_models_collaboration::events_payloads::device_identity::{
 };
 use arkret_wire::{
     AccountId, ActorId, CommitStreamHead, CommitStreamRef, CommittedEventView, DeviceId, EventId,
-    EventKind, Hash, RealmCommit, RealmId, StreamScanRequest,
+    EventKind, Hash, RealmCommit, RealmId, StreamScanRequestBody,
 };
 
 use crate::state::AppState;
@@ -94,7 +94,7 @@ async fn verify_registered_genesis(
         .log_events(initial.did.as_str())
         .await
         .map_err(unavailable)?;
-    let mut inception_entries = entries.iter().filter(|entry| entry.seq == 1);
+    let mut inception_entries = entries.iter().filter(|entry| entry.sequence == 1);
     let entry = inception_entries
         .next()
         .ok_or_else(|| unavailable("registered PCR DID inception is missing"))?;
@@ -113,8 +113,8 @@ async fn verify_registered_genesis(
             arkret_models_identity::DidOperationSubmitRequestBody {
                 did: initial.did.clone(),
                 did_method: arkret_models_identity::DidMethodName::Webvh,
-                seq: Some(entry.seq),
-                prev_event_digest: None,
+                sequence: Some(entry.sequence),
+                previous_event_digest: None,
                 operation: operation.clone(),
             },
         ),
@@ -320,7 +320,7 @@ pub(crate) async fn load_confirmed_device_history(
     loop {
         let page = state
             .authority_commits()
-            .scan_stream(&StreamScanRequest {
+            .scan_stream(&StreamScanRequestBody {
                 realm_id: realm_id.clone(),
                 stream_ref: stream_ref.clone(),
                 direction: arkret_wire::StreamScanDirection::After(

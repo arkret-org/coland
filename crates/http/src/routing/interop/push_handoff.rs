@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use arkret_http_client::{Client, HttpMessageSigner};
 use arkret_models_integration::{
-    PushRegisterDeviceOutcome, PushRegisterDeviceRequestBody, PushRegistrationHandoffRequestBody,
-    PushRegistrationId, PushRegistrationInstallationReceipt, PushRegistrationRecord,
+    PushRegisterDeviceRequestBody, PushRegisterDeviceResponseBody,
+    PushRegistrationHandoffRequestBody, PushRegistrationId, PushRegistrationInstallationReceipt,
+    PushRegistrationRecord,
 };
 use arkret_wire::{AccountId, ServiceKind, WebOrigin};
 use base64::Engine as _;
@@ -44,7 +45,7 @@ pub(super) struct PublicPushRegistration<'a> {
 pub(super) async fn register(
     state: &AppState,
     input: PublicPushRegistration<'_>,
-) -> Result<PushRegisterDeviceOutcome, AppError> {
+) -> Result<PushRegisterDeviceResponseBody, AppError> {
     let origin = canonical_gateway_origin(&input.body.push_gateway_url)?;
     let gateway = trusted_gateway_for_origin(state, &origin)?;
     let source_station_id = state.service_core_id();
@@ -613,7 +614,7 @@ async fn replay_verified_registration(
     origin: &WebOrigin,
     session_revocation_ref: Option<&str>,
     record: PushRegistrationHandoffIntentRecord,
-) -> Result<PushRegisterDeviceOutcome, AppError> {
+) -> Result<PushRegisterDeviceResponseBody, AppError> {
     let request = record.request().map_err(persistence_error)?;
     let receipt = record.receipt.as_ref().ok_or_else(|| {
         AppError::internal("verified push registration replay is missing its durable receipt")
@@ -792,7 +793,7 @@ fn local_registration(
 
 fn outcome_from_record(
     record: &PushRegistrationHandoffIntentRecord,
-) -> Result<PushRegisterDeviceOutcome, AppError> {
+) -> Result<PushRegisterDeviceResponseBody, AppError> {
     record.validate().map_err(persistence_error)?;
     if record.status != PushRegistrationHandoffIntentStatus::ReceiptVerified
         || record.receipt.is_none()
@@ -813,7 +814,7 @@ fn outcome_from_record(
             "revoked Push Gateway intent cannot produce active registration outcome",
         ));
     };
-    Ok(PushRegisterDeviceOutcome {
+    Ok(PushRegisterDeviceResponseBody {
         push_target_id,
         registration_id: Some(
             arkret_wire::OpaqueLocalId::new(registration_id.into_string()).map_err(|error| {

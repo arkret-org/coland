@@ -4,10 +4,12 @@ use arkret_models_collaboration::governance::membership_invite::{
     MembershipPayload, MembershipPayloadState,
 };
 use arkret_models_collaboration::governance::realm_join_intake::{
-    PeerRealmJoinBootstrapOutcome, PeerRealmJoinBootstrapRequestBody, SelfRealmJoinPrepareOutcome,
-    SelfRealmJoinPrepareRequestBody,
+    PeerRealmJoinBootstrapRequestBody, PeerRealmJoinBootstrapResponseBody,
+    SelfRealmJoinPrepareRequestBody, SelfRealmJoinPrepareResponseBody,
 };
-use arkret_wire::{ActorId, AuthorityBundleRequest, Base64UrlString, CommitStreamRef, EventKind};
+use arkret_wire::{
+    ActorId, Base64UrlString, CommitStreamRef, EventKind, RealmAuthorityBundleRequestBody,
+};
 use coland_http::error::AppError;
 use coland_http::result::{JsonResult, json_ok};
 use salvo::prelude::*;
@@ -98,7 +100,7 @@ pub(crate) async fn local_authority_bundle(
     state
         .authority_commits()
         .authority_bundle(
-            &AuthorityBundleRequest {
+            &RealmAuthorityBundleRequestBody {
                 realm_id: realm_id.clone(),
                 nonce: nonce.clone(),
             },
@@ -119,7 +121,10 @@ pub(crate) async fn local_authority_bundle(
 
 #[handler]
 #[tracing::instrument(skip_all, fields(op = "ak.self.realm_join.command.prepare.v1"))]
-async fn prepare(depot: &mut Depot, req: &mut Request) -> JsonResult<SelfRealmJoinPrepareOutcome> {
+async fn prepare(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> JsonResult<SelfRealmJoinPrepareResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = AuthArgs.authenticated_session(state, req).await?;
     let account_id = crate::routing::identity::auth_grant_dpop::authenticated_session_account_id(
@@ -147,7 +152,7 @@ async fn prepare(depot: &mut Depot, req: &mut Request) -> JsonResult<SelfRealmJo
             .map_err(unavailable)?;
     }
     let bundle = located.bundle;
-    let outcome = SelfRealmJoinPrepareOutcome {
+    let outcome = SelfRealmJoinPrepareResponseBody {
         request_id: body.request_id,
         realm_stream_head: bundle.realm_stream_head.clone(),
         authority_bundle: bundle,
@@ -160,7 +165,7 @@ async fn prepare(depot: &mut Depot, req: &mut Request) -> JsonResult<SelfRealmJo
 async fn peer_bootstrap(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<PeerRealmJoinBootstrapOutcome> {
+) -> JsonResult<PeerRealmJoinBootstrapResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     crate::routing::events::peer::validate_peer_request(state, req, true).await?;
     let source_id = crate::routing::events::peer::source_id_from_request(req)?;
@@ -240,7 +245,7 @@ async fn peer_bootstrap(
             .await
             .map_err(unavailable)?
             .ok_or_else(|| AppError::not_found("history basis unavailable"))?;
-        return json_ok(PeerRealmJoinBootstrapOutcome {
+        return json_ok(PeerRealmJoinBootstrapResponseBody {
             request_id: body.request_id,
             authority_bundle: bundle,
             visible_stream_heads: snapshot.visible_stream_heads.clone(),
@@ -273,7 +278,7 @@ async fn peer_bootstrap(
         crate::wire::now(),
     )
     .map_err(unavailable)?;
-    json_ok(PeerRealmJoinBootstrapOutcome {
+    json_ok(PeerRealmJoinBootstrapResponseBody {
         request_id: body.request_id,
         authority_bundle: bundle,
         snapshot,

@@ -7,7 +7,7 @@ use super::*;
 pub(super) async fn search_realms(
     body: JsonBody<DirectorySearchRealmsRequestBody>,
     depot: &mut Depot,
-) -> JsonResult<DirectoryRealmSearchOutcome> {
+) -> JsonResult<DirectoryRealmSearchResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     body.validate()
@@ -51,7 +51,7 @@ pub(super) async fn search_realms(
     if has_more {
         results.truncate(requested_limit);
     }
-    let outcome = DirectoryRealmSearchOutcome {
+    let outcome = DirectoryRealmSearchResponseBody {
         realms: results,
         next_cursor: None,
         has_more,

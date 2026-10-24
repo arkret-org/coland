@@ -308,7 +308,7 @@ pub struct PeerKeyPackageClaimLedgerRecord {
 #[derive(Clone, Debug)]
 pub struct RealmKeyPackageClaimSource {
     pub request: arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
-    pub result: Option<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome>,
+    pub result: Option<arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody>,
     pub issuer_histories: Vec<arkret_models_identity::AuthenticatedServiceResolution>,
 }
 
@@ -348,7 +348,7 @@ pub struct MlsKeyPackageClaimAdmission {
 pub struct MlsKeyPackageClaimDelivery {
     /// Mounted consumer, never a caller-selected wire disclosure mode.
     pub operation: arkret_wire::ServiceOperationId,
-    pub outcome: arkret_models_crypto::PeerKeyPackagesClaimOutcome,
+    pub outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody,
     pub endpoints: Vec<crate::AppletManagedDeviceScopeGuard>,
     pub command: Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>,
     pub remote_devices: Vec<MlsClaimRemoteDeviceEvidence>,
@@ -717,7 +717,7 @@ pub enum PeerKeyPackageClaimLedgerWriteResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MlsGroupCurrentRecord {
     pub realm_id: RealmId,
-    pub value: arkret_wire::MlsGroupCurrent,
+    pub value: arkret_wire::MlsGroupValue,
     pub current_commit_id: arkret_wire::RealmCommitId,
     pub current_stream_position: u64,
     /// Station-private public RFC 9420 tracker state at `value.epoch`, the
@@ -726,7 +726,7 @@ pub struct MlsGroupCurrentRecord {
 }
 /// Internal committed result; the outcome is the shared SDK wire DTO.
 pub struct MlsKeyPackageRevocation {
-    pub outcome: arkret_models_crypto::KeyPackagesRevokeOutcome,
+    pub outcome: arkret_models_crypto::KeyPackagesRevokeResponseBody,
     pub records: Vec<MlsKeyPackageRow>,
 }
 
@@ -750,7 +750,7 @@ pub struct AppletDeviceKeyPackageConsume<'a> {
 }
 
 pub struct MlsKeyPackageConsumption {
-    pub outcome: arkret_models_crypto::KeyPackagesConsumeOutcome,
+    pub outcome: arkret_models_crypto::KeyPackagesConsumeResponseBody,
     pub record: MlsKeyPackageRow,
 }
 
@@ -891,10 +891,10 @@ pub trait MlsKeyPackageStore: Send + Sync {
     async fn retain_realm_claim_source_result(
         &self,
         request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
-        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome,
+        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody,
         histories: &[arkret_models_identity::AuthenticatedServiceResolution],
         governor: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome>;
+    ) -> PersistenceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody>;
     /// Resolve the ledger row whose stored success outcome issued the exact
     /// `KeypackageClaimId` a Welcome names (`keypackage_claim_ref`).
     async fn realm_claim_issuer_resolution(

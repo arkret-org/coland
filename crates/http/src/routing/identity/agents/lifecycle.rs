@@ -7,7 +7,7 @@ const AGENT_PROVISION_ALLOCATION_DOMAIN: &str = "org.arkret.coland.agent_provisi
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreparedAgentProvision {
-    outcome: AgentProvisionOutcome,
+    outcome: AgentProvisionResponseBody,
     controller_authority: arkret_wire::AccountId,
     slug: String,
     requested_scope: AgentKeyScope,
@@ -194,7 +194,7 @@ pub(super) async fn provision_agent(
     depot: &mut Depot,
     res: &mut Response,
     req: &mut Request,
-) -> JsonResult<AgentProvisionOutcome> {
+) -> JsonResult<AgentProvisionResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let controller_principal_id = session.actor.clone();
@@ -332,7 +332,7 @@ pub(super) async fn provision_agent(
                 &operation_id,
                 &idempotency_key,
             )?;
-            let outcome = AgentProvisionOutcome::AwaitingControllerEvent(
+            let outcome = AgentProvisionResponseBody::AwaitingControllerEvent(
                 AgentProvisionAwaitingControllerEvent {
                     status: AgentProvisionAwaitingControllerEventStatus::AwaitingControllerEvent,
                     agent_id,
@@ -426,7 +426,7 @@ pub(super) async fn provision_agent(
                         "stored Agent provision allocation invalid: {error}"
                     ))
                 })?;
-            let AgentProvisionOutcome::AwaitingControllerEvent(
+            let AgentProvisionResponseBody::AwaitingControllerEvent(
                 AgentProvisionAwaitingControllerEvent {
                     status: _,
                     agent_id: allocated_agent_id,
@@ -648,7 +648,7 @@ pub(super) async fn provision_agent(
                 )
                 .await?
             else {
-                return json_ok(AgentProvisionOutcome::AwaitingPcrGenesis(
+                return json_ok(AgentProvisionResponseBody::AwaitingPcrGenesis(
                     AgentProvisionAwaitingPcrGenesis {
                         status: AgentProvisionAwaitingPcrGenesisStatus::AwaitingPcrGenesis,
                         agent_id,
@@ -692,7 +692,7 @@ pub(super) async fn provision_agent(
                             "Agent DID binding checkpoint persist failed: {error}"
                         ))
                     })?;
-                return json_ok(AgentProvisionOutcome::AwaitingDidBinding(
+                return json_ok(AgentProvisionResponseBody::AwaitingDidBinding(
                     AgentProvisionAwaitingDidBinding {
                         status: AgentProvisionAwaitingDidBindingStatus::AwaitingDidBinding,
                         agent_id,
@@ -748,7 +748,7 @@ pub(super) async fn provision_agent(
                 .await
                 .map_err(|error| AppError::internal(format!("agent persist failed: {error}")))?;
 
-            let outcome = AgentProvisionOutcome::Complete(AgentProvisionComplete {
+            let outcome = AgentProvisionResponseBody::Complete(AgentProvisionComplete {
                 status: AgentProvisionCompleteStatus::Complete,
                 agent_id: agent_id.clone(),
                 did: did.clone(),
@@ -839,7 +839,7 @@ pub(super) async fn renew_agent_pairing(
     body: JsonBody<AgentRenewPairingRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AgentRenewPairingOutcome> {
+) -> JsonResult<AgentRenewPairingResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let agent_id = agent_id.into_inner();
@@ -927,7 +927,7 @@ pub(super) async fn renew_agent_pairing(
     let controller_authorization_ref = record.controller_authorization_ref.clone();
     let requested_scope_digest =
         crate::routing::identity::agent_pcr::requested_scope_digest_for_record(&record)?;
-    json_ok(AgentRenewPairingOutcome {
+    json_ok(AgentRenewPairingResponseBody {
         agent_id,
         principal_control_realm_id,
         controller_authorization_ref,
@@ -948,7 +948,7 @@ pub(super) async fn list_agents(
     aa: AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AgentList> {
+) -> JsonResult<AgentPage> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let records = state
@@ -975,8 +975,8 @@ pub(super) async fn list_agents(
             agent_runtime_state_from_record(&record, !keys.is_empty(), chrono::Utc::now());
         agents.push(accepted_agent_projection(state, &record, runtime_state).await?);
     }
-    // spec `agent_list` = `{agents: [agent_projection], next_cursor?, has_more}`.
-    json_ok(AgentList {
+    // spec `agent_page` = `{agents: [agent_projection], next_cursor?, has_more}`.
+    json_ok(AgentPage {
         agents,
         next_cursor: None,
         has_more: false,
@@ -1129,7 +1129,7 @@ pub(super) async fn lifecycle_transition(
     event_kind: &str,
     reason: Option<String>,
     lifecycle_event: Option<arkret_wire::EventAdmissionSubmission>,
-) -> Result<AgentLifecycleOutcome, AppError> {
+) -> Result<AgentOperationStatusView, AppError> {
     // Authentication is deliberately completed by the endpoint before this
     // helper is entered. A DPoP proof is single-use, so passing `AuthArgs` and
     // `Request` through here would verify the same proof twice and reject the
@@ -1179,7 +1179,7 @@ pub(super) async fn lifecycle_transition(
             lifecycle_event,
         )
         .await?;
-        return Ok(AgentLifecycleOutcome { status: new_state });
+        return Ok(AgentOperationStatusView { status: new_state });
     }
     let (_, _, lifecycle) = accepted_agent_key_authorization_snapshot(state, &record).await?;
     record.state = projected_agent_lifecycle(record.state, lifecycle)?;
@@ -1264,9 +1264,9 @@ pub(super) async fn lifecycle_transition(
         )
         .await?;
     }
-    // spec `agent_lifecycle_state` = `operation_status_outcome` =
+    // spec `agent_lifecycle_state` = `operation_status_view` =
     // `{status}` (status is the post-transition `agent_status`).
-    Ok(AgentLifecycleOutcome { status: new_state })
+    Ok(AgentOperationStatusView { status: new_state })
 }
 
 #[endpoint(
@@ -1281,7 +1281,7 @@ pub(super) async fn pause_agent(
     body: JsonBody<AgentPauseRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AgentLifecycleOutcome> {
+) -> JsonResult<AgentOperationStatusView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
@@ -1311,7 +1311,7 @@ pub(super) async fn resume_agent(
     body: JsonBody<AgentResumeRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AgentLifecycleOutcome> {
+) -> JsonResult<AgentOperationStatusView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
@@ -1341,7 +1341,7 @@ pub(super) async fn deactivate_agent(
     body: JsonBody<AgentDeactivateRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AgentLifecycleOutcome> {
+) -> JsonResult<AgentOperationStatusView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let agent_id = agent_id.into_inner();

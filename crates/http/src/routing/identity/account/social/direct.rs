@@ -80,7 +80,7 @@ pub(crate) async fn fresh_direct_contact_evidence(
         } else if direction
             .current_proof
             .as_ref()
-            .is_none_or(|p| p.fresh_until <= at)
+            .is_none_or(|p| p.cache_expires_at <= at)
         {
             crate::routing::identity::contact_federation::request_remote_contact_current(
                 state,

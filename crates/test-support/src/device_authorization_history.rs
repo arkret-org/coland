@@ -199,7 +199,7 @@ impl DeviceHistoryFixture {
                 principal_endpoint: &"https://principal.example/".parse().unwrap(),
                 local_id: &options.local_id,
                 also_known_as: &[],
-                version_time: options.created_at,
+                version_created_at: options.created_at,
                 root_seed: &options.root_seed,
                 next_root_public_key_multibase: &next_root,
                 witness_policy: None,
@@ -377,7 +377,7 @@ impl DeviceHistoryFixture {
                     verification_method: self.authority_method(),
                     signed_digest: hash("unsigned"),
                     created_at: self.created_at,
-                    sig: Base64UrlString::new("AA".to_owned()).unwrap(),
+                    signature: Base64UrlString::new("AA".to_owned()).unwrap(),
                 },
             };
             let identity =

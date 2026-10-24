@@ -431,9 +431,9 @@ fn builtin_operation_conformance_vectors_cover_registry() {
                     "ak.profile.applet_service.v1"
                 ],
                 "registration_epoch": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                // applet-package.schema.json#/$defs/webhook_auth is closed and
+                // applet-package.schema.json#/$defs/webhook_signature_policy is closed and
                 // requires kind + key_ref + accepted_signature_algorithms.
-                "webhook_auth": {
+                "webhook_signature_policy": {
                     "kind": "http_message_signature",
                     "key_ref": "did:web:applet.example#server-key-1",
                     "accepted_signature_algorithms": ["ed25519"]
@@ -492,9 +492,9 @@ fn builtin_operation_conformance_vectors_cover_registry() {
                     "ak.profile.applet_service.v1"
                 ],
                 "registration_epoch": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                // applet-package.schema.json#/$defs/webhook_auth is closed and
+                // applet-package.schema.json#/$defs/webhook_signature_policy is closed and
                 // requires kind + key_ref + accepted_signature_algorithms.
-                "webhook_auth": {
+                "webhook_signature_policy": {
                     "kind": "http_message_signature",
                     "key_ref": "did:web:applet.example#server-key-1",
                     "accepted_signature_algorithms": ["ed25519"]

@@ -49,7 +49,7 @@ impl RateLimitSettings {
             window_seconds: u32::try_from(config.window.as_secs())
                 .unwrap_or(u32::MAX)
                 .max(1),
-            default_per_minute: config.max_requests,
+            default_per_minute: config.max_request_count,
             auth_per_minute: config.auth_max_requests,
             api_per_minute: config.api_max_requests,
             probe_per_minute: config.probe_max_requests,
@@ -60,7 +60,7 @@ impl RateLimitSettings {
     /// against, from the current snapshot.
     pub fn to_limiter_config(&self) -> RateLimiterConfig {
         RateLimiterConfig {
-            max_requests: self.default_per_minute,
+            max_request_count: self.default_per_minute,
             window: std::time::Duration::from_secs(u64::from(self.window_seconds.max(1))),
             auth_max_requests: self.auth_per_minute,
             api_max_requests: self.api_per_minute,

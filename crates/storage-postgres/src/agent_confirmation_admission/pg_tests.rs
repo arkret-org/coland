@@ -131,7 +131,7 @@ fn commit(f: &Fixture, event: &Event, position: u64) -> RealmCommit {
                 .unwrap(),
             signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "aa".repeat(32))).unwrap(),
             created_at: event.created_at,
-            sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
+            signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
         },
     };
     origin_fixture::origin_seal(&mut value, &f.origin.method, &f.origin.issuer);
@@ -159,7 +159,7 @@ async fn seed(f: &Fixture, conn: &mut AsyncPgConnection) {
         .bind::<Text,_>(f.origin.genesis.event.realm_id.as_str())
         .bind::<Text,_>(f.origin.provision.event.payload.get("controller_authorization_ref").and_then(serde_json::Value::as_str).unwrap())
         .bind::<Timestamptz,_>(f.origin.provision.event.created_at).execute(&mut *conn).await.unwrap();
-    sql_query("INSERT INTO realm_authority_root_current_results(realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref,current_commit_id,current_stream_position,updated_at) VALUES($1,$2,0,0,$3,$4,0,$5)")
+    sql_query("INSERT INTO realm_authority_root_current_states(realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref,current_commit_id,current_stream_position,updated_at) VALUES($1,$2,0,0,$3,$4,0,$5)")
         .bind::<Text,_>(realm(f).as_str()).bind::<Jsonb,_>(json!(ActorId::account(owner(f))))
         .bind::<Text,_>(genesis.event_id.as_str()).bind::<Text,_>(source.commit_id.as_str())
         .bind::<Timestamptz,_>(at(f)).execute(&mut *conn).await.unwrap();
@@ -402,7 +402,7 @@ async fn private_request_selects_agent_actor_when_controller_is_the_producer() {
     let mut other = owner(&f);
     other.station_id = "ak:did_core:web:other-station.example".parse().unwrap();
     sql_query(
-        "UPDATE realm_authority_root_current_results SET controller_actor_id=$1 WHERE realm_id=$2",
+        "UPDATE realm_authority_root_current_states SET controller_actor_id=$1 WHERE realm_id=$2",
     )
     .bind::<Jsonb, _>(json!(ActorId::account(other.clone())))
     .bind::<Text, _>(realm(&f).as_str())
@@ -412,7 +412,7 @@ async fn private_request_selects_agent_actor_when_controller_is_the_producer() {
     require_publication(&mut conn, &target, &commit(&f, &target, 2))
         .await
         .unwrap();
-    sql_query("UPDATE agent_action_approval_current_results SET controller_actor_key=$1 WHERE approved_event_id=$2")
+    sql_query("UPDATE agent_action_approval_current_states SET controller_actor_key=$1 WHERE approved_event_id=$2")
         .bind::<Text,_>(ActorId::account(other).to_string()).bind::<Text,_>(target.event_id.as_str())
         .execute(&mut conn).await.unwrap();
     assert_required(require_publication(&mut conn, &target, &commit(&f, &target, 2)).await);

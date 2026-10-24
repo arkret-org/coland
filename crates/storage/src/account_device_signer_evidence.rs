@@ -67,13 +67,13 @@ pub trait AccountDeviceSignerEvidenceStore: Send + Sync {
 
     async fn prepare_forward_request(
         &self,
-        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
         destination: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<Option<PreparedAccountDeviceForwardSource>>;
 
     async fn retain_forward_request(
         &self,
-        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
     ) -> PersistenceResult<SignerEvidenceRef>;
 
     /// Resolve only an immutable origin source already bound by this Commit.

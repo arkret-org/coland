@@ -115,7 +115,7 @@ impl Fixture {
                 account_id: pcr.history.account.clone(),
                 principal_control_realm_id: pcr.unit.transactions[0].event.realm_id.clone(),
                 binding_version: 1,
-                status_seq: 1,
+                status_sequence: 1,
                 previous_account_status_record_id: None,
                 status: arkret_models_collaboration::objects::account_status::AccountStatus::Active,
                 reason_code: None,
@@ -140,7 +140,7 @@ impl Fixture {
                 station_id: pcr.history.account.station_id.clone(),
                 localpart: String::new(),
                 display_name: Some("Applet admin".to_owned()),
-                bio: None,
+                biography: None,
                 avatar_blob_ref: None,
                 created_at: chrono::Utc::now(),
             })
@@ -205,7 +205,7 @@ impl Fixture {
         grant
             .validate()
             .expect("actual accepted founding-device StandardGrant metadata");
-        let introspection = arkret_models_collaboration::session_grants::SessionGrantValidationOutcome {
+        let introspection = arkret_models_collaboration::session_grants::SessionGrantValidationResponseBody {
             active: true,
             status: arkret_models_identity::admin_grant::SessionGrantAdminIntrospectionStatus::Active,
             proof_required: false,
@@ -214,7 +214,7 @@ impl Fixture {
         };
         let wire = serde_json::to_value(&introspection).unwrap();
         serde_json::from_value::<
-            arkret_models_collaboration::session_grants::SessionGrantValidationOutcome,
+            arkret_models_collaboration::session_grants::SessionGrantValidationResponseBody,
         >(wire.clone())
         .expect("typed introspection response round-trip")
         .validate()
@@ -299,7 +299,7 @@ impl Fixture {
         for (submission, tx) in unit.submission.events.iter_mut().zip(&unit.transactions) {
             submission.event = tx.event.clone();
         }
-        unit.exact_request_body=arkret_canonical::canonical_json_bytes(&arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(unit.submission.clone())).unwrap();
+        unit.exact_request_body=arkret_canonical::canonical_json_bytes(&arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(unit.submission.clone())).unwrap();
         PgAuthorityCommitStore {
             pool: self.pool.clone(),
         }
@@ -470,12 +470,12 @@ impl Fixture {
                 .unwrap()
                 .to_string()
         } else {
-            package.webhook_auth.key_ref.to_string()
+            package.webhook_signature_policy.key_ref.to_string()
         };
         let transport_key = if peer_forward {
             self.state.notary_signing_key().as_ref().clone()
         } else {
-            applet_service_signing_key(&package.webhook_auth.key_ref)
+            applet_service_signing_key(&package.webhook_signature_policy.key_ref)
         };
 
         let destination_service_id = self.state.service_id().to_owned();
@@ -645,7 +645,7 @@ fn signed_applet_package(
             ..Default::default()
         },
     );
-    package.webhook_auth = WebhookAuth::http_message_signature(
+    package.webhook_signature_policy = WebhookSignaturePolicy::http_message_signature(
         arkret_wire::DidUrl::new(format!("{service_did}#applet-service-key")).unwrap(),
         vec![HttpMessageSignatureAlgorithm::Ed25519],
     );
@@ -682,7 +682,7 @@ fn signed_applet_package(
         .map(|path| AppletEndpointEntry {
             method: AppletEndpointMethod::Post,
             path: path.to_owned(),
-            auth: Some(AppletEndpointAuth::WebhookSignature),
+            authentication_kind: Some(AppletEndpointAuth::WebhookSignature),
             description: None,
             extra: Default::default(),
         })
@@ -714,7 +714,7 @@ fn signed_applet_package(
 fn applet_service_did(package: &AppletPackage) -> Did {
     let did = Did::new(
         package
-            .webhook_auth
+            .webhook_signature_policy
             .key_ref
             .as_str()
             .split_once('#')
@@ -742,7 +742,7 @@ fn fixture_applet_service_inception(
             principal_endpoint: &endpoint,
             local_id: "service",
             also_known_as: &[],
-            version_time: "2026-01-01T00:00:00Z".parse().unwrap(),
+            version_created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
             did_key_fragment: Some("applet-service-key"),
         },
         &[42; 32],
@@ -794,7 +794,7 @@ async fn ingest_applet_service_id_document(state: &AppState, package: &AppletPac
                 .to_method_history_head
                 .clone(),
         ),
-        seq: 1,
+        sequence: 1,
         method_evidence: serde_json::to_value(&source.method_history_evidence).unwrap(),
         fetched_at: now,
         expires_at: now + chrono::Duration::minutes(15),
@@ -811,7 +811,7 @@ async fn ingest_applet_service_id_document(state: &AppState, package: &AppletPac
             did: record.did,
             did_document: record.did_document,
             key_log_head: record.key_log_head,
-            seq: record.seq,
+            sequence: record.sequence,
             method_evidence: record.method_evidence,
             fetched_at: record.fetched_at,
             expires_at: record.expires_at,
@@ -891,7 +891,7 @@ async fn spawn_introspection_mock(
                     == Some("POST /_arkret/peer/account-status/resolve HTTP/1.1")
                 {
                     use arkret_models_collaboration::account_lifecycle::{
-                        AccountStatusResolveOutcome, AccountStatusResolveRequestBody,
+                        AccountStatusResolveRequestBody, AccountStatusResolveResponseBody,
                     };
                     let query: AccountStatusResolveRequestBody =
                         serde_json::from_slice(&request[end..]).unwrap();
@@ -928,15 +928,15 @@ async fn spawn_introspection_mock(
                         chrono::Utc::now().timestamp(),
                     )
                     .unwrap();
-                    let answer = AccountStatusResolveOutcome {
+                    let answer = AccountStatusResolveResponseBody {
                         account_authority_id: query.account_authority_id.clone(),
                         account_id: query.account_id.clone(),
-                        records: if query.from_status_seq <= source.record.status_seq {
+                        records: if query.from_status_sequence <= source.record.status_sequence {
                             vec![source.record]
                         } else {
                             vec![]
                         },
-                        next_status_seq: None,
+                        next_status_sequence: None,
                         has_more: false,
                     };
                     answer.validate_for_request(&query).unwrap();
@@ -1014,7 +1014,8 @@ async fn admin_domain_request(
         StatusCode::OK,
         "explicit Device directory issuance: {result}"
     );
-    let result: arkret_models_crypto::KeysQueryOutcome = serde_json::from_value(result).unwrap();
+    let result: arkret_models_crypto::KeysQueryResponseBody =
+        serde_json::from_value(result).unwrap();
     let row = result
         .device_keys
         .iter()
@@ -1404,8 +1405,8 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
         ingest_applet_service_id_document(&self.fixture.state, &package).await;
         let evidence = applet_registration_epoch_evidence(&package);
         let (status, current) = self.fixture.admin_post(
-            "/_arkret/self/current-results/exact",
-            arkret_wire::ServiceOperationId::SELF_CURRENT_RESULTS_READ_EXACT_V1,
+            "/_arkret/self/current-state/exact",
+            arkret_wire::ServiceOperationId::SELF_CURRENT_STATE_READ_EXACT_V1,
             &json!({"realm_id":self.fixture.realm,"selector":{"kind":"applet_registration","applet_id":package.applet_id,"service_id":package.service_id}}),
             None,
         ).await;
@@ -1414,12 +1415,12 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
             StatusCode::OK,
             "registration exact current: {current}"
         );
-        let current: arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome = serde_json::from_value(current).unwrap();
+        let current: arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody = serde_json::from_value(current).unwrap();
         let expected_revision = match current {
-            arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome::Present {
-                entry: arkret_models_collaboration::exact_current_results::ExactCurrentResultEntry::AppletRegistration(row), ..
+            arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody::Present {
+                entry: arkret_models_collaboration::exact_current_state::ExactCurrentStateEntry::AppletRegistration(row), ..
             } => Some(row.revision),
-            arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome::NeverWritten { .. } => None,
+            arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody::NeverWritten { .. } => None,
             _ => panic!("wrong registration current family"),
         };
         let registration = self.fixture.admin_event(
@@ -1593,7 +1594,7 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
                     .iter()
                     .map(|event| arkret_wire::GrantId::from_event_id(&event.event_id))
                     .collect::<Vec<_>>();
-                let outcome = AppletInstallOutcome {
+                let outcome = AppletInstallResponseBody {
                     install_id: format!("install-{}", frozen.idempotency_key),
                     applet_id: package.applet_id.clone(),
                     service_id: package.service_id.clone(),
@@ -1705,9 +1706,9 @@ pub async fn registered_service_pair(pool: PgPool) {
             event.semantic_refs = refs;
             event.producer_proof = None;
             let signer = arkret_test_kit::seeded_signer_for_seed(
-                applet_service_signing_key(&package.webhook_auth.key_ref).to_bytes(),
+                applet_service_signing_key(&package.webhook_signature_policy.key_ref).to_bytes(),
                 applet_service_did(&package),
-                package.webhook_auth.key_ref.clone(),
+                package.webhook_signature_policy.key_ref.clone(),
             );
             arkret_test_kit::sign_verifiable_event(
                 event,
@@ -1721,7 +1722,7 @@ pub async fn registered_service_pair(pool: PgPool) {
     let permission = factory.fixture.admin_event(EventKind::CapabilityGrant, install.effective_scope.clone(), json!({"grant":{
         "schema":"ak.schema.capability.v1","realm_id":factory.fixture.realm,"issuer_id":accountable,"subject":accountable,
         "actions":["ak.strand.watch.set.others","ak.audit.accessed"],"resources":[{"kind":"realm","realm_id":factory.fixture.realm,"match_scope":"realm_wide"}],"constraints":[],
-        "issuer_authority_refs":[{"kind":"realm_root","realm_id":factory.fixture.realm,"authority_event_ref":factory.fixture.authority_event_ref,"authority_generation":0}],
+        "issuer_authority_refs":[{"kind":"realm_root","realm_id":factory.fixture.realm,"authority_event_ref":factory.fixture.authority_event_ref,"authority_generation":"0"}],
         "issued_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}}));
     accepted_admin_domain_event(&factory.fixture, permission).await;
     let mut strand = factory.fixture.admin_event(EventKind::StrandCreate, install.effective_scope.clone(), json!({"object":{
@@ -1758,8 +1759,8 @@ pub async fn registered_service_pair(pool: PgPool) {
             critical: true,
         }],
     );
-    let request =
-        PeerAuthoritySubmitRequest::AuthorityForwardAtomic(PeerAuthorityForwardAtomicRequest {
+    let request = PeerAuthoritySubmitRequestBody::AuthorityForwardAtomic(
+        PeerAuthorityForwardAtomicRequestBody {
             branch: AuthorityForwardBranch::AuthorityForward,
             atomic_submission: AuditPairedEventUnitSubmission {
                 unit_kind: AuditPairedEventUnitKind::AuditPairedEvent,
@@ -1772,12 +1773,13 @@ pub async fn registered_service_pair(pool: PgPool) {
                 AtomicSlotProducerEvidence::Service {},
                 AtomicSlotProducerEvidence::Service {},
             ],
-        });
+        },
+    );
     request.validate().unwrap();
     // The Account's permission cannot substitute for the Service's exact
     // signed authorization_ref, even if the Service owns another good grant.
     let mut wrong = request.clone();
-    let PeerAuthoritySubmitRequest::AuthorityForwardAtomic(wrong_unit) = &mut wrong else {
+    let PeerAuthoritySubmitRequestBody::AuthorityForwardAtomic(wrong_unit) = &mut wrong else {
         unreachable!()
     };
     wrong_unit.atomic_submission.events[0]
@@ -1785,9 +1787,9 @@ pub async fn registered_service_pair(pool: PgPool) {
         .authorization_ref =
         Some(arkret_wire::AuthorizationRef::new(grant("ak.audit.accessed").to_string()).unwrap());
     let signer = arkret_test_kit::seeded_signer_for_seed(
-        applet_service_signing_key(&package.webhook_auth.key_ref).to_bytes(),
+        applet_service_signing_key(&package.webhook_signature_policy.key_ref).to_bytes(),
         applet_service_did(&package),
-        package.webhook_auth.key_ref.clone(),
+        package.webhook_signature_policy.key_ref.clone(),
     );
     let mut wrong_business = wrong_unit.atomic_submission.events[0].event.clone();
     wrong_business.producer_proof = None;
@@ -1862,12 +1864,12 @@ pub async fn registered_service_pair(pool: PgPool) {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "Service pair: {value}");
-    let outcome: PeerAuthoritySubmitOutcome = serde_json::from_value(value).unwrap();
+    let outcome: PeerAuthoritySubmitResponseBody = serde_json::from_value(value).unwrap();
     outcome.validate_for_request(&request).unwrap();
-    let PeerAuthoritySubmitOutcome::AuthorityForward(outcome) = outcome else {
+    let PeerAuthoritySubmitResponseBody::AuthorityForward(outcome) = outcome else {
         panic!("forward outcome")
     };
-    let PeerAuthorityForwardOutcomeValue::AuditPairedEvent(outcome) = outcome.outcome else {
+    let ForwardedAuthorityResponseBody::AuditPairedEvent(outcome) = outcome.response_body else {
         panic!("pair outcome")
     };
     let source = PgAuthorityCommitStore { pool };
@@ -1885,7 +1887,7 @@ pub async fn registered_service_pair(pool: PgPool) {
             Some(HistoricalProducerSignerFact::Service(_))
         ));
     }
-    let scan = arkret_wire::StreamScanRequest {
+    let scan = arkret_wire::StreamScanRequestBody {
         realm_id: factory.fixture.realm.clone(),
         stream_ref: stream.clone(),
         direction: arkret_wire::StreamScanDirection::Before(Some(
@@ -1929,10 +1931,11 @@ pub async fn registered_service_pair(pool: PgPool) {
         "[2133-service-scan] signed_service_pair=1 peer_tail_rows=2 exact_service_facts={}",
         page.producer_signer_facts.len()
     );
-    let PeerAuthoritySubmitRequest::AuthorityForwardAtomic(peer) = &request else {
+    let PeerAuthoritySubmitRequestBody::AuthorityForwardAtomic(peer) = &request else {
         unreachable!()
     };
-    let self_request = SelfAuthoritySubmitRequest::AuditPairedEvent(peer.atomic_submission.clone());
+    let self_request =
+        SelfAuthoritySubmitRequestBody::AuditPairedEvent(peer.atomic_submission.clone());
     let (status, self_replay) = factory
         .fixture
         .admin_post(
@@ -1947,7 +1950,7 @@ pub async fn registered_service_pair(pool: PgPool) {
         StatusCode::OK,
         "Service self exact recovery: {self_replay}"
     );
-    let self_replay: SelfAuthoritySubmitOutcome = serde_json::from_value(self_replay).unwrap();
+    let self_replay: SelfAuthoritySubmitResponseBody = serde_json::from_value(self_replay).unwrap();
     self_replay.validate_for_request(&self_request).unwrap();
     let self_business = sign(
         EventKind::StrandWatchSet,
@@ -1967,13 +1970,14 @@ pub async fn registered_service_pair(pool: PgPool) {
             critical: true,
         }],
     );
-    let self_first = SelfAuthoritySubmitRequest::AuditPairedEvent(AuditPairedEventUnitSubmission {
-        unit_kind: AuditPairedEventUnitKind::AuditPairedEvent,
-        events: [
-            arkret_wire::EventAdmissionSubmission::new(self_business),
-            arkret_wire::EventAdmissionSubmission::new(self_audit),
-        ],
-    });
+    let self_first =
+        SelfAuthoritySubmitRequestBody::AuditPairedEvent(AuditPairedEventUnitSubmission {
+            unit_kind: AuditPairedEventUnitKind::AuditPairedEvent,
+            events: [
+                arkret_wire::EventAdmissionSubmission::new(self_business),
+                arkret_wire::EventAdmissionSubmission::new(self_audit),
+            ],
+        });
     self_first.validate().unwrap();
     let (status, value) = factory
         .fixture
@@ -1985,7 +1989,7 @@ pub async fn registered_service_pair(pool: PgPool) {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "Service first self pair: {value}");
-    let value: SelfAuthoritySubmitOutcome = serde_json::from_value(value).unwrap();
+    let value: SelfAuthoritySubmitResponseBody = serde_json::from_value(value).unwrap();
     value.validate_for_request(&self_first).unwrap();
     let (status, replay) = factory
         .fixture
@@ -1998,7 +2002,7 @@ pub async fn registered_service_pair(pool: PgPool) {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "Service exact replay: {replay}");
-    let replay: PeerAuthoritySubmitOutcome = serde_json::from_value(replay).unwrap();
+    let replay: PeerAuthoritySubmitResponseBody = serde_json::from_value(replay).unwrap();
     replay.validate_for_request(&request).unwrap();
 }
 
@@ -2109,7 +2113,8 @@ mod realm_native_fixture {
             let mut package =
                 signed_applet_package(applet.as_str(), &namespace, station, Some(&endpoint));
             package.service_id = project_did_to_core_id(&did).unwrap();
-            package.webhook_auth.key_ref = DidUrl::new(native.did_key_id.clone()).unwrap();
+            package.webhook_signature_policy.key_ref =
+                DidUrl::new(native.did_key_id.clone()).unwrap();
 
             let method = package.proof.as_ref().unwrap().verification_method.clone();
             let evidence = applet_registration_epoch_evidence(&package);
@@ -2494,7 +2499,7 @@ mod realm_native_fixture {
     async fn peer_audit_post(
         source: &Fixture,
         destination: &Fixture,
-        body: &arkret_models_integration::PeerRealmActorMaterialRequest,
+        body: &arkret_models_integration::PeerRealmActorMaterialRequestBody,
         tamper: bool,
     ) -> (StatusCode, Value) {
         let bytes = arkret_canonical::canonical_json_bytes(body).unwrap();
@@ -2671,7 +2676,7 @@ mod realm_native_fixture {
         commit: &arkret_wire::RealmCommit,
     ) {
         let actor = &candidate.actor_id;
-        let request: RealmActorMaterialRequest = serde_json::from_value(json!({
+        let request: RealmActorMaterialRequestBody = serde_json::from_value(json!({
             "purpose":"current", "actor_id":actor,
             "request_nonce":arkret_canonical::base64url_encode(rand::random::<[u8;32]>()),
             "selectors":[
@@ -2701,7 +2706,7 @@ mod realm_native_fixture {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "private material: {response}");
-        let material: RealmActorMaterialOutcome = serde_json::from_value(response).unwrap();
+        let material: RealmActorMaterialResponseBody = serde_json::from_value(response).unwrap();
         material
             .validate_for_request(&request, actor, chrono::Utc::now())
             .unwrap();
@@ -2722,7 +2727,7 @@ mod realm_native_fixture {
             &key,
         )
         .unwrap();
-        let RealmActorMaterial::Current { entries } = material.result else {
+        let RealmActorMaterial::Current { entries } = material.material else {
             panic!("current material required");
         };
         let RealmActorMaterialCurrentEntry::Present { source_ref, .. } = &entries[0] else {
@@ -2848,7 +2853,7 @@ mod realm_native_fixture {
         expires_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> arkret_wire::DeviceId {
         use arkret_models_collaboration::authority_commit::{
-            SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
+            SelfAuthoritySubmitRequestBody, SelfAuthoritySubmitResponseBody,
         };
         use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
         use ed25519_dalek::Signer as _;
@@ -2919,7 +2924,7 @@ mod realm_native_fixture {
         serde_json::from_value::<Event>(json!(event)).expect("Device Event wire round trip");
         serde_json::from_value::<DeviceAuthorizePayload>(json!(payload))
             .expect("Device payload wire round trip");
-        let request = SelfAuthoritySubmitRequest::Event(
+        let request = SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(event.clone()),
         );
         let metadata = RealmActorControlHttpMetadata {
@@ -2952,7 +2957,7 @@ mod realm_native_fixture {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "first Device: {response}");
-        let outcome: SelfAuthoritySubmitOutcome = serde_json::from_value(response).unwrap();
+        let outcome: SelfAuthoritySubmitResponseBody = serde_json::from_value(response).unwrap();
         outcome.validate_for_request(&request).unwrap();
         let accepted = fixture
             .state
@@ -2976,7 +2981,7 @@ mod realm_native_fixture {
         installation: &Value,
     ) {
         use arkret_models_collaboration::authority_commit::{
-            SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
+            SelfAuthoritySubmitRequestBody, SelfAuthoritySubmitResponseBody,
         };
         let authority = fixture
             .state
@@ -3032,7 +3037,7 @@ mod realm_native_fixture {
         )
         .unwrap();
         let event = authored.into_event();
-        let request = SelfAuthoritySubmitRequest::Event(
+        let request = SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(event.clone()),
         );
         let metadata = arkret_models_integration::AppletManagedDeviceMetadata {
@@ -3056,7 +3061,7 @@ mod realm_native_fixture {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "Realm Device self join: {response}");
-        let outcome: SelfAuthoritySubmitOutcome = serde_json::from_value(response).unwrap();
+        let outcome: SelfAuthoritySubmitResponseBody = serde_json::from_value(response).unwrap();
         outcome.validate_for_request(&request).unwrap();
         let accepted = fixture
             .state
@@ -3093,7 +3098,7 @@ mod realm_native_fixture {
         let inception = prepare_realm_actor_inception(&RealmActorInceptionInput {
             principal_endpoint: &endpoint,
             local_id: "ghost-1",
-            version_time: at,
+            version_created_at: at,
             root_seed: &root,
             next_root_public_key_multibase: &next_key,
             controller_public_key: control.verifying_key().as_bytes(),
@@ -3129,9 +3134,9 @@ mod realm_native_fixture {
         let service_did = applet_service_did(package);
         let service = package.service_id.clone();
         let signer = Ed25519PayloadSigner::new(
-            applet_service_signing_key(&package.webhook_auth.key_ref),
+            applet_service_signing_key(&package.webhook_signature_policy.key_ref),
             service_did,
-            package.webhook_auth.key_ref.clone(),
+            package.webhook_signature_policy.key_ref.clone(),
         );
         let method = DidUrl::new(format!("{}#managed-controller", inception.did)).unwrap();
         let mut value = json!({
@@ -3213,7 +3218,7 @@ mod realm_native_fixture {
                     &arkret_canonical::ed25519_pubkey_to_did_key_multibase(
                         next_update.verifying_key().as_bytes(),
                     ),
-                version_time: at,
+                version_created_at: at,
             },
         )
         .unwrap();
@@ -3375,7 +3380,7 @@ mod realm_native_fixture {
                     &arkret_canonical::ed25519_pubkey_to_did_key_multibase(
                         SigningKey::from_bytes(&[46; 32]).verifying_key().as_bytes(),
                     ),
-                version_time: at,
+                version_created_at: at,
             },
         )
         .unwrap();
@@ -3445,7 +3450,7 @@ mod realm_native_fixture {
         current: &arkret_wire::RealmCommit,
         published: &AppletManagedActorMethodHistoryEvidence,
     ) {
-        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
         let old_method = DidUrl::new(format!(
             "{}#recovered-controller",
             candidate.initial_resolution.did
@@ -3515,7 +3520,7 @@ mod realm_native_fixture {
             )
             .unwrap();
             let event = authored.into_event();
-            let request = SelfAuthoritySubmitRequest::Event(
+            let request = SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(event.clone()),
             );
             metadata.nonce = arkret_canonical::base64url_encode(rand::random::<[u8; 32]>());
@@ -3629,7 +3634,7 @@ mod realm_native_fixture {
             },
             nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
         };
-        let request = RealmActorMaterialRequest::Outcome {
+        let request = RealmActorMaterialRequestBody::RequestStatus {
             actor_id: candidate.actor_id.clone(),
             request_nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
             target_request_digest: digest.clone(),
@@ -3644,7 +3649,7 @@ mod realm_native_fixture {
         )
         .await;
         if status == StatusCode::OK {
-            let material: RealmActorMaterialOutcome =
+            let material: RealmActorMaterialResponseBody =
                 serde_json::from_value(value.clone()).unwrap();
             material
                 .validate_for_request(&request, &candidate.actor_id, chrono::Utc::now())
@@ -3686,7 +3691,7 @@ mod realm_native_fixture {
         candidate: &RealmActorCreatePayload,
         creation: &arkret_wire::RealmCommit,
     ) {
-        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
         use arkret_models_collaboration::events_payloads::DeviceRevokePayload;
         use diesel::sql_query;
         use diesel::sql_types::{Jsonb, Text};
@@ -3728,7 +3733,7 @@ mod realm_native_fixture {
             )
             .unwrap();
             let event = authored.into_event();
-            let request = SelfAuthoritySubmitRequest::Event(
+            let request = SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(event.clone()),
             );
             let metadata = RealmActorControlHttpMetadata {
@@ -3768,14 +3773,19 @@ mod realm_native_fixture {
                 StatusCode::OK,
                 "revoke pending material: {response}"
             );
-            let material: RealmActorMaterialOutcome = serde_json::from_value(response).unwrap();
-            let RealmActorMaterial::Outcome { outcome, .. } = material.result else {
+            let material: RealmActorMaterialResponseBody =
+                serde_json::from_value(response).unwrap();
+            let RealmActorMaterial::RequestStatus {
+                request_status: outcome,
+                ..
+            } = material.material
+            else {
                 panic!("outcome required")
             };
             assert!(matches!(
                 outcome,
-                RealmActorOperationOutcome::DeviceRevoke {
-                    state: RealmActorDeviceRevokeState::Pending,
+                RealmActorRequestStatus::DeviceRevoke {
+                    state: RealmActorDeviceRevocationState::Pending,
                     decided_at: None,
                     ..
                 }
@@ -3798,13 +3808,13 @@ mod realm_native_fixture {
         );
         for (digest, outcome, authority) in &pending[..2] {
             let mut terminal = outcome.clone();
-            let RealmActorOperationOutcome::DeviceRevoke {
+            let RealmActorRequestStatus::DeviceRevoke {
                 state, decided_at, ..
             } = &mut terminal
             else {
                 unreachable!()
             };
-            *state = RealmActorDeviceRevokeState::Rejected;
+            *state = RealmActorDeviceRevocationState::Rejected;
             *decided_at = Some(arkret_canonical::normalize_timestamp_canonical(
                 chrono::Utc::now(),
             ));
@@ -3829,14 +3839,19 @@ mod realm_native_fixture {
                 .unwrap();
             let (_, response) =
                 boxed_step(|| revoke_material(fixture, candidate, creation, digest)).await;
-            let material: RealmActorMaterialOutcome = serde_json::from_value(response).unwrap();
-            let RealmActorMaterial::Outcome { outcome: read, .. } = material.result else {
+            let material: RealmActorMaterialResponseBody =
+                serde_json::from_value(response).unwrap();
+            let RealmActorMaterial::RequestStatus {
+                request_status: read,
+                ..
+            } = material.material
+            else {
                 unreachable!()
             };
             assert_eq!(json!(read), json!(terminal));
             let mut conflict = terminal.clone();
-            if let RealmActorOperationOutcome::DeviceRevoke { state, .. } = &mut conflict {
-                *state = RealmActorDeviceRevokeState::Accepted;
+            if let RealmActorRequestStatus::DeviceRevoke { state, .. } = &mut conflict {
+                *state = RealmActorDeviceRevocationState::Accepted;
             }
             assert!(
                 store
@@ -3859,7 +3874,7 @@ mod realm_native_fixture {
             );
         }
         let (digest, outcome, _) = &pending[2];
-        let RealmActorOperationOutcome::DeviceRevoke { proposal_ref, .. } = outcome else {
+        let RealmActorRequestStatus::DeviceRevoke { proposal_ref, .. } = outcome else {
             unreachable!()
         };
         let mut conn = fixture.pool.get().await.unwrap();
@@ -3911,12 +3926,12 @@ mod realm_native_fixture {
         let (status, response) =
             boxed_step(|| revoke_material(fixture, candidate, creation, digest)).await;
         assert_eq!(status, StatusCode::OK, "terminal material: {response}");
-        let material: RealmActorMaterialOutcome = serde_json::from_value(response).unwrap();
+        let material: RealmActorMaterialResponseBody = serde_json::from_value(response).unwrap();
         assert!(matches!(
-            material.result,
-            RealmActorMaterial::Outcome {
-                outcome: RealmActorOperationOutcome::DeviceRevoke {
-                    state: RealmActorDeviceRevokeState::Accepted,
+            material.material,
+            RealmActorMaterial::RequestStatus {
+                request_status: RealmActorRequestStatus::DeviceRevoke {
+                    state: RealmActorDeviceRevocationState::Accepted,
                     decided_at: Some(_),
                     ..
                 },
@@ -3960,7 +3975,7 @@ mod realm_native_fixture {
         native: &NativeService,
         candidate: &RealmActorCreatePayload,
     ) {
-        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
         let completion_before = durable_completion(fixture, &candidate.actor_id).await;
         let persistence = fixture.state.test_persistence();
         let grant_source = persistence
@@ -3997,8 +4012,9 @@ mod realm_native_fixture {
             "current installation material: {active_material}"
         );
         assert_eq!(active_material["current_binding"]["status"], "active");
-        let revoke_request =
-            SelfAuthoritySubmitRequest::Event(arkret_wire::EventAdmissionSubmission::new(revoke));
+        let revoke_request = SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission::new(revoke),
+        );
         let (status, response) = fixture
             .admin_post_network(
                 "/_arkret/self/events",
@@ -4050,7 +4066,7 @@ mod realm_native_fixture {
             value: Value,
         }
         let mut conn = fixture.pool.get().await.unwrap();
-        let missing = diesel::sql_query("DELETE FROM applet_registration_current_results WHERE realm_id=$1 AND applet_id=$2 RETURNING to_jsonb(applet_registration_current_results) AS value")
+        let missing = diesel::sql_query("DELETE FROM applet_registration_current_states WHERE realm_id=$1 AND applet_id=$2 RETURNING to_jsonb(applet_registration_current_states) AS value")
             .bind::<Text,_>(fixture.realm.as_str())
             .bind::<Text,_>(candidate.applet_id.as_str())
             .get_result::<MissingRegistration>(&mut conn).await.unwrap();
@@ -4063,7 +4079,7 @@ mod realm_native_fixture {
                 "installation-missing-current-is-not-inactive",
             )
             .await;
-        diesel::sql_query("INSERT INTO applet_registration_current_results SELECT * FROM jsonb_populate_record(NULL::applet_registration_current_results,$1)")
+        diesel::sql_query("INSERT INTO applet_registration_current_states SELECT * FROM jsonb_populate_record(NULL::applet_registration_current_states,$1)")
             .bind::<Jsonb,_>(missing.value).execute(&mut conn).await.unwrap();
         drop(conn);
         assert_ne!(
@@ -4088,7 +4104,7 @@ mod realm_native_fixture {
                 "grant_id":grant_id,
                 "expected_revision":{"commit_id":source.commit.commit_id,"stream_position":source.commit.stream_position}
             }));
-            let request = SelfAuthoritySubmitRequest::Event(
+            let request = SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(revoke),
             );
             let (status, result) = fixture
@@ -4144,7 +4160,7 @@ mod realm_native_fixture {
             .as_ref()
             .unwrap()
             .material
-            .result
+            .material
         else {
             panic!("expected original creation")
         };
@@ -4161,7 +4177,7 @@ mod realm_native_fixture {
         device: &arkret_wire::DeviceId,
     ) {
         use arkret_models_collaboration::authority_commit::{
-            SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
+            SelfAuthoritySubmitRequestBody, SelfAuthoritySubmitResponseBody,
         };
         use diesel::sql_query;
         use diesel::sql_types::{Jsonb, Text};
@@ -4173,7 +4189,7 @@ mod realm_native_fixture {
         }
         async fn snapshot(fixture: &Fixture, actor: &ActorId) -> Value {
             let mut conn = fixture.pool.get().await.unwrap();
-            sql_query("SELECT jsonb_object_agg(selector->>'kind'||COALESCE(selector->>'gate',''),value) AS value FROM realm_actor_current_results WHERE realm_id=$1 AND actor_id=$2")
+            sql_query("SELECT jsonb_object_agg(selector->>'kind'||COALESCE(selector->>'gate',''),value) AS value FROM realm_actor_current_states WHERE realm_id=$1 AND actor_id=$2")
                 .bind::<Text,_>(fixture.realm.as_str()).bind::<Jsonb,_>(json!(actor)).get_result::<Row>(&mut conn).await.unwrap().value
         }
         eprintln!("recovery: checking current device");
@@ -4219,7 +4235,7 @@ mod realm_native_fixture {
         let mut bad_plan = plan.clone();
         bad_plan.expected_control_revision.stream_position += 1;
         let bad = make_begin(bad_plan);
-        let request = SelfAuthoritySubmitRequest::Event(
+        let request = SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(bad.clone()),
         );
         let (status, _) = fixture
@@ -4248,7 +4264,7 @@ mod realm_native_fixture {
         eprintln!("recovery: beginning accepted plan");
         let begin = make_begin(plan.clone());
         assert!(begin.authorization_ref.is_none());
-        let request = SelfAuthoritySubmitRequest::Event(
+        let request = SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(begin.clone()),
         );
         let (status, response) = fixture
@@ -4261,7 +4277,7 @@ mod realm_native_fixture {
             )
             .await;
         assert_eq!(status, StatusCode::OK, "recovery begin: {response}");
-        serde_json::from_value::<SelfAuthoritySubmitOutcome>(response)
+        serde_json::from_value::<SelfAuthoritySubmitResponseBody>(response)
             .unwrap()
             .validate_for_request(&request)
             .unwrap();
@@ -4325,7 +4341,7 @@ mod realm_native_fixture {
             },
             nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
         };
-        let pending_request = SelfAuthoritySubmitRequest::Event(
+        let pending_request = SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(pending_resume),
         );
         let (status, _) = control_post(
@@ -4376,9 +4392,9 @@ mod realm_native_fixture {
         )
         .unwrap();
         let reset = authored.into_event();
-        let finish = SelfAuthoritySubmitRequest::Event(arkret_wire::EventAdmissionSubmission::new(
-            reset.clone(),
-        ));
+        let finish = SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission::new(reset.clone()),
+        );
         let (status, _) = fixture
             .service_post(
                 &native.package,
@@ -4441,7 +4457,7 @@ mod realm_native_fixture {
             .unwrap()
             .unwrap();
         assert_eq!(stored.commit, accepted.commit);
-        let material = RealmActorMaterialRequest::Outcome {
+        let material = RealmActorMaterialRequestBody::RequestStatus {
             actor_id: candidate.actor_id.clone(),
             request_nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
             target_request_digest: Hash::new(canonical_sha256(&request).unwrap()).unwrap(),
@@ -4487,8 +4503,9 @@ mod realm_native_fixture {
             &[44; 32],
             RealmActorStatusSetPayloadState::Active,
         );
-        let resume_request =
-            SelfAuthoritySubmitRequest::Event(arkret_wire::EventAdmissionSubmission::new(resume));
+        let resume_request = SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission::new(resume),
+        );
         let (status, response) = control_post_with_seed(
             fixture,
             &metadata,
@@ -4552,7 +4569,7 @@ mod realm_native_fixture {
             arkret_signatures::SignEventOptions::new().with_created_at(at),
         )
         .unwrap();
-        let devices_request = SelfAuthoritySubmitRequest::Event(
+        let devices_request = SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(authored.into_event()),
         );
         let mut metadata = metadata;
@@ -4611,7 +4628,7 @@ mod realm_native_fixture {
             value: Value,
         }
         let mut conn = fixture.pool.get().await.unwrap();
-        let row = sql_query("SELECT jsonb_build_object('event_id',c.commit_json->'event_ref','commit_id',r.current_commit_id,'stream_ref',r.source_stream_ref,'stream_position',r.current_stream_position) AS value FROM realm_actor_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id WHERE r.realm_id=$1 AND r.actor_id=$2 AND r.selector=$3")
+        let row = sql_query("SELECT jsonb_build_object('event_id',c.commit_json->'event_ref','commit_id',r.current_commit_id,'stream_ref',r.source_stream_ref,'stream_position',r.current_stream_position) AS value FROM realm_actor_current_states r JOIN realm_commits c ON c.commit_id=r.current_commit_id WHERE r.realm_id=$1 AND r.actor_id=$2 AND r.selector=$3")
             .bind::<Text,_>(fixture.realm.as_str()).bind::<Jsonb,_>(json!(actor)).bind::<Jsonb,_>(selector)
             .get_result::<Row>(&mut conn).await.unwrap();
         serde_json::from_value(row.value).unwrap()
@@ -4622,7 +4639,7 @@ mod realm_native_fixture {
         native: &NativeService,
         candidate: &RealmActorCreatePayload,
     ) {
-        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
         let fixture = &factory.fixture;
         let actor = &candidate.actor_id;
         let completion = fixture
@@ -4697,7 +4714,7 @@ mod realm_native_fixture {
             &control.control_method_kid,
             "/_arkret/self/events",
             arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1,
-            &json!(SelfAuthoritySubmitRequest::Event(
+            &json!(SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(pause)
             )),
             &[55; 32],
@@ -4763,10 +4780,10 @@ mod realm_native_fixture {
                 "actions":["ak.realm.actor.manager.change"],
                 "resources":[{"kind":"realm_actor","actor_id":actor}],"constraints":[],
                 "issuer_authority_refs":[{"kind":"realm_root","realm_id":fixture.realm,
-                    "authority_event_ref":fixture.authority_event_ref,"authority_generation":0}],
+                    "authority_event_ref":fixture.authority_event_ref,"authority_generation":"0"}],
                 "issued_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}}),
         );
-        let grant_request = SelfAuthoritySubmitRequest::Event(
+        let grant_request = SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(grant.clone()),
         );
         let (status, response) = fixture
@@ -4810,7 +4827,7 @@ mod realm_native_fixture {
                                 .verifying_key()
                                 .as_bytes(),
                         ),
-                    version_time: std::cmp::max(
+                    version_created_at: std::cmp::max(
                         chrono::Utc::now(),
                         previous_time + chrono::Duration::seconds(1),
                     ),
@@ -4879,9 +4896,9 @@ mod realm_native_fixture {
         let signature = sign_detached_object(
             &transcript,
             DetachedSignatureContext::RealmActorManagerAcceptance,
-            receiving.package.webhook_auth.key_ref.clone(),
+            receiving.package.webhook_signature_policy.key_ref.clone(),
             at,
-            &applet_service_signing_key(&receiving.package.webhook_auth.key_ref),
+            &applet_service_signing_key(&receiving.package.webhook_signature_policy.key_ref),
         )
         .unwrap();
         let mut value = json!(transcript);
@@ -4923,7 +4940,7 @@ mod realm_native_fixture {
         let mut wrong = payload.clone();
         wrong.expected_manager_revision.stream_position += 1;
         let rejected = author(wrong);
-        let request = SelfAuthoritySubmitRequest::Event(
+        let request = SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(rejected.clone()),
         );
         let (status, _) = control_post_with_seed(
@@ -4953,7 +4970,7 @@ mod realm_native_fixture {
                 .is_none()
         );
         let event = author(payload);
-        let request = SelfAuthoritySubmitRequest::Event(
+        let request = SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(event.clone()),
         );
         let (status, response) = control_post_with_seed(
@@ -5060,7 +5077,7 @@ mod realm_native_fixture {
             (&native.package, StatusCode::NOT_FOUND),
             (&receiving.package, StatusCode::OK),
         ] {
-            let request = RealmActorMaterialRequest::Current {
+            let request = RealmActorMaterialRequestBody::Current {
                 actor_id: actor.clone(),
                 request_nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
                 selectors: vec![
@@ -5094,7 +5111,7 @@ mod realm_native_fixture {
             value: Value,
         }
         let mut conn = fixture.pool.get().await.unwrap();
-        sql_query("SELECT jsonb_object_agg(selector->>'kind'||COALESCE(selector->>'gate',''),value) AS value FROM realm_actor_current_results WHERE realm_id=$1 AND actor_id=$2")
+        sql_query("SELECT jsonb_object_agg(selector->>'kind'||COALESCE(selector->>'gate',''),value) AS value FROM realm_actor_current_states WHERE realm_id=$1 AND actor_id=$2")
             .bind::<Text,_>(fixture.realm.as_str()).bind::<Jsonb,_>(json!(actor)).get_result::<Row>(&mut conn).await.unwrap().value
     }
     async fn current_revision(fixture: &Fixture, actor: &ActorId, kind: &str) -> Value {
@@ -5107,7 +5124,7 @@ mod realm_native_fixture {
             value: Value,
         }
         let mut conn = fixture.pool.get().await.unwrap();
-        sql_query("SELECT jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position) AS value FROM realm_actor_current_results WHERE realm_id=$1 AND actor_id=$2 AND selector->>'kind'=$3")
+        sql_query("SELECT jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position) AS value FROM realm_actor_current_states WHERE realm_id=$1 AND actor_id=$2 AND selector->>'kind'=$3")
             .bind::<Text,_>(fixture.realm.as_str()).bind::<Jsonb,_>(json!(actor)).bind::<Text,_>(kind).get_result::<Row>(&mut conn).await.unwrap().value
     }
 
@@ -5117,13 +5134,13 @@ mod realm_native_fixture {
         candidate: &arkret_models_integration::RealmActorCreatePayload,
         creation: &arkret_wire::RealmCommit,
     ) -> arkret_wire::GrantId {
-        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
         let admin = ActorId::account(fixture.pcr.history.account.clone());
         let permission = fixture.admin_event(EventKind::CapabilityGrant,
             ScopeRef::Realm { realm_id: fixture.realm.clone() }, json!({"grant":{
                 "schema":"ak.schema.capability.v1","realm_id":fixture.realm,"issuer_id":admin,"subject":admin,
                 "actions":["ak.realm.actor.manage"],"resources":[{"kind":"realm_actor","actor_id":candidate.actor_id}],"constraints":[],
-                "issuer_authority_refs":[{"kind":"realm_root","realm_id":fixture.realm,"authority_event_ref":fixture.authority_event_ref,"authority_generation":0}],
+                "issuer_authority_refs":[{"kind":"realm_root","realm_id":fixture.realm,"authority_event_ref":fixture.authority_event_ref,"authority_generation":"0"}],
                 "issued_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}}));
         let grant = arkret_wire::GrantId::from_event_id(&permission.event_id);
         let command = |kind, payload| {
@@ -5149,7 +5166,7 @@ mod realm_native_fixture {
                 .admin_post_network(
                     "/_arkret/self/events",
                     arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-                    &json!(SelfAuthoritySubmitRequest::Event(
+                    &json!(SelfAuthoritySubmitRequestBody::Event(
                         arkret_wire::EventAdmissionSubmission::new(event)
                     )),
                     "governance-control",
@@ -5165,7 +5182,7 @@ mod realm_native_fixture {
         );
         assert_eq!(before, snapshot(fixture, &candidate.actor_id).await);
         accepted_admin_domain_event(fixture, permission).await;
-        let audit_request: RealmActorMaterialRequest = serde_json::from_value(json!({
+        let audit_request: RealmActorMaterialRequestBody = serde_json::from_value(json!({
             "purpose":"current", "actor_id":candidate.actor_id,
             "request_nonce":arkret_canonical::base64url_encode(rand::random::<[u8;32]>()),
             "selectors":[{"kind":"realm_actor_recovery","actor_id":candidate.actor_id}]
@@ -5184,7 +5201,7 @@ mod realm_native_fixture {
             ScopeRef::Realm { realm_id: fixture.realm.clone() }, json!({"grant":{
                 "schema":"ak.schema.capability.v1","realm_id":fixture.realm,"issuer_id":admin,"subject":admin,
                 "actions":["ak.realm.actor.audit"],"resources":[{"kind":"realm_actor","actor_id":candidate.actor_id}],"constraints":[],
-                "issuer_authority_refs":[{"kind":"realm_root","realm_id":fixture.realm,"authority_event_ref":fixture.authority_event_ref,"authority_generation":0}],
+                "issuer_authority_refs":[{"kind":"realm_root","realm_id":fixture.realm,"authority_event_ref":fixture.authority_event_ref,"authority_generation":"0"}],
                 "issued_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}}));
         accepted_admin_domain_event(fixture, audit_permission).await;
         let (status, response) = fixture
@@ -5196,7 +5213,7 @@ mod realm_native_fixture {
             )
             .await;
         assert_eq!(status, StatusCode::OK, "explicit Account audit: {response}");
-        let material: RealmActorMaterialOutcome = serde_json::from_value(response).unwrap();
+        let material: RealmActorMaterialResponseBody = serde_json::from_value(response).unwrap();
         material
             .validate_for_request(&audit_request, &admin, chrono::Utc::now())
             .unwrap();
@@ -5344,7 +5361,7 @@ mod realm_native_fixture {
     ) {
         // The Applet did not author the administrator's replacement. Obtain
         // its complete original coordinate solely through the signed API.
-        let request: RealmActorMaterialRequest = serde_json::from_value(json!({
+        let request: RealmActorMaterialRequestBody = serde_json::from_value(json!({
             "purpose":"current", "actor_id":candidate.actor_id,
             "request_nonce":arkret_canonical::base64url_encode(rand::random::<[u8;32]>()),
             "selectors":[{"kind":"realm_actor_recovery","actor_id":candidate.actor_id}]
@@ -5364,7 +5381,7 @@ mod realm_native_fixture {
             StatusCode::OK,
             "Service current after re-enable: {response}"
         );
-        let material: RealmActorMaterialOutcome = serde_json::from_value(response).unwrap();
+        let material: RealmActorMaterialResponseBody = serde_json::from_value(response).unwrap();
         material
             .validate_for_request(
                 &request,
@@ -5386,13 +5403,13 @@ mod realm_native_fixture {
             },
         )
         .unwrap();
-        let RealmActorMaterial::Current { entries } = &material.result else {
+        let RealmActorMaterial::Current { entries } = &material.material else {
             panic!("current required")
         };
         let RealmActorMaterialCurrentEntry::Present { row, source_ref } = &entries[0] else {
             panic!("recovery must be present")
         };
-        let arkret_wire::TypedCurrentRow::Value {
+        let arkret_wire::CurrentState::Value {
             revision, value, ..
         } = row;
         assert_eq!(value["enabled"], true);
@@ -5400,7 +5417,7 @@ mod realm_native_fixture {
         assert_ne!(source_ref.event_id, creation.event_ref);
         assert_eq!(source_ref.commit_id, revision.commit_id);
         assert_eq!(source_ref.stream_position, revision.stream_position);
-        let request = RealmActorMaterialRequest::Event {
+        let request = RealmActorMaterialRequestBody::Event {
             actor_id: candidate.actor_id.clone(),
             request_nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
             target: source_ref.clone(),
@@ -5419,7 +5436,7 @@ mod realm_native_fixture {
             StatusCode::OK,
             "Service reads actual re-enable original: {response}"
         );
-        let material: RealmActorMaterialOutcome = serde_json::from_value(response).unwrap();
+        let material: RealmActorMaterialResponseBody = serde_json::from_value(response).unwrap();
         material
             .validate_for_request(
                 &request,
@@ -5427,7 +5444,7 @@ mod realm_native_fixture {
                 chrono::Utc::now(),
             )
             .unwrap();
-        let RealmActorMaterial::Event { event, .. } = material.result else {
+        let RealmActorMaterial::Event { event, .. } = material.material else {
             panic!("original required")
         };
         assert_eq!(&event, enable);
@@ -5521,7 +5538,7 @@ mod realm_native_fixture {
         candidate: &RealmActorCreatePayload,
     ) {
         use arkret_models_crypto::{
-            PeerKeysQueryOutcome, PeerKeysQueryPurpose, PeerKeysQueryRequestBody,
+            PeerKeysQueryPurpose, PeerKeysQueryRequestBody, PeerKeysQueryResponseBody,
             PeerKeysRelationshipBasis, QueryAccountDeviceSelector,
         };
         let request = PeerKeysQueryRequestBody {
@@ -5545,7 +5562,7 @@ mod realm_native_fixture {
             StatusCode::OK,
             "Realm requester peer device query: {value}"
         );
-        let outcome: PeerKeysQueryOutcome = serde_json::from_value(value).unwrap();
+        let outcome: PeerKeysQueryResponseBody = serde_json::from_value(value).unwrap();
         outcome.validate_for_request(&request).unwrap();
         let row = outcome
             .device_keys
@@ -5601,7 +5618,7 @@ mod realm_native_fixture {
             StatusCode::OK,
             "nonmember indistinguishable directory outcome: {value}"
         );
-        let unavailable: PeerKeysQueryOutcome = serde_json::from_value(value).unwrap();
+        let unavailable: PeerKeysQueryResponseBody = serde_json::from_value(value).unwrap();
         assert!(unavailable.device_keys.is_empty());
         assert!(unavailable.device_generations.is_empty());
         let mut substituted = outcome;
@@ -5610,7 +5627,7 @@ mod realm_native_fixture {
     }
 
     async fn cross_station_audit(fixture: &Fixture, candidate: &RealmActorCreatePayload) {
-        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
         let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
         let (account_station, _server) = network_fixture(database.pool()).await;
         for (reader, destination) in [(&account_station, fixture), (fixture, &account_station)] {
@@ -5698,7 +5715,7 @@ mod realm_native_fixture {
             .admin_post(
                 "/_arkret/self/events",
                 arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-                &json!(SelfAuthoritySubmitRequest::Event(
+                &json!(SelfAuthoritySubmitRequestBody::Event(
                     arkret_wire::EventAdmissionSubmission::new(accept)
                 )),
                 None,
@@ -5726,7 +5743,7 @@ mod realm_native_fixture {
             );
         }
         boxed_step(|| realm_peer_device_lookup(fixture, &account_station, candidate)).await;
-        let request = || -> RealmActorMaterialRequest {
+        let request = || -> RealmActorMaterialRequestBody {
             serde_json::from_value(json!({
                 "purpose":"current", "actor_id":candidate.actor_id,
                 "request_nonce":arkret_canonical::base64url_encode(rand::random::<[u8;32]>()),
@@ -5751,14 +5768,14 @@ mod realm_native_fixture {
             "schema":"ak.schema.capability.v1","realm_id":fixture.realm,
             "issuer_id":ActorId::account(fixture.pcr.history.account.clone()),"subject":requester,
             "actions":["ak.realm.actor.audit"],"resources":[{"kind":"realm_actor","actor_id":candidate.actor_id}],"constraints":[],
-            "issuer_authority_refs":[{"kind":"realm_root","realm_id":fixture.realm,"authority_event_ref":fixture.authority_event_ref,"authority_generation":0}],
+            "issuer_authority_refs":[{"kind":"realm_root","realm_id":fixture.realm,"authority_event_ref":fixture.authority_event_ref,"authority_generation":"0"}],
             "issued_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}}));
         let grant_id = arkret_wire::GrantId::from_event_id(&grant.event_id);
         let (status, response) = fixture
             .admin_post(
                 "/_arkret/self/events",
                 arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-                &json!(SelfAuthoritySubmitRequest::Event(
+                &json!(SelfAuthoritySubmitRequestBody::Event(
                     arkret_wire::EventAdmissionSubmission::new(grant.clone())
                 )),
                 None,
@@ -5769,7 +5786,7 @@ mod realm_native_fixture {
             StatusCode::OK,
             "audit grant through real fanout admission: {response}"
         );
-        let peer = || arkret_models_integration::PeerRealmActorMaterialRequest {
+        let peer = || arkret_models_integration::PeerRealmActorMaterialRequestBody {
             requester_account_id: account_station.pcr.history.account.clone(),
             request: request(),
         };
@@ -5808,7 +5825,7 @@ mod realm_native_fixture {
             StatusCode::OK,
             "real two-Station private audit: {response}"
         );
-        let material: RealmActorMaterialOutcome = serde_json::from_value(response).unwrap();
+        let material: RealmActorMaterialResponseBody = serde_json::from_value(response).unwrap();
         material
             .validate_for_request(&request, &requester, chrono::Utc::now())
             .unwrap();
@@ -5900,7 +5917,7 @@ mod realm_native_fixture {
             .admin_post(
                 "/_arkret/self/events",
                 arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-                &json!(SelfAuthoritySubmitRequest::Event(
+                &json!(SelfAuthoritySubmitRequestBody::Event(
                     arkret_wire::EventAdmissionSubmission::new(revoke)
                 )),
                 None,
@@ -5916,9 +5933,9 @@ mod realm_native_fixture {
                 value: Value,
             }
             let mut governor = fixture.pool.get().await.unwrap();
-            let current = diesel::sql_query("SELECT jsonb_build_object('selector',jsonb_build_object('kind','capability_grant','grant_id',grant_id),'source_stream_ref',current_stream_ref,'revision',jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position),'value',value) AS value FROM capability_grant_current_results WHERE realm_id=$1 AND grant_id=$2")
+            let current = diesel::sql_query("SELECT jsonb_build_object('selector',jsonb_build_object('kind','capability_grant','grant_id',grant_id),'source_stream_ref',current_stream_ref,'revision',jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position),'value',value) AS value FROM capability_grant_current_states WHERE realm_id=$1 AND grant_id=$2")
                 .bind::<Text,_>(fixture.realm.as_str()).bind::<Text,_>(grant_id.as_str()).get_result::<Current>(&mut *governor).await.unwrap();
-            let arkret_wire::TypedCurrentRow::Value {
+            let arkret_wire::CurrentState::Value {
                 selector,
                 source_stream_ref,
                 revision,
@@ -5983,7 +6000,7 @@ mod realm_native_fixture {
             pool: target_pool.clone(),
         };
         let mut conn = target_pool.get().await.unwrap();
-        conn.batch_execute("CREATE FUNCTION test_private_archive_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private archive write failure'; END $$; CREATE TRIGGER test_private_archive_failure BEFORE INSERT ON realm_actor_current_results FOR EACH ROW EXECUTE FUNCTION test_private_archive_failure();")
+        conn.batch_execute("CREATE FUNCTION test_private_archive_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private archive write failure'; END $$; CREATE TRIGGER test_private_archive_failure BEFORE INSERT ON realm_actor_current_states FOR EACH ROW EXECUTE FUNCTION test_private_archive_failure();")
             .await.unwrap();
         assert!(
             target_store
@@ -5997,7 +6014,7 @@ mod realm_native_fixture {
             count.count, 0,
             "a mid-import writer failure rolls back original Events and creations"
         );
-        conn.batch_execute("DROP TRIGGER test_private_archive_failure ON realm_actor_current_results; DROP FUNCTION test_private_archive_failure();").await.unwrap();
+        conn.batch_execute("DROP TRIGGER test_private_archive_failure ON realm_actor_current_states; DROP FUNCTION test_private_archive_failure();").await.unwrap();
         if !archive["tables"]["realm_actor_blob_uploads"]
             .as_array()
             .unwrap()
@@ -6091,7 +6108,7 @@ mod realm_native_fixture {
     }
 
     async fn private_management_archive(fixture: &Fixture, has_blob: bool) {
-        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
         let store = PgAuthorityCommitStore {
             pool: fixture.pool.clone(),
         };
@@ -6117,7 +6134,7 @@ mod realm_native_fixture {
                 realm_id: fixture.realm.clone(),
             },
             json!({
-                "expected_governance_generation":authority.generation,
+                "expected_governance_generation":(authority.generation).to_string(),
                 "expected_realm_stream_commit_id":head.commit_id,
                 "new_governance_station_id":"ak:did_core:web:archive-next.example"
             }),
@@ -6126,7 +6143,7 @@ mod realm_native_fixture {
             .admin_post(
                 "/_arkret/self/events",
                 arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-                &json!(SelfAuthoritySubmitRequest::Event(
+                &json!(SelfAuthoritySubmitRequestBody::Event(
                     arkret_wire::EventAdmissionSubmission::new(change)
                 )),
                 None,
@@ -6206,7 +6223,7 @@ mod realm_native_fixture {
                     changed["tables"]["private_keys"] = json!([]);
                 }
                 "changed_current" => {
-                    changed["tables"]["realm_actor_current_results"][0]["value"] = json!(null);
+                    changed["tables"]["realm_actor_current_states"][0]["value"] = json!(null);
                 }
                 "missing_event" => {
                     changed["tables"]["canonical_events"]
@@ -6282,7 +6299,7 @@ mod realm_native_fixture {
     async fn commit_install_http(
         fixture: &Fixture,
         install: &AppletFormalCommitUnit,
-    ) -> AppletInstallOutcome {
+    ) -> AppletInstallResponseBody {
         let body = serde_json::to_value(&install.input.request).unwrap();
         let (status, outcome) = boxed_step(|| {
             fixture.admin_post(
@@ -6534,7 +6551,7 @@ mod realm_native_fixture {
                 .unwrap();
             let RealmActorMaterial::Event {
                 commit: creation, ..
-            } = &original.authoring_context.material.result
+            } = &original.authoring_context.material.material
             else {
                 panic!("accepted creation original required");
             };
@@ -6753,7 +6770,7 @@ mod realm_native_fixture {
                     }));
                 event.authorization_ref = Some(grant.clone().into());
                 let event = fixture.sign_admin(event);
-                let body = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+                let body = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
                     arkret_wire::EventAdmissionSubmission::new(event));
                 let (status, response) = fixture
                     .admin_post_network(
@@ -6890,9 +6907,9 @@ mod realm_native_fixture {
                     .await
                     .unwrap()
                     .unwrap();
-                let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+                let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
                     arkret_wire::EventAdmissionSubmission::new(old.event));
-                let material = RealmActorMaterialRequest::Outcome {
+                let material = RealmActorMaterialRequestBody::RequestStatus {
                     actor_id: actor.clone(),
                     request_nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
                     target_request_digest: Hash::new(canonical_sha256(&request).unwrap()).unwrap(),
@@ -7078,8 +7095,8 @@ mod realm_native_fixture {
                 .unwrap()
                 .unwrap();
             assert_eq!(
-                canonical_sha256(&retained.authoring_context.material.result).unwrap(),
-                canonical_sha256(&original.authoring_context.material.result).unwrap()
+                canonical_sha256(&retained.authoring_context.material.material).unwrap(),
+                canonical_sha256(&original.authoring_context.material.material).unwrap()
             );
             drop(custody);
             drop(devices);
@@ -7102,7 +7119,7 @@ mod realm_native_fixture {
                 .push(AppletEndpointEntry {
                     method: AppletEndpointMethod::Post,
                     path: "/_arkret/edge/applet/configuration".into(),
-                    auth: Some(AppletEndpointAuth::WebhookSignature),
+                    authentication_kind: Some(AppletEndpointAuth::WebhookSignature),
                     description: None,
                     extra: Default::default(),
                 });
@@ -7186,7 +7203,7 @@ mod realm_native_fixture {
                     Ed25519PayloadSigner::new(
                         SigningKey::from_bytes(&[42; 32]),
                         did.clone(),
-                        package.webhook_auth.key_ref.clone(),
+                        package.webhook_signature_policy.key_ref.clone(),
                     ),
                     AuthoringJournal::new(Arc::new(LostDeviceReceipt {
                         inner: FileAuthoringStore::new(path.clone()).unwrap(),
@@ -7223,10 +7240,10 @@ mod realm_native_fixture {
         let candidate = if bot {
             use arkret_models_integration::{
                 AppletConfigurationAdmissionStatus, AppletConfigurationCommand,
-                AppletConfigurationIntent, AppletConfigurationOutcome, AppletConfigurationRequest,
-                AppletConfigurationSelection,
+                AppletConfigurationIntent, AppletConfigurationRequestBody,
+                AppletConfigurationResponseBody, AppletConfigurationSelection,
             };
-            let request = AppletConfigurationRequest {
+            let request = AppletConfigurationRequestBody {
                 command: AppletConfigurationCommand::Configure,
                 intent: AppletConfigurationIntent {
                     service_id: package.service_id.clone(),
@@ -7252,12 +7269,12 @@ mod realm_native_fixture {
             })
             .await;
             assert_eq!(status, StatusCode::OK, "Bot creation: {value}");
-            let accepted: AppletConfigurationOutcome = serde_json::from_value(value).unwrap();
+            let accepted: AppletConfigurationResponseBody = serde_json::from_value(value).unwrap();
             assert_eq!(
                 accepted.admission_status,
                 AppletConfigurationAdmissionStatus::Accepted
             );
-            let original = accepted.source_outcome.unwrap().create_event.unwrap();
+            let original = accepted.source_response_body.unwrap().create_event.unwrap();
             let candidate: RealmActorCreatePayload =
                 serde_json::from_value(json!(original.payload)).unwrap();
             assert_eq!(
@@ -7310,7 +7327,7 @@ mod realm_native_fixture {
             let first = boxed_step(|| edge.submit_managed_creation(&command))
                 .await
                 .unwrap();
-            let arkret_wire::AuthoritySubmitOutcome::Accepted { commit, .. } = first else {
+            let arkret_wire::AuthoritySubmitResponseBody::Accepted { commit, .. } = first else {
                 panic!("creation must be accepted");
             };
             assert_eq!(commit.stream_position, 0);
@@ -7321,7 +7338,7 @@ mod realm_native_fixture {
             let second = boxed_step(|| edge.submit_managed_creation(&command))
                 .await
                 .unwrap();
-            let arkret_wire::AuthoritySubmitOutcome::Accepted { commit: replay, .. } = second
+            let arkret_wire::AuthoritySubmitResponseBody::Accepted { commit: replay, .. } = second
             else {
                 panic!("creation replay must be accepted");
             };
@@ -8142,7 +8159,7 @@ mod realm_native_fixture {
             boxed_step(|| devices.revoke_device(&device, revoke_operation, revoke_reason.clone()))
                 .await
                 .unwrap(),
-            arkret::RealmActorDeviceRevokeState::Pending,
+            arkret::RealmActorDeviceRevocationState::Pending,
         );
         assert_eq!(
             control_nonce_count(&factory.fixture.pool, &actor).await,
@@ -8210,7 +8227,7 @@ mod realm_native_fixture {
             boxed_step(|| devices.revoke_device(&device, revoke_operation, revoke_reason))
                 .await
                 .unwrap(),
-            arkret::RealmActorDeviceRevokeState::Accepted,
+            arkret::RealmActorDeviceRevocationState::Accepted,
         );
         eprintln!(
             "real Bridge runtime: native revoke terminal and cold private-key cleanup verified"
@@ -8250,7 +8267,7 @@ mod realm_native_fixture {
         }
     }
     pub(super) async fn completion_fixture(pool: PgPool, count: usize) -> CompletionFixture {
-        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
         let (fixture, governor) = boxed_step(|| network_fixture(pool.clone())).await;
         let factory = AppletAuthoringFactory {
             fixture,
@@ -8314,7 +8331,7 @@ mod realm_native_fixture {
                 &signer,
             )
             .unwrap();
-            let request = SelfAuthoritySubmitRequest::Event(
+            let request = SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(event.clone()),
             );
             let (status, outcome) = boxed_step(|| async {
@@ -8372,7 +8389,7 @@ mod realm_native_fixture {
 
     pub(super) async fn run_suite(pool: PgPool, suite: NativeSuite) {
         use arkret_models_collaboration::authority_commit::{
-            SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
+            SelfAuthoritySubmitRequestBody, SelfAuthoritySubmitResponseBody,
         };
         let mls = !matches!(suite, NativeSuite::Lifecycle);
         let (fixture, _governor_server) = Box::pin(network_fixture(pool.clone())).await;
@@ -8477,7 +8494,7 @@ mod realm_native_fixture {
             &signer,
         )
         .unwrap();
-        let request = SelfAuthoritySubmitRequest::Event(
+        let request = SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(event.clone()),
         );
         let body = serde_json::to_value(&request).unwrap();
@@ -8494,7 +8511,7 @@ mod realm_native_fixture {
         };
         let (status, response) = send("realm-create").await;
         assert_eq!(status, StatusCode::OK, "creation: {response}");
-        let parsed: SelfAuthoritySubmitOutcome = serde_json::from_value(response).unwrap();
+        let parsed: SelfAuthoritySubmitResponseBody = serde_json::from_value(response).unwrap();
         parsed.validate_for_request(&request).unwrap();
         let committed = factory
             .fixture

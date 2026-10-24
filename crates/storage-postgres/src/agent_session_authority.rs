@@ -58,7 +58,7 @@ async fn content_target(
             WireResourceSelector::realm(realm.clone()),
         ),
         ([], [strand]) => {
-            let row = sql_query("SELECT p.value,c.commit_json FROM strand_current_results p JOIN realm_commits c ON c.commit_id=p.current_commit_id AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE p.strand_id=$1")
+            let row = sql_query("SELECT p.value,c.commit_json FROM strand_current_states p JOIN realm_commits c ON c.commit_id=p.current_commit_id AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE p.strand_id=$1")
                 .bind::<Text,_>(strand.as_str()).get_result::<Row>(&mut *conn).await.optional()
                 .map_err(PersistenceError::database)?.ok_or_else(||unavailable("exact current Strand is absent"))?;
             let current: arkret_models_collaboration::objects::strand::Strand =
@@ -250,7 +250,7 @@ async fn read_at_cut(
     request: &AgentSessionAuthorityRequest,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<AgentSessionAuthorityOutcome> {
-    let source = sql_query("SELECT e.envelope,c.commit_json,a.requested_scope,EXISTS(SELECT 1 FROM agent_key_current_results k CROSS JOIN LATERAL jsonb_array_elements(k.value->'authorizations') d WHERE k.realm_id=a.principal_control_realm_id AND d->>'tag_id'=$3||':1' AND d->'value'=e.envelope->'payload') AS active FROM agent_principals a JOIN agent_status_current_results s ON s.realm_id=a.principal_control_realm_id AND s.agent_id=a.id JOIN canonical_events e ON e.envelope->>'event_id'=$3 AND e.state='committed' JOIN realm_commits c ON c.event_pk=e.pk AND c.realm_id=a.principal_control_realm_id WHERE a.id=$1 AND a.controller_principal_id=$2 AND s.value='\"active\"'::jsonb")
+    let source = sql_query("SELECT e.envelope,c.commit_json,a.requested_scope,EXISTS(SELECT 1 FROM agent_key_current_states k CROSS JOIN LATERAL jsonb_array_elements(k.value->'authorizations') d WHERE k.realm_id=a.principal_control_realm_id AND d->>'tag_id'=$3||':1' AND d->'value'=e.envelope->'payload') AS active FROM agent_principals a JOIN agent_status_current_states s ON s.realm_id=a.principal_control_realm_id AND s.agent_id=a.id JOIN canonical_events e ON e.envelope->>'event_id'=$3 AND e.state='committed' JOIN realm_commits c ON c.event_pk=e.pk AND c.realm_id=a.principal_control_realm_id WHERE a.id=$1 AND a.controller_principal_id=$2 AND s.value='\"active\"'::jsonb")
         .bind::<Text,_>(request.agent_account_id.principal_id.as_str())
         .bind::<Text,_>(request.controller_account_id.principal_id.as_str())
         .bind::<Text,_>(request.agent_key_authorization_ref.as_str())
@@ -413,7 +413,7 @@ async fn read_at_cut(
     let policies = if direct {
         Vec::new()
     } else {
-        crate::policy_current_results::read_scoped_agent_management_policy_snapshot_in_connection(
+        crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(
             conn, realm, circle,
         )
         .await?
@@ -478,9 +478,9 @@ async fn read_at_cut(
             continue 'action;
         };
         if !match action_id {
-            CapabilityActionId::MessageCreate => participation.reply_message,
-            CapabilityActionId::ReactionAdd => participation.reaction_add,
-            CapabilityActionId::ReactionRemove => participation.reaction_remove,
+            CapabilityActionId::MessageCreate => participation.message_creation_allowed,
+            CapabilityActionId::ReactionAdd => participation.reaction_addition_allowed,
+            CapabilityActionId::ReactionRemove => participation.reaction_removal_allowed,
             _ => true,
         } {
             continue 'action;
@@ -580,9 +580,15 @@ async fn read_at_cut(
                         && private_selection
                             .as_ref()
                             .is_some_and(|selected| match action_id {
-                                CapabilityActionId::MessageCreate => selected.reply_message,
-                                CapabilityActionId::ReactionAdd => selected.reaction_add,
-                                CapabilityActionId::ReactionRemove => selected.reaction_remove,
+                                CapabilityActionId::MessageCreate => {
+                                    selected.message_creation_allowed
+                                }
+                                CapabilityActionId::ReactionAdd => {
+                                    selected.reaction_addition_allowed
+                                }
+                                CapabilityActionId::ReactionRemove => {
+                                    selected.reaction_removal_allowed
+                                }
                                 _ => false,
                             }) =>
                 {

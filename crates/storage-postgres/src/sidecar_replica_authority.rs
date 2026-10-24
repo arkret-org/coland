@@ -51,7 +51,7 @@ pub(crate) async fn holds_source_at_cut(
 ) -> PersistenceResult<bool> {
     let lock = if lock_rows { " FOR SHARE" } else { "" };
     let owner = diesel::sql_query(format!(
-        "SELECT controller_account_id AS controller FROM sidecar_current_results \
+        "SELECT controller_account_id AS controller FROM sidecar_current_states \
         WHERE realm_id=$1 AND sidecar_id=$2 AND value->>'state'='active'{lock}",
     ))
     .bind::<diesel::sql_types::Text, _>(realm_id.as_str())
@@ -89,7 +89,7 @@ pub(crate) async fn controller_in_connection(
     else {
         return Ok(None);
     };
-    Ok(diesel::sql_query("SELECT controller_account_id AS controller FROM sidecar_current_results WHERE realm_id=$1 AND sidecar_id=$2")
+    Ok(diesel::sql_query("SELECT controller_account_id AS controller FROM sidecar_current_states WHERE realm_id=$1 AND sidecar_id=$2")
         .bind::<diesel::sql_types::Text,_>(realm_id.as_str()).bind::<diesel::sql_types::Text,_>(sidecar_id.as_str())
         .get_result::<Owner>(&mut *conn).await.optional().map_err(PersistenceError::database)?.map(|row|row.controller))
 }

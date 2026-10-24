@@ -257,9 +257,9 @@ pub(crate) async fn signer_fact(
         event_id: event.event_id.clone(),
         actor_id: event.actor_id.clone(),
         verification_method: method,
-        public_key_b64u: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
-            key.ed25519_bytes().map_err(invalid)?,
-        ))
+        public_key_base64url: arkret_wire::Base64UrlString::new(
+            arkret_canonical::base64url_encode(key.ed25519_bytes().map_err(invalid)?),
+        )
         .map_err(invalid)?,
         accepted_at: arkret_canonical::normalize_timestamp_canonical(at),
         control_event_ref: control.source,

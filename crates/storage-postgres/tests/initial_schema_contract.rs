@@ -30,7 +30,7 @@ fn retired_authority_storage_cannot_return_to_the_initial_migration() {
 
 #[test]
 fn capability_authority_root_is_durable_and_distinct_from_station_tenure() {
-    assert!(INITIAL_UP.contains("CREATE TABLE realm_authority_root_current_results"));
+    assert!(INITIAL_UP.contains("CREATE TABLE realm_authority_root_current_states"));
     for column in [
         "controller_actor_id JSONB NOT NULL",
         "controller_epoch BIGINT NOT NULL",
@@ -45,15 +45,15 @@ fn capability_authority_root_is_durable_and_distinct_from_station_tenure() {
         );
     }
     assert!(INITIAL_UP.contains("CREATE TABLE public.realm_authorities"));
-    assert!(INITIAL_DOWN.contains("DROP TABLE IF EXISTS realm_authority_root_current_results"));
+    assert!(INITIAL_DOWN.contains("DROP TABLE IF EXISTS realm_authority_root_current_states"));
 }
 
 #[test]
-fn parent_membership_inputs_are_authoritative_typed_current_results() {
+fn parent_membership_inputs_are_authoritative_current_states() {
     for table in [
-        "realm_policy_bundle_current_results",
-        "realm_link_current_results",
-        "member_state_current_results",
+        "realm_policy_bundle_current_states",
+        "realm_link_current_states",
+        "member_state_current_states",
     ] {
         assert!(INITIAL_UP.contains(&format!("CREATE TABLE {table}")));
         assert!(INITIAL_DOWN.contains(&format!("DROP TABLE IF EXISTS {table}")));
@@ -162,10 +162,10 @@ fn franking_replay_nonce_ledger_has_bounded_expiry_contract() {
 /// neither needs the retired `realm_invites` table or its status predicate.
 #[test]
 fn invite_current_registers_replace_the_retired_invite_table() {
-    assert!(INITIAL_UP.contains("CREATE TABLE invite_lifecycle_current_results"));
-    assert!(INITIAL_UP.contains("CREATE TABLE invite_live_target_current_results"));
+    assert!(INITIAL_UP.contains("CREATE TABLE invite_lifecycle_current_states"));
+    assert!(INITIAL_UP.contains("CREATE TABLE invite_live_target_current_states"));
     assert!(INITIAL_UP.contains("PRIMARY KEY(realm_id,invitee_account_id)"));
-    assert!(INITIAL_UP.contains("CREATE TABLE invite_directed_invitee_current_results"));
+    assert!(INITIAL_UP.contains("CREATE TABLE invite_directed_invitee_current_states"));
     assert!(INITIAL_UP.contains("CREATE TABLE invite_third_party_create_index"));
     assert!(INITIAL_UP.contains("token_commitment TEXT COLLATE \"C\" NOT NULL UNIQUE"));
     assert!(INITIAL_DOWN.contains("DROP TABLE IF EXISTS invite_third_party_create_index"));

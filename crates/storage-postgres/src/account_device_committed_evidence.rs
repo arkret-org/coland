@@ -111,7 +111,7 @@ pub(crate) fn validate(
         .ok_or_else(|| rejected("Device key is not did:key"))?;
     let key = arkret_canonical::decode_ed25519_multibase(key).map_err(rejected)?;
     if core.device_authorize_event_id != fact.key.authorization_ref.event_id
-        || arkret_canonical::base64url_encode(key) != fact.key.public_key_b64u.as_str()
+        || arkret_canonical::base64url_encode(key) != fact.key.public_key_base64url.as_str()
         || !core.device_status.is_active()
         || core.attested_at > commit.committed_at
         || commit.committed_at >= core.expires_at

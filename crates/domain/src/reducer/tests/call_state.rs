@@ -332,7 +332,7 @@ fn recording_start_requires_consent_before_both_facets_are_written() {
     );
 
     // `call-state.md` §5 / `call_recording_start_payload` close the consent gate
-    // at the payload boundary: `result.retention.consent_confirmed` is pinned to
+    // at the payload boundary: `capture_metadata.retention.consent_confirmed` is pinned to
     // `true`, so a start Event that never collected consent is not a well-formed
     // payload at all and cannot reach the capture facets.
     let start_payload = |consent_confirmed: bool| {
@@ -343,7 +343,7 @@ fn recording_start_requires_consent_before_both_facets_are_written() {
             "capture_kind": "recording",
             "mode": "audio_video",
             "visible_notice": true,
-            "result": {"retention": {"consent_confirmed": consent_confirmed}}
+            "capture_metadata": {"retention": {"consent_confirmed": consent_confirmed}}
         })
     };
     let unconsented = call_input(

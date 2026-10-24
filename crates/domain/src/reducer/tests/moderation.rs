@@ -127,7 +127,7 @@ fn moderation_decision_then_lift_converges_on_the_target_facet() {
         other => panic!("moderation target facet should hold a keyed set, got {other:?}"),
     };
     // The element tag is the accepting Event's dot, not an issuer/digest
-    // composite (`typed-current-result.schema.json` canonical_event_dot).
+    // composite (`current-state.schema.json` canonical_event_dot).
     assert_eq!(
         items[0].get("tag_id").and_then(Value::as_str),
         Some(entry_tag(MOD_DECISION_ID).as_str())

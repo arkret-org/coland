@@ -4,8 +4,8 @@ pub(super) async fn run_configuration(pool: PgPool) {
     use arkret_bridge_runtime::{ArkretEdge, AuthoringJournal, FileAuthoringStore};
     use arkret_models_integration::{
         AppletConfigurationAdmissionStatus as Admission, AppletConfigurationCommand as Command,
-        AppletConfigurationIntent, AppletConfigurationOutcome as Outcome,
-        AppletConfigurationRequest, AppletConfigurationSelection,
+        AppletConfigurationIntent, AppletConfigurationResponseBody as Outcome,
+        AppletConfigurationRequestBody, AppletConfigurationSelection,
     };
     let (fixture, _governor_server) = boxed_step(|| network_fixture(pool.clone())).await;
     let factory = AppletAuthoringFactory {
@@ -22,7 +22,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
         .push(AppletEndpointEntry {
             method: AppletEndpointMethod::Post,
             path: "/_arkret/edge/applet/configuration".into(),
-            auth: Some(AppletEndpointAuth::WebhookSignature),
+            authentication_kind: Some(AppletEndpointAuth::WebhookSignature),
             description: None,
             extra: Default::default(),
         });
@@ -94,7 +94,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
                 Ed25519PayloadSigner::new(
                     SigningKey::from_bytes(&[42; 32]),
                     did.clone(),
-                    package.webhook_auth.key_ref.clone(),
+                    package.webhook_signature_policy.key_ref.clone(),
                 ),
                 AuthoringJournal::new(FileAuthoringStore::shared(path.clone()).unwrap()),
             )
@@ -108,7 +108,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
     };
     *native.managed_router.lock().unwrap() = Some(make_router());
     let endpoint = format!("/_arkret/self/applets/{id}/configuration");
-    let mut request = AppletConfigurationRequest {
+    let mut request = AppletConfigurationRequestBody {
         command: Command::Recover,
         intent: AppletConfigurationIntent {
                     service_id: package.service_id.clone(),
@@ -122,7 +122,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
         },
         approval_signatures: None,
     };
-    let submit = |request: AppletConfigurationRequest| {
+    let submit = |request: AppletConfigurationRequestBody| {
         let endpoint = endpoint.clone();
         let fixture = &factory.fixture;
         async move {
@@ -144,7 +144,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
     );
     let pending: Outcome = serde_json::from_value(pending).unwrap();
     assert_eq!(pending.admission_status, Admission::NotStarted);
-    assert!(pending.source_outcome.unwrap().create_event.is_none());
+    assert!(pending.source_response_body.unwrap().create_event.is_none());
     request.command = Command::Configure;
     let (status, accepted) = boxed_step(|| submit(request.clone())).await;
     assert_eq!(
@@ -155,7 +155,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
     let accepted: Outcome = serde_json::from_value(accepted).unwrap();
     assert_eq!(accepted.admission_status, Admission::Accepted);
     let original = accepted
-        .source_outcome
+        .source_response_body
         .as_ref()
         .unwrap()
         .create_event
@@ -237,8 +237,8 @@ pub(super) async fn run_configuration(pool: PgPool) {
         .unwrap();
     assert_ne!(fresh.idempotency_key, delivery.idempotency_key);
     assert_eq!(
-        json!(fresh.context.as_ref().unwrap().material.result),
-        json!(delivery.context.as_ref().unwrap().material.result),
+        json!(fresh.context.as_ref().unwrap().material.material),
+        json!(delivery.context.as_ref().unwrap().material.material),
         "refresh preserves original Event, Commit and signer fact"
     );
     let mut conflict = fresh.clone();
@@ -327,7 +327,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
     );
     let reused: Outcome = serde_json::from_value(reused).unwrap();
     assert_eq!(reused.admission_status, Admission::Accepted);
-    let source = reused.source_outcome.as_ref().unwrap();
+    let source = reused.source_response_body.as_ref().unwrap();
     assert_eq!(source.actor_id.as_ref(), Some(&candidate.actor_id));
     assert!(source.create_event.is_none());
     assert_eq!(
@@ -384,7 +384,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
         "recover the original after response loss: {recovered}"
     );
     assert_eq!(recovered["admission_status"], "accepted");
-    assert_eq!(recovered["source_outcome"], retained);
+    assert_eq!(recovered["source_response_body"], retained);
     let committed = factory
         .fixture
         .state
@@ -418,7 +418,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
         "cancelled cannot restart: {cancelled}"
     );
     assert_eq!(cancelled["admission_status"], "cancelled");
-    assert!(cancelled["source_outcome"].get("create_event").is_none());
+    assert!(cancelled["source_response_body"].get("create_event").is_none());
 
     boxed_step(|| {
         cross_station_configuration(&factory.fixture, &id, &package.service_id, &request.intent.effective_scope)
@@ -449,7 +449,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
     let pending: Outcome = serde_json::from_value(pending).unwrap();
     assert_eq!(pending.admission_status, Admission::Pending);
     let candidate = pending
-        .source_outcome
+        .source_response_body
         .as_ref()
         .unwrap()
         .create_event
@@ -525,7 +525,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
     assert_eq!(admitted.admission_status, Admission::Accepted);
     assert_eq!(
         admitted
-            .source_outcome
+            .source_response_body
             .as_ref()
             .unwrap()
             .create_event
@@ -625,7 +625,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
     let (late_response, (manifest, bytes)) =
         tokio::join!(boxed_step(|| submit(delayed_request)), async {
             let source = observed.await.unwrap();
-            assert_eq!(source, pending["source_outcome"]);
+            assert_eq!(source, pending["source_response_body"]);
             let head = store
                 .stream_head(&arkret_wire::CommitStreamRef::Realm {
                     realm_id: factory.fixture.realm.clone(),
@@ -644,7 +644,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
                     realm_id: factory.fixture.realm.clone(),
                 },
                 json!({
-                        "expected_governance_generation": authority.generation,
+                        "expected_governance_generation": (authority.generation).to_string(),
                         "expected_realm_stream_commit_id": head.commit_id,
                 "new_governance_station_id": next_governor.state.service_core_id()
                     }),
@@ -678,7 +678,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
         .find(|row| row["request_id"] == json!(request.intent.request_id))
         .unwrap();
     assert_eq!(row["outcome"], pending);
-    assert_eq!(row["candidate"], pending["source_outcome"]["create_event"]);
+    assert_eq!(row["candidate"], pending["source_response_body"]["create_event"]);
     assert_eq!(
         row["ingress"]["requester_account_id"],
         json!(factory.fixture.pcr.history.account)
@@ -744,7 +744,7 @@ async fn deliver_configuration_completion(
     fixture: &Fixture,
     completion: &coland_storage::AppletAuthoringCompletion,
     delivery: &coland_storage::AppletAuthoringCompletion,
-) -> Result<arkret_models_integration::AppletTransactionOutcome, String> {
+) -> Result<arkret_models_integration::AppletTransactionResponseBody, String> {
     let http = reqwest::Client::builder()
         .tls_backend_rustls()
         .tls_certs_only(reqwest::Certificate::from_pem_bundle(&native_tls_material().ca).unwrap())
@@ -781,7 +781,7 @@ async fn deliver_configuration_completion(
         .await
         .map_err(|e| e.to_string())?;
     match &outcome {
-        arkret_models_integration::AppletTransactionOutcome::Accepted {
+        arkret_models_integration::AppletTransactionResponseBody::Accepted {
             committed_event_refs,
             rejections,
             retry_after_ms,
@@ -818,7 +818,7 @@ async fn activate_fixture_handoff(
     bytes: &[u8],
 ) {
     use arkret_models_collaboration::authority_commit::{
-        AuthorityHandoffRequest, HistoricalProducerSignerFactEntry, historical_signer_facts_digest,
+        AuthorityRealmAuthorityHandoffRequestBody, HistoricalProducerSignerFactEntry, historical_signer_facts_digest,
     };
     use arkret_wire::*;
     let source = PgAuthorityCommitStore {
@@ -1009,7 +1009,7 @@ async fn activate_fixture_handoff(
         next.state.notary_signing_key().as_ref(),
     )
     .unwrap();
-    let bundle_request = AuthorityBundleRequest {
+    let bundle_request = RealmAuthorityBundleRequestBody {
         realm_id: previous.realm.clone(),
         nonce: Base64UrlString::new(arkret_canonical::base64url_encode(
             rand::random::<[u8; 32]>(),
@@ -1082,7 +1082,7 @@ async fn activate_fixture_handoff(
         next.state.notary_signing_key().as_ref(),
     )
     .unwrap();
-    let activation = AuthorityHandoffRequest {
+    let activation = AuthorityRealmAuthorityHandoffRequestBody {
         handoff,
         final_stream_heads: heads,
         snapshot,
@@ -1096,7 +1096,7 @@ async fn activate_fixture_handoff(
     invalid_signature
         .handoff
         .new_authority_acceptance_signature
-        .sig = Base64UrlString::new(arkret_canonical::base64url_encode([0u8; 64])).unwrap();
+        .signature = Base64UrlString::new(arkret_canonical::base64url_encode([0u8; 64])).unwrap();
     invalid_signature
         .authority_bundle
         .authority_transitions
@@ -1237,7 +1237,7 @@ async fn activate_fixture_handoff(
 async fn configuration_handoff_resume(
     previous: &Fixture,
     next: &Fixture,
-    request: &arkret_models_integration::AppletConfigurationRequest,
+    request: &arkret_models_integration::AppletConfigurationRequestBody,
     manifest: &arkret_models_collaboration::authority_commit::ManagementPrivateHandoffManifest,
     bytes: &[u8],
     pending: &Value,
@@ -1266,16 +1266,16 @@ async fn configuration_handoff_resume(
         manifest.governance_generation + 1
     );
     let arkret_models_integration::RealmActorMaterial::Event { event, commit, .. } =
-        &resumed_delivery.context.as_ref().unwrap().material.result
+        &resumed_delivery.context.as_ref().unwrap().material.material
     else {
         panic!("creation material required")
     };
     assert_eq!(event.event_id, completion.creation_ref.event_id);
     assert_eq!(commit.commit_id, completion.creation_ref.commit_id);
     let reference = pending["review_request_id"].as_str().unwrap();
-    let outcome: arkret_models_integration::AppletConfigurationOutcome =
+    let outcome: arkret_models_integration::AppletConfigurationResponseBody =
         serde_json::from_value(pending.clone()).unwrap();
-    let candidate = outcome.source_outcome.unwrap().create_event.unwrap();
+    let candidate = outcome.source_response_body.unwrap().create_event.unwrap();
     let candidate_payload: RealmActorCreatePayload =
         serde_json::from_value(json!(candidate.payload)).unwrap();
     let actor = ActorId::service(candidate_payload.service_id.clone());
@@ -1316,7 +1316,7 @@ async fn configuration_handoff_resume(
         resumed["admission_status"], "accepted",
         "continued configuration: {resumed}"
     );
-    assert_eq!(resumed["source_outcome"], pending["source_outcome"]);
+    assert_eq!(resumed["source_response_body"], pending["source_response_body"]);
     let accepted = target
         .committed_event(&candidate.event_id)
         .await
@@ -1427,7 +1427,7 @@ fn configuration_review_vote(
 }
 
 async fn cross_station_configuration(governor: &Fixture, applet: &AppletId, service: &arkret_wire::DidCoreId, scope: &ScopeRef) {
-    use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+    use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let (account_station, _server) = boxed_step(|| network_fixture(database.pool())).await;
     for (reader, destination) in [(&account_station, governor), (governor, &account_station)] {
@@ -1483,7 +1483,7 @@ async fn cross_station_configuration(governor: &Fixture, applet: &AppletId, serv
         "invite_id":arkret_wire::InviteId::from_event_id(&invite.event_id),"previous_state":"pending",
         "invitee_account_id":account_station.pcr.history.account
     }));
-    let accept_body = json!(SelfAuthoritySubmitRequest::Event(
+    let accept_body = json!(SelfAuthoritySubmitRequestBody::Event(
         arkret_wire::EventAdmissionSubmission::new(accept)
     ));
     let (status, result) = boxed_step(|| {
@@ -1501,7 +1501,7 @@ async fn cross_station_configuration(governor: &Fixture, applet: &AppletId, serv
         "foreign administrator membership: {result}"
     );
     let endpoint = format!("/_arkret/self/applets/{applet}/configuration");
-    let mut request = arkret_models_integration::AppletConfigurationRequest {
+    let mut request = arkret_models_integration::AppletConfigurationRequestBody {
         command: arkret_models_integration::AppletConfigurationCommand::Recover,
         intent: arkret_models_integration::AppletConfigurationIntent {
             service_id: service.clone(),
@@ -1515,7 +1515,7 @@ async fn cross_station_configuration(governor: &Fixture, applet: &AppletId, serv
         },
         approval_signatures: None,
     };
-    let submit = |request: arkret_models_integration::AppletConfigurationRequest| {
+    let submit = |request: arkret_models_integration::AppletConfigurationRequestBody| {
         let station = &account_station;
         let endpoint = endpoint.clone();
         async move {
@@ -1535,7 +1535,7 @@ async fn cross_station_configuration(governor: &Fixture, applet: &AppletId, serv
         StatusCode::FORBIDDEN,
         "membership is not configuration authority: {refused}"
     );
-    let mut peer = arkret_models_integration::AppletConfigurationPeerRequest {
+    let mut peer = arkret_models_integration::AppletConfigurationPeerRequestBody {
         requester_account_id: account_station.pcr.history.account.clone(),
         request: request.clone(),
     };
@@ -1562,7 +1562,7 @@ async fn cross_station_configuration(governor: &Fixture, applet: &AppletId, serv
         "issuer_id":ActorId::account(governor.pcr.history.account.clone()),
         "subject":ActorId::account(account_station.pcr.history.account.clone()),
         "actions":["ak.realm.admin"],"resources":[{"kind":"realm","realm_id":governor.realm}],"constraints":[],
-        "issuer_authority_refs":[{"kind":"realm_root","realm_id":governor.realm,"authority_event_ref":governor.authority_event_ref,"authority_generation":0}],
+        "issuer_authority_refs":[{"kind":"realm_root","realm_id":governor.realm,"authority_event_ref":governor.authority_event_ref,"authority_generation":"0"}],
         "issued_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())
     }}));
     let grant_id = arkret_wire::GrantId::from_event_id(&grant.event_id);
@@ -1636,7 +1636,7 @@ async fn peer_configuration_post(
     source: &Fixture,
     destination: &Fixture,
     applet: &AppletId,
-    body: &arkret_models_integration::AppletConfigurationPeerRequest,
+    body: &arkret_models_integration::AppletConfigurationPeerRequestBody,
     tamper: bool,
 ) -> (StatusCode, Value) {
     let bytes = arkret_canonical::canonical_json_bytes(body).unwrap();
@@ -1753,7 +1753,7 @@ async fn configuration_peer_post_wire(
 
 async fn configuration_admin_event(fixture: &Fixture, event: Event) {
     let body = json!(
-        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(event)
         )
     );
@@ -1793,11 +1793,11 @@ pub(super) async fn handoff_runtime_realm(previous: &Fixture, next: &Fixture) {
         ScopeRef::Realm {
             realm_id: previous.realm.clone(),
         },
-        json!({"expected_governance_generation":authority.generation,
+        json!({"expected_governance_generation":(authority.generation).to_string(),
             "expected_realm_stream_commit_id":head.commit_id,
             "new_governance_station_id":next.state.service_core_id()}),
     );
-    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
         arkret_wire::EventAdmissionSubmission::new(change.clone()),
     );
     // Keep client orchestration outside the server's admission stack, exactly

@@ -20,8 +20,8 @@ use diesel::sql_types::{Jsonb, Text};
 use diesel::{QueryableByName, sql_query};
 use horme::{OptionalExtension as _, RunQueryDsl};
 
-use crate::capability_grant_current_results::{
-    CapabilityGrantCurrentResultReadRow, RealmAuthorityRootCurrent, RealmAuthorityRootReadRow,
+use crate::capability_grant_current_states::{
+    CapabilityGrantCurrentStateReadRow, RealmAuthorityRootCurrent, RealmAuthorityRootReadRow,
     decode_authority_root, decode_row,
 };
 
@@ -727,10 +727,10 @@ async fn operation_context(
             ManagedActorRole::Ghost
         }
     };
-    let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1 FOR SHARE")
+    let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1 FOR SHARE")
         .bind::<Text,_>(scope.realm_id().as_str()).get_result::<RealmAuthorityRootReadRow>(conn).await.map_err(PersistenceError::database)?;
-    let rows=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
-        .bind::<Text,_>(scope.realm_id().as_str()).get_results::<CapabilityGrantCurrentResultReadRow>(conn).await.map_err(PersistenceError::database)?;
+    let rows=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_states WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
+        .bind::<Text,_>(scope.realm_id().as_str()).get_results::<CapabilityGrantCurrentStateReadRow>(conn).await.map_err(PersistenceError::database)?;
     let mut grants = BTreeMap::new();
     for row in rows {
         let row = decode_row(row)?;
@@ -742,7 +742,7 @@ async fn operation_context(
     .await?;
     cut.require_open_content_read()?;
     let policies =
-        crate::policy_current_results::read_scoped_applet_management_policies_for_delivery(
+        crate::policy_current_states::read_scoped_applet_management_policies_for_delivery(
             conn,
             scope.realm_id(),
             scope.circle_id(),
@@ -976,9 +976,9 @@ pub(crate) async fn mls_scope_read_proof(
     } = &endpoint.effective_scope
     {
         let basis =
-            crate::circle_current_results::locked_circle_basis(conn, realm_id, circle_id).await?;
+            crate::circle_current_states::locked_circle_basis(conn, realm_id, circle_id).await?;
         if basis["value"]["state"] != "active"
-            || !crate::circle_current_results::effective_member_in_connection(
+            || !crate::circle_current_states::effective_member_in_connection(
                 conn,
                 realm_id,
                 circle_id,
@@ -991,7 +991,7 @@ pub(crate) async fn mls_scope_read_proof(
     }
     let mut proof = stream_proof(context);
     if let Some(strand) = strand {
-        let actual = crate::strand_current_results::locked_active_strand_scope(
+        let actual = crate::strand_current_states::locked_active_strand_scope(
             conn,
             endpoint.effective_scope.realm_id(),
             strand,

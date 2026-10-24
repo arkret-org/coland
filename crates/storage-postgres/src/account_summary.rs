@@ -100,8 +100,8 @@ async fn realm_title(
     realm_id: &arkret_wire::RealmId,
 ) -> PersistenceResult<Option<String>> {
     let row = diesel::sql_query(
-        "SELECT value FROM realm_bootstrap_current_results \
-         WHERE realm_id=$1 AND result_family='realm_profile'",
+        "SELECT value FROM realm_bootstrap_current_states \
+         WHERE realm_id=$1 AND state_family='realm_profile'",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<ValueRow>(&mut *conn)
@@ -121,7 +121,7 @@ async fn realm_default_strand_id(
     realm_id: &arkret_wire::RealmId,
 ) -> PersistenceResult<Option<String>> {
     let row = diesel::sql_query(
-        "SELECT value FROM realm_set_default_strand_current_results WHERE realm_id=$1",
+        "SELECT value FROM realm_set_default_strand_current_states WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<ValueRow>(&mut *conn)
@@ -152,7 +152,7 @@ pub(crate) async fn publish_realm_account_summary_in_connection(
     realm_id: &arkret_wire::RealmId,
 ) -> PersistenceResult<()> {
     let members = diesel::sql_query(
-        "SELECT member_id,membership FROM member_state_current_results \
+        "SELECT member_id,membership FROM member_state_current_states \
          WHERE realm_id=$1 ORDER BY member_id COLLATE \"C\"",
     )
     .bind::<Text, _>(realm_id.as_str())

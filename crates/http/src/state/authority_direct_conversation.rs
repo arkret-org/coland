@@ -13,7 +13,7 @@ use arkret_models_collaboration::authority_commit::{
     DirectConversationFoundingFederationSubmission, DirectConversationFoundingUnitSubmission,
 };
 use arkret_models_collaboration::objects::direct_conversation::DirectConversationFoundingAuthorityEvidence;
-use arkret_wire::{AuthorityRejectionStatus, AuthoritySubmitOutcome, Event};
+use arkret_wire::{AuthorityRejectionStatus, AuthoritySubmitResponseBody, Event};
 use chrono::Utc;
 use coland_services::identity::SessionIdentityState;
 use coland_services::projection::StagedRealmBootstrap;
@@ -123,9 +123,9 @@ async fn reconcile_founding_projection(
 /// when the code is not one of the seven mapped reasons.
 pub(super) fn direct_conversation_refusal(
     code: ConflictCode,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     match code.direct_conversation_admission_reason() {
-        Some(reason_code) => Ok(AuthoritySubmitOutcome::Rejected {
+        Some(reason_code) => Ok(AuthoritySubmitResponseBody::Rejected {
             status: AuthorityRejectionStatus::Rejected,
             reason_code: reason_code.to_owned(),
         }),
@@ -140,7 +140,7 @@ pub(super) fn direct_conversation_refusal(
 /// transaction; any other error passes through unchanged.
 pub(super) fn relay_direct_conversation_refusal(
     error: ServiceError,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     match error.conflict_code() {
         Some(code) if code.direct_conversation_admission_reason().is_some() => {
             direct_conversation_refusal(code)
@@ -156,7 +156,7 @@ pub(super) async fn refuse_unadmitted_event(
     state: &AppState,
     event: &Event,
     unsupported: ServiceError,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     match state
         .authority_commits()
         .direct_conversation_admission(event)
@@ -363,7 +363,7 @@ pub(super) async fn submit_peer_direct_conversation_founding(
             .source_commit
             .committed_at;
         if contact_round_evidence.current_proofs.iter().any(|proof| {
-            proof.issuer_id != peer.source_service_id && proof.fresh_until <= accepted_at
+            proof.issuer_id != peer.source_service_id && proof.cache_expires_at <= accepted_at
         }) {
             return Err(ServiceError::Conflict(
                 "failed_precondition: source Contact proof expired at founding cut".into(),

@@ -1,5 +1,7 @@
 //! Original Realm creation tasks and current-governor material for retry delivery.
-use arkret_models_integration::{AppletManagedActorAuthoringContext, RealmActorMaterialRequest};
+use arkret_models_integration::{
+    AppletManagedActorAuthoringContext, RealmActorMaterialRequestBody,
+};
 use arkret_wire::{CommittedEventRef, DidCoreId, Event, Hash, RealmCommit};
 use coland_storage::{
     AppletAuthoringCompletion, PersistenceError, PersistenceResult, RealmActorMaterialCaller,
@@ -56,7 +58,7 @@ pub(crate) async fn pending(
     conn: &mut AsyncPgConnection,
     limit: u32,
 ) -> PersistenceResult<Vec<AppletAuthoringCompletion>> {
-    sql_query(format!("SELECT {FIELDS} AS value FROM applet_authoring_completions c WHERE delivered_at IS NULL AND (next_attempt_at IS NULL OR next_attempt_at<=clock_timestamp()) AND EXISTS(SELECT 1 FROM realm_authorities a WHERE a.realm_id=c.realm_id AND a.service_id=current_device_inventory_station()) AND EXISTS(SELECT 1 FROM realm_actor_current_results m WHERE m.realm_id=c.realm_id AND m.selector=jsonb_build_object('kind','realm_actor_manager','actor_id',c.actor_id) AND m.value->>'service_id'=c.destination_id) AND NOT EXISTS(SELECT 1 FROM realm_authorities a JOIN realm_commits rc ON rc.realm_id=a.realm_id AND rc.governance_generation=a.generation JOIN canonical_events e ON e.pk=rc.event_pk WHERE a.realm_id=c.realm_id AND e.kind='ak.realm.governance_station.change') ORDER BY next_attempt_at NULLS FIRST,accepted_at,applet_id,request_digest LIMIT $1"))
+    sql_query(format!("SELECT {FIELDS} AS value FROM applet_authoring_completions c WHERE delivered_at IS NULL AND (next_attempt_at IS NULL OR next_attempt_at<=clock_timestamp()) AND EXISTS(SELECT 1 FROM realm_authorities a WHERE a.realm_id=c.realm_id AND a.service_id=current_device_inventory_station()) AND EXISTS(SELECT 1 FROM realm_actor_current_states m WHERE m.realm_id=c.realm_id AND m.selector=jsonb_build_object('kind','realm_actor_manager','actor_id',c.actor_id) AND m.value->>'service_id'=c.destination_id) AND NOT EXISTS(SELECT 1 FROM realm_authorities a JOIN realm_commits rc ON rc.realm_id=a.realm_id AND rc.governance_generation=a.generation JOIN canonical_events e ON e.pk=rc.event_pk WHERE a.realm_id=c.realm_id AND e.kind='ak.realm.governance_station.change') ORDER BY next_attempt_at NULLS FIRST,accepted_at,applet_id,request_digest LIMIT $1"))
         .bind::<BigInt,_>(i64::from(limit.min(128))).load::<Row>(conn).await.map_err(PersistenceError::database)?
         .into_iter().map(decode).collect()
 }
@@ -83,7 +85,7 @@ pub(crate) async fn prepare(
     {
         return Err(unavailable("creation completion original changed"));
     }
-    let request = RealmActorMaterialRequest::Event {
+    let request = RealmActorMaterialRequestBody::Event {
         actor_id: completion.actor_id.clone(),
         request_nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
         target: completion.creation_ref.clone(),
@@ -103,7 +105,7 @@ pub(crate) async fn prepare(
             || context.material.realm_id != completion.realm_id
             || context.material.requester_actor_id
                 != arkret_wire::ActorId::service(completion.destination_id.clone())
-            || json!(context.material.result) != json!(current.result)
+            || json!(context.material.material) != json!(current.material)
         {
             return Err(unavailable(
                 "cached completion differs from its original creation",

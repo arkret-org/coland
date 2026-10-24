@@ -8,7 +8,7 @@ use arkret_models_collaboration::mls_roster_authority::{
 };
 use arkret_models_crypto::MlsCommitPayload;
 use arkret_wire::{
-    ActorId, Base64UrlString, CommitStreamRef, DidCoreId, EventId, EventKind, MlsGroupCurrent,
+    ActorId, Base64UrlString, CommitStreamRef, DidCoreId, EventId, EventKind, MlsGroupValue,
     MlsWelcomeDelivery,
 };
 use coland_storage::{
@@ -109,7 +109,7 @@ pub(crate) async fn member_selector_in_connection(
     )
     .map_err(PersistenceError::database)?;
     let current =
-        sql_query("SELECT mls_group_id,value FROM mls_group_current_results WHERE scope_key=$1")
+        sql_query("SELECT mls_group_id,value FROM mls_group_current_states WHERE scope_key=$1")
             .bind::<Text, _>(&key)
             .get_result::<GroupRow>(&mut *conn)
             .await
@@ -117,7 +117,7 @@ pub(crate) async fn member_selector_in_connection(
             .map_err(PersistenceError::database)?;
     let mut genesis = None;
     if let Some(row) = current {
-        let Ok(group) = serde_json::from_value::<MlsGroupCurrent>(row.value) else {
+        let Ok(group) = serde_json::from_value::<MlsGroupValue>(row.value) else {
             return Ok(Selected::RevisionUnavailable);
         };
         if row.mls_group_id != request.mls_group_id.as_str()
@@ -289,7 +289,7 @@ async fn read_in_connection(
     )
     .map_err(PersistenceError::database)?;
     let Some(group) =
-        sql_query("SELECT mls_group_id,value FROM mls_group_current_results WHERE scope_key=$1")
+        sql_query("SELECT mls_group_id,value FROM mls_group_current_states WHERE scope_key=$1")
             .bind::<Text, _>(&key)
             .get_result::<GroupRow>(&mut *conn)
             .await
@@ -298,7 +298,7 @@ async fn read_in_connection(
     else {
         return Ok(unavailable());
     };
-    let current: MlsGroupCurrent = serde_json::from_value(group.value).map_err(|error| {
+    let current: MlsGroupValue = serde_json::from_value(group.value).map_err(|error| {
         PersistenceError::Internal(format!("stored MLS group current invalid: {error}"))
     })?;
     if group.mls_group_id != request.mls_group_id.as_str()
@@ -380,7 +380,7 @@ async fn read_in_connection(
     let mut records = vec![MlsRosterRecord::Genesis {
         genesis_event_ref: request.genesis_event_ref.clone(),
         actor_id: genesis.event.actor_id.clone(),
-        leaf_signature_key_b64u: payload.creator_leaf_authority.leaf_signature_key_b64u,
+        leaf_signature_key_base64url: payload.creator_leaf_authority.leaf_signature_key_base64url,
         endpoint: payload.creator_leaf_authority.endpoint,
         authorization_event_ref: payload.creator_leaf_authority.authorization_event_ref,
     }];
@@ -510,7 +510,7 @@ async fn read_in_connection(
                 != Some(row.commit_stream_position)
             || i64::try_from(attestation.epoch).ok() != Some(row.epoch)
             || attestation.actor_id != target_actor
-            || attestation.leaf_signature_key_b64u != parsed.leaf_signature_key
+            || attestation.leaf_signature_key_base64url != parsed.leaf_signature_key
         {
             return Ok(unavailable());
         }
@@ -572,7 +572,7 @@ async fn read_in_connection(
         {
             return Ok(unavailable());
         }
-        let Ok(proposal_wire_b64u) =
+        let Ok(proposal_wire_base64url) =
             Base64UrlString::new(arkret_canonical::base64url_encode(&row.proposal_wire))
         else {
             return Ok(unavailable());
@@ -582,7 +582,7 @@ async fn read_in_connection(
             consumed_proposal_ordinal: u64::try_from(row.consumed_proposal_ordinal)
                 .map_err(PersistenceError::database)?,
             sender_actor_id: sender_actor,
-            proposal_wire_b64u,
+            proposal_wire_base64url,
             claim_issuer_resolution: attestation
                 .actor_id
                 .as_realm_actor_id()

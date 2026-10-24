@@ -4,7 +4,7 @@
 pub struct KeyBackupListPosition {
     pub backup_kind: String,
     pub series_id: String,
-    pub series_seq: i64,
+    pub series_sequence: i64,
     pub backup_id: String,
 }
 

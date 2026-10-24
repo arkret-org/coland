@@ -487,9 +487,10 @@ impl DeviceMessageStore for PgDeviceMessageStore {
         &self,
         recipient: &str,
         device_id: &str,
-        ack_token: &str,
+        acknowledgement_token: &str,
     ) -> PersistenceResult<Option<usize>> {
-        queue_authority::ack_with_token(&self.pool, recipient, device_id, ack_token).await
+        queue_authority::ack_with_token(&self.pool, recipient, device_id, acknowledgement_token)
+            .await
     }
     async fn list_after(
         &self,
@@ -522,9 +523,9 @@ impl DeviceMessageStore for PgDeviceMessageStore {
     async fn ack_recipient_with_token(
         &self,
         selector: &RecipientQueueSelector,
-        ack_token: &str,
+        acknowledgement_token: &str,
     ) -> PersistenceResult<Option<usize>> {
-        queue_authority::ack_recipient_with_token(&self.pool, selector, ack_token).await
+        queue_authority::ack_recipient_with_token(&self.pool, selector, acknowledgement_token).await
     }
 
     async fn lost_watermark(

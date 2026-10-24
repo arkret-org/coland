@@ -2,9 +2,7 @@
 #[path = "support/ordinary_realm.rs"]
 #[allow(dead_code)]
 mod ordinary_realm;
-use arkret_wire::{
-    CircleId, CommitStreamRef, CurrentSelector, EventKind, ScopeRef, TypedCurrentRow,
-};
+use arkret_wire::{CircleId, CommitStreamRef, CurrentSelector, CurrentState, EventKind, ScopeRef};
 use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, EventCommitRequest, EventCommitUnitOfWork,
 };
@@ -58,7 +56,7 @@ struct Counts {
     policies: i64,
 }
 async fn counts(pool: &coland_storage_postgres::PgPool) -> Counts {
-    diesel::sql_query("SELECT (SELECT count(*) FROM canonical_events) AS events,(SELECT count(*) FROM realm_commits) AS commits,(SELECT count(*) FROM scope_read_receipt_policy_current_results) AS policies")
+    diesel::sql_query("SELECT (SELECT count(*) FROM canonical_events) AS events,(SELECT count(*) FROM realm_commits) AS commits,(SELECT count(*) FROM scope_read_receipt_policy_current_states) AS policies")
         .get_result(&mut *pool.get().await.unwrap()).await.unwrap()
 }
 #[tokio::test]
@@ -166,9 +164,9 @@ async fn scope_read_receipt_policy_independent_streams_and_atomic_refusals() {
             scope_ref: scope.clone(),
         };
         expected.retain(
-            |row| !matches!(row,TypedCurrentRow::Value {selector:found,..} if found==&selector),
+            |row| !matches!(row,CurrentState::Value {selector:found,..} if found==&selector),
         );
-        expected.push(TypedCurrentRow::Value {
+        expected.push(CurrentState::Value {
             selector,
             source_stream_ref: request.authority_commit.commit.stream_ref.clone(),
             revision: arkret_wire::CurrentRevision {
@@ -188,7 +186,7 @@ async fn scope_read_receipt_policy_independent_streams_and_atomic_refusals() {
             .filter(|row| {
                 matches!(
                     row,
-                    TypedCurrentRow::Value {
+                    CurrentState::Value {
                         selector: CurrentSelector::ScopeReadReceiptPolicy { .. },
                         ..
                     }

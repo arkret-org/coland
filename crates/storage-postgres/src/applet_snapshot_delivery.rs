@@ -1,7 +1,7 @@
 //! Exact-scope native snapshots retain the shared Account disclosure proof.
 
 use arkret_wire::{
-    CommitStreamRef, CurrentSelector, RealmCommit, RealmStateSnapshot, TypedCurrentRow,
+    CommitStreamRef, CurrentSelector, CurrentState, RealmCommit, RealmStateSnapshot,
 };
 use diesel::sql_types::Array;
 
@@ -43,7 +43,7 @@ pub(super) async fn restrict_material(
     // to the Circle. It cannot ride a Realm Device cut; its Realm source is
     // also outside a Circle-only independent stream cut.
     material.current_state_entries.retain(|row| match row {
-        TypedCurrentRow::Value {
+        CurrentState::Value {
             selector,
             source_stream_ref,
             ..
@@ -184,7 +184,7 @@ async fn prepare_material(
         || material.retention_and_history_floor.stream_floors.len() != 1
         || material.retention_and_history_floor.stream_floors[0].stream_ref != expected
         || material.current_state_entries.iter().any(|row| match row {
-            TypedCurrentRow::Value {
+            CurrentState::Value {
                 source_stream_ref, ..
             } => source_stream_ref != &expected,
         })
@@ -208,7 +208,7 @@ async fn prepare_material(
             .current_state_entries
             .iter()
             .map(|row| match row {
-                TypedCurrentRow::Value { revision, .. } => revision.commit_id.to_string(),
+                CurrentState::Value { revision, .. } => revision.commit_id.to_string(),
             })
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -240,7 +240,7 @@ async fn prepare_material(
             }
         }
         for row in &material.current_state_entries {
-            let TypedCurrentRow::Value {
+            let CurrentState::Value {
                 revision,
                 value,
                 source_stream_ref,

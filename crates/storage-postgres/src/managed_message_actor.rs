@@ -14,8 +14,8 @@ use diesel_async::AsyncPgConnection;
 use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
-use crate::capability_grant_current_results::{
-    CapabilityGrantCurrentResultReadRow, RealmAuthorityRootReadRow, decode_authority_root,
+use crate::capability_grant_current_states::{
+    CapabilityGrantCurrentStateReadRow, RealmAuthorityRootReadRow, decode_authority_root,
     decode_row, grant_is_active_at, validate_ancestor_graph,
 };
 
@@ -45,7 +45,7 @@ pub(crate) async fn registration_for_scope(
     applet: &arkret_wire::AppletId,
     service: &arkret_wire::DidCoreId,
 ) -> PersistenceResult<AppletRegistrationPayload> {
-    let row=sql_query("SELECT r.value FROM applet_registration_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3 AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position AND e.kind='ak.applet.registration' AND e.state='committed' FOR SHARE OF r")
+    let row=sql_query("SELECT r.value FROM applet_registration_current_states r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3 AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position AND e.kind='ak.applet.registration' AND e.state='committed' FOR SHARE OF r")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(applet.as_str()).bind::<Text,_>(service.as_str()).get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(||denied("Applet has no accepted current registration"))?;
     serde_json::from_value(row.value).map_err(PersistenceError::database)
@@ -167,7 +167,7 @@ async fn require_applet_producer_inner(
         .validate_against_did_document(&guard.service_did_document)
         .map_err(denied)?;
     let scope = coland_storage::applet_effective_scope_key(&effective_scope)?;
-    let install=sql_query("SELECT i.record AS value FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id AND r.service_id=i.service_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{registration_event,event_id}' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND i.service_id=$4 FOR UPDATE OF i")
+    let install=sql_query("SELECT i.record AS value FROM applet_installations i JOIN applet_registration_current_states r ON r.realm_id=$3 AND r.applet_id=i.applet_id AND r.service_id=i.service_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{registration_event,event_id}' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND i.service_id=$4 FOR UPDATE OF i")
         .bind::<Text,_>(registration.applet_id.as_str()).bind::<Text,_>(scope).bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(registration.service_id.as_str())
         .get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(||denied("Applet is not installed on this exact scope"))?;
@@ -191,7 +191,7 @@ async fn require_applet_producer_inner(
         .producer_proof
         .as_ref()
         .ok_or_else(|| denied("Applet Event producer proof is absent"))?;
-    if proof.verification_method != registration.webhook_auth.key_ref {
+    if proof.verification_method != registration.webhook_signature_policy.key_ref {
         return Err(denied(
             "Applet producer method differs from accepted registration",
         ));
@@ -228,8 +228,8 @@ async fn require_applet_producer_inner(
         .as_str()
         .parse::<GrantId>()
         .map_err(denied)?;
-    let rows=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
-        .bind::<Text,_>(event.realm_id.as_str()).load::<CapabilityGrantCurrentResultReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let rows=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_states WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
+        .bind::<Text,_>(event.realm_id.as_str()).load::<CapabilityGrantCurrentStateReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut grants = BTreeMap::new();
     for row in rows {
         let record = decode_row(row)?;
@@ -291,7 +291,7 @@ async fn require_applet_producer_inner(
                 && target.issuer_authority_refs.iter().any(|source| matches!(source,
                     arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::Grant {grant_id:parent}
                         if parent==&grant_id))
-                && crate::capability_grant_current_results::managed_subject_role(
+                && crate::capability_grant_current_states::managed_subject_role(
                     conn,
                     event,
                     &target.subject,
@@ -524,7 +524,7 @@ async fn require_applet_producer_inner(
             );
         }
     }
-    let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1")
+    let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1")
         .bind::<Text,_>(event.realm_id.as_str()).get_result::<RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     if !revoking_own_child {
         validate_ancestor_graph(
@@ -568,9 +568,9 @@ async fn require_applet_producer_inner(
         actor: service,
         verification_method: proof.verification_method.clone(),
         key: arkret_models_identity::ServiceHistoricalSigningKey {
-            public_key_b64u: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
-                key.ed25519_bytes().map_err(denied)?,
-            ))
+            public_key_base64url: arkret_wire::Base64UrlString::new(
+                arkret_canonical::base64url_encode(key.ed25519_bytes().map_err(denied)?),
+            )
             .map_err(denied)?,
             applet_id: registration.applet_id.clone(),
             registration_epoch: registration.registration_epoch.clone(),

@@ -66,9 +66,9 @@ pub struct PgPersistenceStore {
     strand_projections: PgStrandProjectionStore,
     object_current_snapshot: crate::object_projection_reads::PgObjectCurrentSnapshotStore,
     morph_projections: PgMorphProjectionStore,
-    relation_current_results: PgRelationCurrentResultStore,
-    capability_grant_current_results: PgCapabilityGrantCurrentResultStore,
-    invite_current_results: crate::invite_current_results::PgInviteCurrentResultStore,
+    relation_current_states: PgRelationCurrentStateStore,
+    capability_grant_current_states: PgCapabilityGrantCurrentStateStore,
+    invite_current_states: crate::invite_current_states::PgInviteCurrentStateStore,
     publication_evidence: PgPublicationEvidenceStore,
     projection_events: PgProjectionEventStore,
     applets: PgAppletStore,
@@ -77,7 +77,7 @@ pub struct PgPersistenceStore {
     one_time_keys: PgOneTimeKeyStore,
     member_identity: PgMemberIdentityStore,
     mls_key_packages: PgMlsKeyPackageStore,
-    mls_groups: crate::mls_group_current_results::PgMlsGroupCurrentStore,
+    mls_groups: crate::mls_group_current_states::PgMlsGroupCurrentStore,
     agent_participation: PgAgentParticipationStore,
     agents: PgAgentStore,
     sidecars: PgSidecarStore,
@@ -154,11 +154,11 @@ impl PgPersistenceStore {
                 pool: pool.clone(),
             },
             morph_projections: PgMorphProjectionStore { pool: pool.clone() },
-            relation_current_results: PgRelationCurrentResultStore { pool: pool.clone() },
-            capability_grant_current_results: PgCapabilityGrantCurrentResultStore {
+            relation_current_states: PgRelationCurrentStateStore { pool: pool.clone() },
+            capability_grant_current_states: PgCapabilityGrantCurrentStateStore {
                 pool: pool.clone(),
             },
-            invite_current_results: crate::invite_current_results::PgInviteCurrentResultStore {
+            invite_current_states: crate::invite_current_states::PgInviteCurrentStateStore {
                 pool: pool.clone(),
             },
             publication_evidence: PgPublicationEvidenceStore { pool: pool.clone() },
@@ -169,7 +169,7 @@ impl PgPersistenceStore {
             one_time_keys: PgOneTimeKeyStore { pool: pool.clone() },
             member_identity: PgMemberIdentityStore { pool: pool.clone() },
             mls_key_packages: PgMlsKeyPackageStore { pool: pool.clone() },
-            mls_groups: crate::mls_group_current_results::PgMlsGroupCurrentStore {
+            mls_groups: crate::mls_group_current_states::PgMlsGroupCurrentStore {
                 pool: pool.clone(),
             },
             agent_participation: PgAgentParticipationStore { pool: pool.clone() },
@@ -427,16 +427,16 @@ impl EventProjectionStoreRegistry for PgPersistenceStore {
         &self.morph_projections
     }
 
-    fn relation_current_results(&self) -> &dyn RelationCurrentResultStore {
-        &self.relation_current_results
+    fn relation_current_states(&self) -> &dyn RelationCurrentStateStore {
+        &self.relation_current_states
     }
 
-    fn capability_grant_current_results(&self) -> &dyn CapabilityGrantCurrentResultStore {
-        &self.capability_grant_current_results
+    fn capability_grant_current_states(&self) -> &dyn CapabilityGrantCurrentStateStore {
+        &self.capability_grant_current_states
     }
 
-    fn invite_current_results(&self) -> &dyn coland_storage::InviteCurrentResultStore {
-        &self.invite_current_results
+    fn invite_current_states(&self) -> &dyn coland_storage::InviteCurrentStateStore {
+        &self.invite_current_states
     }
 
     fn publication_evidence(&self) -> &dyn PublicationEvidenceStore {

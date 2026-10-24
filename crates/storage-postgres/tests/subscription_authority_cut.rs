@@ -91,7 +91,7 @@ async fn accepted_append_preserves_digest_policy_change_rebinds_and_missing_sour
     );
     // Fault the stored source identity rather than inventing an accepted policy.
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("UPDATE realm_bootstrap_current_results SET current_commit_id=$2 WHERE realm_id=$1 AND result_family='realm_history_access'")
+    diesel::sql_query("UPDATE realm_bootstrap_current_states SET current_commit_id=$2 WHERE realm_id=$1 AND state_family='realm_history_access'")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(RealmCommitId::from_digest([91;32]).as_str())
         .execute(&mut *conn).await.unwrap();
     drop(conn);

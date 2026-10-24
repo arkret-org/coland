@@ -1,7 +1,7 @@
 use super::*;
 
 /// Resolve the exact canonical room URI against its authority-committed
-/// typed current result.
+/// current state.
 pub(super) async fn latest_mimi_room_binding(
     state: &AppState,
     room_id: &str,

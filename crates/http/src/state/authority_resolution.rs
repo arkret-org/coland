@@ -3,7 +3,7 @@ use arkret_models_identity::{
     PrincipalResolutionProjection, PrincipalResolutionUpdatePayload,
     ResolutionMethodHistoryEvidence,
 };
-use arkret_wire::{AuthoritySubmitOutcome, EventAdmissionSubmission};
+use arkret_wire::{AuthoritySubmitResponseBody, EventAdmissionSubmission};
 use coland_services::{ServiceError, ServiceResult};
 
 use super::AppState;
@@ -11,7 +11,7 @@ use super::AppState;
 pub(super) async fn commit(
     state: &AppState,
     request: &EventAdmissionSubmission,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     request
         .validate()
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;

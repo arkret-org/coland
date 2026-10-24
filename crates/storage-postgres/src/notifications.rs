@@ -569,7 +569,7 @@ impl NotificationStore for PgNotificationStore {
                     ..NotificationFanoutBasis::default()
                 });
             };
-            let strand = sql_query("SELECT value FROM strand_current_results WHERE strand_id=$1")
+            let strand = sql_query("SELECT value FROM strand_current_states WHERE strand_id=$1")
                 .bind::<Text, _>(strand_id.as_str())
                 .get_result::<FanoutValueRow>(&mut *conn)
                 .await
@@ -649,12 +649,12 @@ impl NotificationStore for PgNotificationStore {
 /// while its current join's controller binding names the controller's own
 /// current join (agent-membership generation binding).
 const FANOUT_JOINED_MEMBERS_SQL: &str = "SELECT m.member_id AS actor_id \
-     FROM member_state_current_results m \
+     FROM member_state_current_states m \
      JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id \
      JOIN canonical_events e ON e.pk=c.event_pk \
      WHERE m.realm_id=$1 AND m.membership='join' \
        AND (NOT (e.envelope->'payload' ? 'agent_controller_binding') \
-         OR EXISTS (SELECT 1 FROM member_state_current_results cm \
+         OR EXISTS (SELECT 1 FROM member_state_current_states cm \
            JOIN realm_commits cc ON cc.commit_id=cm.current_commit_id AND cc.realm_id=cm.realm_id \
            JOIN canonical_events ce ON ce.pk=cc.event_pk \
            WHERE cm.realm_id=m.realm_id AND cm.membership='join' \
@@ -665,18 +665,18 @@ const FANOUT_JOINED_MEMBERS_SQL: &str = "SELECT m.member_id AS actor_id \
      ORDER BY m.member_id";
 
 const FANOUT_CIRCLE_MEMBERS_SQL: &str = "SELECT m.member_id AS actor_id \
-     FROM circle_member_state_current_results m \
-     JOIN circle_current_results c ON c.circle_id=m.circle_id AND c.realm_id=m.realm_id \
+     FROM circle_member_state_current_states m \
+     JOIN circle_current_states c ON c.circle_id=m.circle_id AND c.realm_id=m.realm_id \
      WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.membership='join' \
        AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) \
        AND c.value->>'state'='active' ORDER BY m.member_id";
 
 const FANOUT_WATCH_LEVELS_SQL: &str = "SELECT watcher_actor_id AS actor_id, value->>'level' AS level \
-     FROM strand_watch_current_results \
+     FROM strand_watch_current_states \
      WHERE realm_id=$1 AND strand_id=$2 AND value<>'null'::jsonb \
      ORDER BY watcher_actor_id";
 
-const FANOUT_ASSIGNEES_SQL: &str = "SELECT value FROM relation_current_results \
+const FANOUT_ASSIGNEES_SQL: &str = "SELECT value FROM relation_current_states \
      WHERE realm_id=$1 AND state='active' \
        AND value->>'relation_kind'='assigned_to' AND value->>'from_ref'=$2 \
      ORDER BY relation_id";

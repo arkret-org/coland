@@ -21,7 +21,7 @@ pub(crate) async fn list_key_backups(
     limit: QueryParam<u32, false>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeysBackupsList> {
+) -> JsonResult<KeysBackupsPage> {
     let session = {
         let state = depot.get_typed::<AppState>().expect("state injected");
         aa.authenticated_session(state, req).await?
@@ -49,7 +49,7 @@ pub(crate) async fn list_key_backups_admin(
     backup_kind: QueryParam<String, false>,
     limit: QueryParam<u32, false>,
     depot: &mut Depot,
-) -> JsonResult<KeysBackupsList> {
+) -> JsonResult<KeysBackupsPage> {
     let session = admin.session()?;
     list(
         session,
@@ -74,7 +74,7 @@ async fn list(
     limit: QueryParam<u32, false>,
     depot: &mut Depot,
     operation: &str,
-) -> JsonResult<KeysBackupsList> {
+) -> JsonResult<KeysBackupsPage> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     crate::routing::events::require_agent_session_scope(
         &session,
@@ -129,7 +129,7 @@ async fn list(
     };
     let filter = arkret_server::cursor_filter_digest(&json!({
         "operation":operation, "series_id":query.series_id, "backup_kind":query.backup_kind,
-        "order":"backup_kind,series_id,series_seq,backup_id", "active_series":active_series,
+        "order":"backup_kind,series_id,series_sequence,backup_id", "active_series":active_series,
     }))
     .map_err(invalid_cursor)?;
     let context = CursorBindingContext::for_account(
@@ -219,7 +219,7 @@ async fn list(
             after: KeyBackupListPosition {
                 backup_kind: last.backup_kind.as_str().to_owned(),
                 series_id: last.series_id.to_string(),
-                series_seq: i64::try_from(last.series_seq).map_err(internal)?,
+                series_sequence: i64::try_from(last.series_sequence).map_err(internal)?,
                 backup_id: last.backup_id.to_string(),
             },
         };
@@ -250,7 +250,7 @@ async fn list(
     } else {
         None
     };
-    let result = KeysBackupsList {
+    let result = KeysBackupsPage {
         backups,
         active_series,
         next_cursor,

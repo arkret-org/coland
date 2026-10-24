@@ -5,17 +5,17 @@ use arkret_models_collaboration::governance::grant_constraint::{
 };
 use arkret_models_discovery::ServiceDescribe;
 use arkret_models_integration::{
-    AppletCapabilityRevokeIntent, AppletGhostAuthoringRequestBasis, AppletInstallOutcome,
-    AppletInstallPreviewOutcome, AppletInstallPreviewRequestBody, AppletInstallRequestBody,
-    AppletManagedActorAuthoringRequest, AppletManagedActorPurpose, AppletManagedMembershipRemoval,
-    AppletMembershipRemoveIntent, AppletPingOutcome, AppletRevokeCommittedEventStatus,
-    AppletRevokeCommittedEventStep, AppletRevokeEffectRef, AppletRevokeEventEffectKind,
-    AppletRevokeLocalEffectKind, AppletRevokeLocalEffectRef, AppletRevokeLocalEffectStatus,
-    AppletRevokeLocalEffectStep, AppletRevokeOutcome, AppletRevokePlan, AppletRevokePreviewOutcome,
-    AppletRevokePreviewRequestBody, AppletRevokeRequestBody, AppletRevokeSagaStatus,
-    AppletRevokeStep, AppletRevokeSubmittedEventStatus, AppletRevokeSubmittedEventStep,
-    AppletTransactionOutcome, AppletTransactionRequestBody, GhostPreviewOutcome,
-    GhostPreviewRequestBody,
+    AppletCapabilityRevokeIntent, AppletGhostAuthoringRequestBasis,
+    AppletInstallPreviewRequestBody, AppletInstallPreviewResponseBody, AppletInstallRequestBody,
+    AppletInstallResponseBody, AppletManagedActorAuthoringRequest, AppletManagedActorPurpose,
+    AppletManagedMembershipRemoval, AppletMembershipRemoveIntent, AppletPingResponseBody,
+    AppletRevokeCommittedEventStatus, AppletRevokeCommittedEventStep, AppletRevokeEffectRef,
+    AppletRevokeEventEffectKind, AppletRevokeLocalEffectKind, AppletRevokeLocalEffectRef,
+    AppletRevokeLocalEffectStatus, AppletRevokeLocalEffectStep, AppletRevokePlan,
+    AppletRevokePreviewRequestBody, AppletRevokePreviewResponseBody, AppletRevokeRequestBody,
+    AppletRevokeResponseBody, AppletRevokeSagaStatus, AppletRevokeStep,
+    AppletRevokeSubmittedEventStatus, AppletRevokeSubmittedEventStep, AppletTransactionRequestBody,
+    AppletTransactionResponseBody, GhostPreviewRequestBody, GhostPreviewResponseBody,
 };
 use arkret_wire::{
     AppletRevokeMode, CommittedEventRef, CurrentRevision, EventId, EventKind, ProtocolOperationId,
@@ -29,9 +29,9 @@ use serde_json::{Value, json};
 
 use super::ghost::{ghost_provision_authorization_ref, revoke_applet_record_after_admin_gate};
 use super::install::{
-    approved_scope_grants, approved_scopes_from_formal_install_events, build_install_plan,
-    effective_scope_realm_id, register_package_install, registration_epoch_evidence_from_event,
-    require_realm_admin, validate_admin_install_events, validate_applet_package,
+    approved_scopes_from_formal_install_events, build_install_plan, effective_scope_realm_id,
+    register_package_install, registration_epoch_evidence_from_event, require_realm_admin,
+    validate_admin_install_events, validate_applet_package,
 };
 use super::record::{
     applet_id_param, applet_record, ensure_not_revoked, idempotency_key, persist_applet_record,
@@ -109,13 +109,13 @@ pub(in crate::routing::extensions) fn protocol_router() -> Router {
 
 #[salvo::oapi::endpoint(operation_id = "ak.edge.applet.read.ping", tags("extensions"))]
 #[tracing::instrument(skip_all, fields(op = "ak.edge.applet.read.ping.v1"))]
-async fn protocol_ping_endpoint(depot: &mut Depot) -> JsonResult<AppletPingOutcome> {
+async fn protocol_ping_endpoint(depot: &mut Depot) -> JsonResult<AppletPingResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let service_id =
         arkret_identifiers::DidCoreId::new(state.service_id().clone()).map_err(|error| {
             AppError::internal(format!("configured service_id is invalid: {error}"))
         })?;
-    json_ok(AppletPingOutcome {
+    json_ok(AppletPingResponseBody {
         applet_id: arkret_identifiers::AppletId::new(COLAND_EDGE_APPLET_ID.to_owned()).map_err(
             |error| AppError::internal(format!("configured applet_id is invalid: {error}")),
         )?,
@@ -143,7 +143,7 @@ async fn install_preview_endpoint(
     body: JsonBody<AppletInstallPreviewRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AppletInstallPreviewOutcome> {
+) -> JsonResult<AppletInstallPreviewResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let preview = body.into_inner();
@@ -176,8 +176,7 @@ async fn install_preview_endpoint(
     let registration_epoch_evidence =
         registration_epoch_evidence_from_event(&basis.registration_event)?;
     validate_applet_package(state, &preview.applet_package, &registration_epoch_evidence)?;
-    let approved_scopes =
-        approved_scope_grants(&basis.effective_scope, validated_admin.approved_actions)?;
+    let approved_scopes = validated_admin.approved_scopes;
     let plan = build_install_plan(
         state,
         &preview.applet_package,
@@ -188,7 +187,7 @@ async fn install_preview_endpoint(
     )
     .await?;
     require_realm_admin(state, &session, &basis.effective_scope).await?;
-    json_ok(AppletInstallPreviewOutcome { plan })
+    json_ok(AppletInstallPreviewResponseBody { plan })
 }
 
 #[salvo::oapi::endpoint(operation_id = "ak.self.applet.command.install", tags("extensions"))]
@@ -199,7 +198,7 @@ async fn install_endpoint(
     depot: &mut Depot,
     req: &mut Request,
     res: &mut Response,
-) -> JsonResult<AppletInstallOutcome> {
+) -> JsonResult<AppletInstallResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let idempotency_key = idempotency_key(req)
@@ -406,7 +405,7 @@ async fn revoke_preview_endpoint(
     body: JsonBody<AppletRevokePreviewRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AppletRevokePreviewOutcome> {
+) -> JsonResult<AppletRevokePreviewResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let applet_id = applet_id_param(req)?;
@@ -431,7 +430,7 @@ async fn revoke_install_endpoint(
     body: JsonBody<AppletRevokeRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AppletRevokeOutcome> {
+) -> JsonResult<AppletRevokeResponseBody> {
     revoke_install_future(aa, body, depot, req).await
 }
 
@@ -440,8 +439,9 @@ fn revoke_install_future<'a>(
     body: JsonBody<AppletRevokeRequestBody>,
     depot: &'a mut Depot,
     req: &'a mut Request,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = JsonResult<AppletRevokeOutcome>> + Send + 'a>>
-{
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = JsonResult<AppletRevokeResponseBody>> + Send + 'a>,
+> {
     Box::pin(revoke_install_inner(aa, body, depot, req))
 }
 
@@ -450,7 +450,7 @@ async fn revoke_install_inner(
     body: JsonBody<AppletRevokeRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AppletRevokeOutcome> {
+) -> JsonResult<AppletRevokeResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = crate::boxed_future(|| aa.authenticated_session(state, req)).await?;
     let applet_id = applet_id_param(req)?;
@@ -576,7 +576,7 @@ async fn revoke_install_inner(
                 reason_code: None,
             }));
         }
-        let mut outcome = AppletRevokeOutcome {
+        let mut outcome = AppletRevokeResponseBody {
             operation_id,
             revoke_plan_digest: revoke.revoke_plan_digest.clone(),
             status: AppletRevokeSagaStatus::InProgress,
@@ -906,7 +906,7 @@ fn load_stored_revoke_outcome(
     admin_actor_id: &str,
     idempotency_key: &str,
     request_digest: &str,
-) -> Result<Option<AppletRevokeOutcome>, AppError> {
+) -> Result<Option<AppletRevokeResponseBody>, AppError> {
     let Some(execution) = execution else {
         return Ok(None);
     };
@@ -921,7 +921,7 @@ fn load_stored_revoke_outcome(
         )
         .with_wire_code("duplicate_conflict"));
     }
-    serde_json::from_value::<AppletRevokeOutcome>(
+    serde_json::from_value::<AppletRevokeResponseBody>(
         execution.get("outcome").cloned().unwrap_or(Value::Null),
     )
     .map(Some)
@@ -1043,7 +1043,7 @@ async fn build_revoke_plan(
     state: &AppState,
     record: &AppletRecord,
     preview: &AppletRevokePreviewRequestBody,
-) -> Result<AppletRevokePreviewOutcome, AppError> {
+) -> Result<AppletRevokePreviewResponseBody, AppError> {
     ensure_not_revoked(record)?;
     let response = &record.install_response;
     let widget_token_refs = if matches!(
@@ -1073,7 +1073,7 @@ async fn build_revoke_plan(
         .map_err(|error| AppError::internal(format!("effective Realm id is invalid: {error}")))?;
         let grant_snapshot = state
             .persistence()
-            .capability_grant_current_results(&scope_realm_id)
+            .capability_grant_current_states(&scope_realm_id)
             .await
             .map_err(|error| {
                 AppError::internal(format!(
@@ -1115,11 +1115,11 @@ async fn build_revoke_plan(
         membership_removals,
         widget_token_refs,
     };
-    Ok(AppletRevokePreviewOutcome { revoke_plan: plan })
+    Ok(AppletRevokePreviewResponseBody { revoke_plan: plan })
 }
 
 fn active_applet_grant_revisions(
-    snapshot: Vec<coland_storage::CapabilityGrantCurrentResultRecord>,
+    snapshot: Vec<coland_storage::CapabilityGrantCurrentStateRecord>,
     realm_id: &arkret_wire::RealmId,
     applet_service_id: &arkret_wire::DidCoreId,
     target_station_id: &arkret_wire::DidCoreId,
@@ -1427,7 +1427,7 @@ async fn persist_revoke_execution(
     request_digest: &str,
     request: &Value,
     revoke_plan: Option<&AppletRevokePlan>,
-    outcome: &mut AppletRevokeOutcome,
+    outcome: &mut AppletRevokeResponseBody,
 ) -> Result<(), AppError> {
     let execution = json!({
         "principal_id": state.service_id(),
@@ -1477,7 +1477,7 @@ async fn persist_revoke_execution(
     )
 }
 
-fn revoke_outcome_progress(outcome: &AppletRevokeOutcome) -> (bool, usize, usize, u8) {
+fn revoke_outcome_progress(outcome: &AppletRevokeResponseBody) -> (bool, usize, usize, u8) {
     let completed_prefix = outcome
         .steps
         .iter()
@@ -1526,7 +1526,7 @@ fn revoke_step_is_successful(step: &AppletRevokeStep) -> bool {
     )
 }
 
-fn revoke_outcome_ready_for_local_effect(outcome: &AppletRevokeOutcome) -> bool {
+fn revoke_outcome_ready_for_local_effect(outcome: &AppletRevokeResponseBody) -> bool {
     let mut local_fence_pending = false;
     for step in &outcome.steps {
         match step {
@@ -1559,7 +1559,7 @@ async fn preview_ghost_actor_endpoint(
     body: JsonBody<GhostPreviewRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<GhostPreviewOutcome> {
+) -> JsonResult<GhostPreviewResponseBody> {
     let verified = depot
         .remove_typed::<VerifiedAppletProvisionService>()
         .map_err(|_| AppError::unauthenticated("Applet service signature verification missing"))?;
@@ -1658,7 +1658,7 @@ async fn preview_ghost_actor_endpoint(
     )
     .map_err(|error| AppError::internal(format!("Ghost authoring request sign failed: {error}")))?;
     let authoring_request = issue_applet_authoring_preview(state, authoring_request).await?;
-    json_ok(GhostPreviewOutcome {
+    json_ok(GhostPreviewResponseBody {
         authoring_request,
         existing_managed_actor,
     })
@@ -1673,7 +1673,7 @@ async fn transaction_endpoint(
     body: JsonBody<AppletTransactionRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AppletTransactionOutcome> {
+) -> JsonResult<AppletTransactionResponseBody> {
     let state = depot
         .get_typed::<AppState>()
         .expect("state injected")
@@ -2116,7 +2116,7 @@ mod revoke_saga_tests {
     #[test]
     fn concurrent_revoke_progress_never_regresses_from_step_three_to_step_two() {
         let outcome = |statuses: &[&str]| {
-            serde_json::from_value::<AppletRevokeOutcome>(json!({
+            serde_json::from_value::<AppletRevokeResponseBody>(json!({
                 "operation_id": "ak:operation:01904100-0000-7000-8000-000000000001",
                 "revoke_plan_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "status": "in_progress",
@@ -2148,7 +2148,7 @@ mod revoke_saga_tests {
 
     #[test]
     fn accepted_then_rejected_events_do_not_open_the_local_fence_gate() {
-        let outcome: AppletRevokeOutcome = serde_json::from_value(json!({
+        let outcome: AppletRevokeResponseBody = serde_json::from_value(json!({
             "operation_id": "ak:operation:01904100-0000-7000-8000-000000000001",
             "revoke_plan_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "status": "partially_completed",
@@ -2179,7 +2179,7 @@ mod revoke_saga_tests {
         .unwrap();
         assert!(!revoke_outcome_ready_for_local_effect(&outcome));
 
-        let all_events_committed: AppletRevokeOutcome = serde_json::from_value(json!({
+        let all_events_committed: AppletRevokeResponseBody = serde_json::from_value(json!({
             "operation_id": "ak:operation:01904100-0000-7000-8000-000000000001",
             "revoke_plan_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "status": "in_progress",

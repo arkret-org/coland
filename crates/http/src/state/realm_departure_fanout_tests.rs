@@ -165,7 +165,7 @@ async fn departure(membership: &str, another_member_remains: bool) {
     // Arm the receiver before committing the source's durable delivery intent.
     // An independently running dispatcher must encounter the same rollback cut.
     execute(&receiver.pool, "CREATE OR REPLACE FUNCTION reject_departing_current() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.membership IN ('leave','ban') THEN RAISE EXCEPTION 'departure rollback'; END IF; RETURN NEW; END $$").await;
-    execute(&receiver.pool, "CREATE TRIGGER reject_departing_current BEFORE UPDATE ON member_state_current_results FOR EACH ROW EXECUTE FUNCTION reject_departing_current()").await;
+    execute(&receiver.pool, "CREATE TRIGGER reject_departing_current BEFORE UPDATE ON member_state_current_states FOR EACH ROW EXECUTE FUNCTION reject_departing_current()").await;
     assert!(
         receiver
             .state
@@ -203,7 +203,7 @@ async fn departure(membership: &str, another_member_remains: bool) {
     assert_eq!(pending["idempotency_key"], row["idempotency_key"]);
     execute(
         &receiver.pool,
-        "DROP TRIGGER reject_departing_current ON member_state_current_results",
+        "DROP TRIGGER reject_departing_current ON member_state_current_states",
     )
     .await;
     execute(&receiver.pool, "DROP FUNCTION reject_departing_current()").await;
@@ -236,7 +236,7 @@ async fn departure(membership: &str, another_member_remains: bool) {
             .contains(&previous.event.realm_id)
     );
     let departed = terminal_persistent_rows(&receiver.pool).await;
-    let member_row = departed["member_state_current_results"]
+    let member_row = departed["member_state_current_states"]
         .as_array()
         .unwrap()
         .iter()
@@ -251,12 +251,12 @@ async fn departure(membership: &str, another_member_remains: bool) {
         departing.authority_commit.commit.commit_id.as_str()
     );
     assert!(
-        departed["realm_bootstrap_current_results"]
+        departed["realm_bootstrap_current_states"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|row| row["result_family"] != "realm_tombstone"
-                && row["result_family"] != "realm_destroy")
+            .all(|row| row["state_family"] != "realm_tombstone"
+                && row["state_family"] != "realm_destroy")
     );
 
     let fresh = historical_human::signed_ordinary_event(
@@ -323,11 +323,7 @@ async fn departure(membership: &str, another_member_remains: bool) {
     ))
     .await;
     assert_eq!(status, 200, "{value}");
-    assert_replication_outcome(
-        value,
-        &body,
-        PeerCommittedReplicationOutcomeRecord::Duplicate {},
-    );
+    assert_replication_outcome(value, &body, CommittedEventReplicationOutcome::Duplicate {});
     assert_eq!(terminal_persistent_rows(&receiver.pool).await, departed);
 
     let terminal = owner_candidate(
@@ -397,7 +393,7 @@ async fn departure(membership: &str, another_member_remains: bool) {
             assert_replication_outcome(
                 value,
                 &body,
-                PeerCommittedReplicationOutcomeRecord::Rejected {
+                CommittedEventReplicationOutcome::Rejected {
                     reason_code: "capability_denied".into(),
                 },
             );

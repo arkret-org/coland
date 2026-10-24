@@ -20,10 +20,10 @@ pub(crate) async fn after_current_writes_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
 ) -> PersistenceResult<()> {
-    let affected = sql_query("SELECT DISTINCT s.realm_id,s.sidecar_id,s.controller_account_id FROM sidecar_current_results s \
+    let affected = sql_query("SELECT DISTINCT s.realm_id,s.sidecar_id,s.controller_account_id FROM sidecar_current_states s \
         LEFT JOIN pcr_genesis_units g ON g.principal_id=s.controller_account_id->>'principal_id' \
           AND g.station_id=s.controller_account_id->>'station_id' \
-        LEFT JOIN agent_provisioning_current_results p ON p.realm_id=g.realm_id \
+        LEFT JOIN agent_provisioning_current_states p ON p.realm_id=g.realm_id \
           AND p.value->>'controller_principal_id'=g.principal_id \
         WHERE s.value->>'state'='active' AND (s.realm_id=$1 OR g.realm_id=$1 OR p.value->>'principal_control_realm_id'=$1) \
         ORDER BY s.realm_id,s.sidecar_id")

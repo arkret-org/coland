@@ -39,7 +39,7 @@ use arkret_identifiers::{MorphId, RealmId};
 #[cfg(test)]
 use arkret_models_collaboration::objects::query_projection::ProjectionAssignedToRelation;
 use arkret_models_collaboration::objects::query_projection::{
-    DocumentMorphProjectionOutcome, ProjectionMorphList, ProjectionSpaceList, ProjectionStrandList,
+    DocumentMorphView, MorphPage, SpacePage, StrandPage,
 };
 use arkret_models_collaboration::objects::relation::RelationEndpoint;
 #[cfg(test)]
@@ -124,7 +124,7 @@ pub(crate) async fn structural_navigation_available(
         !snapshot.current_state_entries.iter().any(|row| {
             matches!(
                 row,
-                arkret_wire::TypedCurrentRow::Value {
+                arkret_wire::CurrentState::Value {
                     selector: arkret_wire::CurrentSelector::RealmTombstone,
                     ..
                 }
@@ -314,7 +314,7 @@ async fn list_space_container_projections(
     req: &mut Request,
     realm_id: PathParam<String>,
     include_terminal: QueryParam<bool, false>,
-) -> GuardedJsonResult<ProjectionSpaceList> {
+) -> GuardedJsonResult<SpacePage> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let session_actor =
@@ -348,7 +348,7 @@ async fn list_strand_projections(
     req: &mut Request,
     realm_id: PathParam<String>,
     include_terminal: QueryParam<bool, false>,
-) -> GuardedJsonResult<ProjectionStrandList> {
+) -> GuardedJsonResult<StrandPage> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let session_actor =
@@ -429,11 +429,11 @@ fn relation_edge_view(relation: ColandRelationState) -> RelationEdgeView {
     }
 }
 
-/// Convert one authoritative Relation current-result row into the private
+/// Convert one authoritative Relation current-state row into the private
 /// read model. Unlike the reducer projection, this record carries the exact
 /// accepting RealmCommit revision needed by the next CAS operation.
 fn relation_current_edge_view(
-    record: coland_storage::RelationCurrentResultRecord,
+    record: coland_storage::RelationCurrentStateRecord,
 ) -> Result<RelationEdgeView, AppError> {
     let relation = record.relation;
     let relation_id = relation
@@ -535,7 +535,7 @@ mod relation_actor_endpoint_tests {
             "created_at":"2026-09-21T00:00:00.000Z"
         }))
         .unwrap();
-        let view = relation_current_edge_view(coland_storage::RelationCurrentResultRecord {
+        let view = relation_current_edge_view(coland_storage::RelationCurrentStateRecord {
             realm_id,
             domain_key: arkret_canonical::canonical_json_string(&primary_conflict_domain).unwrap(),
             primary_conflict_domain,
@@ -821,11 +821,11 @@ async fn list_relation_projections(
 
     let durable_current = state
         .persistence()
-        .relation_current_results()
+        .relation_current_states()
         .await
         .map_err(|error| {
             AppError::internal(format!(
-                "authoritative Relation current-result read failed: {error}"
+                "authoritative Relation current-state read failed: {error}"
             ))
         })?;
     let durable_current_ids = durable_current
@@ -926,7 +926,7 @@ async fn get_document_projection(
     req: &mut Request,
     realm_id: PathParam<String>,
     morph_id: PathParam<String>,
-) -> GuardedJsonResult<DocumentMorphProjectionOutcome> {
+) -> GuardedJsonResult<DocumentMorphView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let actor =
@@ -980,7 +980,7 @@ async fn list_morph_projections(
     req: &mut Request,
     realm_id: PathParam<String>,
     include_terminal: QueryParam<bool, false>,
-) -> GuardedJsonResult<ProjectionMorphList> {
+) -> GuardedJsonResult<MorphPage> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let actor =

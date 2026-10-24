@@ -169,7 +169,7 @@ fn non_governance_service_receipt_verifies_frozen_source_and_fails_closed_withou
             actor,
             verification_method: vm,
             key: arkret_models_identity::ServiceHistoricalSigningKey {
-                public_key_b64u: arkret_wire::Base64UrlString::new(
+                public_key_base64url: arkret_wire::Base64UrlString::new(
                     arkret_canonical::base64url_encode(
                         ed25519_dalek::SigningKey::from_bytes(&seed)
                             .verifying_key()
@@ -236,7 +236,7 @@ fn non_governance_service_receipt_verifies_frozen_source_and_fails_closed_withou
         changed.key.authorization_ref = coordinate(33);
         substitutions.push(changed);
         let mut changed = fact.clone();
-        changed.key.public_key_b64u =
+        changed.key.public_key_base64url =
             arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
                 ed25519_dalek::SigningKey::from_bytes(&[79; 32])
                     .verifying_key()
@@ -254,7 +254,7 @@ fn non_governance_service_receipt_verifies_frozen_source_and_fails_closed_withou
         // A new governance signature over the wrong key cannot replace the
         // independent verification of the Event's original producer proof.
         let mut wrong_key = fact.clone();
-        wrong_key.key.public_key_b64u =
+        wrong_key.key.public_key_base64url =
             arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
                 ed25519_dalek::SigningKey::from_bytes(&[79; 32])
                     .verifying_key()
@@ -418,7 +418,7 @@ fn non_governance_receiver_verifies_original_human_fact_and_legacy_is_unavailabl
             foreign_pcr.history.founding_device_id.as_str(),
         );
         let mut tampered = commit.clone();
-        tampered.signature.sig =
+        tampered.signature.signature =
             arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode([0u8; 64]))
                 .unwrap();
         let wrong_governor = chain.seal(commit.clone(), GovernanceSigner::GenesisStation);

@@ -1,7 +1,7 @@
 //! Exact current projection reads at the real native Account and resource cut.
-use arkret_models_collaboration::exact_current_results::{
-    ExactCurrentResultEntry as Entry, ExactCurrentResultsReadOutcome as Outcome,
-    ExactCurrentResultsReadRequestBody as Request, NeverWrittenExactCurrentSelector,
+use arkret_models_collaboration::exact_current_state::{
+    ExactCurrentStateEntry as Entry, ExactCurrentStateReadRequestBody as Request,
+    ExactCurrentStateReadResponseBody as Outcome, NeverWrittenExactCurrentSelector,
 };
 use arkret_wire::{CommitStreamRef, CurrentRevision};
 
@@ -56,7 +56,7 @@ pub(super) async fn prepare(
         return Err(refused("native exact current has another Realm"));
     }
     let fresh = crate::boxed_future(|| {
-        crate::self_current_reads::exact_current_result_for_actor_in_connection(
+        crate::self_current_reads::exact_current_state_for_actor_in_connection(
             conn,
             request,
             &endpoint.authority.actor_id,

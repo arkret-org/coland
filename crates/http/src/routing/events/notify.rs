@@ -13,7 +13,7 @@
 //!
 //! Direct mentions keep the AKP-0016 third-party agent gate: a native Agent
 //! is notified of a third-party mention (author != its controller) only when
-//! its effective `accept_third_party_mention` bit (selection intersected
+//! its effective `third_party_mention_delivery_allowed` bit (selection intersected
 //! with ceiling) is true for the message scope.
 
 use std::collections::BTreeSet;
@@ -334,7 +334,7 @@ fn canonical_patch_set_value(value: &Value) -> Option<&Value> {
 }
 
 /// AKP-0016 section 9.4.5: a native Agent receives a third-party mention only
-/// when its effective `accept_third_party_mention` bit for the message scope
+/// when its effective `third_party_mention_delivery_allowed` bit for the message scope
 /// is true. A mention by its controller always passes.
 async fn mention_passes_agent_gate(
     state: &AppState,
@@ -376,7 +376,7 @@ async fn mention_passes_agent_gate(
             },
         )
         .await;
-    let public = matches!(mode, Ok(Some(arkret_wire::TypedCurrentRow::Value { source_stream_ref: arkret_wire::CommitStreamRef::Realm { realm_id }, value, .. })) if realm_id == *source.realm_id && serde_json::from_value::<arkret_models_collaboration::agent_interaction::AgentInteractionCurrentValue>(value.clone()).is_ok_and(|v| v.controller_account_id == controller && v.interaction_mode == arkret_models_collaboration::agent_interaction::AgentInteractionMode::Public));
+    let public = matches!(mode, Ok(Some(arkret_wire::CurrentState::Value { source_stream_ref: arkret_wire::CommitStreamRef::Realm { realm_id }, value, .. })) if realm_id == *source.realm_id && serde_json::from_value::<arkret_models_collaboration::agent_interaction::AgentInteractionCurrentValue>(value.clone()).is_ok_and(|v| v.controller_account_id == controller && v.interaction_mode == arkret_models_collaboration::agent_interaction::AgentInteractionMode::Public));
     if !public {
         return false;
     }
@@ -395,7 +395,7 @@ async fn mention_passes_agent_gate(
     scope_keys.push(strand_scope_key(realm_id, planned.strand_id.as_str()));
     resolve_agent_participation_for_scope_keys(state, agent, &scope_keys)
         .await
-        .is_some_and(|resolved| resolved.effective.accept_third_party_mention)
+        .is_some_and(|resolved| resolved.effective.third_party_mention_delivery_allowed)
 }
 
 async fn put_notification(
@@ -887,7 +887,7 @@ mod tests {
                 account_id: controller_account.clone(),
                 localpart: "controller".to_owned(),
                 display_name: None,
-                bio: None,
+                biography: None,
                 avatar_blob_ref: None,
                 created_at: chrono::Utc::now(),
             })
@@ -924,7 +924,7 @@ mod tests {
         scope: Value,
         scope_kind: &str,
         scope_key: String,
-        accept_third_party_mention: bool,
+        third_party_mention_delivery_allowed: bool,
         expected_version: u64,
     ) {
         assert!(
@@ -938,11 +938,11 @@ mod tests {
                         "realm_id": REALM,
                         "scope": scope,
                         "version": expected_version + 1,
-                        "reply_message": true,
-                        "reaction_add": false,
-                        "reaction_remove": false,
-                        "accept_third_party_mention": accept_third_party_mention,
-                        "act_on_behalf": false,
+                        "message_creation_allowed": true,
+                        "reaction_addition_allowed": false,
+                        "reaction_removal_allowed": false,
+                        "third_party_mention_delivery_allowed": third_party_mention_delivery_allowed,
+                        "acting_on_behalf_allowed": false,
                     }),
                     expected_version
                 )

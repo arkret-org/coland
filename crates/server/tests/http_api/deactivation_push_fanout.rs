@@ -215,7 +215,7 @@ fn gateway_route(base: &str, key: &SigningKey) -> PushGatewayRoute {
 #[derive(Clone)]
 struct GatewayExchange {
     request: arkret_models_integration::PushRegistrationHandoffRequestBody,
-    response: Option<arkret_models_integration::PushRegistrationHandoffOutcome>,
+    response: Option<arkret_models_integration::PushRegistrationHandoffResponseBody>,
 }
 
 struct ReceiptGateway {
@@ -441,9 +441,9 @@ fn gateway_receipt(
     request: &arkret_models_integration::PushRegistrationHandoffRequestBody,
     source: &DidCoreId,
     key: &SigningKey,
-) -> arkret_models_integration::PushRegistrationHandoffOutcome {
+) -> arkret_models_integration::PushRegistrationHandoffResponseBody {
     use arkret_models_integration::{
-        PushRegistrationHandoffOutcome, PushRegistrationInstallationReceipt,
+        PushRegistrationHandoffResponseBody, PushRegistrationInstallationReceipt,
     };
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let mut receipt = PushRegistrationInstallationReceipt {
@@ -482,7 +482,7 @@ fn gateway_receipt(
         &key.verifying_key(),
     )
     .unwrap();
-    PushRegistrationHandoffOutcome { receipt }
+    PushRegistrationHandoffResponseBody { receipt }
 }
 
 #[test]
@@ -500,7 +500,7 @@ fn opaque_deactivation_recovery_future() -> std::pin::Pin<Box<dyn std::future::F
 }
 
 async fn opaque_deactivation_recovery_body() {
-    use arkret_models_integration::{PushRegisterDeviceOutcome, PushRegistrationHandoffState};
+    use arkret_models_integration::{PushRegisterDeviceResponseBody, PushRegistrationHandoffState};
     use coland_storage::PushRegistrationHandoffIntentStatus;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("https://{}/", listener.local_addr().unwrap());
@@ -541,7 +541,7 @@ async fn opaque_deactivation_recovery_body() {
         Some(StatusCode::OK),
         "real public-Gateway registration must succeed"
     );
-    let installed: PushRegisterDeviceOutcome = response.take_json().await.unwrap();
+    let installed: PushRegisterDeviceResponseBody = response.take_json().await.unwrap();
     let registration_id = arkret_models_integration::PushRegistrationId::new(
         installed
             .registration_id

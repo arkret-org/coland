@@ -1,7 +1,7 @@
 use arkret_event_draft::{EventPayloadExt as _, TypedEventDraft};
 use arkret_identifiers::SidecarId;
 use arkret_models_collaboration::agent_operations::{
-    AgentLifecycleState, AgentSidecarList, AgentSidecarView,
+    AgentLifecycleState, AgentSidecarPage, AgentSidecarView,
 };
 #[cfg(test)]
 use arkret_models_collaboration::agent_sidecar::SidecarAccessProvisioningPhase;
@@ -14,10 +14,10 @@ use arkret_models_collaboration::events_payloads::sidecar::{
 };
 use arkret_models_collaboration::prepared_event_draft::PreparedEventDraft;
 use arkret_models_collaboration::sidecar_operations::{
-    SidecarContextRef, SidecarEnsureAcceptedOutcome, SidecarEnsureAcceptedPhase,
+    SidecarContextRef, SidecarEnsureAcceptedPhase, SidecarEnsureAcceptedResponseBody,
     SidecarEnsureAcceptedStatus, SidecarEnsureExistingBranch, SidecarEnsureNewBranch,
-    SidecarEnsureOutcome, SidecarEnsurePreparedExistingOutcome, SidecarEnsurePreparedNewOutcome,
-    SidecarEnsurePreparedStatus, SidecarEnsureRequestBody,
+    SidecarEnsurePreparedExistingResponseBody, SidecarEnsurePreparedNewResponseBody,
+    SidecarEnsurePreparedStatus, SidecarEnsureRequestBody, SidecarEnsureResponseBody,
 };
 #[cfg(test)]
 use arkret_models_crypto::MlsGovernanceBindingPayload;
@@ -415,7 +415,7 @@ fn sidecar_event_draft(
     )
     .map_err(|error| AppError::internal(format!("Sidecar draft digest invalid: {error}")))?;
     Ok(PreparedEventDraft {
-        unsigned_event_bytes: arkret_wire::Base64UrlString::new(
+        unsigned_event_base64url: arkret_wire::Base64UrlString::new(
             URL_SAFE_NO_PAD.encode(unsigned_bytes),
         )
         .map_err(|error| AppError::internal(format!("Sidecar draft bytes invalid: {error}")))?,
@@ -448,7 +448,7 @@ async fn store_sidecar_prepare(
     request_hash: &str,
     reservation_handle: &arkret_wire::ReservationHandle,
     expires_at: chrono::DateTime<chrono::Utc>,
-    outcome: &SidecarEnsureOutcome,
+    outcome: &SidecarEnsureResponseBody,
 ) -> Result<(), AppError> {
     let principal_id = arkret_wire::DidCoreId::new(principal_id.to_owned())
         .map_err(|error| AppError::internal(format!("Sidecar principal id invalid: {error}")))?;
@@ -485,7 +485,7 @@ async fn store_sidecar_final_outcome(
     principal_id: &str,
     idempotency_key: &str,
     request_hash: &str,
-    outcome: &SidecarEnsureOutcome,
+    outcome: &SidecarEnsureResponseBody,
 ) -> Result<(), AppError> {
     let created_at = chrono::Utc::now();
     let principal_id = arkret_wire::DidCoreId::new(principal_id.to_owned())
@@ -535,7 +535,7 @@ async fn prepare_sidecar(
     state: &AppState,
     session: &SessionRecord,
     body: arkret_models_collaboration::sidecar_operations::SidecarEnsurePrepareRequestBody,
-) -> JsonResult<SidecarEnsureOutcome> {
+) -> JsonResult<SidecarEnsureResponseBody> {
     let principal_id = arkret_wire::DidCoreId::new(session.actor.clone())
         .map_err(|error| AppError::internal(format!("session actor invalid: {error}")))?;
     let authenticated_controller_account_id =
@@ -573,7 +573,7 @@ async fn prepare_sidecar(
                 "idempotency key was used for another Sidecar prepare",
             ));
         }
-        let outcome = serde_json::from_value::<SidecarEnsureOutcome>(cached.response_body)
+        let outcome = serde_json::from_value::<SidecarEnsureResponseBody>(cached.response_body)
             .map_err(|error| AppError::internal(format!("stored Sidecar outcome: {error}")))?;
         return json_ok(outcome);
     }
@@ -653,7 +653,7 @@ async fn prepare_sidecar(
         .map_err(AppError::internal)?;
     let expires_at = created_at + chrono::Duration::minutes(10);
     let prepared = if let Some(create_event) = create_event {
-        SidecarEnsureOutcome::PreparedNew(SidecarEnsurePreparedNewOutcome {
+        SidecarEnsureResponseBody::PreparedNew(SidecarEnsurePreparedNewResponseBody {
             status: SidecarEnsurePreparedStatus::Prepared,
             branch: SidecarEnsureNewBranch::New,
             operation_id: body.operation_id.clone(),
@@ -663,7 +663,7 @@ async fn prepare_sidecar(
             context_attach_event_draft,
         })
     } else {
-        SidecarEnsureOutcome::PreparedExisting(SidecarEnsurePreparedExistingOutcome {
+        SidecarEnsureResponseBody::PreparedExisting(SidecarEnsurePreparedExistingResponseBody {
             status: SidecarEnsurePreparedStatus::Prepared,
             branch: SidecarEnsureExistingBranch::Existing,
             operation_id: body.operation_id.clone(),
@@ -698,7 +698,7 @@ fn validate_signed_sidecar_draft(
     )
     .map_err(|error| AppError::param_invalid(format!("signed Sidecar Event: {error}")))?;
     let expected_unsigned = URL_SAFE_NO_PAD
-        .decode(draft.unsigned_event_bytes.as_str())
+        .decode(draft.unsigned_event_base64url.as_str())
         .map_err(|_| AppError::internal("stored Sidecar draft bytes are invalid"))?;
     let digest_suite = draft
         .event_digest
@@ -732,7 +732,7 @@ async fn validate_sidecar_commit_reservation(
     reservation_handle: &arkret_wire::ReservationHandle,
     create_event: Option<&arkret_wire::Event>,
     context_attach_event: &arkret_wire::Event,
-) -> Result<SidecarEnsureOutcome, AppError> {
+) -> Result<SidecarEnsureResponseBody, AppError> {
     let principal_id = arkret_wire::DidCoreId::new(session.actor.clone())
         .map_err(|error| AppError::internal(format!("session actor invalid: {error}")))?;
     let record = state
@@ -751,15 +751,15 @@ async fn validate_sidecar_commit_reservation(
     if record.expires_at <= chrono::Utc::now() {
         return Err(AppError::conflict("Sidecar reservation has expired"));
     }
-    let outcome = serde_json::from_value::<SidecarEnsureOutcome>(record.response_body)
+    let outcome = serde_json::from_value::<SidecarEnsureResponseBody>(record.response_body)
         .map_err(|error| AppError::internal(format!("stored Sidecar reservation: {error}")))?;
-    if matches!(outcome, SidecarEnsureOutcome::Accepted(_)) {
+    if matches!(outcome, SidecarEnsureResponseBody::Accepted(_)) {
         return Err(AppError::conflict(
             "Sidecar reservation is already finalized",
         ));
     }
     match &outcome {
-        SidecarEnsureOutcome::PreparedNew(SidecarEnsurePreparedNewOutcome {
+        SidecarEnsureResponseBody::PreparedNew(SidecarEnsurePreparedNewResponseBody {
             operation_id: reserved_operation_id,
             reservation_handle: reserved_handle,
             create_event_draft,
@@ -777,12 +777,14 @@ async fn validate_sidecar_commit_reservation(
             validate_signed_sidecar_draft(create_event, create_event_draft)?;
             validate_signed_sidecar_draft(context_attach_event, context_attach_event_draft)?;
         }
-        SidecarEnsureOutcome::PreparedExisting(SidecarEnsurePreparedExistingOutcome {
-            operation_id: reserved_operation_id,
-            reservation_handle: reserved_handle,
-            context_attach_event_draft,
-            ..
-        }) => {
+        SidecarEnsureResponseBody::PreparedExisting(
+            SidecarEnsurePreparedExistingResponseBody {
+                operation_id: reserved_operation_id,
+                reservation_handle: reserved_handle,
+                context_attach_event_draft,
+                ..
+            },
+        ) => {
             if reserved_operation_id != operation_id || reserved_handle != reservation_handle {
                 return Err(AppError::param_invalid(
                     "Sidecar reservation binding mismatch",
@@ -795,22 +797,26 @@ async fn validate_sidecar_commit_reservation(
             }
             validate_signed_sidecar_draft(context_attach_event, context_attach_event_draft)?;
         }
-        SidecarEnsureOutcome::Accepted(_) => unreachable!("accepted reservation rejected above"),
+        SidecarEnsureResponseBody::Accepted(_) => {
+            unreachable!("accepted reservation rejected above")
+        }
     }
     Ok(outcome)
 }
 
-fn sidecar_prepared_sidecar_id(prepared: &SidecarEnsureOutcome) -> Result<SidecarId, AppError> {
+fn sidecar_prepared_sidecar_id(
+    prepared: &SidecarEnsureResponseBody,
+) -> Result<SidecarId, AppError> {
     match prepared {
-        SidecarEnsureOutcome::PreparedNew(SidecarEnsurePreparedNewOutcome {
+        SidecarEnsureResponseBody::PreparedNew(SidecarEnsurePreparedNewResponseBody {
             create_event_draft,
             ..
         }) => create_event_draft
             .event_id()
             .map(|event_id| SidecarId::from_event_id(&event_id))
             .map_err(|error| AppError::internal(format!("stored Sidecar draft: {error}"))),
-        SidecarEnsureOutcome::PreparedExisting(outcome) => Ok(outcome.sidecar_id.clone()),
-        SidecarEnsureOutcome::Accepted(_) => {
+        SidecarEnsureResponseBody::PreparedExisting(outcome) => Ok(outcome.sidecar_id.clone()),
+        SidecarEnsureResponseBody::Accepted(_) => {
             Err(AppError::internal("accepted Sidecar is not a preparation"))
         }
     }
@@ -819,7 +825,7 @@ fn sidecar_prepared_sidecar_id(prepared: &SidecarEnsureOutcome) -> Result<Sideca
 async fn finalize_sidecar_projection_records(
     state: &AppState,
     session: &SessionRecord,
-    prepared: &SidecarEnsureOutcome,
+    prepared: &SidecarEnsureResponseBody,
     context_attach_event: &arkret_wire::Event,
 ) -> Result<(), AppError> {
     let sidecar_id = sidecar_prepared_sidecar_id(prepared)?;
@@ -873,7 +879,7 @@ async fn ensure_sidecar_impl(
     body: SidecarEnsureRequestBody,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<SidecarEnsureOutcome> {
+) -> JsonResult<SidecarEnsureResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let principal_id = arkret_wire::DidCoreId::new(session.actor.clone())
@@ -945,7 +951,7 @@ async fn ensure_sidecar_impl(
                 .typed_payload::<arkret_wire::event_spec::SidecarContextAttach>()
                 .map_err(|error| AppError::internal(format!("accepted Sidecar context: {error}")))?
                 .source_context_ref;
-            let outcome = SidecarEnsureOutcome::Accepted(SidecarEnsureAcceptedOutcome {
+            let outcome = SidecarEnsureResponseBody::Accepted(SidecarEnsureAcceptedResponseBody {
                 status: SidecarEnsureAcceptedStatus::Accepted,
                 operation_id: body.operation_id,
                 accepted_phase: SidecarEnsureAcceptedPhase::Commit,
@@ -1030,7 +1036,7 @@ async fn ensure_sidecar_impl(
                 .typed_payload::<arkret_wire::event_spec::SidecarContextAttach>()
                 .map_err(|error| AppError::internal(format!("accepted Sidecar context: {error}")))?
                 .source_context_ref;
-            let outcome = SidecarEnsureOutcome::Accepted(SidecarEnsureAcceptedOutcome {
+            let outcome = SidecarEnsureResponseBody::Accepted(SidecarEnsureAcceptedResponseBody {
                 status: SidecarEnsureAcceptedStatus::Accepted,
                 operation_id: body.operation_id,
                 accepted_phase: SidecarEnsureAcceptedPhase::Attach,
@@ -1062,7 +1068,7 @@ pub(super) async fn ensure_sidecar(
     body: JsonBody<SidecarEnsureRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<SidecarEnsureOutcome> {
+) -> JsonResult<SidecarEnsureResponseBody> {
     ensure_sidecar_impl(aa, body.into_inner(), depot, req).await
 }
 
@@ -1097,7 +1103,7 @@ pub(super) async fn list_sidecars(
     cursor: QueryParam<String, false>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AgentSidecarList> {
+) -> JsonResult<AgentSidecarPage> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let controller_account_id = arkret_wire::AccountId::new(
@@ -1129,7 +1135,7 @@ pub(super) async fn list_sidecars(
     for record in records {
         items.push(sidecar_view(state, &record, &session).await?);
     }
-    json_ok(AgentSidecarList {
+    json_ok(AgentSidecarPage {
         sidecars: items,
         next_cursor,
     })
@@ -1291,8 +1297,8 @@ mod tests {
             sidecar_event_draft(&draft_event, arkret_canonical::DigestSuite::Sha256).unwrap();
         assert!(validate_signed_sidecar_draft(&draft_event, &draft).is_err());
         // A new reservation freezes an attach-only successor, never Accepted.
-        let prepared =
-            SidecarEnsureOutcome::PreparedExisting(SidecarEnsurePreparedExistingOutcome {
+        let prepared = SidecarEnsureResponseBody::PreparedExisting(
+            SidecarEnsurePreparedExistingResponseBody {
                 status: SidecarEnsurePreparedStatus::Prepared,
                 branch: SidecarEnsureExistingBranch::Existing,
                 operation_id: arkret_wire::ProtocolOperationId::new(
@@ -1306,10 +1312,11 @@ mod tests {
                 expires_at: at + chrono::Duration::minutes(10),
                 sidecar_id: sidecar.clone(),
                 context_attach_event_draft: draft.clone(),
-            });
+            },
+        );
         assert!(matches!(
             prepared,
-            SidecarEnsureOutcome::PreparedExisting(_)
+            SidecarEnsureResponseBody::PreparedExisting(_)
         ));
         let mut signed = draft_event.clone().into_event();
         signed.producer_proof = first.authority_commit.event.producer_proof.clone();
@@ -1355,7 +1362,7 @@ mod tests {
             #[diesel(sql_type=diesel::sql_types::BigInt)]
             count: i64,
         }
-        let counts = "SELECT (SELECT count(*) FROM canonical_events)+(SELECT count(*) FROM realm_commits)+(SELECT count(*) FROM sidecar_context_current_results)+(SELECT count(*) FROM member_state_current_results)+(SELECT count(*) FROM strand_current_results)+(SELECT count(*) FROM circle_current_results)+(SELECT count(*) FROM mls_group_current_results)+(SELECT count(*) FROM mls_welcome_provenance) AS count";
+        let counts = "SELECT (SELECT count(*) FROM canonical_events)+(SELECT count(*) FROM realm_commits)+(SELECT count(*) FROM sidecar_context_current_states)+(SELECT count(*) FROM member_state_current_states)+(SELECT count(*) FROM strand_current_states)+(SELECT count(*) FROM circle_current_states)+(SELECT count(*) FROM mls_group_current_states)+(SELECT count(*) FROM mls_welcome_provenance) AS count";
         let mut conn = pool.get().await.unwrap();
         assert_eq!(diesel::sql_query("SELECT (SELECT count(*) FROM agent_sidecars)+(SELECT count(*) FROM agent_sidecar_contexts) AS count").get_result::<Count>(&mut conn).await.unwrap().count, 0);
         let before = diesel::sql_query(counts)
@@ -1447,7 +1454,7 @@ mod tests {
             before
         );
         diesel::sql_query(
-            "UPDATE sidecar_current_results SET value=jsonb_set(value,'{state}','\"tombstoned\"')",
+            "UPDATE sidecar_current_states SET value=jsonb_set(value,'{state}','\"tombstoned\"')",
         )
         .execute(&mut conn)
         .await
@@ -1459,12 +1466,12 @@ mod tests {
                 .is_err()
         );
         diesel::sql_query(
-            "UPDATE sidecar_current_results SET value=jsonb_set(value,'{state}','\"active\"')",
+            "UPDATE sidecar_current_states SET value=jsonb_set(value,'{state}','\"active\"')",
         )
         .execute(&mut conn)
         .await
         .unwrap();
-        diesel::sql_query("UPDATE realm_commits SET event_pk=NULL WHERE commit_id IN (SELECT current_commit_id FROM sidecar_context_current_results)")
+        diesel::sql_query("UPDATE realm_commits SET event_pk=NULL WHERE commit_id IN (SELECT current_commit_id FROM sidecar_context_current_states)")
             .execute(&mut conn).await.unwrap();
         assert!(
             store
@@ -1699,9 +1706,9 @@ mod tests {
                 "sidecar_id": BINDING_SIDECAR_ID,
             },
             "base_group_state_ref": null,
-            "previous_epoch": 0,
-            "next_epoch": 0,
-            "key_access_revision": 0,
+            "previous_epoch": "0",
+            "next_epoch": "0",
+            "key_access_revision": "0",
             "participant_authority_digest": format!("sha256:{}", "4".repeat(64)),
             "authority_stream_head": authority_stream_head,
         })

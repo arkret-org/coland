@@ -341,7 +341,7 @@ pub(crate) async fn audit_account_status_propagation_transition(
                 "account_authority_id": projection.account_authority_id,
                 "account_id": projection.account_id,
                 "account_status_record_id": projection.account_status_record_id,
-                "status_seq": projection.status_seq,
+                "status_sequence": projection.status_sequence,
                 "propagation_state": transition_name,
                 "pending_destination_count": projection.pending_destination_count,
                 "deadline_at": projection.deadline_at,
@@ -509,7 +509,7 @@ pub(crate) async fn execute_account_status_erasure(
     let account_pk = account.pk;
     let previous_localpart = account.localpart.clone();
     account.display_name = Some("[user erased]".to_owned());
-    account.bio = None;
+    account.biography = None;
     account.avatar_blob_ref = None;
     account.localpart = String::new();
     state

@@ -365,7 +365,7 @@ impl ProjectionState {
                 };
             }
             writes.push((capture, Value::String(to.to_owned())));
-            if let Some(result) = &transition.result {
+            if let Some(result) = &transition.capture_metadata {
                 let Ok(value) = serde_json::to_value(result) else {
                     return ProjectionEffect::Rejected {
                         reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
@@ -396,7 +396,7 @@ impl ProjectionState {
                 };
             }
             writes.push((capture, Value::String(to.to_owned())));
-            if let Some(result) = &transition.result {
+            if let Some(result) = &transition.capture_metadata {
                 let Ok(value) = serde_json::to_value(result) else {
                     return ProjectionEffect::Rejected {
                         reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
@@ -502,7 +502,7 @@ impl ProjectionState {
                 };
             }
         };
-        if payload.result.retention.consent_confirmed != Some(true) {
+        if payload.capture_metadata.retention.consent_confirmed != Some(true) {
             return ProjectionEffect::Rejected {
                 reason: arkret_wire::ReasonCode::RECORDING_CONSENT_REQUIRED.to_owned(),
             };
@@ -527,7 +527,7 @@ impl ProjectionState {
                 reason: arkret_wire::ReasonCode::RECORDING_STATE_TRANSITION_INVALID.to_owned(),
             };
         }
-        let Ok(outcome) = serde_json::to_value(&payload.result) else {
+        let Ok(outcome) = serde_json::to_value(&payload.capture_metadata) else {
             return ProjectionEffect::Rejected {
                 reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
             };

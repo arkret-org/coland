@@ -422,7 +422,7 @@ pub(super) async fn issue_ack_token(
             .get_result::<crate::ExistsRow>(conn).await?;
         if !exists.present { return Ok(None); }
         let token = fresh_device_message_ack_token();
-        sql_query("INSERT INTO device_message_ack_tokens(ack_token,recipient,device_id,recipient_device_authorization,queue_position,issued_at,expires_at,consumed_at) VALUES($1,$2,$3,$4,$5,NOW(),$6,NULL)")
+        sql_query("INSERT INTO device_message_ack_tokens(acknowledgement_token,recipient,device_id,recipient_device_authorization,queue_position,issued_at,expires_at,consumed_at) VALUES($1,$2,$3,$4,$5,NOW(),$6,NULL)")
             .bind::<Text,_>(&token).bind::<Text,_>(recipient).bind::<Text,_>(device_id).bind::<Jsonb,_>(&binding)
             .bind::<BigInt,_>(queue_position).bind::<Timestamptz,_>(Utc::now()+chrono::Duration::hours(24)).execute(conn).await?;
         Ok(Some(token))
@@ -433,13 +433,13 @@ pub(super) async fn ack_with_token(
     pool: &PgPool,
     recipient: &str,
     device_id: &str,
-    ack_token: &str,
+    acknowledgement_token: &str,
 ) -> PersistenceResult<Option<usize>> {
     let mut conn = pg_conn(pool).await.map_err(PersistenceError::database)?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
         let Some(binding) = current_binding(conn, recipient, device_id).await? else { return Ok(None); };
-        let token = sql_query("SELECT recipient,device_id,recipient_device_authorization,queue_position,expires_at,consumed_at FROM device_message_ack_tokens WHERE ack_token=$1 AND effective_scope IS NULL FOR UPDATE")
-            .bind::<Text,_>(ack_token).get_result::<DeviceMessageAckTokenRow>(conn).await.optional()?;
+        let token = sql_query("SELECT recipient,device_id,recipient_device_authorization,queue_position,expires_at,consumed_at FROM device_message_ack_tokens WHERE acknowledgement_token=$1 AND effective_scope IS NULL FOR UPDATE")
+            .bind::<Text,_>(acknowledgement_token).get_result::<DeviceMessageAckTokenRow>(conn).await.optional()?;
         let Some(token) = token else { return Ok(None); };
         if token.recipient != recipient || token.device_id != device_id || token.recipient_device_authorization != binding || token.expires_at <= Utc::now() { return Ok(None); }
         if token.consumed_at.is_some() { return Ok(Some(0)); }
@@ -451,7 +451,7 @@ pub(super) async fn ack_with_token(
             .bind::<Text,_>(recipient).bind::<Text,_>(device_id).bind::<BigInt,_>(token.queue_position)
             .bind::<Jsonb,_>(&binding)
             .execute(conn).await?;
-        sql_query("UPDATE device_message_ack_tokens SET consumed_at=NOW() WHERE ack_token=$1 AND consumed_at IS NULL").bind::<Text,_>(ack_token).execute(conn).await?;
+        sql_query("UPDATE device_message_ack_tokens SET consumed_at=NOW() WHERE acknowledgement_token=$1 AND consumed_at IS NULL").bind::<Text,_>(acknowledgement_token).execute(conn).await?;
         Ok(Some(count + welcome_count))
     }).await.map_err(PgTransactionError::into_persistence)
 }
@@ -695,7 +695,7 @@ pub(super) async fn issue_recipient_ack_token(
                 let token = fresh_device_message_ack_token();
                 sql_query(
                     "INSERT INTO agent_recipient_delivery_ack_tokens \
-                     (ack_token, agent_id, verification_method, authorization_event_ref, \
+                     (acknowledgement_token, agent_id, verification_method, authorization_event_ref, \
                       queue_position, issued_at, expires_at, consumed_at) \
                      VALUES ($1,$2,$3,$4,$5,NOW(),$6,NULL)",
                 )
@@ -718,13 +718,13 @@ pub(super) async fn issue_recipient_ack_token(
 pub(super) async fn ack_recipient_with_token(
     pool: &PgPool,
     selector: &RecipientQueueSelector,
-    ack_token: &str,
+    acknowledgement_token: &str,
 ) -> PersistenceResult<Option<usize>> {
     match selector {
         RecipientQueueSelector::HumanDevice {
             recipient,
             device_id,
-        } => ack_with_token(pool, recipient, device_id, ack_token).await,
+        } => ack_with_token(pool, recipient, device_id, acknowledgement_token).await,
         RecipientQueueSelector::AgentRuntime {
             agent_id,
             verification_method,
@@ -741,9 +741,9 @@ pub(super) async fn ack_recipient_with_token(
                 let token = sql_query(
                     "SELECT agent_id, verification_method, authorization_event_ref, \
                             queue_position, expires_at, consumed_at \
-                     FROM agent_recipient_delivery_ack_tokens WHERE ack_token=$1 FOR UPDATE",
+                     FROM agent_recipient_delivery_ack_tokens WHERE acknowledgement_token=$1 FOR UPDATE",
                 )
-                .bind::<Text, _>(ack_token)
+                .bind::<Text, _>(acknowledgement_token)
                 .get_result::<AgentAckTokenRow>(conn)
                 .await
                 .optional()?;
@@ -774,9 +774,9 @@ pub(super) async fn ack_recipient_with_token(
                 .await?;
                 sql_query(
                     "UPDATE agent_recipient_delivery_ack_tokens SET consumed_at=NOW() \
-                     WHERE ack_token=$1 AND consumed_at IS NULL",
+                     WHERE acknowledgement_token=$1 AND consumed_at IS NULL",
                 )
-                .bind::<Text, _>(ack_token)
+                .bind::<Text, _>(acknowledgement_token)
                 .execute(conn)
                 .await?;
                 Ok(Some(count))
@@ -805,14 +805,14 @@ mod tests {
                 "recipient_actor_id": {"kind":"service", "service_id":"ak:did_core:webvh:z6mkfixturestationb"},
                 "recipient_endpoint": endpoint,
                 "keypackage_claim_ref": "ak:keypackage_claim:0199cccc-cccc-7ccc-8ccc-cccccccccccc",
-                "ciphertext_b64": "AQIDBA",
+                "ciphertext_base64url": "AQIDBA",
                 "producer_proof": {
                     "context": "ak.mls_welcome_delivery_signature.v1",
                     "signature_algorithm": "Ed25519",
                     "verification_method": "did:webvh:z6mkfixturealice:alice.example#device-fixture",
                     "signed_digest": "sha256:f51a607977aa5ba077764b06209d77c0231822b23a59be07cdb44f11f6582a29",
                     "created_at": "2026-09-20T00:00:00.000Z",
-                    "sig": "R_RF4nAmz0yEIvqPt7BLemCd4npd36B5p5wyhSB8gXy2AL2AHTZHypwUsIsbqL5mZ3uesmfoOdcO8vbShWzNDw"
+                    "signature": "R_RF4nAmz0yEIvqPt7BLemCd4npd36B5p5wyhSB8gXy2AL2AHTZHypwUsIsbqL5mZ3uesmfoOdcO8vbShWzNDw"
                 }
             }),
         }

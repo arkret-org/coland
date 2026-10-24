@@ -42,7 +42,7 @@ impl HistoricalControlStation {
                     provider_endpoint: &"https://historical-fixture.example/".parse().unwrap(),
                     registration_key: &registration,
                     also_known_as: &[],
-                    version_time: "2026-01-01T00:00:00Z".parse().unwrap(),
+                    version_created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
                     did_key_fragment: Some("authority"),
                 },
                 &seed,
@@ -156,8 +156,8 @@ impl HistoricalControlStation {
             .append_log_event(coland_storage::WebvhLogRecord {
                 event_digest: log_head_digest,
                 did: self.did.to_string(),
-                seq: 1,
-                created_at: self.inception.version_time.parse().unwrap(),
+                sequence: 1,
+                created_at: self.inception.version_created_at.parse().unwrap(),
                 operation: self.inception.log_entry.clone(),
             })
             .await
@@ -345,7 +345,7 @@ pub fn managed_agent_did(
             principal_endpoint: &endpoint,
             local_id: &local_id,
             controller_principal_id: controller,
-            version_time: at,
+            version_created_at: at,
             root_seed: &[101; 32],
             next_root_public_key_multibase: &next,
         },

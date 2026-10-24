@@ -6,7 +6,7 @@
 //! at the locked PCR cut: device status, current authorization Event and
 //! generation, source checkpoint, record signature and pointer CAS.
 
-use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitOutcome, EventAdmissionSubmission};
+use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitResponseBody, EventAdmissionSubmission};
 use chrono::Utc;
 use coland_services::{ServiceError, ServiceResult};
 use coland_storage::{KeyBackupActiveSeriesCommitOutcome, KeyBackupActiveSeriesCommitWrite};
@@ -16,7 +16,7 @@ use super::AppState;
 pub(super) async fn submit_self_key_backup_pointer(
     state: &AppState,
     request: &EventAdmissionSubmission,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     let event = &request.event;
     if event.kind != arkret_wire::EventKind::KeyBackupActiveSeries {
         return Err(ServiceError::Internal(
@@ -38,7 +38,7 @@ pub(super) async fn submit_self_key_backup_pointer(
                 "event_id is already committed with different canonical content".to_owned(),
             ));
         }
-        return Ok(AuthoritySubmitOutcome::Accepted {
+        return Ok(AuthoritySubmitResponseBody::Accepted {
             status: AuthorityCommitStatus::Duplicate,
             commit: existing.commit,
         });
@@ -68,13 +68,17 @@ pub(super) async fn submit_self_key_backup_pointer(
         })
         .await?;
     Ok(match outcome {
-        KeyBackupActiveSeriesCommitOutcome::Committed(commit) => AuthoritySubmitOutcome::Accepted {
-            status: AuthorityCommitStatus::Committed,
-            commit,
-        },
-        KeyBackupActiveSeriesCommitOutcome::Duplicate(commit) => AuthoritySubmitOutcome::Accepted {
-            status: AuthorityCommitStatus::Duplicate,
-            commit,
-        },
+        KeyBackupActiveSeriesCommitOutcome::Committed(commit) => {
+            AuthoritySubmitResponseBody::Accepted {
+                status: AuthorityCommitStatus::Committed,
+                commit,
+            }
+        }
+        KeyBackupActiveSeriesCommitOutcome::Duplicate(commit) => {
+            AuthoritySubmitResponseBody::Accepted {
+                status: AuthorityCommitStatus::Duplicate,
+                commit,
+            }
+        }
     })
 }

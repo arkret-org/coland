@@ -1,6 +1,7 @@
 use arkret_models_collaboration::governance::third_party_invite::{
     ThirdPartyInvite, ThirdPartyInviteAcceptanceAttestation,
-    ThirdPartyInviteAcceptanceAttestationOutcome, ThirdPartyInviteAcceptanceAttestationRequestBody,
+    ThirdPartyInviteAcceptanceAttestationRequestBody,
+    ThirdPartyInviteAcceptanceAttestationResponseBody,
 };
 
 use super::{PersistenceResult, async_trait};
@@ -75,7 +76,7 @@ pub trait ThirdPartyInviteProviderLivenessGuard: Send {
 
 /// Reads over the Invite typed current results.
 #[async_trait]
-pub trait InviteCurrentResultStore: Send + Sync {
+pub trait InviteCurrentStateStore: Send + Sync {
     /// Sign only while the local governing Realm cut still holds the accepted
     /// pending invite, its exact author and the current verifier allowlist.
     /// The callback returns a proof over the SDK attestation; it executes before
@@ -88,7 +89,7 @@ pub trait InviteCurrentResultStore: Send + Sync {
         verification_method: &arkret_wire::DidUrl,
         observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
         sign: &InviteAcceptanceAttestationSigner<'_>,
-    ) -> PersistenceResult<ThirdPartyInviteAcceptanceAttestationOutcome>;
+    ) -> PersistenceResult<ThirdPartyInviteAcceptanceAttestationResponseBody>;
 
     /// Verify the inviter's current accepted Device over the original SDK
     /// provisioning transcript and hold that PCR cut through private minting.

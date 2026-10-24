@@ -29,7 +29,7 @@ pub struct DirectConversationPendingPeerClaimQuery {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AccountStreamScan {
     /// A page inside the caller's proved readable interval.
-    Page(arkret_wire::StreamScanOutcome),
+    Page(arkret_wire::StreamScanResponseBody),
     /// The Realm is not governed here, or the caller is not (and hosts no)
     /// currently joined member: it has no readable interval on this stream.
     NotAuthorized,
@@ -41,7 +41,7 @@ pub enum AccountStreamScan {
 /// Peer-only Full disclosure and its original immutable Human sources.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PeerStreamScan {
-    Page(arkret_models_collaboration::authority_commit::PeerStreamScanOutcome),
+    Page(arkret_models_collaboration::authority_commit::PeerStreamScanResponseBody),
     NotAuthorized,
     Unproved(&'static str),
 }
@@ -86,7 +86,7 @@ pub enum MemberCommittedEventRead {
 }
 
 /// Result of an exact, non-enumerating self current read at one governing
-/// read cut (`ak.self.current_results.read.exact.v1`,
+/// read cut (`ak.self.current_state.read.exact.v1`,
 /// `ak.self.strand.watch.read.current.v1`).
 #[derive(Clone, Debug)]
 pub enum SelfExactCurrentRead<T> {
@@ -144,10 +144,10 @@ impl ForwardAttemptStatus {
 pub struct ForwardAttemptRecord {
     /// Exact original submission; this is transport intent, never current state.
     pub original_submission:
-        Option<arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest>,
+        Option<arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody>,
     /// Frozen signed source siblings and complete peer unit, only for exact transport retry.
     pub peer_request:
-        Option<Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest>>,
+        Option<Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody>>,
     /// Verified governing acceptance witness, not an installed replica.
     pub accepted_commit: Option<RealmCommit>,
     pub status: ForwardAttemptStatus,
@@ -215,7 +215,7 @@ pub struct RealmStateSnapshotMaterial {
     pub purpose: arkret_wire::RealmSnapshotPurpose,
     pub history_basis: Option<arkret_wire::RealmSnapshotHistoryBasis>,
     pub visible_stream_heads: Vec<arkret_wire::CommitStreamHead>,
-    pub current_state_entries: Vec<arkret_wire::TypedCurrentRow>,
+    pub current_state_entries: Vec<arkret_wire::CurrentState>,
     pub retention_and_history_floor: arkret_wire::RetentionAndHistoryFloor,
 }
 
@@ -225,7 +225,7 @@ pub struct RealmStateSnapshotMaterial {
 pub struct DirectConversationReplicaCut {
     pub authority: CurrentRealmAuthority,
     pub head: CommitStreamHead,
-    pub current_state_entries: Vec<arkret_wire::TypedCurrentRow>,
+    pub current_state_entries: Vec<arkret_wire::CurrentState>,
 }
 
 impl DirectConversationReplicaCut {
@@ -296,7 +296,7 @@ pub struct AccountRealmWindow {
     pub current_stream_heads: Vec<arkret_wire::CommitStreamHead>,
     /// Typed current results of the same proved cut, i.e. at the window
     /// cut; the Account current carrier of the window's Realm detail.
-    pub current_state_entries: Vec<arkret_wire::TypedCurrentRow>,
+    pub current_state_entries: Vec<arkret_wire::CurrentState>,
 }
 
 /// An issued snapshot without any live window reservation stays archived at
@@ -417,8 +417,8 @@ pub enum RealmActorMaterialCaller {
 
 pub type RealmActorMaterialSigner<'a> = &'a (
         dyn Fn(
-    &arkret_models_integration::RealmActorMaterialUnsigned,
-) -> PersistenceResult<arkret_models_integration::RealmActorMaterialOutcome>
+    &arkret_models_integration::RealmActorMaterialSignatureInput,
+) -> PersistenceResult<arkret_models_integration::RealmActorMaterialResponseBody>
             + Send
             + Sync
     );
@@ -438,7 +438,7 @@ pub enum SelfProducerCommitGuard {
         attributed_actor: arkret_wire::ActorId,
         source_provider_id: arkret_wire::DidCoreId,
         reporter_authority: Option<serde_json::Value>,
-        submit_request: Option<serde_json::Value>,
+        submit_request_body: Option<serde_json::Value>,
         mapping_receipt: Option<serde_json::Value>,
         reporter_device_guard: Option<Box<crate::DeviceRevocationGateSelector>>,
     },
@@ -781,8 +781,8 @@ pub struct PcrGenesisCommitUnit {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PcrGenesisCommitOutcome {
-    Committed(arkret_models_collaboration::principal_operations::PcrGenesisAdmissionOutcome),
-    Duplicate(arkret_models_collaboration::principal_operations::PcrGenesisAdmissionOutcome),
+    Committed(arkret_models_collaboration::principal_operations::PcrGenesisAdmissionResponseBody),
+    Duplicate(arkret_models_collaboration::principal_operations::PcrGenesisAdmissionResponseBody),
 }
 
 impl PcrGenesisCommitUnit {
@@ -849,10 +849,10 @@ impl OrdinaryRealmBootstrapCommitUnit {
             ));
         }
         match serde_json::from_slice::<
-            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest,
+            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody,
         >(&self.exact_request_body)
         {
-            Ok(arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(parsed))
+            Ok(arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(parsed))
                 if parsed == self.submission => {}
             _ => return Err(arkret_wire::WireError::Protocol(
                 "ordinary Realm bootstrap exact body does not match the submitted unit".to_owned(),
@@ -1163,7 +1163,7 @@ pub fn message_create_envelopes(
 /// sending endpoint's own authorization is decided by the caller first, at
 /// the same cut.
 pub fn decide_mls_send_gate(
-    current: Option<&arkret_wire::MlsGroupCurrent>,
+    current: Option<&arkret_wire::MlsGroupValue>,
     scope: &arkret_wire::ScopeRef,
     envelopes: Option<&[&arkret_models_crypto::EncryptedEnvelope]>,
 ) -> Result<(), MlsSendGateRefusal> {
@@ -1458,7 +1458,7 @@ pub struct ReplicaAnchorInstall {
     /// The snapshot's head on the Realm stream, at or after the join.
     pub snapshot_head: CommitStreamHead,
     pub visible_stream_heads: Vec<CommitStreamHead>,
-    pub current_state_entries: Vec<arkret_wire::TypedCurrentRow>,
+    pub current_state_entries: Vec<arkret_wire::CurrentState>,
     /// Exact signed bootstrap verified by the caller, archived with its rows.
     pub verified_snapshot: arkret_wire::RealmStateSnapshot,
 }
@@ -1485,7 +1485,7 @@ pub struct SignalScopeAuthorityQuery<'a> {
 pub struct SignalScopeAuthority {
     pub recipient_actors: Vec<arkret_wire::ActorId>,
     pub historical_mls_event_ref: arkret_wire::EventId,
-    pub current_mls: arkret_wire::MlsGroupCurrent,
+    pub current_mls: arkret_wire::MlsGroupValue,
     pub cipher_suite: String,
     pub current_realm_head: arkret_wire::CommitStreamHead,
     pub current_scope_head: arkret_wire::CommitStreamHead,
@@ -1573,26 +1573,26 @@ pub struct AccountContentDeliveryInput {
     >,
     /// Exact prepared scan and original SDK response, re-read on the held cut.
     pub stream_scans: Vec<(
-        arkret_wire::StreamScanRequest,
-        arkret_wire::StreamScanOutcome,
+        arkret_wire::StreamScanRequestBody,
+        arkret_wire::StreamScanResponseBody,
     )>,
     pub current_views:
-        Vec<arkret_models_collaboration::sync_frames::current_results::AccountCurrentView>,
+        Vec<arkret_models_collaboration::sync_frames::current_states::AccountStateView>,
     pub projection_lists: Vec<(
         arkret_wire::RealmId,
         bool,
-        arkret_models_collaboration::objects::query_projection::ProjectionSpaceList,
-        arkret_models_collaboration::objects::query_projection::ProjectionStrandList,
+        arkret_models_collaboration::objects::query_projection::SpacePage,
+        arkret_models_collaboration::objects::query_projection::StrandPage,
     )>,
     pub morph_lists: Vec<(
         arkret_wire::RealmId,
         bool,
-        arkret_models_collaboration::objects::query_projection::ProjectionMorphList,
+        arkret_models_collaboration::objects::query_projection::MorphPage,
     )>,
     pub morph_documents: Vec<(
         arkret_wire::RealmId,
         arkret_wire::MorphId,
-        arkret_models_collaboration::objects::query_projection::DocumentMorphProjectionOutcome,
+        arkret_models_collaboration::objects::query_projection::DocumentMorphView,
     )>,
     pub morph_absences: Vec<(arkret_wire::RealmId, arkret_wire::MorphId)>,
     pub account_status_observations: Vec<AccountStatusCurrentObservation>,
@@ -1604,31 +1604,31 @@ pub struct AccountContentDeliveryInput {
     pub notifications:
         Vec<arkret_models_collaboration::sync_frames::account_subscribe::NotificationDelta>,
     pub exact_reads: Vec<(
-        arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadRequestBody,
-        arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome,
+        arkret_models_collaboration::exact_current_state::ExactCurrentStateReadRequestBody,
+        arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody,
     )>,
     pub watch_reads: Vec<(
         arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody,
-        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome,
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentResponseBody,
     )>,
     /// Trusted in-process witness from a fresh authenticated governing peer.
     /// It is only consumed by this one response's local delivery guard.
     pub remote_watch_read: Option<(
         arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody,
-        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome,
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentResponseBody,
         CurrentRealmAuthority,
     )>,
     /// A fresh governing audited-read response or its durable local freeze.
     pub audited_watch_read: Option<(
-        arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
-        arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequestBody,
+        arkret_models_collaboration::strand_watch_operations::WatchAuditReadResponseBody,
         CurrentRealmAuthority,
     )>,
     pub watch_delivery_device: Option<crate::DeviceRevocationGateSelector>,
     /// Authenticated exact private material, verified before entering delivery.
     pub realm_actor_material: Option<Box<(
-        arkret_models_integration::RealmActorMaterialRequest,
-        arkret_models_integration::RealmActorMaterialOutcome,
+        arkret_models_integration::RealmActorMaterialRequestBody,
+        arkret_models_integration::RealmActorMaterialResponseBody,
         CurrentRealmAuthority,
     )>>,
     /// Local bearer sessions retain their exact stored Account through handoff.
@@ -1790,9 +1790,11 @@ pub trait AuthorityCommitStore: Send + Sync {
         &self,
         _caller: &arkret_wire::ActorId,
         _station: &arkret_wire::DidCoreId,
-        _request: &arkret_models_collaboration::governance::authorization::AuthzCheckRequestBody,
+        _request: &arkret_models_collaboration::governance::authorization::AuthorizationCheckRequestBody,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::governance::authorization::AuthzCheckOutcome>,
+        Option<
+            arkret_models_collaboration::governance::authorization::AuthorizationCheckResponseBody,
+        >,
     > {
         Ok(None)
     }
@@ -1943,11 +1945,11 @@ pub trait AuthorityCommitStore: Send + Sync {
 
     async fn read_realm_actor_material(
         &self,
-        request: &arkret_models_integration::RealmActorMaterialRequest,
+        request: &arkret_models_integration::RealmActorMaterialRequestBody,
         caller: &RealmActorMaterialCaller,
         governor: &arkret_wire::DidCoreId,
         sign: RealmActorMaterialSigner<'_>,
-    ) -> PersistenceResult<arkret_models_integration::RealmActorMaterialOutcome> {
+    ) -> PersistenceResult<arkret_models_integration::RealmActorMaterialResponseBody> {
         let _ = (request, caller, governor, sign);
         Err(PersistenceError::Conflict(
             "dependency_missing: private Realm material reader unavailable".into(),
@@ -2046,7 +2048,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         &self,
         realm_id: &arkret_wire::RealmId,
         selector: &arkret_models_identity::SignerKeyQuerySelector,
-    ) -> PersistenceResult<Option<arkret_models_identity::SignerKeyQueryOutcome>> {
+    ) -> PersistenceResult<Option<arkret_models_identity::SignerKeyResolution>> {
         let _ = (realm_id, selector);
         Ok(None)
     }
@@ -2058,7 +2060,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         realm_id: &arkret_wire::RealmId,
         selector: &arkret_models_identity::SignerKeyQuerySelector,
         recipient: &arkret_wire::AccountId,
-    ) -> PersistenceResult<Option<arkret_models_identity::SignerKeyQueryOutcome>> {
+    ) -> PersistenceResult<Option<arkret_models_identity::SignerKeyResolution>> {
         let _ = (realm_id, selector, recipient);
         Ok(None)
     }
@@ -2086,8 +2088,9 @@ pub trait AuthorityCommitStore: Send + Sync {
         &self,
         verified: &VerifiedMlsAddAuthorityAttestation,
         issuer: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<arkret_models_collaboration::mls_roster_authority::MlsAttestAddOutcome>
-    {
+    ) -> PersistenceResult<
+        arkret_models_collaboration::mls_roster_authority::MlsAttestAddResponseBody,
+    > {
         let _ = (verified, issuer);
         Err(crate::PersistenceError::Conflict(
             "unsupported_feature: MLS Add authority ingress is unavailable".to_owned(),
@@ -2492,7 +2495,7 @@ pub trait AuthorityCommitStore: Send + Sync {
     async fn retain_forwarded_submission(
         &self,
         event: &Event,
-        submission: &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest,
+        submission: &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody,
         at: DateTime<Utc>,
     ) -> PersistenceResult<()> {
         let _ = (event, submission, at);
@@ -2506,10 +2509,10 @@ pub trait AuthorityCommitStore: Send + Sync {
     async fn freeze_forwarded_peer_request(
         &self,
         event: &Event,
-        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
         at: DateTime<Utc>,
     ) -> PersistenceResult<
-        Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest>,
+        Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody>,
     > {
         let _ = (event, request, at);
         Err(crate::PersistenceError::Conflict(
@@ -2554,7 +2557,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         authority: &CurrentRealmAuthority,
         reason_code: &str,
         native: Option<(ManagedMlsRefusalSource<'_>, &crate::IdempotencyRecord)>,
-    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
         let _ = (event, authority, reason_code, native);
         Err(crate::PersistenceError::Conflict(
             "temporarily_unavailable: durable MLS refusal is unavailable".into(),
@@ -2595,8 +2598,8 @@ pub trait AuthorityCommitStore: Send + Sync {
 
     async fn watch_audit_read_delivery_guard(
         &self,
-        _request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
-        _outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        _request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequestBody,
+        _outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadResponseBody,
         _issuer: &arkret_wire::DidCoreId,
         _expires_at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<Box<dyn AccountContentDeliveryGuard>> {
@@ -2607,8 +2610,8 @@ pub trait AuthorityCommitStore: Send + Sync {
 
     async fn watch_audit_read_disclosure(
         &self,
-        _request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
-        _outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        _request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequestBody,
+        _outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadResponseBody,
         _issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<()> {
         Err(PersistenceError::Conflict(
@@ -2766,7 +2769,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         producer: &crate::AppletEventProducerGuard,
         prepared: Option<&crate::EventApprovalCommit>,
         digest: &arkret_wire::Hash,
-    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
         let _ = (transaction, producer, prepared, digest);
         Err(PersistenceError::Conflict(
             "dependency_missing: creation unit unavailable".into(),
@@ -2790,7 +2793,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         producer: &crate::AppletEventProducerGuard,
         publication: Option<&arkret_models_identity::ResolutionCommitment>,
         digest: &arkret_wire::Hash,
-    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
         let _ = (transaction, producer, publication, digest);
         Err(PersistenceError::Conflict(
             "dependency_missing: recovery unit unavailable".into(),
@@ -2805,7 +2808,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         manager: Option<&crate::AppletEventProducerGuard>,
         prepared: Option<&crate::EventApprovalCommit>,
         digest: &arkret_wire::Hash,
-    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
         let _ = (transaction, carrier, publication, manager, prepared, digest);
         Err(PersistenceError::Conflict(
             "dependency_missing: owner control admission unavailable".into(),
@@ -2826,7 +2829,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         &self,
         actor: &arkret_wire::ActorId,
         authority: &CurrentRealmAuthority,
-        terminal: &arkret_models_integration::RealmActorOperationOutcome,
+        terminal: &arkret_models_integration::RealmActorRequestStatus,
     ) -> PersistenceResult<()> {
         let _ = (actor, authority, terminal);
         Err(PersistenceError::Conflict(
@@ -2840,7 +2843,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         carrier: &AppletControlCarrier,
         prepared: Option<&crate::EventApprovalCommit>,
         request_digest: &arkret_wire::Hash,
-    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
         let _ = (transaction, carrier, prepared, request_digest);
         Err(PersistenceError::Conflict(
             "dependency_missing: Realm Profile control admission unavailable".into(),
@@ -2867,7 +2870,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         submission: &arkret_models_collaboration::principal_operations::PcrGenesisAdmissionInput,
         exact_request_body: &[u8],
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::principal_operations::PcrGenesisAdmissionOutcome>,
+        Option<arkret_models_collaboration::principal_operations::PcrGenesisAdmissionResponseBody>,
     >;
 
     /// Atomically checks current authority, appends the per-stream commit,
@@ -2917,14 +2920,14 @@ pub trait AuthorityCommitStore: Send + Sync {
         &self,
         realm_id: &arkret_wire::RealmId,
         selector: &arkret_wire::CurrentSelector,
-    ) -> PersistenceResult<Option<arkret_wire::TypedCurrentRow>>;
+    ) -> PersistenceResult<Option<arkret_wire::CurrentState>>;
 
     /// Restore the default pointer from its accepted Commit or verified
     /// replica cut, without reading unrelated current families.
     async fn realm_default_strand_current(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> PersistenceResult<Option<arkret_wire::TypedCurrentRow>>;
+    ) -> PersistenceResult<Option<arkret_wire::CurrentState>>;
 
     /// Governance generation and current heads for every independent Realm,
     /// Circle, and Sidecar stream at one durable cut, sorted by `stream_ref`.
@@ -2975,7 +2978,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         Option<(
             arkret_models_collaboration::agent_sidecar::SidecarParticipantAuthorityCut,
             Vec<arkret_wire::DidCoreId>,
-            Option<arkret_wire::MlsGroupCurrent>,
+            Option<arkret_wire::MlsGroupValue>,
             bool,
         )>,
     > {
@@ -3076,8 +3079,8 @@ pub trait AuthorityCommitStore: Send + Sync {
         _include_terminal: bool,
     ) -> PersistenceResult<
         Option<(
-            arkret_models_collaboration::objects::query_projection::ProjectionSpaceList,
-            arkret_models_collaboration::objects::query_projection::ProjectionStrandList,
+            arkret_models_collaboration::objects::query_projection::SpacePage,
+            arkret_models_collaboration::objects::query_projection::StrandPage,
         )>,
     > {
         Err(crate::PersistenceError::Internal(
@@ -3095,9 +3098,9 @@ pub trait AuthorityCommitStore: Send + Sync {
         include_terminal: bool,
     ) -> PersistenceResult<
         Option<(
-            arkret_models_collaboration::objects::query_projection::ProjectionSpaceList,
-            arkret_models_collaboration::objects::query_projection::ProjectionStrandList,
-            arkret_models_collaboration::sync_frames::current_results::AccountCurrentView,
+            arkret_models_collaboration::objects::query_projection::SpacePage,
+            arkret_models_collaboration::objects::query_projection::StrandPage,
+            arkret_models_collaboration::sync_frames::current_states::AccountStateView,
         )>,
     > {
         let _ = (realm_id, actor, include_terminal);
@@ -3113,9 +3116,8 @@ pub trait AuthorityCommitStore: Send + Sync {
         _actor: &arkret_wire::ActorId,
         _station: &arkret_wire::DidCoreId,
         _include_terminal: bool,
-    ) -> PersistenceResult<
-        Option<arkret_models_collaboration::objects::query_projection::ProjectionMorphList>,
-    > {
+    ) -> PersistenceResult<Option<arkret_models_collaboration::objects::query_projection::MorphPage>>
+    {
         Err(crate::PersistenceError::Internal(
             "native Morph list is unavailable".into(),
         ))
@@ -3128,9 +3130,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         _actor: &arkret_wire::ActorId,
         _station: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
-        Option<
-            arkret_models_collaboration::objects::query_projection::DocumentMorphProjectionOutcome,
-        >,
+        Option<arkret_models_collaboration::objects::query_projection::DocumentMorphView>,
     > {
         Err(crate::PersistenceError::Internal(
             "native document Morph is unavailable".into(),
@@ -3314,11 +3314,11 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// position 0 when `after_position` is `None` and otherwise at
     /// `after_position + 1`, run consecutively, and stop after `limit` rows.
     /// No opaque page token, no reverse direction, and no separate
-    /// `has_more`: `StreamScanOutcome::truncated` carries that alone.
+    /// `has_more`: `StreamScanResponseBody::truncated` carries that alone.
     async fn scan_stream(
         &self,
-        request: &arkret_wire::StreamScanRequest,
-    ) -> PersistenceResult<arkret_wire::StreamScanOutcome>;
+        request: &arkret_wire::StreamScanRequestBody,
+    ) -> PersistenceResult<arkret_wire::StreamScanResponseBody>;
 
     /// `ak.self.committed_event.read.scan.v1` for one authenticated Account.
     ///
@@ -3329,7 +3329,7 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// page that could disclose rows outside the caller's permission.
     async fn scan_stream_for_actor(
         &self,
-        _request: &arkret_wire::StreamScanRequest,
+        _request: &arkret_wire::StreamScanRequestBody,
         _actor: &arkret_wire::ActorId,
         _issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<AccountStreamScan> {
@@ -3340,7 +3340,7 @@ pub trait AuthorityCommitStore: Send + Sync {
 
     async fn scan_stream_for_account(
         &self,
-        request: &arkret_wire::StreamScanRequest,
+        request: &arkret_wire::StreamScanRequestBody,
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<AccountStreamScan>;
@@ -3355,7 +3355,7 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// until this Station can prove the peer's exact interval and disclosure.
     async fn scan_stream_for_peer(
         &self,
-        request: &arkret_wire::StreamScanRequest,
+        request: &arkret_wire::StreamScanRequestBody,
         peer: &arkret_wire::DidCoreId,
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<PeerStreamScan>;
@@ -3412,17 +3412,17 @@ pub trait AuthorityCommitStore: Send + Sync {
         })
     }
 
-    /// `ak.self.current_results.read.exact.v1` for one authenticated Account:
+    /// `ak.self.current_state.read.exact.v1` for one authenticated Account:
     /// membership, governance generation, effective stream head and the
     /// selector's durable current row from one read cut.
-    async fn exact_current_result_for_actor(
+    async fn exact_current_state_for_actor(
         &self,
-        _request: &arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadRequestBody,
+        _request: &arkret_models_collaboration::exact_current_state::ExactCurrentStateReadRequestBody,
         _actor: &arkret_wire::ActorId,
         _issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
         SelfExactCurrentRead<
-            arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome,
+            arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody,
         >,
     > {
         Err(PersistenceError::Internal(
@@ -3430,14 +3430,14 @@ pub trait AuthorityCommitStore: Send + Sync {
         ))
     }
 
-    async fn exact_current_result_for_account(
+    async fn exact_current_state_for_account(
         &self,
-        request: &arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadRequestBody,
+        request: &arkret_models_collaboration::exact_current_state::ExactCurrentStateReadRequestBody,
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
         SelfExactCurrentRead<
-            arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome,
+            arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody,
         >,
     >;
 
@@ -3450,7 +3450,7 @@ pub trait AuthorityCommitStore: Send + Sync {
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
         SelfExactCurrentRead<
-            arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome,
+            arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentResponseBody,
         >,
     >;
 

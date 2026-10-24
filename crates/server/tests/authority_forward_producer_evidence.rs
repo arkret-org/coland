@@ -8,7 +8,7 @@
 //! an accepted PCR genesis.
 
 use arkret_models_collaboration::authority_commit::{
-    AuthorityForwardBranch, MlsGenesisMaterial, PeerAuthorityForwardEventRequest,
+    AuthorityForwardBranch, MlsGenesisMaterial, PeerAuthorityForwardEventRequestBody,
 };
 use arkret_models_crypto::{
     DeviceAuthorizationWindow, DeviceStatus, ForwardDeviceProjectionAttestation,
@@ -20,9 +20,9 @@ use arkret_signatures::webvh::{
     ServiceRegistrationInceptionInput, prepare_service_registration_inception,
 };
 use arkret_wire::{
-    AccountId, AuthorityCommitStatus, AuthoritySubmitOutcome, DeviceId, Did, DidCoreId, DidKey,
-    DidUrl, Event, EventAdmissionSubmission, EventId, EventKind, NonEmptyString, ProtocolSignature,
-    RealmId, ScopeRef, ServiceKind,
+    AccountId, AuthorityCommitStatus, AuthoritySubmitResponseBody, DeviceId, Did, DidCoreId,
+    DidKey, DidUrl, Event, EventAdmissionSubmission, EventId, EventKind, NonEmptyString,
+    ProtocolSignature, RealmId, ScopeRef, ServiceKind,
 };
 use chrono::{DateTime, Duration, Utc};
 use coland_http::state::AppState;
@@ -79,7 +79,7 @@ impl Station {
                 provider_endpoint: &"https://identity.example/".parse().unwrap(),
                 registration_key: &registration,
                 also_known_as: &[],
-                version_time: registered_at,
+                version_created_at: registered_at,
                 did_key_fragment: None,
             },
         )
@@ -244,7 +244,7 @@ fn forward(
     evidence: Option<ForwardAccountDeviceSignerEvidence>,
     destination: &DidCoreId,
     signers: &[&Station],
-) -> PeerAuthorityForwardEventRequest {
+) -> PeerAuthorityForwardEventRequestBody {
     forward_with_material(event, evidence, destination, signers, None)
 }
 
@@ -254,8 +254,8 @@ fn forward_with_material(
     destination: &DidCoreId,
     signers: &[&Station],
     material: Option<MlsGenesisMaterial>,
-) -> PeerAuthorityForwardEventRequest {
-    let mut request = PeerAuthorityForwardEventRequest {
+) -> PeerAuthorityForwardEventRequestBody {
+    let mut request = PeerAuthorityForwardEventRequestBody {
         branch: AuthorityForwardBranch::AuthorityForward,
         event_submission: EventAdmissionSubmission::new(event.clone()),
         mls_genesis_material: material,
@@ -298,7 +298,7 @@ fn peer(source: &DidCoreId) -> AuthenticatedPeerContext {
     }
 }
 
-fn refusal_code(result: Result<AuthoritySubmitOutcome, ServiceError>) -> String {
+fn refusal_code(result: Result<AuthoritySubmitResponseBody, ServiceError>) -> String {
     match result.expect_err("the forward must be refused") {
         ServiceError::SchemaViolation(_) => "schema_violation".to_owned(),
         ServiceError::UnsupportedEventKind(_) => "unsupported_event_kind".to_owned(),
@@ -564,7 +564,7 @@ fn exact_replay_returns_the_original_outcome_before_evidence_freshness() {
         let a = Station::new(0x63, "replayer.example", at - Duration::hours(1));
         let store = state.test_persistence();
         let stream_ref = commit.stream_ref.clone();
-        let original = AuthoritySubmitOutcome::Accepted {
+        let original = AuthoritySubmitResponseBody::Accepted {
             status: AuthorityCommitStatus::Duplicate,
             commit: commit.clone(),
         };
@@ -681,7 +681,7 @@ fn forwarding_station_signs_fresh_retained_evidence_the_governance_station_verif
         let result = coland_http::test_admit_authority_forward(
             &governance,
             &peer(&account.station_id),
-            PeerAuthorityForwardEventRequest::new(
+            PeerAuthorityForwardEventRequestBody::new(
                 EventAdmissionSubmission::new(event.clone()),
                 None,
                 Some(second),
@@ -804,7 +804,7 @@ fn genesis_event(
             // Complete signed endpoint shape for negative Blob vectors; this
             // does not claim a successful PCR/MLS source admission.
             "creator_leaf_authority": arkret_models_collaboration::events_payloads::MlsGenesisCreatorLeafAuthority {
-                leaf_signature_key_b64u: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(SigningKey::from_bytes(&DEVICE_SEED).verifying_key().as_bytes())).unwrap(),
+                leaf_signature_key_base64url: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(SigningKey::from_bytes(&DEVICE_SEED).verifying_key().as_bytes())).unwrap(),
                 endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device { device_id: DeviceId::new(DEVICE).unwrap() },
                 authorization_event_ref: core(station, created_at).device_authorize_event_id,
             },
@@ -830,7 +830,7 @@ fn genesis_event(
 
 /// The registered code a refusal carries, including a protocol code that is
 /// no persistence conflict code.
-fn protocol_code(result: Result<AuthoritySubmitOutcome, ServiceError>) -> String {
+fn protocol_code(result: Result<AuthoritySubmitResponseBody, ServiceError>) -> String {
     match result.expect_err("the forward must be refused") {
         ServiceError::SchemaViolation(_) => "schema_violation".to_owned(),
         ServiceError::Conflict(detail) => detail

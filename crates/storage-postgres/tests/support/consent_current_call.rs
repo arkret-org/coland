@@ -90,7 +90,7 @@ pub fn call_request(
         "sender_actor_id":peer,"sender_device_id":f.history.founding_device_id,
         "authority_commit_id":f.unit.transactions[1].commit.commit_id,
         "signal_class":"setup","sent_at":arkret_canonical::format_timestamp_canonical(at),"expires_at":arkret_canonical::format_timestamp_canonical(at+chrono::Duration::seconds(120)),
-        "encrypted_payload":{"scheme":arkret_wire::SIGNAL_AEAD_SCHEME,"key_ref":{"group_state_ref":f.unit.transactions[1].event.event_id},"purpose":arkret_wire::SIGNAL_AEAD_PURPOSE,"aead_profile":"MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519","epoch":1,"nonce":"AAAAAAAAAAAAAAAA","ciphertext":"Q2lwaGVydGV4dFBsYWNlaG9sZGVy"},
+        "encrypted_payload":{"scheme":arkret_wire::SIGNAL_AEAD_SCHEME,"key_ref":{"group_state_ref":f.unit.transactions[1].event.event_id},"purpose":arkret_wire::SIGNAL_AEAD_PURPOSE,"aead_profile":"MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519","epoch":"1","nonce":"AAAAAAAAAAAAAAAA","ciphertext":"Q2lwaGVydGV4dFBsYWNlaG9sZGVy"},
         "proof":{"kind":"detached_jws","verification_method":f.history.device_verification_method,"envelope_digest":format!("sha256:{}","0".repeat(64)),"jws":"AA..AA"}
     })).unwrap();
     envelope.proof.envelope_digest = envelope.envelope_digest().unwrap();

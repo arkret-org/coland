@@ -26,7 +26,7 @@
 | `admin::queries` | `AdminAuditEntry` | local contract | Coland、Codmin | `/_coland/admin` 操作面审计投影；未命中 spec wire 类型 |
 | `admin::queries` | `AdminAuditList` | local contract | Coland、Codmin | `/_coland/admin` 操作面列表 envelope；未命中 spec wire 类型 |
 | `admin::queries` | `CapabilityGrantState` | local contract | Coland、Codmin | `/_coland/admin` 操作面枚举；未命中 spec wire 类型 |
-| `admin::queries` | `CapabilitySummary` | SDK re-export | Coland、Codmin | Alias of SDK CapabilityGrantExactCurrentRow; operator metadata review preserves full Actor/subject and durable revision, never substitutes the registered effective-grants authoring carrier. |
+| `admin::queries` | `CapabilitySummary` | SDK re-export | Coland、Codmin | Alias of SDK CurrentCapabilityGrant; operator metadata review preserves full Actor/subject and durable revision, never substitutes the registered effective-grants authoring carrier. |
 | `admin::queries` | `AdminCapabilityList` | local contract | Coland、Codmin | `/_coland/admin` 操作面列表 envelope；未命中 spec wire 类型 |
 | `admin::queries` | `AdminDevice` | local contract | Coland、Codmin | `/_coland/admin` 操作面投影；字段复用 SDK 类型，整体未命中 spec wire 类型 |
 | `admin::queries` | `AdminDeviceList` | local contract | Coland、Codmin | `/_coland/admin` 操作面列表 envelope；未命中 spec wire 类型 |
@@ -77,7 +77,7 @@
 
 | `account_projection` | `AccountProjectionRequestBody`, `AccountLocalpartsBaseUrlError` | local contract/helper | Coland、Coauth | Deployment-private Account Authority projection of an already verified binding; fields reuse SDK identifiers. The URL helper error is not a wire model. |
 | `agent_session_authority` | `AgentSessionAuthorityRequest`, `AgentSessionAuthorityOutcome` | local contract | Coland、Coauth | Deployment-private source-snapshot binding; SDK-owned scope and identity types are reused. This projection cannot independently authorize an Arkret operation. |
-| `admin::queries` | `CapabilityGrantExactCurrentRow` | SDK re-export | Coland、Codmin | Original SDK public name behind `CapabilitySummary`; no local definition. |
+| `admin::queries` | `CurrentCapabilityGrant` | SDK re-export | Coland、Codmin | Original SDK public name behind `CapabilitySummary`; no local definition. |
 
 若以后出现同名或等价的规范类型，必须先在 `arkret-rust-sdk` 实现，并用规范固定样例做
 canonical JSON 字节对比，再从本表和 `coland-contracts` 删除相应本地契约。

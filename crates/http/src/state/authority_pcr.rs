@@ -1,10 +1,10 @@
 //! Native PCR forwarding keeps the original device/root proof and atomic unit.
 
 use arkret_models_collaboration::authority_commit::{
-    PeerAuthorityForwardEventRequest, PeerAuthoritySubmitRequest,
+    PeerAuthorityForwardEventRequestBody, PeerAuthoritySubmitRequestBody,
 };
 use arkret_wire::{
-    AuthorityCommitStatus, AuthoritySubmitOutcome, EventAdmissionSubmission, EventKind,
+    AuthorityCommitStatus, AuthoritySubmitResponseBody, EventAdmissionSubmission, EventKind,
 };
 use coland_services::authority_commit::AuthenticatedPeerContext;
 use coland_services::identity::SessionIdentityState;
@@ -19,8 +19,8 @@ fn unavailable(detail: impl std::fmt::Display) -> ServiceError {
 pub(crate) async fn admit_forwarded(
     state: &AppState,
     peer: &AuthenticatedPeerContext,
-    request: &PeerAuthorityForwardEventRequest,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+    request: &PeerAuthorityForwardEventRequestBody,
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     request
         .validate()
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
@@ -52,7 +52,7 @@ pub(crate) async fn admit_forwarded(
 pub(crate) async fn commit(
     state: &AppState,
     request: &EventAdmissionSubmission,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     let event = &request.event;
     if let Some(outcome) = super::authority_self_event_unit::exact_replay(state, event).await? {
         return Ok(outcome);
@@ -77,7 +77,7 @@ pub(crate) async fn commit(
                 (AuthorityCommitStatus::Duplicate, record)
             }
         };
-        return Ok(AuthoritySubmitOutcome::Accepted {
+        return Ok(AuthoritySubmitResponseBody::Accepted {
             status,
             commit: record.commit,
         });
@@ -104,7 +104,7 @@ pub(crate) async fn commit(
         .await?
     {
         coland_storage::AuthorityCommitWriteOutcome::Committed => {
-            Ok(AuthoritySubmitOutcome::Accepted {
+            Ok(AuthoritySubmitResponseBody::Accepted {
                 status: AuthorityCommitStatus::Committed,
                 commit: transaction.commit,
             })
@@ -125,7 +125,7 @@ pub(crate) async fn submit_self(
     state: &AppState,
     session: &SessionIdentityState,
     request: &EventAdmissionSubmission,
-) -> ServiceResult<Option<AuthoritySubmitOutcome>> {
+) -> ServiceResult<Option<AuthoritySubmitResponseBody>> {
     let event = &request.event;
     let Some(origin) = state
         .persistence()
@@ -188,7 +188,7 @@ pub(crate) async fn submit_self(
 pub(crate) async fn submit_from_host(
     state: &AppState,
     request: &EventAdmissionSubmission,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     let event = &request.event;
     let origin = state
         .persistence()
@@ -218,14 +218,14 @@ pub(crate) async fn submit_from_host(
         .authority_commits()
         .retain_forwarded_submission(
             event,
-            &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+            &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
                 request.clone(),
             ),
             crate::wire::now(),
         )
         .await?;
-    let forward = PeerAuthoritySubmitRequest::AuthorityForwardEvent(
-        PeerAuthorityForwardEventRequest::new(request.clone(), None, None)
+    let forward = PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(
+        PeerAuthorityForwardEventRequestBody::new(request.clone(), None, None)
             .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?,
     );
     let bytes = arkret_canonical::canonical_json_bytes(&forward)
@@ -238,7 +238,7 @@ pub(crate) async fn submit_from_host(
     .await
     .map_err(unavailable)?;
     let outcome = super::authority_forward::relay_governance_response(&forward, response)?;
-    if let AuthoritySubmitOutcome::Accepted { commit, .. } = &outcome {
+    if let AuthoritySubmitResponseBody::Accepted { commit, .. } = &outcome {
         super::authority_forward::verify_forwarded_acknowledgement(state, &service, event, commit)
             .await?;
         state
@@ -252,11 +252,11 @@ pub(crate) async fn submit_from_host(
 
 /// Dedicated Consent and MIMI adapters must not report a native refusal as success.
 pub(crate) fn require_accepted(
-    outcome: AuthoritySubmitOutcome,
+    outcome: AuthoritySubmitResponseBody,
 ) -> ServiceResult<arkret_wire::RealmCommit> {
     match outcome {
-        AuthoritySubmitOutcome::Accepted { commit, .. } => Ok(commit),
-        AuthoritySubmitOutcome::Rejected {
+        AuthoritySubmitResponseBody::Accepted { commit, .. } => Ok(commit),
+        AuthoritySubmitResponseBody::Rejected {
             status: arkret_wire::AuthorityRejectionStatus::Rejected,
             reason_code,
         } => {
@@ -267,7 +267,7 @@ pub(crate) fn require_accepted(
                 "native Consent authority refused the original",
             ))
         }
-        AuthoritySubmitOutcome::Rejected { .. } => {
+        AuthoritySubmitResponseBody::Rejected { .. } => {
             Err(unavailable("native authority outcome remains retryable"))
         }
     }

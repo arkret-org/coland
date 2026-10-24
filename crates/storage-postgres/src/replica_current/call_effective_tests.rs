@@ -15,7 +15,7 @@ fn checkpoint(
 ) -> (
     arkret_wire::RealmId,
     arkret_wire::CommitStreamHead,
-    Vec<arkret_wire::TypedCurrentRow>,
+    Vec<arkret_wire::CurrentState>,
 ) {
     let snapshot = &fixture["checkpoints"][index];
     let rows = snapshot["current_state_entries"]
@@ -38,7 +38,7 @@ struct Footprint {
     value: Value,
 }
 async fn footprint(conn: &mut AsyncPgConnection) -> Value {
-    diesel::sql_query("SELECT jsonb_build_object('axes',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY realm_id,call_id,selector),'[]') FROM call_component_current_results c),'cuts',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY realm_id),'[]') FROM replica_authorization_cuts c),'rows',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY realm_id,selector),'[]') FROM replica_authorization_rows c),'keys',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY realm_id,call_id,source_commit_id),'[]') FROM call_participant_issuer_sources c)) AS value")
+    diesel::sql_query("SELECT jsonb_build_object('axes',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY realm_id,call_id,selector),'[]') FROM call_component_current_states c),'cuts',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY realm_id),'[]') FROM replica_authorization_cuts c),'rows',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY realm_id,selector),'[]') FROM replica_authorization_rows c),'keys',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY realm_id,call_id,source_commit_id),'[]') FROM call_participant_issuer_sources c)) AS value")
         .get_result::<Footprint>(&mut *conn).await.unwrap().value
 }
 
@@ -70,7 +70,7 @@ async fn empty_call_axes_recover_exact_last_sources_and_refuse_partial_forked_re
             .filter(|row| {
                 !matches!(
                     row,
-                    arkret_wire::TypedCurrentRow::Value {
+                    arkret_wire::CurrentState::Value {
                         selector: arkret_wire::CurrentSelector::CallRoster { .. },
                         ..
                     }
@@ -86,12 +86,12 @@ async fn empty_call_axes_recover_exact_last_sources_and_refuse_partial_forked_re
         "legacy_assertions",
     ] {
         let mut changed = rows.clone();
-        let arkret_wire::TypedCurrentRow::Value { value, .. } = changed
+        let arkret_wire::CurrentState::Value { value, .. } = changed
             .iter_mut()
             .find(|row| {
                 matches!(
                     row,
-                    arkret_wire::TypedCurrentRow::Value {
+                    arkret_wire::CurrentState::Value {
                         selector: arkret_wire::CurrentSelector::CallModeration { .. },
                         ..
                     }
@@ -122,7 +122,7 @@ async fn empty_call_axes_recover_exact_last_sources_and_refuse_partial_forked_re
     let mut reopened = pool.get().await.unwrap();
     assert_eq!(footprint(&mut reopened).await, before);
     let roster = diesel::sql_query(
-        "SELECT value FROM call_component_current_results WHERE selector->>'kind'='call_roster'",
+        "SELECT value FROM call_component_current_states WHERE selector->>'kind'='call_roster'",
     )
     .get_result::<Footprint>(&mut reopened)
     .await

@@ -18,8 +18,9 @@
 
 use arkret_identifiers::DeviceId;
 use arkret_models_collaboration::device_pairing::{
-    DevicePairingBootstrap, DevicePairingResolveRequestBody, DevicePairingStageOutcome,
-    DevicePairingStageRequestBody, DevicePairingStatusOutcome, DevicePairingStatusRequestBody,
+    DevicePairingBootstrap, DevicePairingResolveRequestBody, DevicePairingStageRequestBody,
+    DevicePairingStageResponseBody, DevicePairingStatusRequestBody,
+    DevicePairingStatusResponseBody,
 };
 use arkret_models_collaboration::governance::agent_artifacts::PublicKey;
 use coland_http::error::AppError;
@@ -48,11 +49,11 @@ pub(super) async fn stage_device_pairing(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<DevicePairingStageRequestBody>,
-) -> JsonResult<DevicePairingStageOutcome> {
+) -> JsonResult<DevicePairingStageResponseBody> {
     reject_device_pairing_query(req)?;
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
-    validate_new_device_pubkey(&body.new_device_pubkey)?;
+    validate_new_device_pubkey(&body.new_device_public_key)?;
     // This key belongs to exactly this accepted public ingress. The port owns
     // transport retry and receives the key once, so every retry is forced to
     // reuse it while the next public invocation receives a fresh value.
@@ -100,7 +101,7 @@ pub(super) async fn resolve_device_pairing(
 pub(super) async fn device_pairing_status(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<DevicePairingStatusOutcome> {
+) -> JsonResult<DevicePairingStatusResponseBody> {
     reject_device_pairing_query(req)?;
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = req
@@ -148,22 +149,22 @@ fn device_pairing_not_found() -> AppError {
 /// authorizing: `kid` must be an `ak:device` id and `key` must be an Ed25519
 /// raw 32-byte base64url key. Directory multibase is a distinct representation
 /// and accepting it here would stage a request the proof verifier cannot use.
-fn validate_new_device_pubkey(new_device_pubkey: &PublicKey) -> Result<(), AppError> {
-    let public_key = new_device_pubkey.key.as_str().trim();
+fn validate_new_device_pubkey(new_device_public_key: &PublicKey) -> Result<(), AppError> {
+    let public_key = new_device_public_key.key.as_str().trim();
     let bytes = arkret_canonical::base64url_decode(public_key).map_err(|error| {
         AppError::param_invalid(format!(
-            "new_device_pubkey.key must be a base64url Ed25519 key: {error}"
+            "new_device_public_key.key must be a base64url Ed25519 key: {error}"
         ))
     })?;
     let _: [u8; 32] = bytes.try_into().map_err(|bytes: Vec<u8>| {
         AppError::param_invalid(format!(
-            "new_device_pubkey.key decoded to {} bytes, expected 32",
+            "new_device_public_key.key decoded to {} bytes, expected 32",
             bytes.len()
         ))
     })?;
-    DeviceId::new(new_device_pubkey.kid.as_str().to_owned())
+    DeviceId::new(new_device_public_key.kid.as_str().to_owned())
         .map(|_| ())
-        .map_err(|_| AppError::param_invalid("new_device_pubkey.kid must be a ak:device id"))
+        .map_err(|_| AppError::param_invalid("new_device_public_key.kid must be a ak:device id"))
 }
 
 #[cfg(test)]

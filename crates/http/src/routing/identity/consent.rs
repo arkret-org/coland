@@ -4,7 +4,7 @@
 //! and introduction evidence use that same durable current, without caches.
 
 use arkret_models_collaboration::consent_operations::{
-    ConsentList, ConsentReplaceRequestBody, ConsentRequestOutcome, ConsentRequestRequestBody,
+    ConsentList, ConsentReplaceRequestBody, ConsentRequestRequestBody, ConsentRequestResponseBody,
     ConsentView,
 };
 use salvo::oapi::extract::JsonBody;
@@ -94,7 +94,7 @@ async fn request_consent(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<ConsentRequestRequestBody>,
-) -> JsonResult<ConsentRequestOutcome> {
+) -> JsonResult<ConsentRequestResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
@@ -111,7 +111,7 @@ async fn request_consent(
     // The self route is Station-local. Remote or unknown holders receive the
     // same opaque result as quota, policy and successful queue admission.
     if body.holder_account_id.station_id != state.service_core_id() {
-        return json_ok(ConsentRequestOutcome::accepted());
+        return json_ok(ConsentRequestResponseBody::accepted());
     }
     use arkret_models_collaboration::consent_private::*;
     let result = crate::routing::consent_private::execute(
@@ -133,7 +133,7 @@ async fn request_consent(
     if result.is_err() {
         tracing::debug!("Consent request admission deferred without disclosure");
     }
-    json_ok(ConsentRequestOutcome::accepted())
+    json_ok(ConsentRequestResponseBody::accepted())
 }
 
 pub(crate) fn consent_error(error: coland_services::ServiceError) -> AppError {

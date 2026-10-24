@@ -139,17 +139,18 @@ pub(crate) async fn commit(
     }
     // Preparation preserves the original signature list order; reconstruct the exact
     // registered self submission, never a normalized Event-only digest.
-    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
-        arkret_wire::EventAdmissionSubmission {
-            event: event.clone(),
-            approval_signatures: prepared
-                .map(|p| p.methods.iter().map(|m| m.signature.clone()).collect()),
-        },
-    );
+    let request =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission {
+                event: event.clone(),
+                approval_signatures: prepared
+                    .map(|p| p.methods.iter().map(|m| m.signature.clone()).collect()),
+            },
+        );
     let digest =
         arkret_wire::Hash::new(arkret_canonical::canonical_sha256(&request).map_err(invalid)?)
             .map_err(invalid)?;
-    let outcome = arkret_wire::AuthoritySubmitOutcome::Accepted {
+    let outcome = arkret_wire::AuthoritySubmitResponseBody::Accepted {
         status: arkret_wire::AuthorityCommitStatus::Committed,
         commit: commit.clone(),
     };

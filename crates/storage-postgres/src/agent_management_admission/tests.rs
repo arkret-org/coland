@@ -897,14 +897,14 @@ fn public_output_classification_preserves_original_private_self_exceptions() {
         arkret_wire::EventKind::MlsCommit,
     ] {
         event.kind = kind;
-        assert!(!crate::agent_interaction_current_results::requires_shared_public_mode(&event));
+        assert!(!crate::agent_interaction_current_states::requires_shared_public_mode(&event));
     }
     event.kind = arkret_wire::EventKind::MemberState;
     event.payload =
         serde_json::from_value(json!({"member_id":event.actor_id,"membership":"leave"})).unwrap();
-    assert!(!crate::agent_interaction_current_results::requires_shared_public_mode(&event));
+    assert!(!crate::agent_interaction_current_states::requires_shared_public_mode(&event));
     event.executed_by = Some(ActorId::account(account("other")));
-    assert!(crate::agent_interaction_current_results::requires_shared_public_mode(&event));
+    assert!(crate::agent_interaction_current_states::requires_shared_public_mode(&event));
 }
 
 #[test]

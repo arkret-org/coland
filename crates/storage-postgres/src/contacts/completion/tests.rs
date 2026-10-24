@@ -4,7 +4,7 @@
 //! different plan, commit reference, result, or delivery.
 
 use arkret_models_collaboration::contact_operations::{
-    ContactAcceptedOutcome, ContactPeer, ContactProducerSigner, RequestAcceptanceReceipt,
+    ContactAcceptedResponseBody, ContactPeer, ContactProducerSigner, RequestAcceptanceReceipt,
 };
 use arkret_models_collaboration::governance::peer_contact::{
     ContactIntroductionEvidence, PeerContactAddress,
@@ -104,7 +104,7 @@ fn request_result(
         })
         .unwrap();
     ContactCompletionResult::Accepted {
-        outcome: Box::new(ContactAcceptedOutcome::Request {
+        outcome: Box::new(ContactAcceptedResponseBody::Request {
             operation_id: intent.plan.operation_id.clone(),
             request_acceptance_receipt: receipt,
         }),
@@ -125,7 +125,7 @@ fn contact_completion_indirection_preserves_closed_json() {
     unknown["unknown"] = json!(true);
     assert!(serde_json::from_value::<ContactCompletionResult>(unknown).is_err());
 
-    let ContactAcceptedOutcome::Request {
+    let ContactAcceptedResponseBody::Request {
         request_acceptance_receipt,
         ..
     } = outcome.as_ref()
@@ -521,7 +521,7 @@ async fn different_completion_after_terminal_still_conflicts() {
         // A result that is not a valid terminal for this plan.
         let mut invalid_result = fixture.clone();
         if let ContactCompletionResult::Accepted { outcome } = &mut invalid_result.result
-            && let ContactAcceptedOutcome::Request { operation_id, .. } = outcome.as_mut()
+            && let ContactAcceptedResponseBody::Request { operation_id, .. } = outcome.as_mut()
         {
             *operation_id =
                 arkret_wire::ProtocolOperationId::new("ak:operation:ak.self.contact.other")
@@ -611,7 +611,7 @@ async fn request_lookup_reads_detached_jws_receipts_and_rejects_bare_signatures(
     else {
         panic!("the terminal request result is readable");
     };
-    let ContactAcceptedOutcome::Request {
+    let ContactAcceptedResponseBody::Request {
         request_acceptance_receipt,
         ..
     } = *outcome
@@ -655,7 +655,7 @@ async fn request_current_and_exact_delivery_freeze_in_the_same_completion() {
     let ContactCompletionResult::Accepted { outcome } = &f.result else {
         unreachable!()
     };
-    let ContactAcceptedOutcome::Request {
+    let ContactAcceptedResponseBody::Request {
         request_acceptance_receipt,
         ..
     } = outcome.as_ref()

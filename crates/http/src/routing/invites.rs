@@ -13,11 +13,12 @@ use arkret_models_collaboration::governance::invite_addressing::{
     DisclosedOutcome, DisclosureLevel, InviteDelivery, InviteDeliveryEntry,
 };
 use arkret_models_collaboration::governance::invite_addressing::{
-    IntroductionEvidence, InviteDeliveryOutcome, InviteDeliveryOutcomeStatus,
-    InviteDeliveryRequestBody, InviteLocatorIssueOutcome, InviteLocatorIssueRequestBody,
-    InviteLocatorResolveRequestBody, InviteLocatorRevokeOutcome, InviteLocatorRevokeRequestBody,
-    InviteLocatorRotateRequestBody, InviteLocatorStatus, InviteReceivePolicy, PrincipalLocator,
-    PrincipalLocatorProof, PrincipalLocatorProofPurpose, SelfInviteDispatchRequestBody,
+    IntroductionEvidence, InviteDeliveryOutcomeStatus, InviteDeliveryRequestBody,
+    InviteDeliveryResponseBody, InviteLocatorIssueRequestBody, InviteLocatorIssueResponseBody,
+    InviteLocatorResolveRequestBody, InviteLocatorRevokeRequestBody,
+    InviteLocatorRevokeResponseBody, InviteLocatorRotateRequestBody, InviteLocatorStatus,
+    InviteReceivePolicy, PrincipalLocator, PrincipalLocatorProof, PrincipalLocatorProofPurpose,
+    SelfInviteDispatchRequestBody,
 };
 #[cfg(test)]
 use arkret_models_collaboration::governance::peer_contact::ContactIntroductionEvidence;
@@ -25,8 +26,8 @@ use arkret_models_collaboration::governance::realm_join_intake::{
     AuthorityLocatorSource, RealmJoinCandidate, RealmJoinCandidateServiceKind,
 };
 use arkret_models_collaboration::governance::third_party_invite::{
-    ThirdPartyInviteAcceptanceAttestation, ThirdPartyInviteAcceptanceAttestationOutcome,
-    ThirdPartyInviteAcceptanceAttestationRequestBody,
+    ThirdPartyInviteAcceptanceAttestation, ThirdPartyInviteAcceptanceAttestationRequestBody,
+    ThirdPartyInviteAcceptanceAttestationResponseBody,
 };
 use arkret_models_identity::ServiceResolutionCarrier;
 use arkret_models_identity::proof::DetachedPayloadProof;
@@ -99,7 +100,7 @@ async fn third_party_invite_acceptance_attestation(
     depot: &mut Depot,
     req: &mut Request,
     res: &mut Response,
-) -> JsonResult<ThirdPartyInviteAcceptanceAttestationOutcome> {
+) -> JsonResult<ThirdPartyInviteAcceptanceAttestationResponseBody> {
     use coland_storage::PersistenceError;
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
@@ -198,8 +199,8 @@ fn set_invite_locator_secret_response_headers(res: &mut Response) {
 fn locator_issue_outcome(
     record: &InviteLocatorRecord,
     locator_token: String,
-) -> Result<InviteLocatorIssueOutcome, AppError> {
-    Ok(InviteLocatorIssueOutcome {
+) -> Result<InviteLocatorIssueResponseBody, AppError> {
+    Ok(InviteLocatorIssueResponseBody {
         locator_id: InviteLocatorId::new(record.locator_id.clone())
             .map_err(|error| AppError::internal(format!("stored invite locator id: {error}")))?,
         locator_token,
@@ -215,7 +216,7 @@ async fn issue_invite_locator(
     req: &mut Request,
     res: &mut Response,
     body: JsonBody<InviteLocatorIssueRequestBody>,
-) -> JsonResult<InviteLocatorIssueOutcome> {
+) -> JsonResult<InviteLocatorIssueResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let (record, token) =
@@ -245,7 +246,7 @@ async fn rotate_invite_locator(
     req: &mut Request,
     res: &mut Response,
     body: JsonBody<InviteLocatorRotateRequestBody>,
-) -> JsonResult<InviteLocatorIssueOutcome> {
+) -> JsonResult<InviteLocatorIssueResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
@@ -278,7 +279,7 @@ async fn revoke_invite_locator(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<InviteLocatorRevokeRequestBody>,
-) -> JsonResult<InviteLocatorRevokeOutcome> {
+) -> JsonResult<InviteLocatorRevokeResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
@@ -293,7 +294,7 @@ async fn revoke_invite_locator(
     else {
         return Err(invite_locator_not_found());
     };
-    json_ok(InviteLocatorRevokeOutcome {
+    json_ok(InviteLocatorRevokeResponseBody {
         locator_id: InviteLocatorId::new(record.locator_id)
             .map_err(|error| AppError::internal(format!("stored invite locator id: {error}")))?,
         status: InviteLocatorStatus::Revoked,
@@ -310,7 +311,7 @@ async fn revoke_invite_locator(
 async fn peer_invites_submit(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<InviteDeliveryOutcome> {
+) -> JsonResult<InviteDeliveryResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     super::events::peer::validate_peer_request(state, req, true).await?;
     let delivery = req
@@ -361,7 +362,7 @@ async fn receive_private_invite_delivery(
     body: &Value,
     source_id: &str,
     audit_operation: &'static str,
-) -> Result<InviteDeliveryOutcome, AppError> {
+) -> Result<InviteDeliveryResponseBody, AppError> {
     if delivery.invite_address.account_id.station_id != state.service_core_id() {
         return Err(super::events::peer::cross_domain_replay(
             "Invite recipient differs from its hosting Station",
@@ -390,14 +391,14 @@ async fn receive_private_invite_delivery(
     )
     .await;
     match outcome {
-        Ok(arkret_models_collaboration::consent_private::ConsentPrivateCommandOutcome::InviteDelivery(outcome))=>Ok(outcome.body),
+        Ok(arkret_models_collaboration::consent_private::ConsentPrivateCommandResponseBody::InviteDelivery(outcome))=>Ok(outcome.body),
         Ok(_)=>Err(AppError::internal("Invite authority returned another closed command")),
         Err(error)=>{
             // Authorization/source failures stay failures. Private authority
             // availability never reveals the holder's policy to the requester.
             if error.wire_code()=="temporarily_unavailable" {
                 tracing::warn!(op=audit_operation,"private Invite authority is unavailable");
-                Ok(InviteDeliveryOutcome{status:InviteDeliveryOutcomeStatus::Deferred,disclosed_outcome:None,received_at:Some(now()),retry_after_ms:None})
+                Ok(InviteDeliveryResponseBody{status:InviteDeliveryOutcomeStatus::Deferred,disclosed_outcome:None,received_at:Some(now()),retry_after_ms:None})
             } else {Err(error)}
         }
     }
@@ -405,7 +406,7 @@ async fn receive_private_invite_delivery(
 
 pub(crate) async fn prepare_private_invite(
     state: &AppState,
-    request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+    request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequestBody,
 ) -> Result<Option<coland_storage::PreparedPrivateInviteDelivery>, AppError> {
     let prepared =
         prepare_native_invite(state, &request.holder_account_id, &request.command).await?;
@@ -466,7 +467,7 @@ async fn self_invites_dispatch(
     aa: AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<InviteDeliveryOutcome> {
+) -> JsonResult<InviteDeliveryResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let raw_body = req
@@ -668,7 +669,7 @@ async fn enqueue_remote_invite_delivery(
     delivery: &InviteDeliveryRequestBody,
     body: &Value,
     accepted: &AcceptedEvent,
-) -> Result<InviteDeliveryOutcome, AppError> {
+) -> Result<InviteDeliveryResponseBody, AppError> {
     validate_invite_delivery_event_binding(body, delivery)?;
     let recipient_id = &delivery.invite_address.account_id.station_id;
     let resolver = state
@@ -733,7 +734,7 @@ async fn enqueue_remote_invite_delivery(
         if duplicate { "duplicate" } else { "accepted" },
     )
     .await;
-    Ok(InviteDeliveryOutcome {
+    Ok(InviteDeliveryResponseBody {
         status: if duplicate {
             InviteDeliveryOutcomeStatus::Duplicate
         } else {
@@ -1467,7 +1468,7 @@ mod invite_locator_security_tests {
                 principal_id: DidCoreId::new(PRODUCTION_HOLDER.to_owned()).unwrap(),
                 localpart: "holder".to_owned(),
                 display_name: None,
-                bio: None,
+                biography: None,
                 avatar_blob_ref: None,
                 created_at,
             })
@@ -1514,7 +1515,7 @@ mod invite_locator_security_tests {
                 principal_id: holder.clone(),
                 localpart: "holder".to_owned(),
                 display_name: None,
-                bio: None,
+                biography: None,
                 avatar_blob_ref: None,
                 created_at: now(),
             })
@@ -1593,7 +1594,7 @@ mod invite_locator_security_tests {
                 signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "3".repeat(64)))
                     .unwrap(),
                 created_at: now(),
-                sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
+                signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
             },
         };
         serde_json::from_value(json!({
@@ -1756,7 +1757,7 @@ mod invite_locator_security_tests {
             .as_mut()
             .unwrap()
             .key
-            .public_key_b64u =
+            .public_key_base64url =
             arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
                 ed25519_dalek::SigningKey::from_bytes(&[0x79; 32])
                     .verifying_key()

@@ -291,12 +291,12 @@ fn circle_review_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output
         }
         let mut conn = pool.get().await.unwrap();
         let root = diesel::sql_query(
-        "SELECT authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1",
-    )
-    .bind::<diesel::sql_types::Text, _>(realm.as_str())
-    .get_result::<Root>(&mut *conn)
-    .await
-    .unwrap();
+            "SELECT authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1",
+        )
+        .bind::<diesel::sql_types::Text, _>(realm.as_str())
+        .get_result::<Root>(&mut *conn)
+        .await
+        .unwrap();
         drop(conn);
         let grant = ordinary_realm::next_request_for_actor(
             &create.authority_commit,
@@ -305,7 +305,7 @@ fn circle_review_scenario() -> std::pin::Pin<Box<impl std::future::Future<Output
             serde_json::json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":actor,"subject":actor,
             "actions":["ak.moderation.decision","ak.moderation.decision.lift"],
             "resources":[{"kind":"circle","realm_id":realm,"circle_id":circle}],
-            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":root.authority_event_ref,"authority_generation":0}],
+            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":root.authority_event_ref,"authority_generation":"0"}],
             "issued_at":arkret_canonical::format_timestamp_canonical(at)}}),
             at,
         );

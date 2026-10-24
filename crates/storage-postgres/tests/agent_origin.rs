@@ -138,7 +138,7 @@ async fn agent_slug_is_reserved_until_accepted_terminal_lifecycle() {
         agent: String,
     }
     let mut conn = f.pool.get().await.unwrap();
-    let selector = diesel::sql_query("SELECT value->'subject_account_id'->>'principal_id' AS agent FROM agent_selector_claim_current_results WHERE realm_id=$1 AND agent_slug='origin'")
+    let selector = diesel::sql_query("SELECT value->'subject_account_id'->>'principal_id' AS agent FROM agent_selector_claim_current_states WHERE realm_id=$1 AND agent_slug='origin'")
         .bind::<Text,_>(f.provision.event.realm_id.as_str()).get_result::<Selector>(&mut *conn).await.unwrap();
     assert_eq!(
         selector.agent,

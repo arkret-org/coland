@@ -16,7 +16,7 @@ pub mod ordinary_realm;
     reason = "This fixture is also compiled by test-support without a circular crate dependency."
 )]
 mod pcr_genesis;
-use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
 use arkret_models_identity::{HistoricalSignerKeyQuerySender, SignerKeyQuerySelector};
 use arkret_wire::{ActorId, CommittedEventRef, Did, EventKind};
 use coland_storage::{
@@ -88,7 +88,7 @@ impl HumanFixture {
                 arkret_wire::EventAdmissionSubmission::new(transaction.event.clone());
         }
         unit.exact_request_body = serde_json::to_vec(
-            &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(unit.submission.clone()),
+            &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(unit.submission.clone()),
         )
         .unwrap();
         Self { pcr, guard, unit }

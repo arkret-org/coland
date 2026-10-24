@@ -16,7 +16,7 @@ use diesel_async::AsyncPgConnection;
 use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::{Value, json};
 
-use crate::capability_grant_current_results::{CapabilityGrantCurrentResultReadRow, decode_row};
+use crate::capability_grant_current_states::{CapabilityGrantCurrentStateReadRow, decode_row};
 use crate::managed_forward_admission::Source;
 
 fn denied(detail: &str) -> PersistenceError {
@@ -269,7 +269,7 @@ pub(crate) async fn installation_identity(
         "FOR SHARE OF i,m NOWAIT"
     };
     let query = format!(
-        "SELECT i.record AS value,(m.record->>'globally_fenced_at' IS NOT NULL) AS globally_fenced FROM applet_installations i JOIN applet_registration_current_results r ON r.realm_id=$3 AND r.applet_id=i.applet_id AND r.service_id=i.service_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{{registration_event,event_id}}' JOIN applet_managed_identities m ON m.applet_id=i.applet_id AND m.target_station_id=i.record->>'target_station_id' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND i.service_id=$4 {locking}"
+        "SELECT i.record AS value,(m.record->>'globally_fenced_at' IS NOT NULL) AS globally_fenced FROM applet_installations i JOIN applet_registration_current_states r ON r.realm_id=$3 AND r.applet_id=i.applet_id AND r.service_id=i.service_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{{registration_event,event_id}}' JOIN applet_managed_identities m ON m.applet_id=i.applet_id AND m.target_station_id=i.record->>'target_station_id' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND i.service_id=$4 {locking}"
     );
     let row = sql_query(query)
         .bind::<Text, _>(applet.as_str())
@@ -364,8 +364,8 @@ pub(crate) async fn require_installation_source(
                 == Some(&id)
         })
         .ok_or_else(|| denied("subject-only action reference is outside its exact installation"))?;
-    let rows=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
-        .bind::<Text,_>(event.realm_id.as_str()).load::<CapabilityGrantCurrentResultReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let rows=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_states WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
+        .bind::<Text,_>(event.realm_id.as_str()).load::<CapabilityGrantCurrentStateReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut grants = std::collections::BTreeMap::new();
     for row in rows {
         let row = decode_row(row)?;
@@ -377,7 +377,7 @@ pub(crate) async fn require_installation_source(
         )
     })?;
     if !matches!(&grant.subject,CapabilitySubject::Actor(actor) if actor==&service)
-        || !crate::capability_grant_current_results::grant_is_active_at(grant, at)
+        || !crate::capability_grant_current_states::grant_is_active_at(grant, at)
         || source["actor_id"] != json!(grant.issuer_id)
     {
         return Err(denied(
@@ -401,13 +401,13 @@ pub(crate) async fn require_installation_source(
     {
         return Err(denied("subject-only action installation authority differs"));
     }
-    let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1")
-        .bind::<Text,_>(event.realm_id.as_str()).get_result::<crate::capability_grant_current_results::RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    crate::capability_grant_current_results::validate_ancestor_graph(
+    let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1")
+        .bind::<Text,_>(event.realm_id.as_str()).get_result::<crate::capability_grant_current_states::RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    crate::capability_grant_current_states::validate_ancestor_graph(
         &GrantId::from_event_id(&event.event_id),
         &id,
         &grants,
-        &crate::capability_grant_current_results::decode_authority_root(root)?,
+        &crate::capability_grant_current_states::decode_authority_root(root)?,
         &event.realm_id,
         at,
         &mut std::collections::BTreeSet::new(),
@@ -445,7 +445,7 @@ pub(crate) async fn select_management(
     let service = ActorId::service(registration.service_id.clone());
     // A complete authoritative read is mandatory even when no Policy exists.
     let policies =
-        crate::policy_current_results::read_scoped_applet_management_policies_in_connection(
+        crate::policy_current_states::read_scoped_applet_management_policies_in_connection(
             conn,
             &event.realm_id,
             circle,
@@ -513,7 +513,7 @@ struct BusinessBasis {
         GrantId,
         arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
     >,
-    root: crate::capability_grant_current_results::RealmAuthorityRootCurrent,
+    root: crate::capability_grant_current_states::RealmAuthorityRootCurrent,
     sources: Vec<arkret_models_collaboration::governance::grant_constraint::CapabilityGrant>,
 }
 
@@ -558,8 +558,8 @@ async fn business_basis_source(
         .as_str()
         .parse()
         .map_err(PersistenceError::database)?;
-    let rows=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
-        .bind::<Text,_>(event.realm_id.as_str()).load::<CapabilityGrantCurrentResultReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let rows=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_states WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
+        .bind::<Text,_>(event.realm_id.as_str()).load::<CapabilityGrantCurrentStateReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut grants = std::collections::BTreeMap::new();
     for row in rows {
         let row = decode_row(row)?;
@@ -609,10 +609,10 @@ async fn business_basis_source(
         issuer_authority_refs: child.issuer_authority_refs.clone(),
         issued_at: child.issued_at,
     };
-    crate::capability_grant_current_results::validate_managed_sources(&parents, &definition, role)?;
-    let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1")
-        .bind::<Text,_>(event.realm_id.as_str()).get_result::<crate::capability_grant_current_results::RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    let root = crate::capability_grant_current_results::decode_authority_root(root)?;
+    crate::capability_grant_current_states::validate_managed_sources(&parents, &definition, role)?;
+    let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1")
+        .bind::<Text,_>(event.realm_id.as_str()).get_result::<crate::capability_grant_current_states::RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let root = crate::capability_grant_current_states::decode_authority_root(root)?;
     // A selected positive child cannot erase an unproved independent Account
     // lineage from the global refusal set. Only known closed sources may drop.
     arkret_policy::grant_authority::current_subject_grants(
@@ -767,7 +767,7 @@ pub(crate) async fn require_mls_permission_source(
     if !matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit) {
         return Err(denied("native MLS permission requires an actual MLS Event"));
     }
-    if !crate::moderation_report_current_results::scope_member_in_connection(
+    if !crate::moderation_report_current_states::scope_member_in_connection(
         conn,
         &event.realm_id,
         &event.scope_ref,

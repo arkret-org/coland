@@ -199,7 +199,7 @@ async fn health_and_describe_work_body() {
     );
     assert_eq!(
         describe["limits"]["authz_policy"]["invites"]["response_schema_ref"],
-        "schemas/authz-operations.schema.json#/$defs/authz_invite_list"
+        "schemas/authorization-operations.schema.json#/$defs/authorization_invite_page"
     );
     for bundle in describe["supported_operation_bundles"].as_array().unwrap() {
         let bundle = bundle.as_str().expect("bundle id string");

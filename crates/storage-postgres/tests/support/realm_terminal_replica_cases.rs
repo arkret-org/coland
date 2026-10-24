@@ -130,7 +130,7 @@ async fn terminal_persistent_rows(pool: &coland_storage_postgres::PgPool) -> ser
         value: serde_json::Value,
     }
     let mut conn = pool.get().await.unwrap();
-    let tables = diesel::sql_query("SELECT tablename::text AS tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE '%current_results' OR tablename IN ('canonical_events','realm_commits','realm_authorities','federation_outbox','event_federation_outbox','replica_stream_anchors','replica_authorization_rows','replica_authorization_cuts','account_summary_current','account_summary_versions','account_summary_clock','current_result_heads','current_result_versions','direct_conversation_founding_slots')) ORDER BY tablename")
+    let tables = diesel::sql_query("SELECT tablename::text AS tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE '%current_states' OR tablename IN ('canonical_events','realm_commits','realm_authorities','federation_outbox','event_federation_outbox','replica_stream_anchors','replica_authorization_rows','replica_authorization_cuts','account_summary_current','account_summary_versions','account_summary_clock','current_state_heads','current_state_versions','direct_conversation_founding_slots')) ORDER BY tablename")
         .load::<Table>(&mut *conn).await.unwrap();
     let mut snapshot = serde_json::Map::new();
     for table in tables {
@@ -156,7 +156,7 @@ async fn terminal_persistent_rows(pool: &coland_storage_postgres::PgPool) -> ser
         "realm_authorities",
         "federation_outbox",
         "event_federation_outbox",
-        "realm_bootstrap_current_results",
+        "realm_bootstrap_current_states",
         "replica_stream_anchors",
         "replica_authorization_rows",
         "replica_authorization_cuts",
@@ -401,7 +401,7 @@ async fn retained_terminal_rows(pool: &PgPool, realm: &arkret_wire::RealmId) -> 
         .as_object()
         .unwrap()
         .iter()
-        .filter(|(table, _)| table.ends_with("current_results"))
+        .filter(|(table, _)| table.ends_with("current_states"))
         .map(|(table, rows)| (table.clone(), rows.clone()))
         .collect::<serde_json::Map<_, _>>();
     snapshot["current"] = serde_json::Value::Object(business);

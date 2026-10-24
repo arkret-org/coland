@@ -3,7 +3,7 @@
 #[allow(dead_code)]
 mod ordinary_realm;
 use arkret_models_collaboration::strand_watch_operations::{
-    StrandWatchCurrentOutcome, StrandWatchCurrentRequestBody,
+    StrandWatchCurrentRequestBody, StrandWatchCurrentResponseBody,
 };
 use coland_storage::{
     AuthorityCommitStore, EventCommitRequest, EventCommitUnitOfWork, SelfExactCurrentRead,
@@ -21,7 +21,7 @@ struct Footprint {
 }
 async fn footprint(pool: &PgPool) -> Value {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT count(*) FROM canonical_events),'commits',(SELECT count(*) FROM realm_commits),'watches',(SELECT count(*) FROM strand_watch_current_results),'outbox',(SELECT count(*) FROM federation_outbox)) AS value")
+    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT count(*) FROM canonical_events),'commits',(SELECT count(*) FROM realm_commits),'watches',(SELECT count(*) FROM strand_watch_current_states),'outbox',(SELECT count(*) FROM federation_outbox)) AS value")
         .get_result::<Footprint>(&mut *conn).await.unwrap().value
 }
 async fn write(
@@ -64,7 +64,7 @@ fn read_request(discussion: &ordinary_realm::Discussion) -> StrandWatchCurrentRe
 async fn read(
     pool: &PgPool,
     discussion: &ordinary_realm::Discussion,
-) -> SelfExactCurrentRead<StrandWatchCurrentOutcome> {
+) -> SelfExactCurrentRead<StrandWatchCurrentResponseBody> {
     let store = PgAuthorityCommitStore { pool: pool.clone() };
     let account = discussion
         .head
@@ -143,16 +143,16 @@ async fn complete_watch_reads_with_ten_thousand_accepted_history_events_meet_lat
                 assert!(match (index, outcome) {
                     (
                         0,
-                        SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::Current {
-                            result,
+                        SelfExactCurrentRead::Answer(StrandWatchCurrentResponseBody::Current {
+                            current_state: result,
                             ..
                         }),
                     ) => result.revision.commit_id == watch.authority_commit.commit.commit_id,
                     (
                         1,
-                        SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::NeverWritten {
-                            ..
-                        }),
+                        SelfExactCurrentRead::Answer(
+                            StrandWatchCurrentResponseBody::NeverWritten { .. },
+                        ),
                     ) => true,
                     _ => false,
                 });
@@ -219,7 +219,7 @@ async fn realm_watch_current_remains_provable_after_private_sidecar_history() {
     uow.commit_event(attach).await.unwrap();
     assert!(matches!(
         read(&pool, &discussion).await,
-        SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::NeverWritten { .. })
+        SelfExactCurrentRead::Answer(StrandWatchCurrentResponseBody::NeverWritten { .. })
     ));
     let watch = ordinary_realm::next_request(
         &create.authority_commit,
@@ -232,7 +232,7 @@ async fn realm_watch_current_remains_provable_after_private_sidecar_history() {
     uow.commit_event(watch).await.unwrap();
     assert!(matches!(
         read(&pool, &discussion).await,
-        SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::Current { .. })
+        SelfExactCurrentRead::Answer(StrandWatchCurrentResponseBody::Current { .. })
     ));
 }
 
@@ -244,7 +244,7 @@ async fn current_read_distinguishes_never_written_cleared_and_complete_cas() {
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     assert!(matches!(
         read(&pool, &discussion).await,
-        SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::NeverWritten { .. })
+        SelfExactCurrentRead::Answer(StrandWatchCurrentResponseBody::NeverWritten { .. })
     ));
     let first = write(
         &pool,
@@ -297,8 +297,10 @@ async fn current_read_distinguishes_never_written_cleared_and_complete_cas() {
     )
     .await;
     uow.commit_event(clear.clone()).await.unwrap();
-    let SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::Current { result, .. }) =
-        read(&pool, &discussion).await
+    let SelfExactCurrentRead::Answer(StrandWatchCurrentResponseBody::Current {
+        current_state: result,
+        ..
+    }) = read(&pool, &discussion).await
     else {
         panic!("clear must retain a current revision")
     };
@@ -336,8 +338,10 @@ async fn current_read_distinguishes_never_written_cleared_and_complete_cas() {
     )
     .await;
     uow.commit_event(restore.clone()).await.unwrap();
-    let SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::Current { result, .. }) =
-        read(&pool, &discussion).await
+    let SelfExactCurrentRead::Answer(StrandWatchCurrentResponseBody::Current {
+        current_state: result,
+        ..
+    }) = read(&pool, &discussion).await
     else {
         panic!("a fresh storage adapter must reopen the durable row")
     };
@@ -350,7 +354,7 @@ async fn current_read_distinguishes_never_written_cleared_and_complete_cas() {
         restore.authority_commit.commit.commit_id
     );
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("DELETE FROM strand_watch_current_results WHERE realm_id=$1")
+    diesel::sql_query("DELETE FROM strand_watch_current_states WHERE realm_id=$1")
         .bind::<Text, _>(discussion.realm_id().as_str())
         .execute(&mut *conn)
         .await
@@ -436,7 +440,7 @@ async fn watch_projection_fault_rolls_back_event_commit_and_outbox() {
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let baseline = footprint(&pool).await;
     let mut conn = pool.get().await.unwrap();
-    conn.batch_execute("CREATE FUNCTION watch_projection_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'watch projection fault'; END $$; CREATE TRIGGER watch_projection_fault BEFORE INSERT ON strand_watch_current_results FOR EACH ROW EXECUTE FUNCTION watch_projection_fault();").await.unwrap();
+    conn.batch_execute("CREATE FUNCTION watch_projection_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'watch projection fault'; END $$; CREATE TRIGGER watch_projection_fault BEFORE INSERT ON strand_watch_current_states FOR EACH ROW EXECUTE FUNCTION watch_projection_fault();").await.unwrap();
     drop(conn);
     let request = write(
         &pool,
@@ -450,14 +454,14 @@ async fn watch_projection_fault_rolls_back_event_commit_and_outbox() {
     .await;
     let result = uow.commit_event(request.clone()).await;
     let mut conn = pool.get().await.unwrap();
-    conn.batch_execute("DROP TRIGGER watch_projection_fault ON strand_watch_current_results; DROP FUNCTION watch_projection_fault();").await.unwrap();
+    conn.batch_execute("DROP TRIGGER watch_projection_fault ON strand_watch_current_states; DROP FUNCTION watch_projection_fault();").await.unwrap();
     drop(conn);
     assert!(result.is_err());
     assert_eq!(footprint(&pool).await, baseline);
     uow.commit_event(request).await.unwrap();
     assert!(matches!(
         read(&pool, &discussion).await,
-        SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::Current { .. })
+        SelfExactCurrentRead::Answer(StrandWatchCurrentResponseBody::Current { .. })
     ));
 }
 
@@ -546,8 +550,9 @@ async fn circle_watch_uses_its_exact_namespace_and_loses_disclosure_on_circle_le
         .strand_watch_current_for_account(&request, account, &ordinary_realm::station())
         .await
         .unwrap();
-    let SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::NeverWritten {
-        stream_head, ..
+    let SelfExactCurrentRead::Answer(StrandWatchCurrentResponseBody::NeverWritten {
+        stream_head,
+        ..
     }) = first_read
     else {
         panic!("complete Circle namespace proves never-written");
@@ -588,8 +593,8 @@ async fn circle_watch_uses_its_exact_namespace_and_loses_disclosure_on_circle_le
     );
     let clear = Box::pin(ordinary_realm::source_request(&pool, clear)).await;
     uow.commit_event(clear.clone()).await.unwrap();
-    let SelfExactCurrentRead::Answer(StrandWatchCurrentOutcome::Current {
-        result,
+    let SelfExactCurrentRead::Answer(StrandWatchCurrentResponseBody::Current {
+        current_state: result,
         stream_head,
         ..
     }) = store
@@ -611,7 +616,7 @@ async fn circle_watch_uses_its_exact_namespace_and_loses_disclosure_on_circle_le
         .unwrap()
         .unwrap();
     assert!(snapshot.current_state_entries.iter().any(|row| matches!(row,
-        arkret_wire::TypedCurrentRow::Value {
+        arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::StrandWatch { strand_id: id, watcher_actor_id },
             source_stream_ref, value, ..
         } if id == &strand_id && watcher_actor_id == &actor
@@ -709,7 +714,7 @@ async fn remote_watch_delivery_uses_the_verified_peer_cut_without_local_reducer_
     };
     // This contract test injects an already authenticated read witness at the
     // production storage port; it does not claim real S2S authentication.
-    let outcome = StrandWatchCurrentOutcome::NeverWritten {
+    let outcome = StrandWatchCurrentResponseBody::NeverWritten {
         realm_id: realm.clone(), governance_generation: 4,
         stream_head: arkret_wire::CommitStreamHead {
             stream_ref: arkret_wire::CommitStreamRef::Realm { realm_id: realm.clone() },
@@ -758,7 +763,7 @@ async fn remote_watch_delivery_uses_the_verified_peer_cut_without_local_reducer_
         .execute(&mut *conn).await.unwrap();
     // A stale cache without any accepted provenance cannot override the
     // authenticated governor's current active namespace. This is not a replica.
-    diesel::sql_query("INSERT INTO strand_current_results(realm_id,strand_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,9,$4,now())")
+    diesel::sql_query("INSERT INTO strand_current_states(realm_id,strand_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,9,$4,now())")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(request.strand_id.as_str())
         .bind::<Text,_>(arkret_wire::RealmCommitId::from_digest([70;32]).as_str())
         .bind::<Jsonb,_>(json!({"id":request.strand_id,"realm_id":realm,"state":"archived"}))
@@ -928,7 +933,7 @@ async fn circle_self_knock_and_cancel_have_durable_current_without_join_access()
         #[diesel(sql_type=diesel::sql_types::Bool)]
         effective: bool,
     }
-    let current = diesel::sql_query("SELECT membership,current_commit_id,circle_member_parent_join_current(realm_id,member_id,value) AS effective FROM circle_member_state_current_results WHERE circle_id=$1 AND member_id=$2")
+    let current = diesel::sql_query("SELECT membership,current_commit_id,circle_member_parent_join_current(realm_id,member_id,value) AS effective FROM circle_member_state_current_states WHERE circle_id=$1 AND member_id=$2")
         .bind::<Text,_>(circle.as_str()).bind::<Text,_>(actor.to_string()).get_result::<Member>(&mut *conn).await.unwrap();
     assert_eq!(current.membership, "knock");
     assert_eq!(
@@ -964,7 +969,7 @@ async fn circle_self_knock_and_cancel_have_durable_current_without_join_access()
     let cancel = Box::pin(ordinary_realm::source_request(&pool, cancel)).await;
     uow.commit_event(cancel.clone()).await.unwrap();
     let mut conn = pool.get().await.unwrap();
-    let current = diesel::sql_query("SELECT membership,current_commit_id,circle_member_parent_join_current(realm_id,member_id,value) AS effective FROM circle_member_state_current_results WHERE circle_id=$1 AND member_id=$2")
+    let current = diesel::sql_query("SELECT membership,current_commit_id,circle_member_parent_join_current(realm_id,member_id,value) AS effective FROM circle_member_state_current_states WHERE circle_id=$1 AND member_id=$2")
         .bind::<Text,_>(circle.as_str()).bind::<Text,_>(actor.to_string()).get_result::<Member>(&mut *conn).await.unwrap();
     assert_eq!(current.membership, "leave");
     assert_eq!(

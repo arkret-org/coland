@@ -21,17 +21,17 @@ mod sql_fault_matrix;
 
 use arkret_models_collaboration::authority_commit::{
     OrdinaryRealmBootstrapUnitKind, OrdinaryRealmBootstrapUnitSubmission,
-    SelfAuthoritySubmitRequest,
+    SelfAuthoritySubmitRequestBody,
 };
 use coland_services::projection::ProjectionService;
 use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, CurrentRealmAuthority, EventCommitRequest,
-    EventCommitUnitOfWork, InviteCurrentResultStore, OrdinaryRealmBootstrapCommitOutcome,
+    EventCommitUnitOfWork, InviteCurrentStateStore, OrdinaryRealmBootstrapCommitOutcome,
     OrdinaryRealmBootstrapCommitUnit, SelfProducerCommitGuard,
 };
 use coland_storage_postgres::test_database::TestDatabase;
 use coland_storage_postgres::{
-    PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgInviteCurrentResultStore,
+    PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgInviteCurrentStateStore,
     account_snapshot_material,
 };
 use diesel::sql_types::{BigInt, Text};
@@ -224,8 +224,8 @@ async fn damage_hydration_mirror(
 
 #[tokio::test]
 async fn owned_agent_exact_current_is_issuer_only_even_after_membership_ends() {
-    use arkret_models_collaboration::exact_current_results::{
-        ExactCurrentResultEntry, ExactCurrentResultsReadOutcome, ExactCurrentResultsReadRequestBody,
+    use arkret_models_collaboration::exact_current_state::{
+        ExactCurrentStateEntry, ExactCurrentStateReadRequestBody, ExactCurrentStateReadResponseBody,
     };
     use coland_storage::SelfExactCurrentRead;
     use diesel::sql_types::Jsonb;
@@ -267,18 +267,18 @@ async fn owned_agent_exact_current_is_issuer_only_even_after_membership_ends() {
         "issued_at":arkret_canonical::format_timestamp_canonical(head.committed_at),"status":"active"
     });
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("INSERT INTO capability_grant_current_results(realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value,updated_at) VALUES($1,$2,'active',$3,$4,$5,$6,$7,now())")
+    diesel::sql_query("INSERT INTO capability_grant_current_states(realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value,updated_at) VALUES($1,$2,'active',$3,$4,$5,$6,$7,now())")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(grant_id.as_str()).bind::<Text,_>(head.event_ref.as_str()).bind::<Text,_>(head.commit_id.as_str())
         .bind::<Jsonb,_>(serde_json::to_value(&head.stream_ref).unwrap()).bind::<BigInt,_>(head.stream_position as i64).bind::<Jsonb,_>(value).execute(&mut *conn).await.unwrap();
-    diesel::sql_query("UPDATE member_state_current_results SET membership='leave',value=jsonb_set(value,'{membership}','\"leave\"'::jsonb) WHERE realm_id=$1 AND member_id=$2")
+    diesel::sql_query("UPDATE member_state_current_states SET membership='leave',value=jsonb_set(value,'{membership}','\"leave\"'::jsonb) WHERE realm_id=$1 AND member_id=$2")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(arkret_wire::ActorId::account(controller.clone()).to_string()).execute(&mut *conn).await.unwrap();
     drop(conn);
-    let request: ExactCurrentResultsReadRequestBody = serde_json::from_value(serde_json::json!({"realm_id":realm,"selector":{"kind":"capability_grant","grant_id":grant_id}})).unwrap();
-    let SelfExactCurrentRead::Answer(ExactCurrentResultsReadOutcome::Present {
-        entry: ExactCurrentResultEntry::CapabilityGrant(row),
+    let request: ExactCurrentStateReadRequestBody = serde_json::from_value(serde_json::json!({"realm_id":realm,"selector":{"kind":"capability_grant","grant_id":grant_id}})).unwrap();
+    let SelfExactCurrentRead::Answer(ExactCurrentStateReadResponseBody::Present {
+        entry: ExactCurrentStateEntry::CapabilityGrant(row),
         ..
     }) = store
-        .exact_current_result_for_account(&request, &controller, &station)
+        .exact_current_state_for_account(&request, &controller, &station)
         .await
         .unwrap()
     else {
@@ -311,11 +311,11 @@ async fn owned_agent_exact_current_is_issuer_only_even_after_membership_ends() {
         serde_json::json!({"grant_id":grant_id,"expected_revision":row.revision}),
     );
     uow.commit_event(revoke.clone()).await.unwrap();
-    let SelfExactCurrentRead::Answer(ExactCurrentResultsReadOutcome::Present {
-        entry: ExactCurrentResultEntry::CapabilityGrant(terminal),
+    let SelfExactCurrentRead::Answer(ExactCurrentStateReadResponseBody::Present {
+        entry: ExactCurrentStateEntry::CapabilityGrant(terminal),
         ..
     }) = store
-        .exact_current_result_for_account(&request, &controller, &station)
+        .exact_current_state_for_account(&request, &controller, &station)
         .await
         .unwrap()
     else {
@@ -338,16 +338,16 @@ async fn owned_agent_exact_current_is_issuer_only_even_after_membership_ends() {
     ] {
         assert!(matches!(
             store
-                .exact_current_result_for_account(&request, &stranger, &station)
+                .exact_current_state_for_account(&request, &stranger, &station)
                 .await
                 .unwrap(),
             SelfExactCurrentRead::NotFound
         ));
     }
-    let missing: ExactCurrentResultsReadRequestBody = serde_json::from_value(serde_json::json!({"realm_id":realm,"selector":{"kind":"capability_grant","grant_id":arkret_wire::GrantId::from_event_id(&arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [62;32]))}})).unwrap();
+    let missing: ExactCurrentStateReadRequestBody = serde_json::from_value(serde_json::json!({"realm_id":realm,"selector":{"kind":"capability_grant","grant_id":arkret_wire::GrantId::from_event_id(&arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [62;32]))}})).unwrap();
     assert!(matches!(
         store
-            .exact_current_result_for_account(
+            .exact_current_state_for_account(
                 &missing,
                 row.value.issuer_id.as_account_id().unwrap(),
                 &station
@@ -394,7 +394,7 @@ async fn founder_disclosure_covers_every_accepted_cut_of_disclosed_kinds() {
     assert_eq!(material.current_state_entries.len(), 9);
     assert!(material.current_state_entries.iter().any(|entry| matches!(
         entry,
-        arkret_wire::TypedCurrentRow::Value {
+        arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::RealmPlaintextVisibleServices,
             ..
         }
@@ -408,7 +408,7 @@ async fn founder_disclosure_covers_every_accepted_cut_of_disclosed_kinds() {
     // A private PCR current must refuse the entire ordinary cut, even if a
     // privileged storage fault places it in a collaboration Realm.
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("INSERT INTO principal_resolution_current_results (principal_id,station_id,pcr_realm_id,genesis_event_id,current_commit_id,current_stream_position,value,updated_at) VALUES ('ak:did_core:web:private-snapshot.example',$1,$2,$3,$4,0,'{\"private_marker\":true}'::jsonb,now())")
+    diesel::sql_query("INSERT INTO principal_resolution_current_states (principal_id,station_id,pcr_realm_id,genesis_event_id,current_commit_id,current_stream_position,value,updated_at) VALUES ('ak:did_core:web:private-snapshot.example',$1,$2,$3,$4,0,'{\"private_marker\":true}'::jsonb,now())")
         .bind::<Text,_>(creator.station_id.as_str())
         .bind::<Text,_>(realm_id.as_str())
         .bind::<Text,_>(unit.transactions[0].event.event_id.as_str())
@@ -421,7 +421,7 @@ async fn founder_disclosure_covers_every_accepted_cut_of_disclosed_kinds() {
         error.to_string().contains("outside the disclosure subset"),
         "{error}"
     );
-    diesel::sql_query("DELETE FROM principal_resolution_current_results WHERE pcr_realm_id=$1")
+    diesel::sql_query("DELETE FROM principal_resolution_current_states WHERE pcr_realm_id=$1")
         .bind::<Text, _>(realm_id.as_str())
         .execute(&mut conn)
         .await
@@ -430,7 +430,7 @@ async fn founder_disclosure_covers_every_accepted_cut_of_disclosed_kinds() {
 
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "INSERT INTO relation_current_results \
+        "INSERT INTO relation_current_states \
          (realm_id,domain_key,domain,relation_id,state,current_commit_id,current_stream_position,value,updated_at) \
          VALUES ($1,'injected','{}'::jsonb,'ak:relation:test','active',$2,6, \
                  '{\"id\":\"ak:relation:test\",\"state\":\"active\"}'::jsonb,now())",
@@ -443,7 +443,7 @@ async fn founder_disclosure_covers_every_accepted_cut_of_disclosed_kinds() {
             .await
             .is_err()
     );
-    diesel::sql_query("DELETE FROM relation_current_results WHERE realm_id=$1")
+    diesel::sql_query("DELETE FROM relation_current_states WHERE realm_id=$1")
         .bind::<Text, _>(realm_id.as_str())
         .execute(&mut conn)
         .await
@@ -453,7 +453,7 @@ async fn founder_disclosure_covers_every_accepted_cut_of_disclosed_kinds() {
     // This injected row is an isolation probe, not accepted Circle evidence.
     let circle_id = arkret_wire::CircleId::from_event_id(&unit.transactions[0].event.event_id);
     diesel::sql_query(
-        "INSERT INTO circle_current_results \
+        "INSERT INTO circle_current_states \
          (realm_id,circle_id,create_event_id,current_commit_id,current_stream_position,source_stream_ref,short_name_folded,value,updated_at) \
          VALUES ($1,$2,$3,$4,0,$5,'private',$6,now())",
     )
@@ -475,14 +475,14 @@ async fn founder_disclosure_covers_every_accepted_cut_of_disclosed_kinds() {
             .iter()
             .all(|head| matches!(head.stream_ref, arkret_wire::CommitStreamRef::Realm { .. }))
     );
-    diesel::sql_query("DELETE FROM circle_current_results WHERE realm_id=$1")
+    diesel::sql_query("DELETE FROM circle_current_states WHERE realm_id=$1")
         .bind::<Text, _>(realm_id.as_str())
         .execute(&mut conn)
         .await
         .unwrap();
     let sidecar_id = arkret_wire::SidecarId::from_event_id(&unit.transactions[0].event.event_id);
     diesel::sql_query(
-        "INSERT INTO sidecar_current_results \
+        "INSERT INTO sidecar_current_states \
          (realm_id,sidecar_id,controller_account_id,create_event_id,current_commit_id,current_stream_position,source_stream_ref,value,updated_at) \
          VALUES ($1,$2,$3,$4,$5,0,$6,$7,now())",
     )
@@ -499,7 +499,7 @@ async fn founder_disclosure_covers_every_accepted_cut_of_disclosed_kinds() {
             .await
             .is_err()
     );
-    diesel::sql_query("DELETE FROM sidecar_current_results WHERE realm_id=$1")
+    diesel::sql_query("DELETE FROM sidecar_current_states WHERE realm_id=$1")
         .bind::<Text, _>(realm_id.as_str())
         .execute(&mut conn)
         .await
@@ -518,7 +518,7 @@ async fn founder_disclosure_covers_every_accepted_cut_of_disclosed_kinds() {
     assert_eq!(material.current_state_entries.len(), 11);
     let strand_id = arkret_wire::StrandId::from_event_id(&strand.authority_commit.event.event_id);
     assert!(material.current_state_entries.iter().any(|entry| matches!(entry,
-        arkret_wire::TypedCurrentRow::Value {
+        arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::CalendarScheduleSource { strand_id: id },
             source_stream_ref, revision, ..
         } if id == &strand_id
@@ -555,7 +555,7 @@ async fn founder_disclosure_covers_every_accepted_cut_of_disclosed_kinds() {
         let commit = &request.authority_commit.commit;
         assert!(material.current_state_entries.iter().any(|entry| matches!(
             entry,
-            arkret_wire::TypedCurrentRow::Value {
+            arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::MessageRevision { message_id: found },
                 revision,
                 ..
@@ -770,7 +770,7 @@ async fn account_snapshot_issuance_is_same_cut_and_by_ref_rechecks_disclosure() 
         .current_state_entries
         .iter()
         .find_map(|entry| match entry {
-            arkret_wire::TypedCurrentRow::Value {
+            arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::CalendarScheduleSource { strand_id: id },
                 source_stream_ref,
                 revision,
@@ -827,7 +827,7 @@ async fn account_snapshot_issuance_is_same_cut_and_by_ref_rechecks_disclosure() 
     let mut conn = pool.get().await.unwrap();
     let member = arkret_wire::ActorId::account(creator.clone()).to_string();
     diesel::sql_query(
-        "UPDATE member_state_current_results SET membership='leave', \
+        "UPDATE member_state_current_states SET membership='leave', \
          value='{\"membership\":\"leave\"}'::jsonb WHERE realm_id=$1 AND member_id=$2",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -848,7 +848,7 @@ async fn account_snapshot_issuance_is_same_cut_and_by_ref_rechecks_disclosure() 
         ));
     }
     diesel::sql_query(
-        "UPDATE member_state_current_results SET membership='join', \
+        "UPDATE member_state_current_states SET membership='join', \
          value='{\"membership\":\"join\"}'::jsonb WHERE realm_id=$1 AND member_id=$2",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -907,7 +907,7 @@ async fn authority_root_count(
 ) -> i64 {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "SELECT COUNT(*) AS count FROM realm_authority_root_current_results WHERE realm_id=$1",
+        "SELECT COUNT(*) AS count FROM realm_authority_root_current_states WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<CountRow>(&mut *conn)
@@ -922,7 +922,7 @@ async fn bootstrap_singleton_count(
 ) -> i64 {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "SELECT COUNT(*) AS count FROM realm_bootstrap_current_results WHERE realm_id=$1",
+        "SELECT COUNT(*) AS count FROM realm_bootstrap_current_states WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<CountRow>(&mut *conn)
@@ -1050,7 +1050,7 @@ fn signature(
         verification_method: arkret_wire::DidUrl::new(format!("{did}#authority")).unwrap(),
         signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "3".repeat(64))).unwrap(),
         created_at: at,
-        sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
+        signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
     }
 }
 
@@ -1173,7 +1173,7 @@ fn legacy_unit() -> OrdinaryRealmBootstrapCommitUnit {
             .collect(),
     };
     let exact_request_body = serde_json::to_vec(
-        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(submission.clone()),
+        &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(submission.clone()),
     )
     .unwrap();
     OrdinaryRealmBootstrapCommitUnit {
@@ -1221,7 +1221,7 @@ fn legacy_unit_with_plaintext_service() -> OrdinaryRealmBootstrapCommitUnit {
         .events
         .insert(6, arkret_wire::EventAdmissionSubmission::new(event));
     unit.exact_request_body = serde_json::to_vec(
-        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(unit.submission.clone()),
+        &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(unit.submission.clone()),
     )
     .unwrap();
     unit
@@ -1559,7 +1559,7 @@ async fn ordinary_bootstrap_failure_rolls_back_every_event_then_exact_replay_ret
         },
     ] {
         assert!(snapshot.current_state_entries.iter().any(|entry| {
-            matches!(entry, arkret_wire::TypedCurrentRow::Value { selector: found, .. } if found == &selector)
+            matches!(entry, arkret_wire::CurrentState::Value { selector: found, .. } if found == &selector)
         }));
     }
     assert!(
@@ -1677,7 +1677,7 @@ async fn confirmed_bootstrap_recovers_after_postcommit_projection_install_is_los
 }
 
 #[tokio::test]
-async fn strand_create_writes_registered_current_result_and_rejects_remote_unplanned_target() {
+async fn strand_create_writes_registered_current_state_and_rejects_remote_unplanned_target() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     human_profile::admit(
@@ -1706,7 +1706,7 @@ async fn strand_create_writes_registered_current_result_and_rejects_remote_unpla
         .unwrap()
         .unwrap();
     assert!(snapshot.current_state_entries.iter().any(|entry| {
-        matches!(entry, arkret_wire::TypedCurrentRow::Value {
+        matches!(entry, arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::Strand { strand_id: found },
             source_stream_ref,
             revision,
@@ -1746,7 +1746,7 @@ async fn strand_create_writes_registered_current_result_and_rejects_remote_unpla
     ));
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "INSERT INTO member_state_current_results \
+        "INSERT INTO member_state_current_states \
          (realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) \
          VALUES($1,$2,'join',$3,$4,$5,$6)",
     )
@@ -1821,7 +1821,7 @@ async fn strand_create_writes_registered_current_result_and_rejects_remote_unpla
             .filter(|entry| {
                 matches!(
                     entry,
-                    arkret_wire::TypedCurrentRow::Value {
+                    arkret_wire::CurrentState::Value {
                         selector: arkret_wire::CurrentSelector::Strand { .. },
                         ..
                     }
@@ -1875,7 +1875,7 @@ async fn default_strand_writes_exact_current_at_commit_and_rejects_dangling_and_
         .unwrap()
         .unwrap();
     assert!(snapshot.current_state_entries.iter().any(|entry| {
-        matches!(entry, arkret_wire::TypedCurrentRow::Value {
+        matches!(entry, arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::RealmSetDefaultStrand,
             source_stream_ref,
             revision,
@@ -1928,7 +1928,7 @@ async fn default_strand_writes_exact_current_at_commit_and_rejects_dangling_and_
     let absent_commit = arkret_wire::RealmCommitId::from_digest([0xee; 32]);
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "UPDATE member_state_current_results SET current_commit_id=$2 WHERE realm_id=$1",
+        "UPDATE member_state_current_states SET current_commit_id=$2 WHERE realm_id=$1",
     )
     .bind::<diesel::sql_types::Text, _>(realm_id.as_str())
     .bind::<diesel::sql_types::Text, _>(absent_commit.as_str())
@@ -1954,7 +1954,7 @@ async fn default_strand_writes_exact_current_at_commit_and_rejects_dangling_and_
     );
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "UPDATE realm_set_default_strand_current_results SET current_commit_id=$2 WHERE realm_id=$1",
+        "UPDATE realm_set_default_strand_current_states SET current_commit_id=$2 WHERE realm_id=$1",
     )
     .bind::<diesel::sql_types::Text, _>(realm_id.as_str())
     .bind::<diesel::sql_types::Text, _>(absent_commit.as_str())
@@ -2179,7 +2179,7 @@ async fn local_markdown_text_message_writes_exact_revision_and_rejects_missing_s
         .unwrap()
         .unwrap();
     assert!(snapshot.current_state_entries.iter().any(|entry| {
-        matches!(entry, arkret_wire::TypedCurrentRow::Value {
+        matches!(entry, arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::MessageRevision { message_id: found },
             source_stream_ref,
             revision,
@@ -2215,7 +2215,7 @@ async fn local_markdown_text_message_writes_exact_revision_and_rejects_missing_s
     ));
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "INSERT INTO member_state_current_results \
+        "INSERT INTO member_state_current_states \
          (realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) \
          VALUES($1,$2,'join',$3,$4,$5,$6)",
     )
@@ -2250,7 +2250,7 @@ async fn local_markdown_text_message_writes_exact_revision_and_rejects_missing_s
             .iter()
             .filter(|entry| matches!(
                 entry,
-                arkret_wire::TypedCurrentRow::Value {
+                arkret_wire::CurrentState::Value {
                     selector: arkret_wire::CurrentSelector::MessageRevision { .. },
                     ..
                 }
@@ -2267,7 +2267,7 @@ async fn local_markdown_text_message_writes_exact_revision_and_rejects_missing_s
     ));
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "UPDATE message_revision_current_results SET current_commit_id=$1 WHERE message_id=$2",
+        "UPDATE message_revision_current_states SET current_commit_id=$1 WHERE message_id=$2",
     )
     .bind::<Text, _>(nonexistent.as_str())
     .bind::<Text, _>(message_id.as_str())
@@ -2597,7 +2597,7 @@ async fn account_window_basis_reserves_exact_issued_snapshot_or_is_preview_only(
     let member = arkret_wire::ActorId::account(creator.clone()).to_string();
     for membership in ["leave", "join"] {
         diesel::sql_query(
-            "UPDATE member_state_current_results SET membership=$3, \
+            "UPDATE member_state_current_states SET membership=$3, \
              value=jsonb_build_object('membership', $3::text) WHERE realm_id=$1 AND member_id=$2",
         )
         .bind::<Text, _>(realm_id.as_str())
@@ -2734,8 +2734,8 @@ fn scan_request(
     realm_id: &arkret_wire::RealmId,
     direction: arkret_wire::StreamScanDirection,
     limit: u16,
-) -> arkret_wire::StreamScanRequest {
-    arkret_wire::StreamScanRequest {
+) -> arkret_wire::StreamScanRequestBody {
+    arkret_wire::StreamScanRequestBody {
         realm_id: realm_id.clone(),
         stream_ref: arkret_wire::CommitStreamRef::Realm {
             realm_id: realm_id.clone(),
@@ -2745,14 +2745,14 @@ fn scan_request(
     }
 }
 
-fn scanned_page(scan: coland_storage::AccountStreamScan) -> arkret_wire::StreamScanOutcome {
+fn scanned_page(scan: coland_storage::AccountStreamScan) -> arkret_wire::StreamScanResponseBody {
     match scan {
         coland_storage::AccountStreamScan::Page(page) => page,
         other => panic!("expected a proved page, got {other:?}"),
     }
 }
 
-fn positions(page: &arkret_wire::StreamScanOutcome) -> Vec<u64> {
+fn positions(page: &arkret_wire::StreamScanResponseBody) -> Vec<u64> {
     page.committed_events
         .iter()
         .map(|item| item.commit().stream_position)
@@ -2791,7 +2791,7 @@ async fn account_stream_scan_serves_only_the_proved_sole_founder_interval() {
         .await
         .unwrap();
     let genesis_commit = unit.transactions[0].commit.commit_id.clone();
-    let scan = |request: arkret_wire::StreamScanRequest, account: arkret_wire::AccountId| {
+    let scan = |request: arkret_wire::StreamScanRequestBody, account: arkret_wire::AccountId| {
         let store = store.clone();
         let station = station.clone();
         async move {
@@ -2895,7 +2895,7 @@ async fn account_stream_scan_serves_only_the_proved_sole_founder_interval() {
     let stranger_actor = arkret_wire::ActorId::account(stranger.clone()).to_string();
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "INSERT INTO member_state_current_results \
+        "INSERT INTO member_state_current_states \
          (realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) \
          VALUES ($1,$2,'knock',$3,6,'{\"membership\":\"knock\"}'::jsonb,now())",
     )
@@ -2916,17 +2916,15 @@ async fn account_stream_scan_serves_only_the_proved_sole_founder_interval() {
         scan(scan_request(&realm_id, After(None), 3), stranger.clone()).await,
         AccountStreamScan::NotAuthorized
     );
-    diesel::sql_query(
-        "DELETE FROM member_state_current_results WHERE realm_id=$1 AND member_id=$2",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(&stranger_actor)
-    .execute(&mut conn)
-    .await
-    .unwrap();
+    diesel::sql_query("DELETE FROM member_state_current_states WHERE realm_id=$1 AND member_id=$2")
+        .bind::<Text, _>(realm_id.as_str())
+        .bind::<Text, _>(&stranger_actor)
+        .execute(&mut conn)
+        .await
+        .unwrap();
     // A founder who left no longer has a readable interval.
     diesel::sql_query(
-        "UPDATE member_state_current_results \
+        "UPDATE member_state_current_states \
          SET membership='leave', value='{\"membership\":\"leave\"}'::jsonb WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -3197,7 +3195,7 @@ async fn message_tail_window_beyond_twenty_commits_names_the_issued_anchor() {
         .current_state_entries
         .iter()
         .find_map(|entry| match entry {
-            arkret_wire::TypedCurrentRow::Value {
+            arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::CalendarScheduleSource { strand_id: id },
                 source_stream_ref,
                 revision,
@@ -3223,7 +3221,7 @@ async fn message_tail_window_beyond_twenty_commits_names_the_issued_anchor() {
             .iter()
             .filter(|entry| matches!(
                 entry,
-                arkret_wire::TypedCurrentRow::Value {
+                arkret_wire::CurrentState::Value {
                     selector: arkret_wire::CurrentSelector::MessageRevision { .. },
                     ..
                 }
@@ -3771,7 +3769,7 @@ async fn account_scan_withholds_expired_and_redacted_messages_on_their_commits()
         .current_state_entries
         .iter()
         .filter_map(|row| match row {
-            arkret_wire::TypedCurrentRow::Value {
+            arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::MessageRevision { message_id },
                 ..
             } => Some(message_id.clone()),
@@ -3785,9 +3783,9 @@ async fn account_scan_withholds_expired_and_redacted_messages_on_their_commits()
         )]
     );
     assert!(after.current_state_entries.iter().any(|row| matches!(row,
-        arkret_wire::TypedCurrentRow::Value { selector: arkret_wire::CurrentSelector::Strand { strand_id: id }, .. } if id == &strand_id)));
+        arkret_wire::CurrentState::Value { selector: arkret_wire::CurrentSelector::Strand { strand_id: id }, .. } if id == &strand_id)));
     assert!(after.current_state_entries.iter().any(|row| matches!(row,
-        arkret_wire::TypedCurrentRow::Value { selector: arkret_wire::CurrentSelector::ObjectRedaction { target_ref }, .. } if target_ref == redacted_message.as_str())));
+        arkret_wire::CurrentState::Value { selector: arkret_wire::CurrentSelector::ObjectRedaction { target_ref }, .. } if target_ref == redacted_message.as_str())));
     for snapshot in [&safe_before, &after] {
         assert_eq!(
             store
@@ -3879,7 +3877,7 @@ async fn peer_stream_scan_refuses_non_hosting_peers_and_serves_a_hosting_peer_it
         .admit_ordinary_realm_bootstrap_unit(&unit, unit.transactions[0].commit.committed_at)
         .await
         .unwrap();
-    let scan = |request: arkret_wire::StreamScanRequest, peer: arkret_wire::DidCoreId| {
+    let scan = |request: arkret_wire::StreamScanRequestBody, peer: arkret_wire::DidCoreId| {
         let store = store.clone();
         let station = station.clone();
         async move {
@@ -3918,7 +3916,7 @@ async fn peer_stream_scan_refuses_non_hosting_peers_and_serves_a_hosting_peer_it
     let mut conn = pool.get().await.unwrap();
     for membership in ["knock", "join"] {
         diesel::sql_query(
-            "INSERT INTO member_state_current_results \
+            "INSERT INTO member_state_current_states \
              (realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) \
              VALUES ($1,$2,$3,$4,6,jsonb_build_object('membership',$3::text),now()) \
              ON CONFLICT (realm_id,member_id) DO UPDATE SET membership=EXCLUDED.membership, \
@@ -4082,7 +4080,7 @@ fn franking_nonce(
 
 async fn report_row_count(pool: &coland_storage_postgres::PgPool) -> i64 {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT COUNT(*) AS count FROM moderation_report_current_results")
+    diesel::sql_query("SELECT COUNT(*) AS count FROM moderation_report_current_states")
         .get_result::<CountRow>(&mut *conn)
         .await
         .unwrap()
@@ -4251,7 +4249,7 @@ async fn self_moderation_report_commits_exact_current_and_refuses_with_zero_writ
     let mut conn = pool.get().await.unwrap();
     let row = diesel::sql_query(
         "SELECT current_commit_id,current_stream_position,value \
-         FROM moderation_report_current_results WHERE report_event_id=$1 AND realm_id=$2",
+         FROM moderation_report_current_states WHERE report_event_id=$1 AND realm_id=$2",
     )
     .bind::<Text, _>(report.authority_commit.event.event_id.as_str())
     .bind::<Text, _>(realm_id.as_str())
@@ -4336,7 +4334,7 @@ async fn self_moderation_report_commits_exact_current_and_refuses_with_zero_writ
     ));
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "INSERT INTO member_state_current_results \
+        "INSERT INTO member_state_current_states \
          (realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) \
          VALUES($1,$2,'join',$3,$4,$5,$6)",
     )
@@ -4412,7 +4410,7 @@ async fn moderation_report_row_is_disclosed_to_the_realm_root_controller() {
         .unwrap();
     assert_eq!(material.current_state_entries.len(), 12);
     assert!(material.current_state_entries.iter().any(|entry| matches!(entry,
-        arkret_wire::TypedCurrentRow::Value {
+        arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::CalendarScheduleSource { strand_id: id },
             source_stream_ref, revision, ..
         } if id == &strand_id
@@ -4421,7 +4419,7 @@ async fn moderation_report_row_is_disclosed_to_the_realm_root_controller() {
             && revision.stream_position == strand.authority_commit.commit.stream_position
     )));
     assert!(material.current_state_entries.iter().any(|entry| matches!(entry,
-        arkret_wire::TypedCurrentRow::Value {
+        arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::ModerationReport { event_id },
             source_stream_ref, revision, value,
         } if event_id == &report.authority_commit.event.event_id
@@ -4671,10 +4669,10 @@ async fn moderation_queue_view_derives_from_the_report_family_at_one_cut() {
             .current_state_entries
             .iter()
             .find(|entry| {
-                matches!(entry, arkret_wire::TypedCurrentRow::Value { selector: found, .. } if found == &selector)
+                matches!(entry, arkret_wire::CurrentState::Value { selector: found, .. } if found == &selector)
             })
             .expect("snapshot material carries the report row");
-        let arkret_wire::TypedCurrentRow::Value {
+        let arkret_wire::CurrentState::Value {
             source_stream_ref,
             revision,
             value,
@@ -4804,10 +4802,10 @@ async fn moderation_queue_view_derives_from_the_report_family_at_one_cut() {
     let selector = arkret_wire::CurrentSelector::ModerationState {
         target_ref: realm_id.to_string(),
     };
-    let Some(arkret_wire::TypedCurrentRow::Value {
+    let Some(arkret_wire::CurrentState::Value {
         revision, value, ..
     }) = material.current_state_entries.iter().find(|entry| {
-        matches!(entry, arkret_wire::TypedCurrentRow::Value { selector: found, .. } if found == &selector)
+        matches!(entry, arkret_wire::CurrentState::Value { selector: found, .. } if found == &selector)
     })
     else {
         panic!("snapshot material carries the moderation_state row");
@@ -4852,7 +4850,7 @@ async fn moderation_queue_view_derives_from_the_report_family_at_one_cut() {
                     "kind": "realm_root",
                     "realm_id": realm_id,
                     "authority_event_ref": root_event_ref,
-                    "authority_generation": 0
+                    "authority_generation": "0"
                 }],
                 "issued_at": arkret_canonical::format_timestamp_canonical(
                     current.authority_commit.commit.committed_at
@@ -4869,7 +4867,7 @@ async fn moderation_queue_view_derives_from_the_report_family_at_one_cut() {
 
 async fn moderation_state_rows(pool: &coland_storage_postgres::PgPool) -> i64 {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT COUNT(*) AS count FROM moderation_state_current_results")
+    diesel::sql_query("SELECT COUNT(*) AS count FROM moderation_state_current_states")
         .get_result::<CountRow>(&mut *conn)
         .await
         .unwrap()
@@ -4887,7 +4885,7 @@ async fn realm_root_authority_event_ref(
     }
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "SELECT authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1",
+        "SELECT authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<RootRow>(&mut *conn)
@@ -4903,8 +4901,8 @@ async fn realm_root_authority_event_ref(
 /// inferred from absence.
 #[tokio::test]
 async fn self_current_reads_answer_only_the_provable_cut() {
-    use arkret_models_collaboration::exact_current_results::{
-        ExactCurrentResultEntry, ExactCurrentResultsReadOutcome, ExactCurrentResultsReadRequestBody,
+    use arkret_models_collaboration::exact_current_state::{
+        ExactCurrentStateEntry, ExactCurrentStateReadRequestBody, ExactCurrentStateReadResponseBody,
     };
     use arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody;
     use coland_storage::{AccountRealmStreamList, MediaServiceAnchorRead, SelfExactCurrentRead};
@@ -4994,19 +4992,19 @@ async fn self_current_reads_answer_only_the_provable_cut() {
         "to_ref":"ak:strand:AQdknt9AByYY2gb16KB093xeB4J8b02mTEd4Mt8z2rO-"
     });
     let relation_request = |realm: &arkret_wire::RealmId| {
-        serde_json::from_value::<ExactCurrentResultsReadRequestBody>(serde_json::json!({
+        serde_json::from_value::<ExactCurrentStateReadRequestBody>(serde_json::json!({
             "realm_id": realm,
             "selector": {"kind":"relation","primary_conflict_domain": domain},
         }))
         .unwrap()
     };
-    let exact = |request: ExactCurrentResultsReadRequestBody,
+    let exact = |request: ExactCurrentStateReadRequestBody,
                  account: arkret_wire::AccountId,
                  issuer: arkret_wire::DidCoreId| {
         let store = store.clone();
         async move {
             store
-                .exact_current_result_for_account(&request, &account, &issuer)
+                .exact_current_state_for_account(&request, &account, &issuer)
                 .await
                 .unwrap()
         }
@@ -5035,7 +5033,7 @@ async fn self_current_reads_answer_only_the_provable_cut() {
     });
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "INSERT INTO relation_current_results \
+        "INSERT INTO relation_current_states \
          (realm_id,domain_key,domain,relation_id,state,current_commit_id,current_stream_position,\
           value,updated_at) VALUES ($1,$2,$3,$4,'active',$5,6,$6,now())",
     )
@@ -5048,11 +5046,11 @@ async fn self_current_reads_answer_only_the_provable_cut() {
     .execute(&mut conn)
     .await
     .unwrap();
-    let SelfExactCurrentRead::Answer(ExactCurrentResultsReadOutcome::Present {
+    let SelfExactCurrentRead::Answer(ExactCurrentStateReadResponseBody::Present {
         realm_id: answered_realm,
         governance_generation,
         effective_stream_head,
-        entry: ExactCurrentResultEntry::Relation(entry),
+        entry: ExactCurrentStateEntry::Relation(entry),
     }) = exact(
         relation_request(&realm_id),
         creator.clone(),
@@ -5102,7 +5100,7 @@ async fn self_current_reads_answer_only_the_provable_cut() {
         SelfExactCurrentRead::Unresolved(_)
     ));
     let moderation =
-        serde_json::from_value::<ExactCurrentResultsReadRequestBody>(serde_json::json!({
+        serde_json::from_value::<ExactCurrentStateReadRequestBody>(serde_json::json!({
             "realm_id": realm_id,
             "selector": {"kind":"moderation_state","target_ref": relation_id},
         }))
@@ -5147,7 +5145,7 @@ async fn self_current_reads_answer_only_the_provable_cut() {
     // A second joined member does not move the founder's genesis floor.
     let second_member = arkret_wire::ActorId::account(stranger.clone()).to_string();
     diesel::sql_query(
-        "INSERT INTO member_state_current_results \
+        "INSERT INTO member_state_current_states \
          (realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) \
          VALUES ($1,$2,'join',$3,6,'{\"membership\":\"join\"}'::jsonb,now())",
     )
@@ -5378,11 +5376,11 @@ async fn invite_families(
     let mut rows = Vec::new();
     for sql in [
         "SELECT invite_id AS subject, value, current_commit_id \
-         FROM invite_lifecycle_current_results WHERE realm_id=$1 ORDER BY invite_id",
+         FROM invite_lifecycle_current_states WHERE realm_id=$1 ORDER BY invite_id",
         "SELECT invite_id AS subject, value, current_commit_id \
-         FROM invite_directed_invitee_current_results WHERE realm_id=$1 ORDER BY invite_id",
+         FROM invite_directed_invitee_current_states WHERE realm_id=$1 ORDER BY invite_id",
         "SELECT invitee_account_id AS subject, value, current_commit_id \
-         FROM invite_live_target_current_results WHERE realm_id=$1 ORDER BY invitee_account_id",
+         FROM invite_live_target_current_states WHERE realm_id=$1 ORDER BY invitee_account_id",
     ] {
         rows.push(
             diesel::sql_query(sql)
@@ -5432,7 +5430,7 @@ async fn inject_joined_member(
     let basis = unit.transactions.last().unwrap();
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "INSERT INTO member_state_current_results \
+        "INSERT INTO member_state_current_states \
          (realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) \
          VALUES($1,$2,'join',$3,$4,$5,$6)",
     )
@@ -5550,7 +5548,7 @@ fn invite_grant_request<'a>(
                         "kind": "realm_root",
                         "realm_id": realm_id,
                         "authority_event_ref": root_event_ref,
-                        "authority_generation": 0
+                        "authority_generation": "0"
                     }],
                     "issued_at": arkret_canonical::format_timestamp_canonical(
                         previous.authority_commit.commit.committed_at
@@ -5639,7 +5637,7 @@ async fn invite_create_writes_three_families_and_rejects_occupied_live_target() 
             .is_some()
     );
     let families = invite_families(&pool, &realm_id).await;
-    let current = PgInviteCurrentResultStore { pool: pool.clone() };
+    let current = PgInviteCurrentStateStore { pool: pool.clone() };
     let in_realm = current.invites_in_realm(Some(&realm_id)).await.unwrap();
     let all_realms = current.invites_in_realm(None).await.unwrap();
     assert_eq!(in_realm.len(), 1);
@@ -5695,7 +5693,7 @@ async fn invite_create_writes_three_families_and_rejects_occupied_live_target() 
         assert!(
             material.current_state_entries.iter().any(|entry| matches!(
                 entry,
-                arkret_wire::TypedCurrentRow::Value { selector: found, revision, source_stream_ref, .. }
+                arkret_wire::CurrentState::Value { selector: found, revision, source_stream_ref, .. }
                     if found == &selector
                         && revision.commit_id == create.authority_commit.commit.commit_id
                         && source_stream_ref == &create.authority_commit.commit.stream_ref
@@ -5769,7 +5767,7 @@ async fn third_party_invite_create_reads_from_committed_event_and_lifecycle() {
             "token_commitment": format!("sha256:{}", "a".repeat(64)),
             "token_salt_id": "salt-test-1410",
             "token_entropy_bits": 128,
-            "max_claims": 1,
+            "max_claim_count": 1,
             "verification_id": "ak:did_core:web:verifier.example",
             "verification_public_key": "did:web:verifier.example#invite-1"
         },
@@ -5853,7 +5851,7 @@ async fn third_party_invite_create_reads_from_committed_event_and_lifecycle() {
         coland_storage::ConflictCode::DuplicateConflict,
     )
     .await;
-    let current = PgInviteCurrentResultStore { pool: pool.clone() };
+    let current = PgInviteCurrentStateStore { pool: pool.clone() };
     let in_realm = current.invites_in_realm(Some(&realm_id)).await.unwrap();
     let all_realms = current.invites_in_realm(None).await.unwrap();
     assert_eq!(in_realm.len(), 1);
@@ -6030,7 +6028,7 @@ async fn third_party_invite_create_reads_from_committed_event_and_lifecycle() {
     // A stale projection cannot stand in for the newest accepted checkpoint.
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "UPDATE realm_policy_bundle_current_results SET current_stream_position=current_stream_position+1 WHERE realm_id=$1",
+        "UPDATE realm_policy_bundle_current_states SET current_stream_position=current_stream_position+1 WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm_id.as_str())
     .execute(&mut *conn)
@@ -6054,7 +6052,7 @@ async fn third_party_invite_create_reads_from_committed_event_and_lifecycle() {
     );
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "UPDATE realm_policy_bundle_current_results SET current_stream_position=current_stream_position-1 WHERE realm_id=$1",
+        "UPDATE realm_policy_bundle_current_states SET current_stream_position=current_stream_position-1 WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm_id.as_str())
     .execute(&mut *conn)
@@ -6089,7 +6087,7 @@ async fn third_party_invite_create_reads_from_committed_event_and_lifecycle() {
     attestation.validate_freshness(observed).unwrap();
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "DELETE FROM invite_lifecycle_current_results WHERE realm_id=$1 AND invite_id=$2",
+        "DELETE FROM invite_lifecycle_current_states WHERE realm_id=$1 AND invite_id=$2",
     )
     .bind::<Text, _>(realm_id.as_str())
     .bind::<Text, _>(request.invite_id.as_str())
@@ -6153,7 +6151,7 @@ async fn delegated_invite_provider_holds_current_cut_until_private_completion() 
                 "oob_code_kind":"offline_token",
                 "token_commitment":format!("sha256:{}", "b".repeat(64)),
                 "token_salt_id":"delegated-cut-salt", "token_entropy_bits":256,
-                "max_claims":1, "verification_id":station,
+                "max_claim_count":1, "verification_id":station,
                 "verification_public_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(
                     &ed25519_dalek::SigningKey::from_bytes(&[53;32]).verifying_key().to_bytes())
             },
@@ -6161,7 +6159,7 @@ async fn delegated_invite_provider_holds_current_cut_until_private_completion() 
         }),
     );
     uow.commit_event(create.clone()).await.unwrap();
-    let current = PgInviteCurrentResultStore { pool: pool.clone() };
+    let current = PgInviteCurrentStateStore { pool: pool.clone() };
     let original = current
         .invites_in_realm(Some(&realm))
         .await
@@ -6326,7 +6324,7 @@ async fn invite_provision_proof_uses_current_accepted_device_without_root_or_doc
         )
         .unwrap();
     request.validate_for_service(&station).unwrap();
-    let current = PgInviteCurrentResultStore { pool: pool.clone() };
+    let current = PgInviteCurrentStateStore { pool: pool.clone() };
     let before = current.invites_in_realm(None).await.unwrap();
     let guard = current
         .acquire_third_party_invite_provision_device(&request, &station, &|| at)
@@ -6635,7 +6633,7 @@ fn relation_snapshot_rows(material: &coland_storage::RealmStateSnapshotMaterial)
         .filter(|row| {
             matches!(
                 row,
-                arkret_wire::TypedCurrentRow::Value {
+                arkret_wire::CurrentState::Value {
                     selector: arkret_wire::CurrentSelector::Relation { .. },
                     ..
                 }
@@ -6649,7 +6647,7 @@ fn assert_circle_relation_snapshot_disclosure<'a>(
     fixture: &'a RelationSnapshotFixture,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
     Box::pin(async move {
-        use arkret_wire::{CurrentSelector, RelationId, TypedCurrentRow};
+        use arkret_wire::{CurrentSelector, CurrentState, RelationId};
         let RelationSnapshotFixture {
             unit,
             bob,
@@ -6675,14 +6673,14 @@ fn assert_circle_relation_snapshot_disclosure<'a>(
             .find(|row| {
                 matches!(
                     row,
-                    TypedCurrentRow::Value {
+                    CurrentState::Value {
                         selector: CurrentSelector::Relation { .. },
                         ..
                     }
                 )
             })
             .unwrap();
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             selector,
             source_stream_ref,
             revision,
@@ -6867,7 +6865,7 @@ fn assert_cross_realm_relation_snapshot_disclosure<'a>(
             1
         );
         let mut conn = pool.get().await.unwrap();
-        diesel::sql_query("UPDATE relation_current_results SET current_stream_position=current_stream_position+1 WHERE relation_id=$1")
+        diesel::sql_query("UPDATE relation_current_states SET current_stream_position=current_stream_position+1 WHERE relation_id=$1")
         .bind::<Text, _>(relation_id.as_str()).execute(&mut conn).await.unwrap();
         drop(conn);
         assert!(
@@ -6920,7 +6918,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
     let circle_id = arkret_wire::CircleId::from_event_id(&create.authority_commit.event.event_id);
     let mut conn = pool.get().await.unwrap();
     let created = diesel::sql_query(
-        "SELECT COUNT(*) AS count FROM circle_current_results WHERE realm_id=$1 AND circle_id=$2 \
+        "SELECT COUNT(*) AS count FROM circle_current_states WHERE realm_id=$1 AND circle_id=$2 \
          AND current_commit_id=$3 AND source_stream_ref->>'kind'='realm'",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -7014,7 +7012,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
     uow.commit_event(join.clone()).await.unwrap();
     let mut conn = pool.get().await.unwrap();
     let joined = diesel::sql_query(
-        "SELECT COUNT(*) AS count FROM circle_member_state_current_results \
+        "SELECT COUNT(*) AS count FROM circle_member_state_current_states \
          WHERE circle_id=$1 AND member_id=$2 AND membership='join' AND current_commit_id=$3 \
          AND current_stream_position=0 AND source_stream_ref->>'kind'='circle'",
     )
@@ -7087,7 +7085,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
     )));
     assert!(frozen.current_state_entries.iter().any(|row| matches!(
         row,
-        arkret_wire::TypedCurrentRow::Value {
+        arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::CircleMemberState { .. },
             ..
         }
@@ -7126,7 +7124,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
     ));
     assert!(selected.additional_windows.is_empty());
     assert_eq!(selected.current_stream_heads.len(), 2);
-    let scan_request = arkret_wire::StreamScanRequest {
+    let scan_request = arkret_wire::StreamScanRequestBody {
         realm_id: realm_id.clone(),
         stream_ref: arkret_wire::CommitStreamRef::Realm {
             realm_id: realm_id.clone(),
@@ -7175,7 +7173,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
     );
     let mut conn = pool.get().await.unwrap();
     let unchanged = diesel::sql_query(
-        "SELECT COUNT(*) AS count FROM circle_member_state_current_results \
+        "SELECT COUNT(*) AS count FROM circle_member_state_current_states \
          WHERE circle_id=$1 AND member_id=$2 AND membership='join' AND current_commit_id=$3",
     )
     .bind::<Text, _>(circle_id.as_str())
@@ -7220,7 +7218,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
             .iter()
             .any(|row| matches!(
                 row,
-                arkret_wire::TypedCurrentRow::Value {
+                arkret_wire::CurrentState::Value {
                     selector: arkret_wire::CurrentSelector::Circle { .. }
                         | arkret_wire::CurrentSelector::CircleMemberState { .. },
                     ..
@@ -7928,9 +7926,9 @@ async fn message_families(
     let mut families = Vec::new();
     for sql in [
         "SELECT message_id AS subject, current_commit_id, value \
-         FROM message_revision_current_results WHERE realm_id=$1 ORDER BY message_id",
+         FROM message_revision_current_states WHERE realm_id=$1 ORDER BY message_id",
         "SELECT target_ref AS subject, current_commit_id, value \
-         FROM object_redaction_current_results WHERE realm_id=$1 ORDER BY target_ref",
+         FROM object_redaction_current_states WHERE realm_id=$1 ORDER BY target_ref",
     ] {
         families.push(
             diesel::sql_query(sql)
@@ -8074,7 +8072,7 @@ async fn historical_snapshot_rechecks_original_rows_after_updates_and_withdrawal
     ] {
         let row = |snapshot: &arkret_wire::RealmStateSnapshot| {
             snapshot.current_state_entries.iter()
-            .find(|row| matches!(row, arkret_wire::TypedCurrentRow::Value { selector: actual, .. } if actual == &selector))
+            .find(|row| matches!(row, arkret_wire::CurrentState::Value { selector: actual, .. } if actual == &selector))
             .cloned().unwrap()
         };
         assert_ne!(row(&before), row(&current));
@@ -8142,11 +8140,11 @@ async fn historical_snapshot_rechecks_original_rows_after_updates_and_withdrawal
         .unwrap()
         .unwrap();
     assert!(!after.current_state_entries.iter().any(|row| matches!(row,
-        arkret_wire::TypedCurrentRow::Value {
+        arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::MessageRevision { message_id: id }, ..
         } if id == &message_id)));
     assert!(after.current_state_entries.iter().any(|row| matches!(row,
-        arkret_wire::TypedCurrentRow::Value {
+        arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::ObjectRedaction { target_ref }, ..
         } if target_ref == message_id.as_str())));
     assert_eq!(
@@ -8218,7 +8216,7 @@ async fn historical_snapshot_watch_publication_is_rechecked_for_other_members() 
             .current_state_entries
             .iter()
             .any(|row| matches!(row,
-        arkret_wire::TypedCurrentRow::Value {
+        arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::StrandWatch { watcher_actor_id, .. }, ..
         } if watcher_actor_id == &actor))
     );
@@ -8345,7 +8343,7 @@ fn assert_message_revision_carriers<'a>(
             .unwrap();
         assert!(snapshot.current_state_entries.iter().any(|entry| matches!(
             entry,
-            arkret_wire::TypedCurrentRow::Value {
+            arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::MessageRevision { message_id: found },
                 revision,
                 value,
@@ -8777,7 +8775,7 @@ async fn message_redact_writes_object_redaction_and_withholds_on_scan() {
         .current_state_entries
         .iter()
         .filter_map(|entry| match entry {
-            arkret_wire::TypedCurrentRow::Value {
+            arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::MessageRevision { message_id },
                 ..
             } => Some(message_id.clone()),
@@ -8787,7 +8785,7 @@ async fn message_redact_writes_object_redaction_and_withholds_on_scan() {
     assert_eq!(messages, vec![kept_id.clone()]);
     assert!(after.current_state_entries.iter().any(|entry| matches!(
         entry,
-        arkret_wire::TypedCurrentRow::Value {
+        arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::ObjectRedaction { target_ref },
             revision,
             ..
@@ -8876,7 +8874,7 @@ async fn admitted_message_discussion(
 
 #[tokio::test]
 async fn poll_responses_keep_accepted_history_and_reject_invalid_partition_heads() {
-    use arkret_models_collaboration::poll::{PollPartition, PollResponseSet, VerifiedPollResponse};
+    use arkret_models_collaboration::poll::{PollPartition, PollResponseSet, VerifiedPollVote};
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let (unit, head, strand_id) = admitted_message_discussion(&pool).await;
@@ -8897,7 +8895,7 @@ async fn poll_responses_keep_accepted_history_and_reject_invalid_partition_heads
         &creator,
         arkret_wire::EventKind::MessageCreate,
         serde_json::json!({"strand_id":strand_id,"track_name":"discussion","reply_to_id":anchor_id,"content":{
-            "kind":"ak.content.poll","body":"Choose","poll":{"kind":"disclosed","max_selections":2,
+            "kind":"ak.content.poll","body":"Choose","poll":{"kind":"disclosed","max_selection_count":2,
             "answers":[{"id":"a","text":{"kind":"ak.content.text","body":"A"}},
                        {"id":"b","text":{"kind":"ak.content.text","body":"B"}}]}}}),
     );
@@ -8940,7 +8938,7 @@ async fn poll_responses_keep_accepted_history_and_reject_invalid_partition_heads
     ] {
         let response_id = arkret_wire::MessageId::from_event_id(response_event);
         assert!(!material.current_state_entries.iter().any(|entry| matches!(entry,
-            arkret_wire::TypedCurrentRow::Value { selector: arkret_wire::CurrentSelector::MessageRevision { message_id }, .. }
+            arkret_wire::CurrentState::Value { selector: arkret_wire::CurrentSelector::MessageRevision { message_id }, .. }
                 if message_id == &response_id)));
     }
     let before = message_families(&pool, &head.authority_commit.event.realm_id).await;
@@ -9033,7 +9031,7 @@ async fn poll_responses_keep_accepted_history_and_reject_invalid_partition_heads
         else {
             continue;
         };
-        let input = VerifiedPollResponse::new(
+        let input = VerifiedPollVote::new(
             partition.clone(),
             accepted(item.commit()),
             &content.poll_response.selections,
@@ -9137,7 +9135,7 @@ async fn replies_and_direct_mentions_require_accepted_visible_full_accounts() {
     let account_without_profile =
         human_profile::admit_without_profile(&pool, &creator.station_id, "reply-late-member").await;
     let mut conn = pool.get().await.unwrap();
-    let profiles = diesel::sql_query("SELECT count(*) AS count FROM actor_profile_current_results WHERE value->>'principal_id'=$1")
+    let profiles = diesel::sql_query("SELECT count(*) AS count FROM actor_profile_current_states WHERE value->>'principal_id'=$1")
         .bind::<Text, _>(account_without_profile.principal_id.as_str())
         .get_result::<CountRow>(&mut *conn).await.unwrap().count;
     assert_eq!(
@@ -9300,8 +9298,8 @@ async fn member_identity_accepted_assertions_keep_bad_proofs_edges_and_restart_e
         .await
         .unwrap()
         .unwrap();
-    let entry = material.current_state_entries.iter().find(|entry| matches!(entry,arkret_wire::TypedCurrentRow::Value{selector:found,..} if found == &selector)).unwrap();
-    let arkret_wire::TypedCurrentRow::Value {
+    let entry = material.current_state_entries.iter().find(|entry| matches!(entry,arkret_wire::CurrentState::Value{selector:found,..} if found == &selector)).unwrap();
+    let arkret_wire::CurrentState::Value {
         revision, value, ..
     } = entry;
     assert_eq!(revision.commit_id, third.authority_commit.commit.commit_id);
@@ -9422,7 +9420,7 @@ async fn source_unit(
             arkret_wire::EventAdmissionSubmission::new(tx.event.clone());
     }
     unit.exact_request_body = serde_json::to_vec(
-        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(unit.submission.clone()),
+        &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(unit.submission.clone()),
     )
     .unwrap();
     unit

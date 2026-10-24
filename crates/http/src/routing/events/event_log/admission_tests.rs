@@ -73,7 +73,7 @@ fn lifecycle_escape_preserves_terminal_and_authority_boundaries() {
 
 #[test]
 fn realm_policy_bundle_media_plaintext_authorization() {
-    let payload = json!({"media_service_decrypts": true});
+    let payload = json!({"media_service_decryption_allowed": true});
     let err = realm_policy_bundle_check(&payload, false).unwrap_err();
     assert_eq!(err.0, ErrorCode::FailedPrecondition);
     realm_policy_bundle_check(&payload, true).unwrap();

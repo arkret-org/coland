@@ -13,7 +13,7 @@ use super::AppState;
 pub(crate) async fn accepted_original(
     state: &AppState,
     request: &EventAdmissionSubmission,
-) -> ServiceResult<Option<arkret_wire::AuthoritySubmitOutcome>> {
+) -> ServiceResult<Option<arkret_wire::AuthoritySubmitResponseBody>> {
     validate_submission(request)?;
     super::authority_self_event_unit::validate_replay_event_identity(&request.event)?;
     let Some(queued) = state
@@ -33,7 +33,7 @@ pub(crate) async fn accepted_original(
     } else if let Some(attempt) = queued.forward_attempt {
         if attempt.original_submission.as_ref()
             != Some(
-                &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+                &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
                     request.clone(),
                 ),
             )
@@ -52,7 +52,7 @@ pub(crate) async fn accepted_original(
             "Consent acceptance witness differs from original".into(),
         ));
     }
-    Ok(Some(arkret_wire::AuthoritySubmitOutcome::Accepted {
+    Ok(Some(arkret_wire::AuthoritySubmitResponseBody::Accepted {
         status: arkret_wire::AuthorityCommitStatus::Duplicate,
         commit,
     }))

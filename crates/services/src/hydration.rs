@@ -311,12 +311,12 @@ async fn ordered_hydration_replay_records(
     Ok(ordered.into_values().collect())
 }
 
-fn install_relation_current_results(
+fn install_relation_current_states(
     proj: &mut ProjectionState,
-    records: Vec<coland_storage::RelationCurrentResultRecord>,
+    records: Vec<coland_storage::RelationCurrentStateRecord>,
 ) -> coland_storage::PersistenceResult<()> {
     use arkret_wire::RelationState;
-    use coland_domain::reducer::{ColandRelationState, RelationCurrentResultProjection};
+    use coland_domain::reducer::{ColandRelationState, RelationCurrentStateProjection};
 
     let mut staged_relations = std::collections::BTreeMap::new();
     let mut staged_current = std::collections::BTreeMap::new();
@@ -354,7 +354,7 @@ fn install_relation_current_results(
         staged_current.insert(current_key.clone(), relation_id.clone());
         staged_metadata.insert(
             current_key,
-            RelationCurrentResultProjection {
+            RelationCurrentStateProjection {
                 relation_id: relation_id.clone(),
                 primary_conflict_domain: record.primary_conflict_domain,
                 revision: record.revision,
@@ -535,9 +535,9 @@ async fn confirmed_ordinary_bootstrap_facets(
     use arkret_schema::{
         RealmBootstrapPresence, RealmBootstrapProfile, realm_bootstrap_profile_descriptor,
     };
-    use arkret_wire::{CommitStreamRef, StreamScanDirection, StreamScanRequest};
+    use arkret_wire::{CommitStreamRef, StreamScanDirection, StreamScanRequestBody};
 
-    let request = StreamScanRequest {
+    let request = StreamScanRequestBody {
         realm_id: create.realm_id.clone(),
         stream_ref: CommitStreamRef::Realm {
             realm_id: create.realm_id.clone(),
@@ -1459,10 +1459,10 @@ pub async fn hydrate_projections_from_persistence(
             .await?
             .ok_or_else(|| {
                 coland_storage::PersistenceError::Internal(
-                    "confirmed default Strand Event has no typed current result".to_owned(),
+                    "confirmed default Strand Event has no current state".to_owned(),
                 )
             })?;
-        let arkret_wire::TypedCurrentRow::Value { value, .. } = result;
+        let arkret_wire::CurrentState::Value { value, .. } = result;
         let object = value
             .as_object()
             .filter(|object| object.len() == 1)
@@ -1526,11 +1526,8 @@ pub async fn hydrate_projections_from_persistence(
     // primary domain in the RealmCommit transaction. Hydrate that same row,
     // rather than trusting a process-local reducer cache or replaying Events
     // in receipt-time order, before Sidecar bindings resolve Relation refs.
-    let relation_current = persistence
-        .relation_current_results()
-        .snapshot_all()
-        .await?;
-    install_relation_current_results(proj, relation_current)?;
+    let relation_current = persistence.relation_current_states().snapshot_all().await?;
+    install_relation_current_states(proj, relation_current)?;
 
     // Run after object mirrors because a native Sidecar attachment validates
     // that its referenced source Relation or Strand already exists.
@@ -1921,7 +1918,7 @@ pub async fn hydrate_realm_create_event(
     if create_seeds_membership {
         entry.members.insert(actor.signing_principal_id().clone());
     }
-    entry.as_of = record.received_at;
+    entry.evaluated_at = record.received_at;
     entry.policy_revision = preview_policy_digest
         .clone()
         .unwrap_or_else(|| record.canonical_digest.clone());
@@ -2072,14 +2069,14 @@ mod agent_membership_reconcile_tests {
 }
 
 #[cfg(test)]
-mod relation_current_result_hydration_tests {
+mod relation_current_state_hydration_tests {
     use arkret_models_collaboration::objects::relation::{Relation, RelationPrimaryConflictDomain};
     use coland_domain::reducer::ColandRelationState;
-    use coland_storage::RelationCurrentResultRecord;
+    use coland_storage::RelationCurrentStateRecord;
 
     use super::*;
 
-    fn current_relation_record() -> RelationCurrentResultRecord {
+    fn current_relation_record() -> RelationCurrentStateRecord {
         let realm_id =
             RealmId::new("ak:realm:AUGIFvQctz4TjQTmvvO4Wdy-xdc5XP2ZnJ5Qpbh4s8Ru").unwrap();
         let primary_conflict_domain =
@@ -2113,7 +2110,7 @@ mod relation_current_result_hydration_tests {
             "updated_at":"2026-09-21T00:00:01.000Z"
         }))
         .unwrap();
-        RelationCurrentResultRecord {
+        RelationCurrentStateRecord {
             realm_id,
             domain_key,
             primary_conflict_domain,
@@ -2132,7 +2129,7 @@ mod relation_current_result_hydration_tests {
         let current_key = (record.realm_id.to_string(), record.domain_key.clone());
 
         let mut first_boot = ProjectionState::default();
-        install_relation_current_results(&mut first_boot, vec![record.clone()]).unwrap();
+        install_relation_current_states(&mut first_boot, vec![record.clone()]).unwrap();
 
         let materialized = first_boot.relations.get(&relation_id).unwrap();
         assert_eq!(materialized.state, "active");
@@ -2160,7 +2157,7 @@ mod relation_current_result_hydration_tests {
         // authoritative storage snapshot reproduces the exact query/admission
         // identity without relying on the previous process state.
         let mut restarted = ProjectionState::default();
-        install_relation_current_results(&mut restarted, vec![record]).unwrap();
+        install_relation_current_states(&mut restarted, vec![record]).unwrap();
         assert_eq!(restarted.relation_current, first_boot.relation_current);
         assert_eq!(
             restarted.relation_current_metadata,
@@ -2176,7 +2173,7 @@ mod relation_current_result_hydration_tests {
     fn hydration_rejects_duplicate_authoritative_domains() {
         let record = current_relation_record();
         let mut projection = ProjectionState::default();
-        let error = install_relation_current_results(&mut projection, vec![record.clone(), record])
+        let error = install_relation_current_states(&mut projection, vec![record.clone(), record])
             .unwrap_err();
         assert!(matches!(
             error,
@@ -2210,7 +2207,7 @@ mod relation_current_result_hydration_tests {
             },
         );
 
-        install_relation_current_results(&mut projection, vec![current_relation_record()]).unwrap();
+        install_relation_current_states(&mut projection, vec![current_relation_record()]).unwrap();
 
         assert!(projection.relations.contains_key(&derived_id));
         assert_eq!(projection.relation_current.len(), 1);

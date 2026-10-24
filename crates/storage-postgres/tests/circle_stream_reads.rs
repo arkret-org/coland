@@ -12,8 +12,8 @@ mod ordinary_realm;
 mod pcr_genesis;
 
 use arkret_wire::{
-    ActorId, CommitStreamRef, CurrentSelector, EventKind, StreamScanDirection, StreamScanRequest,
-    TypedCurrentRow,
+    ActorId, CommitStreamRef, CurrentSelector, CurrentState, EventKind, StreamScanDirection,
+    StreamScanRequestBody,
 };
 use coland_storage::{
     AccountStreamScan, AuthorityCommitStore, AuthorityCommitTransaction, EventCommitUnitOfWork,
@@ -64,7 +64,7 @@ fn membership(
     request
 }
 
-fn page(result: AccountStreamScan) -> arkret_wire::StreamScanOutcome {
+fn page(result: AccountStreamScan) -> arkret_wire::StreamScanResponseBody {
     match result {
         AccountStreamScan::Page(page) => page,
         other => panic!("expected an authorized Circle page: {other:?}"),
@@ -129,7 +129,7 @@ async fn check_circle_reads(history: &str) {
         realm_id: realm.clone(),
         circle_id: circle.clone(),
     };
-    let request = StreamScanRequest {
+    let request = StreamScanRequestBody {
         realm_id: realm.clone(),
         stream_ref: stream.clone(),
         direction: StreamScanDirection::After(None),
@@ -150,7 +150,7 @@ async fn check_circle_reads(history: &str) {
         .unwrap();
     assert!(!hidden.current_state_entries.iter().any(|row| matches!(
         row,
-        TypedCurrentRow::Value {
+        CurrentState::Value {
             selector: CurrentSelector::Circle { .. },
             ..
         }
@@ -287,7 +287,7 @@ async fn check_circle_reads(history: &str) {
             .iter()
             .all(|row| !matches!(
                 row,
-                TypedCurrentRow::Value {
+                CurrentState::Value {
                     selector: CurrentSelector::Circle { .. } | CurrentSelector::Sidecar { .. },
                     ..
                 }
@@ -477,7 +477,7 @@ fn peer_interval_decision(
 ) -> coland_storage::AccountStreamScan {
     match scan {
         coland_storage::PeerStreamScan::Page(page) => {
-            coland_storage::AccountStreamScan::Page(arkret_wire::StreamScanOutcome {
+            coland_storage::AccountStreamScan::Page(arkret_wire::StreamScanResponseBody {
                 committed_events: page.committed_events,
                 readable_floor: page.readable_floor,
                 truncated: page.truncated,

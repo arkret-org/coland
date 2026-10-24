@@ -17,7 +17,6 @@
 
 use arkret_identity::service_identity::DidCoreIdentityState;
 use arkret_models_discovery::ServiceDescribe;
-use arkret_models_discovery::http_bodies::ServerDescribeOutcome;
 use salvo::http::StatusCode;
 use salvo::oapi::extract::QueryParam;
 use salvo::prelude::*;
@@ -28,7 +27,7 @@ use crate::state::AppState;
 use crate::wire::{
     AuthBridgeAuthDescriptor, AuthBridgeDescribeOutcome, AuthBridgeExamples,
     AuthBridgePushDescriptor, ColandServerDescribeOutcome, HealthOutcome,
-    IntegrationDependencyDescriptor, IntegrationDescribeOutcome, IntegrationSurfaceDescriptor,
+    IntegrationDependencyDescriptor, IntegrationManifest, IntegrationSurfaceDescriptor,
     UnsupportedProfileDescriptor, describe,
 };
 use crate::{JsonResult, json_ok};
@@ -296,7 +295,7 @@ async fn database_ready(state: &AppState) -> bool {
 async fn server_describe(
     service_kind: QueryParam<String, false>,
     depot: &mut Depot,
-) -> JsonResult<ServerDescribeOutcome> {
+) -> JsonResult<ServiceDescribe> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     if let Some(service_kind) = service_kind.into_inner()
         && service_kind != arkret_wire::ServiceKind::Station.as_str()
@@ -305,9 +304,7 @@ async fn server_describe(
             "service_kind {service_kind:?} is not available on this binding"
         )));
     }
-    json_ok(ServerDescribeOutcome(
-        build_server_description_resolved(state).await?,
-    ))
+    json_ok(build_server_description_resolved(state).await?)
 }
 
 #[endpoint(operation_id = "org.arkret.coland.system.describe")]
@@ -469,7 +466,7 @@ pub(crate) fn apply_conformance_evidence(
                     artifact_ref: entry.artifact_ref.clone(),
                     verifier_id: entry.verifier_id.clone(),
                     signature: entry.signature.clone(),
-                    timestamp: entry.timestamp,
+                    verified_at: entry.verified_at,
                     expires_at: entry.expires_at,
                     extra: Default::default(),
                 })
@@ -537,8 +534,8 @@ pub(in crate::routing) async fn auth_bridge_describe() -> JsonResult<AuthBridgeD
 
 #[endpoint(operation_id = "org.arkret.coland.integration.describe")]
 #[tracing::instrument(skip_all, fields(op = "org.arkret.coland.integration.describe"))]
-async fn integration_describe() -> JsonResult<IntegrationDescribeOutcome> {
-    json_ok(IntegrationDescribeOutcome {
+async fn integration_describe() -> JsonResult<IntegrationManifest> {
+    json_ok(IntegrationManifest {
         contract: "arkret.rest.integration_manifest.v1".to_owned(),
         version: "2026-05-04-scaffold".to_owned(),
         service: "coland".to_owned(),

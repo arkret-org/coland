@@ -112,7 +112,7 @@ pub(crate) fn validate_bootstrap_candidate(
     for submitted in &mut original.events {
         submitted.approval_signatures = None;
     }
-    let original = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(original);
+    let original = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(original);
     let digest =
         arkret_canonical::canonical_sha256(&original).map_err(|e| error("schema_violation", e))?;
     let methods = validate_candidate_with_operation_digest(
@@ -473,7 +473,7 @@ async fn qualify_principal_or_actor(
     let approver_action = arkret_schema::capability_action_descriptor(action)
         .approver_capability_action
         .unwrap_or(action);
-    let members = sql_query("SELECT member_id,jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position) AS membership_revision FROM member_state_current_results WHERE realm_id=$1 AND membership='join'")
+    let members = sql_query("SELECT member_id,jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position) AS membership_revision FROM member_state_current_states WHERE realm_id=$1 AND membership='join'")
         .bind::<Text,_>(realm.as_str()).load::<Member>(&mut *conn).await.map_err(PersistenceError::database)?;
     for member in members {
         let actor: ActorId = serde_json::from_str(&member.member_id).map_err(|e| {
@@ -526,7 +526,7 @@ async fn qualify_principal_or_actor(
                 #[diesel(sql_type=Jsonb)]
                 value: serde_json::Value,
             }
-            let root_basis=sql_query("SELECT to_jsonb(r) AS value FROM realm_authority_root_current_results r WHERE realm_id=$1")
+            let root_basis=sql_query("SELECT to_jsonb(r) AS value FROM realm_authority_root_current_states r WHERE realm_id=$1")
                 .bind::<Text,_>(realm.as_str()).get_result::<RootBasis>(&mut *conn).await.map_err(PersistenceError::database)?;
             let grants = authorization
                 .grants
@@ -728,12 +728,12 @@ pub(crate) async fn require_governance(
         match &vote.input.approval_context {
             arkret_wire::ApprovalContext::RealmGovernance {} => {}
             arkret_wire::ApprovalContext::Grant { grant_id } if dependencies.contains(grant_id) => {
-                let row = sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 AND grant_id=$2")
+                let row = sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_states WHERE realm_id=$1 AND grant_id=$2")
                     .bind::<Text, _>(event.realm_id.as_str())
                     .bind::<Text, _>(grant_id.as_str())
-                    .get_result::<crate::capability_grant_current_results::CapabilityGrantCurrentResultReadRow>(&mut *conn)
+                    .get_result::<crate::capability_grant_current_states::CapabilityGrantCurrentStateReadRow>(&mut *conn)
                     .await.map_err(PersistenceError::database)?;
-                let grant = crate::capability_grant_current_results::decode_row(row)?;
+                let grant = crate::capability_grant_current_states::decode_row(row)?;
                 if !crate::grant_approval_admission::grant_vote_is_current(
                     &grant.value,
                     action,

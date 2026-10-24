@@ -62,14 +62,14 @@ mod tests {
         DidUrl::new(format!("did:key:{key}#{key}")).unwrap()
     }
 
-    async fn append(state: &AppState, did: &Did, seq: u64, entry: serde_json::Value) {
+    async fn append(state: &AppState, did: &Did, sequence: u64, entry: serde_json::Value) {
         let at = entry["versionTime"].as_str().unwrap().parse().unwrap();
         state
             .dids()
             .append_log_event(coland_services::identity::DidLogEvent {
                 event_digest: arkret_canonical::canonical_sha256(&entry).unwrap(),
                 did: did.to_string(),
-                seq,
+                sequence,
                 operation: entry,
                 created_at: at,
             })
@@ -95,7 +95,7 @@ mod tests {
             principal_endpoint: &endpoint,
             local_id: "claim-subject",
             also_known_as: &[],
-            version_time: inception_at,
+            version_created_at: inception_at,
             root_seed: &old_seed,
             next_root_public_key_multibase: &public_key(&rotated_seed),
             witness_policy: None,
@@ -136,7 +136,7 @@ mod tests {
             did: did.as_str(),
             local_id: "claim-subject",
             previous_entries: std::slice::from_ref(&inception.log_entry),
-            version_time: rotation_at,
+            version_created_at: rotation_at,
             current_root_seed: &rotated_seed,
             next_root_public_key_multibase: &next_key,
             state: &inception.log_entry["state"],

@@ -44,7 +44,7 @@ async fn bootstrap(
         unit.submission.events[index] =
             arkret_wire::EventAdmissionSubmission::new(tx.event.clone());
     }
-    unit.exact_request_body = arkret_canonical::canonical_json_bytes(&arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(unit.submission.clone())).unwrap();
+    unit.exact_request_body = arkret_canonical::canonical_json_bytes(&arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(unit.submission.clone())).unwrap();
     unit.validate().unwrap();
     persistence
         .authority_commits()
@@ -138,7 +138,7 @@ async fn publish_fixture_status(session: &GrantSession, fixture: &PcrGenesisFixt
             account_id: fixture.history.account.clone(),
             principal_control_realm_id: fixture.unit.transactions[0].event.realm_id.clone(),
             binding_version: 1,
-            status_seq: 1,
+            status_sequence: 1,
             previous_account_status_record_id: None,
             status: arkret_models_collaboration::objects::account_status::AccountStatus::Active,
             reason_code: None,
@@ -165,7 +165,7 @@ async fn publish_fixture_status(session: &GrantSession, fixture: &PcrGenesisFixt
             record_digest: record.payload_digest().unwrap(),
             account_authority_id: record.account_authority_id.clone(),
             account_id: record.account_id.clone(),
-            status_seq: 1,
+            status_sequence: 1,
             receiver_id: session.state.service_core_id(),
             accepted_at: at,
             verification_method: method,

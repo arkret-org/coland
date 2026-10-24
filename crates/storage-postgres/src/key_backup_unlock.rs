@@ -267,7 +267,7 @@ pub(crate) async fn validate_recovery_unlock_policy(
         return Err(rejected("recovery policy snapshot binding mismatch").into());
     }
     let version = i32::try_from(bound_version).map_err(PersistenceError::database)?;
-    let rows=sql_query("SELECT p.raw_payload AS payload FROM recovery_policies p JOIN policy_current_results c ON c.policy_id=('ak:policy:' || p.id::text) AND c.current_commit_id=(p.acceptance_basis #>> '{}') AND c.value=p.raw_payload WHERE p.principal_id=$1 AND p.station_id=$2 AND p.version>=$3 ORDER BY p.version ASC FOR SHARE OF p")
+    let rows=sql_query("SELECT p.raw_payload AS payload FROM recovery_policies p JOIN policy_current_states c ON c.policy_id=('ak:policy:' || p.id::text) AND c.current_commit_id=(p.acceptance_basis #>> '{}') AND c.value=p.raw_payload WHERE p.principal_id=$1 AND p.station_id=$2 AND p.version>=$3 ORDER BY p.version ASC FOR SHARE OF p")
         .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str()).bind::<crate::Integer,_>(version)
         .load::<JsonPayloadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     if rows
@@ -460,7 +460,7 @@ pub(crate) async fn recheck_pointer_basis(
     let refused = |code: ConflictCode, reason: &str| -> PgTransactionError {
         PersistenceError::Conflict(format!("{code}: {reason}")).into()
     };
-    let pointer = crate::key_backup_current_results::confirmed_key_backup_pointer_in_connection(
+    let pointer = crate::key_backup_current_states::confirmed_key_backup_pointer_in_connection(
         conn,
         &basis.account_id,
     )
@@ -528,7 +528,7 @@ pub(crate) async fn recheck_pointer_basis(
     }
     if let Some(source) = &envelope.source_commit_ref {
         let generation =
-            sql_query("SELECT value FROM pcr_device_generation_current_results WHERE realm_id=$1")
+            sql_query("SELECT value FROM pcr_device_generation_current_states WHERE realm_id=$1")
                 .bind::<Text, _>(pointer.control_realm_id.as_str())
                 .get_result::<GenerationRow>(&mut *conn)
                 .await

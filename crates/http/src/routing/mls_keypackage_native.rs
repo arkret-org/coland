@@ -67,7 +67,7 @@ pub(super) async fn claim(
     state: &AppState,
     body: &KeyPackagesClaimRequestBody,
     source: &NativeRequester,
-) -> JsonResult<KeyPackagesClaimOutcome> {
+) -> JsonResult<KeyPackagesClaimResponseBody> {
     let peer = PeerKeyPackagesClaimRequestBody::from(body);
     let target_actor = match (
         &body.target_actor_id,
@@ -202,8 +202,8 @@ pub(super) async fn claim(
 }
 
 fn replay_source_result(
-    result: PeerKeyPackagesClaimQueryOutcome,
-) -> JsonResult<KeyPackagesClaimOutcome> {
+    result: PeerKeyPackagesClaimQueryResponseBody,
+) -> JsonResult<KeyPackagesClaimResponseBody> {
     result
         .validate_shape()
         .map_err(|e| AppError::internal(e.to_string()))?;
@@ -219,8 +219,8 @@ fn replay_source_result(
 pub(super) async fn capture_source_result(
     state: &AppState,
     request: &PeerKeyPackagesClaimRequestBody,
-    result: &PeerKeyPackagesClaimQueryOutcome,
-) -> Result<PeerKeyPackagesClaimQueryOutcome, AppError> {
+    result: &PeerKeyPackagesClaimQueryResponseBody,
+) -> Result<PeerKeyPackagesClaimQueryResponseBody, AppError> {
     let retained = state
         .mls_key_packages()
         .realm_claim_source(
@@ -336,7 +336,7 @@ pub(super) async fn capture_source_result(
 pub(super) async fn verify_ordinary_target(
     state: &AppState,
     request: &PeerKeyPackagesClaimRequestBody,
-    outcome: &KeyPackagesClaimOutcome,
+    outcome: &KeyPackagesClaimResponseBody,
     deadline: DateTime<Utc>,
 ) -> Result<
     (
@@ -411,7 +411,7 @@ async fn read_remote_claim(
     path: &str,
     body: &[u8],
     idempotency_key: Option<&str>,
-) -> Result<PeerKeyPackagesClaimQueryOutcome, AppError> {
+) -> Result<PeerKeyPackagesClaimQueryResponseBody, AppError> {
     let response = if let Some(key) = idempotency_key {
         crate::routing::federation::outbox::signed_peer_command(
             state,
@@ -449,7 +449,7 @@ async fn read_remote_claim(
             "original KeyPackage peer result unavailable"
         ));
     }
-    let outcome: PeerKeyPackagesClaimQueryOutcome = serde_json::from_slice(&response.body)
+    let outcome: PeerKeyPackagesClaimQueryResponseBody = serde_json::from_slice(&response.body)
         .map_err(|_| {
             crate::app_error!(
                 TemporarilyUnavailable,
@@ -547,7 +547,7 @@ pub(super) async fn targets(
 pub(super) async fn delivery_guard(
     state: &AppState,
     operation: arkret_wire::ServiceOperationId,
-    outcome: &PeerKeyPackagesClaimOutcome,
+    outcome: &PeerKeyPackagesClaimResponseBody,
     source: Option<&NativeRequester>,
     credential_deadline: DateTime<Utc>,
     command: Option<&PeerKeyPackagesClaimRequestBody>,
@@ -642,7 +642,7 @@ pub(super) async fn consume(
     state: &AppState,
     native: &VerifiedAppletManagedDevice,
     body: &KeyPackagesConsumeRequestBody,
-) -> JsonResult<KeyPackagesConsumeOutcome> {
+) -> JsonResult<KeyPackagesConsumeResponseBody> {
     body.validate_shape().map_err(AppError::param_invalid)?;
     let receipt = &body.recipient_durable_receipt;
     let authority = &native.authority;

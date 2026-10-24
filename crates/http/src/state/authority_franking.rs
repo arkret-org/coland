@@ -176,7 +176,7 @@ pub(crate) async fn verify_franking_committed_pair(
                 .authority_commits()
                 .historical_producer_signer_key(realm, &selector)
                 .await?;
-            let Some(arkret_models_identity::SignerKeyQueryOutcome::HistoricalResolved {
+            let Some(arkret_models_identity::SignerKeyResolution::HistoricalResolved {
                 selector: actual,
                 key,
                 ..
@@ -190,7 +190,7 @@ pub(crate) async fn verify_franking_committed_pair(
                 return Err(refused("historical Agent selector differs"));
             }
             key.validate().map_err(refused)?;
-            arkret_canonical::base64url_decode(key.public_key_b64u.as_str().as_bytes())
+            arkret_canonical::base64url_decode(key.public_key_base64url.as_str().as_bytes())
                 .map_err(refused)?
         } else {
             crate::jws_verify::resolve_ed25519_pubkey_at(

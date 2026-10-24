@@ -1,4 +1,4 @@
-//! `KeysBackupsList` has exactly one backup class on real PostgreSQL.
+//! `KeysBackupsPage` has exactly one backup class on real PostgreSQL.
 //!
 //! key-management §7.5.0 / §7.6.1 (decision 0097): the list producer returns
 //! the confirmed `secret_storage` pointer and nothing else, and the metadata
@@ -72,7 +72,7 @@ fn commit(event: &Event, realm_id: &RealmId) -> RealmCommit {
                 .unwrap(),
             signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "aa".repeat(32))).unwrap(),
             created_at: now,
-            sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
+            signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
         },
     }
 }
@@ -164,12 +164,12 @@ async fn seed_confirmed_pcr(pool: &PgPool) -> (AccountId, RealmCommit) {
 fn envelope(id: &str, actor: &ActorId, series: &str, backup_kind: &str) -> serde_json::Value {
     serde_json::json!({
         "backup_id":id, "actor_id":actor, "backup_kind":backup_kind, "backup_version":"kb_1",
-        "created_at":"2026-09-09T00:00:00.000Z", "series_id":series, "series_seq":0,
+        "created_at":"2026-09-09T00:00:00.000Z", "series_id":series, "series_sequence":0,
         "encryption":{"recipient_method":"secret_storage_key", "recipient_key_ref":"backup-key", "aead":{"name":"xchacha20_poly1305", "nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
         "domain_separation":{"subdomain":"secret_storage"},
         "contents":[{"item_kind":"recovery_key_share", "secret_id":"share"}],
         "ciphertext":"AAAA", "ciphertext_digest":"sha256:709e80c88487a2411e1ee4dfb9f22a861492d20c4765150c0c794abd70f8147c",
-        "auth_data":{
+        "signature_proof":{
             "device_id":"ak:device:01904100-0000-7000-8000-000000000001",
             "verification_method":"did:web:backup.example#device-signer",
             "signature_algorithm":"Ed25519", "signature":"AAAA",
@@ -330,7 +330,7 @@ async fn initial_schema_rejects_every_other_backup_class() {
 
     // The typed current pointer table has the same single class.
     let error = diesel::sql_query(
-        "INSERT INTO key_backup_active_series_current_results \
+        "INSERT INTO key_backup_active_series_current_states \
          (realm_id,current_key,actor_id,backup_kind,current_event_id,current_commit_id, \
           current_stream_position,value,updated_at) \
          VALUES($1,$2,$3,'mls_history',$4,$5,0,$6,now())",
@@ -352,7 +352,7 @@ async fn initial_schema_rejects_every_other_backup_class() {
     assert!(
         error
             .to_string()
-            .contains("key_backup_active_series_current_results_backup_kind_check"),
+            .contains("key_backup_active_series_current_states_backup_kind_check"),
         "{error}"
     );
 

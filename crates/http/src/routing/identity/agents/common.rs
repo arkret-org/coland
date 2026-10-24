@@ -564,7 +564,7 @@ pub(super) fn agent_projection_from_record(
         presence: AgentPresence {
             state: AgentPresenceState::Unknown,
             expires_at: observed_at + chrono::Duration::seconds(30),
-            refresh_after: observed_at,
+            refresh_at: observed_at,
         },
         created_at: Some(record.created_at),
         updated_at: Some(record.updated_at),
@@ -632,7 +632,7 @@ pub(super) async fn agent_view_from_record(
             AppError::internal(format!("accepted Agent lifecycle is unavailable: {error}"))
         })?
         .map(|entry| match entry {
-            arkret_wire::TypedCurrentRow::Value { value, .. } => {
+            arkret_wire::CurrentState::Value { value, .. } => {
                 serde_json::from_value::<AgentLifecycleState>(value).map_err(|error| {
                     AppError::internal(format!("accepted Agent lifecycle is invalid: {error}"))
                 })

@@ -2,27 +2,27 @@ pub use arkret_models_collaboration::contact_operations::{
     ContactListRow, ContactState, DirectConversationSummary, DirectConversationSummaryState,
 };
 pub use arkret_models_collaboration::device_messages::{
-    DeviceMessageEnvelope, DeviceMessageSender, DeviceMessageTarget, DeviceMessagesAckOutcome,
-    DeviceMessagesAckRequestBody, DeviceMessagesGetOutcome, DeviceMessagesSendOutcome,
-    DeviceMessagesSendRequestBody,
+    DeviceMessageEnvelope, DeviceMessageSender, DeviceMessageTarget,
+    DeviceMessagesAcknowledgementRequestBody, DeviceMessagesAcknowledgementResponseBody,
+    DeviceMessagesGetResponseBody, DeviceMessagesSendRequestBody, DeviceMessagesSendResponseBody,
 };
 pub use arkret_models_collaboration::session_grants::{
     SessionGrantHolderProof, SessionGrantValidationInput, SessionGrantValidationMetadata,
-    SessionGrantValidationOutcome,
+    SessionGrantValidationResponseBody,
 };
 pub use arkret_models_crypto::{
-    DeviceStatus, KeysClaimOutcome, KeysClaimRequestBody, KeysQueryOutcome, KeysQueryRequestBody,
-    KeysUploadOutcome, KeysUploadRequestBody, KeysUploadUnsignedRequest, PeerQueryDeviceRecord,
-    QueryDeviceRecord,
+    DeviceStatus, KeysClaimRequestBody, KeysClaimResponseBody, KeysQueryRequestBody,
+    KeysQueryResponseBody, KeysUploadFields, KeysUploadRequestBody, KeysUploadResponseBody,
+    PeerQueryDeviceRecord, QueryDeviceRecord,
 };
 pub use arkret_models_discovery::ops::HardeningStatus;
 use arkret_models_discovery::{
-    AccountAuthority, AuthGrantExchange, AuthGrantExchangeKind, AuthMetadata, AuthMethod,
-    AuthMethodKind, ServiceDescribe,
+    AccountAuthority, AccountHandoffExchange, AuthGrantExchangeKind, AuthMethodKind,
+    AuthenticationMetadata, AuthenticationMethod, ServiceDescribe,
 };
 pub use arkret_models_identity::admin_grant::SessionGrantAdminIntrospectionStatus;
 pub use arkret_models_identity::identity::IdentityResolveRequestBody;
-pub use arkret_models_integration::OkOutcome;
+pub use arkret_models_integration::AcknowledgementResponseBody;
 use arkret_wire::{
     MAX_AUTHORIZED_BY_REFS, MAX_EVENT_ENVELOPE_BYTES, MAX_EVENT_SUBMIT_BATCH, MAX_SEMANTIC_REFS,
     ProfileId,
@@ -134,33 +134,33 @@ pub struct AuthBridgeExamples {
 // the SDK contracts crate (the authoritative definition shared by floria,
 // coland, and coauth) instead of a local copy.
 // Client-sync family DTOs come straight from the SDK (`ServiceDescribe`
-// answers `account/describe`, `SyncRequestBody` carries the subscribe/sync
+// answers `account/describe`, `AccountSubscribeParameters` carries the subscribe/sync
 // request); both are shared SDK wire types, so coland keeps
 // no private copies that could drift. NOTE: the explicit `model::` path
 // matters — the SDK root re-exports a different, client-side typed
-// `sync::SyncRequestBody` under the same name.
+// `sync::AccountSubscribeParameters` under the same name.
 // Snapshot head operations return the full signed `ak.schema.realm_state_snapshot.v1`
 // manifest. coland answers both operations with `not_implemented` until it can
 // produce a real Snapshot detached proof.
 
 // authz check DTOs are now the spec-authoritative SDK types. The SDK
-// `AuthzDecision` enum was aligned to the spec five-valued form
+// `AuthorizationDecision` enum was aligned to the spec five-valued form
 // (allow / soft_deny / hard_deny / quarantine / require_review) and
-// `AuthzCheckRequestBody` to `{ actor_id, action, resource?, context? }`,
+// `AuthorizationCheckRequestBody` to `{ actor_id, action, resource?, context? }`,
 // so coland re-uses them directly instead of carrying local copies.
 pub use arkret_models_collaboration::governance::authorization::{
-    AuthzCheckOutcome, AuthzCheckRequestBody,
+    AuthorizationCheckRequestBody, AuthorizationCheckResponseBody,
 };
 // Moderation report request/outcome are the SDK DTOs (`arkret-models-collaboration` carries
-// `service-operation-dtos.schema.json#/$defs/ModerationReportOutcome`:
+// `service-operation-dtos.schema.json#/$defs/ModerationReportResponseBody`:
 // `status` enum `submitted|resolved`, `routed_to` is an array of DIDs);
 // no coland mirrors.
 pub use arkret_models_collaboration::governance::moderation::{
-    ModerationReportOutcome, ModerationReportRequestBody,
+    ModerationReportRequestBody, ModerationReportResponseBody,
 };
-pub use arkret_models_collaboration::sync_frames::account_subscribe::SyncRequestBody;
+pub use arkret_models_collaboration::sync_frames::account_subscribe::AccountSubscribeParameters;
 pub use arkret_models_integration::integration::{
-    IntegrationDependencyDescriptor, IntegrationDescribeOutcome, IntegrationSurfaceDescriptor,
+    IntegrationDependencyDescriptor, IntegrationManifest, IntegrationSurfaceDescriptor,
 };
 pub use arkret_models_integration::{
     PushRegisterDeviceRequestBody, PushUnregisterDeviceRequestBody,
@@ -205,41 +205,45 @@ pub struct ColandAccountRegisterOutcome {
 // authoritative carrier for identity operation shapes); no coland mirrors.
 // AKP-0008 / AKP-0009 — Agent operations. Every request/response
 // DTO is the SDK-authoritative `arkret_models_collaboration::agent_operations` shape (spec
-// `agent-operations.schema.json`): `agent_view`/`agent_list` carry the spec
+// `agent-operations.schema.json`): `agent_view`/`agent_page` carry the spec
 // `agent_projection`; the `agent_key_pair` outcome is
 // `{ok, authorized_event_ref}`; grant attach/detach outcomes are
 // `{ok, grant_id}` / `{ok, revoked_at}`; Sidecar ensure carries the typed
 // event-derived `sidecar_id` and native `source_context_ref`. The lifecycle
-// outcome (`agent_lifecycle_state` = `operation_status_outcome` =
+// outcome (`agent_lifecycle_state` = `operation_status_view` =
 // `{ok: true, status}`) has no struct mirror in the SDK and is emitted as a
 // spec-exact JSON object by the agents handler. `AgentProvisionRequestBody` /
-// `AgentProvisionOutcome` were already SDK-backed.
+// `AgentProvisionResponseBody` were already SDK-backed.
 // ── AKP-0010 (R3 spec-sync 2026-05-27, arkret-spec b47ff6ec) — media
 // token exchange wire shapes. Both the request body and the response types
 // come straight from the SDK (`CallMediaTokenExchangeRequestBody` carries
 // typed ids `realm_id`/`call_id`/`actor_id`/`device_id` plus the optional
-// `capability_refs`/`desired_media` inputs; `CallMediaTokenExchangeOutcome`
+// `capability_refs`/`desired_media` inputs; `CallMediaTokenExchangeResponseBody`
 // / `CallMediaParticipantBinding` are shared SDK wire types),
 // so coland no longer mints private mirrors that can drift from the spec DTOs.
 pub use arkret_models_collaboration::agent_operations::{
-    AgentDeactivateRequestBody, AgentKeyPairOutcome, AgentKeyPairRequestBody, AgentList,
-    AgentPauseRequestBody, AgentResumeRequestBody, AgentSidecarList, AgentSidecarView, AgentView,
+    AgentDeactivateRequestBody, AgentKeyPairRequestBody, AgentKeyPairResponseBody, AgentPage,
+    AgentPauseRequestBody, AgentResumeRequestBody, AgentSidecarPage, AgentSidecarView, AgentView,
 };
 pub use arkret_models_collaboration::objects::media::{
-    CallMediaParticipantBinding, CallMediaTokenExchangeOutcome, CallMediaTokenExchangeRequestBody,
+    CallMediaParticipantBinding, CallMediaTokenExchangeRequestBody,
+    CallMediaTokenExchangeResponseBody,
 };
 pub use arkret_models_collaboration::sidecar_operations::{
-    SidecarEnsureOutcome, SidecarEnsureRequestBody,
+    SidecarEnsureRequestBody, SidecarEnsureResponseBody,
 };
 pub use arkret_models_crypto::KeysBackupsPutRequestBody;
 // Key-backup replace/delete outcomes are the SDK server-side DTOs
 // (`arkret-models-crypto` is the authoritative carrier for
-// `keys-operations.schema.json#/$defs/keys_backups_replace_outcome` /
+// `keys-operations.schema.json#/$defs/keys_backups_replace_response_body` /
 // `keys_backups_delete_outcome`); no coland mirrors.
 pub use arkret_models_crypto::{
-    KeyBackupPutStatus, KeysBackupsDeleteOutcome, KeysBackupsList, KeysBackupsReplaceOutcome,
+    KeyBackupPutStatus, KeysBackupsDeleteResponseBody, KeysBackupsPage,
+    KeysBackupsReplaceResponseBody,
 };
-pub use arkret_models_identity::identity::{IdentityLogListOutcome, IdentityReceiptListOutcome};
+pub use arkret_models_identity::identity::{
+    IdentityLogListResponseBody, IdentityReceiptListResponseBody,
+};
 
 // Recovery policy / receipt endpoints validate against the spec REC-1 shapes in
 // `routing::identity::recovery`: policy publish uses the SDK request body,
@@ -333,7 +337,7 @@ fn profile_limitations() -> Vec<Value> {
             "spec": "T17",
             "implemented": "holder Consent reads and invite introduction evidence use durable PCR current; revoking any invalidates its own record and leaves independently granted concrete scopes active",
             "unsupported": "cross-service freshness and invalidation of downstream directory, MIMI, push and in-flight consumers remain unverified",
-            "reason": "no cross-service completion is claimed by the local current-result path"
+            "reason": "no cross-service completion is claimed by the local current-state path"
         }),
         json!({
             "area": "identity.resolver_health_signal",
@@ -487,7 +491,7 @@ pub fn describe(
         // `issuer` value exactly, so preserve that canonical spelling here.
         let issuer = account_authority_url.to_owned();
         let openid_configuration = format!("{issuer}.well-known/openid-configuration");
-        methods.push(AuthMethod {
+        methods.push(AuthenticationMethod {
             method: AuthMethodKind::Oidc,
             issuer_uri: Some(issuer.clone()),
             provider_uri: None,
@@ -499,7 +503,7 @@ pub fn describe(
                 .filter(|value| !value.trim().is_empty())
                 .map(str::to_owned),
             scopes: vec!["openid".to_owned(), "profile".to_owned()],
-            grant_exchange: AuthGrantExchange {
+            grant_exchange: AccountHandoffExchange {
                 kind: AuthGrantExchangeKind::AccountHandoff,
                 extra: Default::default(),
             },
@@ -508,8 +512,8 @@ pub fn describe(
     }
 
     // `development_mode` is the registered top-level ServiceDescribe field for
-    // this fact; auth_metadata MUST NOT carry a second unregistered copy.
-    let auth_metadata = AuthMetadata {
+    // this fact; authentication_metadata MUST NOT carry a second unregistered copy.
+    let authentication_metadata = AuthenticationMetadata {
         account_authority: Some(AccountAuthority {
             origin: arkret_wire::WebOrigin::new(account_origin)
                 .expect("configured account authority base has a valid Web origin"),
@@ -553,7 +557,7 @@ pub fn describe(
         payload_paths: vec![
             "payload.content".to_owned(),
             "payload.body".to_owned(),
-            "payload.media_service_decrypts".to_owned(),
+            "payload.media_service_decryption_allowed".to_owned(),
         ],
         blob_purposes: vec![
             "download".to_owned(),
@@ -710,7 +714,7 @@ pub fn describe(
             arkret_models_collaboration::objects::direct_conversation::DIRECT_CONVERSATION_REALM_ROLE_FEATURE.to_owned(),
             arkret_wire::FeatureDescriptor::MLS_LAST_RESORT_KEYPACKAGE_V1.to_owned(),
         ],
-        auth_metadata,
+        authentication_metadata,
         receive_policy_constraints: None,
         limits: arkret_models_discovery::service_description::ServerLimits {
             extensions: serde_json::from_value(serde_json::json!({
@@ -752,8 +756,8 @@ pub fn describe(
                     "operation_id": arkret_wire::ServiceOperationId::SELF_AUTHZ_READ_CHECK_V1,
                     "method": "POST",
                     "path": "/_arkret/self/authz/check",
-                    "request_shape": "AuthzCheckRequestBody",
-                    "response_shape": "AuthzCheckOutcome",
+                    "request_shape": "AuthorizationCheckRequestBody",
+                    "response_shape": "AuthorizationCheckResponseBody",
                     "operation_specific_error_codes": [],
                     "decision_source": "local_projection_preflight_diagnostic",
                     "signed_decision": false,
@@ -777,7 +781,7 @@ pub fn describe(
                     "method": "GET",
                     "path": "/_arkret/self/authz/effective-grants",
                     "query": ["realm_id", "subject", "subject_station_id", "at"],
-                    "response_shape": "GrantList",
+                    "response_shape": "EffectiveGrantSnapshot",
                     "subject_scope": "authenticated_actor_or_realm_owner_for_realm_scoped_queries",
                     "operation_specific_error_codes": []
                 },
@@ -786,7 +790,7 @@ pub fn describe(
                     "method": "GET",
                     "path": "/_arkret/self/authz/invites",
                     "query": ["realm_id", "subject", "cursor"],
-                    "response_schema_ref": "schemas/authz-operations.schema.json#/$defs/authz_invite_list",
+                    "response_schema_ref": "schemas/authorization-operations.schema.json#/$defs/authorization_invite_page",
                     "subject_scope": "authenticated_actor_or_inviter_or_realm_owner",
                     "operation_specific_error_codes": []
                 }
@@ -934,7 +938,7 @@ mod tests {
         );
 
         let method = description
-            .auth_metadata
+            .authentication_metadata
             .methods
             .first()
             .expect("configured Account Authority advertises OIDC");
@@ -1039,7 +1043,7 @@ mod tests {
         );
         assert!(matches!(
             arkret_models_discovery::websocket_binding::select_websocket_binding(&description, 262_144),
-            Some(arkret_models_discovery::TransportBinding::Websocket { base_url, max_frame_bytes: 262_144, max_channels: 16 })
+            Some(arkret_models_discovery::TransportBinding::Websocket { base_url, max_frame_bytes: 262_144, max_channel_count: 16 })
                 if base_url == "wss://coland.example/_arkret/ws"
         ));
         let value = serde_json::to_value(description).expect("description serializes");
@@ -1219,7 +1223,7 @@ mod tests {
         );
         assert_eq!(
             value["limits"]["authz_policy"]["invites"]["response_schema_ref"],
-            json!("schemas/authz-operations.schema.json#/$defs/authz_invite_list")
+            json!("schemas/authorization-operations.schema.json#/$defs/authorization_invite_page")
         );
         assert_eq!(
             value["limits"]["personal_productivity"]["reminders"]["storage"],

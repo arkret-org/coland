@@ -7,7 +7,7 @@
 //! protocol surface at `/_arkret/self/read-cursors*`.
 
 use arkret_models_collaboration::objects::read_receipts::{
-    ReadCursor, ReadCursorAdvanceRequestBody, ReadCursorList, ReadMarkerOutcome,
+    ReadCursor, ReadCursorAdvanceRequestBody, ReadCursorList, ReadMarkerResponseBody,
 };
 use arkret_wire::{Event, ReadCursorScope, ReadScopeKind};
 use coland_http::error::AppError;
@@ -35,7 +35,7 @@ pub(super) async fn set_read_cursor(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<ReadCursorAdvanceRequestBody>,
-) -> JsonResult<ReadMarkerOutcome> {
+) -> JsonResult<ReadMarkerResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let actor =
@@ -100,7 +100,7 @@ pub(super) async fn set_read_cursor(
 async fn fanout_read_cursor_winner(
     state: &AppState,
     session: &coland_services::identity::SessionIdentityState,
-    marker: &ReadMarkerOutcome,
+    marker: &ReadMarkerResponseBody,
 ) -> Result<(), AppError> {
     let sender_account_id =
         crate::routing::identity::auth_grant_dpop::authenticated_session_account_id(state, session)

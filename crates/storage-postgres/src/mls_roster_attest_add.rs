@@ -3,9 +3,11 @@
 //! serving layer. This transaction independently binds that proof to accepted
 //! governance facts; the short-lived recipient claim ledger is never read.
 
-use arkret_models_collaboration::mls_roster_authority::{MlsAttestAddOutcome, MlsAttestAddStatus};
+use arkret_models_collaboration::mls_roster_authority::{
+    MlsAttestAddResponseBody, MlsAttestAddStatus,
+};
 use arkret_models_crypto::MlsCommitPayload;
-use arkret_wire::{DidCoreId, EventKind, MlsGroupCurrent, MlsWelcomeDelivery};
+use arkret_wire::{DidCoreId, EventKind, MlsGroupValue, MlsWelcomeDelivery};
 use coland_storage::{ConflictCode, VerifiedMlsAddAuthorityAttestation};
 use diesel::sql_types::{BigInt, Binary, Integer, Jsonb, Text};
 
@@ -98,7 +100,7 @@ pub(crate) async fn install_in_connection(
     conn: &mut AsyncPgConnection,
     verified: &VerifiedMlsAddAuthorityAttestation,
     issuer: &DidCoreId,
-) -> PersistenceResult<MlsAttestAddOutcome> {
+) -> PersistenceResult<MlsAttestAddResponseBody> {
     let request = &verified.request;
     request
         .validate_claim_binding()
@@ -228,7 +230,7 @@ pub(crate) async fn install_in_connection(
     }
 
     let group = sql_query(
-        "SELECT mls_group_id,value FROM mls_group_current_results WHERE scope_key=$1 FOR SHARE",
+        "SELECT mls_group_id,value FROM mls_group_current_states WHERE scope_key=$1 FOR SHARE",
     )
     .bind::<Text, _>(&key)
     .get_result::<GroupRow>(&mut *conn)
@@ -236,7 +238,7 @@ pub(crate) async fn install_in_connection(
     .optional()
     .map_err(PersistenceError::database)?
     .ok_or_else(|| unavailable("accepted MLS group provenance is unavailable"))?;
-    let group_value: MlsGroupCurrent = serde_json::from_value(group.value).map_err(|error| {
+    let group_value: MlsGroupValue = serde_json::from_value(group.value).map_err(|error| {
         PersistenceError::Internal(format!("stored MLS group invalid: {error}"))
     })?;
     if group.mls_group_id != attestation.mls_group_id.as_str()
@@ -294,7 +296,7 @@ pub(crate) async fn install_in_connection(
             return Err(refused("frozen Add Proposal differs from verified target"));
         }
         if parsed.actor_id == attestation.actor_id
-            && parsed.leaf_signature_key == attestation.leaf_signature_key_b64u
+            && parsed.leaf_signature_key == attestation.leaf_signature_key_base64url
             && parsed.key_package_bytes == claim_key_package
             && matching_ordinal
                 .replace(proposal.consumed_proposal_ordinal)
@@ -360,7 +362,7 @@ pub(crate) async fn install_in_connection(
         {
             return Err(refused("replayed Add proof differs from installed history"));
         }
-        return Ok(MlsAttestAddOutcome {
+        return Ok(MlsAttestAddResponseBody {
             status: MlsAttestAddStatus::Duplicate,
             attestation_digest: arkret_wire::Hash::new(digest)
                 .map_err(|error| PersistenceError::Internal(error.to_string()))?,
@@ -397,7 +399,7 @@ pub(crate) async fn install_in_connection(
             "Add proof conflicts with an installed historical fact",
         ));
     }
-    Ok(MlsAttestAddOutcome {
+    Ok(MlsAttestAddResponseBody {
         status: MlsAttestAddStatus::Installed,
         attestation_digest: arkret_wire::Hash::new(digest)
             .map_err(|error| PersistenceError::Internal(error.to_string()))?,
@@ -408,7 +410,7 @@ pub(crate) async fn install(
     pool: &PgPool,
     verified: &VerifiedMlsAddAuthorityAttestation,
     issuer: &DidCoreId,
-) -> PersistenceResult<MlsAttestAddOutcome> {
+) -> PersistenceResult<MlsAttestAddResponseBody> {
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
         install_in_connection(conn, verified, issuer)

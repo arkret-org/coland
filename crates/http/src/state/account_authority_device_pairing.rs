@@ -1,8 +1,9 @@
 use std::time::Duration;
 
 use arkret_models_collaboration::device_pairing::{
-    DevicePairingBootstrap, DevicePairingResolveRequestBody, DevicePairingStageOutcome,
-    DevicePairingStageRequestBody, DevicePairingStatusOutcome, DevicePairingStatusRequestBody,
+    DevicePairingBootstrap, DevicePairingResolveRequestBody, DevicePairingStageRequestBody,
+    DevicePairingStageResponseBody, DevicePairingStatusRequestBody,
+    DevicePairingStatusResponseBody,
 };
 use async_trait::async_trait;
 use reqwest::StatusCode;
@@ -33,7 +34,7 @@ pub trait AccountAuthorityDevicePairingPort: Send + Sync {
         state: &AppState,
         request: &DevicePairingStageRequestBody,
         idempotency_key: &str,
-    ) -> Result<DevicePairingStageOutcome, AppError>;
+    ) -> Result<DevicePairingStageResponseBody, AppError>;
 
     async fn resolve(
         &self,
@@ -45,7 +46,7 @@ pub trait AccountAuthorityDevicePairingPort: Send + Sync {
         &self,
         state: &AppState,
         request: &DevicePairingStatusRequestBody,
-    ) -> Result<DevicePairingStatusOutcome, AppError>;
+    ) -> Result<DevicePairingStatusResponseBody, AppError>;
 }
 
 /// Production Station -> Account Authority private TCB transport.
@@ -63,7 +64,7 @@ impl AccountAuthorityDevicePairingPort for PrivateAccountAuthorityDevicePairing 
         state: &AppState,
         request: &DevicePairingStageRequestBody,
         idempotency_key: &str,
-    ) -> Result<DevicePairingStageOutcome, AppError> {
+    ) -> Result<DevicePairingStageResponseBody, AppError> {
         post_json(
             state,
             STAGE_PATH,
@@ -86,7 +87,7 @@ impl AccountAuthorityDevicePairingPort for PrivateAccountAuthorityDevicePairing 
         &self,
         state: &AppState,
         request: &DevicePairingStatusRequestBody,
-    ) -> Result<DevicePairingStatusOutcome, AppError> {
+    ) -> Result<DevicePairingStatusResponseBody, AppError> {
         post_json(state, STATUS_PATH, "device pairing status", request, None).await
     }
 }

@@ -11,7 +11,7 @@
 //! and (where applicable) encryption.
 
 use arkret_models_identity::account::{
-    AccountDataDeleteOutcome, AccountDataDeleteRequestBody, AccountDataList,
+    AccountDataDeleteRequestBody, AccountDataDeleteResponseBody, AccountDataList,
     AccountDataReplaceRequestBody, AccountDataRow,
 };
 use coland_http::error::AppError;
@@ -637,7 +637,7 @@ async fn delete_account_data(
     req: &mut Request,
     account_data_key: PathParam<String>,
     body: JsonBody<AccountDataDeleteRequestBody>,
-) -> JsonResult<AccountDataDeleteOutcome> {
+) -> JsonResult<AccountDataDeleteResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let account_data_key = account_data_key.into_inner();
@@ -680,7 +680,7 @@ async fn delete_account_data(
         "accepted",
     )
     .await;
-    json_ok(AccountDataDeleteOutcome {
+    json_ok(AccountDataDeleteResponseBody {
         account_data_key,
         revision,
     })

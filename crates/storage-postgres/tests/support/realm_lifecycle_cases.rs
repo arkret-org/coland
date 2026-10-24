@@ -18,7 +18,7 @@ async fn terminal_persistent_rows(pool: &coland_storage_postgres::PgPool) -> ser
         value: serde_json::Value,
     }
     let mut conn = pool.get().await.unwrap();
-    let tables = diesel::sql_query("SELECT tablename::text AS tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE '%current_results' OR tablename IN ('canonical_events','realm_commits','realm_authorities','federation_outbox','event_federation_outbox','replica_stream_anchors','replica_authorization_rows','replica_authorization_cuts','account_summary_current','account_summary_versions','account_summary_clock','current_result_heads','current_result_versions','direct_conversation_founding_slots')) ORDER BY tablename")
+    let tables = diesel::sql_query("SELECT tablename::text AS tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE '%current_states' OR tablename IN ('canonical_events','realm_commits','realm_authorities','federation_outbox','event_federation_outbox','replica_stream_anchors','replica_authorization_rows','replica_authorization_cuts','account_summary_current','account_summary_versions','account_summary_clock','current_state_heads','current_state_versions','direct_conversation_founding_slots')) ORDER BY tablename")
         .load::<Table>(&mut *conn).await.unwrap();
     let mut snapshot = serde_json::Map::new();
     for table in tables {
@@ -44,7 +44,7 @@ async fn terminal_persistent_rows(pool: &coland_storage_postgres::PgPool) -> ser
         "realm_authorities",
         "federation_outbox",
         "event_federation_outbox",
-        "realm_bootstrap_current_results",
+        "realm_bootstrap_current_states",
         "replica_stream_anchors",
         "replica_authorization_rows",
         "replica_authorization_cuts",
@@ -153,7 +153,7 @@ async fn archive_and_freeze_are_reversible_without_reopening_a_terminal_realm() 
             .unwrap()
             .unwrap();
         assert!(material.current_state_entries.iter().any(|entry| matches!(entry,
-            arkret_wire::TypedCurrentRow::Value { selector: actual, revision, value, .. }
+            arkret_wire::CurrentState::Value { selector: actual, revision, value, .. }
             if actual == &selector && revision.commit_id == head.authority_commit.commit.commit_id
                 && value.get(field) == Some(&serde_json::Value::Bool(false))
         )));
@@ -231,7 +231,7 @@ async fn terminal_child_consumer_case() {
         .current_state_entries
         .into_iter()
         .find_map(|row| match row {
-            arkret_wire::TypedCurrentRow::Value {
+            arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::RealmPlaintextVisibleServices,
                 value,
                 ..
@@ -260,7 +260,7 @@ async fn terminal_child_consumer_case() {
             .unwrap()
             .unwrap();
         assert!(material.current_state_entries.iter().any(|row| matches!(row,
-            arkret_wire::TypedCurrentRow::Value { selector:arkret_wire::CurrentSelector::RealmPlaintextVisibleServices, revision, value, .. }
+            arkret_wire::CurrentState::Value { selector:arkret_wire::CurrentSelector::RealmPlaintextVisibleServices, revision, value, .. }
                 if value == &policy && revision.commit_id == change.authority_commit.commit.commit_id)));
         strand = change;
     }
@@ -302,8 +302,8 @@ async fn terminal_child_consumer_case() {
     let placement = lifecycle_future(|| source_if_human(&pool, placement)).await;
     let before_placement = terminal_persistent_rows(&pool).await;
     for table in [
-        "space_parent_current_results",
-        "space_child_scope_policy_current_results",
+        "space_parent_current_states",
+        "space_child_scope_policy_current_states",
     ] {
         let original = before_placement[table]
             .as_array()
@@ -517,7 +517,7 @@ async fn terminal_child_consumer_case() {
         .unwrap()
         .unwrap();
     assert!(material.current_state_entries.iter().any(|entry| matches!(entry,
-        arkret_wire::TypedCurrentRow::Value {selector: arkret_wire::CurrentSelector::RealmTombstone, revision, value, ..}
+        arkret_wire::CurrentState::Value {selector: arkret_wire::CurrentSelector::RealmTombstone, revision, value, ..}
         if revision.commit_id == terminal.authority_commit.commit.commit_id && value == &payload
     )));
     let navigation = store
@@ -547,7 +547,7 @@ async fn terminal_child_consumer_case() {
     );
     assert!(material.current_state_entries.iter().any(|entry| matches!(
         entry,
-        arkret_wire::TypedCurrentRow::Value {
+        arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::Strand { .. },
             ..
         }

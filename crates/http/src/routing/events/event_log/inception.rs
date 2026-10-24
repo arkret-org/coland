@@ -90,7 +90,7 @@ pub(super) async fn resolve_event_root_anchor_method(
                 format!("original DID inception is unavailable: {error}"),
             )
         })?;
-    let mut entries = records.iter().filter(|entry| entry.seq == 1);
+    let mut entries = records.iter().filter(|entry| entry.sequence == 1);
     let entry = entries.next().ok_or_else(|| {
         event_validation_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -139,8 +139,8 @@ pub(super) async fn resolve_event_root_anchor_method(
             arkret_models_identity::DidOperationSubmitRequestBody {
                 did: principal_did,
                 did_method: arkret_models_identity::DidMethodName::Webvh,
-                seq: Some(1),
-                prev_event_digest: None,
+                sequence: Some(1),
+                previous_event_digest: None,
                 operation: operation.clone(),
             },
         ),

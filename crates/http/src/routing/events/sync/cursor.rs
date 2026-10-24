@@ -970,7 +970,8 @@ pub(super) async fn account_cursor_revoke(
     >,
     depot: &mut Depot,
     req: &mut Request,
-) -> coland_http::result::JsonResult<arkret_models_identity::account::AccountCursorRevokeOutcome> {
+) -> coland_http::result::JsonResult<arkret_models_identity::account::AccountCursorRevokeResponseBody>
+{
     use coland_http::error::AppError;
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
@@ -1085,7 +1086,7 @@ pub(super) async fn account_cursor_revoke(
         .expires_at;
 
     crate::json_ok(
-        arkret_models_identity::account::AccountCursorRevokeOutcome {
+        arkret_models_identity::account::AccountCursorRevokeResponseBody {
             revoked: true,
             expires_at: effective_expiry,
             revoke_scope_effective: Some(scope),
@@ -1095,13 +1096,13 @@ pub(super) async fn account_cursor_revoke(
 
 pub(super) async fn account_input_authorities(
     state: &AppState,
-    body: &SyncRequestBody,
+    body: &AccountSubscribeParameters,
     wait_for: Option<&str>,
 ) -> Result<Vec<CursorState>, SyncCursorError> {
     let mut tokens = Vec::new();
     tokens.extend(body.after.as_deref());
     tokens.extend(
-        body.realm_list
+        body.realm_list_parameters
             .as_ref()
             .and_then(|page| page.after.as_ref())
             .map(|token| token.as_str()),

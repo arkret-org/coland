@@ -107,11 +107,11 @@ async fn signed_handle_claim(
         schema: SchemaId::HANDLE_CLAIM_V1.to_owned(),
         claim: core,
         status: HandleClaimStatus::Verified,
-        as_of: issued_at,
+        evaluated_at: issued_at,
         verifier_id: signer_id,
         verified_at: Some(issued_at),
         revocation: None,
-        fresh_until: issued_at + chrono::Duration::minutes(5),
+        cache_expires_at: issued_at + chrono::Duration::minutes(5),
         status_proof: handle_claim_proof(
             state,
             claim_digest,

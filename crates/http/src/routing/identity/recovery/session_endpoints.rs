@@ -457,7 +457,7 @@ async fn device_quorum_methods_at_policy_basis(
     loop {
         let page = state
             .authority_commits()
-            .scan_stream(&arkret_wire::StreamScanRequest {
+            .scan_stream(&arkret_wire::StreamScanRequestBody {
                 realm_id: basis.commit.realm_id.clone(),
                 stream_ref: basis.commit.stream_ref.clone(),
                 direction: arkret_wire::StreamScanDirection::After(after_position),
@@ -1180,7 +1180,7 @@ pub(super) async fn recovery_session_proof_submit(
     body: JsonBody<RecoverySessionProofSubmitRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<RecoverySessionProofSubmitOutcome> {
+) -> JsonResult<RecoverySessionProofSubmitResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session_id = recovery_session_id.into_inner();
     let record = load_owned_recovery_session(&aa, state, req, &session_id).await?;
@@ -1323,7 +1323,7 @@ pub(super) async fn recovery_session_proof_submit(
 
     // A 2xx reply already means the proof verified and the session entered
     // `verified`, so the outcome echoes neither `state` nor `verification`.
-    json_ok(RecoverySessionProofSubmitOutcome {
+    json_ok(RecoverySessionProofSubmitResponseBody {
         recovery_session_id: RecoverySessionId::new(updated.recovery_session_id.clone())
             .map_err(|error| stored_recovery_type_error("recovery_session_id", error))?,
         proof_summary: recovery_proof_summary(&updated),
@@ -1628,11 +1628,11 @@ fn recovery_unlock_proof_body(
 
 /// Resolve a non-revoked, in-window `methods[kind=recovery_unlock].keys[]`
 /// entry whose `verification_method` equals the signed proof method, evaluated
-/// at `as_of` (the recovery session `created_at`).
+/// at `evaluated_at` (the recovery session `created_at`).
 pub(super) fn resolve_recovery_key_entry(
     policy_payload: &Value,
     verification_method: &str,
-    as_of: chrono::DateTime<chrono::Utc>,
+    evaluated_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<Map<String, Value>, AppError> {
     let entries = policy_payload
         .get("methods")
@@ -1656,7 +1656,7 @@ pub(super) fn resolve_recovery_key_entry(
         if object.get("verification_method").and_then(Value::as_str) != Some(verification_method) {
             continue;
         }
-        if !recovery_key_entry_authoritative_at(object, as_of) {
+        if !recovery_key_entry_authoritative_at(object, evaluated_at) {
             return Err(recovery_evidence_unbound_error(
                 "recovery key entry is revoked or outside its validity window",
             ));
@@ -1668,11 +1668,11 @@ pub(super) fn resolve_recovery_key_entry(
     ))
 }
 
-/// `not_before <= as_of < expires_at` and (`revoked_at` is null or
-/// `as_of < revoked_at`).
+/// `not_before <= evaluated_at < expires_at` and (`revoked_at` is null or
+/// `evaluated_at < revoked_at`).
 fn recovery_key_entry_authoritative_at(
     entry: &Map<String, Value>,
-    as_of: chrono::DateTime<chrono::Utc>,
+    evaluated_at: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     let parse = |key: &str| -> Option<chrono::DateTime<chrono::Utc>> {
         entry
@@ -1687,12 +1687,12 @@ fn recovery_key_entry_authoritative_at(
     let Some(expires_at) = parse("expires_at") else {
         return false;
     };
-    if as_of < not_before || as_of >= expires_at {
+    if evaluated_at < not_before || evaluated_at >= expires_at {
         return false;
     }
     match entry.get("revoked_at") {
         Some(Value::Null) | None => true,
-        Some(Value::String(_)) => parse("revoked_at").is_some_and(|revoked| as_of < revoked),
+        Some(Value::String(_)) => parse("revoked_at").is_some_and(|revoked| evaluated_at < revoked),
         _ => false,
     }
 }

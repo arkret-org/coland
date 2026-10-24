@@ -157,7 +157,7 @@ pub(crate) async fn admit_agent_pcr_genesis_in_connection(
             "Agent PCR genesis is unsigned",
         )
     })?;
-    let signer = crate::key_backup_current_results::verification_method_device(
+    let signer = crate::key_backup_current_states::verification_method_device(
         &proof.verification_method,
         &controller,
     )
@@ -317,15 +317,15 @@ pub(crate) async fn admit_agent_pcr_genesis_in_connection(
             ));
         }
     }
-    crate::capability_grant_current_results::commit_realm_authority_root_current_result_in_connection(
+    crate::capability_grant_current_states::commit_realm_authority_root_current_state_in_connection(
         conn, event, commit,
     )
     .await?;
-    crate::realm_bootstrap_current_results::commit_ordinary_bootstrap_singleton_current_result_in_connection(
+    crate::realm_bootstrap_current_states::commit_ordinary_bootstrap_singleton_current_state_in_connection(
         conn, event, commit,
     )
     .await?;
-    crate::agent_current_results::project_agent_status_in_connection(conn, event, commit).await?;
+    crate::agent_current_states::project_agent_status_in_connection(conn, event, commit).await?;
     crate::sidecar_authority_change_guard::after_current_writes_in_connection(conn, event).await?;
 
     let resolution = arkret_models_identity::PrincipalResolutionProjection {

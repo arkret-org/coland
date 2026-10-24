@@ -37,7 +37,7 @@ pub(super) async fn enforce_key_backup_series_chain_typed(
     backup: &KeyBackup,
 ) -> Result<(), AppError> {
     let series_id = backup.series_id.as_str();
-    let series_seq = backup.series_seq;
+    let series_sequence = backup.series_sequence;
     let mut max_existing_seq: Option<u64> = None;
     let mut predecessor: Option<Value> = None;
     let supersedes = backup
@@ -55,8 +55,9 @@ pub(super) async fn enforce_key_backup_series_chain_typed(
         if existing.get("series_id").and_then(Value::as_str) != Some(series_id) {
             continue;
         }
-        if let Some(seq) = existing.get("series_seq").and_then(Value::as_u64) {
-            max_existing_seq = Some(max_existing_seq.map_or(seq, |current| current.max(seq)));
+        if let Some(sequence) = existing.get("series_sequence").and_then(Value::as_u64) {
+            max_existing_seq =
+                Some(max_existing_seq.map_or(sequence, |current| current.max(sequence)));
         }
         if let Some(predecessor_id) = supersedes.as_deref()
             && existing.get("backup_id").and_then(Value::as_str) == Some(predecessor_id)
@@ -65,13 +66,13 @@ pub(super) async fn enforce_key_backup_series_chain_typed(
         }
     }
 
-    if series_seq == 0 {
+    if series_sequence == 0 {
         validate_series_genesis_shape_typed(backup)?;
         if let Some(existing_seq) = max_existing_seq {
             return Err(crate::app_error!(
                 Conflict,
                 format!(
-                    "series_seq_not_monotonic: genesis envelope for series already has seq={existing_seq} persisted"
+                    "series_seq_not_monotonic: genesis envelope for series already has sequence={existing_seq} persisted"
                 ),
             )
             .with_reason_code(arkret_wire::ReasonCode::SERIES_SEQ_NOT_MONOTONIC));
@@ -91,12 +92,12 @@ pub(super) async fn enforce_key_backup_series_chain_typed(
         )
         .with_reason_code(arkret_wire::ReasonCode::SERIES_CHAIN_BROKEN));
     }
-    let expected = max_existing_seq.map(|seq| seq + 1);
-    if expected != Some(series_seq) {
+    let expected = max_existing_seq.map(|sequence| sequence + 1);
+    if expected != Some(series_sequence) {
         return Err(crate::app_error!(
             Conflict,
             format!(
-                "series_seq_not_monotonic: expected series_seq={} but got {series_seq}",
+                "series_seq_not_monotonic: expected series_sequence={} but got {series_sequence}",
                 expected
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "1 (no predecessor)".to_owned())
@@ -188,7 +189,7 @@ pub(super) async fn put_key_backup(
     backup: JsonBody<KeyBackup>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeysBackupsReplaceOutcome> {
+) -> JsonResult<KeysBackupsReplaceResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let idempotency_principal_id = arkret_wire::DidCoreId::new(session.actor.clone())
@@ -290,7 +291,7 @@ pub(super) async fn put_key_backup(
         .map_err(|error| AppError::internal(format!("key backup lookup failed: {error}")))?;
     let duplicate = key_backup_idempotent_retry(existing.as_ref(), &account_actor, &backup_value)?;
     if duplicate {
-        let outcome = KeysBackupsReplaceOutcome {
+        let outcome = KeysBackupsReplaceResponseBody {
             status: KeyBackupPutStatus::Duplicate,
             backup_id: typed_backup_id,
             ciphertext_digest,
@@ -311,10 +312,10 @@ pub(super) async fn put_key_backup(
         .store_backup(backup_id.clone(), backup_value)
         .await
         .map_err(|error| {
-            // SOL-02-004 — the UNIQUE(series_actor_id, series_id, series_seq)
+            // SOL-02-004 — the UNIQUE(series_actor_id, series_id, series_sequence)
             // constraint rejected a concurrent successor double-write. The
             // storage layer is now the authoritative race guard for §7.6
-            // monotonicity; the loser is told the seq is already taken.
+            // monotonicity; the loser is told the sequence is already taken.
             if error.is_conflict_kind() {
                 crate::app_error!(
                     SchemaViolation,
@@ -325,7 +326,7 @@ pub(super) async fn put_key_backup(
                 AppError::internal(error.to_string())
             }
         })?;
-    let outcome = KeysBackupsReplaceOutcome {
+    let outcome = KeysBackupsReplaceResponseBody {
         status: KeyBackupPutStatus::Accepted,
         backup_id: typed_backup_id,
         ciphertext_digest,
@@ -346,7 +347,7 @@ async fn persist_key_backup_idempotency(
     principal_id: &arkret_wire::DidCoreId,
     idempotency_key: &str,
     request_hash: &str,
-    outcome: &KeysBackupsReplaceOutcome,
+    outcome: &KeysBackupsReplaceResponseBody,
 ) {
     let created_at = chrono::Utc::now();
     let response_body = match serde_json::to_value(outcome) {
@@ -448,7 +449,7 @@ pub(super) async fn unlock_key_backup(
         tracing::warn!(actor=%session.actor, device=%session.require_human_device_id(), %backup_id, %request_digest, %error, "key backup unlock proof rejected");
         return Err(error);
     }
-    // key-management.md §7.4.1 - anchor the released envelope's auth_data.signature
+    // key-management.md §7.4.1 - anchor the released envelope's signature_proof.signature
     // to the actor's current device trust root before returning the full ciphertext.
     // Without this, a malicious/compromised server could substitute an envelope
     // signed by a revoked old device key; such envelopes MUST be rejected as
@@ -502,7 +503,7 @@ pub(super) async fn delete_key_backup(
     backup_id: PathParam<String>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeysBackupsDeleteOutcome> {
+) -> JsonResult<KeysBackupsDeleteResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let idempotency_principal_id = arkret_wire::DidCoreId::new(session.actor.clone())
@@ -554,8 +555,8 @@ pub(super) async fn delete_key_backup(
         .await
     {
         Ok(Some(record)) if record.request_hash == request_hash => {
-            let outcome: KeysBackupsDeleteOutcome = serde_json::from_value(record.response_body)
-                .map_err(|error| {
+            let outcome: KeysBackupsDeleteResponseBody =
+                serde_json::from_value(record.response_body).map_err(|error| {
                     AppError::internal(format!("stored delete outcome is corrupt: {error}"))
                 })?;
             return json_ok(outcome);
@@ -604,14 +605,14 @@ pub(super) async fn delete_key_backup(
             "device_id": session.require_human_device_id(),
             "backup_kind": backup.get("backup_kind").cloned().unwrap_or(Value::Null),
             "series_id": backup.get("series_id").cloned().unwrap_or(Value::Null),
-            "series_seq": backup.get("series_seq").cloned().unwrap_or(Value::Null),
+            "series_sequence": backup.get("series_sequence").cloned().unwrap_or(Value::Null),
             // Which of the three §7.8 authority branches carried this delete.
             "delete_proof_kind": authorized.proof_branch,
         }),
         "deleted",
     )
     .await;
-    let outcome = KeysBackupsDeleteOutcome {
+    let outcome = KeysBackupsDeleteResponseBody {
         deleted: true,
         backup_id: BackupId::new(backup_id).ok(),
     };
@@ -637,7 +638,7 @@ async fn record_delete_idempotency(
     actor_id: &arkret_wire::DidCoreId,
     idempotency_key: &str,
     request_hash: &str,
-    outcome: &KeysBackupsDeleteOutcome,
+    outcome: &KeysBackupsDeleteResponseBody,
 ) {
     let Ok(response_body) = serde_json::to_value(outcome) else {
         return;

@@ -8,7 +8,7 @@ use arkret_models_collaboration::events_payloads::agent::{
     AgentActionRejectPayload, AgentActionRequestPayload,
 };
 use arkret_models_identity::device_push_route::DevicePushRoutePayload;
-use arkret_wire::{AccountId, ActorPrivateEventSubmitOutcome, Event};
+use arkret_wire::{AccountId, ActorPrivateEventSubmitResponseBody, Event};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
@@ -58,10 +58,10 @@ pub struct ActorPrivateEventSubmission {
 /// The first saved outcome of a submission, or why it wrote nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActorPrivateEventSubmitResult {
-    Accepted(ActorPrivateEventSubmitOutcome),
+    Accepted(ActorPrivateEventSubmitResponseBody),
     /// The byte-identical Event was already accepted; its first outcome is
     /// returned without another write.
-    Replayed(ActorPrivateEventSubmitOutcome),
+    Replayed(ActorPrivateEventSubmitResponseBody),
     Refused(ActorPrivateEventRefusal),
 }
 

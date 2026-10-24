@@ -104,7 +104,7 @@ pub(crate) async fn current_operation_quorum(
 ) -> PersistenceResult<Option<u64>> {
     use diesel::sql_types::Text;
     use horme::{OptionalExtension, RunQueryDsl};
-    let rows=diesel::sql_query("SELECT subject_kind,subject_id,value FROM policy_action_current_results WHERE realm_id=$1 ORDER BY subject_kind,subject_id,action_key")
+    let rows=diesel::sql_query("SELECT subject_kind,subject_id,value FROM policy_action_current_states WHERE realm_id=$1 ORDER BY subject_kind,subject_id,action_key")
         .bind::<Text,_>(realm.as_str()).load::<ConfigRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut matched = Vec::new();
     for row in rows {
@@ -124,13 +124,13 @@ pub(crate) async fn current_operation_quorum(
             continue;
         }
         let scope =
-            crate::policy_current_results::resolve_scope(conn, realm, &config.policy_scope).await?;
+            crate::policy_current_states::resolve_scope(conn, realm, &config.policy_scope).await?;
         if !scope_contains(conn, realm, &scope, target, facts).await? {
             continue;
         }
         if row.subject_kind == "policy_ref" {
             let Some(policy) = diesel::sql_query(
-                "SELECT value FROM policy_current_results WHERE realm_id=$1 AND policy_id=$2",
+                "SELECT value FROM policy_current_states WHERE realm_id=$1 AND policy_id=$2",
             )
             .bind::<Text, _>(realm.as_str())
             .bind::<Text, _>(&row.subject_id)
@@ -231,7 +231,7 @@ async fn scope_contains(
             #[diesel(sql_type=Text)]
             list: String,
         }
-        let placements=diesel::sql_query("SELECT board_space_id AS board,value->>'list_space_id' AS list FROM strand_position_current_results WHERE realm_id=$1 AND strand_id=$2 AND value<>'null'::jsonb")
+        let placements=diesel::sql_query("SELECT board_space_id AS board,value->>'list_space_id' AS list FROM strand_position_current_states WHERE realm_id=$1 AND strand_id=$2 AND value<>'null'::jsonb")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(strand.as_str()).load::<Placement>(&mut *conn).await.map_err(PersistenceError::database)?;
         for placement in placements {
             starts.extend([placement.board, placement.list]);
@@ -248,7 +248,7 @@ async fn scope_contains(
             #[diesel(sql_type=diesel::sql_types::Bool)]
             cyclic: bool,
         }
-        let ancestry=diesel::sql_query("WITH RECURSIVE ancestors(id,path,cycle) AS (SELECT $2::text,ARRAY[$2::text],false UNION ALL SELECT p.value->>'parent_space_id',a.path||(p.value->>'parent_space_id'),(p.value->>'parent_space_id')=ANY(a.path) FROM ancestors a JOIN space_parent_current_results p ON p.realm_id=$1 AND p.space_id=a.id WHERE p.value->>'parent_space_id' IS NOT NULL AND NOT a.cycle) SELECT COALESCE(bool_or(id=$3),false) AS contains,COALESCE(bool_or(cycle),false) AS cyclic FROM ancestors")
+        let ancestry=diesel::sql_query("WITH RECURSIVE ancestors(id,path,cycle) AS (SELECT $2::text,ARRAY[$2::text],false UNION ALL SELECT p.value->>'parent_space_id',a.path||(p.value->>'parent_space_id'),(p.value->>'parent_space_id')=ANY(a.path) FROM ancestors a JOIN space_parent_current_states p ON p.realm_id=$1 AND p.space_id=a.id WHERE p.value->>'parent_space_id' IS NOT NULL AND NOT a.cycle) SELECT COALESCE(bool_or(id=$3),false) AS contains,COALESCE(bool_or(cycle),false) AS cyclic FROM ancestors")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(&start).bind::<Text,_>(space.as_str())
             .get_result::<Ancestor>(&mut *conn).await.map_err(PersistenceError::database)?;
         if ancestry.cyclic {

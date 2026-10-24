@@ -139,10 +139,10 @@ pub(super) async fn prepare(
         } = &endpoint.effective_scope
         {
             let basis =
-                crate::circle_current_results::locked_circle_basis(conn, realm_id, circle_id)
+                crate::circle_current_states::locked_circle_basis(conn, realm_id, circle_id)
                     .await?;
             if basis["value"]["state"] != "active"
-                || !crate::circle_current_results::effective_member_in_connection(
+                || !crate::circle_current_states::effective_member_in_connection(
                     conn,
                     realm_id,
                     circle_id,

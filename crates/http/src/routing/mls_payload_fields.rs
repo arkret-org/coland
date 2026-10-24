@@ -20,7 +20,9 @@ pub(crate) fn governance_binding(value: &Value) -> Option<&Value> {
 
 #[cfg(test)]
 pub(crate) fn commit_base_epoch(payload: &Value) -> Option<u64> {
-    governance_binding(payload)?.get("previous_epoch")?.as_u64()
+    arkret_canonical::serde_helpers::parse_uint64_decimal_value(
+        governance_binding(payload)?.get("previous_epoch")?,
+    )
 }
 
 #[cfg(test)]
@@ -38,7 +40,7 @@ mod tests {
     fn transition_fields_come_only_from_the_binding() {
         let realm = "ak:realm:AdkQ-RmB1a8zyc52yl9GWAsodQ_EUle1WAVZqbO7pc19";
         let payload = json!({"governance_binding": {
-            "effective_scope": {"kind":"realm", "realm_id":realm}, "previous_epoch":7
+            "effective_scope": {"kind":"realm", "realm_id":realm}, "previous_epoch":"7"
         }});
         let scope = serde_json::from_value::<arkret_wire::ScopeRef>(
             payload["governance_binding"]["effective_scope"].clone(),

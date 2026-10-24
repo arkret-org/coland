@@ -116,12 +116,12 @@ pub(crate) async fn effects(
 
 pub(crate) async fn execute(
     conn: &mut AsyncPgConnection,
-    request: &ConsentPrivateProxyRequest,
+    request: &ConsentPrivateProxyRequestBody,
     source: &DidCoreId,
     acceptor: &DidCoreId,
     quota: &NewSourceQuotaConstraints,
     prepared: Option<&coland_storage::PreparedPrivateInviteDelivery>,
-) -> Result<ConsentPrivateProxyOutcome, PgTransactionError> {
+) -> Result<ConsentPrivateProxyResponseBody, PgTransactionError> {
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     request.validate_at(source, now).map_err(invalid)?;
     let cut =
@@ -157,7 +157,7 @@ pub(crate) async fn execute(
             if held.request_digest != digest || held.expires_at != request.expires_at {
                 return Err(invalid("private command nonce was rebound").into());
             }
-            let outcome: ConsentPrivateProxyOutcome =
+            let outcome: ConsentPrivateProxyResponseBody =
                 serde_json::from_value(held.outcome).map_err(invalid)?;
             outcome
                 .validate_for_request(request, now)
@@ -177,14 +177,14 @@ pub(crate) async fn execute(
         now,
     )
     .await?;
-    let outcome = ConsentPrivateProxyOutcome {
+    let outcome = ConsentPrivateProxyResponseBody {
         request_digest: digest.clone(),
         realm_id: cut.realm_id,
         governance_generation: cut.generation,
         effective_stream_head: cut.head,
         evaluated_at: now,
         expires_at: request.expires_at,
-        outcome,
+        response_body: outcome,
     };
     if request.command.writes_private_state() {
         sql_query("INSERT INTO consent_private_proxy_fences(holder_account_id,realm_id,governance_generation,nonce,expires_at,request_digest,outcome) VALUES($1,$2,$3,$4,$5,$6,$7)")
@@ -208,12 +208,12 @@ async fn apply_command(
     quota: &NewSourceQuotaConstraints,
     prepared: Option<&coland_storage::PreparedPrivateInviteDelivery>,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<ConsentPrivateCommandOutcome, PgTransactionError> {
+) -> Result<ConsentPrivateCommandResponseBody, PgTransactionError> {
     Ok(match command {
         ConsentPrivateCommand::List(_) => {
             let records =
                 crate::consent_current::records_in_connection(conn, holder, realm).await?;
-            ConsentPrivateCommandOutcome::List(ConsentPrivateListOutcome {
+            ConsentPrivateCommandResponseBody::List(ConsentPrivateListResponseBody {
                 kind: ConsentPrivateListOutcomeKind::List,
                 body: arkret_models_collaboration::consent_operations::ConsentList {
                     consents: records.into_iter().map(|r| r.view()).collect(),
@@ -236,7 +236,7 @@ async fn apply_command(
                 serde_json::from_value(row.value).map_err(invalid)?;
             let commit: arkret_wire::RealmCommit =
                 serde_json::from_value(row.commit_json).map_err(invalid)?;
-            ConsentPrivateCommandOutcome::Version(ConsentPrivateVersionOutcome {
+            ConsentPrivateCommandResponseBody::Version(ConsentPrivateVersionResponseBody {
                 kind: ConsentPrivateVersionOutcomeKind::Version,
                 body: arkret_models_collaboration::consent_operations::ConsentView {
                     peer: command.body.peer.clone(),
@@ -250,7 +250,7 @@ async fn apply_command(
             })
         }
         ConsentPrivateCommand::Effects(_) => {
-            ConsentPrivateCommandOutcome::Effects(ConsentPrivateEffectsOutcome {
+            ConsentPrivateCommandResponseBody::Effects(ConsentPrivateEffectsResponseBody {
                 kind: ConsentPrivateEffectsOutcomeKind::Effects,
                 body: effects(conn, holder).await?,
             })
@@ -270,13 +270,15 @@ async fn apply_command(
             if previous != Some(cell.revision) {
                 crate::consent_private_effects::mark_pending(conn, holder, realm).await?;
             }
-            ConsentPrivateCommandOutcome::InvitePolicy(ConsentPrivateInvitePolicyOutcome {
-                kind: ConsentPrivateInvitePolicyOutcomeKind::InvitePolicy,
-                body: ConsentPrivateInviteReceivePolicyCell {
-                    revision: revision(cell.revision)?,
-                    content: serde_json::from_value(cell.content).map_err(invalid)?,
+            ConsentPrivateCommandResponseBody::InvitePolicy(
+                ConsentPrivateInvitePolicyResponseBody {
+                    kind: ConsentPrivateInvitePolicyOutcomeKind::InvitePolicy,
+                    body: ConsentPrivateInviteReceivePolicyCell {
+                        revision: revision(cell.revision)?,
+                        content: serde_json::from_value(cell.content).map_err(invalid)?,
+                    },
                 },
-            })
+            )
         }
         ConsentPrivateCommand::Request(command) => {
             let requester = command
@@ -296,10 +298,10 @@ async fn apply_command(
                 },
             )
             .await?;
-            ConsentPrivateCommandOutcome::Request(ConsentPrivateRequestOutcome {
+            ConsentPrivateCommandResponseBody::Request(ConsentPrivateRequestResponseBody {
                 kind: ConsentPrivateRequestOutcomeKind::Request,
                 body:
-                    arkret_models_collaboration::consent_operations::ConsentRequestOutcome::accepted(
+                    arkret_models_collaboration::consent_operations::ConsentRequestResponseBody::accepted(
                     ),
             })
         }
@@ -317,10 +319,12 @@ async fn apply_command(
                 now,
             )
             .await?;
-            ConsentPrivateCommandOutcome::InviteDelivery(ConsentPrivateInviteDeliveryOutcome {
-                kind: ConsentPrivateInviteDeliveryOutcomeKind::InviteDelivery,
-                body,
-            })
+            ConsentPrivateCommandResponseBody::InviteDelivery(
+                ConsentPrivateInviteDeliveryResponseBody {
+                    kind: ConsentPrivateInviteDeliveryOutcomeKind::InviteDelivery,
+                    body,
+                },
+            )
         }
     })
 }
@@ -333,7 +337,7 @@ pub(crate) async fn execute_native(
     acceptor: &DidCoreId,
     quota: &NewSourceQuotaConstraints,
     prepared: Option<&coland_storage::PreparedPrivateInviteDelivery>,
-) -> Result<ConsentPrivateCommandOutcome, PgTransactionError> {
+) -> Result<ConsentPrivateCommandResponseBody, PgTransactionError> {
     command
         .validate_context(holder, context, acceptor)
         .map_err(invalid)?;

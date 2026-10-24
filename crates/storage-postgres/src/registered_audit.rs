@@ -6,7 +6,7 @@ use arkret_models_collaboration::authority_commit::{
 };
 use arkret_models_collaboration::events_payloads::audit::AuditAccessedKind;
 use arkret_models_collaboration::strand_watch_operations::{
-    WatchAuditReadOutcome, WatchAuditReadRequest,
+    WatchAuditReadRequestBody, WatchAuditReadResponseBody,
 };
 use arkret_wire::{
     CapabilityActionId, EventId, ResourceSelectorKind, ScopeRef, WireResourceSelector,
@@ -69,9 +69,9 @@ pub(crate) async fn original_in_connection(
     let read = sql_query("SELECT canonical_request,outcome,private_audit_digest FROM watch_audit_read_results WHERE audit_event_id=$1")
         .bind::<Text,_>(event.as_str()).get_result::<ArchiveRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     if let Some(row) = read {
-        let request: WatchAuditReadRequest =
+        let request: WatchAuditReadRequestBody =
             serde_json::from_slice(&row.canonical_request).map_err(PersistenceError::database)?;
-        let outcome: WatchAuditReadOutcome =
+        let outcome: WatchAuditReadResponseBody =
             serde_json::from_value(row.outcome).map_err(PersistenceError::database)?;
         outcome
             .validate_for_request(&request, outcome.audit_commit.governance_generation)
@@ -161,7 +161,7 @@ fn target(event: &arkret_wire::Event) -> PersistenceResult<WireResourceSelector>
 
 pub(crate) async fn read_approval_markers_in_connection(
     conn: &mut AsyncPgConnection,
-    request: &WatchAuditReadRequest,
+    request: &WatchAuditReadRequestBody,
 ) -> PersistenceResult<Vec<coland_storage::VerifiedGrantApproval>> {
     #[derive(diesel::QueryableByName)]
     struct Row {
@@ -287,7 +287,7 @@ async fn action_in_connection(
 /// Read-only current rights. Replay does not reserve another quota or approval nonce.
 pub(crate) async fn read_visibility_in_connection(
     conn: &mut AsyncPgConnection,
-    request: &WatchAuditReadRequest,
+    request: &WatchAuditReadRequestBody,
     issuer: &arkret_wire::DidCoreId,
     expected_generation: Option<u64>,
 ) -> PersistenceResult<()> {
@@ -315,7 +315,7 @@ pub(crate) async fn read_visibility_in_connection(
         #[diesel(sql_type=Jsonb)]
         source_stream_ref: Value,
     }
-    let strand = sql_query("SELECT value,current_commit_id,current_stream_position,c.stream_ref AS source_stream_ref FROM strand_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id=$2 FOR SHARE OF s")
+    let strand = sql_query("SELECT value,current_commit_id,current_stream_position,c.stream_ref AS source_stream_ref FROM strand_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id=$2 FOR SHARE OF s")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(request.selector().map_err(PersistenceError::database)?.strand_id.as_str()).get_result::<Strand>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     let strand = match strand {
         Some(strand) => strand,
@@ -325,7 +325,7 @@ pub(crate) async fn read_visibility_in_connection(
                 #[diesel(sql_type=diesel::sql_types::Bool)]
                 present: bool,
             }
-            let orphan = sql_query("SELECT EXISTS(SELECT 1 FROM strand_current_results WHERE realm_id=$1 AND strand_id=$2) AS present")
+            let orphan = sql_query("SELECT EXISTS(SELECT 1 FROM strand_current_states WHERE realm_id=$1 AND strand_id=$2) AS present")
                 .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(request.selector().map_err(PersistenceError::database)?.strand_id.as_str())
                 .get_result::<Exists>(&mut *conn).await.map_err(PersistenceError::database)?.present;
             return Err(if orphan {
@@ -375,7 +375,7 @@ pub(crate) async fn read_visibility_in_connection(
     )
     .await?;
     if let ScopeRef::Circle { circle_id, .. } = &scope {
-        let circle = sql_query("SELECT value,current_commit_id,current_stream_position,source_stream_ref FROM circle_current_results WHERE realm_id=$1 AND circle_id=$2 FOR SHARE")
+        let circle = sql_query("SELECT value,current_commit_id,current_stream_position,source_stream_ref FROM circle_current_states WHERE realm_id=$1 AND circle_id=$2 FOR SHARE")
             .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).get_result::<Strand>(&mut *conn).await.optional().map_err(PersistenceError::database)?
             .ok_or_else(|| unavailable("audited Circle current is missing"))?;
         if circle.value.get("state").and_then(Value::as_str) != Some("active") {
@@ -462,7 +462,7 @@ pub(crate) async fn read_visibility_in_connection(
         }
     }
     if let ScopeRef::Circle { circle_id, .. } = &event.scope_ref
-        && !crate::circle_current_results::effective_member_in_connection(
+        && !crate::circle_current_states::effective_member_in_connection(
             conn,
             &event.realm_id,
             circle_id,
@@ -735,7 +735,7 @@ pub(crate) async fn begin_in_connection(
             )
             .await?;
             if let ScopeRef::Circle { circle_id, .. } = &first.event.scope_ref
-                && !crate::circle_current_results::effective_member_in_connection(
+                && !crate::circle_current_states::effective_member_in_connection(
                     conn,
                     &first.event.realm_id,
                     circle_id,
@@ -905,7 +905,7 @@ pub(crate) async fn finish_in_connection(
                     );
                 }
             };
-            let outcome = WatchAuditReadOutcome {
+            let outcome = WatchAuditReadResponseBody {
                 audit_commit: transaction.commit.clone(),
                 current,
             };
@@ -1092,7 +1092,7 @@ pub(crate) async fn verify_handoff_archive(
                 )
             }
             RegisteredAuditOutcome::WatchRead(outcome) if read => {
-                let request: WatchAuditReadRequest =
+                let request: WatchAuditReadRequestBody =
                     serde_json::from_slice(&original.canonical_request)
                         .map_err(PersistenceError::database)?;
                 outcome

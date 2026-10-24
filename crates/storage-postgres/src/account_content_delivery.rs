@@ -815,7 +815,7 @@ pub(crate) async fn provision_scope_in_connection(
     payload
         .validate_envelope(&full.event)
         .map_err(PersistenceError::database)?;
-    let value = sql_query("SELECT value FROM agent_provisioning_current_results WHERE realm_id=$1 AND agent_id=$2 AND current_commit_id=$3 AND current_stream_position=$4 FOR SHARE")
+    let value = sql_query("SELECT value FROM agent_provisioning_current_states WHERE realm_id=$1 AND agent_id=$2 AND current_commit_id=$3 AND current_stream_position=$4 FOR SHARE")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(endpoint.agent_id.as_str())
         .bind::<Text,_>(reference.commit_id.as_str())
         .bind::<diesel::sql_types::BigInt,_>(i64::try_from(reference.stream_position).map_err(PersistenceError::database)?)
@@ -1167,7 +1167,7 @@ pub(crate) async fn require_owned_content_sources_in_connection(
         // accepted policy history is shared only by this Realm/Circle at this
         // same held transaction cut, including proof of policy absence.
         if !policies_by_circle.contains_key(&circle) {
-            let policies = crate::policy_current_results::read_scoped_agent_management_policy_snapshot_in_connection(
+            let policies = crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(
                 conn, &first.realm_id, circle.as_ref(),
             )
             .await?;
@@ -1345,7 +1345,7 @@ async fn acquire_realm_actor_material(
             .await?,
         )
     } else {
-        let revoked = sql_query("SELECT EXISTS(SELECT 1 FROM member_state_current_results WHERE realm_id=$1 AND member_id=$2 AND membership<>'join' AND updated_at >= $3) AS present")
+        let revoked = sql_query("SELECT EXISTS(SELECT 1 FROM member_state_current_states WHERE realm_id=$1 AND member_id=$2 AND membership<>'join' AND updated_at >= $3) AS present")
             .bind::<Text,_>(authority.realm_id.as_str()).bind::<Text,_>(actor.to_string())
             .bind::<diesel::sql_types::Timestamptz,_>(outcome.issued_at)
             .get_result::<crate::ExistsRow>(held.connection()).await.map_err(PersistenceError::database)?.present;
@@ -1427,7 +1427,7 @@ async fn validate_private_delivery_credentials(
                 "remote Watch session controller or key differs",
             ));
         }
-        Box::pin(crate::agent_current_results::lock_agent_producer_current(
+        Box::pin(crate::agent_current_states::lock_agent_producer_current(
             held.connection(),
             &endpoint.pcr_realm_id,
             &endpoint.agent_id,
@@ -1639,10 +1639,10 @@ async fn acquire_remote_watch_delivery(
         source_stream_ref: Option<serde_json::Value>,
     }
     let (head, result) = match outcome {
-        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::Current { stream_head, result, .. } => (stream_head, Some(result)),
-        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::NeverWritten { stream_head, .. } => (stream_head, None),
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentResponseBody::Current { stream_head, current_state: result, .. } => (stream_head, Some(result)),
+        arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentResponseBody::NeverWritten { stream_head, .. } => (stream_head, None),
     };
-    let revoked = sql_query("SELECT EXISTS(SELECT 1 FROM member_state_current_results WHERE realm_id=$1 AND member_id=$2 AND membership<>'join') AS present")
+    let revoked = sql_query("SELECT EXISTS(SELECT 1 FROM member_state_current_states WHERE realm_id=$1 AND member_id=$2 AND membership<>'join') AS present")
         .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(actor.to_string())
         .get_result::<crate::ExistsRow>(held.connection()).await.map_err(PersistenceError::database)?.present;
     if revoked {
@@ -1654,7 +1654,7 @@ async fn acquire_remote_watch_delivery(
         "s",
         "jsonb_build_object('kind','strand','strand_id',s.strand_id)",
     );
-    let strand = sql_query(format!("SELECT s.value,s.current_commit_id,s.current_stream_position,{strand_source} AS source_stream_ref FROM strand_current_results s WHERE s.realm_id=$1 AND s.strand_id=$2 FOR SHARE OF s"))
+    let strand = sql_query(format!("SELECT s.value,s.current_commit_id,s.current_stream_position,{strand_source} AS source_stream_ref FROM strand_current_states s WHERE s.realm_id=$1 AND s.strand_id=$2 FOR SHARE OF s"))
         .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str())
         .get_result::<LocalCurrent>(held.connection()).await.optional().map_err(PersistenceError::database)?;
     // Only retained accepted provenance can contradict the verified governor.
@@ -1688,7 +1688,7 @@ async fn acquire_remote_watch_delivery(
         }
     }
     if let arkret_wire::CommitStreamRef::Circle { circle_id, .. } = &head.stream_ref {
-        let revoked = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_results m WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3 AND (membership<>'join' OR NOT circle_member_parent_join_current(m.realm_id,m.member_id,m.value))) AS present")
+        let revoked = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3 AND (membership<>'join' OR NOT circle_member_parent_join_current(m.realm_id,m.member_id,m.value))) AS present")
             .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(actor.to_string())
             .get_result::<crate::ExistsRow>(held.connection()).await.map_err(PersistenceError::database)?.present;
         if revoked && audited.is_none() {
@@ -1701,7 +1701,7 @@ async fn acquire_remote_watch_delivery(
         "w",
         "jsonb_build_object('kind','strand_watch','strand_id',w.strand_id,'watcher_actor_id',w.watcher_actor_id::jsonb)",
     );
-    let current = sql_query(format!("SELECT w.value,w.current_commit_id,w.current_stream_position,{watch_source} AS source_stream_ref FROM strand_watch_current_results w WHERE w.realm_id=$1 AND w.strand_id=$2 AND w.watcher_actor_id=$3 FOR SHARE OF w"))
+    let current = sql_query(format!("SELECT w.value,w.current_commit_id,w.current_stream_position,{watch_source} AS source_stream_ref FROM strand_watch_current_states w WHERE w.realm_id=$1 AND w.strand_id=$2 AND w.watcher_actor_id=$3 FOR SHARE OF w"))
         .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str()).bind::<Text,_>(request.watcher_actor_id.to_string())
         .get_result::<LocalCurrent>(held.connection()).await.optional().map_err(PersistenceError::database)?;
     if let Some(current) = current.filter(|_| audited.is_none()) {
@@ -2147,7 +2147,7 @@ async fn native_reply_time_proof_in_connection(
     ))
     .await?;
     Box::pin(
-        crate::agent_interaction_current_results::require_current_public_in_connection(
+        crate::agent_interaction_current_states::require_current_public_in_connection(
             &mut *conn,
             realm,
             reply.controller,
@@ -2167,7 +2167,7 @@ async fn native_reply_time_proof_in_connection(
     )
     .await?;
     let policies = Box::pin(
-        crate::policy_current_results::read_scoped_agent_management_policies_in_connection(
+        crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
             &mut *conn,
             realm,
             target
@@ -2540,7 +2540,7 @@ async fn revalidate_projection_inputs_in_connection(
             .ok_or_else(|| unavailable("current controller is not an Account"))?;
         for recipient in [account, owner] {
             let fresh = Box::pin(
-                crate::self_current_reads::exact_current_result_in_connection(
+                crate::self_current_reads::exact_current_state_in_connection(
                     &mut *conn, request, recipient, station,
                 ),
             )
@@ -2560,8 +2560,8 @@ async fn revalidate_projection_inputs_in_connection(
                 ));
             }
         }
-        use arkret_models_collaboration::exact_current_results::{
-            ExactCurrentResultEntry as Entry, ExactCurrentResultsReadOutcome as Outcome,
+        use arkret_models_collaboration::exact_current_state::{
+            ExactCurrentStateEntry as Entry, ExactCurrentStateReadResponseBody as Outcome,
         };
         let Outcome::Present { entry, .. } = outcome else {
             return Err(unavailable(
@@ -2578,7 +2578,7 @@ async fn revalidate_projection_inputs_in_connection(
             Entry::CalendarScheduleSource(row) => (&row.source_stream_ref, &row.revision),
         };
         if matches!(entry, Entry::Policy(_)) {
-            let target = crate::policy_current_results::management_policy_scope_target(
+            let target = crate::policy_current_states::management_policy_scope_target(
                 &request.realm_id,
                 stream,
             )?;
@@ -2652,10 +2652,10 @@ async fn revalidate_projection_inputs_in_connection(
         .await?
         .ok_or_else(|| unavailable("watch target current material is unavailable"))?;
         let (generation, head) = match outcome {
-            arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::Current {
+            arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentResponseBody::Current {
                 governance_generation, stream_head, ..
             }
-            | arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome::NeverWritten {
+            | arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentResponseBody::NeverWritten {
                 governance_generation, stream_head, ..
             } => (*governance_generation, stream_head),
         };
@@ -2670,12 +2670,12 @@ async fn revalidate_projection_inputs_in_connection(
             .current_state_entries
             .iter()
             .find(|row| {
-                let arkret_wire::TypedCurrentRow::Value { selector, .. } = row;
+                let arkret_wire::CurrentState::Value { selector, .. } = row;
                 matches!(selector, arkret_wire::CurrentSelector::Strand { strand_id }
                 if strand_id == &request.strand_id)
             })
             .ok_or_else(|| unavailable("watch target Strand current is unavailable"))?;
-        let arkret_wire::TypedCurrentRow::Value {
+        let arkret_wire::CurrentState::Value {
             source_stream_ref,
             revision,
             ..
@@ -2988,7 +2988,7 @@ async fn revalidate_content_inputs_in_connection(
                         .flat_map(|snapshot| &snapshot.current_state_entries),
                 )
             {
-                let arkret_wire::TypedCurrentRow::Value {
+                let arkret_wire::CurrentState::Value {
                     source_stream_ref,
                     revision,
                     ..
@@ -3296,7 +3296,7 @@ async fn acquire_owned_delivery_guard(
     }
     // Take the producer lock before reading the clock. The same lock is held
     // by native status/key writers; a waiter cannot reuse pre-wait liveness.
-    Box::pin(crate::agent_current_results::lock_agent_producer_current(
+    Box::pin(crate::agent_current_states::lock_agent_producer_current(
         guard.connection(),
         &endpoint.pcr_realm_id,
         &endpoint.agent_id,
@@ -3401,7 +3401,7 @@ async fn acquire_owned_delivery_guard(
                 return Err(unavailable("native reply body source is withheld"));
             };
             let message_id = arkret_wire::MessageId::from_event_id(&full.event.event_id);
-            let current = crate::message_revision_current_results::locked_message_target(
+            let current = crate::message_revision_current_states::locked_message_target(
                 guard.connection(),
                 &full.event.realm_id,
                 &message_id,
@@ -3418,7 +3418,7 @@ async fn acquire_owned_delivery_guard(
                 || current.created_at != full.event.created_at
                 || current.scope_ref != full.event.scope_ref
                 || current.strand_id != reply.strand.clone()
-                || crate::message_revision_current_results::message_is_redacted(
+                || crate::message_revision_current_states::message_is_redacted(
                     guard.connection(),
                     &full.event.realm_id,
                     &message_id,
@@ -3633,14 +3633,14 @@ async fn acquire_owned_delivery_guard(
                 "session scope differs from the current controller or key",
             ));
         }
-        let accountability = sql_query("SELECT value FROM identity_accountability_current_results WHERE subject_id=$1 AND issuer_id=$2 ORDER BY realm_id,scope_set_digest FOR SHARE")
+        let accountability = sql_query("SELECT value FROM identity_accountability_current_states WHERE subject_id=$1 AND issuer_id=$2 ORDER BY realm_id,scope_set_digest FOR SHARE")
             .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(controller_account_id.principal_id.as_str())
             .load::<ValueRow>(guard.connection()).await.map_err(PersistenceError::database)?;
         let values = accountability.into_iter().map(|row| serde_json::from_value::<arkret_models_collaboration::governance::accountability::AccountabilityProjection>(row.value)
             .map_err(PersistenceError::database)).collect::<PersistenceResult<Vec<_>>>()?
             .into_iter().filter(|value| value.accountability_scope.scopes().contains(&arkret_wire::AccountabilityScopeKind::AgentOperator)).collect::<Vec<_>>();
         clock.accountability.push(values);
-        let policies = sql_query("SELECT value FROM policy_current_results WHERE value->>'policy_kind'='agent' AND value->>'realm_id'=$1 ORDER BY policy_id")
+        let policies = sql_query("SELECT value FROM policy_current_states WHERE value->>'policy_kind'='agent' AND value->>'realm_id'=$1 ORDER BY policy_id")
             .bind::<Text,_>(realm.as_str()).load::<ValueRow>(guard.connection()).await.map_err(PersistenceError::database)?;
         for row in policies {
             let policy: arkret_models_collaboration::governance::operation_wire::Policy =
@@ -3781,8 +3781,8 @@ async fn acquire_owned_delivery_guard(
 /// Hold the governing authorization cut until a signed peer audit answer is serialized.
 pub(crate) async fn acquire_governor_audit_delivery(
     pool: &crate::PgPool,
-    request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
-    outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+    request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequestBody,
+    outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadResponseBody,
     issuer: &DidCoreId,
     expires_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<Box<dyn AccountContentDeliveryGuard>> {

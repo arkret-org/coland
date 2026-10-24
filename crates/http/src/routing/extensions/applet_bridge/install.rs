@@ -10,10 +10,9 @@ use arkret_models_collaboration::governance::grant_constraint::{
 };
 use arkret_models_integration::{
     AppletGhostActorMode, AppletInstallAuthoringRequestBasis, AppletInstallEffectiveStatus,
-    AppletInstallOutcome, AppletInstallPlan, AppletInstallRequestBody, AppletPackage,
-    AppletRegistrationEpochEvidence, AppletScopeRejection, AppletWireNamespaces,
-    CapabilityConstraint, DeniedScope, E2eeEffect, EventSubmission, NamespaceConflict, ScopeGrant,
-    WidgetEffect,
+    AppletInstallPlan, AppletInstallRequestBody, AppletInstallResponseBody, AppletPackage,
+    AppletRegistrationEpochEvidence, AppletScopeRejection, AppletWireNamespaces, DeniedScope,
+    E2eeEffect, NamespaceConflict, PlannedEvent, ScopeGrant, WidgetEffect,
 };
 use arkret_wire::{
     ActorId, CapabilityActionId, Event, ResourceMatchScope, ScopeRef, WireResourceSelector,
@@ -31,14 +30,10 @@ use super::types::{AppletIdentityRecord, AppletRecord};
 use crate::ids;
 use crate::state::AppState;
 
-struct ValidatedInstallEvents {
-    approved_actions: Vec<String>,
-    grant_ids: Vec<GrantId>,
-}
-
 pub(super) struct ValidatedAdminInstallEvents {
     pub approved_actions: Vec<String>,
     pub grant_ids: Vec<GrantId>,
+    pub approved_scopes: Vec<ScopeGrant>,
 }
 
 pub(super) fn approved_scopes_from_formal_install_events(
@@ -47,39 +42,8 @@ pub(super) fn approved_scopes_from_formal_install_events(
     install_actor: &ActorId,
     station_id: &str,
 ) -> Result<Vec<ScopeGrant>, AppError> {
-    let basis = &commit.authoring_request_basis;
     let validated = validate_formal_install_events(state, commit, install_actor, station_id)?;
-    approved_scope_grants(&basis.effective_scope, validated.approved_actions)
-}
-
-pub(super) fn approved_scope_grants(
-    effective_scope: &ScopeRef,
-    approved_actions: Vec<String>,
-) -> Result<Vec<ScopeGrant>, AppError> {
-    if approved_actions.is_empty() {
-        return Err(crate::app_error!(
-            AppletInstallPlanMismatch,
-            "applet install requires at least one approved capability grant action",
-        ));
-    }
-    let (realm_id, circle_ids) = match effective_scope {
-        ScopeRef::Realm { realm_id } => (realm_id.clone(), None),
-        ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } => (realm_id.clone(), Some(vec![circle_id.clone()])),
-        _ => {
-            return Err(AppError::param_invalid(
-                "unsupported applet effective scope",
-            ));
-        }
-    };
-    Ok(vec![ScopeGrant {
-        actions: approved_actions,
-        realm_ids: vec![realm_id],
-        circle_ids,
-        constraints: Vec::new(),
-    }])
+    Ok(validated.approved_scopes)
 }
 
 fn validate_formal_install_events(
@@ -87,14 +51,10 @@ fn validate_formal_install_events(
     commit: &AppletInstallRequestBody,
     install_actor: &ActorId,
     _station_id: &str,
-) -> Result<ValidatedInstallEvents, AppError> {
+) -> Result<ValidatedAdminInstallEvents, AppError> {
     let package = &commit.applet_package;
     let basis = &commit.authoring_request_basis;
-    let admin = validate_admin_install_events(package, basis, install_actor)?;
-    Ok(ValidatedInstallEvents {
-        approved_actions: admin.approved_actions,
-        grant_ids: admin.grant_ids,
-    })
+    validate_admin_install_events(package, basis, install_actor)
 }
 
 pub(super) fn validate_admin_install_events(
@@ -167,6 +127,7 @@ pub(super) fn validate_admin_install_events(
         .collect::<BTreeSet<_>>();
     let mut approved_actions = BTreeSet::new();
     let mut grant_ids = Vec::with_capacity(basis.capability_grant_events.len());
+    let mut approved_scopes = Vec::with_capacity(basis.capability_grant_events.len());
     let mut event_ids = BTreeSet::new();
 
     for event in &basis.capability_grant_events {
@@ -240,11 +201,21 @@ pub(super) fn validate_admin_install_events(
             }
         }
         grant_ids.push(arkret_identifiers::GrantId::from_event_id(&event.event_id));
+        approved_scopes.push(ScopeGrant {
+            actions: grant.actions.clone(),
+            realm_ids: vec![realm_id.clone()],
+            circle_ids: match &basis.effective_scope {
+                ScopeRef::Circle { circle_id, .. } => Some(vec![circle_id.clone()]),
+                _ => None,
+            },
+            constraints: grant.constraints.clone(),
+        });
     }
 
     Ok(ValidatedAdminInstallEvents {
         approved_actions: approved_actions.into_iter().collect(),
         grant_ids,
+        approved_scopes,
     })
 }
 
@@ -256,7 +227,7 @@ pub(super) async fn register_package_install(
     idempotency_key: String,
     body_digest: String,
     res: &mut Response,
-) -> Result<AppletInstallOutcome, AppError> {
+) -> Result<AppletInstallResponseBody, AppError> {
     let owner_actor =
         crate::routing::identity::session_actor::session_actor_from_credential(state, session)?;
     let owner_actor_key = owner_actor.to_string();
@@ -401,7 +372,7 @@ pub(super) async fn register_package_install(
             &registration_event,
         )?
         .event_id;
-        let response = AppletInstallOutcome {
+        let response = AppletInstallResponseBody {
             install_id: install_id.clone(),
             applet_id: package.applet_id.clone(),
             service_id: package.service_id.clone(),
@@ -500,8 +471,8 @@ pub(super) async fn register_package_install(
                     &error.message(),
                 )
             })?;
-    let response: AppletInstallOutcome =
-        serde_json::from_value(accepted.response_body).map_err(|error| {
+    let response: AppletInstallResponseBody = serde_json::from_value(accepted.response_body)
+        .map_err(|error| {
             AppError::internal(format!("stored Applet outcome is invalid: {error}"))
         })?;
     crate::routing::append_audit_log(
@@ -533,7 +504,7 @@ fn build_install_execution_record(
     body_digest: &str,
     submitted_plan_digest: &str,
     record: &AppletRecord,
-    response: &AppletInstallOutcome,
+    response: &AppletInstallResponseBody,
     accepted: bool,
 ) -> Result<Value, AppError> {
     let status = if accepted { "completed" } else { "pending" };
@@ -557,7 +528,7 @@ fn build_install_execution_record(
 
 fn install_produced_event_refs(
     record: &AppletRecord,
-    response: &AppletInstallOutcome,
+    response: &AppletInstallResponseBody,
 ) -> Vec<String> {
     let mut refs = Vec::with_capacity(
         5 + response.capability_grant_refs.len()
@@ -578,7 +549,7 @@ fn install_produced_event_refs(
 
 fn install_execution_steps(
     record: &AppletRecord,
-    response: &AppletInstallOutcome,
+    response: &AppletInstallResponseBody,
     accepted: bool,
 ) -> Result<Vec<Value>, AppError> {
     let package = &record.package;
@@ -743,7 +714,7 @@ fn registration_epoch_signing_key_from_document(
     validate_registration_epoch_evidence_for_document(package, evidence, document)?;
     let public_key = arkret_identity::jws::resolve_ed25519_pubkey_from_document(
         document,
-        package.webhook_auth.key_ref.as_str(),
+        package.webhook_signature_policy.key_ref.as_str(),
     )
     .map_err(|error| {
         AppError::param_invalid(format!(
@@ -870,9 +841,9 @@ fn validate_registration_epoch_evidence_for_document(
                 "applet_registration_epoch_evidence_mismatch: {reason}"
             ))
         })?;
-    if !evidence.contains_signing_key(&package.webhook_auth.key_ref) {
+    if !evidence.contains_signing_key(&package.webhook_signature_policy.key_ref) {
         return Err(AppError::param_invalid(
-            "applet webhook_auth key_ref is outside registration_epoch evidence",
+            "applet webhook_signature_policy key_ref is outside registration_epoch evidence",
         )
         .with_internal_reason("applet_registration_epoch_signing_key_mismatch"));
     }
@@ -918,14 +889,13 @@ pub(super) async fn build_install_plan(
         requested_scopes: package.requested_scopes.clone(),
         approved_scopes,
         denied_scopes,
-        event_submissions: vec![EventSubmission {
+        planned_events: vec![PlannedEvent {
             event_kind: arkret_wire::EventKind::AppletRegistration
                 .as_str()
                 .to_owned(),
             payload: event_payload,
             semantic_refs: None,
         }],
-        capability_constraints: capability_constraints_for_scope(scope),
         namespace_conflicts: Vec::<NamespaceConflict>::new(),
         e2ee_effect: e2ee_effect_for_package(package),
         widget_effect: widget_effect_for_package(package),
@@ -958,20 +928,6 @@ pub(super) fn registration_epoch_evidence_from_event(
     // `applet-registration-epoch-evidence.schema.json` shape; a schema-valid
     // carrier that disagrees with the resolved DID state is rejected later.
     super::registration_epoch_evidence_from_event(event).map_err(AppError::schema_violation)
-}
-
-pub(super) fn capability_constraints_for_scope(scope: &ScopeRef) -> Vec<CapabilityConstraint> {
-    let mut params = std::collections::BTreeMap::from([(
-        "realm_id".to_owned(),
-        Value::String(effective_scope_realm_id(scope)),
-    )]);
-    if let ScopeRef::Circle { circle_id, .. } = scope {
-        params.insert("circle_id".to_owned(), Value::String(circle_id.to_string()));
-    }
-    vec![CapabilityConstraint {
-        constraint_kind: "effective_scope".to_owned(),
-        params: Some(params),
-    }]
 }
 
 pub(super) fn e2ee_effect_for_package(package: &AppletPackage) -> E2eeEffect {
@@ -1208,7 +1164,7 @@ mod tests {
         package.endpoint_policy.endpoints = vec![AppletEndpointEntry {
             method: AppletEndpointMethod::Post,
             path: "/events".to_owned(),
-            auth: Some(AppletEndpointAuth::WebhookSignature),
+            authentication_kind: Some(AppletEndpointAuth::WebhookSignature),
             description: None,
             extra: Default::default(),
         }];
@@ -1218,7 +1174,7 @@ mod tests {
             pinned_service_method_version(),
             vec![
                 arkret_models_integration::applet::AppletAcceptedSigningKeyEvidence {
-                    key_ref: package.webhook_auth.key_ref.to_string(),
+                    key_ref: package.webhook_signature_policy.key_ref.to_string(),
                     public_key_digest: Hash::new(format!("sha256:{}", "33".repeat(32))).unwrap(),
                 },
             ],
@@ -1250,7 +1206,7 @@ mod tests {
             pinned_service_method_version(),
             vec![
                 arkret_models_integration::applet::AppletAcceptedSigningKeyEvidence {
-                    key_ref: package.webhook_auth.key_ref.to_string(),
+                    key_ref: package.webhook_signature_policy.key_ref.to_string(),
                     public_key_digest: Hash::new(format!("sha256:{}", "33".repeat(32))).unwrap(),
                 },
             ],
@@ -1431,7 +1387,7 @@ mod tests {
         for material in [multibase, jwk] {
             let document = DidDocument::new(
                 test_applet_service_did(),
-                package.webhook_auth.key_ref.to_string(),
+                package.webhook_signature_policy.key_ref.to_string(),
                 material,
             );
             let evidence = AppletRegistrationEpochEvidence::from_did_document(
@@ -1447,7 +1403,7 @@ mod tests {
 
             let mut rotated = document.clone();
             rotated.verification_methods.insert(
-                package.webhook_auth.key_ref.to_string(),
+                package.webhook_signature_policy.key_ref.to_string(),
                 arkret_canonical::ed25519_pubkey_to_did_key_multibase(
                     ed25519_dalek::SigningKey::from_bytes(&[32; 32])
                         .verifying_key()
@@ -1473,7 +1429,7 @@ mod tests {
         let package = sample_package();
         let document = DidDocument::new(
             test_applet_service_did(),
-            package.webhook_auth.key_ref.to_string(),
+            package.webhook_signature_policy.key_ref.to_string(),
             json!({"kty": "OKP", "crv": "X25519", "x": arkret_canonical::base64url_encode(&[31; 32])}).to_string(),
         );
         let evidence = AppletRegistrationEpochEvidence::from_did_document(
@@ -1495,7 +1451,7 @@ mod tests {
         let package = sample_package();
         let document = DidDocument::new(
             test_applet_service_did(),
-            package.webhook_auth.key_ref.to_string(),
+            package.webhook_signature_policy.key_ref.to_string(),
             r#"{"crv":"Ed25519","kty":"OKP","x":"fixture"}"#,
         );
         let evidence =
@@ -1537,7 +1493,7 @@ mod tests {
         let package = sample_package();
         let old_document = DidDocument::new(
             test_applet_service_did(),
-            package.webhook_auth.key_ref.to_string(),
+            package.webhook_signature_policy.key_ref.to_string(),
             r#"{"crv":"Ed25519","kty":"OKP","x":"old"}"#,
         );
         let old_evidence = AppletRegistrationEpochEvidence::from_did_document(
@@ -1550,7 +1506,7 @@ mod tests {
 
         let rotated_document = DidDocument::new(
             test_applet_service_did(),
-            package.webhook_auth.key_ref.to_string(),
+            package.webhook_signature_policy.key_ref.to_string(),
             r#"{"crv":"Ed25519","kty":"OKP","x":"rotated"}"#,
         );
         assert!(
@@ -1584,7 +1540,7 @@ mod tests {
         let package = sample_package();
         let mut deactivated_document = DidDocument::new(
             test_applet_service_did(),
-            package.webhook_auth.key_ref.to_string(),
+            package.webhook_signature_policy.key_ref.to_string(),
             r#"{"crv":"Ed25519","kty":"OKP","x":"fixture"}"#,
         );
         let active_evidence = AppletRegistrationEpochEvidence::from_did_document(

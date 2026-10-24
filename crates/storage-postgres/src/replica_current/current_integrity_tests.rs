@@ -1,6 +1,6 @@
 //! Real PostgreSQL snapshot replacement and competing current-row writes.
 use arkret_wire::{
-    CommitStreamHead, CommitStreamRef, CurrentRevision, CurrentSelector, TypedCurrentRow,
+    CommitStreamHead, CommitStreamRef, CurrentRevision, CurrentSelector, CurrentState,
 };
 
 use super::*;
@@ -15,7 +15,7 @@ async fn footprint(conn: &mut AsyncPgConnection, realm: &arkret_wire::RealmId) -
     diesel::sql_query(
         "SELECT jsonb_build_object( \
          'evidence',(SELECT jsonb_agg(to_jsonb(r) ORDER BY selector::text) FROM replica_authorization_rows r WHERE realm_id=$1), \
-         'current',(SELECT jsonb_agg(to_jsonb(r) ORDER BY result_family) FROM realm_bootstrap_current_results r WHERE realm_id=$1), \
+         'current',(SELECT jsonb_agg(to_jsonb(r) ORDER BY state_family) FROM realm_bootstrap_current_states r WHERE realm_id=$1), \
          'heads',(SELECT jsonb_agg(to_jsonb(r) ORDER BY source_stream_ref::text) FROM replica_authorization_cuts r WHERE realm_id=$1)) AS value",
     )
     .bind::<Text, _>(realm.as_str())
@@ -25,8 +25,8 @@ async fn footprint(conn: &mut AsyncPgConnection, realm: &arkret_wire::RealmId) -
     .value
 }
 
-fn entry(realm: &arkret_wire::RealmId, selector: CurrentSelector, value: Value) -> TypedCurrentRow {
-    TypedCurrentRow::Value {
+fn entry(realm: &arkret_wire::RealmId, selector: CurrentSelector, value: Value) -> CurrentState {
+    CurrentState::Value {
         selector,
         source_stream_ref: CommitStreamRef::Realm {
             realm_id: realm.clone(),
@@ -60,7 +60,7 @@ async fn snapshot_same_revision_conflicts_preserve_the_whole_installed_cut() {
             serde_json::json!("since_join"),
         ),
     ];
-    let TypedCurrentRow::Value {
+    let CurrentState::Value {
         source_stream_ref,
         revision,
         ..
@@ -77,7 +77,7 @@ async fn snapshot_same_revision_conflicts_preserve_the_whole_installed_cut() {
     for source_conflict in [false, true] {
         let mut candidates = rows.clone();
         // An earlier valid successor must also be rolled back with a bad sibling.
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             revision, value, ..
         } = &mut candidates[0];
         revision.commit_id = arkret_wire::RealmCommitId::from_digest([32; 32]);
@@ -88,7 +88,7 @@ async fn snapshot_same_revision_conflicts_preserve_the_whole_installed_cut() {
             stream_position: 1,
             ..head.clone()
         };
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             source_stream_ref,
             value,
             ..
@@ -128,11 +128,11 @@ async fn snapshot_same_revision_conflicts_preserve_the_whole_installed_cut() {
     assert_eq!(footprint(&mut conn, &realm).await, before);
     let mut successor = rows.clone();
     for row in &mut successor {
-        let TypedCurrentRow::Value { revision, .. } = row;
+        let CurrentState::Value { revision, .. } = row;
         revision.commit_id = arkret_wire::RealmCommitId::from_digest([32; 32]);
         revision.stream_position = 1;
     }
-    let TypedCurrentRow::Value { value, .. } = &mut successor[1];
+    let CurrentState::Value { value, .. } = &mut successor[1];
     *value = serde_json::json!("all_history_for_current_members");
     let next = CommitStreamHead {
         commit_id: arkret_wire::RealmCommitId::from_digest([32; 32]),
@@ -188,7 +188,7 @@ async fn concurrent_same_revision_values_have_one_winner_and_exact_replay() {
             .is_err()
     );
     let mut source_conflict = winner.clone();
-    let TypedCurrentRow::Value {
+    let CurrentState::Value {
         source_stream_ref, ..
     } = &mut source_conflict;
     *source_stream_ref = CommitStreamRef::Sidecar {

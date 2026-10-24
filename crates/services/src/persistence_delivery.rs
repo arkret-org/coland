@@ -239,12 +239,12 @@ impl crate::delivery::DeviceMessagePort for PersistenceDeviceMessages {
         &self,
         recipient: &str,
         device_id: &str,
-        ack_token: &str,
+        acknowledgement_token: &str,
     ) -> crate::ServiceResult<Option<usize>> {
         Ok(self
             .0
             .device_messages()
-            .ack_with_token(recipient, device_id, ack_token)
+            .ack_with_token(recipient, device_id, acknowledgement_token)
             .await?)
     }
 
@@ -307,12 +307,12 @@ impl crate::delivery::DeviceMessagePort for PersistenceDeviceMessages {
     async fn acknowledge_recipient_deliveries(
         &self,
         selector: &crate::delivery::RecipientQueueSelector,
-        ack_token: &str,
+        acknowledgement_token: &str,
     ) -> crate::ServiceResult<Option<usize>> {
         Ok(self
             .0
             .device_messages()
-            .ack_recipient_with_token(selector, ack_token)
+            .ack_recipient_with_token(selector, acknowledgement_token)
             .await?)
     }
 

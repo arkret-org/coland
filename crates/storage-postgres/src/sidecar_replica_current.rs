@@ -1,5 +1,5 @@
 //! Install source-signed Sidecar current values without replaying admission.
-use arkret_wire::{CommitStreamRef, CurrentSelector, RealmId, TypedCurrentRow};
+use arkret_wire::{CommitStreamRef, CurrentSelector, CurrentState, RealmId};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::QueryableByName;
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
@@ -20,10 +20,10 @@ fn invalid(message: &str) -> PersistenceError {
 pub(crate) async fn install_in_connection(
     conn: &mut crate::AsyncPgConnection,
     realm: &RealmId,
-    entry: &TypedCurrentRow,
+    entry: &CurrentState,
     installed_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
-    let TypedCurrentRow::Value {
+    let CurrentState::Value {
         selector,
         source_stream_ref,
         revision,
@@ -55,11 +55,11 @@ pub(crate) async fn install_in_connection(
                 1,
             ))
             .map_err(PersistenceError::database)?;
-            diesel::sql_query("INSERT INTO sidecar_current_results (realm_id,sidecar_id,controller_account_id,create_event_id,current_commit_id,current_stream_position,source_stream_ref,value,updated_at) \
+            diesel::sql_query("INSERT INTO sidecar_current_states (realm_id,sidecar_id,controller_account_id,create_event_id,current_commit_id,current_stream_position,source_stream_ref,value,updated_at) \
                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(sidecar_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at \
-                WHERE sidecar_current_results.realm_id=EXCLUDED.realm_id AND sidecar_current_results.controller_account_id=EXCLUDED.controller_account_id \
-                AND sidecar_current_results.create_event_id=EXCLUDED.create_event_id AND sidecar_current_results.source_stream_ref=EXCLUDED.source_stream_ref \
-                AND (sidecar_current_results.current_stream_position<EXCLUDED.current_stream_position OR (sidecar_current_results.current_stream_position=EXCLUDED.current_stream_position AND sidecar_current_results.current_commit_id=EXCLUDED.current_commit_id AND sidecar_current_results.value=EXCLUDED.value))")
+                WHERE sidecar_current_states.realm_id=EXCLUDED.realm_id AND sidecar_current_states.controller_account_id=EXCLUDED.controller_account_id \
+                AND sidecar_current_states.create_event_id=EXCLUDED.create_event_id AND sidecar_current_states.source_stream_ref=EXCLUDED.source_stream_ref \
+                AND (sidecar_current_states.current_stream_position<EXCLUDED.current_stream_position OR (sidecar_current_states.current_stream_position=EXCLUDED.current_stream_position AND sidecar_current_states.current_commit_id=EXCLUDED.current_commit_id AND sidecar_current_states.value=EXCLUDED.value))")
                 .bind::<Text,_>(realm.as_str()).bind::<Text,_>(sidecar_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(current.controller_account_id).map_err(PersistenceError::database)?)
                 .bind::<Text,_>(create.as_str()).bind::<Text,_>(revision.commit_id.as_str()).bind::<BigInt,_>(position).bind::<Jsonb,_>(&source).bind::<Jsonb,_>(value).bind::<Timestamptz,_>(installed_at)
                 .execute(&mut *conn).await.map_err(PersistenceError::database)?
@@ -111,9 +111,9 @@ pub(crate) async fn install_in_connection(
                 arkret_wire::EventId::new(covered.event_id).map_err(PersistenceError::database)?;
             let digest = arkret_canonical::canonical_sha256(context_ref)
                 .map_err(PersistenceError::database)?;
-            diesel::sql_query("INSERT INTO sidecar_context_current_results (realm_id,sidecar_id,context_ref_digest,context_ref,version,predecessor_event_ref,attach_event_id,current_commit_id,current_stream_position,source_stream_ref,value,updated_at) \
+            diesel::sql_query("INSERT INTO sidecar_context_current_states (realm_id,sidecar_id,context_ref_digest,context_ref,version,predecessor_event_ref,attach_event_id,current_commit_id,current_stream_position,source_stream_ref,value,updated_at) \
                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(sidecar_id,context_ref_digest) DO UPDATE SET version=EXCLUDED.version,predecessor_event_ref=EXCLUDED.predecessor_event_ref,attach_event_id=EXCLUDED.attach_event_id,current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at \
-                WHERE sidecar_context_current_results.realm_id=EXCLUDED.realm_id AND sidecar_context_current_results.source_stream_ref=EXCLUDED.source_stream_ref AND (sidecar_context_current_results.current_stream_position<EXCLUDED.current_stream_position OR (sidecar_context_current_results.current_stream_position=EXCLUDED.current_stream_position AND sidecar_context_current_results.current_commit_id=EXCLUDED.current_commit_id AND sidecar_context_current_results.value=EXCLUDED.value))")
+                WHERE sidecar_context_current_states.realm_id=EXCLUDED.realm_id AND sidecar_context_current_states.source_stream_ref=EXCLUDED.source_stream_ref AND (sidecar_context_current_states.current_stream_position<EXCLUDED.current_stream_position OR (sidecar_context_current_states.current_stream_position=EXCLUDED.current_stream_position AND sidecar_context_current_states.current_commit_id=EXCLUDED.current_commit_id AND sidecar_context_current_states.value=EXCLUDED.value))")
                 .bind::<Text,_>(realm.as_str()).bind::<Text,_>(sidecar_id.as_str()).bind::<Text,_>(digest).bind::<Jsonb,_>(serde_json::to_value(context_ref).map_err(PersistenceError::database)?)
                 .bind::<BigInt,_>(i64::try_from(current.version).map_err(PersistenceError::database)?).bind::<diesel::sql_types::Nullable<Text>,_>(current.predecessor_event_ref.as_ref().map(|id|id.as_str()))
                 .bind::<Text,_>(event.as_str()).bind::<Text,_>(revision.commit_id.as_str()).bind::<BigInt,_>(position).bind::<Jsonb,_>(source).bind::<Jsonb,_>(value).bind::<Timestamptz,_>(installed_at)
@@ -237,7 +237,7 @@ mod tests {
         attach.authority_commit.commit.stream_position = 0;
         attach.authority_commit.commit.previous_commit_ref = None;
         let attach = recovery_fixture::source_request(&pool, attach).await;
-        let entry = TypedCurrentRow::Value {
+        let entry = CurrentState::Value {
             selector: CurrentSelector::SidecarContext {
                 sidecar_id: sidecar.clone(),
                 source_context_ref: context,
@@ -274,7 +274,7 @@ mod tests {
         );
         assert_eq!(
             diesel::sql_query(
-                "SELECT COUNT(*) AS count FROM sidecar_context_current_results WHERE sidecar_id=$1"
+                "SELECT COUNT(*) AS count FROM sidecar_context_current_states WHERE sidecar_id=$1"
             )
             .bind::<Text, _>(sidecar.as_str())
             .get_result::<Count>(&mut conn)
@@ -289,7 +289,7 @@ mod tests {
         install_in_connection(&mut conn, realm, &entry, parent.commit.committed_at)
             .await
             .unwrap();
-        let actual=diesel::sql_query("SELECT attach_event_id AS event_id FROM sidecar_context_current_results WHERE sidecar_id=$1").bind::<Text,_>(sidecar.as_str()).get_result::<EventIdentity>(&mut conn).await.unwrap();
+        let actual=diesel::sql_query("SELECT attach_event_id AS event_id FROM sidecar_context_current_states WHERE sidecar_id=$1").bind::<Text,_>(sidecar.as_str()).get_result::<EventIdentity>(&mut conn).await.unwrap();
         assert_eq!(
             actual.event_id,
             attach.authority_commit.event.event_id.as_str()

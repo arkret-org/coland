@@ -264,7 +264,9 @@ pub(crate) fn validate_agent_binding_history_at(
     let binding = history
         .entries
         .get(1)
-        .filter(|entry| entry.version_id.starts_with("2-") && entry.version_time <= accepted_at)
+        .filter(|entry| {
+            entry.version_id.starts_with("2-") && entry.version_created_at <= accepted_at
+        })
         .ok_or_else(|| schema_error("Agent PCR binding must be the first continuous update"))?;
     validate_agent_binding_document(
         &binding.state,
@@ -278,7 +280,7 @@ pub(crate) fn validate_agent_binding_history_at(
         .entries
         .iter()
         .skip(2)
-        .filter(|entry| entry.version_time <= accepted_at)
+        .filter(|entry| entry.version_created_at <= accepted_at)
     {
         validate_agent_binding_document(
             &entry.state,
@@ -953,7 +955,7 @@ mod tests {
                     account_id,
                     localpart: format!("controller-{label}"),
                     display_name: None,
-                    bio: None,
+                    biography: None,
                     avatar_blob_ref: None,
                     created_at: chrono::Utc::now(),
                 })

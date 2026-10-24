@@ -83,7 +83,7 @@ impl PrincipalResolutionStore for PgPrincipalResolutionStore {
     async fn admit_update(
         &self,
         write: coland_storage::PrincipalResolutionUpdateWrite,
-    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
         write
             .transaction
             .validate()
@@ -115,7 +115,7 @@ impl PrincipalResolutionStore for PgPrincipalResolutionStore {
             crate::pcr_private_authority::accepted_governance(&mut conn, &realm).await?;
         let input: arkret_models_collaboration::principal_operations::PcrGenesisAdmissionInput =
             serde_json::from_slice(&row.exact_request_body).map_err(PersistenceError::database)?;
-        let outcome: arkret_models_collaboration::principal_operations::PcrGenesisAdmissionOutcome =
+        let outcome: arkret_models_collaboration::principal_operations::PcrGenesisAdmissionResponseBody =
             serde_json::from_value(row.result_json).map_err(PersistenceError::database)?;
         outcome
             .validate_against(&input)
@@ -140,7 +140,7 @@ impl PrincipalResolutionStore for PgPrincipalResolutionStore {
             });
         }
         let mut conn = crate::pg_db(&self.pool);
-        let known=sql_query("SELECT EXISTS(SELECT 1 FROM pcr_genesis_units WHERE principal_id=$1 AND station_id=$2 AND result_json<>'{}'::jsonb) OR EXISTS(SELECT 1 FROM principal_resolution_current_results WHERE principal_id=$1 AND station_id=$2) AS applied")
+        let known=sql_query("SELECT EXISTS(SELECT 1 FROM pcr_genesis_units WHERE principal_id=$1 AND station_id=$2 AND result_json<>'{}'::jsonb) OR EXISTS(SELECT 1 FROM principal_resolution_current_states WHERE principal_id=$1 AND station_id=$2) AS applied")
             .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
             .get_result::<AppliedRow>(&mut conn).await.map_err(PersistenceError::database)?.applied;
         Ok(if known {
@@ -272,7 +272,7 @@ impl PrincipalResolutionStore for PgPrincipalResolutionStore {
         let mut conn = crate::pg_db(&self.pool);
         let rows=sql_query("WITH RECURSIVE chain AS ( \
             SELECT c.commit_json,e.envelope AS event_json,0::bigint AS depth \
-            FROM principal_resolution_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.stream_position=r.current_stream_position AND c.realm_id=r.pcr_realm_id \
+            FROM principal_resolution_current_states r JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.stream_position=r.current_stream_position AND c.realm_id=r.pcr_realm_id \
             JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE r.principal_id=$1 AND r.station_id=$2 \
             UNION ALL \
             SELECT c.commit_json,e.envelope,chain.depth+1 FROM chain \

@@ -291,7 +291,7 @@ impl DeviceRevocationStore for PgDeviceRevocationStore {
                     committed_at: record.committed_at,
                 };
             }
-            let seq = sql_query(
+            let sequence = sql_query(
                 "INSERT INTO device_revocation_linearization_heads \
                  (principal_id, station_id, device_id, last_seq, updated_at) \
                  VALUES ($1,$2,$3,1,$4) ON CONFLICT (principal_id,station_id,device_id) \
@@ -319,7 +319,7 @@ impl DeviceRevocationStore for PgDeviceRevocationStore {
             .bind::<Text, _>(&request.intent_digest)
             .bind::<Jsonb, _>(&request_json)
             .bind::<Jsonb, _>(&status_json)
-            .bind::<BigInt, _>(seq)
+            .bind::<BigInt, _>(sequence)
             .bind::<Timestamptz, _>(request.requested_at)
             .bind::<Timestamptz, _>(expires_at)
             .execute(&mut *conn)
@@ -327,7 +327,7 @@ impl DeviceRevocationStore for PgDeviceRevocationStore {
             Ok(DeviceRevocationGateLinearization {
                 request,
                 status,
-                linearization_seq: u64::try_from(seq).map_err(|_| {
+                linearization_seq: u64::try_from(sequence).map_err(|_| {
                     PersistenceError::Internal("negative gate sequence".to_owned())
                 })?,
                 linearized_at: expires_at - chrono::TimeDelta::seconds(30),

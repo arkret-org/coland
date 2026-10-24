@@ -1,4 +1,4 @@
-use arkret_models_collaboration::session_grants::AuthSessionTerminationOutcome;
+use arkret_models_collaboration::session_grants::AuthenticationSessionTerminationResponseBody;
 
 use super::*;
 
@@ -26,7 +26,7 @@ pub(super) async fn logout(
     aa: super::super::AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AccountLogoutOutcome> {
+) -> JsonResult<AccountLogoutResponseBody> {
     let _ = &aa; // header presence registered with the OpenAPI doc
     let state = depot.get_typed::<AppState>().expect("state injected");
 
@@ -130,7 +130,7 @@ pub(super) async fn logout(
         record
     };
     if journal.completed_at.is_some() {
-        return json_ok(AccountLogoutOutcome { revoked: false });
+        return json_ok(AccountLogoutResponseBody { revoked: false });
     }
 
     if !journal.auth_side_confirmed {
@@ -189,7 +189,7 @@ pub(super) async fn logout(
     )
     .await;
 
-    json_ok(AccountLogoutOutcome { revoked })
+    json_ok(AccountLogoutResponseBody { revoked })
 }
 
 fn auth_error_to_app_error(error: (StatusCode, &'static str, &'static str)) -> AppError {
@@ -220,7 +220,7 @@ fn auth_error_to_app_error(error: (StatusCode, &'static str, &'static str)) -> A
 async fn dev_mode_local_logout(
     state: &AppState,
     token: &str,
-) -> Result<AccountLogoutOutcome, AppError> {
+) -> Result<AccountLogoutResponseBody, AppError> {
     let token_hash = session_credential_hash(token, state.service_id());
     let revoked_session = state
         .sessions()
@@ -246,7 +246,7 @@ async fn dev_mode_local_logout(
         )
         .await;
     }
-    Ok(AccountLogoutOutcome { revoked })
+    Ok(AccountLogoutResponseBody { revoked })
 }
 
 /// Server-to-server introspection of a presented `ak.session.grant` for the
@@ -268,7 +268,7 @@ async fn introspect_session_grant_for_logout(
 /// A metadata-free `not_found` may continue only through an exact durable
 /// journal binding whose DPoP holder is still verified by the caller.
 fn classify_logout_introspection(
-    outcome: crate::wire::SessionGrantValidationOutcome,
+    outcome: crate::wire::SessionGrantValidationResponseBody,
 ) -> Result<Option<crate::wire::SessionGrantValidationMetadata>, AppError> {
     use crate::wire::SessionGrantAdminIntrospectionStatus;
 
@@ -323,8 +323,10 @@ async fn trigger_auth_side_auth_session_logout(
     confirm_auth_side_logout(body)
 }
 
-fn confirm_auth_side_logout(body: AuthSessionTerminationOutcome) -> Result<(), AppError> {
-    if body.grant_chain_terminated && body.auth_session_logged_out {
+fn confirm_auth_side_logout(
+    body: AuthenticationSessionTerminationResponseBody,
+) -> Result<(), AppError> {
+    if body.grant_chain_terminated && body.authentication_session_logged_out {
         return Ok(());
     }
     Err(crate::app_error!(
@@ -357,8 +359,8 @@ mod logout_introspection_tests {
     fn outcome(
         active: bool,
         status: SessionGrantAdminIntrospectionStatus,
-    ) -> crate::wire::SessionGrantValidationOutcome {
-        crate::wire::SessionGrantValidationOutcome {
+    ) -> crate::wire::SessionGrantValidationResponseBody {
+        crate::wire::SessionGrantValidationResponseBody {
             active,
             status,
             proof_required: false,
@@ -420,25 +422,25 @@ mod logout_introspection_tests {
     #[test]
     fn auth_side_must_confirm_both_terminal_states() {
         assert!(
-            confirm_auth_side_logout(AuthSessionTerminationOutcome {
+            confirm_auth_side_logout(AuthenticationSessionTerminationResponseBody {
                 grant_chain_terminated: true,
-                auth_session_logged_out: true,
+                authentication_session_logged_out: true,
             })
             .is_ok()
         );
 
         for body in [
-            AuthSessionTerminationOutcome {
+            AuthenticationSessionTerminationResponseBody {
                 grant_chain_terminated: false,
-                auth_session_logged_out: true,
+                authentication_session_logged_out: true,
             },
-            AuthSessionTerminationOutcome {
+            AuthenticationSessionTerminationResponseBody {
                 grant_chain_terminated: true,
-                auth_session_logged_out: false,
+                authentication_session_logged_out: false,
             },
-            AuthSessionTerminationOutcome {
+            AuthenticationSessionTerminationResponseBody {
                 grant_chain_terminated: false,
-                auth_session_logged_out: false,
+                authentication_session_logged_out: false,
             },
         ] {
             let error = confirm_auth_side_logout(body)

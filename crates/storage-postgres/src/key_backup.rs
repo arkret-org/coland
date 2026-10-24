@@ -46,7 +46,7 @@ impl From<KeyBackupDeleteChallengeRow> for KeyBackupDeleteChallengeRecord {
 const DELETE_CHALLENGE_COLUMNS: &str = "challenge_id, principal_id, station_id, backup_id, request_id, challenge, issued_at, expires_at, consumed_at";
 /// SOL-02-004 — classify a `key_backups` INSERT failure. A unique violation on
 /// `key_backups_series_seq_key` means a concurrent successor PUT already
-/// claimed this `(actor_id, series_id, series_seq)` tuple; surface it as a
+/// claimed this `(actor_id, series_id, series_sequence)` tuple; surface it as a
 /// [`PersistenceError::Conflict`] so the receive path can reject the loser of
 /// the race with the §7.6 `series_seq_not_monotonic` wire code instead of a
 /// generic 5xx. Every other diesel error stays a `Database` error.
@@ -168,19 +168,19 @@ async fn list_page_in_connection(
     let after = query.after.as_ref();
     let row = sql_query(r#"
             WITH candidates AS MATERIALIZED (
-                SELECT metadata, backup_kind, series_id, series_seq, id FROM key_backups
+                SELECT metadata, backup_kind, series_id, series_sequence, id FROM key_backups
                 WHERE actor_id=$1 AND ($2::text IS NULL OR backup_kind=$2) AND ($3::text IS NULL OR series_id=$3)
-                AND ($4::text IS NULL OR (backup_kind COLLATE "C",series_id COLLATE "C",series_seq,id) >
+                AND ($4::text IS NULL OR (backup_kind COLLATE "C",series_id COLLATE "C",series_sequence,id) >
                      ($4::text COLLATE "C",$5::text COLLATE "C",$6::bigint,$7::uuid))
-                ORDER BY backup_kind COLLATE "C",series_id COLLATE "C",series_seq,id LIMIT $8
+                ORDER BY backup_kind COLLATE "C",series_id COLLATE "C",series_sequence,id LIMIT $8
             ), sized AS MATERIALIZED (
                 SELECT *, SUM(octet_length(metadata::text)+1) OVER (
-                    ORDER BY backup_kind COLLATE "C",series_id COLLATE "C",series_seq,id
+                    ORDER BY backup_kind COLLATE "C",series_id COLLATE "C",series_sequence,id
                     ROWS UNBOUNDED PRECEDING) AS running_bytes FROM candidates
             )
             SELECT COALESCE((SELECT revision FROM key_backup_list_revisions WHERE actor_id=$1),0)::bigint AS revision,
                 EXISTS(SELECT 1 FROM sized WHERE running_bytes > 900000) AS byte_limited,
-                COALESCE((SELECT jsonb_agg(metadata ORDER BY backup_kind COLLATE "C",series_id COLLATE "C",series_seq,id)
+                COALESCE((SELECT jsonb_agg(metadata ORDER BY backup_kind COLLATE "C",series_id COLLATE "C",series_sequence,id)
                     FROM sized WHERE running_bytes <= 900000), '[]'::jsonb) AS payloads
         "#)
         .bind::<Text,_>(actor)
@@ -188,7 +188,7 @@ async fn list_page_in_connection(
         .bind::<Nullable<Text>,_>(query.series_id.as_deref())
         .bind::<Nullable<Text>,_>(after.map(|p| p.backup_kind.as_str()))
         .bind::<Text,_>(after.map_or("", |p| p.series_id.as_str()))
-        .bind::<diesel::sql_types::BigInt,_>(after.map_or(0, |p| p.series_seq))
+        .bind::<diesel::sql_types::BigInt,_>(after.map_or(0, |p| p.series_sequence))
         .bind::<Text,_>(after.map_or("00000000-0000-0000-0000-000000000000", |p| p.backup_id.trim_start_matches("ak:backup:")))
         .bind::<diesel::sql_types::BigInt,_>(i64::from(query.limit))
         .get_result::<PageRow>(&mut *conn).await.map_err(PersistenceError::database)?;
@@ -218,7 +218,7 @@ impl KeyBackupStore for PgKeyBackupStore {
                 .execute(&mut *conn)
                 .await?;
             let active_series =
-                crate::key_backup_current_results::confirmed_key_backup_pointer_in_connection(
+                crate::key_backup_current_states::confirmed_key_backup_pointer_in_connection(
                     conn, account_id,
                 )
                 .await?
@@ -256,7 +256,7 @@ impl KeyBackupStore for PgKeyBackupStore {
                 sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                     .execute(&mut *conn)
                     .await?;
-                let active_series = crate::key_backup_current_results::confirmed_key_backup_pointer_for_active_device_in_connection(
+                let active_series = crate::key_backup_current_states::confirmed_key_backup_pointer_for_active_device_in_connection(
                     conn, account_id, device_id, now,
                 )
                 .await?
@@ -286,7 +286,7 @@ impl KeyBackupStore for PgKeyBackupStore {
                     &write.commit.event.event_id,
                 )
                 .await?;
-                crate::key_backup_current_results::commit_key_backup_pointer_unit_in_connection(
+                crate::key_backup_current_states::commit_key_backup_pointer_unit_in_connection(
                     conn, &write,
                 )
                 .await
@@ -302,7 +302,7 @@ impl KeyBackupStore for PgKeyBackupStore {
         device_id: &arkret_wire::DeviceId,
         now: chrono::DateTime<Utc>,
     ) -> PersistenceResult<Option<arkret_models_crypto::BackupActiveSeriesState>> {
-        crate::key_backup_current_results::confirmed_key_backup_pointer_for_active_device(
+        crate::key_backup_current_states::confirmed_key_backup_pointer_for_active_device(
             &self.pool, account_id, device_id, now,
         )
         .await
@@ -312,17 +312,14 @@ impl KeyBackupStore for PgKeyBackupStore {
         &self,
         account_id: &arkret_wire::AccountId,
     ) -> PersistenceResult<Option<arkret_models_crypto::BackupActiveSeriesState>> {
-        crate::key_backup_current_results::confirmed_key_backup_pointer(&self.pool, account_id)
-            .await
+        crate::key_backup_current_states::confirmed_key_backup_pointer(&self.pool, account_id).await
     }
     async fn confirmed_active_series_basis(
         &self,
         account_id: &arkret_wire::AccountId,
     ) -> PersistenceResult<Option<coland_storage::ConfirmedKeyBackupAuthorityBasis>> {
-        crate::key_backup_current_results::confirmed_key_backup_pointer_basis(
-            &self.pool, account_id,
-        )
-        .await
+        crate::key_backup_current_states::confirmed_key_backup_pointer_basis(&self.pool, account_id)
+            .await
     }
     async fn issue_unlock_challenge(
         &self,
@@ -500,7 +497,7 @@ impl KeyBackupStore for PgKeyBackupStore {
                 let account=&backup["actor_id"]["account_id"];
                 let canonical=arkret_canonical::canonical_json_string(account).map_err(PersistenceError::database)?;
                 sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))").bind::<Text,_>(format!("recovery-policy:{canonical}")).execute(&mut *conn).await.map_err(PersistenceError::database)?;
-                let current=sql_query("SELECT p.raw_payload AS payload FROM recovery_policies p JOIN policy_current_results c ON c.policy_id=('ak:policy:' || p.id::text) AND c.current_commit_id=(p.acceptance_basis #>> '{}') AND c.value=p.raw_payload WHERE p.principal_id=$1 AND p.station_id=$2 ORDER BY p.version DESC LIMIT 1 FOR SHARE OF p")
+                let current=sql_query("SELECT p.raw_payload AS payload FROM recovery_policies p JOIN policy_current_states c ON c.policy_id=('ak:policy:' || p.id::text) AND c.current_commit_id=(p.acceptance_basis #>> '{}') AND c.value=p.raw_payload WHERE p.principal_id=$1 AND p.station_id=$2 ORDER BY p.version DESC LIMIT 1 FOR SHARE OF p")
                     .bind::<Text,_>(account["principal_id"].as_str().unwrap_or_default()).bind::<Text,_>(account["station_id"].as_str().unwrap_or_default())
                     .get_result::<JsonPayloadRow>(&mut *conn).await.map_err(PersistenceError::database)?.payload;
                 let now=chrono::Utc::now();

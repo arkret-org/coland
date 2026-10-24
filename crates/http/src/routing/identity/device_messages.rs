@@ -36,8 +36,9 @@ use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
 pub(crate) use crate::wire::DeviceMessageSender;
 use crate::wire::{
-    DeviceMessageEnvelope, DeviceMessagesAckOutcome, DeviceMessagesAckRequestBody,
-    DeviceMessagesGetOutcome, DeviceMessagesSendOutcome, DeviceMessagesSendRequestBody,
+    DeviceMessageEnvelope, DeviceMessagesAcknowledgementRequestBody,
+    DeviceMessagesAcknowledgementResponseBody, DeviceMessagesGetResponseBody,
+    DeviceMessagesSendRequestBody, DeviceMessagesSendResponseBody,
 };
 
 pub(crate) const TO_DEVICE_PAGE_LIMIT: usize = 100;
@@ -348,7 +349,7 @@ async fn send_device_messages(
     body: JsonBody<Value>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<DeviceMessagesSendOutcome> {
+) -> JsonResult<DeviceMessagesSendResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let body = device_messages_send_request_body(body.into_inner())?;
@@ -606,7 +607,7 @@ async fn send_device_messages(
 fn device_message_send_outcome(
     targets: &[PreparedDeviceMessageTarget],
     outcomes: &BTreeMap<String, bool>,
-) -> Result<DeviceMessagesSendOutcome, AppError> {
+) -> Result<DeviceMessagesSendResponseBody, AppError> {
     let mut delivered = BTreeMap::new();
     let mut unknown_devices = BTreeMap::new();
     for target in targets {
@@ -641,7 +642,7 @@ fn device_message_send_outcome(
                 );
         }
     }
-    Ok(DeviceMessagesSendOutcome {
+    Ok(DeviceMessagesSendResponseBody {
         delivered,
         unknown_devices,
     })
@@ -902,7 +903,7 @@ async fn get_device_messages(
     limit: QueryParam<u32, false>,
     depot: &mut Depot,
     req: &mut Request,
-) -> coland_http::result::GuardedJsonResult<DeviceMessagesGetOutcome> {
+) -> coland_http::result::GuardedJsonResult<DeviceMessagesGetResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     if let Ok(native) = depot
         .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
@@ -1005,7 +1006,7 @@ async fn get_device_messages(
     };
     let guard =
         crate::routing::events::sync::content_delivery_guard(state, &session, &input).await?;
-    let ack_token = if page.is_empty() {
+    let acknowledgement_token = if page.is_empty() {
         None
     } else {
         Some(
@@ -1032,9 +1033,9 @@ async fn get_device_messages(
         )
     };
     coland_http::result::guarded_json_ok(
-        DeviceMessagesGetOutcome {
+        DeviceMessagesGetResponseBody {
             deliveries,
-            ack_token,
+            acknowledgement_token,
             next_cursor,
             has_more,
             limited: Some(has_more),
@@ -1048,10 +1049,10 @@ async fn get_device_messages(
 #[tracing::instrument(skip_all, fields(op = "ak.self.device_messages.command.ack.v1"))]
 async fn ack_device_messages(
     aa: AuthArgs,
-    body: JsonBody<DeviceMessagesAckRequestBody>,
+    body: JsonBody<DeviceMessagesAcknowledgementRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<DeviceMessagesAckOutcome> {
+) -> JsonResult<DeviceMessagesAcknowledgementResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     if let Ok(native) = depot
         .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
@@ -1062,21 +1063,21 @@ async fn ack_device_messages(
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
     let selector = recipient_queue_selector(&session)?;
-    let ack_token = body.ack_token.as_str();
-    if ack_token.is_empty() || ack_token.len() > 1024 {
+    let acknowledgement_token = body.acknowledgement_token.as_str();
+    if acknowledgement_token.is_empty() || acknowledgement_token.len() > 1024 {
         return Err(AppError::param_invalid("invalid ack token")
             .with_reason_code(arkret_wire::ReasonCode::INVALID_ACK_TOKEN));
     }
     let Some(pruned_count) = state
         .deliveries()
-        .acknowledge_recipient_deliveries(&selector, ack_token)
+        .acknowledge_recipient_deliveries(&selector, acknowledgement_token)
         .await
         .map_err(|error| AppError::internal(error.to_string()))?
     else {
         return Err(AppError::param_invalid("invalid ack token")
             .with_reason_code(arkret_wire::ReasonCode::INVALID_ACK_TOKEN));
     };
-    json_ok(DeviceMessagesAckOutcome {
+    json_ok(DeviceMessagesAcknowledgementResponseBody {
         pruned_count: pruned_count as u64,
     })
 }
@@ -1295,7 +1296,7 @@ mod tests {
                 principal_id: arkret_wire::DidCoreId::new(holder.clone()).unwrap(),
                 localpart: "holder".to_owned(),
                 display_name: None,
-                bio: None,
+                biography: None,
                 avatar_blob_ref: None,
                 created_at: now(),
             })

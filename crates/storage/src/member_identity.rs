@@ -49,7 +49,7 @@ pub struct HandleClaimEvidenceRecord {
     pub audience: Option<String>,
     pub status: String,
     pub revocation_digest: Option<String>,
-    pub fresh_until: chrono::DateTime<chrono::Utc>,
+    pub cache_expires_at: chrono::DateTime<chrono::Utc>,
     pub visibility: Option<String>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub envelope: Value,

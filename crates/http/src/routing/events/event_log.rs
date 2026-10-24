@@ -64,7 +64,7 @@ fn current_query_error(error: arkret_wire::WireError) -> AppError {
 }
 
 #[cfg(test)]
-fn current_result_error(error: arkret_wire::WireError, fallback: ErrorCode) -> AppError {
+fn current_state_error(error: arkret_wire::WireError, fallback: ErrorCode) -> AppError {
     let code = match error.error_code() {
         Some(ErrorCode::LimitExceeded) => ErrorCode::LimitExceeded,
         _ => fallback,
@@ -96,13 +96,13 @@ mod current_budget_error_tests {
     }
 
     #[test]
-    fn malformed_current_result_is_not_reported_as_a_budget_failure() {
-        let invalid = current_result_error(
+    fn malformed_current_state_is_not_reported_as_a_budget_failure() {
+        let invalid = current_state_error(
             WireError::Protocol("limit_exceeded is only diagnostic text".to_owned()),
             ErrorCode::StateMismatch,
         );
         assert_eq!(invalid.code, ErrorCode::StateMismatch);
-        let oversized = current_result_error(
+        let oversized = current_state_error(
             WireError::ProtocolCode {
                 code: ErrorCode::LimitExceeded,
                 message: "response cannot fit".to_owned(),

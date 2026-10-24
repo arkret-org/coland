@@ -1,8 +1,8 @@
 //! Signed, complete MLS roster pages over one governing read cut.
 
 use arkret_models_collaboration::mls_roster_authority::{
-    MlsRosterAuthorityManifest, MlsRosterAuthorityReadOutcome, MlsRosterAuthorityReadRequestBody,
-    MlsRosterRecord,
+    MlsRosterAuthorityManifest, MlsRosterAuthorityReadRequestBody,
+    MlsRosterAuthorityReadResponseBody, MlsRosterRecord,
 };
 use arkret_models_crypto::KeyOperationSignature;
 use arkret_wire::{
@@ -32,7 +32,7 @@ pub enum MlsRosterAuthorityApplicationRead {
     /// The Account Station proved its local member cut. The self route must
     /// forward to governance and verify the signed complete result there.
     ForwardRequired,
-    Page(MlsRosterAuthorityReadOutcome),
+    Page(MlsRosterAuthorityReadResponseBody),
 }
 
 #[derive(Clone, Debug)]
@@ -288,7 +288,7 @@ fn roster_page(
     start: usize,
     end: usize,
     page_index: usize,
-) -> ServiceResult<MlsRosterAuthorityReadOutcome> {
+) -> ServiceResult<MlsRosterAuthorityReadResponseBody> {
     let next_cursor = if end < records.len() {
         Some(encode_cursor(&Cursor {
             request_digest: request_digest.clone(),
@@ -304,7 +304,7 @@ fn roster_page(
     } else {
         None
     };
-    Ok(MlsRosterAuthorityReadOutcome {
+    Ok(MlsRosterAuthorityReadResponseBody {
         manifest: manifest.clone(),
         page_index: u64::try_from(page_index)
             .map_err(|_| internal("MLS roster page index exceeds u64"))?,
@@ -386,7 +386,7 @@ fn sign_page(
         None
     };
     let issued_at = cursor.as_ref().map_or(now, |cursor| cursor.issued_at);
-    let total_records = facts.records.len();
+    let total_record_count = facts.records.len();
     let mut manifest = MlsRosterAuthorityManifest {
         governance_station_id: issuer.clone(),
         realm_id: request.realm_id.clone(),
@@ -399,9 +399,9 @@ fn sign_page(
         target_epoch: request.target_epoch,
         authority_head_commit_event_ref: facts.authority_head_commit_event_ref.clone(),
         caller_actor_id: request.caller_actor_id.clone(),
-        total_records: u64::try_from(total_records)
+        total_record_count: u64::try_from(total_record_count)
             .map_err(|_| internal("MLS roster record count exceeds u64"))?,
-        page_count: u64::try_from(total_records)
+        page_count: u64::try_from(total_record_count)
             .map_err(|_| internal("MLS roster page count exceeds u64"))?,
         records_digest: records_digest.clone(),
         issued_at,
@@ -409,7 +409,7 @@ fn sign_page(
             kid: NonEmptyString::new(verification_method.as_str().to_owned())
                 .map_err(|error| internal(error.to_string()))?,
             signature_algorithm: Some(NonEmptyString::new("Ed25519").expect("non-empty")),
-            sig: Base64UrlString::new("AA").expect("canonical placeholder"),
+            signature: Base64UrlString::new("AA").expect("canonical placeholder"),
         },
     };
     // `page_count` is included in the signed manifest and therefore in the
@@ -473,8 +473,8 @@ mod tests {
         MlsAddAuthorityAttestation, MlsAttestAddRequestBody, MlsRosterRecord,
     };
     use arkret_models_crypto::{
-        KeyPackageClaimRecord, PeerKeyPackageClaimReceipt, PeerKeyPackagesClaimOutcome,
-        PeerKeyPackagesClaimUnsignedRequest, peer_keypackage_claim_receipt_signing_bytes,
+        KeyPackageClaimRecord, PeerKeyPackageClaimReceipt, PeerKeyPackagesClaimFields,
+        PeerKeyPackagesClaimResponseBody, peer_keypackage_claim_receipt_signing_bytes,
     };
     use arkret_models_identity::{
         AuthenticatedServiceResolution, ResolutionDidBindingEvidenceKind,
@@ -492,7 +492,7 @@ mod tests {
         EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [seed; 32])
     }
 
-    fn page(result: MlsRosterAuthorityApplicationRead) -> MlsRosterAuthorityReadOutcome {
+    fn page(result: MlsRosterAuthorityApplicationRead) -> MlsRosterAuthorityReadResponseBody {
         match result {
             MlsRosterAuthorityApplicationRead::Page(page) => page,
             _ => panic!("complete historical facts must produce a signed page"),
@@ -570,7 +570,7 @@ mod tests {
         };
         let mut claim_nonce = [0_u8; 16];
         getrandom::fill(&mut claim_nonce).unwrap();
-        let claim_request: PeerKeyPackagesClaimUnsignedRequest = serde_json::from_value(
+        let claim_request: PeerKeyPackagesClaimFields = serde_json::from_value(
             serde_json::json!({
                 "claim_request_id": arkret_canonical::base64url_encode(claim_nonce),
                 "target_agent_id": actor.signing_principal_id(),
@@ -587,7 +587,7 @@ mod tests {
         let placeholder = || KeyOperationSignature {
             kid: NonEmptyString::new(method.as_str().to_owned()).unwrap(),
             signature_algorithm: Some(NonEmptyString::new("Ed25519").unwrap()),
-            sig: Base64UrlString::new("AA").unwrap(),
+            signature: Base64UrlString::new("AA").unwrap(),
         };
         let mut receipt = PeerKeyPackageClaimReceipt {
             claim_request_id: claim_request.claim_request_id.clone(),
@@ -610,7 +610,7 @@ mod tests {
         )
         .unwrap();
         arkret_models_crypto::validate_target_claim_evidence(&record, &receipt).unwrap();
-        let outcome = PeerKeyPackagesClaimOutcome {
+        let outcome = PeerKeyPackagesClaimResponseBody {
             claim_request_id: receipt.claim_request_id.clone(),
             claims: vec![record],
             claim_receipt: receipt.clone(),
@@ -635,7 +635,7 @@ mod tests {
                 verification_method: method.clone(),
             },
             authorization_event_ref: event(14),
-            leaf_signature_key_b64u: Base64UrlString::new(arkret_canonical::base64url_encode(
+            leaf_signature_key_base64url: Base64UrlString::new(arkret_canonical::base64url_encode(
                 [7; 32],
             ))
             .unwrap(),
@@ -667,7 +667,7 @@ mod tests {
                 MlsRosterRecord::Genesis {
                     genesis_event_ref: genesis,
                     actor_id: actor.clone(),
-                    leaf_signature_key_b64u: Base64UrlString::new(
+                    leaf_signature_key_base64url: Base64UrlString::new(
                         arkret_canonical::base64url_encode([5; 32]),
                     )
                     .unwrap(),
@@ -680,7 +680,7 @@ mod tests {
                     commit_event_ref: commit,
                     consumed_proposal_ordinal: 0,
                     sender_actor_id: actor,
-                    proposal_wire_b64u: Base64UrlString::new("AQ").unwrap(),
+                    proposal_wire_base64url: Base64UrlString::new("AQ").unwrap(),
                     attestation,
                     claim_issuer_resolution: None,
                     attestor_resolution: resolution,
@@ -713,18 +713,18 @@ mod tests {
             .claim_outcome
             .claim_receipt
             .signature
-            .sig = Base64UrlString::new("AQ").unwrap();
+            .signature = Base64UrlString::new("AQ").unwrap();
         altered_receipt.historical_add_proofs[0]
             .attestation
             .claim_receipt
             .signature
-            .sig = Base64UrlString::new("AQ").unwrap();
+            .signature = Base64UrlString::new("AQ").unwrap();
         assert!(!verify_historical_proofs(&altered_receipt));
         let mut altered_attestation = facts.clone();
         altered_attestation.historical_add_proofs[0]
             .attestation
             .signature
-            .sig = Base64UrlString::new("AQ").unwrap();
+            .signature = Base64UrlString::new("AQ").unwrap();
         assert!(!verify_historical_proofs(&altered_attestation));
         let mut missing = facts;
         missing.historical_add_proofs.clear();
@@ -763,7 +763,7 @@ mod tests {
                 .map(|_| MlsRosterRecord::Genesis {
                     genesis_event_ref: genesis.clone(),
                     actor_id: actor.clone(),
-                    leaf_signature_key_b64u: Base64UrlString::new("AQ".to_owned()).unwrap(),
+                    leaf_signature_key_base64url: Base64UrlString::new("AQ".to_owned()).unwrap(),
                     endpoint: MlsWelcomeRecipientEndpoint::AgentRuntime {
                         verification_method: method.clone(),
                     },
@@ -779,7 +779,7 @@ mod tests {
         let first = page(sign_page(&request, &issuer, &method, &key, now, facts.clone()).unwrap());
         assert_eq!((first.page_index, first.records.len()), (0, 8));
         assert_eq!(
-            (first.manifest.total_records, first.manifest.page_count),
+            (first.manifest.total_record_count, first.manifest.page_count),
             (9, 2)
         );
         arkret_signatures::keypackages::verify_keypackage_signing_input(

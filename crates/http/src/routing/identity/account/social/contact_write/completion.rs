@@ -9,7 +9,7 @@ use super::*;
 pub(super) async fn resolve_completion(
     state: &AppState,
     binding: &ContactCompletionBinding,
-) -> JsonResult<ContactOperationOutcome> {
+) -> JsonResult<ContactOperationResponseBody> {
     materialize_contact_completions(state).await?;
     let result = state
         .persistence()
@@ -23,7 +23,7 @@ pub(super) async fn resolve_completion(
         .and_then(|state| state.result);
     match result {
         Some(ContactCompletionResult::Accepted { outcome }) => {
-            json_ok(ContactOperationOutcome::Accepted { outcome: *outcome })
+            json_ok(ContactOperationResponseBody::Accepted { outcome: *outcome })
         }
         Some(ContactCompletionResult::Rejected { problem }) => {
             Err(AppError::from_frozen_problem(problem))
@@ -92,7 +92,7 @@ async fn materialize_one(
     // both directions here: the requester's own request is its direction head.
     // A local tombstone also confirms the opposite direction's terminal fence.
     let counterpart_proof = match &outcome {
-        ContactAcceptedOutcome::Request {
+        ContactAcceptedResponseBody::Request {
             request_acceptance_receipt,
             ..
         } => {
@@ -124,7 +124,7 @@ async fn materialize_one(
                 .await?,
             )
         }
-        ContactAcceptedOutcome::Response {
+        ContactAcceptedResponseBody::Response {
             normal_response_acceptance_receipt,
             ..
         } => {
@@ -176,7 +176,7 @@ async fn materialize_one(
         )
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
-    if let ContactAcceptedOutcome::Request {
+    if let ContactAcceptedResponseBody::Request {
         request_acceptance_receipt,
         ..
     } = &outcome
@@ -201,7 +201,7 @@ async fn materialize_one(
 async fn sign_outcome(
     state: &AppState,
     intent: &ContactCompletionIntent,
-) -> Result<ContactAcceptedOutcome, AppError> {
+) -> Result<ContactAcceptedResponseBody, AppError> {
     use coland_storage::ContactCompletionAction;
     let error = |error: arkret_wire::WireError| AppError::internal(error.to_string());
     let accepted_at = intent
@@ -245,7 +245,7 @@ async fn sign_outcome(
         })
     };
     Ok(match &intent.plan.action {
-        ContactCompletionAction::Request { .. } => ContactAcceptedOutcome::Request {
+        ContactCompletionAction::Request { .. } => ContactAcceptedResponseBody::Request {
             operation_id,
             request_acceptance_receipt: RequestAcceptanceReceipt::sign_with(
                 intent
@@ -302,44 +302,46 @@ async fn sign_outcome(
                 None,
             ))
             .await?;
-            ContactAcceptedOutcome::Response {
+            ContactAcceptedResponseBody::Response {
                 operation_id,
                 normal_response_acceptance_receipt: receipt,
                 lineage,
                 current_proof,
             }
         }
-        ContactCompletionAction::Reject { request_receipt } => ContactAcceptedOutcome::Reject {
-            operation_id,
-            reject_acceptance_receipt: RejectAcceptanceReceipt::sign_with(
-                state.config().trust_domain.clone(),
-                serde_json::from_value::<ContactRejectedPayload>(
-                    serde_json::to_value(&event.payload)
+        ContactCompletionAction::Reject { request_receipt } => {
+            ContactAcceptedResponseBody::Reject {
+                operation_id,
+                reject_acceptance_receipt: RejectAcceptanceReceipt::sign_with(
+                    state.config().trust_domain.clone(),
+                    serde_json::from_value::<ContactRejectedPayload>(
+                        serde_json::to_value(&event.payload)
+                            .map_err(|e| AppError::internal(e.to_string()))?,
+                    )
+                    .map_err(|e| AppError::internal(e.to_string()))?
+                    .initial_contact_round_id,
+                    event
+                        .payload
+                        .get("version")
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| AppError::internal("Contact reject version missing"))?,
+                    event
+                        .payload
+                        .get("predecessor_event_ref")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
                         .map_err(|e| AppError::internal(e.to_string()))?,
+                    request_receipt.as_ref().clone(),
+                    event.event_id.clone(),
+                    producer,
+                    accepted_at,
+                    issuer,
+                    sign_receipt,
                 )
-                .map_err(|e| AppError::internal(e.to_string()))?
-                .initial_contact_round_id,
-                event
-                    .payload
-                    .get("version")
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| AppError::internal("Contact reject version missing"))?,
-                event
-                    .payload
-                    .get("predecessor_event_ref")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|e| AppError::internal(e.to_string()))?,
-                request_receipt.as_ref().clone(),
-                event.event_id.clone(),
-                producer,
-                accepted_at,
-                issuer,
-                sign_receipt,
-            )
-            .map_err(error)?,
-        },
+                .map_err(error)?,
+            }
+        }
         ContactCompletionAction::ScopeUpdate => {
             let payload: ContactScopeUpdatePayload = serde_json::from_value(
                 serde_json::to_value(&event.payload)
@@ -369,7 +371,7 @@ async fn sign_outcome(
                 None,
             ))
             .await?;
-            ContactAcceptedOutcome::ScopeUpdate {
+            ContactAcceptedResponseBody::ScopeUpdate {
                 operation_id,
                 lineage,
                 current_proof,
@@ -411,7 +413,7 @@ async fn sign_outcome(
                 }),
             ))
             .await?;
-            ContactAcceptedOutcome::Tombstone {
+            ContactAcceptedResponseBody::Tombstone {
                 operation_id,
                 lineage,
                 current_proof,

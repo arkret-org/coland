@@ -4,8 +4,8 @@ use std::sync::Arc;
 use arkret_models_identity::{
     OrganizationControlProof, OrganizationControlProofKind, OrganizationHandleAttestationStatus,
     OrganizationRegistrationChallenge, OrganizationRegistrationChallengeRequestBody,
-    OrganizationRegistrationEnsureRequestBody, OrganizationRegistrationOutcome,
-    OrganizationRegistrationReceipt, OrganizationRegistrationRefreshRequestBody,
+    OrganizationRegistrationEnsureRequestBody, OrganizationRegistrationReceipt,
+    OrganizationRegistrationRefreshRequestBody, OrganizationRegistrationResponseBody,
     OrganizationRegistrationRevokeReason, OrganizationRegistrationRevokeRequestBody,
     OrganizationRegistrationStatus, next_organization_registration_generation,
 };
@@ -219,7 +219,7 @@ impl OrganizationRegistrationService {
         request: OrganizationRegistrationEnsureRequestBody,
         signer: &dyn OrganizationRegistrationReceiptSigner,
         now: DateTime<Utc>,
-    ) -> Result<OrganizationRegistrationOutcome, OrganizationRegistrationError> {
+    ) -> Result<OrganizationRegistrationResponseBody, OrganizationRegistrationError> {
         validate_handle_attestation(&request, now)?;
         let request_digest = request
             .canonical_request_digest()
@@ -332,7 +332,7 @@ impl OrganizationRegistrationService {
         current: &OrganizationRegistrationCurrent,
         signer: &dyn OrganizationRegistrationReceiptSigner,
         now: DateTime<Utc>,
-    ) -> Result<OrganizationRegistrationOutcome, OrganizationRegistrationError> {
+    ) -> Result<OrganizationRegistrationResponseBody, OrganizationRegistrationError> {
         validate_refresh_request(&request)?;
         let request_digest = request
             .canonical_request_digest()
@@ -418,7 +418,7 @@ impl OrganizationRegistrationService {
         current: &OrganizationRegistrationCurrent,
         signer: &dyn OrganizationRegistrationReceiptSigner,
         now: DateTime<Utc>,
-    ) -> Result<OrganizationRegistrationOutcome, OrganizationRegistrationError> {
+    ) -> Result<OrganizationRegistrationResponseBody, OrganizationRegistrationError> {
         if current.generation.organization_id != request.organization_id {
             return Err(not_found("authorized organization registration differs"));
         }
@@ -472,7 +472,7 @@ impl OrganizationRegistrationService {
         challenge_id: &str,
         request_digest: &Hash,
         now: DateTime<Utc>,
-    ) -> Result<Option<OrganizationRegistrationOutcome>, OrganizationRegistrationError> {
+    ) -> Result<Option<OrganizationRegistrationResponseBody>, OrganizationRegistrationError> {
         let Some(record) = self
             .store()
             .get_challenge(challenge_id)
@@ -702,7 +702,7 @@ fn verify_control_proof(
 }
 
 fn validate_replay_current(
-    replay: &OrganizationRegistrationOutcome,
+    replay: &OrganizationRegistrationResponseBody,
     current: Option<&OrganizationRegistrationCurrent>,
 ) -> Result<(), OrganizationRegistrationError> {
     let Some(current) = current else {
@@ -1253,7 +1253,7 @@ fn sign_outcome(
     status: OrganizationRegistrationStatus,
     now: DateTime<Utc>,
     created: bool,
-) -> Result<OrganizationRegistrationOutcome, OrganizationRegistrationError> {
+) -> Result<OrganizationRegistrationResponseBody, OrganizationRegistrationError> {
     let issued_at = canonical_time(now);
     let mut receipt = OrganizationRegistrationReceipt {
         registration_receipt_id: "ak:organization_registration_receipt:placeholder".to_owned(),
@@ -1295,7 +1295,7 @@ fn sign_outcome(
     receipt
         .validate()
         .map_err(|error| internal(error.to_string()))?;
-    let outcome = OrganizationRegistrationOutcome {
+    let outcome = OrganizationRegistrationResponseBody {
         registration_receipt: receipt,
         created,
     };
@@ -1709,8 +1709,8 @@ mod tests {
             "OrganizationRegistrationReceipt" => {
                 serde_json::from_value::<OrganizationRegistrationReceipt>(instance).is_ok()
             }
-            "OrganizationRegistrationOutcome" => {
-                serde_json::from_value::<OrganizationRegistrationOutcome>(instance).is_ok()
+            "OrganizationRegistrationResponseBody" => {
+                serde_json::from_value::<OrganizationRegistrationResponseBody>(instance).is_ok()
             }
             other => panic!("unhandled organization registration schema {other}"),
         }

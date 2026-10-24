@@ -1,8 +1,8 @@
 //! Atomic Realm Device proposal and terminal effects, independent of Account PCRs.
 use arkret_models_collaboration::events_payloads::{DeviceOrPrincipalRef, DeviceRevokePayload};
 use arkret_models_integration::{
-    RealmActorDeviceAuthorizationValue, RealmActorDeviceRevokeOutcomeStatus,
-    RealmActorDeviceRevokeState, RealmActorOperationOutcome,
+    RealmActorDeviceAuthorizationValue, RealmActorDeviceRevocationState,
+    RealmActorDeviceRevocationStatusTag, RealmActorRequestStatus,
 };
 use arkret_wire::{ActorId, CommittedEventRef, Event, EventKind, Hash};
 use coland_storage::{
@@ -43,7 +43,7 @@ pub(crate) async fn prepare(
     conn: &mut AsyncPgConnection,
     event: &Event,
     proposal: &CommittedEventRef,
-) -> Result<RealmActorOperationOutcome, PgTransactionError> {
+) -> Result<RealmActorRequestStatus, PgTransactionError> {
     let payload: DeviceRevokePayload = decode(json!(event.payload))?;
     payload.validate().map_err(invalid)?;
     let subject = event
@@ -68,13 +68,13 @@ pub(crate) async fn prepare(
     {
         return Err(invalid("revoke authorization original differs").into());
     }
-    Ok(RealmActorOperationOutcome::DeviceRevoke {
-        status: RealmActorDeviceRevokeOutcomeStatus::DeviceRevoke,
+    Ok(RealmActorRequestStatus::DeviceRevoke {
+        status: RealmActorDeviceRevocationStatusTag::DeviceRevoke,
         proposal_ref: proposal.clone(),
         device_id: payload.device_id,
         authorization_ref,
         authorized_generation_ref: value.authorized_generation_ref,
-        state: RealmActorDeviceRevokeState::Pending,
+        state: RealmActorDeviceRevocationState::Pending,
         decided_at: None,
     })
 }
@@ -83,9 +83,9 @@ pub(crate) async fn retain(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
     digest: &Hash,
-    outcome: RealmActorOperationOutcome,
+    outcome: RealmActorRequestStatus,
 ) -> Result<(), PgTransactionError> {
-    let RealmActorOperationOutcome::DeviceRevoke {
+    let RealmActorRequestStatus::DeviceRevoke {
         proposal_ref,
         device_id,
         authorized_generation_ref,
@@ -128,16 +128,16 @@ pub(crate) async fn read(
     conn: &mut AsyncPgConnection,
     actor: &ActorId,
     proposal: &CommittedEventRef,
-) -> PersistenceResult<RealmActorOperationOutcome> {
+) -> PersistenceResult<RealmActorRequestStatus> {
     let row = sql_query("SELECT to_jsonb(r) AS value FROM realm_actor_device_revoke_results r WHERE proposal_commit_id=$1 FOR UPDATE")
         .bind::<Text,_>(proposal.commit_id.as_str()).get_result::<Row>(&mut *conn).await
         .optional().map_err(PersistenceError::database)?
         .ok_or_else(|| invalid("accepted revoke lost its command ledger"))?;
-    let outcome: RealmActorOperationOutcome = decode(row.value["result_json"].clone())?;
+    let outcome: RealmActorRequestStatus = decode(row.value["result_json"].clone())?;
     if row.value["cleanup_digest"] != json!(cleanup_digest(conn, proposal).await?) {
         return Err(invalid("revoke cleanup inventory incomplete"));
     }
-    let RealmActorOperationOutcome::DeviceRevoke {
+    let RealmActorRequestStatus::DeviceRevoke {
         proposal_ref,
         device_id,
         authorization_ref,
@@ -156,7 +156,7 @@ pub(crate) async fn read(
         || row.value["actor_id"] != json!(actor)
         || row.value["realm_id"] != json!(subject.realm_id)
         || row.value["command_result"] != json!(state)
-        || (*state == RealmActorDeviceRevokeState::Pending) != decided_at.is_none()
+        || (*state == RealmActorDeviceRevocationState::Pending) != decided_at.is_none()
         || *authorized_generation_ref == 0
         || authorization_ref.stream_ref != proposal.stream_ref
         || authorization_ref.stream_position >= proposal.stream_position
@@ -203,7 +203,7 @@ pub(crate) async fn finish(
     conn: &mut AsyncPgConnection,
     actor: &ActorId,
     authority: &CurrentRealmAuthority,
-    terminal: &RealmActorOperationOutcome,
+    terminal: &RealmActorRequestStatus,
 ) -> Result<(), PgTransactionError> {
     let subject = actor
         .as_realm_actor_id()
@@ -223,7 +223,7 @@ pub(crate) async fn finish(
     {
         return Err(invalid("stale_realm_authority: revoke worker no longer governs").into());
     }
-    let RealmActorOperationOutcome::DeviceRevoke {
+    let RealmActorRequestStatus::DeviceRevoke {
         proposal_ref,
         state,
         decided_at,
@@ -232,7 +232,7 @@ pub(crate) async fn finish(
     else {
         return Err(invalid("revoke terminal required").into());
     };
-    if *state == RealmActorDeviceRevokeState::Pending
+    if *state == RealmActorDeviceRevocationState::Pending
         || decided_at.is_none()
         || decided_at.is_some_and(|at| at > chrono::Utc::now())
     {
@@ -243,7 +243,7 @@ pub(crate) async fn finish(
         return Ok(());
     }
     let mut expected = original;
-    let RealmActorOperationOutcome::DeviceRevoke {
+    let RealmActorRequestStatus::DeviceRevoke {
         state: old_state,
         decided_at: old_time,
         ..
@@ -251,7 +251,7 @@ pub(crate) async fn finish(
     else {
         return Err(invalid("invalid revoke ledger").into());
     };
-    if *old_state != RealmActorDeviceRevokeState::Pending {
+    if *old_state != RealmActorDeviceRevocationState::Pending {
         return Err(PersistenceError::Conflict(
             "duplicate_conflict: revoke terminal differs".into(),
         )
@@ -276,12 +276,12 @@ pub(crate) async fn finish(
     if decided_at.is_some_and(|at| at < proposal_commit.committed_at) {
         return Err(invalid("terminal predates proposal").into());
     }
-    if *state == RealmActorDeviceRevokeState::Accepted {
+    if *state == RealmActorDeviceRevocationState::Accepted {
         sql_query("INSERT INTO realm_actor_mls_cleanup(realm_id,actor_id,fenced_generation,device_id,mls_group_id,leaf_index,signature_key,authorization_ref,begin_ref,group_state_ref,completion_ref,queue_state) SELECT realm_id,actor_id,fenced_generation,device_id,mls_group_id,leaf_index,signature_key,authorization_ref,begin_ref,group_state_ref,completion_ref,CASE WHEN completion_ref IS NULL THEN 'pending' ELSE 'completed' END FROM realm_actor_device_revoke_cleanup WHERE proposal_commit_id=$1 ON CONFLICT DO NOTHING")
             .bind::<Text,_>(proposal_ref.commit_id.as_str()).execute(&mut *conn).await?;
     }
     sql_query("UPDATE realm_actor_device_revoke_results SET command_result=$1,result_json=$2 WHERE proposal_commit_id=$3 AND command_result='pending'")
-        .bind::<Text,_>(if *state == RealmActorDeviceRevokeState::Accepted {"accepted"} else {"rejected"})
+        .bind::<Text,_>(if *state == RealmActorDeviceRevocationState::Accepted {"accepted"} else {"rejected"})
         .bind::<Jsonb,_>(json!(terminal)).bind::<Text,_>(proposal_ref.commit_id.as_str())
         .execute(&mut *conn).await?;
     Ok(())
@@ -304,7 +304,7 @@ pub(crate) async fn sweep(
             authority_ref: decode(selected_authority["authority_ref"].clone())?,
             last_handoff_ref: decode(selected_authority["last_handoff_ref"].clone())?,
         };
-        let selected: RealmActorOperationOutcome = decode(row.value["outcome"].clone())?;
+        let selected: RealmActorRequestStatus = decode(row.value["outcome"].clone())?;
         crate::realm_authorization_cut::lock_realm_authorization_cut(
             conn,
             &actor
@@ -313,20 +313,20 @@ pub(crate) async fn sweep(
                 .realm_id,
         )
         .await?;
-        let RealmActorOperationOutcome::DeviceRevoke { proposal_ref, .. } = selected else {
+        let RealmActorRequestStatus::DeviceRevoke { proposal_ref, .. } = selected else {
             return Err(invalid("revoke ledger malformed").into());
         };
         let mut terminal = read(conn, &actor, &proposal_ref).await?;
-        let RealmActorOperationOutcome::DeviceRevoke {
+        let RealmActorRequestStatus::DeviceRevoke {
             state, decided_at, ..
         } = &mut terminal
         else {
             return Err(invalid("revoke ledger malformed").into());
         };
-        if *state != RealmActorDeviceRevokeState::Pending {
+        if *state != RealmActorDeviceRevocationState::Pending {
             continue;
         }
-        *state = RealmActorDeviceRevokeState::Accepted;
+        *state = RealmActorDeviceRevocationState::Accepted;
         *decided_at = Some(arkret_canonical::normalize_timestamp_canonical(
             chrono::Utc::now(),
         ));

@@ -20,14 +20,14 @@ use arkret_models_collaboration::agent_operations::AgentLifecycleState;
 // resolves at the crate root, but the invite-addressing strong type lives under `model`;
 // import it via the `model` path to avoid binding the wrong same-named re-export.
 use arkret_models_collaboration::contact_operations::{
-    ContactAcceptRequestBody, ContactAgentProjection, ContactList, ContactListRow,
-    ContactNextPrepareInput, ContactOperationOutcome, ContactOperationRequestBody, ContactPeer,
+    ContactAcceptRequestBody, ContactAgentProjection, ContactListRow, ContactNextPrepareInput,
+    ContactOperationRequestBody, ContactOperationResponseBody, ContactPage, ContactPeer,
     ContactRejectRequestBody, ContactScopeUpdateRequestBody, ContactState,
     ContactTombstoneRequestBody, DirectConversationSummary, DirectConversationSummaryState,
 };
 use arkret_models_collaboration::direct_conversation::{
     DirectConversationCoordinates, DirectConversationFoundingInput,
-    DirectConversationResolveOutcome, DirectConversationResolveRequestBody,
+    DirectConversationResolveRequestBody, DirectConversationResolveResponseBody,
     DirectConversationSendBlocker,
 };
 use arkret_models_collaboration::governance::invite_addressing::InviteReceivePolicy;
@@ -37,16 +37,16 @@ use arkret_models_identity::account::{
     AccountDeviceSummary, AccountRegistrationAudit, AccountRegistrationAuditOutcome,
     AccountRegistrationEvidenceSummary, AccountRegistrationPolicy,
     AccountRegistrationPolicyEvidence, AccountRegistrationRateLimitPolicy,
-    AccountUpdateProfileOutcome,
+    AccountUpdateProfileResponseBody,
 };
 use arkret_models_identity::actor_profile::{AccountMaterializedProfile, ActorProfile};
 use arkret_models_identity::actor_profile_operations::{
-    ActorProfileResolveFailure, ActorProfileResolveFailureReason, ActorProfileResolveOutcome,
-    ActorProfileResolveRequest, ResolvedActorProfile,
+    ActorProfileResolveFailure, ActorProfileResolveFailureReason, ActorProfileResolveRequestBody,
+    ActorProfileResolveResponseBody, ResolvedActorProfile,
 };
 use arkret_models_identity::{
     DeviceSummaryStatus, DeviceSummaryVerificationState, PrincipalResolutionAuditEvidence,
-    PrincipalResolutionAuditRequest,
+    PrincipalResolutionAuditRequestBody,
 };
 use arkret_wire::ActorId;
 use coland_contracts::AccountProjectionRequestBody;
@@ -77,7 +77,7 @@ use crate::state::AppState;
 use crate::wire::ColandAccountRegisterOutcome;
 
 /// Deployment-local Station projection result. The Account
-/// Authority owns `AccountRegisterOutcome` and its signed binding receipt;
+/// Authority owns `AccountRegisterResponseBody` and its signed binding receipt;
 /// this internal edge only confirms the durable local projection.
 #[derive(Debug, Serialize, salvo::oapi::ToSchema)]
 struct AccountProjectionRegisterOutcome {
@@ -464,12 +464,12 @@ fn account_registration_retry_after_ms(
     rate_limit: Option<&AccountRegistrationRateLimitPolicy>,
 ) -> Option<u64> {
     let rate_limit = rate_limit?;
-    if rate_limit.max_attempts == 0 || rate_limit.window_seconds == 0 {
+    if rate_limit.max_attempt_count == 0 || rate_limit.window_seconds == 0 {
         return Some(0);
     }
     state.identities().account_registration_retry_after_ms(
         did,
-        rate_limit.max_attempts,
+        rate_limit.max_attempt_count,
         rate_limit.window_seconds,
         now(),
     )
@@ -763,7 +763,7 @@ async fn local_account_register(
         principal_id: principal_id.clone(),
         localpart,
         display_name,
-        bio: None,
+        biography: None,
         avatar_blob_ref: None,
         created_at,
     };
@@ -1047,7 +1047,7 @@ async fn project_account(
         principal_id,
         localpart: String::new(),
         display_name: body.display_name.clone(),
-        bio: None,
+        biography: None,
         avatar_blob_ref: None,
         created_at,
     };
@@ -1100,7 +1100,7 @@ async fn update_profile(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<AccountUpdateProfileRequestBody>,
-) -> JsonResult<AccountUpdateProfileOutcome> {
+) -> JsonResult<AccountUpdateProfileResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
@@ -1147,7 +1147,7 @@ async fn update_profile(
         coland_storage::ActorProfileAdmissionOutcome::Committed(record)
         | coland_storage::ActorProfileAdmissionOutcome::Duplicate(record) => record,
     };
-    json_ok(AccountUpdateProfileOutcome {
+    json_ok(AccountUpdateProfileResponseBody {
         profile: AccountMaterializedProfile::new(record.profile)
             .map_err(|error| AppError::internal(error.to_string()))?,
         commit: record.commit,
@@ -1285,8 +1285,8 @@ async fn resolve_actor_profiles(
     aa: AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-    body: JsonBody<ActorProfileResolveRequest>,
-) -> JsonResult<ActorProfileResolveOutcome> {
+    body: JsonBody<ActorProfileResolveRequestBody>,
+) -> JsonResult<ActorProfileResolveResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
@@ -1340,7 +1340,7 @@ async fn resolve_actor_profiles(
             }),
         }
     }
-    let outcome = ActorProfileResolveOutcome {
+    let outcome = ActorProfileResolveResponseBody {
         profiles,
         failures: (!failures.is_empty()).then_some(failures),
     };
@@ -1360,7 +1360,7 @@ async fn read_principal_resolution_audit(
     depot: &mut Depot,
     req: &mut Request,
     res: &mut Response,
-    body: JsonBody<PrincipalResolutionAuditRequest>,
+    body: JsonBody<PrincipalResolutionAuditRequestBody>,
 ) -> JsonResult<PrincipalResolutionAuditEvidence> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
@@ -1596,7 +1596,7 @@ async fn direct_conversation_resolve(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<DirectConversationResolveRequestBody>,
-) -> JsonResult<DirectConversationResolveOutcome> {
+) -> JsonResult<DirectConversationResolveResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
@@ -1666,7 +1666,7 @@ async fn direct_conversation_resolve(
         .map_err(|error| AppError::internal(format!("direct pair key invalid: {error}")))?;
 
     // Existing coordinates and their state come from the accepted durable
-    // founding/current-result cut.  In particular, a live binding no longer
+    // founding/current-state cut.  In particular, a live binding no longer
     // depends on process hydration having replayed it into ContactService.
     let mut durable = state
         .event_queries()
@@ -1705,7 +1705,7 @@ async fn direct_conversation_resolve(
         if projection.realm_is_destroyed(&binding.realm_id)
             || projection.realm_is_tombstoned(&binding.realm_id)
         {
-            return json_ok(DirectConversationResolveOutcome::Suspended {
+            return json_ok(DirectConversationResolveResponseBody::Suspended {
                 coordinates,
                 blockers: vec![DirectConversationSendBlocker::RealmTerminalFault],
                 group_state_ref,
@@ -1715,14 +1715,14 @@ async fn direct_conversation_resolve(
             .as_ref()
             .is_some_and(|contact| contact.status != "accepted")
         {
-            return json_ok(DirectConversationResolveOutcome::Suspended {
+            return json_ok(DirectConversationResolveResponseBody::Suspended {
                 coordinates,
                 blockers: vec![DirectConversationSendBlocker::ContactScopeStale],
                 group_state_ref,
             });
         }
         if let Some(blocker) = direct_current_membership_blocker(durable.as_ref(), &actor, &peer) {
-            return json_ok(DirectConversationResolveOutcome::Suspended {
+            return json_ok(DirectConversationResolveResponseBody::Suspended {
                 coordinates,
                 blockers: vec![blocker],
                 group_state_ref,
@@ -1732,7 +1732,7 @@ async fn direct_conversation_resolve(
             || (agent_basis.is_none()
                 && state.account_lifecycle_state(peer.signing_principal_id().as_str()) != "active")
         {
-            return json_ok(DirectConversationResolveOutcome::Suspended {
+            return json_ok(DirectConversationResolveResponseBody::Suspended {
                 coordinates,
                 blockers: vec![DirectConversationSendBlocker::PolicyStale],
                 group_state_ref,
@@ -1755,9 +1755,11 @@ async fn direct_conversation_resolve(
                     .await
                     .unwrap_or(false)
                 {
-                    return json_ok(DirectConversationResolveOutcome::TemporarilyUnavailable {
-                        retry_after_ms: Some(250),
-                    });
+                    return json_ok(
+                        DirectConversationResolveResponseBody::TemporarilyUnavailable {
+                            retry_after_ms: Some(250),
+                        },
+                    );
                 }
                 durable = state
                     .event_queries()
@@ -1771,9 +1773,11 @@ async fn direct_conversation_resolve(
                     .as_ref()
                     .is_none_or(|facts| facts.group_current_exact_pair.is_none())
                 {
-                    return json_ok(DirectConversationResolveOutcome::TemporarilyUnavailable {
-                        retry_after_ms: Some(250),
-                    });
+                    return json_ok(
+                        DirectConversationResolveResponseBody::TemporarilyUnavailable {
+                            retry_after_ms: Some(250),
+                        },
+                    );
                 }
             }
         }
@@ -1783,7 +1787,7 @@ async fn direct_conversation_resolve(
         // The refresh may advance membership or lifecycle while material is
         // in flight. Evaluate deterministic blockers again at the published cut.
         if let Some(blocker) = direct_current_membership_blocker(durable.as_ref(), &actor, &peer) {
-            return json_ok(DirectConversationResolveOutcome::Suspended {
+            return json_ok(DirectConversationResolveResponseBody::Suspended {
                 coordinates,
                 blockers: vec![blocker],
                 group_state_ref,
@@ -1793,7 +1797,7 @@ async fn direct_conversation_resolve(
         if projection.realm_is_destroyed(&binding.realm_id)
             || projection.realm_is_tombstoned(&binding.realm_id)
         {
-            return json_ok(DirectConversationResolveOutcome::Suspended {
+            return json_ok(DirectConversationResolveResponseBody::Suspended {
                 coordinates,
                 blockers: vec![DirectConversationSendBlocker::RealmTerminalFault],
                 group_state_ref,
@@ -1803,7 +1807,7 @@ async fn direct_conversation_resolve(
             || (agent_basis.is_none()
                 && state.account_lifecycle_state(peer.signing_principal_id().as_str()) != "active")
         {
-            return json_ok(DirectConversationResolveOutcome::Suspended {
+            return json_ok(DirectConversationResolveResponseBody::Suspended {
                 coordinates,
                 blockers: vec![DirectConversationSendBlocker::PolicyStale],
                 group_state_ref,
@@ -1814,7 +1818,7 @@ async fn direct_conversation_resolve(
             .and_then(|facts| facts.group_current_exact_pair)
             != Some(true)
         {
-            return json_ok(DirectConversationResolveOutcome::Suspended {
+            return json_ok(DirectConversationResolveResponseBody::Suspended {
                 coordinates,
                 blockers: vec![DirectConversationSendBlocker::MlsReconcileRequired],
                 group_state_ref,
@@ -1863,13 +1867,13 @@ async fn direct_conversation_resolve(
         send_blockers.sort_by_key(|blocker| format!("{blocker:?}"));
         send_blockers.dedup();
         let Some(group_state_ref) = group_state_ref else {
-            return json_ok(DirectConversationResolveOutcome::Suspended {
+            return json_ok(DirectConversationResolveResponseBody::Suspended {
                 coordinates,
                 blockers: vec![DirectConversationSendBlocker::MlsReconcileRequired],
                 group_state_ref: None,
             });
         };
-        return json_ok(DirectConversationResolveOutcome::Found {
+        return json_ok(DirectConversationResolveResponseBody::Found {
             coordinates,
             group_state_ref,
             send_blockers,
@@ -1882,13 +1886,13 @@ async fn direct_conversation_resolve(
             .as_ref()
             .is_some_and(|contact| contact.status != "accepted")
         {
-            return json_ok(DirectConversationResolveOutcome::Suspended {
+            return json_ok(DirectConversationResolveResponseBody::Suspended {
                 coordinates,
                 blockers: vec![DirectConversationSendBlocker::ContactScopeStale],
                 group_state_ref: facts.group_state_ref.clone(),
             });
         }
-        return json_ok(DirectConversationResolveOutcome::Provisional {
+        return json_ok(DirectConversationResolveResponseBody::Provisional {
             coordinates,
             authorization_basis: facts.founding_slot.authorization_basis.clone(),
             group_state_ref: facts.group_state_ref.clone(),
@@ -1912,9 +1916,11 @@ async fn direct_conversation_resolve(
             diagnostic = "accepted_contact",
             "Direct founding resolution is unavailable"
         );
-        return json_ok(DirectConversationResolveOutcome::TemporarilyUnavailable {
-            retry_after_ms: None,
-        });
+        return json_ok(
+            DirectConversationResolveResponseBody::TemporarilyUnavailable {
+                retry_after_ms: None,
+            },
+        );
     }
     match founder {
         Some(founder) if founder == actor.to_string() => {
@@ -1955,20 +1961,24 @@ async fn direct_conversation_resolve(
                                 "Agent founding evidence is invalid: {error}"
                             ))
                         })?;
-                    return json_ok(DirectConversationResolveOutcome::CreationRequired {
+                    return json_ok(DirectConversationResolveResponseBody::CreationRequired {
                         next_founding_input: DirectConversationFoundingInput {
                             founding_authority_evidence: evidence,
                         },
                     });
                 }
-                return json_ok(DirectConversationResolveOutcome::TemporarilyUnavailable {
-                    retry_after_ms: None,
-                });
+                return json_ok(
+                    DirectConversationResolveResponseBody::TemporarilyUnavailable {
+                        retry_after_ms: None,
+                    },
+                );
             }
             let Some(contact) = contact.as_ref() else {
-                return json_ok(DirectConversationResolveOutcome::TemporarilyUnavailable {
-                    retry_after_ms: None,
-                });
+                return json_ok(
+                    DirectConversationResolveResponseBody::TemporarilyUnavailable {
+                        retry_after_ms: None,
+                    },
+                );
             };
             let Some(contact_round_evidence) =
                 social::direct::fresh_direct_contact_evidence(state, contact).await?
@@ -1977,11 +1987,13 @@ async fn direct_conversation_resolve(
                     diagnostic = "fresh_contact_evidence",
                     "Direct founding resolution is unavailable"
                 );
-                return json_ok(DirectConversationResolveOutcome::TemporarilyUnavailable {
-                    retry_after_ms: None,
-                });
+                return json_ok(
+                    DirectConversationResolveResponseBody::TemporarilyUnavailable {
+                        retry_after_ms: None,
+                    },
+                );
             };
-            json_ok(DirectConversationResolveOutcome::CreationRequired {
+            json_ok(DirectConversationResolveResponseBody::CreationRequired {
                 next_founding_input: DirectConversationFoundingInput {
                     founding_authority_evidence:
                         DirectConversationFoundingAuthorityEvidence::Human {
@@ -1990,7 +2002,7 @@ async fn direct_conversation_resolve(
                 },
             })
         }
-        Some(_) => json_ok(DirectConversationResolveOutcome::AwaitingFounder {
+        Some(_) => json_ok(DirectConversationResolveResponseBody::AwaitingFounder {
             retry_after_ms: None,
         }),
         // The basis is not verifiable right now, so we cannot safely classify the pair.
@@ -1999,9 +2011,11 @@ async fn direct_conversation_resolve(
                 diagnostic = "founder",
                 "Direct founding resolution is unavailable"
             );
-            json_ok(DirectConversationResolveOutcome::TemporarilyUnavailable {
-                retry_after_ms: None,
-            })
+            json_ok(
+                DirectConversationResolveResponseBody::TemporarilyUnavailable {
+                    retry_after_ms: None,
+                },
+            )
         }
     }
 }

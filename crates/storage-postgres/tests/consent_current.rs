@@ -42,7 +42,7 @@ async fn fixture(pool: &PgPool) -> pcr_genesis::PcrGenesisFixture {
             station_id: fixture.history.account.station_id.clone(),
             localpart: String::new(),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: chrono::Utc::now(),
         })
@@ -126,7 +126,7 @@ struct Footprint {
 }
 async fn footprint(pool: &PgPool) -> Footprint {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT jsonb_build_array((SELECT count(*) FROM canonical_events),(SELECT count(*) FROM realm_commits),(SELECT jsonb_agg(to_jsonb(r) ORDER BY peer_id) FROM consent_current_results r),(SELECT count(*) FROM consent_result_versions),(SELECT count(*) FROM account_data_changes)) AS footprint").get_result(&mut conn).await.unwrap()
+    diesel::sql_query("SELECT jsonb_build_array((SELECT count(*) FROM canonical_events),(SELECT count(*) FROM realm_commits),(SELECT jsonb_agg(to_jsonb(r) ORDER BY peer_id) FROM consent_current_states r),(SELECT count(*) FROM consent_result_versions),(SELECT count(*) FROM account_data_changes)) AS footprint").get_result(&mut conn).await.unwrap()
 }
 
 #[tokio::test]
@@ -649,7 +649,7 @@ async fn native_human_policy_retry_and_durable_effect_drain_do_not_create_proxy_
             station_id: holder.station_id.clone(),
             localpart: String::new(),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: chrono::Utc::now(),
         })
@@ -744,7 +744,7 @@ async fn human_pcr_rejects_change_export_proxy_import_and_activation_without_any
         &f,
         tail,
         EventKind::RealmGovernanceStationChange,
-        serde_json::json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":tail.commit_id,"new_governance_station_id":"ak:did_core:web:other.example"}),
+        serde_json::json!({"expected_governance_generation":"0","expected_realm_stream_commit_id":tail.commit_id,"new_governance_station_id":"ak:did_core:web:other.example"}),
     );
     let error = store
         .admit_pcr_governance_change(&change.transaction)
@@ -776,10 +776,10 @@ async fn human_pcr_rejects_change_export_proxy_import_and_activation_without_any
             )
             .await
             .unwrap(),
-        ConsentPrivateCommandOutcome::List(_)
+        ConsentPrivateCommandResponseBody::List(_)
     ));
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let request = ConsentPrivateProxyRequest {
+    let request = ConsentPrivateProxyRequestBody {
         holder_account_id: account.clone(),
         realm_id: tail.realm_id.clone(),
         governance_generation: 0,
@@ -809,23 +809,23 @@ async fn human_pcr_rejects_change_export_proxy_import_and_activation_without_any
         "realm_authority_handoffs",
         "pcr_private_handoff_imports",
         "realm_state_snapshots",
-        "realm_bootstrap_current_results",
-        "realm_authority_root_current_results",
-        "realm_policy_bundle_current_results",
-        "member_state_current_results",
-        "current_result_heads",
-        "current_result_versions",
-        "relation_current_results",
+        "realm_bootstrap_current_states",
+        "realm_authority_root_current_states",
+        "realm_policy_bundle_current_states",
+        "member_state_current_states",
+        "current_state_heads",
+        "current_state_versions",
+        "relation_current_states",
         "governance_current_ready",
         "realm_meta",
         "principal_resolutions",
         "principal_resolution_events",
-        "pcr_device_generation_current_results",
-        "pcr_device_authorization_current_results",
+        "pcr_device_generation_current_states",
+        "pcr_device_authorization_current_states",
         "pcr_device_revocation_proposals",
-        "actor_profile_current_results",
+        "actor_profile_current_states",
         "actor_profile_result_versions",
-        "consent_current_results",
+        "consent_current_states",
         "consent_result_versions",
         "agent_producer_signer_keys",
         "account_datas",
@@ -1072,7 +1072,7 @@ async fn incomplete_holder_projection_cannot_issue_or_accept_never_written_for_a
     let mut misplaced = holder.clone();
     misplaced.station_id = "ak:did_core:web:other-station.example".parse().unwrap();
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("UPDATE consent_current_results SET holder_account_id=$1 WHERE realm_id=$2")
+    diesel::sql_query("UPDATE consent_current_states SET holder_account_id=$1 WHERE realm_id=$2")
         .bind::<Jsonb, _>(serde_json::to_value(misplaced).unwrap())
         .bind::<Text, _>(f.unit.transactions[1].commit.realm_id.as_str())
         .execute(&mut conn)
@@ -1100,7 +1100,7 @@ async fn incomplete_holder_projection_cannot_issue_or_accept_never_written_for_a
     assert_eq!(footprint(&pool).await, before);
 
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("DELETE FROM consent_current_results WHERE realm_id=$1")
+    diesel::sql_query("DELETE FROM consent_current_states WHERE realm_id=$1")
         .bind::<Text, _>(accepted.event.realm_id.as_str())
         .execute(&mut conn)
         .await

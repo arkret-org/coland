@@ -1,13 +1,12 @@
 //! Exact Service-owned Applet authority material at one read-only MVCC cut.
 use arkret_models_collaboration::applet_installation_authority::{
-    AppletAuthorityMaterialOutcome, AppletAuthorityMaterialRequestBody, AppletCommittedEvent,
+    AppletAuthorityMaterialRequestBody, AppletAuthorityMaterialResponseBody, AppletCommittedEvent,
     AppletInstallationCurrentBinding,
 };
 use arkret_models_collaboration::events_payloads::CapabilityGrantPayload;
-use arkret_models_collaboration::exact_current_results::{
-    CapabilityGrantExactCurrentRow, CapabilityGrantExactCurrentSelector,
-    CapabilityGrantExactCurrentSelectorKind, ExactCurrentResultEntry,
-    ExactCurrentResultsReadOutcome,
+use arkret_models_collaboration::exact_current_state::{
+    CapabilityGrantExactCurrentSelector, CapabilityGrantExactCurrentSelectorKind,
+    CurrentCapabilityGrant, ExactCurrentStateEntry, ExactCurrentStateReadResponseBody,
 };
 use arkret_models_collaboration::governance::grant_constraint::{
     CapabilitySubject, GrantConstraintKind, GrantConstraintSubkind,
@@ -24,7 +23,7 @@ use diesel_async::AsyncPgConnection;
 use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
-use crate::capability_grant_current_results::{CapabilityGrantCurrentResultReadRow, decode_row};
+use crate::capability_grant_current_states::{CapabilityGrantCurrentStateReadRow, decode_row};
 
 fn unavailable() -> PersistenceError {
     PersistenceError::Conflict(
@@ -111,7 +110,7 @@ pub(crate) async fn read(
     service: &DidCoreId,
     station: &DidCoreId,
     request: &AppletAuthorityMaterialRequestBody,
-) -> PersistenceResult<AppletAuthorityMaterialOutcome> {
+) -> PersistenceResult<AppletAuthorityMaterialResponseBody> {
     if !(1..=64).contains(&request.grant_ids.len())
         || request
             .grant_ids
@@ -216,11 +215,11 @@ pub(crate) async fn read(
         commit_id: head.commit_id,
     };
     let mut grant_events = Vec::with_capacity(request.grant_ids.len());
-    let mut current_results = Vec::with_capacity(request.grant_ids.len());
+    let mut current_states = Vec::with_capacity(request.grant_ids.len());
     let actor = ActorId::service(service.clone());
     for id in &request.grant_ids {
-        let current=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 AND grant_id=$2")
-            .bind::<Text,_>(realm.as_str()).bind::<Text,_>(id.as_str()).get_result::<CapabilityGrantCurrentResultReadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unavailable)?;
+        let current=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_states WHERE realm_id=$1 AND grant_id=$2")
+            .bind::<Text,_>(realm.as_str()).bind::<Text,_>(id.as_str()).get_result::<CapabilityGrantCurrentStateReadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unavailable)?;
         let current = decode_row(current)?;
         let current_full = accepted(conn, &current.source.event_id).await?;
         if current_full.commit.commit_id != current.source.commit_id
@@ -290,11 +289,11 @@ pub(crate) async fn read(
             kind: CapabilityGrantExactCurrentSelectorKind::CapabilityGrant,
             grant_id: id.clone(),
         };
-        let present = ExactCurrentResultsReadOutcome::Present {
+        let present = ExactCurrentStateReadResponseBody::Present {
             realm_id: realm.clone(),
             governance_generation: generation,
             effective_stream_head: effective_head.clone(),
-            entry: ExactCurrentResultEntry::CapabilityGrant(CapabilityGrantExactCurrentRow {
+            entry: ExactCurrentStateEntry::CapabilityGrant(CurrentCapabilityGrant {
                 selector: selector.clone(),
                 source_stream_ref: current.source.stream_ref,
                 revision: current.revision,
@@ -302,7 +301,7 @@ pub(crate) async fn read(
             }),
         };
         grant_events.push(original);
-        current_results.push(present);
+        current_states.push(present);
     }
     let current_binding = current_binding(conn, applet, service, &request.effective_scope).await?;
     if matches!(
@@ -312,9 +311,9 @@ pub(crate) async fn read(
         current_binding,
         AppletInstallationCurrentBinding::Active { .. }
     ) {
-        use arkret_models_collaboration::exact_current_results::{
-            AppletRegistrationExactCurrentRow, AppletRegistrationExactCurrentSelector,
-            AppletRegistrationExactCurrentSelectorKind,
+        use arkret_models_collaboration::exact_current_state::{
+            AppletRegistrationExactCurrentSelector, AppletRegistrationExactCurrentSelectorKind,
+            CurrentAppletRegistration,
         };
         #[derive(QueryableByName)]
         struct RegistrationCurrent {
@@ -325,7 +324,7 @@ pub(crate) async fn read(
             #[diesel(sql_type=Jsonb)]
             value: Value,
         }
-        let current = sql_query("SELECT current_commit_id,current_stream_position,value FROM applet_registration_current_results WHERE realm_id=$1 AND applet_id=$2 AND service_id=$3")
+        let current = sql_query("SELECT current_commit_id,current_stream_position,value FROM applet_registration_current_states WHERE realm_id=$1 AND applet_id=$2 AND service_id=$3")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(applet.as_str()).bind::<Text,_>(service.as_str())
             .get_result::<RegistrationCurrent>(&mut *conn).await.map_err(PersistenceError::database)?;
         let stream = CommitStreamRef::Realm {
@@ -335,7 +334,7 @@ pub(crate) async fn read(
             .bind::<Text,_>(crate::authority_commit::stream_key(&stream)?)
             .get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
         let head: arkret_wire::RealmCommit = decode(head.value)?;
-        current_results.push(ExactCurrentResultsReadOutcome::Present {
+        current_states.push(ExactCurrentStateReadResponseBody::Present {
             realm_id: realm.clone(),
             governance_generation: generation,
             effective_stream_head: CommitStreamHead {
@@ -343,7 +342,7 @@ pub(crate) async fn read(
                 commit_id: head.commit_id,
                 stream_position: head.stream_position,
             },
-            entry: ExactCurrentResultEntry::AppletRegistration(AppletRegistrationExactCurrentRow {
+            entry: ExactCurrentStateEntry::AppletRegistration(CurrentAppletRegistration {
                 selector: AppletRegistrationExactCurrentSelector {
                     kind: AppletRegistrationExactCurrentSelectorKind::AppletRegistration,
                     applet_id: applet.clone(),
@@ -362,13 +361,13 @@ pub(crate) async fn read(
             }),
         });
     }
-    let outcome = AppletAuthorityMaterialOutcome {
+    let outcome = AppletAuthorityMaterialResponseBody {
         applet_id: applet.clone(),
         service_id: service.clone(),
         effective_scope: request.effective_scope.clone(),
         registration,
         grant_events,
-        current_results,
+        current_states,
         current_binding,
     };
     outcome
@@ -385,7 +384,7 @@ async fn current_binding(
     service: &DidCoreId,
     scope: &arkret_wire::ScopeRef,
 ) -> PersistenceResult<AppletInstallationCurrentBinding> {
-    use crate::capability_grant_current_results::{
+    use crate::capability_grant_current_states::{
         RealmAuthorityRootReadRow, accepted_grant_is_current, decode_authority_root,
     };
     let scope_key = coland_storage::applet_effective_scope_key(scope)?;
@@ -419,7 +418,7 @@ async fn current_binding(
         return Ok(AppletInstallationCurrentBinding::Inactive);
     }
     let current = sql_query(
-        "SELECT value FROM applet_registration_current_results WHERE realm_id=$1 AND applet_id=$2 AND service_id=$3",
+        "SELECT value FROM applet_registration_current_states WHERE realm_id=$1 AND applet_id=$2 AND service_id=$3",
     )
     .bind::<Text, _>(scope.realm_id().as_str())
     .bind::<Text, _>(applet.as_str())
@@ -436,8 +435,10 @@ async fn current_binding(
     {
         return Ok(AppletInstallationCurrentBinding::Inactive);
     }
-    let did = arkret_identity::verification_method_did(registration.webhook_auth.key_ref.as_str())
-        .map_err(PersistenceError::database)?;
+    let did = arkret_identity::verification_method_did(
+        registration.webhook_signature_policy.key_ref.as_str(),
+    )
+    .map_err(PersistenceError::database)?;
     let document = sql_query(
         "SELECT did_document AS value FROM webvh_documents WHERE id=$1 AND expires_at>$2",
     )
@@ -457,7 +458,7 @@ async fn current_binding(
     {
         return Ok(AppletInstallationCurrentBinding::Inactive);
     }
-    let current_instance = sql_query("SELECT c.commit_json AS value FROM applet_registration_current_results r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref JOIN realm_commits c ON c.commit_id=a.accepted_commit_id WHERE r.realm_id=$1 AND r.applet_id=$2 AND a.registration_event_ref=$3 AND r.service_id=$4")
+    let current_instance = sql_query("SELECT c.commit_json AS value FROM applet_registration_current_states r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref JOIN realm_commits c ON c.commit_id=a.accepted_commit_id WHERE r.realm_id=$1 AND r.applet_id=$2 AND a.registration_event_ref=$3 AND r.service_id=$4")
         .bind::<Text,_>(scope.realm_id().as_str()).bind::<Text,_>(applet.as_str())
         .bind::<Text,_>(install["registration_event"]["event_id"].as_str().ok_or_else(unavailable)?)
         .bind::<Text,_>(service.as_str())
@@ -471,21 +472,21 @@ async fn current_binding(
         || registration_full.commit != commit
         || serde_json::to_value(&registration_full.event).map_err(PersistenceError::database)?
             != install["registration_event"]
-        || crate::applet_current_results::registration_security_value(
+        || crate::applet_current_states::registration_security_value(
             &serde_json::to_value(&registration_full.event.payload)
                 .map_err(PersistenceError::database)?,
-        ) != crate::applet_current_results::registration_security_value(&current.value)
+        ) != crate::applet_current_states::registration_security_value(&current.value)
     {
         return Err(unavailable());
     }
-    let rows = sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 ORDER BY grant_id")
-        .bind::<Text,_>(scope.realm_id().as_str()).load::<CapabilityGrantCurrentResultReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let rows = sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_states WHERE realm_id=$1 ORDER BY grant_id")
+        .bind::<Text,_>(scope.realm_id().as_str()).load::<CapabilityGrantCurrentStateReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut grants = std::collections::BTreeMap::new();
     for row in rows {
         let row = decode_row(row)?;
         grants.insert(row.grant_id, row.value);
     }
-    let root = sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1")
+    let root = sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1")
         .bind::<Text,_>(scope.realm_id().as_str()).get_result::<RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let root = decode_authority_root(root)?;
     let originals = install["capability_grant_events"]

@@ -9,7 +9,7 @@ mod ordinary_realm;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use arkret_models_integration::{AppletTransactionOutcome, AppletTransactionRequestBody};
+use arkret_models_integration::{AppletTransactionRequestBody, AppletTransactionResponseBody};
 use arkret_signatures::http_signature::{
     HttpSignatureScenario, SignatureVerificationPolicy, verify_signed_http_message,
 };
@@ -62,7 +62,7 @@ async fn durable_completion_retries_real_signed_delivery_before_ack() {
         event,
         commit,
         producer_signer_fact,
-    } = &context.material.result
+    } = &context.material.material
     else {
         panic!("completion must name the original creation")
     };
@@ -120,7 +120,7 @@ async fn durable_completion_retries_real_signed_delivery_before_ack() {
         if attempt==0 {
             (StatusCode::SERVICE_UNAVAILABLE,serde_json::json!({"type":"https://arkret.org/problems/service_unavailable","title":"Service unavailable","status":503}))
         } else {
-            (StatusCode::OK,serde_json::to_value(AppletTransactionOutcome::Accepted {committed_event_refs:vec![],rejections:vec![],retry_after_ms:None}).unwrap())
+            (StatusCode::OK,serde_json::to_value(AppletTransactionResponseBody::Accepted {committed_event_refs:vec![],rejections:vec![],retry_after_ms:None}).unwrap())
         }
     }));
     // Preparing the expected material also schedules the next durable attempt.
@@ -252,8 +252,8 @@ async fn expired_completion_refresh_and_old_key_ack_preserve_one_original() {
     assert_eq!(refreshed.actor_id, first.actor_id);
     assert_eq!(refreshed.request_digest, first.request_digest);
     assert_eq!(
-        serde_json::to_value(&refreshed.context.as_ref().unwrap().material.result).unwrap(),
-        serde_json::to_value(&first.context.as_ref().unwrap().material.result).unwrap(),
+        serde_json::to_value(&refreshed.context.as_ref().unwrap().material.material).unwrap(),
+        serde_json::to_value(&first.context.as_ref().unwrap().material.material).unwrap(),
         "refresh never replaces the accepted Event/Commit/fact"
     );
     let race = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -369,12 +369,12 @@ async fn failing_completion_prefix_does_not_starve_a_later_accepted_creation() {
             arkret_wire::DetachedSignatureContext::RealmActorMaterial,
             &arkret_signatures::PublicKeyMaterial::Ed25519Raw { bytes:key.to_bytes().to_vec() },
         ).unwrap();
-        let arkret_models_integration::RealmActorMaterial::Event {event,commit,..}=&body.authoring_context.material.result else { panic!("real accepted creation result") };
+        let arkret_models_integration::RealmActorMaterial::Event {event,commit,..}=&body.authoring_context.material.material else { panic!("real accepted creation result") };
         assert_eq!(commit.event_ref,event.event_id);
         assert_eq!(event.kind,arkret_wire::EventKind::RealmActorCreate);
         *delivered.lock().unwrap().entry(event.event_id.to_string()).or_default()+=1;
         if event.event_id==healthy_event {
-            (StatusCode::OK,serde_json::to_value(AppletTransactionOutcome::Accepted {committed_event_refs:vec![],rejections:vec![],retry_after_ms:None}).unwrap())
+            (StatusCode::OK,serde_json::to_value(AppletTransactionResponseBody::Accepted {committed_event_refs:vec![],rejections:vec![],retry_after_ms:None}).unwrap())
         } else {
             (StatusCode::SERVICE_UNAVAILABLE,serde_json::json!({"type":"https://arkret.org/problems/service_unavailable","title":"Service unavailable","status":503}))
         }

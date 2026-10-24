@@ -218,7 +218,7 @@ impl PcrGenesisFixture {
                     event_digest: arkret_canonical::canonical_sha256(&operation)
                         .expect("fixture DID inception digest"),
                     did,
-                    seq: self.history.inception.seq.unwrap_or(1),
+                    sequence: self.history.inception.sequence.unwrap_or(1),
                     operation,
                     created_at: self.history.events[0].created_at,
                 })

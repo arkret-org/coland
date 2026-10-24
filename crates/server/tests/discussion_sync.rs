@@ -8,7 +8,7 @@ mod ordinary_realm;
 
 use arkret_wire::{
     CommitStreamRef, CommittedEventView, EventKind, StrandId, StreamScanDirection,
-    StreamScanOutcome, StreamScanRequest,
+    StreamScanRequestBody, StreamScanResponseBody,
 };
 use coland_http::config::AppConfig;
 use coland_http::service;
@@ -36,7 +36,7 @@ async fn persisted_read_session(
             station_id: state.service_core_id(),
             localpart: format!("history-{}", uuid::Uuid::now_v7().simple()),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: now,
         })
@@ -87,7 +87,7 @@ async fn persisted_read_session(
 async fn scan(
     state: &coland_http::state::AppState,
     token: &str,
-    request: &StreamScanRequest,
+    request: &StreamScanRequestBody,
 ) -> (StatusCode, Value) {
     let canonical_body = String::from_utf8(
         arkret_canonical::canonical_json_bytes(request).expect("canonical scan request"),
@@ -283,7 +283,7 @@ fn history_scenario<'a>(
             before.authority_commit.event.created_at,
             after.authority_commit.event.created_at
         );
-        let request = StreamScanRequest {
+        let request = StreamScanRequestBody {
             realm_id: realm_id.clone(),
             stream_ref: CommitStreamRef::Realm { realm_id },
             direction: StreamScanDirection::After(None),
@@ -291,7 +291,7 @@ fn history_scenario<'a>(
         };
         let (status, body) = scan(&state, &token, &request).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let page: StreamScanOutcome = serde_json::from_value(body).unwrap();
+        let page: StreamScanResponseBody = serde_json::from_value(body).unwrap();
         page.validate_for_request(&request).unwrap();
         let event_ids = page
             .committed_events
@@ -328,7 +328,7 @@ fn history_scenario<'a>(
                 arkret_wire::ReadableFloorReason::StreamStart
             );
         }
-        let continuation = StreamScanRequest {
+        let continuation = StreamScanRequestBody {
             direction: StreamScanDirection::After(Some(
                 join.authority_commit.commit.stream_position,
             )),
@@ -336,7 +336,7 @@ fn history_scenario<'a>(
         };
         let (status, body) = scan(&state, &token, &continuation).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let tail: StreamScanOutcome = serde_json::from_value(body).unwrap();
+        let tail: StreamScanResponseBody = serde_json::from_value(body).unwrap();
         tail.validate_for_request(&continuation).unwrap();
         assert_eq!(tail.committed_events.len(), 1);
         assert_eq!(

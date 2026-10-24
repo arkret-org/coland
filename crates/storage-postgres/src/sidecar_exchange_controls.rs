@@ -1,10 +1,10 @@
 //! Durable encrypted exchange controls at one accepted native Sidecar cut.
 
 use arkret_models_collaboration::agent_sidecar::{
-    AgentSidecarExchangeControlAssertion, AgentSidecarExchangeControlsCurrentValue,
+    AgentSidecarExchangeControlAssertion, AgentSidecarExchangeControlsValue,
 };
 use arkret_models_collaboration::events_payloads::sidecar::AgentSidecarExchangeControlPayload;
-use arkret_models_collaboration::exact_current_results::CanonicalEventDot;
+use arkret_models_collaboration::exact_current_state::CanonicalEventDot;
 use arkret_wire::{CommitStreamRef, Event, EventKind, RealmCommit, ScopeRef};
 use coland_storage::{ConflictCode, PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
@@ -86,7 +86,7 @@ pub(crate) async fn commit_in_connection(
     if authorize {
         crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;
         let owner = diesel::sql_query(
-            "SELECT controller_account_id,value FROM sidecar_current_results \
+            "SELECT controller_account_id,value FROM sidecar_current_states \
              WHERE realm_id=$1 AND sidecar_id=$2 FOR SHARE",
         )
         .bind::<Text, _>(event.realm_id.as_str())
@@ -124,7 +124,7 @@ pub(crate) async fn commit_in_connection(
             ));
         }
         let attached = diesel::sql_query(
-            "SELECT context_ref FROM sidecar_context_current_results \
+            "SELECT context_ref FROM sidecar_context_current_states \
              WHERE realm_id=$1 AND sidecar_id=$2 AND context_ref_digest=$3 FOR SHARE",
         )
         .bind::<Text, _>(event.realm_id.as_str())
@@ -140,13 +140,13 @@ pub(crate) async fn commit_in_connection(
                 "Sidecar source context is not attached",
             ));
         }
-        crate::mls_group_current_results::require_mls_send_gate_in_connection(conn, event).await?;
+        crate::mls_group_current_states::require_mls_send_gate_in_connection(conn, event).await?;
     }
     let source = serde_json::to_value(&stream).map_err(PersistenceError::database)?;
     let position = i64::try_from(commit.stream_position).map_err(PersistenceError::database)?;
     let previous = diesel::sql_query(
         "SELECT value,source_stream_ref,current_stream_position \
-         FROM sidecar_exchange_controls_current_results \
+         FROM sidecar_exchange_controls_current_states \
          WHERE realm_id=$1 AND sidecar_id=$2 AND context_ref_digest=$3 FOR UPDATE",
     )
     .bind::<Text, _>(event.realm_id.as_str())
@@ -165,10 +165,10 @@ pub(crate) async fn commit_in_connection(
                     "Sidecar control does not extend its current stream",
                 ));
             }
-            serde_json::from_value::<AgentSidecarExchangeControlsCurrentValue>(previous.value)
+            serde_json::from_value::<AgentSidecarExchangeControlsValue>(previous.value)
                 .map_err(corrupt)?
         }
-        None => AgentSidecarExchangeControlsCurrentValue::new(Vec::new()).map_err(corrupt)?,
+        None => AgentSidecarExchangeControlsValue::new(Vec::new()).map_err(corrupt)?,
     };
     current
         .validate_for_context(&payload.sidecar_id, &payload.source_context_ref)
@@ -180,15 +180,15 @@ pub(crate) async fn commit_in_connection(
         })
         .map_err(corrupt)?;
     let changed = diesel::sql_query(
-        "INSERT INTO sidecar_exchange_controls_current_results \
+        "INSERT INTO sidecar_exchange_controls_current_states \
          (realm_id,sidecar_id,context_ref_digest,context_ref,current_commit_id,current_stream_position,source_stream_ref,value,updated_at) \
          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) \
          ON CONFLICT(sidecar_id,context_ref_digest) DO UPDATE SET \
          current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position, \
          value=EXCLUDED.value,updated_at=EXCLUDED.updated_at \
-         WHERE sidecar_exchange_controls_current_results.realm_id=EXCLUDED.realm_id \
-           AND sidecar_exchange_controls_current_results.context_ref=EXCLUDED.context_ref \
-           AND sidecar_exchange_controls_current_results.source_stream_ref=EXCLUDED.source_stream_ref",
+         WHERE sidecar_exchange_controls_current_states.realm_id=EXCLUDED.realm_id \
+           AND sidecar_exchange_controls_current_states.context_ref=EXCLUDED.context_ref \
+           AND sidecar_exchange_controls_current_states.source_stream_ref=EXCLUDED.source_stream_ref",
     )
     .bind::<Text, _>(event.realm_id.as_str())
     .bind::<Text, _>(payload.sidecar_id.as_str())
@@ -216,10 +216,10 @@ pub(crate) async fn commit_in_connection(
 pub(crate) async fn install_in_connection(
     conn: &mut AsyncPgConnection,
     realm: &arkret_wire::RealmId,
-    entry: &arkret_wire::TypedCurrentRow,
+    entry: &arkret_wire::CurrentState,
     installed_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
-    let arkret_wire::TypedCurrentRow::Value {
+    let arkret_wire::CurrentState::Value {
         selector:
             arkret_wire::CurrentSelector::AgentSidecarExchangeControls {
                 sidecar_id,
@@ -232,7 +232,7 @@ pub(crate) async fn install_in_connection(
     else {
         return Ok(());
     };
-    let current: AgentSidecarExchangeControlsCurrentValue =
+    let current: AgentSidecarExchangeControlsValue =
         serde_json::from_value(value.clone()).map_err(corrupt)?;
     current
         .validate_for_context(sidecar_id, source_context_ref)
@@ -252,7 +252,7 @@ pub(crate) async fn install_in_connection(
         .map_err(PersistenceError::database)?;
     let previous = diesel::sql_query(
         "SELECT value,source_stream_ref,current_stream_position \
-         FROM sidecar_exchange_controls_current_results \
+         FROM sidecar_exchange_controls_current_states \
          WHERE realm_id=$1 AND sidecar_id=$2 AND context_ref_digest=$3 FOR UPDATE",
     )
     .bind::<Text, _>(realm.as_str())
@@ -263,7 +263,7 @@ pub(crate) async fn install_in_connection(
     .optional()
     .map_err(PersistenceError::database)?;
     if let Some(previous) = previous {
-        let previous: AgentSidecarExchangeControlsCurrentValue =
+        let previous: AgentSidecarExchangeControlsValue =
             serde_json::from_value(previous.value).map_err(corrupt)?;
         if previous
             .assertions()
@@ -277,18 +277,18 @@ pub(crate) async fn install_in_connection(
         }
     }
     let changed = diesel::sql_query(
-        "INSERT INTO sidecar_exchange_controls_current_results \
+        "INSERT INTO sidecar_exchange_controls_current_states \
          (realm_id,sidecar_id,context_ref_digest,context_ref,current_commit_id,current_stream_position,source_stream_ref,value,updated_at) \
          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(sidecar_id,context_ref_digest) DO UPDATE SET \
          current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position, \
          value=EXCLUDED.value,updated_at=EXCLUDED.updated_at \
-         WHERE sidecar_exchange_controls_current_results.realm_id=EXCLUDED.realm_id \
-           AND sidecar_exchange_controls_current_results.context_ref=EXCLUDED.context_ref \
-           AND sidecar_exchange_controls_current_results.source_stream_ref=EXCLUDED.source_stream_ref \
-           AND (sidecar_exchange_controls_current_results.current_stream_position<EXCLUDED.current_stream_position \
-             OR (sidecar_exchange_controls_current_results.current_stream_position=EXCLUDED.current_stream_position \
-               AND sidecar_exchange_controls_current_results.current_commit_id=EXCLUDED.current_commit_id \
-               AND sidecar_exchange_controls_current_results.value=EXCLUDED.value))",
+         WHERE sidecar_exchange_controls_current_states.realm_id=EXCLUDED.realm_id \
+           AND sidecar_exchange_controls_current_states.context_ref=EXCLUDED.context_ref \
+           AND sidecar_exchange_controls_current_states.source_stream_ref=EXCLUDED.source_stream_ref \
+           AND (sidecar_exchange_controls_current_states.current_stream_position<EXCLUDED.current_stream_position \
+             OR (sidecar_exchange_controls_current_states.current_stream_position=EXCLUDED.current_stream_position \
+               AND sidecar_exchange_controls_current_states.current_commit_id=EXCLUDED.current_commit_id \
+               AND sidecar_exchange_controls_current_states.value=EXCLUDED.value))",
     )
     .bind::<Text, _>(realm.as_str())
     .bind::<Text, _>(sidecar_id.as_str())

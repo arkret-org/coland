@@ -227,7 +227,7 @@ mod tests {
                     account_id,
                     localpart: format!("account-{label}"),
                     display_name: None,
-                    bio: None,
+                    biography: None,
                     avatar_blob_ref: None,
                     created_at: chrono::Utc::now(),
                 })

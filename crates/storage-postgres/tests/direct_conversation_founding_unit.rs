@@ -469,7 +469,7 @@ fn normal_round(
             }],
             closed_round: None,
             issued_at: at,
-            fresh_until: at + chrono::Duration::hours(1),
+            cache_expires_at: at + chrono::Duration::hours(1),
             signature: source_signature(account),
         };
     let evidence = ContactRoundEvidenceBundle {
@@ -899,7 +899,7 @@ async fn footprint(pool: &PgPool, realm_id: &RealmId) -> [i64; 5] {
         .await,
         count(
             pool,
-            "SELECT COUNT(*) AS count FROM member_state_current_results WHERE realm_id=$1",
+            "SELECT COUNT(*) AS count FROM member_state_current_states WHERE realm_id=$1",
             realm_id,
         )
         .await,
@@ -923,11 +923,11 @@ async fn exact_genesis_scan(
     realm: &RealmId,
     account: &AccountId,
     station: &DidCoreId,
-) -> arkret_wire::StreamScanOutcome {
+) -> arkret_wire::StreamScanResponseBody {
     use coland_storage::AccountStreamScan;
     let scan = store
         .scan_stream_for_account(
-            &arkret_wire::StreamScanRequest {
+            &arkret_wire::StreamScanRequestBody {
                 realm_id: realm.clone(),
                 stream_ref: arkret_wire::CommitStreamRef::Realm {
                     realm_id: realm.clone(),
@@ -1145,7 +1145,7 @@ async fn direct_participation_inherits_accepted_fixed_baseline_without_a_policy_
     assert_eq!(
         count(
             &pool,
-            "SELECT COUNT(*) AS count FROM realm_policy_bundle_current_results WHERE realm_id=$1",
+            "SELECT COUNT(*) AS count FROM realm_policy_bundle_current_states WHERE realm_id=$1",
             &realm
         )
         .await,
@@ -1160,12 +1160,12 @@ async fn direct_participation_inherits_accepted_fixed_baseline_without_a_policy_
     assert_eq!(rows.len(), 2);
     for (row, scope) in rows.iter().zip(&scopes) {
         assert_eq!(row["scope_key"], *scope);
-        assert_eq!(row["reply_message"], true);
+        assert_eq!(row["message_creation_allowed"], true);
     }
     // A profile label or a slot cannot substitute for a covering current
     // Commit. Corrupting that coordinate must make the same read unresolved.
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("UPDATE realm_bootstrap_current_results SET current_stream_position=current_stream_position+1 WHERE realm_id=$1 AND result_family='realm_genesis'")
+    diesel::sql_query("UPDATE realm_bootstrap_current_states SET current_stream_position=current_stream_position+1 WHERE realm_id=$1 AND state_family='realm_genesis'")
         .bind::<Text,_>(realm.as_str()).execute(&mut *conn).await.unwrap();
     assert!(
         participation
@@ -1260,7 +1260,7 @@ async fn founding_unit_commits_four_consecutive_commits_and_exact_retry_replays_
     assert_eq!(facts.realm_id, realm_id);
     // Both joins belong to the same accepted unit as position zero. The
     // caller scan and snapshot must agree on that original stream-start floor.
-    let request = arkret_wire::StreamScanRequest {
+    let request = arkret_wire::StreamScanRequestBody {
         realm_id: realm_id.clone(),
         stream_ref: arkret_wire::CommitStreamRef::Realm {
             realm_id: realm_id.clone(),
@@ -1308,7 +1308,7 @@ async fn founding_unit_commits_four_consecutive_commits_and_exact_retry_replays_
     assert_eq!(
         count(
             &pool,
-            "SELECT COUNT(*) AS count FROM strand_current_results WHERE realm_id=$1",
+            "SELECT COUNT(*) AS count FROM strand_current_states WHERE realm_id=$1",
             &realm_id,
         )
         .await,
@@ -1318,8 +1318,8 @@ async fn founding_unit_commits_four_consecutive_commits_and_exact_retry_replays_
     assert_eq!(
         count(
             &pool,
-            "SELECT COUNT(*) AS count FROM realm_bootstrap_current_results \
-             WHERE realm_id=$1 AND result_family='realm_genesis'",
+            "SELECT COUNT(*) AS count FROM realm_bootstrap_current_states \
+             WHERE realm_id=$1 AND state_family='realm_genesis'",
             &realm_id,
         )
         .await,
@@ -1330,13 +1330,13 @@ async fn founding_unit_commits_four_consecutive_commits_and_exact_retry_replays_
     // evidence nor any founding receipt or coordinate, and the outcome
     // carries no receipt.
     let carrier = serde_json::to_value(
-        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::DirectConversationFounding(
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::DirectConversationFounding(
             unit.submission.clone(),
         ),
     )
     .unwrap();
     serde_json::from_value::<
-        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest,
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody,
     >(carrier.clone())
     .expect("the exact carrier parses");
     for (member, value) in [
@@ -1352,7 +1352,7 @@ async fn founding_unit_commits_four_consecutive_commits_and_exact_retry_replays_
         injected[member] = value;
         assert!(
             serde_json::from_value::<
-                arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest,
+                arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody,
             >(injected)
             .is_err(),
             "{member} is not a member of the self founding carrier"
@@ -1523,9 +1523,9 @@ async fn cross_station_founding_commits_one_exact_peer_delivery_atomically() {
     .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].peer_id, remote_station.as_str());
-    let request: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest =
+    let request: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody =
         serde_json::from_str(&rows[0].payload_json).unwrap();
-    let arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest::RegisteredAtomicUnit(
+    let arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody::RegisteredAtomicUnit(
         request,
     ) = request
     else {
@@ -1574,9 +1574,9 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
     .await
     .unwrap();
     assert_eq!(row.peer_id, peer_station.as_str());
-    let submission: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest =
+    let submission: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody =
         serde_json::from_str(&row.payload_json).unwrap();
-    let arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest::RegisteredAtomicUnit(request) = submission else {
+    let arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody::RegisteredAtomicUnit(request) = submission else {
         panic!("expected registered_atomic_unit");
     };
     let arkret_models_collaboration::authority_commit::PeerRegisteredAtomicUnit::DirectConversationFounding(delivered) = request.unit else {
@@ -1698,7 +1698,7 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
     );
     assert_eq!(profile_spy.hits(), 1);
     assert_eq!(footprint(&peer_pool, &realm_id).await, [1, 4, 4, 1, 2]);
-    let request = arkret_wire::StreamScanRequest {
+    let request = arkret_wire::StreamScanRequestBody {
         realm_id: realm_id.clone(),
         stream_ref: arkret_wire::CommitStreamRef::Realm {
             realm_id: realm_id.clone(),
@@ -1779,7 +1779,7 @@ async fn peer_founding_missing_contact_dependency_writes_nothing() {
     assert_eq!(historical.selector(), &historical_selector);
     assert!(matches!(
         historical,
-        arkret_models_identity::SignerKeyQueryOutcome::HistoricalResolved { .. }
+        arkret_models_identity::SignerKeyResolution::HistoricalResolved { .. }
     ));
     historical.validate(&realm_id).unwrap();
 
@@ -2516,7 +2516,7 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     // An owned Agent never needs a Contact round. Its provisional Message
     // and peer Add use the current controller/provision branch at the cut.
     let realm_id = realm_of(&unit);
-    use coland_storage::CapabilityGrantCurrentResultStore;
+    use coland_storage::CapabilityGrantCurrentStateStore;
     let content_request = coland_storage::AgentSessionAuthorityRequest {
         approval_evidence_refs: Vec::new(),
         agent_account_id: agent.clone(),
@@ -2531,7 +2531,7 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
         .unwrap(),
     };
     let content_store =
-        coland_storage_postgres::PgCapabilityGrantCurrentResultStore { pool: pool.clone() };
+        coland_storage_postgres::PgCapabilityGrantCurrentStateStore { pool: pool.clone() };
     let issued = content_store
         .agent_session_authority(&content_request, chrono::Utc::now())
         .await
@@ -2678,7 +2678,7 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     // Accepted founding coordinates do not bypass a current Agent pause.
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "UPDATE agent_status_current_results SET value='\"paused\"'::jsonb WHERE agent_id=$1",
+        "UPDATE agent_status_current_states SET value='\"paused\"'::jsonb WHERE agent_id=$1",
     )
     .bind::<Text, _>(agent_id.as_str())
     .execute(&mut *conn)
@@ -2721,13 +2721,13 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
     );
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "UPDATE agent_status_current_results SET value='\"active\"'::jsonb WHERE agent_id=$1",
+        "UPDATE agent_status_current_states SET value='\"active\"'::jsonb WHERE agent_id=$1",
     )
     .bind::<Text, _>(agent_id.as_str())
     .execute(&mut *conn)
     .await
     .unwrap();
-    diesel::sql_query("DELETE FROM agent_key_current_results WHERE agent_id=$1")
+    diesel::sql_query("DELETE FROM agent_key_current_states WHERE agent_id=$1")
         .bind::<Text, _>(agent_id.as_str())
         .execute(&mut *conn)
         .await
@@ -2766,7 +2766,7 @@ async fn terminal_persistent_rows(pool: &coland_storage_postgres::PgPool) -> ser
         value: serde_json::Value,
     }
     let mut conn = pool.get().await.unwrap();
-    let tables = diesel::sql_query("SELECT tablename::text AS tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE '%current_results' OR tablename IN ('canonical_events','realm_commits','realm_authorities','federation_outbox','event_federation_outbox','replica_stream_anchors','replica_authorization_rows','replica_authorization_cuts','account_summary_current','account_summary_versions','account_summary_clock','current_result_heads','current_result_versions','direct_conversation_founding_slots')) ORDER BY tablename")
+    let tables = diesel::sql_query("SELECT tablename::text AS tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE '%current_states' OR tablename IN ('canonical_events','realm_commits','realm_authorities','federation_outbox','event_federation_outbox','replica_stream_anchors','replica_authorization_rows','replica_authorization_cuts','account_summary_current','account_summary_versions','account_summary_clock','current_state_heads','current_state_versions','direct_conversation_founding_slots')) ORDER BY tablename")
         .load::<Table>(&mut *conn).await.unwrap();
     let mut snapshot = serde_json::Map::new();
     for table in tables {
@@ -2792,7 +2792,7 @@ async fn terminal_persistent_rows(pool: &coland_storage_postgres::PgPool) -> ser
         "realm_authorities",
         "federation_outbox",
         "event_federation_outbox",
-        "realm_bootstrap_current_results",
+        "realm_bootstrap_current_states",
         "replica_stream_anchors",
         "replica_authorization_rows",
         "replica_authorization_cuts",
@@ -2989,7 +2989,7 @@ async fn profile_admission_table_refuses_in_registered_precedence_with_zero_writ
     for actor in [&pair.founder, &pair.peer, &third] {
         let payload = serde_json::json!({
             "new_governance_station_id":"ak:did_core:web:other-station.example",
-            "expected_governance_generation":0,
+            "expected_governance_generation":"0",
             "expected_realm_stream_commit_id":head.commit.commit_id,
         });
         let request = ordinary_realm::next_request(
@@ -3139,7 +3139,7 @@ async fn profile_admission_table_refuses_in_registered_precedence_with_zero_writ
     // complete found -> leave -> rejoin path is exercised below.
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "UPDATE member_state_current_results \
+        "UPDATE member_state_current_states \
          SET membership='leave', value=jsonb_set(value,'{membership}','\"leave\"') \
          WHERE realm_id=$1 AND member_id=$2",
     )
@@ -3172,14 +3172,12 @@ async fn profile_admission_table_refuses_in_registered_precedence_with_zero_writ
     // Once the membership projection no longer resolves the exact pair, a
     // new write fails the exact-two gate before any later stage.
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query(
-        "DELETE FROM member_state_current_results WHERE realm_id=$1 AND member_id=$2",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(pair.peer_actor().to_string())
-    .execute(&mut *conn)
-    .await
-    .unwrap();
+    diesel::sql_query("DELETE FROM member_state_current_states WHERE realm_id=$1 AND member_id=$2")
+        .bind::<Text, _>(realm_id.as_str())
+        .bind::<Text, _>(pair.peer_actor().to_string())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
     drop(conn);
     assert_eq!(
         Box::pin(evaluate(
@@ -3395,7 +3393,7 @@ fn founder_leaf_authority(
     selector: &coland_storage::DeviceRevocationGateSelector,
 ) -> arkret_models_collaboration::events_payloads::MlsGenesisCreatorLeafAuthority {
     arkret_models_collaboration::events_payloads::MlsGenesisCreatorLeafAuthority {
-        leaf_signature_key_b64u: arkret_wire::Base64UrlString::new(
+        leaf_signature_key_base64url: arkret_wire::Base64UrlString::new(
             arkret_canonical::base64url_encode(
                 ed25519_dalek::SigningKey::from_bytes(
                     &fixture.history.founding_device_signing_seed,
@@ -3615,19 +3613,19 @@ async fn dc_footprint(pool: &PgPool, realm_id: &RealmId) -> [i64; 8] {
         members,
         count(
             pool,
-            "SELECT COUNT(*) AS count FROM message_revision_current_results WHERE realm_id=$1",
+            "SELECT COUNT(*) AS count FROM message_revision_current_states WHERE realm_id=$1",
             realm_id,
         )
         .await,
         count(
             pool,
-            "SELECT COUNT(*) AS count FROM direct_conversation_binding_current_results WHERE realm_id=$1",
+            "SELECT COUNT(*) AS count FROM direct_conversation_binding_current_states WHERE realm_id=$1",
             realm_id,
         )
         .await,
         count(
             pool,
-            "SELECT COUNT(*) AS count FROM mls_group_current_results WHERE realm_id=$1",
+            "SELECT COUNT(*) AS count FROM mls_group_current_states WHERE realm_id=$1",
             realm_id,
         )
         .await,
@@ -3723,7 +3721,7 @@ async fn assert_direct_replica_governance_fixed(
             head,
             EventKind::RealmGovernanceStationChange,
             pair.founder_actor(),
-            serde_json::json!({"expected_governance_generation":0,
+            serde_json::json!({"expected_governance_generation":"0",
         "expected_realm_stream_commit_id":head.commit.commit_id,
         "new_governance_station_id":"ak:did_core:web:direct-replica-successor.example"}),
             Cites::Root(genesis),
@@ -3881,7 +3879,7 @@ async fn assert_direct_governance_fixed(
     let before = governance_footprint(&pair.pool).await;
     let next_station = DidCoreId::new("ak:did_core:web:direct-successor.example").unwrap();
     let change = boxed_source(|| sourced_cited(pair, head, EventKind::RealmGovernanceStationChange,
-        pair.founder_actor(), serde_json::json!({"expected_governance_generation":0,
+        pair.founder_actor(), serde_json::json!({"expected_governance_generation":"0",
         "expected_realm_stream_commit_id":head.commit.commit_id,"new_governance_station_id":next_station}), Cites::Root(genesis))).await;
     assert_eq!(
         change.authority_commit.event.authorization_ref.as_deref(),
@@ -3919,7 +3917,7 @@ async fn assert_direct_governance_fixed(
             "applet_managed_creation_service_sources",
             "realm_actor_creations",
             "applet_configurations",
-            "realm_actor_current_results",
+            "realm_actor_current_states",
             "realm_actor_private_signer_facts",
             "management_private_handoff_imports",
             "realm_actor_recovery_intents",
@@ -3931,7 +3929,7 @@ async fn assert_direct_governance_fixed(
             "realm_actor_control_nonces",
             "applet_managed_device_nonces",
             "applet_registration_instances",
-            "applet_registration_current_results",
+            "applet_registration_current_states",
             "applet_grant_registration_sources",
             "applet_managed_identities",
             "applet_namespace_claims",
@@ -4187,7 +4185,7 @@ async fn direct_governance_rejects_change_export_import_and_dual_signed_activati
 /// Read the same complete typed binding row supplied to snapshot/handoff.
 /// Its revision, selector, source stream, original Event ref and full payload
 /// must survive later membership and projection transitions unchanged.
-async fn binding_current_row(pool: &PgPool, realm_id: &RealmId) -> arkret_wire::TypedCurrentRow {
+async fn binding_current_row(pool: &PgPool, realm_id: &RealmId) -> arkret_wire::CurrentState {
     PgAuthorityCommitStore { pool: pool.clone() }
         .realm_state_snapshot_material(realm_id)
         .await
@@ -4198,7 +4196,7 @@ async fn binding_current_row(pool: &PgPool, realm_id: &RealmId) -> arkret_wire::
         .find(|entry| {
             matches!(
                 entry,
-                arkret_wire::TypedCurrentRow::Value {
+                arkret_wire::CurrentState::Value {
                     selector: arkret_wire::CurrentSelector::DirectConversationBinding { .. },
                     ..
                 }
@@ -4266,8 +4264,8 @@ async fn participant_authority_scenario() {
         assert_eq!(
             count(
                 &pool,
-                "SELECT COUNT(*) AS count FROM realm_bootstrap_current_results \
-             WHERE realm_id=$1 AND result_family='realm_history_access' AND value='\"since_join\"'",
+                "SELECT COUNT(*) AS count FROM realm_bootstrap_current_states \
+             WHERE realm_id=$1 AND state_family='realm_history_access' AND value='\"since_join\"'",
                 &realm_id,
             )
             .await,
@@ -4801,7 +4799,7 @@ async fn participant_authority_scenario() {
     .await;
     boxed_source(|| assert_direct_governance_fixed(&pair, &head, &create_ref, true)).await;
     let original_binding = binding_current_row(&pool, &realm_id).await;
-    let arkret_wire::TypedCurrentRow::Value {
+    let arkret_wire::CurrentState::Value {
         revision, value, ..
     } = &original_binding;
     assert_eq!(revision.commit_id, head.commit.commit_id);
@@ -4819,7 +4817,7 @@ async fn participant_authority_scenario() {
             .current_state_entries
             .iter()
             .find_map(|entry| match entry {
-                arkret_wire::TypedCurrentRow::Value {
+                arkret_wire::CurrentState::Value {
                     selector: arkret_wire::CurrentSelector::DirectConversationBinding { pair_key },
                     source_stream_ref,
                     value,
@@ -4979,7 +4977,7 @@ async fn participant_authority_scenario() {
             };
         let rows_before = count(
             &pool,
-            "SELECT COUNT(*) AS count FROM strand_watch_current_results WHERE realm_id=$1",
+            "SELECT COUNT(*) AS count FROM strand_watch_current_states WHERE realm_id=$1",
             &realm_id,
         )
         .await;
@@ -5005,7 +5003,7 @@ async fn participant_authority_scenario() {
             assert_eq!(
                 count(
                     &pool,
-                    "SELECT COUNT(*) AS count FROM strand_watch_current_results WHERE realm_id=$1",
+                    "SELECT COUNT(*) AS count FROM strand_watch_current_states WHERE realm_id=$1",
                     &realm_id
                 )
                 .await,
@@ -5023,7 +5021,7 @@ async fn participant_authority_scenario() {
         .await;
         uow.commit_event(write.clone()).await.unwrap();
         head = write.authority_commit;
-        assert_eq!(count(&pool, "SELECT COUNT(*) AS count FROM strand_watch_current_results WHERE realm_id=$1 AND value->>'level'='all'", &realm_id).await, rows_before + 1);
+        assert_eq!(count(&pool, "SELECT COUNT(*) AS count FROM strand_watch_current_states WHERE realm_id=$1 AND value->>'level'='all'", &realm_id).await, rows_before + 1);
         let mut stale = payload(actor);
         stale["level"] = serde_json::json!("muted");
         assert_eq!(
@@ -5041,7 +5039,7 @@ async fn participant_authority_scenario() {
             .await,
             ConflictCode::FailedPrecondition
         );
-        assert_eq!(count(&pool, "SELECT COUNT(*) AS count FROM strand_watch_current_results WHERE realm_id=$1 AND value->>'level'='all'", &realm_id).await, rows_before + 1);
+        assert_eq!(count(&pool, "SELECT COUNT(*) AS count FROM strand_watch_current_states WHERE realm_id=$1 AND value->>'level'='all'", &realm_id).await, rows_before + 1);
     }
 
     // Both participants cite the original immutable confirmation.
@@ -5235,7 +5233,7 @@ async fn participant_authority_scenario() {
         );
         let watch_rows = count(
             &pool,
-            "SELECT COUNT(*) AS count FROM strand_watch_current_results WHERE realm_id=$1",
+            "SELECT COUNT(*) AS count FROM strand_watch_current_states WHERE realm_id=$1",
             &realm_id,
         )
         .await;
@@ -5264,7 +5262,7 @@ async fn participant_authority_scenario() {
         assert_eq!(
             count(
                 &pool,
-                "SELECT COUNT(*) AS count FROM strand_watch_current_results WHERE realm_id=$1",
+                "SELECT COUNT(*) AS count FROM strand_watch_current_states WHERE realm_id=$1",
                 &realm_id,
             )
             .await,
@@ -5480,7 +5478,7 @@ async fn terminal_founding_claim_repairs_the_same_group_and_keeps_the_first_bind
         &bound.authority_commit,
         EventKind::RealmGovernanceStationChange,
         founder.clone(),
-        serde_json::json!({"expected_governance_generation":0,
+        serde_json::json!({"expected_governance_generation":"0",
             "expected_realm_stream_commit_id":bound.authority_commit.commit.commit_id,
             "new_governance_station_id":"ak:did_core:web:other-station.example"}),
         Cites::Participant(&binding_ref),
@@ -5580,7 +5578,7 @@ async fn exercise_flat_topics(
     }
     async fn current(pool: &PgPool, id: &arkret_wire::StrandId) -> serde_json::Value {
         let mut conn = pool.get().await.unwrap();
-        diesel::sql_query("SELECT value FROM strand_current_results WHERE strand_id=$1")
+        diesel::sql_query("SELECT value FROM strand_current_states WHERE strand_id=$1")
             .bind::<Text, _>(id.as_str())
             .get_result::<ValueRow>(&mut *conn)
             .await
@@ -5589,13 +5587,13 @@ async fn exercise_flat_topics(
     }
     async fn structure(pool: &PgPool, realm: &RealmId) -> serde_json::Value {
         let mut conn = pool.get().await.unwrap();
-        diesel::sql_query("SELECT jsonb_build_object('strands',(SELECT jsonb_agg(to_jsonb(s) ORDER BY strand_id) FROM strand_current_results s WHERE realm_id=$1),'spaces',(SELECT jsonb_agg(to_jsonb(s) ORDER BY space_id) FROM space_current_results s WHERE realm_id=$1),'parents',(SELECT jsonb_agg(to_jsonb(s) ORDER BY space_id) FROM space_parent_current_results s WHERE realm_id=$1),'positions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY strand_id) FROM strand_position_current_results s WHERE realm_id=$1)) AS value")
+        diesel::sql_query("SELECT jsonb_build_object('strands',(SELECT jsonb_agg(to_jsonb(s) ORDER BY strand_id) FROM strand_current_states s WHERE realm_id=$1),'spaces',(SELECT jsonb_agg(to_jsonb(s) ORDER BY space_id) FROM space_current_states s WHERE realm_id=$1),'parents',(SELECT jsonb_agg(to_jsonb(s) ORDER BY space_id) FROM space_parent_current_states s WHERE realm_id=$1),'positions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY strand_id) FROM strand_position_current_states s WHERE realm_id=$1)) AS value")
             .bind::<Text,_>(realm.as_str()).get_result::<ValueRow>(&mut *conn).await.unwrap().value
     }
     let realm = head.event.realm_id.clone();
     let before_group = count(
         pool,
-        "SELECT COUNT(*) AS count FROM mls_group_current_results WHERE realm_id=$1",
+        "SELECT COUNT(*) AS count FROM mls_group_current_states WHERE realm_id=$1",
         &realm,
     )
     .await;
@@ -5898,7 +5896,7 @@ async fn exercise_flat_topics(
         assert_eq!(
             count(
                 pool,
-                "SELECT COUNT(*) AS count FROM strand_position_current_results WHERE realm_id=$1",
+                "SELECT COUNT(*) AS count FROM strand_position_current_states WHERE realm_id=$1",
                 &realm
             )
             .await,
@@ -5907,7 +5905,7 @@ async fn exercise_flat_topics(
         assert_eq!(
             count(
                 pool,
-                "SELECT COUNT(*) AS count FROM mls_group_current_results WHERE realm_id=$1",
+                "SELECT COUNT(*) AS count FROM mls_group_current_states WHERE realm_id=$1",
                 &realm
             )
             .await,
@@ -5929,7 +5927,7 @@ async fn claim_human_peer_package(
 ) -> arkret_models_crypto::MlsKeyPackageRecord {
     use arkret_models_crypto::{
         KeyPackageClaimRecord, PeerKeyPackageClaimReceipt, PeerKeyPackageRequesterAuthorization,
-        PeerKeyPackagesClaimOutcome, PeerKeyPackagesClaimRequestBody,
+        PeerKeyPackagesClaimRequestBody, PeerKeyPackagesClaimResponseBody,
     };
     use coland_storage::MlsKeyPackageStore;
     let guard = pair
@@ -6005,7 +6003,7 @@ async fn claim_human_peer_package(
         "requester_authorization":{"kind":"device", "verification_method":pair.founder_method,
           "requester_device_id":requester_guard.device_id, "device_authorize_event_id":requester_guard.authorization_ref.event_id,
           "signed_at":arkret_canonical::format_timestamp_canonical(at),
-          "signature":{"kid":pair.founder_method,"signature_algorithm":"Ed25519","sig":"AA"}}
+          "signature":{"kid":pair.founder_method,"signature_algorithm":"Ed25519","signature":"AA"}}
     })).unwrap();
     let bytes = arkret_models_crypto::keypackage_claim_authorization_signing_bytes(
         &request.unsigned_request(),
@@ -6057,7 +6055,7 @@ async fn claim_human_peer_package(
         signature: arkret_models_crypto::KeyOperationSignature {
             kid: arkret_wire::NonEmptyString::new(method.clone()).unwrap(),
             signature_algorithm: Some(arkret_wire::NonEmptyString::new("Ed25519").unwrap()),
-            sig: arkret_wire::Base64UrlString::new("AA").unwrap(),
+            signature: arkret_wire::Base64UrlString::new("AA").unwrap(),
         },
     };
     receipt.signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
@@ -6066,7 +6064,7 @@ async fn claim_human_peer_package(
         &arkret_models_crypto::peer_keypackage_claim_receipt_signing_bytes(&receipt).unwrap(),
     )
     .unwrap();
-    let outcome = PeerKeyPackagesClaimOutcome {
+    let outcome = PeerKeyPackagesClaimResponseBody {
         claim_request_id: request_id.clone(),
         claims: vec![record],
         claim_receipt: receipt,
@@ -6111,7 +6109,7 @@ async fn claim_human_peer_package(
         .await
         .unwrap()
         .unwrap();
-    let retained_outcome: PeerKeyPackagesClaimOutcome =
+    let retained_outcome: PeerKeyPackagesClaimResponseBody =
         serde_json::from_value(retained.outcome.unwrap()).unwrap();
     assert_eq!(retained_outcome.claims[0].keypackage, package.keypackage);
     assert_eq!(

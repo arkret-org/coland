@@ -1,6 +1,7 @@
 //! Account-originated private audit reads, with a separate final delivery cut.
 use arkret_models_integration::{
-    PeerRealmActorMaterialRequest, RealmActorMaterialOutcome, RealmActorMaterialRequest,
+    PeerRealmActorMaterialRequestBody, RealmActorMaterialRequestBody,
+    RealmActorMaterialResponseBody,
 };
 use arkret_wire::{ActorId, ServiceOperationId};
 use coland_http::error::AppError;
@@ -59,9 +60,9 @@ pub(crate) async fn peer_read(req: &mut Request, depot: &mut Depot, res: &mut Re
 async fn peer_material(
     state: &AppState,
     req: &mut Request,
-) -> Result<RealmActorMaterialOutcome, AppError> {
+) -> Result<RealmActorMaterialResponseBody, AppError> {
     crate::routing::events::peer::validate_peer_request(state, req, true).await?;
-    let request: PeerRealmActorMaterialRequest =
+    let request: PeerRealmActorMaterialRequestBody =
         body(req, ServiceOperationId::PeerRealmActorReadMaterialV1).await?;
     let source = crate::routing::events::peer::source_id_from_request(req)?;
     let source = source.parse().map_err(|_| hidden())?;
@@ -89,7 +90,7 @@ pub(super) async fn read_account(req: &mut Request, depot: &mut Depot, res: &mut
         if account.station_id != state.service_core_id() {
             return Err(hidden());
         }
-        let request: RealmActorMaterialRequest =
+        let request: RealmActorMaterialRequestBody =
             body(req, ServiceOperationId::SelfRealmActorReadMaterialV1).await?;
         request.validate().map_err(|_| hidden())?;
         let realm = &request
@@ -147,7 +148,7 @@ pub(super) async fn read_account(req: &mut Request, depot: &mut Depot, res: &mut
                 .record_remote_authority(&authority, &state.service_core_id())
                 .await
                 .map_err(|_| unavailable())?;
-            let peer = PeerRealmActorMaterialRequest {
+            let peer = PeerRealmActorMaterialRequestBody {
                 requester_account_id: account.clone(),
                 request: request.clone(),
             };
@@ -173,7 +174,7 @@ pub(super) async fn read_account(req: &mut Request, depot: &mut Depot, res: &mut
             if response.status != 200 {
                 return Err(unavailable());
             }
-            let outcome: RealmActorMaterialOutcome =
+            let outcome: RealmActorMaterialResponseBody =
                 serde_json::from_slice(&response.body).map_err(|_| unavailable())?;
             let resolution = super::agents::evidence::fetch_service_resolution(
                 state,

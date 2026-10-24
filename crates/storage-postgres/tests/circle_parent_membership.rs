@@ -138,7 +138,7 @@ async fn circle_member(pool: &PgPool, circle: &CircleId, member: &ActorId) -> Ef
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
         "SELECT circle_member_parent_join_current(realm_id,member_id,value) AS effective, \
-         membership,current_commit_id,value FROM circle_member_state_current_results \
+         membership,current_commit_id,value FROM circle_member_state_current_states \
          WHERE circle_id=$1 AND member_id=$2",
     )
     .bind::<Text, _>(circle.as_str())
@@ -169,7 +169,7 @@ async fn circle_scan_authorized(
     stream: &CommitStreamRef,
     member: &ActorId,
 ) -> bool {
-    let request = arkret_wire::StreamScanRequest {
+    let request = arkret_wire::StreamScanRequestBody {
         realm_id: stream.realm_id().clone(),
         stream_ref: stream.clone(),
         direction: arkret_wire::StreamScanDirection::After(None),
@@ -215,7 +215,7 @@ async fn root_digest(pool: &PgPool, realm: &arkret_wire::RealmId) -> arkret_wire
         value: Value,
     }
     let mut conn = pool.get().await.unwrap();
-    let root=diesel::sql_query("SELECT jsonb_build_object('controller_actor_id',controller_actor_id,'controller_epoch',controller_epoch,'authority_generation',authority_generation,'authority_event_ref',authority_event_ref) AS value FROM realm_authority_root_current_results WHERE realm_id=$1")
+    let root=diesel::sql_query("SELECT jsonb_build_object('controller_actor_id',controller_actor_id,'controller_epoch',controller_epoch,'authority_generation',authority_generation,'authority_event_ref',authority_event_ref) AS value FROM realm_authority_root_current_states WHERE realm_id=$1")
         .bind::<Text,_>(realm.as_str()).get_result::<Root>(&mut conn).await.unwrap();
     arkret_wire::Hash::new(arkret_canonical::canonical_sha256(&root.value).unwrap()).unwrap()
 }
@@ -281,7 +281,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
         }
         let mut conn = pool.get().await.unwrap();
         diesel::sql_query(
-            "SELECT authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1",
+            "SELECT authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1",
         )
         .bind::<Text, _>(realm.as_str())
         .get_result::<RootRow>(&mut conn)
@@ -298,7 +298,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             "issuer_id":creator,"subject":alice,"actions":["ak.circle.member.add","ak.mls.genesis"],
             "resources":[{"kind":"circle","realm_id":realm,"circle_id":circle}],
             "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,
-                "authority_event_ref":root_event_ref,"authority_generation":0}],
+                "authority_event_ref":root_event_ref,"authority_generation":"0"}],
             "issued_at":arkret_canonical::format_timestamp_canonical(at)
         }}),
         at,
@@ -396,7 +396,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
             "group_info_ref":format!("ak:blob:sha256:{}", "3".repeat(64)),
             "ratchet_tree_ref":format!("ak:blob:sha256:{}", "4".repeat(64)),
             "creator_leaf_authority":{
-                "leaf_signature_key_b64u":arkret_canonical::base64url_encode([7_u8;32]),
+                "leaf_signature_key_base64url":arkret_canonical::base64url_encode([7_u8;32]),
                 "endpoint":{"kind":"device","device_id":format!("ak:device:{}",uuid::Uuid::now_v7())},
                 "authorization_event_ref":arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[8_u8;32]),
             },
@@ -536,7 +536,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                 creator.clone(),
                 json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":creator,
                     "subject":alice,"actions":["ak.call.moderate"],"resources":[{"kind":"circle","realm_id":realm,"circle_id":circle}],
-                    "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":root_event_ref,"authority_generation":0}],
+                    "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":root_event_ref,"authority_generation":"0"}],
                     "issued_at":arkret_canonical::format_timestamp_canonical(moderation_at)}}),
                 moderation_at,
             ));
@@ -698,7 +698,7 @@ product_agent: None,
                         &tail,
                         EventKind::RealmGovernanceStationChange,
                         creator.clone(),
-                        json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":tail.commit.commit_id,
+                        json!({"expected_governance_generation":"0","expected_realm_stream_commit_id":tail.commit.commit_id,
                             "new_governance_station_id":next_station}),
                         tail.commit.committed_at + chrono::TimeDelta::milliseconds(1),
                     ));

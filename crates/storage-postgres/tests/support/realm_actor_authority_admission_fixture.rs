@@ -32,7 +32,7 @@ fn authority_admission_candidate(
 fn authority_admission_create(
     candidate: &RealmActorCreatePayload,
     signer: &Ed25519PayloadSigner,
-) -> arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest {
+) -> arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody {
     let event = arkret::author_realm_actor_create(
         candidate.clone(),
         arkret_canonical::DigestSuite::Sha256,
@@ -40,7 +40,7 @@ fn authority_admission_create(
         signer,
     )
     .unwrap();
-    arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+    arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
         arkret_wire::EventAdmissionSubmission::new(event),
     )
 }
@@ -48,7 +48,7 @@ fn authority_admission_create(
 async fn authority_admission_send(
     fixture: &Fixture,
     package: &AppletPackage,
-    request: &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest,
+    request: &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody,
 ) -> (StatusCode, Value) {
     fixture
         .service_post(
@@ -119,7 +119,7 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
         let (status, value) =
             boxed_step(|| authority_admission_send(&factory.fixture, package, &request)).await;
         assert_eq!(status, StatusCode::OK, "independent Bot creation: {value}");
-        let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+        let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
             submission,
         ) = &request
         else {
@@ -180,7 +180,7 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
         StatusCode::OK,
         "Ghost DID host is independent of Service host: {value}"
     );
-    let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+    let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
         submission,
     ) = &request
     else {
@@ -207,11 +207,11 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
         StatusCode::OK,
         "independently hosted Ghost exact retry: {replay}"
     );
-    let replay: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome =
+    let replay: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody =
         serde_json::from_value(replay).unwrap();
     replay.validate_for_request(&request).unwrap();
-    let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(
-        arkret_wire::AuthoritySubmitOutcome::Accepted { commit, .. },
+    let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(
+        arkret_wire::AuthoritySubmitResponseBody::Accepted { commit, .. },
     ) = replay
     else {
         panic!("independently hosted Ghost retry must recover its original Commit")
@@ -240,7 +240,7 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
         .fixture
         .state
         .test_persistence()
-        .capability_grant_current_results()
+        .capability_grant_current_states()
         .snapshot_for_realm(&factory.fixture.realm)
         .await
         .unwrap();
@@ -256,7 +256,7 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
             "/_arkret/self/events",
             arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1.as_str(),
             &json!(
-                arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+                arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
                     arkret_wire::EventAdmissionSubmission::new(close)
                 )
             ),
@@ -329,10 +329,10 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
 async fn authority_material_survives_service_rotation(
     fixture: &Fixture,
     native: &NativeService,
-    install: &AppletInstallOutcome,
+    install: &AppletInstallResponseBody,
 ) {
     use arkret_models_collaboration::applet_installation_authority::{
-        AppletAuthorityMaterialOutcome, AppletAuthorityMaterialRequestBody,
+        AppletAuthorityMaterialResponseBody, AppletAuthorityMaterialRequestBody,
     };
     let path = format!(
         "/_arkret/self/applets/{}/authority/material",
@@ -356,7 +356,7 @@ async fn authority_material_survives_service_rotation(
         )
         .await;
     assert_eq!(status, StatusCode::OK, "original material: {before}");
-    let original: AppletAuthorityMaterialOutcome = serde_json::from_value(before.clone()).unwrap();
+    let original: AppletAuthorityMaterialResponseBody = serde_json::from_value(before.clone()).unwrap();
     original
         .validate_for_request(&install.applet_id, &request)
         .unwrap();
@@ -389,7 +389,7 @@ async fn authority_material_survives_service_rotation(
     let event=fixture.admin_event(EventKind::CapabilityGrant,request.effective_scope.clone(),json!({"grant":{
         "schema":"ak.schema.capability.v1","realm_id":fixture.realm,"issuer_id":account,"subject":account,
         "actions":["ak.event.read"],"resources":[{"kind":"realm","realm_id":fixture.realm,"match_scope":"realm_wide"}],"constraints":[],
-        "issuer_authority_refs":[{"kind":"realm_root","realm_id":fixture.realm,"authority_event_ref":fixture.authority_event_ref,"authority_generation":0}],
+        "issuer_authority_refs":[{"kind":"realm_root","realm_id":fixture.realm,"authority_event_ref":fixture.authority_event_ref,"authority_generation":"0"}],
         "issued_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())
     }}));
     let foreign_id = arkret_wire::GrantId::from_event_id(&event.event_id);
@@ -398,7 +398,7 @@ async fn authority_material_survives_service_rotation(
             "/_arkret/self/events",
             arkret_wire::ServiceOperationId::SelfEventsCommandSubmitV1.as_str(),
             &json!(
-                arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+                arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
                     arkret_wire::EventAdmissionSubmission::new(event)
                 )
             ),
@@ -487,7 +487,7 @@ async fn authority_material_survives_service_rotation(
     document["verificationMethod"]
         .as_array_mut()
         .unwrap()
-        .retain(|value| value["id"] != native.package.webhook_auth.key_ref.as_str());
+        .retain(|value| value["id"] != native.package.webhook_signature_policy.key_ref.as_str());
     document["verificationMethod"]
         .as_array_mut()
         .unwrap()
@@ -509,7 +509,7 @@ async fn authority_material_survives_service_rotation(
             state: &document,
             current_update_seed: &inception.next_update_key_seed,
             next_update_public_key_multibase: &next,
-            version_time: chrono::Utc::now() - chrono::Duration::seconds(1),
+            version_created_at: chrono::Utc::now() - chrono::Duration::seconds(1),
         },
     )
     .unwrap();
@@ -535,7 +535,7 @@ async fn authority_material_survives_service_rotation(
                 .to_method_history_head
                 .clone(),
         ),
-        seq: 2,
+        sequence: 2,
         method_evidence: json!(source.method_history_evidence),
         fetched_at: now,
         expires_at: now + chrono::Duration::minutes(15),
@@ -554,7 +554,7 @@ async fn authority_material_survives_service_rotation(
             did: record.did,
             did_document: record.did_document,
             key_log_head: record.key_log_head,
-            seq: record.seq,
+            sequence: record.sequence,
             method_evidence: record.method_evidence,
             fetched_at: record.fetched_at,
             expires_at: record.expires_at,
@@ -562,7 +562,7 @@ async fn authority_material_survives_service_rotation(
         })
         .unwrap();
     let mut rotated = native.package.clone();
-    rotated.webhook_auth.key_ref = DidUrl::new(method).unwrap();
+    rotated.webhook_signature_policy.key_ref = DidUrl::new(method).unwrap();
     let footprint = boxed_step(|| native_business_footprint(fixture)).await;
     let (status, after) = fixture
         .service_post(

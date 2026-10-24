@@ -85,7 +85,7 @@ pub(crate) async fn replay(
     if !matches!(crate::agent_producer_signer_keys::producer_source_for_commit_in_connection(conn, event, &original.commit).await?, Some(arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::RealmRecoveryService(_))) {
         return Err(invalid("recovery signer original is unavailable"));
     }
-    let outcome = arkret_wire::AuthoritySubmitOutcome::Accepted {
+    let outcome = arkret_wire::AuthoritySubmitResponseBody::Accepted {
         status: arkret_wire::AuthorityCommitStatus::Committed,
         commit: original.commit.clone(),
     };
@@ -107,7 +107,7 @@ pub(crate) async fn admit(
     producer: &AppletEventProducerGuard,
     publication: Option<&arkret_models_identity::ResolutionCommitment>,
     digest: &arkret_wire::Hash,
-) -> Result<arkret_wire::AuthoritySubmitOutcome, PgTransactionError> {
+) -> Result<arkret_wire::AuthoritySubmitResponseBody, PgTransactionError> {
     let event = &transaction.event;
     let commit = &transaction.commit;
     let actor = target(event)?;
@@ -120,7 +120,7 @@ pub(crate) async fn admit(
     )
     .await?
     {
-        return Ok(arkret_wire::AuthoritySubmitOutcome::Accepted {
+        return Ok(arkret_wire::AuthoritySubmitResponseBody::Accepted {
             status: arkret_wire::AuthorityCommitStatus::Duplicate,
             commit,
         });
@@ -220,8 +220,8 @@ pub(crate) async fn admit(
                 arkret_canonical::canonical_sha256(&payload).map_err(invalid)?,
             )
             .map_err(invalid)?;
-            let outcome = RealmActorOperationOutcome::Recovery {
-                status: RealmActorRecoveryOutcomeStatus::Recovery,
+            let outcome = RealmActorRequestStatus::Recovery {
+                status: RealmActorRecoveryStatusTag::Recovery,
                 begin_ref: accepted.clone(),
                 state: RealmActorRecoveryState::Pending,
                 terminal_ref: None,
@@ -333,7 +333,7 @@ pub(crate) async fn admit(
     for (selector, value) in writes {
         write_current(conn, &actor, selector, value, commit).await?;
     }
-    let outcome = arkret_wire::AuthoritySubmitOutcome::Accepted {
+    let outcome = arkret_wire::AuthoritySubmitResponseBody::Accepted {
         status: arkret_wire::AuthorityCommitStatus::Committed,
         commit: commit.clone(),
     };
@@ -356,8 +356,8 @@ pub(crate) async fn terminal(
     state: RealmActorRecoveryState,
     terminal: &CommittedEventRef,
 ) -> Result<(), PgTransactionError> {
-    let outcome = RealmActorOperationOutcome::Recovery {
-        status: RealmActorRecoveryOutcomeStatus::Recovery,
+    let outcome = RealmActorRequestStatus::Recovery {
+        status: RealmActorRecoveryStatusTag::Recovery,
         begin_ref: begin.clone(),
         state,
         terminal_ref: Some(terminal.clone()),
@@ -404,12 +404,12 @@ pub(crate) async fn inventory_selected(
         .as_realm_actor_id()
         .ok_or_else(|| invalid("Realm actor required"))?
         .realm_id;
-    let groups = sql_query("SELECT g.mls_group_id,g.value,g.public_state,c.commit_json FROM mls_group_current_results g JOIN realm_commits c ON c.commit_id=g.current_commit_id AND c.realm_id=g.realm_id WHERE g.realm_id=$1 FOR SHARE OF g")
+    let groups = sql_query("SELECT g.mls_group_id,g.value,g.public_state,c.commit_json FROM mls_group_current_states g JOIN realm_commits c ON c.commit_id=g.current_commit_id AND c.realm_id=g.realm_id WHERE g.realm_id=$1 FOR SHARE OF g")
         .bind::<Text,_>(realm.as_str()).load::<Group>(&mut *conn).await?;
-    let devices = sql_query("SELECT jsonb_build_object('selector',selector,'value',value) AS value FROM realm_actor_current_results WHERE realm_id=$1 AND actor_id=$2 AND selector->>'kind'='realm_actor_device_authorization'")
+    let devices = sql_query("SELECT jsonb_build_object('selector',selector,'value',value) AS value FROM realm_actor_current_states WHERE realm_id=$1 AND actor_id=$2 AND selector->>'kind'='realm_actor_device_authorization'")
         .bind::<Text,_>(realm.as_str()).bind::<Jsonb,_>(json!(actor)).load::<Row>(&mut *conn).await?;
     for group in groups {
-        let current: arkret_wire::MlsGroupCurrent = decode(group.value)?;
+        let current: arkret_wire::MlsGroupValue = decode(group.value)?;
         let group_commit: RealmCommit = decode(group.commit_json)?;
         let leaves = arkret_mls::MlsPublicGroupTracker::restore(
             &group.public_state,
@@ -549,7 +549,7 @@ pub(crate) async fn complete_mls_cleanup(
                 let begin: CommittedEventRef = decode(row.value["begin_ref"].clone())?;
                 let (source, _) = crate::realm_actor_control_source::original(conn, &begin).await?;
                 let device_revoke = source.kind == EventKind::DeviceRevoke;
-                let devices = sql_query("SELECT jsonb_build_object('selector',selector,'value',value) AS value FROM realm_actor_current_results WHERE realm_id=$1 AND actor_id=$2 AND selector->>'kind'='realm_actor_device_authorization'")
+                let devices = sql_query("SELECT jsonb_build_object('selector',selector,'value',value) AS value FROM realm_actor_current_states WHERE realm_id=$1 AND actor_id=$2 AND selector->>'kind'='realm_actor_device_authorization'")
                     .bind::<Text,_>(transaction.event.realm_id.as_str()).bind::<Jsonb,_>(json!(actor)).load::<Row>(&mut *conn).await?;
                 for device in devices {
                     let authorization: RealmActorDeviceAuthorizationValue =

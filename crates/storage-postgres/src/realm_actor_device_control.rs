@@ -160,8 +160,8 @@ pub(crate) async fn admit(
         };
         if !matches!(
             crate::realm_actor_device_revoke::read(conn, actor, &proposal).await?,
-            arkret_models_integration::RealmActorOperationOutcome::DeviceRevoke {
-                state: arkret_models_integration::RealmActorDeviceRevokeState::Rejected,
+            arkret_models_integration::RealmActorRequestStatus::DeviceRevoke {
+                state: arkret_models_integration::RealmActorDeviceRevocationState::Rejected,
                 ..
             }
         ) {
@@ -227,7 +227,7 @@ pub(crate) async fn admit(
         .map_err(invalid)?;
     let service_key = arkret_identity::public_key_material_from_document(
         &service,
-        &registration.webhook_auth.key_ref,
+        &registration.webhook_signature_policy.key_ref,
     )
     .map_err(invalid)?;
     if service_key.ed25519_bytes().map_err(invalid)? == device_key {
@@ -255,7 +255,7 @@ pub(crate) async fn admit(
         )
         .await?;
         let policies =
-            crate::policy_current_results::read_scoped_applet_management_policies_in_connection(
+            crate::policy_current_states::read_scoped_applet_management_policies_in_connection(
                 conn,
                 &event.realm_id,
                 scope.circle_id(),

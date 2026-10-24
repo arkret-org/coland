@@ -22,8 +22,9 @@ use arkret_models_collaboration::events_payloads::RealmMediaServiceValue;
 use arkret_models_collaboration::objects::media::{
     ArkretNativeMediaBackendToken, ArkretNativeMediaPermissions,
     ArkretNativeMediaSignatureAlgorithm, ArkretNativeMediaTokenPayload, MediaBackendKind,
-    MediaBackendToken, MediaIceConfigOutcome, MediaIceConfigRequestBody, MediaIceConfigSignature,
-    MediaIceCredentialType, MediaIceMode, MediaIceServer, MediaIceSignatureAlgorithm,
+    MediaBackendToken, MediaIceConfigurationRequestBody, MediaIceConfigurationResponseBody,
+    MediaIceConfigurationSignature, MediaIceCredentialType, MediaIceMode, MediaIceServer,
+    MediaIceSignatureAlgorithm,
 };
 use arkret_wire::{CapabilityActionId, DidUrl, XExtensionMap};
 use base64::Engine;
@@ -43,7 +44,8 @@ use super::{hmac_sha256, now, sha256_hex, validate_device_id};
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
 use crate::wire::{
-    CallMediaParticipantBinding, CallMediaTokenExchangeOutcome, CallMediaTokenExchangeRequestBody,
+    CallMediaParticipantBinding, CallMediaTokenExchangeRequestBody,
+    CallMediaTokenExchangeResponseBody,
 };
 
 /// Spec-canonical RTC media surface. Mounted under the `self` trust segment by
@@ -78,11 +80,11 @@ struct IceConfigRequestContext {
 #[tracing::instrument(skip_all, fields(op = "ak.self.media.read.ice_config.v1"))]
 async fn arkret_ice_config(
     aa: AuthArgs,
-    body: JsonBody<MediaIceConfigRequestBody>,
+    body: JsonBody<MediaIceConfigurationRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
     res: &mut Response,
-) -> JsonResult<MediaIceConfigOutcome> {
+) -> JsonResult<MediaIceConfigurationResponseBody> {
     set_ice_config_cache_headers(res);
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
@@ -105,7 +107,7 @@ async fn issue_ice_config(
     state: &AppState,
     session: &SessionRecord,
     body: IceConfigRequestContext,
-) -> JsonResult<MediaIceConfigOutcome> {
+) -> JsonResult<MediaIceConfigurationResponseBody> {
     let realm_id = body.realm_id.as_str();
     let call_id = body.call_id.as_str();
     if call_id.is_empty() {
@@ -200,7 +202,7 @@ async fn issue_ice_config(
     if turn_required {
         ice_servers = vec![turn_server.clone()];
     }
-    let mut response = MediaIceConfigOutcome {
+    let mut response = MediaIceConfigurationResponseBody {
         realm_id: body.realm_id,
         call_id: call_id.to_owned(),
         actor_id: body.actor_id,
@@ -212,10 +214,10 @@ async fn issue_ice_config(
         turn_required,
         constraints: None,
         next_retry_at: None,
-        signature: MediaIceConfigSignature {
+        signature: MediaIceConfigurationSignature {
             kid: format!("{}#notary-key", state.service_did()),
             signature_algorithm: MediaIceSignatureAlgorithm::Ed25519,
-            sig: String::new(),
+            signature: String::new(),
         },
         extensions: XExtensionMap::default(),
     };
@@ -236,7 +238,7 @@ fn set_ice_config_cache_headers(res: &mut Response) {
 const ICE_PSEUDONYM_BUCKET_SECONDS: u32 = 300;
 
 /// Schema-aligned floor for `refresh_lead_seconds`
-/// (`ice-config-response.schema.json`: `minimum: 10`).
+/// (`media-ice-configuration-response-body.schema.json`: `minimum: 10`).
 const ICE_REFRESH_LEAD_FLOOR_SECONDS: u32 = 10;
 
 /// `webrtc-signaling.md` §4.2 — server-side guarantee that
@@ -328,13 +330,13 @@ fn turn_rest_credential(state: &AppState, username: &str) -> String {
 /// payload and domain-separated transcript implementation.
 fn sign_ice_config_outcome(
     state: &AppState,
-    outcome: &mut MediaIceConfigOutcome,
+    outcome: &mut MediaIceConfigurationResponseBody,
 ) -> Result<(), AppError> {
     let signing_input = outcome
         .signature_input()
         .map_err(|error| AppError::internal(format!("ICE config transcript: {error}")))?;
     let signature = state.notary_signing_key().sign(&signing_input);
-    outcome.signature.sig = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+    outcome.signature.signature = URL_SAFE_NO_PAD.encode(signature.to_bytes());
     Ok(())
 }
 
@@ -502,12 +504,12 @@ async fn handle_rtc_token_with_original(
     session: &SessionRecord,
     body: CallMediaTokenExchangeRequestBody,
     original: Option<Value>,
-) -> JsonResult<CallMediaTokenExchangeOutcome> {
+) -> JsonResult<CallMediaTokenExchangeResponseBody> {
     // The request body is the SDK typed shape: `realm_id`/`call_id`/`actor_id`/
     // `device_id` retain their exact complete ActorId and typed DeviceId shapes,
     // and the response binding carries the same typed ids — so the wire outcome
-    // reuses `arkret_models_collaboration::objects::media::CallMediaTokenExchangeOutcome` directly
-    // instead of a stringly coland mirror.
+    // reuses `arkret_models_collaboration::objects::media::CallMediaTokenExchangeResponseBody`
+    // directly instead of a stringly coland mirror.
     let realm_id = body.realm_id.clone();
     if !is_valid_webrtc_session_id(body.call_id.as_str()) {
         return Err(AppError::param_invalid("invalid call_id"));
@@ -704,7 +706,7 @@ async fn handle_rtc_token_with_original(
             "configured media issuer_kid is not a verification-method DID URL: {error}"
         ))
     })?;
-    let mut outcome = CallMediaTokenExchangeOutcome {
+    let mut outcome = CallMediaTokenExchangeResponseBody {
         focus_id: body.focus_id.clone(),
         backend_kind: focus.provider.backend_kind(),
         connect_url: issued_token.connect_url,
@@ -713,7 +715,7 @@ async fn handle_rtc_token_with_original(
         participant_binding: CallMediaParticipantBinding {
             expires_at,
             issuer_kid,
-            sig: String::new(),
+            signature: String::new(),
         },
         expires_at,
         realm_id,
@@ -730,7 +732,7 @@ async fn handle_rtc_token_with_original(
         &arkret_signatures::media::ParticipantBindingContext::from_outcome(&outcome),
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
-    outcome.participant_binding.sig =
+    outcome.participant_binding.signature =
         URL_SAFE_NO_PAD.encode(signing_key.sign(&signing_input).to_bytes());
     // The token is prepared privately. This is its final, outstanding release cut.
     #[cfg(feature = "conformance-harness")]
@@ -956,7 +958,7 @@ async fn validate_token_join_context(
                 &key,
                 &arkret_signatures::media::participant_binding_signing_input(&public)
                     .map_err(|e| AppError::internal(e.to_string()))?,
-                &binding.sig,
+                &binding.signature,
             ) {
                 return Err(invalid("accepted participant binding is invalid"));
             }
@@ -1198,7 +1200,7 @@ pub(crate) async fn prepare_verified_roster_participant(
             )
         })?;
     let key = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
-        bytes: arkret_canonical::base64url_decode(&key.public_key_b64u)
+        bytes: arkret_canonical::base64url_decode(&key.public_key_base64url)
             .map_err(|e| coland_services::ServiceError::SchemaViolation(e.to_string()))?,
     };
     arkret_signatures::media::VerifiedCallParticipant::verify(event, &descriptor.service_id, &key)
@@ -1289,7 +1291,7 @@ fn media_token_issuer_for(provider: MediaProviderKind) -> Box<dyn MediaTokenIssu
 
 /// Arkret-native `backend_token` (`bindings/arkret-native.md` §2).
 ///
-/// The wire form is the binding's own object — `{kid, payload, sig,
+/// The wire form is the binding's own object — `{kid, payload, signature,
 /// signature_algorithm}` with the payload carrying exactly `call_id`,
 /// `focus_id`, `participant_id`, `issued_at`, `expires_at` and `media`.
 /// It is not a private envelope: an arkret-native SFU validates this token
@@ -1327,7 +1329,7 @@ fn issue_arkret_native_backend_token(
             ))
         })?,
         payload,
-        sig: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+        signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
         signature_algorithm: ArkretNativeMediaSignatureAlgorithm::Ed25519,
     };
     Ok(IssuedMediaToken {
@@ -1342,7 +1344,7 @@ fn token_media_permissions(request: &MediaTokenIssueRequestBody<'_>) -> (bool, b
 }
 
 /// LiveKit backend token (`bindings/livekit.md` §2). Emits a **standard
-/// LiveKit JWT** — `base64url(header).base64url(payload).base64url(sig)`
+/// LiveKit JWT** — `base64url(header).base64url(payload).base64url(signature)`
 /// with header `{"alg":"HS256","typ":"JWT"}` and signature
 /// `HMAC-SHA256(API Secret, header.payload)` — so a real LiveKit
 /// deployment validates it.
@@ -1466,7 +1468,7 @@ async fn arkret_rtc_token(
     body: JsonBody<CallMediaTokenExchangeRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<CallMediaTokenExchangeOutcome> {
+) -> JsonResult<CallMediaTokenExchangeResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let original: Value = serde_json::from_slice(

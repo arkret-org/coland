@@ -51,7 +51,7 @@ async fn admission_add_boundary_recipient(
     arkret_mls::ArkretMlsIdentity,
     arkret_wire::MlsWelcomeDelivery,
     arkret_wire::CommittedEventFullView,
-    KeyPackagesClaimOutcome,
+    KeyPackagesClaimResponseBody,
 ) {
     let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
         recipient.actor_id.clone(),
@@ -106,7 +106,7 @@ async fn admission_add_boundary_recipient(
         StatusCode::OK,
         "real signed recipient claim: {value}"
     );
-    let claim: KeyPackagesClaimOutcome = serde_json::from_value(value).unwrap();
+    let claim: KeyPackagesClaimResponseBody = serde_json::from_value(value).unwrap();
     assert_eq!(claim.claim_receipt.request, request.unsigned_request());
     assert_eq!(claim.claims.len(), 1);
     assert_eq!(claim.claims[0].actor_id, recipient.actor_id);
@@ -173,7 +173,7 @@ async fn admission_add_boundary_recipient(
             device_id: recipient.device_id.clone(),
         },
         keypackage_claim_ref: added.welcome.keypackage_claim_ref,
-        ciphertext_b64: added.welcome.ciphertext_b64,
+        ciphertext_base64url: added.welcome.ciphertext_base64url,
         producer_proof: arkret_signatures::detached_object::sign_detached_object(
             &Value::Null,
             arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
@@ -191,7 +191,7 @@ async fn admission_add_boundary_recipient(
         &SigningKey::from_bytes(&[79; 32]),
     )
     .unwrap();
-    let submission = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+    let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
         commit_event: event.clone(),
         welcomes: vec![welcome.clone()],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -367,7 +367,7 @@ async fn admission_native_mls_writer_expiry(
             DidUrl::new(format!("{}#{}", authority.native_did, authority.device_id)).unwrap(),
         ),
     );
-    let request = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+    let request = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
         commit_event: event.clone(),
         welcomes: vec![],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -378,7 +378,7 @@ async fn admission_native_mls_writer_expiry(
     let key = 8_477_600_i64;
     // This is the real MLS state upsert after authentication/producer and
     // initial admission, not a Realm lock that could stop authentication.
-    holder.batch_execute(&format!("CREATE FUNCTION test_native_mls_finalization_wait() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.value->>'current_mls_commit_event_ref'=TG_ARGV[0] THEN PERFORM pg_advisory_xact_lock(TG_ARGV[1]::bigint); END IF; RETURN NEW; END $$; CREATE TRIGGER test_native_mls_finalization_wait AFTER INSERT OR UPDATE ON mls_group_current_results FOR EACH ROW EXECUTE FUNCTION test_native_mls_finalization_wait('{}','{}');",event.event_id.as_str().replace('\'',"''"),key)).await.unwrap();
+    holder.batch_execute(&format!("CREATE FUNCTION test_native_mls_finalization_wait() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.value->>'current_mls_commit_event_ref'=TG_ARGV[0] THEN PERFORM pg_advisory_xact_lock(TG_ARGV[1]::bigint); END IF; RETURN NEW; END $$; CREATE TRIGGER test_native_mls_finalization_wait AFTER INSERT OR UPDATE ON mls_group_current_states FOR EACH ROW EXECUTE FUNCTION test_native_mls_finalization_wait('{}','{}');",event.event_id.as_str().replace('\'',"''"),key)).await.unwrap();
     let prior=diesel::sql_query("SELECT nonce,consumed_at FROM applet_managed_device_nonces WHERE actor_id=$1 AND device_id=$2")
         .bind::<diesel::sql_types::Jsonb,_>(json!(authority.actor_id)).bind::<diesel::sql_types::Text,_>(authority.device_id.as_str())
         .load::<Nonce>(&mut holder).await.unwrap();
@@ -405,7 +405,7 @@ async fn admission_native_mls_writer_expiry(
         let mut observer = fixture.pool.get().await.unwrap();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let observed = loop {
-            let row=diesel::sql_query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE '%INSERT INTO mls_group_current_results%' AND a.wait_event_type='Lock' AND a.wait_event='advisory') AS waiting")
+            let row=diesel::sql_query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE '%INSERT INTO mls_group_current_states%' AND a.wait_event_type='Lock' AND a.wait_event='advisory') AS waiting")
                 .bind::<diesel::sql_types::Integer,_>(pid).get_result::<Waiting>(&mut observer).await.unwrap();
             if row.waiting {
                 break true;
@@ -441,7 +441,7 @@ async fn admission_native_mls_writer_expiry(
         tokio::time::timeout(std::time::Duration::from_secs(75), post),
         gate
     );
-    holder.batch_execute("DROP TRIGGER test_native_mls_finalization_wait ON mls_group_current_results; DROP FUNCTION test_native_mls_finalization_wait();").await.unwrap();
+    holder.batch_execute("DROP TRIGGER test_native_mls_finalization_wait ON mls_group_current_states; DROP FUNCTION test_native_mls_finalization_wait();").await.unwrap();
     drop(holder);
     assert!(
         observed,
@@ -595,7 +595,7 @@ async fn admission_scope_genesis(
         EventKind::MlsGenesis,
         json!({
         "cipher_suite":"MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519","group_info_ref":info,"ratchet_tree_ref":tree,
-        "creator_leaf_authority":{"leaf_signature_key_b64u":arkret_canonical::base64url_encode(key.verifying_key().as_bytes()),
+        "creator_leaf_authority":{"leaf_signature_key_base64url":arkret_canonical::base64url_encode(key.verifying_key().as_bytes()),
             "endpoint":{"kind":"device","device_id":authority.device_id},"authorization_event_ref":authority.authorization_ref.event_id},
         "governance_binding":binding,"created_at":arkret_canonical::format_timestamp_canonical(at)}),
         Some(&child),
@@ -611,7 +611,7 @@ async fn admission_scope_genesis(
         event.payload["created_at"],
         json!(arkret_canonical::format_timestamp_canonical(at))
     );
-    let request = SelfAuthoritySubmitRequest::Event(arkret_wire::EventAdmissionSubmission::new(
+    let request = SelfAuthoritySubmitRequestBody::Event(arkret_wire::EventAdmissionSubmission::new(
         event.clone(),
     ));
     let (status, value) = boxed_step(|| {
@@ -685,7 +685,7 @@ async fn admission_join_human_circle(fixture: &Fixture, circle: &ScopeRef) {
     let current = diesel::sql_query(
         "SELECT to_jsonb(m) AS value, \
          circle_member_parent_join_current(realm_id,member_id,value) AS effective \
-         FROM circle_member_state_current_results m \
+         FROM circle_member_state_current_states m \
          WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3",
     )
     .bind::<diesel::sql_types::Text, _>(fixture.realm.as_str())
@@ -696,7 +696,7 @@ async fn admission_join_human_circle(fixture: &Fixture, circle: &ScopeRef) {
     .unwrap();
     assert!(current.effective);
     assert_eq!(current.value["membership"], "join");
-    let expected = arkret_wire::CircleMemberStateCurrent {
+    let expected = arkret_wire::CircleMemberStateValue {
         membership: arkret_wire::MembershipState::Join,
         parent_membership_revision: Some(serde_json::from_value(parent).unwrap()),
         effective_at: join.created_at,
@@ -751,7 +751,7 @@ pub(super) async fn admission_circle_claim_after_realm_fence(
         StatusCode::OK,
         "actual native Circle requester bound to its real MLS group: {original}"
     );
-    let result: KeyPackagesClaimOutcome = serde_json::from_value(original.clone()).unwrap();
+    let result: KeyPackagesClaimResponseBody = serde_json::from_value(original.clone()).unwrap();
     assert_eq!(result.claim_receipt.request, request.unsigned_request());
     assert_eq!(result.claims.len(), 1);
     assert_eq!(result.claims[0].keypackage_ref, reference.as_str());
@@ -855,7 +855,7 @@ pub(super) async fn admission_circle_claim_after_realm_fence(
         StatusCode::OK,
         "fresh real Circle claim remains legal after independent Realm fence: {value}"
     );
-    let accepted: KeyPackagesClaimOutcome = serde_json::from_value(value).unwrap();
+    let accepted: KeyPackagesClaimResponseBody = serde_json::from_value(value).unwrap();
     assert_eq!(accepted.claims.len(), 1);
     assert_eq!(accepted.claims[0].keypackage_ref, fresh.as_str());
     assert_eq!(

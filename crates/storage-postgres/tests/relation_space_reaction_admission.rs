@@ -61,7 +61,7 @@ async fn value(pool: &PgPool, query: &str, key: &str) -> Value {
 
 async fn space_write_footprint(pool: &PgPool, realm: &arkret_wire::RealmId) -> Value {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY to_jsonb(e)::text),'[]'::jsonb) FROM canonical_events e WHERE realm_id=$1),'commits',(SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY to_jsonb(c)::text),'[]'::jsonb) FROM realm_commits c WHERE realm_id=$1),'space',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY space_id),'[]'::jsonb) FROM space_current_results s WHERE realm_id=$1),'parent',(SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY space_id),'[]'::jsonb) FROM space_parent_current_results p WHERE realm_id=$1),'policy',(SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY space_id),'[]'::jsonb) FROM space_child_scope_policy_current_results p WHERE realm_id=$1),'outbox',(SELECT coalesce(jsonb_agg(to_jsonb(o) ORDER BY to_jsonb(o)::text),'[]'::jsonb) FROM federation_outbox o),'event_outbox',(SELECT coalesce(jsonb_agg(to_jsonb(o) ORDER BY to_jsonb(o)::text),'[]'::jsonb) FROM event_federation_outbox o)) AS value")
+    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY to_jsonb(e)::text),'[]'::jsonb) FROM canonical_events e WHERE realm_id=$1),'commits',(SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY to_jsonb(c)::text),'[]'::jsonb) FROM realm_commits c WHERE realm_id=$1),'space',(SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY space_id),'[]'::jsonb) FROM space_current_states s WHERE realm_id=$1),'parent',(SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY space_id),'[]'::jsonb) FROM space_parent_current_states p WHERE realm_id=$1),'policy',(SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY space_id),'[]'::jsonb) FROM space_child_scope_policy_current_states p WHERE realm_id=$1),'outbox',(SELECT coalesce(jsonb_agg(to_jsonb(o) ORDER BY to_jsonb(o)::text),'[]'::jsonb) FROM federation_outbox o),'event_outbox',(SELECT coalesce(jsonb_agg(to_jsonb(o) ORDER BY to_jsonb(o)::text),'[]'::jsonb) FROM event_federation_outbox o)) AS value")
         .bind::<Text,_>(realm.as_str()).get_result::<ValueRow>(&mut conn).await.unwrap().value
 }
 
@@ -152,7 +152,7 @@ async fn relation_create_is_authorized_cas_guarded_and_rejects_cross_realm_struc
     let error = uow.commit_event(denied).await.unwrap_err().to_string();
     assert!(error.contains("capability_denied"), "{error}");
     assert_eq!(count(&pool, "realm_commits", &realm_id).await, before);
-    assert_eq!(count(&pool, "relation_current_results", &realm_id).await, 0);
+    assert_eq!(count(&pool, "relation_current_states", &realm_id).await, 0);
 
     let accepted = Box::pin(ordinary_realm::source_request(
         &pool,
@@ -175,7 +175,7 @@ async fn relation_create_is_authorized_cas_guarded_and_rejects_cross_realm_struc
         arkret_wire::RelationId::from_event_id(&accepted.authority_commit.event.event_id);
     let stored = value(
         &pool,
-        "SELECT value FROM relation_current_results WHERE relation_id=$1",
+        "SELECT value FROM relation_current_states WHERE relation_id=$1",
         relation_id.as_str(),
     )
     .await;
@@ -230,7 +230,7 @@ async fn relation_create_is_authorized_cas_guarded_and_rejects_cross_realm_struc
     let error = uow.commit_event(cross).await.unwrap_err().to_string();
     assert!(error.contains("cross_realm_structural_relation"), "{error}");
     assert_eq!(count(&pool, "realm_commits", &realm_id).await, before);
-    assert_eq!(count(&pool, "relation_current_results", &realm_id).await, 1);
+    assert_eq!(count(&pool, "relation_current_states", &realm_id).await, 1);
 }
 
 fn board(
@@ -286,7 +286,7 @@ async fn space_lifecycle_basis(pool: PgPool) -> SpaceLifecycleBasis {
     let last = unit.transactions.last().unwrap();
     let realm_id = last.event.realm_id.clone();
     let at = last.commit.committed_at;
-    let space_query = "SELECT value FROM space_current_results WHERE space_id=$1";
+    let space_query = "SELECT value FROM space_current_states WHERE space_id=$1";
 
     let root = Box::pin(ordinary_realm::source_request(
         &pool,
@@ -318,7 +318,7 @@ async fn space_restore_cases(basis: &SpaceLifecycleBasis) -> coland_storage::Eve
     let realm_id = basis.realm_id.clone();
     let at = basis.at;
     let root_id = basis.root_id.clone();
-    let space_query = "SELECT value FROM space_current_results WHERE space_id=$1";
+    let space_query = "SELECT value FROM space_current_states WHERE space_id=$1";
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let root = basis.root.clone();
     let created = &basis.created;
@@ -438,7 +438,7 @@ async fn space_restore_cases(basis: &SpaceLifecycleBasis) -> coland_storage::Eve
     ))
     .await;
     uow.commit_event(child.clone()).await.unwrap();
-    assert_eq!(count(&pool, "space_current_results", &realm_id).await, 2);
+    assert_eq!(count(&pool, "space_current_states", &realm_id).await, 2);
 
     child
 }
@@ -451,7 +451,7 @@ async fn space_terminal_cases(
     let realm_id = basis.realm_id.clone();
     let at = basis.at;
     let root_id = basis.root_id.clone();
-    let space_query = "SELECT value FROM space_current_results WHERE space_id=$1";
+    let space_query = "SELECT value FROM space_current_states WHERE space_id=$1";
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let terminal = |previous: &coland_storage::AuthorityCommitTransaction,
                     space: &arkret_wire::SpaceId| {
@@ -550,7 +550,7 @@ async fn reactions_join_one_keyed_set_per_target_message() {
     uow.commit_event(message.clone()).await.unwrap();
     let message_id =
         arkret_wire::MessageId::from_event_id(&message.authority_commit.event.event_id);
-    let set_query = "SELECT value FROM message_reactions_current_results WHERE target_ref=$1";
+    let set_query = "SELECT value FROM message_reactions_current_states WHERE target_ref=$1";
 
     let missing =
         arkret_wire::MessageId::from_event_id(&discussion.head.authority_commit.event.event_id);
@@ -584,7 +584,7 @@ async fn reactions_join_one_keyed_set_per_target_message() {
     let error = uow.commit_event(denied).await.unwrap_err().to_string();
     assert!(error.contains("capability_denied"), "{error}");
     assert_eq!(
-        count(&pool, "message_reactions_current_results", &realm_id).await,
+        count(&pool, "message_reactions_current_states", &realm_id).await,
         0
     );
 
@@ -641,7 +641,7 @@ async fn reactions_join_one_keyed_set_per_target_message() {
         .current_state_entries
         .iter()
         .find_map(|row| match row {
-            arkret_wire::TypedCurrentRow::Value {
+            arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::MessageReactions { target_ref },
                 source_stream_ref,
                 value,
@@ -694,7 +694,7 @@ async fn space_update_preserves_scope_and_rolls_back_both_branches_on_rejection(
     .await;
     uow.commit_event(create.clone()).await.unwrap();
     let id = arkret_wire::SpaceId::from_event_id(&create.authority_commit.event.event_id);
-    let query = "SELECT value FROM space_current_results WHERE space_id=$1";
+    let query = "SELECT value FROM space_current_states WHERE space_id=$1";
     let before = value(&pool, query, id.as_str()).await;
     let digest =
         arkret_canonical::sha256_digest(arkret_canonical::canonical_json_bytes(&before).unwrap());
@@ -735,7 +735,7 @@ async fn space_update_preserves_scope_and_rolls_back_both_branches_on_rejection(
         assert_eq!(after[retained], before[retained]);
     }
     let policy_query =
-        "SELECT value FROM space_child_scope_policy_current_results WHERE space_id=$1";
+        "SELECT value FROM space_child_scope_policy_current_states WHERE space_id=$1";
     let policy = value(&pool, policy_query, id.as_str()).await;
     let count_before = count(&pool, "realm_commits", &realm).await;
     let footprint_before = space_write_footprint(&pool, &realm).await;
@@ -808,7 +808,7 @@ async fn schema_subjects_are_immutable_and_policy_revisions_are_contiguous() {
     ))
     .await;
     uow.commit_event(define.clone()).await.unwrap();
-    let query = "SELECT value FROM schema_definition_current_results WHERE schema_id=$1";
+    let query = "SELECT value FROM schema_definition_current_states WHERE schema_id=$1";
     assert_eq!(
         value(&pool, query, "ak.schema.local_test.v1").await,
         document
@@ -837,13 +837,13 @@ async fn schema_subjects_are_immutable_and_policy_revisions_are_contiguous() {
         .unwrap()
         .unwrap();
     assert!(snapshot.current_state_entries.iter().any(|entry| matches!(entry,
-        arkret_wire::TypedCurrentRow::Value { selector: arkret_wire::CurrentSelector::SchemaDefinition { schema_id },value,.. }
+        arkret_wire::CurrentState::Value { selector: arkret_wire::CurrentSelector::SchemaDefinition { schema_id },value,.. }
             if schema_id=="ak.schema.local_test.v1" && value==&document)));
     let policy = Box::pin(ordinary_realm::source_request(&pool, next_request(
         &define.authority_commit,
         arkret_wire::EventKind::RealmPolicyBundle,
         &founder(),
-        json!({"policy_revision":2,"media_service_decrypts":false,"federation_policy":"closed"}),
+        json!({"policy_revision":2,"media_service_decryption_allowed":false,"federation_policy":"closed"}),
         at,
     ))).await;
     uow.commit_event(policy.clone()).await.unwrap();
@@ -853,7 +853,7 @@ async fn schema_subjects_are_immutable_and_policy_revisions_are_contiguous() {
             &policy.authority_commit,
             arkret_wire::EventKind::RealmPolicyBundle,
             &founder(),
-            json!({"policy_revision":3,"media_service_decrypts":true,"federation_policy":"closed"}),
+            json!({"policy_revision":3,"media_service_decryption_allowed":true,"federation_policy":"closed"}),
             at,
         ),
     ))
@@ -863,17 +863,17 @@ async fn schema_subjects_are_immutable_and_policy_revisions_are_contiguous() {
     for (actor, payload, reason) in [
         (
             founder(),
-            json!({"policy_revision":1,"media_service_decrypts":false,"federation_policy":"closed"}),
+            json!({"policy_revision":1,"media_service_decryption_allowed":false,"federation_policy":"closed"}),
             "policy_revision_rollback",
         ),
         (
             founder(),
-            json!({"policy_revision":5,"media_service_decrypts":false,"federation_policy":"closed"}),
+            json!({"policy_revision":5,"media_service_decryption_allowed":false,"federation_policy":"closed"}),
             "policy_revision_gap",
         ),
         (
             intruder(),
-            json!({"policy_revision":4,"media_service_decrypts":false,"federation_policy":"closed"}),
+            json!({"policy_revision":4,"media_service_decryption_allowed":false,"federation_policy":"closed"}),
             "capability_denied",
         ),
     ] {

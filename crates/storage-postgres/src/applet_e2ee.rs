@@ -9,7 +9,7 @@ use arkret_models_collaboration::governance::operation_wire::{
     AppletPolicyOperation, PolicyResourceKind, PolicyResourceSelector,
 };
 use arkret_models_integration::{
-    AppletInstallOutcome, AppletInstallRequestBody, AppletRegistrationPayload,
+    AppletInstallRequestBody, AppletInstallResponseBody, AppletRegistrationPayload,
 };
 use arkret_wire::{ActorId, Event, EventKind, GrantId, PolicyEffect, ScopeRef};
 use coland_storage::{PersistenceError, PersistenceResult};
@@ -37,7 +37,7 @@ pub(crate) async fn require_install_policy(
         _ => None,
     };
     let policies =
-        crate::policy_current_results::read_scoped_applet_management_policies_in_connection(
+        crate::policy_current_states::read_scoped_applet_management_policies_in_connection(
             conn,
             scope.realm_id(),
             circle,
@@ -108,12 +108,12 @@ impl CurrentConsent {
     pub(crate) fn permits_at(
         &self,
         grants: &BTreeMap<GrantId, CapabilityGrant>,
-        root: &crate::capability_grant_current_results::RealmAuthorityRootCurrent,
+        root: &crate::capability_grant_current_states::RealmAuthorityRootCurrent,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<bool> {
         let mut current = false;
         for id in &self.grant_ids {
-            current |= crate::capability_grant_current_results::accepted_grant_is_current(
+            current |= crate::capability_grant_current_states::accepted_grant_is_current(
                 id,
                 grants,
                 root,
@@ -172,9 +172,9 @@ pub(crate) async fn current_consent(
         || basis.effective_scope != *scope
         || basis.service_id != registration.service_id
         || basis.registration_event.kind != EventKind::AppletRegistration
-        || crate::applet_current_results::registration_security_value(&json!(
+        || crate::applet_current_states::registration_security_value(&json!(
             basis.registration_event.payload
-        )) != crate::applet_current_results::registration_security_value(&json!(registration))
+        )) != crate::applet_current_states::registration_security_value(&json!(registration))
         || installation["registration_event"] != json!(basis.registration_event)
         || installation["capability_grant_events"] != json!(basis.capability_grant_events)
         || installation["package"] != json!(body.applet_package)
@@ -183,7 +183,7 @@ pub(crate) async fn current_consent(
             "exact accepted registration and install consent differ",
         ));
     }
-    let outcome: AppletInstallOutcome =
+    let outcome: AppletInstallResponseBody =
         serde_json::from_value(accepted.response_body.clone()).map_err(refused)?;
     if outcome.registration_event_ref != basis.registration_event.event_id
         || outcome.e2ee_authorization_refs != refs
@@ -210,20 +210,20 @@ pub(crate) async fn current_consent(
             return Err(refused("original accepted installation Event differs"));
         }
     }
-    let rows = sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
+    let rows = sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_states WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
         .bind::<Text,_>(scope.realm_id().as_str())
-        .get_results::<crate::capability_grant_current_results::CapabilityGrantCurrentResultReadRow>(&mut *conn)
+        .get_results::<crate::capability_grant_current_states::CapabilityGrantCurrentStateReadRow>(&mut *conn)
         .await.map_err(PersistenceError::database)?;
     let mut grants = BTreeMap::new();
     for row in rows {
-        let row = crate::capability_grant_current_results::decode_row(row)?;
+        let row = crate::capability_grant_current_states::decode_row(row)?;
         grants.insert(row.grant_id, row.value);
     }
-    let root = sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1 FOR SHARE")
+    let root = sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1 FOR SHARE")
         .bind::<Text,_>(scope.realm_id().as_str())
-        .get_result::<crate::capability_grant_current_results::RealmAuthorityRootReadRow>(&mut *conn)
+        .get_result::<crate::capability_grant_current_states::RealmAuthorityRootReadRow>(&mut *conn)
         .await.map_err(PersistenceError::database)?;
-    let root = crate::capability_grant_current_results::decode_authority_root(root)?;
+    let root = crate::capability_grant_current_states::decode_authority_root(root)?;
     for source in &basis.capability_grant_events {
         let id = GrantId::from_event_id(&source.event_id);
         let grant = grants.get(&id).ok_or_else(|| {

@@ -1,6 +1,6 @@
 //! Original native receipt cleanup under one current Realm control and claim transaction.
 use arkret_models_crypto::{
-    KeyPackageConsumeReceipt, KeyPackagesConsumeOutcome, RecipientMlsDurableSigner,
+    KeyPackageConsumeReceipt, KeyPackagesConsumeResponseBody, RecipientMlsDurableSigner,
 };
 use coland_storage::{AppletDeviceKeyPackageConsume, MlsKeyPackageConsumption};
 use diesel_async::AsyncConnection;
@@ -155,7 +155,7 @@ pub(crate) async fn consume(
         if &current!=authority || at>=transport_expires_at || at>=authority.expires_at {
             return Err(denied("consume Device instance or credential window changed").into());
         }
-        let outcome:arkret_models_crypto::PeerKeyPackagesClaimOutcome=serde_json::from_value(ledger.outcome.clone().ok_or_else(||conflict("consume has no original claim outcome"))?).map_err(PersistenceError::database)?;
+        let outcome:arkret_models_crypto::PeerKeyPackagesClaimResponseBody=serde_json::from_value(ledger.outcome.clone().ok_or_else(||conflict("consume has no original claim outcome"))?).map_err(PersistenceError::database)?;
         outcome.validate_shape().map_err(|_|conflict("original claim outcome is invalid"))?;
         let original_authority=outcome.claim_receipt.claim_authority_ref.as_ref()
             .ok_or_else(||conflict("Realm claim has no original authority reference"))?;
@@ -209,7 +209,7 @@ pub(crate) async fn consume(
                 || (!reusable && (package.consumed_at.is_none() || package.claimed_by_mls_group_id.as_deref()!=Some(receipt.mls_group_id.as_str()))) {
                 return Err(conflict("consume retry differs from the first accepted signed command").into());
             }
-            return Ok(MlsKeyPackageConsumption {outcome:KeyPackagesConsumeOutcome {consume_receipt:stored},record:package});
+            return Ok(MlsKeyPackageConsumption {outcome:KeyPackagesConsumeResponseBody {consume_receipt:stored},record:package});
         }
         if ledger.state!=if reusable {"last_resort_claimed"} else {"claimed"}
             || ledger.claim_expires_at_unix_ms.is_none_or(|end|at.timestamp_millis()>=end)
@@ -244,6 +244,6 @@ pub(crate) async fn consume(
         if final_at>=transport_expires_at || ledger.claim_expires_at_unix_ms.is_none_or(|end|final_at.timestamp_millis()>=end) {
             return Err(denied("consume authority expired before finalization").into());
         }
-        Ok(MlsKeyPackageConsumption {outcome:KeyPackagesConsumeOutcome {consume_receipt:signed},record:package})
+        Ok(MlsKeyPackageConsumption {outcome:KeyPackagesConsumeResponseBody {consume_receipt:signed},record:package})
     }).await.map_err(PgTransactionError::into_persistence)
 }

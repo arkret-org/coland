@@ -26,7 +26,7 @@ use crate::ids;
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
 use crate::wire::{
-    AdminPolicyDocument, AdminPolicyDocumentPage, AdminPolicyPayload, OkOutcome,
+    AcknowledgementResponseBody, AdminPolicyDocument, AdminPolicyDocumentPage, AdminPolicyPayload,
     UpsertPolicyDocumentRequestBody,
 };
 
@@ -206,7 +206,7 @@ async fn delete_policy_document(
     policy_id: PathParam<String>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<OkOutcome> {
+) -> JsonResult<AcknowledgementResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let policy_id = policy_id.into_inner();
@@ -223,7 +223,7 @@ async fn delete_policy_document(
         .delete_policy_document(&policy_id)
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
-    json_ok(OkOutcome { ok: true })
+    json_ok(AcknowledgementResponseBody { ok: true })
 }
 
 /// Decode a stored local policy document into its public response shape.

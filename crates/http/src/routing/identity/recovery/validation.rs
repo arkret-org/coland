@@ -61,27 +61,31 @@ pub(super) fn validate_recovery_policy(
             "expires_at MUST be strictly after issued_at",
         ));
     }
-    let auth_data = payload
-        .get("auth_data")
+    let signature_proof = payload
+        .get("signature_proof")
         .and_then(Value::as_object)
-        .ok_or_else(|| AppError::param_invalid("auth_data is required"))?;
-    auth_data
+        .ok_or_else(|| AppError::param_invalid("signature_proof is required"))?;
+    signature_proof
         .get("verification_method")
         .and_then(Value::as_str)
-        .ok_or_else(|| AppError::param_invalid("auth_data.verification_method is required"))?;
-    let signature_algorithm = auth_data
+        .ok_or_else(|| {
+            AppError::param_invalid("signature_proof.verification_method is required")
+        })?;
+    let signature_algorithm = signature_proof
         .get("signature_algorithm")
         .and_then(Value::as_str)
-        .ok_or_else(|| AppError::param_invalid("auth_data.signature_algorithm is required"))?;
+        .ok_or_else(|| {
+            AppError::param_invalid("signature_proof.signature_algorithm is required")
+        })?;
     if signature_algorithm != "Ed25519" {
         return Err(AppError::param_invalid(format!(
-            "auth_data.signature_algorithm `{signature_algorithm}` not in {{Ed25519, Ed25519}}",
+            "signature_proof.signature_algorithm `{signature_algorithm}` not in {{Ed25519, Ed25519}}",
         )));
     }
-    auth_data
+    signature_proof
         .get("signature")
         .and_then(Value::as_str)
-        .ok_or_else(|| AppError::param_invalid("auth_data.signature is required"))?;
+        .ok_or_else(|| AppError::param_invalid("signature_proof.signature is required"))?;
     Ok(account_id)
 }
 

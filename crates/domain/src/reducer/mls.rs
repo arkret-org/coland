@@ -1,7 +1,7 @@
 //! MLS KeyPackage ledger projection helpers.
 //!
 //! `ak.mls.genesis` and `ak.mls.commit` do not reach the reducer: their
-//! `mls_group` typed current result is written by the guarded authority unit
+//! `mls_group` current state is written by the guarded authority unit
 //! of work at the covering RealmCommit. KeyPackage publication is not an
 //! Event: `prepare_keypackage_upload_projection` validates the dedicated
 //! KeyPackage ledger projection that `/_arkret/self/keys/keypackages/*`

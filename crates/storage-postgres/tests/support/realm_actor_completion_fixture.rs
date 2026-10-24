@@ -139,7 +139,7 @@ async fn actual_completion_receiver<F>(
         .unwrap();
     let bytes = completion_wire_bytes(&prepared);
     let expected = json!(
-        arkret_models_integration::AppletTransactionOutcome::Accepted {
+        arkret_models_integration::AppletTransactionResponseBody::Accepted {
             committed_event_refs: vec![],
             rejections: vec![],
             retry_after_ms: None,
@@ -264,8 +264,8 @@ async fn actual_completion_receiver<F>(
     assert_ne!(refreshed.idempotency_key, prepared.idempotency_key);
     assert_eq!(refreshed.creation_ref, prepared.creation_ref);
     assert_eq!(
-        json!(refreshed.context.as_ref().unwrap().material.result),
-        json!(prepared.context.as_ref().unwrap().material.result)
+        json!(refreshed.context.as_ref().unwrap().material.material),
+        json!(prepared.context.as_ref().unwrap().material.material)
     );
     assert_ne!(
         refreshed.context.as_ref().unwrap().material.request_nonce,

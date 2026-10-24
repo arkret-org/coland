@@ -263,8 +263,8 @@ pub(crate) async fn confirmed_pcr_device_cut_in_connection(
                        WHERE realm_id=p.realm_id \
                          AND stream_ref=jsonb_build_object('kind','realm','realm_id',p.realm_id) \
                        ORDER BY stream_position DESC LIMIT 1) h ON TRUE \
-         LEFT JOIN pcr_device_generation_current_results g ON g.realm_id=p.realm_id \
-         LEFT JOIN pcr_device_authorization_current_results a \
+         LEFT JOIN pcr_device_generation_current_states g ON g.realm_id=p.realm_id \
+         LEFT JOIN pcr_device_authorization_current_states a \
            ON a.realm_id=p.realm_id AND a.device_id=$3 \
          WHERE p.principal_id=$1 AND p.station_id=$2 AND p.result_json<>'{}'::jsonb",
     )

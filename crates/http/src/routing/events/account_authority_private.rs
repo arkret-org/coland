@@ -1,6 +1,6 @@
 use arkret_wire::{
-    AuthorityCommitStatus, AuthorityRejectionStatus, AuthoritySubmitOutcome,
-    AuthoritySubmitRequest, EventAdmissionSubmission,
+    AuthorityCommitStatus, AuthorityRejectionStatus, AuthoritySubmitRequestBody,
+    AuthoritySubmitResponseBody, EventAdmissionSubmission,
 };
 use coland_http::error::AppError;
 use coland_http::result::{JsonResult, json_ok};
@@ -52,7 +52,7 @@ pub(super) async fn read_agent_participation(
     depot: &mut Depot,
     req: &mut Request,
 ) -> JsonResult<
-    arkret_models_collaboration::governance::agent_participation::AgentParticipationOutcome,
+    arkret_models_collaboration::governance::agent_participation::AgentParticipationResponseBody,
 > {
     let state = depot.get_typed::<AppState>().expect("state injected");
     super::peer::authenticate_account_authority_private_request(state, req)?;
@@ -111,7 +111,7 @@ pub(super) async fn read_agent_participation(
 pub(super) async fn admit_event(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AuthoritySubmitOutcome> {
+) -> JsonResult<AuthoritySubmitResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     super::peer::authenticate_account_authority_private_request(state, req)?;
 
@@ -155,7 +155,7 @@ pub(super) async fn admit_event(
             .await,
     );
     outcome
-        .validate_for_request(&AuthoritySubmitRequest::Event(submission))
+        .validate_for_request(&AuthoritySubmitRequestBody::Event(submission))
         .map_err(|error| AppError::internal(error.to_string()))?;
     json_ok(outcome)
 }
@@ -167,26 +167,30 @@ pub(super) async fn admit_event(
 /// retryable and leaves the reservation in place.
 fn accepted_device_outcome(
     admission: coland_services::ServiceResult<AuthorityEventAdmissionOutcome>,
-) -> AuthoritySubmitOutcome {
+) -> AuthoritySubmitResponseBody {
     use coland_storage::ConflictCode;
 
-    let rejected = |reason_code: &str| AuthoritySubmitOutcome::Rejected {
+    let rejected = |reason_code: &str| AuthoritySubmitResponseBody::Rejected {
         status: AuthorityRejectionStatus::Rejected,
         reason_code: reason_code.to_owned(),
     };
-    let retryable = || AuthoritySubmitOutcome::Rejected {
+    let retryable = || AuthoritySubmitResponseBody::Rejected {
         status: AuthorityRejectionStatus::RetryableUnavailable,
         reason_code: "authority_transaction_unavailable".to_owned(),
     };
     match admission {
-        Ok(AuthorityEventAdmissionOutcome::Committed(commit)) => AuthoritySubmitOutcome::Accepted {
-            status: AuthorityCommitStatus::Committed,
-            commit,
-        },
-        Ok(AuthorityEventAdmissionOutcome::Duplicate(commit)) => AuthoritySubmitOutcome::Accepted {
-            status: AuthorityCommitStatus::Duplicate,
-            commit,
-        },
+        Ok(AuthorityEventAdmissionOutcome::Committed(commit)) => {
+            AuthoritySubmitResponseBody::Accepted {
+                status: AuthorityCommitStatus::Committed,
+                commit,
+            }
+        }
+        Ok(AuthorityEventAdmissionOutcome::Duplicate(commit)) => {
+            AuthoritySubmitResponseBody::Accepted {
+                status: AuthorityCommitStatus::Duplicate,
+                commit,
+            }
+        }
         Ok(AuthorityEventAdmissionOutcome::NotCurrentAuthority) => rejected("authority_mismatch"),
         Err(error) => match error.kind() {
             ServiceErrorKind::SchemaViolation => rejected(ConflictCode::SchemaViolation.as_str()),
@@ -243,7 +247,7 @@ mod tests {
         ] {
             assert_eq!(
                 accepted_device_outcome(conflict(code)),
-                AuthoritySubmitOutcome::Rejected {
+                AuthoritySubmitResponseBody::Rejected {
                     status: AuthorityRejectionStatus::Rejected,
                     reason_code: code.as_str().to_owned(),
                 }
@@ -255,7 +259,7 @@ mod tests {
         ] {
             assert!(matches!(
                 accepted_device_outcome(retryable),
-                AuthoritySubmitOutcome::Rejected {
+                AuthoritySubmitResponseBody::Rejected {
                     status: AuthorityRejectionStatus::RetryableUnavailable,
                     ..
                 }
@@ -263,7 +267,7 @@ mod tests {
         }
         assert_eq!(
             accepted_device_outcome(Ok(AuthorityEventAdmissionOutcome::NotCurrentAuthority)),
-            AuthoritySubmitOutcome::Rejected {
+            AuthoritySubmitResponseBody::Rejected {
                 status: AuthorityRejectionStatus::Rejected,
                 reason_code: "authority_mismatch".to_owned(),
             }

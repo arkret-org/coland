@@ -84,13 +84,13 @@ the realm's `ak.realm.media_service.foci[]` set, returning `focus_mismatch`.
   "device_id": "ak:device:...",
   "participant_id": "ak:participant:<realm>:<actor>:<device>:<call>",
   "expires_at": "2026-05-27T12:34:56.789Z",
-  "sig": "<base64url>"
+  "signature": "<base64url>"
 }
 ```
 
 Canonical byte derivation for signing / verification:
 
-1. Compute `inner = the binding object with the `sig` field removed`.
+1. Compute `inner = the binding object with the `signature` field removed`.
 2. Apply RFC 8785 JCS to `inner`.
 3. Hash with SHA-256.
 4. Sign the digest under the issuer's signing key indexed by `issuer_kid`.

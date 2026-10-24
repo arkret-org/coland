@@ -1,5 +1,5 @@
 //! Exact private Realm actor material; callers cannot select another identity.
-use arkret_models_integration::RealmActorMaterialRequest;
+use arkret_models_integration::RealmActorMaterialRequestBody;
 use coland_http::error::AppError;
 use salvo::prelude::*;
 
@@ -42,7 +42,7 @@ async fn read_material(
     state: &AppState,
     req: &mut Request,
     depot: &Depot,
-) -> Result<arkret_models_integration::RealmActorMaterialOutcome, AppError> {
+) -> Result<arkret_models_integration::RealmActorMaterialResponseBody, AppError> {
     let operation = arkret_wire::ServiceOperationId::SelfRealmActorReadMaterialV1;
     if req.headers().get_all("arkret-operation").iter().count() != 1
         || req
@@ -98,7 +98,7 @@ async fn read_material(
     }
     arkret_canonical::canonical::validate_canonical_bytes(bytes)
         .map_err(|_| AppError::json_invalid("Realm material body is not canonical"))?;
-    let request: RealmActorMaterialRequest = serde_json::from_slice(bytes)
+    let request: RealmActorMaterialRequestBody = serde_json::from_slice(bytes)
         .map_err(|_| AppError::schema_violation("invalid Realm material selector"))?;
     request
         .validate()
@@ -108,9 +108,9 @@ async fn read_material(
 
 pub(super) async fn supply(
     state: &AppState,
-    request: &RealmActorMaterialRequest,
+    request: &RealmActorMaterialRequestBody,
     caller: &coland_storage::RealmActorMaterialCaller,
-) -> Result<arkret_models_integration::RealmActorMaterialOutcome, AppError> {
+) -> Result<arkret_models_integration::RealmActorMaterialResponseBody, AppError> {
     let method = arkret_wire::DidUrl::new(
         crate::routing::federation::federation_service_signature_key_id(
             state.service_did().as_str(),

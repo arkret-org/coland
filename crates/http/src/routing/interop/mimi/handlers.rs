@@ -33,8 +33,9 @@ pub(super) async fn mimi_provider_directory(
 pub(super) async fn mimi_key_material(
     depot: &mut Depot,
     req: &mut Request,
-) -> coland_http::result::GuardedJsonResult<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome>
-{
+) -> coland_http::result::GuardedJsonResult<
+    arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody,
+> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let room = arkret_wire::MimiRoomUri::new(mimi_required_header(req, "mimi-room-uri")?)
         .map_err(|_| mimi_signature_error_invalid("MIMI-Room-URI is invalid"))?;
@@ -53,7 +54,7 @@ pub(super) async fn mimi_room_update(
     body: JsonBody<MimiRoomUpdateRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<MimiRoomUpdateOutcome> {
+) -> JsonResult<MimiRoomUpdateResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let room_id = strand_id.into_inner();
     let body = typed_body_value(body.into_inner(), "mimi room update")?;
@@ -136,7 +137,7 @@ pub(super) async fn mimi_room_update(
             "binding_emitted": binding_event_id.is_some(),
         }),
     );
-    json_ok(MimiRoomUpdateOutcome {
+    json_ok(MimiRoomUpdateResponseBody {
         accepted: true,
         room_state_ref,
         rejections: None,
@@ -154,7 +155,7 @@ pub(super) async fn mimi_notify(
     body: JsonBody<MimiNotifyRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<MimiNotifyOutcome> {
+) -> JsonResult<MimiNotifyResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let room_id = strand_id.into_inner();
     let body = typed_body_value(body.into_inner(), "mimi notify")?;
@@ -182,7 +183,7 @@ pub(super) async fn mimi_notify(
             "broadcast_emitted": false,
         }),
     );
-    json_ok(MimiNotifyOutcome {
+    json_ok(MimiNotifyResponseBody {
         accepted: true,
         retry_after_ms: None,
     })
@@ -199,7 +200,7 @@ pub(super) async fn mimi_room_message(
     body: JsonBody<MimiSubmitMessageRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<MimiSubmitMessageOutcome> {
+) -> JsonResult<MimiSubmitMessageResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let room_id = strand_id.into_inner();
     let body = body.into_inner();
@@ -329,7 +330,7 @@ pub(super) async fn mimi_room_message(
     .await;
     let event_ref = EventId::new(event_id)
         .map_err(|error| AppError::internal(format!("MIMI mapped event ref: {error}")))?;
-    json_ok(MimiSubmitMessageOutcome {
+    json_ok(MimiSubmitMessageResponseBody {
         event_ref: Some(event_ref),
         delivery: MimiDelivery {
             status: MimiDeliveryStatus::Accepted,
@@ -350,7 +351,7 @@ pub(super) async fn mimi_consent_request(
     body: JsonBody<MimiRequestConsentRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<MimiRequestConsentOutcome> {
+) -> JsonResult<MimiRequestConsentResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     let body_value = typed_body_value(body.clone(), "mimi consent request")?;
@@ -391,7 +392,7 @@ pub(super) async fn mimi_consent_request(
             "identifier_mapping": "pending_invite_or_pairwise"
         }),
     );
-    json_ok(MimiRequestConsentOutcome {
+    json_ok(MimiRequestConsentResponseBody {
         consent_id,
         challenge: None,
     })
@@ -408,7 +409,7 @@ pub(super) async fn mimi_consent_update(
     body: JsonBody<MimiUpdateConsentRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<MimiUpdateConsentOutcome> {
+) -> JsonResult<MimiUpdateConsentResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     let body_value = typed_body_value(body.clone(), "mimi consent update")?;
@@ -458,7 +459,7 @@ pub(super) async fn mimi_consent_update(
         }
     }
     .map_err(|error| mimi_consent_admission_error(body.decision, error))?;
-    json_ok(MimiUpdateConsentOutcome {
+    json_ok(MimiUpdateConsentResponseBody {
         consent_id: body.consent_id,
         decision: body.decision,
         updated_at,
@@ -923,7 +924,7 @@ async fn verify_mimi_consent_correlation(
     }
 
     use arkret_models_collaboration::call_invitation::{
-        ConsentCurrentReadRequestBody, ConsentCurrentState,
+        ConsentCurrentReadRequestBody, ConsentCurrentReadState,
     };
     use arkret_models_collaboration::events_payloads::consent::{
         ConsentExpectedCurrent, ConsentReplacePayload,
@@ -979,12 +980,13 @@ async fn verify_mimi_consent_correlation(
     };
     let cut = crate::routing::call_admission::read_current_for_holder(state, &request).await?;
     let old = match (&replacement.expected_current, cut.current) {
-        (ConsentExpectedCurrent::NeverWritten, ConsentCurrentState::NeverWritten) => Vec::new(),
-        (ConsentExpectedCurrent::Present { revision }, ConsentCurrentState::Present { result })
-            if *revision == result.revision =>
-        {
-            result.value.permissions
-        }
+        (ConsentExpectedCurrent::NeverWritten, ConsentCurrentReadState::NeverWritten) => Vec::new(),
+        (
+            ConsentExpectedCurrent::Present { revision },
+            ConsentCurrentReadState::Present {
+                current_state: result,
+            },
+        ) if *revision == result.revision => result.value.permissions,
         _ => {
             return Err(mimi_consent_correlation_unavailable());
         }
@@ -1096,7 +1098,7 @@ pub(super) async fn mimi_identifiers_query(
     body: JsonBody<MimiIdentifierQueryRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<MimiIdentifierQueryOutcome> {
+) -> JsonResult<MimiIdentifierQueryResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let typed = body.into_inner();
     let body = typed_body_value(&typed, "mimi identifiers query")?;
@@ -1150,7 +1152,7 @@ pub(super) async fn mimi_identifiers_query(
             "mapping_policy": "opaque_fail_closed"
         }),
     );
-    json_ok(MimiIdentifierQueryOutcome {
+    json_ok(MimiIdentifierQueryResponseBody {
         matches,
         proofs: Vec::new(),
         has_more: false,
@@ -1167,7 +1169,7 @@ pub(super) async fn mimi_report_abuse(
     body: JsonBody<MimiReportAbuseRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<MimiReportAbuseOutcome> {
+) -> JsonResult<MimiReportAbuseResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     body.validate()
@@ -1256,7 +1258,7 @@ pub(super) async fn mimi_report_abuse(
     )
     .await
     .map_err(mimi_report_admission_error)?;
-    let response = MimiReportAbuseOutcome {
+    let response = MimiReportAbuseResponseBody {
         report_id: arkret_wire::ReportId::from_event_id(&event.event_id),
         routed_to_ids: Vec::new(),
     };
@@ -1285,7 +1287,7 @@ pub(super) async fn mimi_report_abuse(
         reporter_authority: Some(
             serde_json::to_value(&body).map_err(|e| AppError::internal(e.to_string()))?,
         ),
-        submit_request: None,
+        submit_request_body: None,
         mapping_receipt: None,
         reporter_device_guard: Some(Box::new(selector)),
     };
@@ -1343,7 +1345,7 @@ pub(super) async fn mimi_proxy_download(
     body: JsonBody<MimiProxyDownloadRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<MimiProxyDownloadOutcome> {
+) -> JsonResult<MimiProxyDownloadResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = typed_body_value(body.into_inner(), "mimi proxy download")?;
     verify_mimi_source_service_signature(state, req, None).await?;
@@ -1391,9 +1393,9 @@ pub(super) async fn mimi_proxy_download(
             "client_must_verify_content_hash": true
         }),
     );
-    json_ok(MimiProxyDownloadOutcome {
+    json_ok(MimiProxyDownloadResponseBody {
         download_ref,
-        headers,
+        download_request_headers: headers,
         expires_at: Some(now() + Duration::minutes(5)),
     })
 }
@@ -1632,7 +1634,7 @@ mod consent_proof_tests {
             value: Value,
         }
         let mut conn = pool.get().await.unwrap();
-        diesel::sql_query("SELECT jsonb_build_array((SELECT count(*) FROM canonical_events),(SELECT count(*) FROM realm_commits),(SELECT jsonb_agg(to_jsonb(r) ORDER BY peer_id) FROM consent_current_results r),(SELECT count(*) FROM consent_result_versions),(SELECT count(*) FROM account_data_changes),(SELECT count(*) FROM authority_forward_attempts),(SELECT count(*) FROM federation_outbox),(SELECT count(*) FROM event_federation_outbox)) AS value")
+        diesel::sql_query("SELECT jsonb_build_array((SELECT count(*) FROM canonical_events),(SELECT count(*) FROM realm_commits),(SELECT jsonb_agg(to_jsonb(r) ORDER BY peer_id) FROM consent_current_states r),(SELECT count(*) FROM consent_result_versions),(SELECT count(*) FROM account_data_changes),(SELECT count(*) FROM authority_forward_attempts),(SELECT count(*) FROM federation_outbox),(SELECT count(*) FROM event_federation_outbox)) AS value")
             .get_result::<Row>(&mut conn).await.unwrap().value
     }
 
@@ -1989,20 +1991,21 @@ mod consent_proof_tests {
             "backup_id":format!("ak:backup:{}",uuid::Uuid::now_v7()),
             "actor_id":arkret_wire::ActorId::account(account.clone()),
             "backup_kind":"secret_storage","backup_version":"kb_1","created_at":arkret_canonical::format_timestamp_canonical(at),
-            "series_id":new_series,"series_seq":0,
+            "series_id":new_series,"series_sequence":0,
             "encryption":{"recipient_method":"secret_storage_key","recipient_key_ref":"backup-key","aead":{"name":"xchacha20_poly1305","nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
             "domain_separation":{"subdomain":"secret_storage"},
             "contents":[{"item_kind":"recovery_key_share","secret_id":"share"}],
             "ciphertext":"AAAA","ciphertext_digest":"sha256:709e80c88487a2411e1ee4dfb9f22a861492d20c4765150c0c794abd70f8147c",
-            "auth_data":{"device_id":authorizing_device,"verification_method":authorizer.verification_method,
+            "signature_proof":{"device_id":authorizing_device,"verification_method":authorizer.verification_method,
                 "signature_algorithm":"Ed25519","signature":"AAAA",
                 "device_authorize_event_id":authorizer.authorization.authorization_ref.event_id}
         })).unwrap();
-        envelope.auth_data.signature = Base64UrlString::new(arkret_canonical::base64url_encode(
-            key.sign(&envelope.signing_payload_bytes().unwrap())
-                .to_bytes(),
-        ))
-        .unwrap();
+        envelope.signature_proof.signature =
+            Base64UrlString::new(arkret_canonical::base64url_encode(
+                key.sign(&envelope.signing_payload_bytes().unwrap())
+                    .to_bytes(),
+            ))
+            .unwrap();
         let unsigned = UnsignedKeyBackupActiveSeries::new(
             arkret_wire::ActorId::account(account.clone()),
             BackupKind::SecretStorage,
@@ -2059,7 +2062,7 @@ mod consent_proof_tests {
             )
             .unwrap()
         };
-        let request = SecurityRotationTransactionCreateRequest::from_prepared_rotations(
+        let request = SecurityRotationTransactionCreateRequestBody::from_prepared_rotations(
             TransactionId::new(format!("ak:transaction:{}", uuid::Uuid::now_v7())).unwrap(),
             account.clone(),
             authorizing_device,
@@ -2092,7 +2095,7 @@ mod consent_proof_tests {
         .unwrap();
         let plan = SecurityTransactionPreparedPlan::SecurityRotation(request.prepared_plan.clone());
         let (mut resource, canonical_request) =
-            SecurityTransactionCreateRequest::SecurityRotation(request)
+            SecurityTransactionCreateRequestBody::SecurityRotation(request)
                 .into_initial_resource(plan, at)
                 .unwrap();
         let transaction_id = resource.transaction_id.clone();
@@ -2156,7 +2159,7 @@ mod consent_proof_tests {
         accepted.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
             proposal_event_id: revoke.event_id,
             covering_commit_id: covering.commit_id,
-            result: SecurityRotationRevokeCommandDecision::Accepted,
+            outcome: SecurityRotationRevokeCommandDecision::Accepted,
             decided_at: at,
         });
         state
@@ -2219,7 +2222,7 @@ mod consent_proof_tests {
                 .await
                 .unwrap()
                 .unwrap();
-        let arkret_wire::AuthoritySubmitOutcome::Accepted {
+        let arkret_wire::AuthoritySubmitResponseBody::Accepted {
             commit: original_commit,
             ..
         } = &original
@@ -2526,7 +2529,7 @@ mod consent_proof_tests {
                 value: Value,
             }
             let mut conn = pool.get().await.unwrap();
-            diesel::sql_query("SELECT jsonb_build_array((SELECT count(*) FROM canonical_events),(SELECT count(*) FROM realm_commits),(SELECT jsonb_agg(to_jsonb(r) ORDER BY peer_id) FROM consent_current_results r),(SELECT count(*) FROM consent_result_versions),(SELECT count(*) FROM account_data_changes)) AS value")
+            diesel::sql_query("SELECT jsonb_build_array((SELECT count(*) FROM canonical_events),(SELECT count(*) FROM realm_commits),(SELECT jsonb_agg(to_jsonb(r) ORDER BY peer_id) FROM consent_current_states r),(SELECT count(*) FROM consent_result_versions),(SELECT count(*) FROM account_data_changes)) AS value")
                 .get_result::<Row>(&mut conn).await.unwrap().value
         }
         for (decision, scope) in [

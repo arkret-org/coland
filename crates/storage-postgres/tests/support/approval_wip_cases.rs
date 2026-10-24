@@ -208,7 +208,7 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
         0
     );
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("INSERT INTO member_state_current_results(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join',$3,$4,'{\"membership\":\"join\"}'::jsonb,$5)")
+    diesel::sql_query("INSERT INTO member_state_current_states(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join',$3,$4,'{\"membership\":\"join\"}'::jsonb,$5)")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(approver.to_string())
         .bind::<Text,_>(first.authority_commit.commit.commit_id.as_str()).bind::<BigInt,_>(first.authority_commit.commit.stream_position as i64)
         .bind::<diesel::sql_types::Timestamptz,_>(at).execute(&mut conn).await.unwrap();
@@ -217,7 +217,7 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
         &first.authority_commit,
         arkret_wire::EventKind::CapabilityGrant,
         &founder(),
-        json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":actor,"subject":approver,"actions":["ak.space.update"],"resources":[arkret_wire::WireResourceSelector::space(realm.clone(),list_id.clone())],"constraints":[],"issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":opened.unit.transactions[0].event.event_id,"authority_generation":0}],"issued_at":arkret_canonical::format_timestamp_canonical(at)}}),
+        json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":actor,"subject":approver,"actions":["ak.space.update"],"resources":[arkret_wire::WireResourceSelector::space(realm.clone(),list_id.clone())],"constraints":[],"issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],"issued_at":arkret_canonical::format_timestamp_canonical(at)}}),
         at,
     ))).await;
     uow.commit_event(grant.clone()).await.unwrap();
@@ -263,7 +263,7 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
         &grant.authority_commit,
         arkret_wire::EventKind::CapabilityGrant,
         &founder(),
-        json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":actor,"subject":approver,"actions":["ak.space.update"],"resources":[arkret_wire::WireResourceSelector::space(realm.clone(),list_id.clone())],"constraints":[{"constraint_kind":"kind_restriction","effect":"allow","allowed_space_kinds":["list"]}],"issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":opened.unit.transactions[0].event.event_id,"authority_generation":0}],"issued_at":arkret_canonical::format_timestamp_canonical(at)}}),
+        json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":actor,"subject":approver,"actions":["ak.space.update"],"resources":[arkret_wire::WireResourceSelector::space(realm.clone(),list_id.clone())],"constraints":[{"constraint_kind":"kind_restriction","effect":"allow","allowed_space_kinds":["list"]}],"issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],"issued_at":arkret_canonical::format_timestamp_canonical(at)}}),
         at,
     ))).await;
     uow.commit_event(grant.clone()).await.unwrap();

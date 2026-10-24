@@ -4,11 +4,12 @@ use arkret_canonical::base64url::base64url_decode;
 use arkret_models_collaboration::agent_operations::AgentLifecycleState;
 use arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload;
 use arkret_models_identity::{
-    CurrentDeviceSigningKey, CurrentSignerKeyQuerySender, ResolvedSignerKey, SignerKeyQueryOutcome,
-    SignerKeyQuerySelector, SignerKeysQueryOutcome, SignerKeysQueryRequestBody,
+    CurrentDeviceSigningKey, CurrentSignerKeyQuerySender, ResolvedSignerKey,
+    SignerKeyQueryResponseBody, SignerKeyQuerySelector, SignerKeyResolution,
+    SignerKeysQueryRequestBody,
 };
 use arkret_wire::{
-    CommittedEventRef, CurrentSelector, EventId, RealmId, StationSigningKey, TypedCurrentRow,
+    CommittedEventRef, CurrentSelector, CurrentState, EventId, RealmId, StationSigningKey,
 };
 use coland_http::error::AppError;
 use coland_http::result::{GuardedJsonResult, guarded_json_ok};
@@ -46,7 +47,7 @@ async fn self_query(
     body: JsonBody<SignerKeysQueryRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> GuardedJsonResult<SignerKeysQueryOutcome> {
+) -> GuardedJsonResult<SignerKeyQueryResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     if let Ok(device) =
@@ -77,7 +78,7 @@ async fn native_self_query(
     state: &AppState,
     device: &super::applet_managed_device::VerifiedAppletManagedDevice,
     body: &SignerKeysQueryRequestBody,
-) -> GuardedJsonResult<SignerKeysQueryOutcome> {
+) -> GuardedJsonResult<SignerKeyQueryResponseBody> {
     body.validate().map_err(self_request_error)?;
     if device.operation != arkret_wire::ServiceOperationId::SelfSignerKeysReadResolveV1
         || body.recipient_actor_id.as_ref() != Some(&device.authority.actor_id)
@@ -138,7 +139,7 @@ async fn native_self_query(
         // A current selector alone has no authoritative target scope. It cannot
         // mint a disclosure path from the caller's metadata or PCR identity.
         results.push(
-            resolved.unwrap_or_else(|| SignerKeyQueryOutcome::Unavailable {
+            resolved.unwrap_or_else(|| SignerKeyResolution::Unavailable {
                 selector: selector.clone(),
             }),
         );
@@ -152,12 +153,12 @@ async fn native_self_query(
                 .map_err(|_| AppError::not_found("signer key unavailable"))?,
         )
     };
-    let outcome = SignerKeysQueryOutcome {
+    let outcome = SignerKeyQueryResponseBody {
         request_id: body.request_id.clone(),
         realm_id: body.realm_id.clone(),
         recipient_account_id: body.recipient_account_id.clone(),
         recipient_actor_id: body.recipient_actor_id.clone(),
-        results,
+        resolutions: results,
     };
     outcome
         .validate_for_request(body)
@@ -191,7 +192,7 @@ pub(crate) async fn resolve_self_signer_keys(
     state: &AppState,
     session: &coland_services::identity::SessionIdentityState,
     body: &SignerKeysQueryRequestBody,
-) -> Result<SignerKeysQueryOutcome, AppError> {
+) -> Result<SignerKeyQueryResponseBody, AppError> {
     body.validate().map_err(self_request_error)?;
     let recipient = body
         .recipient_account_id
@@ -323,17 +324,17 @@ pub(crate) async fn resolve_self_signer_keys(
             signer_query_diagnostic("result", "unavailable");
         }
         results.push(
-            resolved.unwrap_or_else(|| SignerKeyQueryOutcome::Unavailable {
+            resolved.unwrap_or_else(|| SignerKeyResolution::Unavailable {
                 selector: selector.clone(),
             }),
         );
     }
-    let outcome = SignerKeysQueryOutcome {
+    let outcome = SignerKeyQueryResponseBody {
         request_id: body.request_id.clone(),
         realm_id: body.realm_id.clone(),
         recipient_account_id: body.recipient_account_id.clone(),
         recipient_actor_id: body.recipient_actor_id.clone(),
-        results,
+        resolutions: results,
     };
     outcome
         .validate_for_request(body)
@@ -345,7 +346,7 @@ async fn current_device_key(
     state: &AppState,
     body: &SignerKeysQueryRequestBody,
     selector: &SignerKeyQuerySelector,
-) -> Option<SignerKeyQueryOutcome> {
+) -> Option<SignerKeyResolution> {
     let account = selector.actor().as_account_id()?;
     let device = selector.device_id()?;
     let projection = super::keys::current_device_projection_for_signer(
@@ -380,11 +381,13 @@ async fn current_device_key(
         .strip_prefix("did:key:")?;
     let raw = arkret_canonical::decode_ed25519_multibase(multibase).ok()?;
     let key = CurrentDeviceSigningKey {
-        public_key_b64u: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(raw))
-            .ok()?,
+        public_key_base64url: arkret_wire::Base64UrlString::new(
+            arkret_canonical::base64url_encode(raw),
+        )
+        .ok()?,
     };
     key.validate().ok()?;
-    Some(SignerKeyQueryOutcome::CurrentDeviceResolved {
+    Some(SignerKeyResolution::CurrentDeviceResolved {
         selector: selector.clone(),
         key,
     })
@@ -453,7 +456,7 @@ async fn current_agent_key(
     state: &AppState,
     realm_id: &RealmId,
     selector: &SignerKeyQuerySelector,
-) -> Option<SignerKeyQueryOutcome> {
+) -> Option<SignerKeyResolution> {
     let agent_id = &selector.actor().as_account_id()?.principal_id;
     let agent = state
         .agent_pairings()
@@ -472,7 +475,7 @@ async fn current_agent_key(
     let mut status = None;
     let mut active = Vec::new();
     for entry in &material.current_state_entries {
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             selector: current,
             value,
             revision,
@@ -577,9 +580,9 @@ async fn current_agent_key(
     let key = StationSigningKey {
         actor: selector.actor().clone(),
         verification_method: selector.verification_method().clone(),
-        public_key_b64u: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
-            raw_key,
-        ))
+        public_key_base64url: arkret_wire::Base64UrlString::new(
+            arkret_canonical::base64url_encode(raw_key),
+        )
         .ok()?,
         authorization_ref: authorization_ref.event_id.clone(),
     };
@@ -592,7 +595,7 @@ async fn current_agent_key(
         realm_id,
     )
     .ok()?;
-    Some(SignerKeyQueryOutcome::CurrentResolved {
+    Some(SignerKeyResolution::CurrentResolved {
         selector: selector.clone(),
         key,
     })
@@ -641,12 +644,12 @@ pub(crate) async fn current_agent_endpoint_key(
             verification_method: verification_method.clone(),
         },
     };
-    let Some(SignerKeyQueryOutcome::CurrentResolved { key, .. }) =
+    let Some(SignerKeyResolution::CurrentResolved { key, .. }) =
         current_agent_key(state, &realm_id, &selector).await
     else {
         return Err("Agent producer has no current accepted signing key".to_owned());
     };
-    let raw_key = base64url_decode(key.public_key_b64u.as_str())
+    let raw_key = base64url_decode(key.public_key_base64url.as_str())
         .map_err(|error| error.to_string())?
         .try_into()
         .map_err(|_| "Agent producer key must be 32 bytes".to_owned())?;
@@ -708,7 +711,7 @@ pub(super) fn verify_current_device_projection(
 async fn current_realm_device_key(
     state: &AppState,
     selector: &SignerKeyQuerySelector,
-) -> Option<SignerKeyQueryOutcome> {
+) -> Option<SignerKeyResolution> {
     let SignerKeyQuerySelector::CurrentRealmDevice {
         actor_id,
         device_id,
@@ -728,12 +731,12 @@ async fn current_realm_device_key(
     {
         return None;
     }
-    Some(SignerKeyQueryOutcome::CurrentDeviceResolved {
+    Some(SignerKeyResolution::CurrentDeviceResolved {
         selector: selector.clone(),
         key: CurrentDeviceSigningKey {
-            public_key_b64u: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
-                authority.public_key,
-            ))
+            public_key_base64url: arkret_wire::Base64UrlString::new(
+                arkret_canonical::base64url_encode(authority.public_key),
+            )
             .ok()?,
         },
     })

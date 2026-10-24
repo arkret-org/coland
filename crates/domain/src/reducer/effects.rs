@@ -264,7 +264,7 @@ pub enum ProjectionEffect {
         realm_id: String,
     },
     /// `ak.policy.set` replaced the complete Policy document selected by
-    /// `policy_id` in the governing Station's current-result projection.
+    /// `policy_id` in the governing Station's current-state projection.
     PolicyProjected {
         policy_id: String,
         realm_id: String,

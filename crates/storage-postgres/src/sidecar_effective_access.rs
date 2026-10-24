@@ -1,6 +1,6 @@
 //! MLS readiness follows the desired authority cut; it never contributes refs.
 
-use arkret_wire::{ActorId, DidCoreId, MlsGroupCurrent, ScopeRef};
+use arkret_wire::{ActorId, DidCoreId, MlsGroupValue, ScopeRef};
 use serde_json::Value;
 
 use super::{
@@ -35,8 +35,8 @@ pub(crate) async fn effective_agents_in_connection(
         realm_id: cut.realm_id.clone(),
         sidecar_id: cut.sidecar_id.clone(),
     };
-    let scope_key = crate::mls_group_current_results::scope_key(&scope)?;
-    let group = sql_query("SELECT g.value,g.public_state,e.envelope FROM mls_group_current_results g \
+    let scope_key = crate::mls_group_current_states::scope_key(&scope)?;
+    let group = sql_query("SELECT g.value,g.public_state,e.envelope FROM mls_group_current_states g \
         JOIN realm_commits c ON c.realm_id=g.realm_id AND c.commit_id=g.current_commit_id AND c.stream_position=g.current_stream_position \
         JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
         WHERE g.scope_key=$1 AND c.stream_ref=jsonb_build_object('kind','sidecar','realm_id',$2,'sidecar_id',$3)")
@@ -77,7 +77,7 @@ pub(crate) async fn effective_agents_in_connection(
     {
         return Ok(Vec::new());
     }
-    let current: MlsGroupCurrent =
+    let current: MlsGroupValue =
         serde_json::from_value(group.value).map_err(PersistenceError::database)?;
     if !crate::sidecar_mls_readiness::tree_authorized_in_connection(
         conn,
@@ -106,7 +106,7 @@ pub(crate) async fn effective_agents_in_connection(
             agent.clone(),
             cut.controller_account_id.station_id.clone(),
         ));
-        let keys = sql_query("SELECT k.value FROM agent_key_current_results k JOIN agent_status_current_results s ON s.realm_id=k.realm_id AND s.agent_id=k.agent_id \
+        let keys = sql_query("SELECT k.value FROM agent_key_current_states k JOIN agent_status_current_states s ON s.realm_id=k.realm_id AND s.agent_id=k.agent_id \
             JOIN realm_commits c ON c.realm_id=k.realm_id AND c.commit_id=k.current_commit_id AND c.stream_position=k.current_stream_position \
             JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
             WHERE s.actor_id=$2::jsonb AND k.agent_id=$1 ORDER BY k.agent_key_id")

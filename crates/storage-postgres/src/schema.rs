@@ -35,7 +35,7 @@ diesel::table! {
         account_authority_id -> Text,
         account_id -> Jsonb,
         account_status_record_id -> Text,
-        status_seq -> Int8,
+        status_sequence -> Int8,
         state -> Text,
         deadline_at -> Timestamptz,
         created_at -> Timestamptz,
@@ -127,11 +127,11 @@ diesel::table! {
         realm_id -> Text,
         scope -> Jsonb,
         version -> Int8,
-        reply_message -> Bool,
-        reaction_add -> Bool,
-        reaction_remove -> Bool,
-        accept_third_party_mention -> Bool,
-        act_on_behalf -> Bool,
+        message_creation_allowed -> Bool,
+        reaction_addition_allowed -> Bool,
+        reaction_removal_allowed -> Bool,
+        third_party_mention_delivery_allowed -> Bool,
+        acting_on_behalf_allowed -> Bool,
         updated_at -> Timestamptz,
     }
 }
@@ -498,8 +498,8 @@ diesel::table! {
 }
 
 diesel::table! {
-    device_message_ack_tokens (ack_token) {
-        ack_token -> Text,
+    device_message_ack_tokens (acknowledgement_token) {
+        acknowledgement_token -> Text,
         recipient -> Text,
         device_id -> Text,
         recipient_device_authorization -> Jsonb,
@@ -513,8 +513,8 @@ diesel::table! {
 }
 
 diesel::table! {
-    agent_recipient_delivery_ack_tokens (ack_token) {
-        ack_token -> Text,
+    agent_recipient_delivery_ack_tokens (acknowledgement_token) {
+        acknowledgement_token -> Text,
         agent_id -> Text,
         verification_method -> Text,
         authorization_event_ref -> Text,
@@ -786,7 +786,7 @@ diesel::table! {
         key_material_encrypted -> Nullable<Bytea>,
         series_actor_id -> Nullable<Text>,
         series_id -> Nullable<Text>,
-        series_seq -> Nullable<Int8>,
+        series_sequence -> Nullable<Int8>,
         created_at -> Timestamptz,
     }
 }
@@ -799,7 +799,7 @@ diesel::table! {
         audience -> Nullable<Text>,
         status -> Text,
         revocation_digest -> Nullable<Text>,
-        fresh_until -> Timestamptz,
+        cache_expires_at -> Timestamptz,
         visibility -> Nullable<Text>,
         expires_at -> Nullable<Timestamptz>,
         envelope -> Jsonb,
@@ -1183,7 +1183,7 @@ diesel::table! {
 }
 
 diesel::table! {
-    policy_current_results (policy_id) {
+    policy_current_states (policy_id) {
         realm_id -> Text,
         policy_id -> Text,
         current_commit_id -> Text,
@@ -1428,7 +1428,7 @@ diesel::table! {
         id -> Text,
         did_document -> Jsonb,
         key_log_head -> Nullable<Text>,
-        seq -> Int8,
+        sequence -> Int8,
         method_evidence -> Jsonb,
         fetched_at -> Timestamptz,
         expires_at -> Timestamptz,
@@ -1440,7 +1440,7 @@ diesel::table! {
     webvh_log_events (id) {
         id -> Text,
         did -> Text,
-        seq -> Int8,
+        sequence -> Int8,
         operation -> Jsonb,
         created_at -> Timestamptz,
     }
@@ -1524,7 +1524,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     policy_documents,
     principal_resolution_events,
     principal_resolutions,
-    policy_current_results,
+    policy_current_states,
     projection_circle_members,
     projection_circles,
     projection_events,

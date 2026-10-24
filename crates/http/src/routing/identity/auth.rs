@@ -12,7 +12,7 @@
 //! - `authenticated_session` — the underlying session-lookup pipeline
 //! - `session_credential_hash` / `token_for` — credential derivation primitives
 
-use arkret_models_identity::AccountLogoutOutcome;
+use arkret_models_identity::AccountLogoutResponseBody;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 #[cfg(any(test, feature = "conformance-harness"))]

@@ -1,4 +1,4 @@
-use arkret_models_identity::{CurrentPrincipalOutcome, CurrentPrincipalRequestBody};
+use arkret_models_identity::{CurrentPrincipalRequestBody, CurrentPrincipalResponseBody};
 use arkret_wire::ErrorCode;
 use coland_storage::CurrentPrincipalRead;
 
@@ -21,7 +21,7 @@ pub(super) async fn resolve(
     aa: AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<CurrentPrincipalOutcome> {
+) -> JsonResult<CurrentPrincipalResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let bytes = req
@@ -60,7 +60,7 @@ pub(super) async fn resolve(
             "current principal unavailable",
         ));
     };
-    let result = CurrentPrincipalOutcome {
+    let result = CurrentPrincipalResponseBody {
         request_id: body.request_id.clone(),
         account_id: body.account_id.clone(),
         principal_control_realm_id: pcr_realm_id,

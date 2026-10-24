@@ -134,7 +134,7 @@ pub fn signature_for_did(
         verification_method: arkret_wire::DidUrl::new(format!("{station_did}#authority")).unwrap(),
         signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "3".repeat(64))).unwrap(),
         created_at: at,
-        sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
+        signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
     }
 }
 
@@ -234,7 +234,7 @@ fn bootstrap_unit_with_join_rule_for_station(
 ) -> OrdinaryRealmBootstrapCommitUnit {
     use arkret_models_collaboration::authority_commit::{
         OrdinaryRealmBootstrapUnitKind, OrdinaryRealmBootstrapUnitSubmission,
-        SelfAuthoritySubmitRequest,
+        SelfAuthoritySubmitRequestBody,
     };
 
     let at =
@@ -360,7 +360,7 @@ fn bootstrap_unit_with_join_rule_for_station(
             .collect(),
     };
     let exact_request_body = serde_json::to_vec(
-        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(submission.clone()),
+        &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(submission.clone()),
     )
     .unwrap();
     OrdinaryRealmBootstrapCommitUnit {
@@ -720,7 +720,7 @@ pub async fn source_bootstrap(
         unit.submission.events[index] =
             arkret_wire::EventAdmissionSubmission::new(tx.event.clone());
     }
-    unit.exact_request_body = serde_json::to_vec(&arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(unit.submission.clone())).unwrap();
+    unit.exact_request_body = serde_json::to_vec(&arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(unit.submission.clone())).unwrap();
     unit
 }
 
@@ -855,7 +855,7 @@ pub async fn parent_membership_revision(
     use diesel_async::RunQueryDsl as _;
     let mut conn = pool.get().await.unwrap();
     let row = diesel::sql_query(
-        "SELECT current_commit_id,current_stream_position FROM member_state_current_results \
+        "SELECT current_commit_id,current_stream_position FROM member_state_current_states \
          WHERE realm_id=$1 AND member_id=$2",
     )
     .bind::<diesel::sql_types::Text, _>(realm_id.as_str())

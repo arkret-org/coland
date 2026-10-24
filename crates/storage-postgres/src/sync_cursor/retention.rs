@@ -224,7 +224,7 @@ async fn prune_batch(pool: &PgPool, now_ms: i64) -> PersistenceResult<(usize, bo
         // to a fresh baseline.
         saturated |= sql_query("DELETE FROM account_summary_versions WHERE ctid IN (SELECT ctid FROM account_summary_versions WHERE valid_until<=$1 ORDER BY valid_until LIMIT $2)")
             .bind::<BigInt,_>(floors.summary_floor).bind::<BigInt,_>(batch).execute(&mut *conn).await? == PRUNE_BATCH_ROWS;
-        saturated |= sql_query("DELETE FROM current_result_versions WHERE ctid IN (SELECT ctid FROM current_result_versions WHERE valid_until<=$1 ORDER BY valid_until LIMIT $2)")
+        saturated |= sql_query("DELETE FROM current_state_versions WHERE ctid IN (SELECT ctid FROM current_state_versions WHERE valid_until<=$1 ORDER BY valid_until LIMIT $2)")
             .bind::<BigInt,_>(floors.summary_floor).bind::<BigInt,_>(batch).execute(&mut *conn).await? == PRUNE_BATCH_ROWS;
         saturated |= sql_query("DELETE FROM account_global_versions WHERE ctid IN (SELECT ctid FROM account_global_versions WHERE valid_until<=$1 ORDER BY valid_until LIMIT $2)")
             .bind::<BigInt,_>(floors.global_floor).bind::<BigInt,_>(batch).execute(&mut *conn).await? == PRUNE_BATCH_ROWS;
@@ -251,15 +251,15 @@ mod tests {
         conn.batch_execute("UPDATE account_summary_clock SET revision=1; UPDATE account_global_clock SET revision=1;
             INSERT INTO account_summary_versions(actor_key,realm_id,revision,activity_position,membership,title,invalidated) VALUES('actor','realm',1,1,'join','old',false);
             INSERT INTO account_global_versions(actor_key,channel,item_key,channel_position,revision,payload) VALUES('actor','station_cas','key',1,1,'{}');
-            INSERT INTO current_result_versions(realm_id,selector_key,revision,target_kind,target_key,payload) VALUES('realm','selector',1,'realm','','{}');").await.unwrap();
+            INSERT INTO current_state_versions(realm_id,selector_key,revision,target_kind,target_key,payload) VALUES('realm','selector',1,'realm','','{}');").await.unwrap();
         assert_eq!(store.account_sync_watermarks().await.unwrap(), (1, 1));
         conn.batch_execute("UPDATE account_summary_clock SET revision=2; UPDATE account_global_clock SET revision=2;
             UPDATE account_summary_versions SET valid_until=2;
             INSERT INTO account_summary_versions(actor_key,realm_id,revision,activity_position,membership,title,invalidated) VALUES('actor','realm',2,2,'join','new',false);
             UPDATE account_global_versions SET valid_until=2;
             INSERT INTO account_global_versions(actor_key,channel,item_key,channel_position,revision,payload) VALUES('actor','station_cas','key',2,2,'{}');
-            UPDATE current_result_versions SET valid_until=2;
-            INSERT INTO current_result_versions(realm_id,selector_key,revision,target_kind,target_key,payload) VALUES('realm','selector',2,'realm','','{}');").await.unwrap();
+            UPDATE current_state_versions SET valid_until=2;
+            INSERT INTO current_state_versions(realm_id,selector_key,revision,target_kind,target_key,payload) VALUES('realm','selector',2,'realm','','{}');").await.unwrap();
         let now = Utc::now().timestamp_millis();
         store.prune_expired(now).await.unwrap();
         let frozen = store
@@ -269,7 +269,7 @@ mod tests {
         assert_eq!(frozen.len(), 1);
         assert_eq!(frozen[0].revision, 1);
         let retained_current =
-            sql_query("SELECT count(*)::bigint AS revision FROM current_result_versions")
+            sql_query("SELECT count(*)::bigint AS revision FROM current_state_versions")
                 .get_result::<SummaryWatermarkRow>(&mut *conn)
                 .await
                 .unwrap();
@@ -331,7 +331,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count.revision, 1);
-        let count = sql_query("SELECT count(*)::bigint AS revision FROM current_result_versions")
+        let count = sql_query("SELECT count(*)::bigint AS revision FROM current_state_versions")
             .get_result::<SummaryWatermarkRow>(&mut *conn)
             .await
             .unwrap();
@@ -400,12 +400,12 @@ mod tests {
         let store = PgSyncCursorStore { pool: pool.clone() };
         let mut conn = pg_conn(&pool).await.unwrap();
         conn.batch_execute("UPDATE account_summary_clock SET revision=1; UPDATE account_global_clock SET revision=1;
-            INSERT INTO current_result_versions(realm_id,selector_key,revision,target_kind,target_key,payload) VALUES('realm','selector',1,'realm','','{}');").await.unwrap();
+            INSERT INTO current_state_versions(realm_id,selector_key,revision,target_kind,target_key,payload) VALUES('realm','selector',1,'realm','','{}');").await.unwrap();
         let (retained_revision, _) = store.account_sync_watermarks().await.unwrap();
         assert_eq!(retained_revision, 1);
         conn.batch_execute("UPDATE account_summary_clock SET revision=2; UPDATE account_global_clock SET revision=2;
-            UPDATE current_result_versions SET valid_until=2;
-            INSERT INTO current_result_versions(realm_id,selector_key,revision,target_kind,target_key,payload) VALUES('realm','selector',2,'realm','','{}');").await.unwrap();
+            UPDATE current_state_versions SET valid_until=2;
+            INSERT INTO current_state_versions(realm_id,selector_key,revision,target_kind,target_key,payload) VALUES('realm','selector',2,'realm','','{}');").await.unwrap();
         let realm_id = arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(
             arkret_canonical::DigestSuite::Sha256,
             [0x61; 32],
@@ -463,7 +463,7 @@ mod tests {
             .unwrap();
         store.prune_expired(now).await.unwrap();
         let versions = || async {
-            sql_query("SELECT count(*)::bigint AS revision FROM current_result_versions")
+            sql_query("SELECT count(*)::bigint AS revision FROM current_state_versions")
                 .get_result::<SummaryWatermarkRow>(&mut *pg_conn(&pool).await.unwrap())
                 .await
                 .unwrap()
@@ -486,7 +486,7 @@ mod tests {
         let backlog = 2 * PRUNE_BATCH_ROWS + 1;
         conn.batch_execute(&format!(
             "UPDATE account_summary_clock SET revision=10; UPDATE account_global_clock SET revision=10;
-            INSERT INTO current_result_versions(realm_id,selector_key,revision,valid_until,target_kind,target_key,payload)
+            INSERT INTO current_state_versions(realm_id,selector_key,revision,valid_until,target_kind,target_key,payload)
               SELECT 'realm','selector-'||n,1,2,'realm','','{{}}' FROM generate_series(1,{backlog}) n;"
         ))
         .await
@@ -496,7 +496,7 @@ mod tests {
             .await
             .unwrap();
         let remaining =
-            sql_query("SELECT count(*)::bigint AS revision FROM current_result_versions")
+            sql_query("SELECT count(*)::bigint AS revision FROM current_state_versions")
                 .get_result::<SummaryWatermarkRow>(&mut *conn)
                 .await
                 .unwrap();

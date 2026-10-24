@@ -136,7 +136,7 @@ async fn project_cell(
 }
 pub(crate) async fn project(
     pool: &PgPool,
-    request: &ConsentPrivateEffectsPublishRequest,
+    request: &ConsentPrivateEffectsPublishRequestBody,
     source: &DidCoreId,
     receiver: &DidCoreId,
     authority: &CurrentRealmAuthority,
@@ -231,7 +231,7 @@ pub(crate) async fn project(
             .bind::<Jsonb,_>(&holder).bind::<Text,_>(request.realm_id.as_str()).bind::<BigInt,_>(generation).bind::<BigInt,_>(position).bind::<Text,_>(request.effective_stream_head.commit_id.as_str()).bind::<Jsonb,_>(cells).execute(&mut *conn).await?;
         sql_query("INSERT INTO consent_private_effect_cuts(holder_account_id,realm_id,governance_generation,head_stream_position,head_commit_id,cell_revisions) SELECT holder_account_id,realm_id,governance_generation,head_stream_position,head_commit_id,cell_revisions FROM consent_private_proxy_cuts WHERE holder_account_id=$1 ON CONFLICT(holder_account_id) DO UPDATE SET realm_id=EXCLUDED.realm_id,governance_generation=EXCLUDED.governance_generation,head_stream_position=EXCLUDED.head_stream_position,head_commit_id=EXCLUDED.head_commit_id,cell_revisions=EXCLUDED.cell_revisions")
             .bind::<Jsonb,_>(&holder).execute(&mut *conn).await?;
-        let outcome=ConsentPrivateEffectsPublishOutcome{request_digest:digest.clone(),status:if changed {ConsentPrivateEffectsPublishStatus::Applied}else{ConsentPrivateEffectsPublishStatus::Duplicate}};
+        let outcome=ConsentPrivateEffectsPublishResponseBody{request_digest:digest.clone(),status:if changed {ConsentPrivateEffectsPublishStatus::Applied}else{ConsentPrivateEffectsPublishStatus::Duplicate}};
         sql_query("DELETE FROM consent_private_effect_fences WHERE holder_account_id=$1 AND expires_at<$2").bind::<Jsonb,_>(&holder).bind::<Timestamptz,_>(now).execute(&mut *conn).await?;
         sql_query("INSERT INTO consent_private_effect_fences(holder_account_id,governance_generation,nonce,expires_at,request_digest,outcome) VALUES($1,$2,$3,$4,$5,$6)")
             .bind::<Jsonb,_>(&holder).bind::<BigInt,_>(generation).bind::<Text,_>(&request.nonce).bind::<Timestamptz,_>(request.expires_at).bind::<Text,_>(&digest).bind::<Jsonb,_>(serde_json::to_value(&outcome).map_err(PersistenceError::database)?).execute(&mut *conn).await?;

@@ -54,8 +54,8 @@ Each line names the successor that already carries the capability.
 
 | group | lines | successor already in the tree |
 |---|---|---|
-| `current_data` (5 files) | 1,813 | `RealmStateSnapshot.current_state_entries: Vec<TypedCurrentRow>` (SDK `wire/src/authority_commit.rs:479`). The orphan imports `arkret_wire::cbs::{ProjectedCellWrite, ProjectedOp}`, which the SDK no longer defines, and resolves conflicts by "greater causal depth wins". |
-| `current_results` (2) | 345 | `sync_cursor.rs:168-256`, where `current_detail_page` is already rewired. `CurrentResultEntry` is gone from the SDK. |
+| `current_data` (5 files) | 1,813 | `RealmStateSnapshot.current_state_entries: Vec<CurrentState>` (SDK `wire/src/authority_commit.rs:479`). The orphan imports `arkret_wire::cbs::{ProjectedCellWrite, ProjectedOp}`, which the SDK no longer defines, and resolves conflicts by "greater causal depth wins". |
+| `current_states` (2) | 345 | `sync_cursor.rs:168-256`, where `current_detail_page` is already rewired. `CurrentStateEntry` is gone from the SDK. |
 | `mls_public_state` (4) | 1,560 | `MlsStateInstallation`, which is **coland's own** type at `crates/storage/src/authority_commit.rs:53`, carried by `AuthorityCommitTransaction.mls_state` (`:48`). It has zero hits in the SDK; an earlier draft of this table cited `wire/src/authority_commit.rs:355-390` for it, which is `RealmAuthorityBundle`. `EventCommitRequest` no longer carries `mls_public_genesis` / `mls_public_producer`. |
 | `devices/confirmed_history` (2) | 707 | `devices.rs`, which writes `devices.verification_state` directly. The orphan's input type `ConfirmedDeviceControlProjection` was deleted from the trait crate in `c30ce6384`. |
 | `device_revocations/historical` (2) | 406 | nothing needed: it read `EventCommitRequest.historical_producer`, a field the protocol removed. |
@@ -77,8 +77,8 @@ current-protocol surface that is declared and never implemented.
    `http/src/routing/authority_commit.rs:245`. The eleven routes in that file
    pull the port out of the Depot, so `POST /_arkret/self/streams/scan` has no
    backend at all. The storage-side half now exists --
-   `AuthorityCommitApplication::scan_stream`, validating `StreamScanRequest` in
-   and `StreamScanOutcome` out -- but the signing Station half does not.
+   `AuthorityCommitApplication::scan_stream`, validating `StreamScanRequestBody` in
+   and `StreamScanResponseBody` out -- but the signing Station half does not.
 2. **The three batch-commit units are cut in the middle.** `EventStore` no
    longer declares `put_realm_bootstrap_batch_atomic`,
    `put_direct_conversation_founding_batch_atomic` or
@@ -134,13 +134,13 @@ because deleting them would be trading coverage for a green build:
      `submit/ghost_provision.rs:379`, `submit/sidecar_ensure.rs:158`;
    - `storage/src/contract_tests.rs`, five fixtures setting both fields.
    These are compile errors today, not working code.
-2. **Eight tables are now permanently empty.** `current_result_versions`,
-   `current_result_heads`, `current_data_*` (4), `current_selector_origins`,
+2. **Eight tables are now permanently empty.** `current_state_versions`,
+   `current_state_heads`, `current_data_*` (4), `current_selector_origins`,
    `agent_approval_publications`, `device_history_projections`,
    `mls_public_genesis_states` and `mls_public_commit_states` have no writer
    left. They cannot simply be dropped from `up.sql` and `schema.rs`: two live
    sites still name them — `sync_cursor/retention.rs:185` sweeps
-   `current_result_versions`, and
+   `current_state_versions`, and
    `test-support/tests/account_device_control_storage.rs:180,315` still asserts
    `device_history_projections` reaches 1. That last assertion is the one that
    matters: it asserts a product behaviour, so it has to be re-pointed at
@@ -164,7 +164,7 @@ to be rewritten onto `reanchor_event_ref` / `device_authorization_event_ref`.
 
 ### Relation current value is stream order, never causal depth
 
-A relation's current value is the typed current result produced by the **last
+A relation's current value is the current state produced by the **last
 accepted `ak.relation.resolve` on that relation's stream**, ordered by the
 Station's `stream_position`, with concurrency resolved by an `expected_revision`
 CAS. There is no "greater causal depth wins" rule and no causal-register join.
@@ -294,7 +294,7 @@ peer-merge graph.
   The module is gone from the SDK (`crates/wire/src/lib.rs` has no `pub mod
   cbs`; `ProjectedCellWrite` / `ProjectedOp` / `LatticeOp` have zero hits
   anywhere in the SDK). Its successors are `arkret_wire::patch::Patch` plus
-  `arkret_models_collaboration`'s `TypedCurrentRow`, which have a **different
+  `arkret_models_collaboration`'s `CurrentState`, which have a **different
   shape**, so this is a port, not a deletion. The four compile errors the
   triage counted are only the ones Cargo reaches before it aborts at
   `coland-services`; they are not the size of the job.
@@ -395,7 +395,7 @@ peer-merge graph.
   | missing module | http files / refs | verdict |
   |---|---|---|
   | `arkret_models_collaboration::governance_dependencies` | 19 / 36 | **port, but not the one it looks like.** See the note below: the evidence type survives, the lookup-by-digest store does not. |
-  | `arkret_wire::cbs` | 12 / 40 | **port.** Successors are `arkret_wire::patch::Patch` and `TypedCurrentRow`, different shape. |
+  | `arkret_wire::cbs` | 12 / 40 | **port.** Successors are `arkret_wire::patch::Patch` and `CurrentState`, different shape. |
   | `arkret_wire::cbs_proof_bundle` | 10 / 31 | **delete.** The SDK ledger adjudicates `EventFederationSubmission` and `CbsProofBundle` as removed: "CBS is a removed unit". |
   | `arkret_models_collaboration::direct_conversation_ops` | 8 / 19 | **mixed.** `DirectConversationFoundingAuthorityEvidence` (11 refs) is a port onto `models-collaboration/src/objects/direct_conversation.rs:330` -- another stale SDK gap line, corrected in `bbca85ef`. `DirectConversationFoundingFederationSubmission` (2) goes with CBS. `DirectConversationFoundingPlan` (2) has zero hits in the SDK and zero `founding_plan` hits in `direct-conversation-operations.schema.json`; it is a local name with no protocol object. |
   | `arkret_models_collaboration::history_key` | 6 / 13 | **delete, except one.** RHRK is an adjudicated removal. `DirectorySourceRefAccess` only moved house, to `arkret_models_discovery::directory`. |
@@ -517,8 +517,8 @@ Wiring `mod authority_commit;` on its own would therefore mount the new surface
   `federation::enqueue_federation_outbox_in_connection`,
   `idempotency::record_idempotency_in_connection`, and
   `device_revocations::commit_revocation_in_connection`.
-- [x] Projection/current-result materialization. `current_data.rs`,
-  `current_results.rs` and `timeline_order.rs` were the pre-migration copies and
+- [x] Projection/current-state materialization. `current_data.rs`,
+  `current_states.rs` and `timeline_order.rs` were the pre-migration copies and
   are deleted (`147630d33`, `0ed83faac`); the live path is
   `RealmStateSnapshot.current_state_entries` plus the already-rewired
   `sync_cursor.rs:168-256`. `state_resolution/` no longer exists.
@@ -531,7 +531,7 @@ Wiring `mod authority_commit;` on its own would therefore mount the new surface
   in `migrations/00000000000000_initial/up.sql` rather than in a follow-on
   delta migration, the schema contract is `authority-commit-v1`, and
   the former per-ID `consent_cells`/`consent_grants` stores are retired. Consent
-  now uses one full-peer replacement in `consent_current_results`, with original
+  now uses one full-peer replacement in `consent_current_states`, with original
   Event/Commit history in `consent_result_versions`; the queries live in
   `crates/storage-postgres/src/consent_current.rs`.
 - [x] Six tables whose Rust store had already moved to the authority-commit
@@ -590,7 +590,7 @@ Wiring `mod authority_commit;` on its own would therefore mount the new surface
 These types are referenced by coland code that must be rewired and do not exist
 in `arkret-rust-sdk` today. Coland must not define local substitutes.
 
-- `governance::realm_join_intake::{RealmJoinBootstrapAssembly, RealmJoinBootstrapOutcome,
+- `governance::realm_join_intake::{RealmJoinBootstrapAssembly, RealmJoinBootstrapResponseBody,
   RealmJoinBootstrapRequestBody, RealmJoinGovernanceFacts}` — blocks
   `crates/services/src/sync.rs` and the join/bootstrap route.
 - `agent_operations::{AgentSidecarState, AgentSidecarEncryptionProfile}` — blocks
@@ -649,8 +649,8 @@ Reference implementation: `e309b047^:crates/signatures/src/agent_evidence.rs`
 
 - `AgentKeyCellEntry` and `agent_authorization_cell_ref` carry `Cell`, which is
   removed vocabulary under the authority-commit clean break. Rebuild them under
-  the typed current result naming, do not copy the old names back.
-- `SignerKeyQueryOutcome`, `AccountSubscribeSnapshotResult` and
+  the current state naming, do not copy the old names back.
+- `SignerKeyResolution`, `AccountSubscribeSnapshotResult` and
   `ModerationQueueItem` are NC-TYPE-001 violations in the same area (`Result` is
   not in the closed wrapper-word table; `Outcome` and `Row` are). Fix them in
   the same pass rather than propagating them.

@@ -30,7 +30,7 @@ pub(crate) async fn admit(
     manager: Option<&coland_storage::AppletEventProducerGuard>,
     prepared: Option<&coland_storage::EventApprovalCommit>,
     digest: &arkret_wire::Hash,
-) -> Result<arkret_wire::AuthoritySubmitOutcome, PgTransactionError> {
+) -> Result<arkret_wire::AuthoritySubmitResponseBody, PgTransactionError> {
     let event = &transaction.event;
     let commit = &transaction.commit;
     let actor = &event.actor_id;
@@ -73,7 +73,7 @@ pub(crate) async fn admit(
                 "duplicate_conflict: owner control original differs",
             ));
         }
-        let stored = arkret_wire::AuthoritySubmitOutcome::Accepted {
+        let stored = arkret_wire::AuthoritySubmitResponseBody::Accepted {
             status: arkret_wire::AuthorityCommitStatus::Committed,
             commit: original.commit.clone(),
         };
@@ -86,7 +86,7 @@ pub(crate) async fn admit(
             original.commit.committed_at,
         )
         .await?;
-        return Ok(arkret_wire::AuthoritySubmitOutcome::Accepted {
+        return Ok(arkret_wire::AuthoritySubmitResponseBody::Accepted {
             status: arkret_wire::AuthorityCommitStatus::Duplicate,
             commit: original.commit,
         });
@@ -258,7 +258,7 @@ pub(crate) async fn admit(
     if let Some(revoke) = revoke {
         crate::realm_actor_device_revoke::retain(conn, transaction, digest, revoke).await?;
     }
-    let outcome = arkret_wire::AuthoritySubmitOutcome::Accepted {
+    let outcome = arkret_wire::AuthoritySubmitResponseBody::Accepted {
         status: arkret_wire::AuthorityCommitStatus::Committed,
         commit: commit.clone(),
     };

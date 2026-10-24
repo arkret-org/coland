@@ -20,9 +20,9 @@ use std::sync::{Arc, LazyLock, mpsc};
 use std::time::Duration;
 
 use arkret_models_collaboration::authority_commit::{
-    CommittedEventSubmission, CommittedReplicationBranch, PeerAuthoritySubmitOutcome,
-    PeerAuthoritySubmitRequest, PeerCommittedReplicationOutcome,
-    PeerCommittedReplicationOutcomeRecord, PeerCommittedReplicationRequest,
+    CommittedEventReplicationOutcome, CommittedEventSubmission, CommittedReplicationBranch,
+    PeerAuthoritySubmitRequestBody, PeerAuthoritySubmitResponseBody,
+    PeerCommittedReplicationRequestBody, PeerCommittedReplicationResponseBody,
 };
 use arkret_models_identity::ResolutionCommitment;
 use arkret_wire::{Did, DidCoreId, ServiceKind, TrustDomainId};
@@ -50,13 +50,13 @@ const FEDERATION_ENDPOINT: &str = "/_arkret/peer/events";
 const IDEMPOTENCY_KEY: &str = "ak:outbox:test-idem-key-0001";
 /// The current `/_arkret/peer/events` carrier the Realm fanout planner
 /// queues: one committed Realm Event with its source RealmCommit, encoded as
-/// canonical JSON (`PeerAuthoritySubmitRequest::CommittedReplication`).
+/// canonical JSON (`PeerAuthoritySubmitRequestBody::CommittedReplication`).
 static PAYLOAD_JSON: LazyLock<String> = LazyLock::new(committed_replication_payload);
 /// The peer's typed receive outcome for [`PAYLOAD_JSON`].
 static STORED_OUTCOME: LazyLock<String> =
-    LazyLock::new(|| replication_outcome(PeerCommittedReplicationOutcomeRecord::Stored {}));
+    LazyLock::new(|| replication_outcome(CommittedEventReplicationOutcome::Stored {}));
 static DUPLICATE_OUTCOME: LazyLock<String> =
-    LazyLock::new(|| replication_outcome(PeerCommittedReplicationOutcomeRecord::Duplicate {}));
+    LazyLock::new(|| replication_outcome(CommittedEventReplicationOutcome::Duplicate {}));
 
 fn committed_replication_payload() -> String {
     let created_at = chrono::DateTime::parse_from_rfc3339("2026-09-03T00:00:00.000Z")
@@ -129,11 +129,11 @@ fn committed_replication_payload() -> String {
             .unwrap(),
             signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "3".repeat(64))).unwrap(),
             created_at,
-            sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
+            signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
         },
     };
     let request =
-        PeerAuthoritySubmitRequest::CommittedReplication(PeerCommittedReplicationRequest {
+        PeerAuthoritySubmitRequestBody::CommittedReplication(PeerCommittedReplicationRequestBody {
             branch: CommittedReplicationBranch::CommittedReplication,
             replications: vec![CommittedEventSubmission {
                 producer_signer_fact: None,
@@ -149,9 +149,9 @@ fn committed_replication_payload() -> String {
     String::from_utf8(arkret_canonical::canonical_json_bytes(&request).unwrap()).unwrap()
 }
 
-fn replication_outcome(record: PeerCommittedReplicationOutcomeRecord) -> String {
-    serde_json::to_string(&PeerAuthoritySubmitOutcome::CommittedReplication(
-        PeerCommittedReplicationOutcome {
+fn replication_outcome(record: CommittedEventReplicationOutcome) -> String {
+    serde_json::to_string(&PeerAuthoritySubmitResponseBody::CommittedReplication(
+        PeerCommittedReplicationResponseBody {
             branch: CommittedReplicationBranch::CommittedReplication,
             replication_outcomes: vec![record],
         },

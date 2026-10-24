@@ -181,7 +181,7 @@ fn unavailable() -> AppError {
 async fn provision(
     req: &mut Request,
     depot: &Depot,
-) -> JsonResult<ThirdPartyInviteProvisionOutcome> {
+) -> JsonResult<ThirdPartyInviteProvisionResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body: ThirdPartyInviteProvisionRequestBody = req
         .parse_json()
@@ -189,7 +189,7 @@ async fn provision(
         .map_err(|_| AppError::json_invalid("invalid invite request"))?;
     body.validate_for_service(&state.service_core_id())
         .map_err(|_| AppError::not_found("third-party invite unavailable"))?;
-    let outcome: ThirdPartyInviteProvisionOutcome = post(
+    let outcome: ThirdPartyInviteProvisionResponseBody = post(
         state,
         ServiceOperationId::OPEN_THIRD_PARTY_INVITE_COMMAND_PROVISION_V1,
         "/_arkret/open/third-party-invites/provision",
@@ -211,7 +211,7 @@ async fn provision(
 async fn activate(
     req: &mut Request,
     depot: &Depot,
-) -> JsonResult<ThirdPartyInviteActivationOutcome> {
+) -> JsonResult<ThirdPartyInviteActivationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body: ThirdPartyInviteActivationRequestBody = req
         .parse_json()
@@ -219,7 +219,7 @@ async fn activate(
         .map_err(|_| AppError::json_invalid("invalid invite request"))?;
     body.validate()
         .map_err(|_| AppError::not_found("third-party invite unavailable"))?;
-    let outcome: ThirdPartyInviteActivationOutcome = post(
+    let outcome: ThirdPartyInviteActivationResponseBody = post(
         state,
         ServiceOperationId::OPEN_THIRD_PARTY_INVITE_COMMAND_ACTIVATE_V1,
         "/_arkret/open/third-party-invites/activate",
@@ -241,13 +241,13 @@ async fn activate(
 async fn status(
     req: &mut Request,
     depot: &Depot,
-) -> JsonResult<ThirdPartyInviteProvisioningStatusOutcome> {
+) -> JsonResult<ThirdPartyInviteProvisioningStatusResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body: ThirdPartyInviteProvisioningStatusRequestBody = req
         .parse_json()
         .await
         .map_err(|_| AppError::json_invalid("invalid invite request"))?;
-    let outcome: ThirdPartyInviteProvisioningStatusOutcome = post(
+    let outcome: ThirdPartyInviteProvisioningStatusResponseBody = post(
         state,
         ServiceOperationId::OPEN_THIRD_PARTY_INVITE_READ_PROVISIONING_STATUS_V1,
         "/_arkret/open/third-party-invites/status",
@@ -267,7 +267,10 @@ async fn status(
     tags("invites")
 )]
 #[tracing::instrument(skip_all, fields(op = ServiceOperationId::OPEN_THIRD_PARTY_INVITE_COMMAND_PRESENT_TOKEN_V1))]
-async fn present(req: &mut Request, depot: &Depot) -> JsonResult<ThirdPartyInvitePresentOutcome> {
+async fn present(
+    req: &mut Request,
+    depot: &Depot,
+) -> JsonResult<ThirdPartyInvitePresentResponseBody> {
     let handler_started = tokio::time::Instant::now();
     let started = depot
         .get_typed::<PresentRequestStarted>()
@@ -314,7 +317,7 @@ async fn finish_present_at_deadline<T>(
 async fn present_inner(
     req: &mut Request,
     depot: &Depot,
-) -> JsonResult<ThirdPartyInvitePresentOutcome> {
+) -> JsonResult<ThirdPartyInvitePresentResponseBody> {
     let body: ThirdPartyInvitePresentRequestBody = req
         .parse_json()
         .await
@@ -322,7 +325,7 @@ async fn present_inner(
     let state = depot.get_typed::<AppState>().expect("state injected");
     // The fixed provider owns claim validation, rate budgets and the uniform
     // negative response boundary. Keep the original typed request unchanged.
-    let outcome: ThirdPartyInvitePresentOutcome = post(
+    let outcome: ThirdPartyInvitePresentResponseBody = post(
         state,
         ServiceOperationId::OPEN_THIRD_PARTY_INVITE_COMMAND_PRESENT_TOKEN_V1,
         "/_arkret/open/third-party-invites/present",
@@ -447,22 +450,22 @@ mod tests {
             (
                 "provision",
                 "ThirdPartyInviteProvisionRequestBody",
-                "ThirdPartyInviteProvisionOutcome",
+                "ThirdPartyInviteProvisionResponseBody",
             ),
             (
                 "activate",
                 "ThirdPartyInviteActivationRequestBody",
-                "ThirdPartyInviteActivationOutcome",
+                "ThirdPartyInviteActivationResponseBody",
             ),
             (
                 "status",
                 "ThirdPartyInviteProvisioningStatusRequestBody",
-                "ThirdPartyInviteProvisioningStatusOutcome",
+                "ThirdPartyInviteProvisioningStatusResponseBody",
             ),
             (
                 "present",
                 "ThirdPartyInvitePresentRequestBody",
-                "ThirdPartyInvitePresentOutcome",
+                "ThirdPartyInvitePresentResponseBody",
             ),
         ] {
             let operation =

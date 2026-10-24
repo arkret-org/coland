@@ -15,7 +15,7 @@ pub(crate) async fn mark_pending(
     Ok(())
 }
 
-use arkret_models_collaboration::consent_private::ConsentPrivateEffectsPublishRequest;
+use arkret_models_collaboration::consent_private::ConsentPrivateEffectsPublishRequestBody;
 use arkret_wire::DidCoreId;
 use coland_storage::{PersistenceError, PrivateEffectsPublication};
 use diesel::sql_types::BigInt;
@@ -63,7 +63,7 @@ pub(crate) async fn prepare(
         crate::consent_current::records_in_connection(conn,holder,&cut.realm_id).await?;
         let effects=crate::consent_private_commands::effects(conn,holder).await?;
         let now=arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-        let request=ConsentPrivateEffectsPublishRequest{holder_account_id:holder.clone(),realm_id:cut.realm_id,governance_generation:cut.generation,nonce,effective_stream_head:cut.head,evaluated_at:now,expires_at:now+chrono::Duration::seconds(30),effects};
+        let request=ConsentPrivateEffectsPublishRequestBody{holder_account_id:holder.clone(),realm_id:cut.realm_id,governance_generation:cut.generation,nonce,effective_stream_head:cut.head,evaluated_at:now,expires_at:now+chrono::Duration::seconds(30),effects};
         request.validate_for_authority(issuer,&holder.station_id,&request.realm_id,issuer,cut.generation,now).map_err(|e|PersistenceError::SchemaViolation(e.to_string()))?;
         Ok(Some(PrivateEffectsPublication{sequence:u64::try_from(job.sequence).map_err(PersistenceError::database)?,request}))
     }).await.map_err(PgTransactionError::into_persistence)

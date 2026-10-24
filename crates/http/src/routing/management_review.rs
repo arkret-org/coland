@@ -316,11 +316,13 @@ async fn read_closed<T: serde::de::DeserializeOwned>(req: &mut Request) -> Resul
 /// Preserve the authority service's registered refusal renderer while exposing
 /// only the original SDK success carrier in generated API documentation.
 enum ManagementReviewResponse {
-    Outcome(ManagementReviewOutcome),
+    Outcome(ManagementReviewResponseBody),
     Refusal(coland_services::ServiceError),
 }
-impl From<coland_services::ServiceResult<ManagementReviewOutcome>> for ManagementReviewResponse {
-    fn from(result: coland_services::ServiceResult<ManagementReviewOutcome>) -> Self {
+impl From<coland_services::ServiceResult<ManagementReviewResponseBody>>
+    for ManagementReviewResponse
+{
+    fn from(result: coland_services::ServiceResult<ManagementReviewResponseBody>) -> Self {
         match result {
             Ok(value) => Self::Outcome(value),
             Err(error) => Self::Refusal(error),
@@ -329,12 +331,12 @@ impl From<coland_services::ServiceResult<ManagementReviewOutcome>> for Managemen
 }
 impl salvo::oapi::ToResponses for ManagementReviewResponse {
     fn to_responses(components: &mut salvo::oapi::Components) -> salvo::oapi::Responses {
-        <Json<ManagementReviewOutcome> as salvo::oapi::ToResponses>::to_responses(components)
+        <Json<ManagementReviewResponseBody> as salvo::oapi::ToResponses>::to_responses(components)
     }
 }
 impl salvo::oapi::EndpointOutRegister for ManagementReviewResponse {
     fn register(components: &mut salvo::oapi::Components, operation: &mut salvo::oapi::Operation) {
-        <Json<ManagementReviewOutcome> as salvo::oapi::EndpointOutRegister>::register(
+        <Json<ManagementReviewResponseBody> as salvo::oapi::EndpointOutRegister>::register(
             components, operation,
         );
     }

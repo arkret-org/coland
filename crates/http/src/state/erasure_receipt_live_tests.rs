@@ -631,8 +631,11 @@ async fn run(departure: Option<&str>) {
         .await;
         assert_eq!(status, 200);
         assert_eq!(std::str::from_utf8(&bytes).unwrap(), ack_text);
-        let replay: ErasureReceiptSubmitOutcome = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(replay, ErasureReceiptSubmitOutcome::Accepted(ack.clone()));
+        let replay: ErasureReceiptSubmitResponseBody = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            replay,
+            ErasureReceiptSubmitResponseBody::Accepted(ack.clone())
+        );
         assert_eq!(snapshot(&receiver.pool).await, accepted);
     }
     let request = ErasureReceiptSubmitRequestBody {

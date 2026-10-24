@@ -364,22 +364,22 @@ pub(crate) async fn materialize_founding_in_connection(
             )
             .await?;
         }
-        crate::capability_grant_current_results::commit_realm_authority_root_current_result_in_connection(
+        crate::capability_grant_current_states::commit_realm_authority_root_current_state_in_connection(
             conn, event, commit,
         )
         .await?;
-        crate::realm_bootstrap_current_results::commit_ordinary_bootstrap_singleton_current_result_in_connection(
+        crate::realm_bootstrap_current_states::commit_ordinary_bootstrap_singleton_current_state_in_connection(
             conn, event, commit,
         )
         .await?;
-        crate::unit_of_work::commit_parent_membership_current_results(conn, event, commit).await?;
+        crate::unit_of_work::commit_parent_membership_current_states(conn, event, commit).await?;
         // The replayed main Strand belongs to the validated four-Event
         // founding unit, exactly as at the source Station: it carries no
         // earlier capability basis for the per-Event authority path.
         if event.kind == arkret_wire::EventKind::StrandCreate {
-            crate::strand_current_results::commit_direct_conversation_founding_strand_in_connection(
-                conn, event, commit,
-             None)
+            crate::strand_current_states::commit_direct_conversation_founding_strand_in_connection(
+                conn, event, commit, None,
+            )
             .await?;
         }
     }
@@ -421,7 +421,7 @@ pub(crate) async fn materialize_founding_in_connection(
         return Err(invalid("founding reducer cut differs from the accepted unit").into());
     }
     for entry in &material.current_state_entries {
-        let arkret_wire::TypedCurrentRow::Value {
+        let arkret_wire::CurrentState::Value {
             source_stream_ref,
             revision,
             ..
@@ -467,9 +467,9 @@ async fn hosted_member_basis(
 ) -> Result<bool, PgTransactionError> {
     let lock = if lock_rows { " FOR SHARE" } else { "" };
     let rows = match stream {
-        arkret_wire::CommitStreamRef::Realm { realm_id } => sql_query(format!("SELECT member_id FROM member_state_current_results WHERE realm_id=$1 AND membership='join'{lock}"))
+        arkret_wire::CommitStreamRef::Realm { realm_id } => sql_query(format!("SELECT member_id FROM member_state_current_states WHERE realm_id=$1 AND membership='join'{lock}"))
             .bind::<Text, _>(realm_id.as_str()).load::<MemberIdRow>(&mut *conn).await?,
-        arkret_wire::CommitStreamRef::Circle { realm_id, circle_id } => sql_query(format!("SELECT cm.member_id FROM circle_member_state_current_results cm JOIN member_state_current_results rm ON rm.realm_id=cm.realm_id AND rm.member_id=cm.member_id JOIN circle_current_results circle ON circle.circle_id=cm.circle_id AND circle.realm_id=cm.realm_id WHERE cm.realm_id=$1 AND cm.circle_id=$2 AND cm.membership='join' AND rm.membership='join' AND circle_member_parent_join_current(cm.realm_id,cm.member_id,cm.value) AND circle.value->>'state'='active'{lock}"))
+        arkret_wire::CommitStreamRef::Circle { realm_id, circle_id } => sql_query(format!("SELECT cm.member_id FROM circle_member_state_current_states cm JOIN member_state_current_states rm ON rm.realm_id=cm.realm_id AND rm.member_id=cm.member_id JOIN circle_current_states circle ON circle.circle_id=cm.circle_id AND circle.realm_id=cm.realm_id WHERE cm.realm_id=$1 AND cm.circle_id=$2 AND cm.membership='join' AND rm.membership='join' AND circle_member_parent_join_current(cm.realm_id,cm.member_id,cm.value) AND circle.value->>'state'='active'{lock}"))
             .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(circle_id.as_str()).load::<MemberIdRow>(&mut *conn).await?,
         arkret_wire::CommitStreamRef::Sidecar {realm_id,sidecar_id} => return crate::sidecar_replica_authority::holds_source_at_cut(conn,realm_id,sidecar_id,local_service_id,lock_rows).await.map_err(Into::into),
         _ => return Ok(false),
@@ -507,7 +507,7 @@ pub(super) async fn bootstrap_readers_in_connection(
     let lock = if lock_rows { " FOR SHARE OF m" } else { "" };
     let rows = match stream {
         arkret_wire::CommitStreamRef::Realm { realm_id } => sql_query(format!(
-            "SELECT m.member_id,c.commit_json,e.envelope FROM member_state_current_results m \
+            "SELECT m.member_id,c.commit_json,e.envelope FROM member_state_current_states m \
              JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id \
                 AND c.stream_position=m.current_stream_position AND c.stream_ref=$2 \
              JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
@@ -515,9 +515,9 @@ pub(super) async fn bootstrap_readers_in_connection(
         )).bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(&scope)
             .load::<ReaderRow>(&mut *conn).await?,
         arkret_wire::CommitStreamRef::Circle { realm_id, circle_id } => sql_query(format!(
-            "SELECT m.member_id,c.commit_json,e.envelope FROM circle_member_state_current_results m \
-             JOIN member_state_current_results rm ON rm.realm_id=m.realm_id AND rm.member_id=m.member_id \
-             JOIN circle_current_results circle ON circle.circle_id=m.circle_id AND circle.realm_id=m.realm_id \
+            "SELECT m.member_id,c.commit_json,e.envelope FROM circle_member_state_current_states m \
+             JOIN member_state_current_states rm ON rm.realm_id=m.realm_id AND rm.member_id=m.member_id \
+             JOIN circle_current_states circle ON circle.circle_id=m.circle_id AND circle.realm_id=m.realm_id \
              JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id \
                 AND c.stream_position=m.current_stream_position AND c.stream_ref=$2 \
              JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
@@ -624,7 +624,7 @@ mod hosted_basis_tests {
         let stream = arkret_wire::CommitStreamRef::Realm {
             realm_id: realm.clone(),
         };
-        sql_query("INSERT INTO member_state_current_results(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join','snapshot-read-fixture',0,'{\"membership\":\"join\"}',now())")
+        sql_query("INSERT INTO member_state_current_states(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join','snapshot-read-fixture',0,'{\"membership\":\"join\"}',now())")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(actor.to_string())
             .execute(&mut *writer).await.unwrap();
         sql_query("BEGIN ISOLATION LEVEL REPEATABLE READ")
@@ -637,7 +637,7 @@ mod hosted_basis_tests {
                 .map_err(PgTransactionError::into_persistence)
                 .unwrap()
         );
-        sql_query("UPDATE member_state_current_results SET membership='leave',value='{\"membership\":\"leave\"}' WHERE realm_id=$1")
+        sql_query("UPDATE member_state_current_states SET membership='leave',value='{\"membership\":\"leave\"}' WHERE realm_id=$1")
             .bind::<Text,_>(realm.as_str()).execute(&mut *writer).await.unwrap();
         assert!(
             hosts_joined_member_in_snapshot(&mut reader, &stream, &station)
@@ -848,8 +848,8 @@ async fn require_visible(
     }
     if crate::realm_fanout::plaintext_message(event) {
         let services = sql_query(
-            "SELECT value FROM realm_bootstrap_current_results \
-             WHERE realm_id=$1 AND result_family='realm_plaintext_visible_services'",
+            "SELECT value FROM realm_bootstrap_current_states \
+             WHERE realm_id=$1 AND state_family='realm_plaintext_visible_services'",
         )
         .bind::<Text, _>(event.realm_id.as_str())
         .get_result::<ValueRow>(&mut *conn)
@@ -878,7 +878,7 @@ async fn require_visible(
                     serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
                 )
                 .map_err(PersistenceError::database)?;
-            crate::moderation_franking_proof_current_results::franking_target_scope_in_connection(
+            crate::moderation_franking_proof_current_states::franking_target_scope_in_connection(
                 conn,
                 &event.realm_id,
                 &proof.event_id,
@@ -887,7 +887,7 @@ async fn require_visible(
         } else {
             event.scope_ref.clone()
         };
-        let rows = sql_query("SELECT member_id FROM member_state_current_results WHERE realm_id=$1 AND membership='join'").bind::<Text, _>(event.realm_id.as_str()).load::<MemberIdRow>(&mut *conn).await?;
+        let rows = sql_query("SELECT member_id FROM member_state_current_states WHERE realm_id=$1 AND membership='join'").bind::<Text, _>(event.realm_id.as_str()).load::<MemberIdRow>(&mut *conn).await?;
         for row in rows {
             let member: arkret_wire::ActorId =
                 serde_json::from_str(&row.member_id).map_err(PersistenceError::database)?;
@@ -1060,7 +1060,7 @@ pub(super) async fn install_registered_replica_in_connection(
         replica.received_at,
     )
     .await?;
-    crate::mls_group_current_results::queue_replicated_welcomes_in_connection(
+    crate::mls_group_current_states::queue_replicated_welcomes_in_connection(
         conn,
         &replica.event,
         &replica.commit,
@@ -1086,18 +1086,18 @@ async fn peer_recipient_basis_digest(
     let mut basis = serde_json::Map::new();
     for table in [
         "realm_authorities",
-        "realm_bootstrap_current_results",
-        "realm_policy_bundle_current_results",
-        "member_state_current_results",
-        "strand_current_results",
-        "circle_current_results",
-        "circle_member_state_current_results",
-        "sidecar_current_results",
-        "space_parent_current_results",
-        "space_child_scope_policy_current_results",
-        "space_current_results",
-        "sidecar_exchange_controls_current_results",
-        "agent_interaction_current_results",
+        "realm_bootstrap_current_states",
+        "realm_policy_bundle_current_states",
+        "member_state_current_states",
+        "strand_current_states",
+        "circle_current_states",
+        "circle_member_state_current_states",
+        "sidecar_current_states",
+        "space_parent_current_states",
+        "space_child_scope_policy_current_states",
+        "space_current_states",
+        "sidecar_exchange_controls_current_states",
+        "agent_interaction_current_states",
         "replica_authorization_rows",
     ] {
         let query = format!(
@@ -1112,24 +1112,24 @@ async fn peer_recipient_basis_digest(
     // Private Sidecar authority additionally depends on the controller's
     // provision declarations and the declared Agents' own PCR lifecycle/keys.
     // Bind their actual accepted rows without including mutable stream heads.
-    let controller_pcrs = "SELECT DISTINCT g.realm_id FROM pcr_genesis_units g JOIN sidecar_current_results s ON s.controller_account_id->>'principal_id'=g.principal_id AND s.controller_account_id->>'station_id'=g.station_id WHERE s.realm_id=$1";
+    let controller_pcrs = "SELECT DISTINCT g.realm_id FROM pcr_genesis_units g JOIN sidecar_current_states s ON s.controller_account_id->>'principal_id'=g.principal_id AND s.controller_account_id->>'station_id'=g.station_id WHERE s.realm_id=$1";
     let agent_pcrs = format!(
-        "SELECT p.value->>'principal_control_realm_id' FROM agent_provisioning_current_results p WHERE p.realm_id IN ({controller_pcrs})"
+        "SELECT p.value->>'principal_control_realm_id' FROM agent_provisioning_current_states p WHERE p.realm_id IN ({controller_pcrs})"
     );
     for (name, table, realms) in [
         (
             "sidecar_controller_provisions",
-            "agent_provisioning_current_results",
+            "agent_provisioning_current_states",
             controller_pcrs.to_owned(),
         ),
         (
             "sidecar_agent_lifecycle",
-            "agent_status_current_results",
+            "agent_status_current_states",
             agent_pcrs.clone(),
         ),
         (
             "sidecar_agent_keys",
-            "agent_key_current_results",
+            "agent_key_current_states",
             agent_pcrs.clone(),
         ),
         ("sidecar_agent_authorities", "realm_authorities", agent_pcrs),
@@ -1232,12 +1232,12 @@ pub(super) async fn install_committed_peer_replica_in_connection(
                 .and_then(Value::as_str)
                 == Some(current_basis.as_str())
         {
-            let original: arkret_models_collaboration::authority_commit::PeerCommittedReplicationOutcomeRecord =
+            let original: arkret_models_collaboration::authority_commit::CommittedEventReplicationOutcome =
                 serde_json::from_value(cached.response_body.get("outcome").cloned().ok_or_else(||invalid("peer receipt has no outcome"))?)
                     .map_err(|error| invalid(error.to_string()))?;
             let outcome = match original {
-                arkret_models_collaboration::authority_commit::PeerCommittedReplicationOutcomeRecord::Stored {} => CommittedReplicaOutcome::Stored,
-                arkret_models_collaboration::authority_commit::PeerCommittedReplicationOutcomeRecord::Duplicate {} => CommittedReplicaOutcome::Duplicate,
+                arkret_models_collaboration::authority_commit::CommittedEventReplicationOutcome::Stored {} => CommittedReplicaOutcome::Stored,
+                arkret_models_collaboration::authority_commit::CommittedEventReplicationOutcome::Duplicate {} => CommittedReplicaOutcome::Duplicate,
                 _ => return Err(invalid("peer accepted receipt contains a rejection").into()),
             };
             return Ok((outcome, false));
@@ -1247,8 +1247,8 @@ pub(super) async fn install_committed_peer_replica_in_connection(
     if cached.is_none() {
         let mut original = receipt.clone();
         let wire = match outcome {
-            CommittedReplicaOutcome::Stored => arkret_models_collaboration::authority_commit::PeerCommittedReplicationOutcomeRecord::Stored {},
-            CommittedReplicaOutcome::Duplicate => arkret_models_collaboration::authority_commit::PeerCommittedReplicationOutcomeRecord::Duplicate {},
+            CommittedReplicaOutcome::Stored => arkret_models_collaboration::authority_commit::CommittedEventReplicationOutcome::Stored {},
+            CommittedReplicaOutcome::Duplicate => arkret_models_collaboration::authority_commit::CommittedEventReplicationOutcome::Duplicate {},
         };
         original.response_body["authorization_basis_digest"] =
             serde_json::json!(peer_recipient_basis_digest(conn, &replica.event.realm_id).await?);
@@ -1297,7 +1297,7 @@ pub(super) async fn queue_welcomes_of_held_replica_in_connection(
         at,
     )
     .await?;
-    crate::mls_group_current_results::queue_replicated_welcomes_in_connection(
+    crate::mls_group_current_states::queue_replicated_welcomes_in_connection(
         conn, event, commit, welcomes, at,
     )
     .await?;
@@ -1435,7 +1435,7 @@ async fn install_replica_commit_in_connection(
             ));
         }
         require_visible(conn, event, &replica.local_service_id).await?;
-        crate::realm_lifecycle_current_results::require_replica_live_in_connection(conn, event)
+        crate::realm_lifecycle_current_states::require_replica_live_in_connection(conn, event)
             .await?;
         store_replica_rows(conn, event, commit, &key, replica.received_at).await?;
         crate::replica_current::advance_in_connection(conn, event, commit).await?;
@@ -1534,7 +1534,7 @@ async fn install_replica_commit_in_connection(
             .into());
         }
     }
-    crate::unit_of_work::commit_parent_membership_current_results(conn, event, commit).await?;
+    crate::unit_of_work::commit_parent_membership_current_states(conn, event, commit).await?;
     crate::account_summary::publish_realm_account_summary_in_connection(conn, &event.realm_id)
         .await?;
     Ok(CommittedReplicaOutcome::Stored)
@@ -1569,7 +1569,7 @@ async fn store_held_successor(
         store_replica_rows(conn, event, commit, key, replica.received_at).await?;
         return Ok(CommittedReplicaOutcome::Stored);
     }
-    crate::realm_lifecycle_current_results::require_replica_live_in_connection(conn, event).await?;
+    crate::realm_lifecycle_current_states::require_replica_live_in_connection(conn, event).await?;
     store_replica_rows(conn, event, commit, key, replica.received_at).await?;
     crate::replica_current::advance_in_connection(conn, event, commit).await?;
     if crate::account_summary::changes_account_summary_inputs(&event.kind) {
@@ -1586,7 +1586,7 @@ async fn accepted_own_circle_cleanup_in_connection(
     conn: &mut AsyncPgConnection,
     replica: &CommittedReplica,
 ) -> Result<bool, PgTransactionError> {
-    use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+    use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
     use arkret_models_collaboration::events_payloads::CircleMemberStatePayload;
     use arkret_models_collaboration::governance::circle::CircleMembership;
 
@@ -1651,7 +1651,7 @@ async fn accepted_own_circle_cleanup_in_connection(
          JOIN replica_stream_anchors a ON a.realm_id=$2 AND a.stream_key=$3 \
          JOIN realm_commits jc ON jc.commit_id=a.join_commit_id \
          JOIN canonical_events j ON j.pk=jc.event_pk \
-         JOIN circle_member_state_current_results m ON m.realm_id=a.realm_id AND m.circle_id=$4 AND m.member_id=$5 \
+         JOIN circle_member_state_current_states m ON m.realm_id=a.realm_id AND m.circle_id=$4 AND m.member_id=$5 \
          WHERE e.id=$1 AND e.envelope=$6 AND e.state='queued' AND j.state='committed' \
            AND f.original_submission_json IS NOT NULL AND f.accepted_commit_json=$7 \
            AND f.circle_leave_parent_revision IS NOT NULL AND a.anchor_commit_id IS NOT NULL \
@@ -1670,9 +1670,9 @@ async fn accepted_own_circle_cleanup_in_connection(
     let Some(row) = row else {
         return Ok(false);
     };
-    let submission: SelfAuthoritySubmitRequest =
+    let submission: SelfAuthoritySubmitRequestBody =
         decode_json(row.submission_json, "Circle cleanup original submission")?;
-    let SelfAuthoritySubmitRequest::Event(original) = submission else {
+    let SelfAuthoritySubmitRequestBody::Event(original) = submission else {
         return Ok(false);
     };
     let accepted: arkret_wire::RealmCommit =
@@ -1683,7 +1683,7 @@ async fn accepted_own_circle_cleanup_in_connection(
         decode_json(row.join_envelope, "Circle cleanup canonical opening")?;
     let join_commit: arkret_wire::RealmCommit =
         decode_json(row.join_commit_json, "Circle cleanup opening Commit")?;
-    let member: arkret_wire::CircleMemberStateCurrent =
+    let member: arkret_wire::CircleMemberStateValue =
         decode_json(row.member_value, "Circle cleanup canonical member")?;
     if original.event != *event
         || accepted != *commit
@@ -1903,7 +1903,7 @@ pub(super) async fn install_replica_anchor_in_connection(
         }
         _ => return Err(invalid("bootstrap has no supported stream").into()),
     };
-    let current_opening = install.current_state_entries.iter().any(|entry| matches!(entry, arkret_wire::TypedCurrentRow::Value { selector, source_stream_ref, revision, value } if selector == &opening_selector && source_stream_ref == &realm_stream && revision.commit_id == join.commit_id && revision.stream_position == join.stream_position && value.get("membership").and_then(Value::as_str) == Some("join")));
+    let current_opening = install.current_state_entries.iter().any(|entry| matches!(entry, arkret_wire::CurrentState::Value { selector, source_stream_ref, revision, value } if selector == &opening_selector && source_stream_ref == &realm_stream && revision.commit_id == join.commit_id && revision.stream_position == join.stream_position && value.get("membership").and_then(Value::as_str) == Some("join")));
     if !current_opening {
         return Err(conflict(
             ConflictCode::CapabilityDenied,
@@ -1918,13 +1918,13 @@ pub(super) async fn install_replica_anchor_in_connection(
             .current_state_entries
             .iter()
             .find_map(|entry| match entry {
-                arkret_wire::TypedCurrentRow::Value {
+                arkret_wire::CurrentState::Value {
                     selector, value, ..
                 } if selector == &opening_selector => Some(value),
                 _ => None,
             })
             .map(|value| {
-                serde_json::from_value::<arkret_wire::CircleMemberStateCurrent>(value.clone())
+                serde_json::from_value::<arkret_wire::CircleMemberStateValue>(value.clone())
             })
             .transpose()
             .map_err(|error| invalid(format!("bootstrap Circle join current: {error}")))?;
@@ -1933,13 +1933,13 @@ pub(super) async fn install_replica_anchor_in_connection(
                 .current_state_entries
                 .iter()
                 .any(|entry| match entry {
-                    arkret_wire::TypedCurrentRow::Value {
+                    arkret_wire::CurrentState::Value {
                         selector: arkret_wire::CurrentSelector::MemberState { actor_id },
                         source_stream_ref,
                         revision,
                         value,
                     } if actor_id == &member => {
-                        serde_json::from_value::<arkret_wire::MemberStateCurrent>(value.clone())
+                        serde_json::from_value::<arkret_wire::MemberStateValue>(value.clone())
                             .is_ok_and(|parent| {
                                 circle.is_effective_under_parent(
                                     &install.realm_id,

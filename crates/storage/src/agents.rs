@@ -207,7 +207,7 @@ pub struct AgentPairingReceipt {
     pub pairing_request_id: OpaqueLocalId,
     pub approval_request_id: OpaqueLocalId,
     pub runtime_key_binding_digest: String,
-    pub outcome: arkret_models_collaboration::agent_operations::AgentKeyPairOutcome,
+    pub outcome: arkret_models_collaboration::agent_operations::AgentKeyPairResponseBody,
     pub scope_custody_ref: Option<AgentScopeCustodyRef>,
 }
 /// Station-private preparation only. Reading this material grants no current
@@ -215,7 +215,7 @@ pub struct AgentPairingReceipt {
 #[derive(Clone)]
 pub struct ManagementReviewMaterial {
     pub request: arkret_models_integration::management_review::ManagementReviewRequestBody,
-    pub outcome: arkret_models_integration::management_review::ManagementReviewOutcome,
+    pub outcome: arkret_models_integration::management_review::ManagementReviewResponseBody,
     pub accounts: Vec<arkret_wire::AccountId>,
 }
 
@@ -276,7 +276,7 @@ pub trait AgentStore: Send + Sync {
         producer: Option<&crate::SelfProducerCommitGuard>,
         current: &ManagementReviewCurrent,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewResponseBody>
     {
         let _ = (caller, request, producer, at, current);
         Err(crate::PersistenceError::Conflict(
@@ -289,7 +289,7 @@ pub trait AgentStore: Send + Sync {
         request: &arkret_models_integration::management_review::ManagementReviewLookupRequestBody,
         current: &ManagementReviewCurrent,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewResponseBody>
     {
         let _ = (caller, request, at, current);
         Err(crate::PersistenceError::NotFound(
@@ -303,7 +303,7 @@ pub trait AgentStore: Send + Sync {
         methods: &[crate::ApprovalHistoricalMethod],
         current: &ManagementReviewCurrent,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewResponseBody>
     {
         let _ = (caller, request, methods, at, current);
         Err(crate::PersistenceError::NotFound(

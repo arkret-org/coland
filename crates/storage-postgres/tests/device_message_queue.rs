@@ -667,7 +667,7 @@ impl CommittedAgent {
                 principal_endpoint: &endpoint,
                 local_id: "queue-agent",
                 controller_principal_id: &controller.account.principal_id,
-                version_time: at,
+                version_created_at: at,
                 root_seed: &[101; 32],
                 next_root_public_key_multibase: &next_root,
             },
@@ -814,7 +814,7 @@ impl CommittedAgent {
                 did: agent_did.as_str(),
                 local_id: &inception.local_id,
                 previous_entries: std::slice::from_ref(&inception.log_entry),
-                version_time: binding_at,
+                version_created_at: binding_at,
                 current_root_seed: &[102; 32],
                 next_root_public_key_multibase: &future_root,
                 controller_principal_id: &controller.account.principal_id,
@@ -832,7 +832,7 @@ impl CommittedAgent {
                 .append_log_event(coland_storage::WebvhLogRecord {
                     event_digest: arkret_canonical::canonical_sha256(entry).unwrap(),
                     did: agent_did.to_string(),
-                    seq: index as u64 + 1,
+                    sequence: index as u64 + 1,
                     created_at: entry["versionTime"].as_str().unwrap().parse().unwrap(),
                     operation: entry.clone(),
                 })
@@ -847,7 +847,7 @@ impl CommittedAgent {
                 did: agent_did.to_string(),
                 did_document: head["state"].clone(),
                 key_log_head: Some(arkret_canonical::canonical_sha256(head).unwrap()),
-                seq: entries.len() as u64,
+                sequence: entries.len() as u64,
                 method_evidence: serde_json::Value::Null,
                 fetched_at: now,
                 expires_at: now + chrono::Duration::minutes(15),
@@ -1028,7 +1028,7 @@ impl CommittedAgent {
             .await
             .unwrap()
             .expect("committed Agent PCR genesis projects agent_status");
-        let arkret_wire::TypedCurrentRow::Value { value, .. } = result;
+        let arkret_wire::CurrentState::Value { value, .. } = result;
         value
     }
 }
@@ -1384,7 +1384,7 @@ async fn controller_agent_discussion(
             station_id: agent.controller.account.station_id.clone(),
             localpart: String::new(),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: controller_pcr.commit.committed_at,
         })
@@ -1496,7 +1496,7 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
             created_at: chrono::DateTime<Utc>,
         }
         let mut conn = pool.get().await.unwrap();
-        let owner = sql_query("SELECT p.value AS provision,s.value AS status,c.committed_at AS created_at FROM agent_provisioning_current_results p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id JOIN realm_commits c ON c.commit_id=p.current_commit_id AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position JOIN agent_status_current_results s ON s.agent_id=p.agent_id AND s.realm_id=p.value->>'principal_control_realm_id' JOIN realm_commits sc ON sc.commit_id=s.current_commit_id AND sc.realm_id=s.realm_id AND sc.stream_position=s.current_stream_position WHERE p.agent_id=$1 AND g.station_id=$2 AND p.value->>'controller_principal_id'=g.principal_id")
+        let owner = sql_query("SELECT p.value AS provision,s.value AS status,c.committed_at AS created_at FROM agent_provisioning_current_states p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id JOIN realm_commits c ON c.commit_id=p.current_commit_id AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position JOIN agent_status_current_states s ON s.agent_id=p.agent_id AND s.realm_id=p.value->>'principal_control_realm_id' JOIN realm_commits sc ON sc.commit_id=s.current_commit_id AND sc.realm_id=s.realm_id AND sc.stream_position=s.current_stream_position WHERE p.agent_id=$1 AND g.station_id=$2 AND p.value->>'controller_principal_id'=g.principal_id")
         .bind::<Text, _>(agent.agent_account.principal_id.as_str())
         .bind::<Text, _>(agent.agent_account.station_id.as_str())
         .get_result::<AcceptedParticipationOwner>(&mut *conn).await.unwrap();
@@ -1538,7 +1538,7 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
             realm_id: realm_id.clone(),
         };
         let selection_bits = ParticipationBits {
-            reply_message: true,
+            message_creation_allowed: true,
             ..ParticipationBits::NONE
         };
         let mut selection_record = serde_json::to_value(selection_bits).unwrap();
@@ -1571,8 +1571,8 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
             selections[0]["scope"],
             serde_json::to_value(&selection_scope).unwrap()
         );
-        assert_eq!(selections[0]["reply_message"], true);
-        assert_eq!(selections[0]["reaction_add"], false);
+        assert_eq!(selections[0]["message_creation_allowed"], true);
+        assert_eq!(selections[0]["reaction_addition_allowed"], false);
         let ceilings = participation
             .ceilings_for_scope_keys(&[
                 selection_scope.scope_key(),
@@ -1588,7 +1588,7 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
         assert!(
             ceilings
                 .iter()
-                .all(|ceiling| ceiling["reply_message"] == true)
+                .all(|ceiling| ceiling["message_creation_allowed"] == true)
         );
         let uow = coland_storage_postgres::PgEventCommitUnitOfWork::new(pool.clone());
         // Bind membership to the actual controller join Event from the accepted
@@ -1759,7 +1759,7 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
             + chrono::TimeDelta::milliseconds(1);
         let creator_leaf_authority =
             arkret_models_collaboration::events_payloads::MlsGenesisCreatorLeafAuthority {
-                leaf_signature_key_b64u: arkret_wire::Base64UrlString::new(
+                leaf_signature_key_base64url: arkret_wire::Base64UrlString::new(
                     arkret_canonical::base64url_encode(
                         ed25519_dalek::SigningKey::from_bytes(
                             &agent.controller.founding_device_signing_seed,

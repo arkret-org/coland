@@ -1,7 +1,7 @@
 //! Service-authenticated preview for independent Realm Bot creation.
 use arkret_models_collaboration::events_payloads::CapabilityGrantPayload;
 use arkret_models_integration::{
-    AppletBotAuthoringRequestBasis, AppletBotPreviewOutcome, AppletBotPreviewRequestBody,
+    AppletBotAuthoringRequestBasis, AppletBotPreviewRequestBody, AppletBotPreviewResponseBody,
     AppletManagedActorAuthoringRequest, AppletManagedActorPurpose,
 };
 use arkret_wire::CapabilityActionId;
@@ -44,7 +44,7 @@ pub(super) async fn preview(
     body: JsonBody<AppletBotPreviewRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AppletBotPreviewOutcome> {
+) -> JsonResult<AppletBotPreviewResponseBody> {
     let verified = depot
         .remove_typed::<VerifiedAppletProvisionService>()
         .map_err(|_| AppError::unauthenticated("Applet Service signature missing"))?;
@@ -109,5 +109,5 @@ pub(super) async fn preview(
     )
     .map_err(|e| AppError::internal(e.to_string()))?;
     let authoring_request = issue_applet_authoring_preview(state, authoring_request).await?;
-    json_ok(AppletBotPreviewOutcome { authoring_request })
+    json_ok(AppletBotPreviewResponseBody { authoring_request })
 }

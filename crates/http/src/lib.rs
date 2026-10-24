@@ -263,19 +263,20 @@ pub async fn test_fresh_producer_forward_request(
     event: &arkret_wire::Event,
     destination: &arkret_wire::DidCoreId,
 ) -> coland_services::ServiceResult<
-    arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequest,
+    arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequestBody,
 > {
     use arkret_models_collaboration::authority_commit::*;
-    let mut request =
-        PeerAuthoritySubmitRequest::AuthorityForwardEvent(PeerAuthorityForwardEventRequest {
+    let mut request = PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(
+        PeerAuthorityForwardEventRequestBody {
             branch: AuthorityForwardBranch::AuthorityForward,
             event_submission: arkret_wire::EventAdmissionSubmission::new(event.clone()),
             mls_genesis_material: None,
             producer_device_evidence: None,
             producer_agent_evidence: None,
-        });
+        },
+    );
     crate::state::fresh_device_request(state, destination, &mut request).await?;
-    let PeerAuthoritySubmitRequest::AuthorityForwardEvent(request) = request else {
+    let PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(request) = request else {
         unreachable!("known test forward branch")
     };
     Ok(request)
@@ -287,9 +288,9 @@ pub async fn test_fresh_producer_forward_request(
 pub async fn test_fresh_native_forward_request(
     state: &crate::state::AppState,
     destination: &arkret_wire::DidCoreId,
-    submission: &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest,
+    submission: &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody,
 ) -> coland_services::ServiceResult<
-    arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+    arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
 > {
     crate::state::prepare_native_forward_request(state, destination, submission).await
 }
@@ -300,10 +301,10 @@ pub async fn test_fresh_native_forward_request(
 #[doc(hidden)]
 pub async fn test_fresh_forward_request(
     state: &crate::state::AppState,
-    request: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+    request: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
     destination: &arkret_wire::DidCoreId,
 ) -> coland_services::ServiceResult<
-    arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+    arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
 > {
     crate::state::fresh_forward_request(state, request, destination).await
 }
@@ -316,7 +317,7 @@ pub async fn test_forward_self_event(
     state: &crate::state::AppState,
     governance: &arkret_wire::DidCoreId,
     submission: arkret_wire::EventAdmissionSubmission,
-) -> coland_services::ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
+) -> coland_services::ServiceResult<arkret_wire::AuthoritySubmitResponseBody> {
     crate::state::forward_self_event(state, governance, submission).await
 }
 
@@ -327,9 +328,9 @@ pub async fn test_forward_self_event(
 pub async fn test_admit_authority_forward(
     state: &crate::state::AppState,
     peer: &coland_services::authority_commit::AuthenticatedPeerContext,
-    request: arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequest,
+    request: arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequestBody,
     now: chrono::DateTime<chrono::Utc>,
-) -> coland_services::ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
+) -> coland_services::ServiceResult<arkret_wire::AuthoritySubmitResponseBody> {
     crate::state::admit_forwarded_event(state, peer, request, now).await
 }
 
@@ -339,10 +340,10 @@ pub async fn test_admit_authority_forward(
 pub async fn test_admit_native_forward(
     state: &crate::state::AppState,
     peer: &coland_services::authority_commit::AuthenticatedPeerContext,
-    request: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+    request: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
     now: chrono::DateTime<chrono::Utc>,
-) -> coland_services::ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
-    use arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest as R;
+) -> coland_services::ServiceResult<arkret_wire::AuthoritySubmitResponseBody> {
+    use arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody as R;
     match request {
         R::AuthorityForwardEvent(v) => {
             crate::state::admit_forwarded_event(state, peer, v, now).await
@@ -360,7 +361,7 @@ pub async fn test_admit_native_forward(
 pub async fn test_install_planned_handoff(
     state: &crate::state::AppState,
     peer: &coland_services::authority_commit::AuthenticatedPeerContext,
-    request: arkret_models_collaboration::authority_commit::AuthorityHandoffRequest,
+    request: arkret_models_collaboration::authority_commit::AuthorityRealmAuthorityHandoffRequestBody,
 ) -> coland_services::ServiceResult<arkret_wire::RealmAuthorityHandoff> {
     crate::state::install_test_handoff(state, peer, request).await
 }

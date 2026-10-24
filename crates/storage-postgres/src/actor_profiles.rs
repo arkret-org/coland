@@ -319,7 +319,7 @@ async fn verify_pcr_self_event_at_cut(
             &format!("{what} producer proof is absent"),
         )
     })?;
-    let signer = crate::key_backup_current_results::verification_method_device(
+    let signer = crate::key_backup_current_states::verification_method_device(
         &proof.verification_method,
         &account,
     )
@@ -443,7 +443,7 @@ async fn locked_profile(
     event: &Event,
 ) -> Result<Option<ActorProfile>, PgTransactionError> {
     let row=sql_query(
-        "SELECT p.actor_profile_id,p.value,e.envelope,c.commit_json,v.value AS accepted_value FROM actor_profile_current_results p \
+        "SELECT p.actor_profile_id,p.value,e.envelope,c.commit_json,v.value AS accepted_value FROM actor_profile_current_states p \
          LEFT JOIN realm_commits c ON c.commit_id=p.current_commit_id AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position \
          LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' AND e.envelope->'actor_id'=p.actor_id AND e.envelope->'scope_ref'=p.scope_ref \
          LEFT JOIN actor_profile_result_versions v ON v.commit_id=p.current_commit_id AND v.actor_profile_id=p.actor_profile_id \
@@ -537,7 +537,7 @@ pub(crate) async fn accountability_holds_in_connection(
 ) -> Result<bool, PgTransactionError> {
     for issuer in issuers {
         let rows = sql_query(
-            "SELECT value FROM identity_accountability_current_results \
+            "SELECT value FROM identity_accountability_current_states \
              WHERE subject_id=$1 AND issuer_id=$2 \
              ORDER BY realm_id,scope_set_digest FOR SHARE",
         )
@@ -741,17 +741,17 @@ pub(crate) async fn write_profile_current_in_connection(
     let position = i64::try_from(commit.stream_position)
         .map_err(|_| corrupt("Commit stream position is out of range"))?;
     let advanced = sql_query(
-        "INSERT INTO actor_profile_current_results \
+        "INSERT INTO actor_profile_current_states \
          (realm_id,actor_profile_id,current_commit_id,current_stream_position,value,updated_at,actor_id,scope_ref) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8) \
          ON CONFLICT (actor_profile_id) DO UPDATE SET \
            current_commit_id=EXCLUDED.current_commit_id, \
            current_stream_position=EXCLUDED.current_stream_position, \
            value=EXCLUDED.value, updated_at=EXCLUDED.updated_at \
-         WHERE actor_profile_current_results.realm_id=EXCLUDED.realm_id \
-           AND actor_profile_current_results.actor_id=EXCLUDED.actor_id \
-           AND actor_profile_current_results.scope_ref=EXCLUDED.scope_ref \
-           AND actor_profile_current_results.current_stream_position<EXCLUDED.current_stream_position",
+         WHERE actor_profile_current_states.realm_id=EXCLUDED.realm_id \
+           AND actor_profile_current_states.actor_id=EXCLUDED.actor_id \
+           AND actor_profile_current_states.scope_ref=EXCLUDED.scope_ref \
+           AND actor_profile_current_states.current_stream_position<EXCLUDED.current_stream_position",
     )
     .bind::<Text, _>(event.realm_id.as_str())
     .bind::<Text, _>(&profile_id)
@@ -796,7 +796,7 @@ pub(crate) async fn write_identity_accountability_in_connection(
     let scope =
         serde_json::to_value(&value.accountability_scope).map_err(PersistenceError::database)?;
     let written = sql_query(
-        "INSERT INTO identity_accountability_current_results \
+        "INSERT INTO identity_accountability_current_states \
          (realm_id,issuer_id,subject_id,accountability_scope,scope_set_digest,\
           current_commit_id,current_stream_position,value,updated_at) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) \
@@ -804,7 +804,7 @@ pub(crate) async fn write_identity_accountability_in_connection(
            current_commit_id=EXCLUDED.current_commit_id, \
            current_stream_position=EXCLUDED.current_stream_position, \
            value=EXCLUDED.value, updated_at=EXCLUDED.updated_at \
-         WHERE identity_accountability_current_results.current_stream_position\
+         WHERE identity_accountability_current_states.current_stream_position\
                <EXCLUDED.current_stream_position",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -1074,7 +1074,7 @@ impl coland_storage::ActorProfileStore for PgActorProfileStore {
         let row = sql_query(
             "SELECT a.value,e.envelope,c.commit_json \
              FROM principal_resolutions p \
-             JOIN actor_profile_current_results a ON a.realm_id=p.pcr_realm_id \
+             JOIN actor_profile_current_states a ON a.realm_id=p.pcr_realm_id \
              JOIN realm_commits c ON c.commit_id=a.current_commit_id \
              JOIN canonical_events e ON e.pk=c.event_pk \
              WHERE p.principal_id=$1 AND p.station_id=$2",
@@ -1098,7 +1098,7 @@ impl coland_storage::ActorProfileStore for PgActorProfileStore {
     ) -> PersistenceResult<bool> {
         let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
-            "SELECT value FROM identity_accountability_current_results \
+            "SELECT value FROM identity_accountability_current_states \
              WHERE subject_id=$1 AND issuer_id=$2",
         )
         .bind::<Text, _>(subject_id.as_str())

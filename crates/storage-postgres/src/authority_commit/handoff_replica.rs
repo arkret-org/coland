@@ -36,7 +36,7 @@ pub(super) fn retain_outgoing_cut<'a>(
             .current_state_entries
             .iter()
             .filter(|row| {
-                let arkret_wire::TypedCurrentRow::Value {
+                let arkret_wire::CurrentState::Value {
                     source_stream_ref, ..
                 } = row;
                 !matches!(

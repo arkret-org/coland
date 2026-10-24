@@ -8,7 +8,7 @@ fn encrypted_payload() -> Value {
         "version": "1.0",
         "content_type": "application/json",
         "encryption_context": {
-            "epoch": 7u64,
+            "epoch": (7u64).to_string(),
             "group_state_ref": "ak:event:AZEvldDJcWI9IRHqP2BMibDDfc59Ax_LwrbsrQmeD6Ml"
         },
         "ciphertext": "Y2lwaGVydGV4dA",

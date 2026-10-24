@@ -34,10 +34,10 @@ fn autonomous_participation_mode(
 
 fn ap_effective_for_mode(mode: AgentParticipationMode, effective: ParticipationBits) -> bool {
     match mode {
-        AgentParticipationMode::ReplyMessage => effective.reply_message,
-        AgentParticipationMode::ReactionAdd => effective.reaction_add,
-        AgentParticipationMode::ReactionRemove => effective.reaction_remove,
-        AgentParticipationMode::ActOnBehalf => effective.act_on_behalf,
+        AgentParticipationMode::ReplyMessage => effective.message_creation_allowed,
+        AgentParticipationMode::ReactionAdd => effective.reaction_addition_allowed,
+        AgentParticipationMode::ReactionRemove => effective.reaction_removal_allowed,
+        AgentParticipationMode::ActOnBehalf => effective.acting_on_behalf_allowed,
     }
 }
 
@@ -591,7 +591,7 @@ pub(super) async fn validate_agent_context(
 /// (coland-native): every agent-originated Event carries auditable
 /// `agent_context`. Reply-as-agent uses the `reply` bit; act-on-behalf uses
 /// envelope-derived `executed_by`, requires a referenced active grant, and
-/// uses the `act_on_behalf` bit. Non-agent actors fall through to standard
+/// uses the `acting_on_behalf_allowed` bit. Non-agent actors fall through to standard
 /// authz.
 pub async fn validate_agent_reply_participation(
     state: &AppState,

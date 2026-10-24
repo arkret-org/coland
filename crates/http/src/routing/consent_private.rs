@@ -34,14 +34,14 @@ fn quota(state: &AppState) -> arkret_wire::NewSourceQuotaConstraints {
 async fn peer_proxy(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<ConsentPrivateProxyOutcome> {
+) -> JsonResult<ConsentPrivateProxyResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let peer = super::events::peer::authenticated_peer_context(state, req, true).await?;
     let bytes = req.payload().await.map_err(invalid)?;
     if bytes.len() > 65_536 {
         return Err(invalid("private PCR request exceeds 64 KiB"));
     }
-    let request: ConsentPrivateProxyRequest = serde_json::from_slice(bytes).map_err(invalid)?;
+    let request: ConsentPrivateProxyRequestBody = serde_json::from_slice(bytes).map_err(invalid)?;
     request
         .validate_at(&peer.source_service_id, chrono::Utc::now())
         .map_err(invalid)?;
@@ -71,9 +71,9 @@ pub(super) async fn require_peer_holder(
 }
 async fn execute_at_authority(
     state: &AppState,
-    request: &ConsentPrivateProxyRequest,
+    request: &ConsentPrivateProxyRequestBody,
     source: &arkret_wire::DidCoreId,
-) -> Result<ConsentPrivateProxyOutcome, AppError> {
+) -> Result<ConsentPrivateProxyResponseBody, AppError> {
     require_peer_holder(state, &request.holder_account_id).await?;
     let prepared = super::invites::prepare_private_invite(state, request).await?;
     state
@@ -93,7 +93,7 @@ pub(crate) async fn holder_command(
     state: &AppState,
     session: &SessionIdentityState,
     command: ConsentPrivateCommand,
-) -> Result<ConsentPrivateCommandOutcome, AppError> {
+) -> Result<ConsentPrivateCommandResponseBody, AppError> {
     let actor = super::identity::session_actor::validated_session_actor(state, session).await?;
     let holder = actor
         .as_account_id()
@@ -124,7 +124,7 @@ pub(crate) async fn execute(
     holder: &AccountId,
     context: ConsentPrivateContext,
     command: ConsentPrivateCommand,
-) -> Result<ConsentPrivateCommandOutcome, AppError> {
+) -> Result<ConsentPrivateCommandResponseBody, AppError> {
     if holder.station_id != state.service_core_id() {
         return Err(invalid(
             "only the holder hosting Station may originate a private proxy",
@@ -159,7 +159,7 @@ pub(crate) async fn execute(
     let (realm, service) = super::call_admission::holder_location(state, holder).await?;
     let located =
         super::realm_join::resolve_verified_authority_of_service(state, &realm, &service).await?;
-    let request = ConsentPrivateProxyRequest {
+    let request = ConsentPrivateProxyRequestBody {
         holder_account_id: holder.clone(),
         realm_id: realm.clone(),
         governance_generation: located.authority.current_generation(),
@@ -193,7 +193,8 @@ pub(crate) async fn execute(
                 "private accepting authority refused the command",
             ));
         }
-        serde_json::from_slice::<ConsentPrivateProxyOutcome>(&response.body).map_err(unavailable)?
+        serde_json::from_slice::<ConsentPrivateProxyResponseBody>(&response.body)
+            .map_err(unavailable)?
     };
     outcome
         .validate_for_request(&request, chrono::Utc::now())
@@ -210,8 +211,8 @@ pub(crate) async fn execute(
         .observe_consent_private_cut(&request, &outcome)
         .await
         .map_err(unavailable)?;
-    if let ConsentPrivateCommandOutcome::Effects(effects) = &outcome.outcome {
-        let publication = ConsentPrivateEffectsPublishRequest {
+    if let ConsentPrivateCommandResponseBody::Effects(effects) = &outcome.response_body {
+        let publication = ConsentPrivateEffectsPublishRequestBody {
             holder_account_id: holder.clone(),
             realm_id: outcome.realm_id.clone(),
             governance_generation: outcome.governance_generation,
@@ -232,7 +233,7 @@ pub(crate) async fn execute(
         )
         .await?;
     }
-    Ok(outcome.outcome)
+    Ok(outcome.response_body)
 }
 
 pub(crate) async fn list(
@@ -249,7 +250,7 @@ pub(crate) async fn list(
     )
     .await?
     {
-        ConsentPrivateCommandOutcome::List(outcome) => Ok(outcome.body),
+        ConsentPrivateCommandResponseBody::List(outcome) => Ok(outcome.body),
         _ => Err(unavailable("private authority returned another command")),
     }
 }
@@ -269,7 +270,7 @@ pub(crate) async fn submit_consent(
         .await
         .map_err(super::identity::consent::consent_error)?
         .ok_or_else(|| invalid("Consent Event is outside the accepted inception PCR"))?;
-    let arkret_wire::AuthoritySubmitOutcome::Accepted { commit, .. } = outcome else {
+    let arkret_wire::AuthoritySubmitResponseBody::Accepted { commit, .. } = outcome else {
         return Err(unavailable("Consent original was not accepted"));
     };
     let payload: arkret_models_collaboration::events_payloads::consent::ConsentReplacePayload =
@@ -295,7 +296,7 @@ pub(crate) async fn submit_consent(
     )
     .await?
     {
-        ConsentPrivateCommandOutcome::Version(outcome) => Ok(outcome.body),
+        ConsentPrivateCommandResponseBody::Version(outcome) => Ok(outcome.body),
         _ => Err(unavailable(
             "private authority did not return the accepted original version",
         )),
@@ -307,22 +308,22 @@ pub(crate) async fn submit_consent(
 async fn peer_effects(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<ConsentPrivateEffectsPublishOutcome> {
+) -> JsonResult<ConsentPrivateEffectsPublishResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let peer = super::events::peer::authenticated_peer_context(state, req, true).await?;
     let bytes = req.payload().await.map_err(invalid)?;
     if bytes.len() > 1_048_576 {
         return Err(invalid("private effects exceed 1 MiB"));
     }
-    let request: ConsentPrivateEffectsPublishRequest =
+    let request: ConsentPrivateEffectsPublishRequestBody =
         serde_json::from_slice(bytes).map_err(invalid)?;
     json_ok(project_publication(state, &request, &peer.source_service_id).await?)
 }
 async fn project_publication(
     state: &AppState,
-    request: &ConsentPrivateEffectsPublishRequest,
+    request: &ConsentPrivateEffectsPublishRequestBody,
     source: &arkret_wire::DidCoreId,
-) -> Result<ConsentPrivateEffectsPublishOutcome, AppError> {
+) -> Result<ConsentPrivateEffectsPublishResponseBody, AppError> {
     require_peer_holder(state, &request.holder_account_id).await?;
     if request.holder_account_id.station_id != state.service_core_id() {
         return Err(invalid(
@@ -349,11 +350,11 @@ async fn project_publication(
 }
 async fn project_verified_effects(
     state: &AppState,
-    request: &ConsentPrivateEffectsPublishRequest,
+    request: &ConsentPrivateEffectsPublishRequestBody,
     source: &arkret_wire::DidCoreId,
     authority: &coland_storage::CurrentRealmAuthority,
     head: &arkret_wire::CommitStreamHead,
-) -> Result<ConsentPrivateEffectsPublishOutcome, AppError> {
+) -> Result<ConsentPrivateEffectsPublishResponseBody, AppError> {
     let projection = state
         .persistence()
         .project_consent_effect_publication(
@@ -466,7 +467,7 @@ async fn publish_pending(state: &AppState) -> Result<(), AppError> {
                         "hosting Station has not acknowledged the private publication",
                     ));
                 }
-                serde_json::from_slice::<ConsentPrivateEffectsPublishOutcome>(&response.body)
+                serde_json::from_slice::<ConsentPrivateEffectsPublishResponseBody>(&response.body)
                     .map_err(unavailable)?
             };
             outcome.validate_for_request(request).map_err(unavailable)?;
@@ -509,7 +510,7 @@ pub(crate) async fn refresh_holder_effects(
         }),
     )
     .await?;
-    if !matches!(result, ConsentPrivateCommandOutcome::Effects(_)) {
+    if !matches!(result, ConsentPrivateCommandResponseBody::Effects(_)) {
         return Err(unavailable("private authority returned another command"));
     }
     Ok(())

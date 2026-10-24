@@ -14,10 +14,9 @@
 //! `did_resolver` remains an in-process bounded cache over durable records.
 
 use arkret_identifiers::{Did, Hash};
-use arkret_models_identity::http_bodies::IdentityDocumentViewOutcome;
 use arkret_models_identity::identity::{
-    DidOperationSubmitOutcome, DidOperationSubmitRequestBody, IdentityDocumentView,
-    IdentityMethodEvidence, IdentityMethodEvidenceKind, IdentityResolveOutcome,
+    DidOperationSubmitRequestBody, DidOperationSubmitResponseBody, IdentityDocumentView,
+    IdentityMethodEvidence, IdentityMethodEvidenceKind, IdentityResolveResponseBody,
 };
 use arkret_wire::NonEmptyString;
 use coland_http::error::AppError;
@@ -38,7 +37,9 @@ use super::webvh_validation::{
 };
 use super::{append_audit_log, bearer_token, now, render_error, sha256_hex, validate_did};
 use crate::state::AppState;
-use crate::wire::{IdentityLogListOutcome, IdentityReceiptListOutcome, IdentityResolveRequestBody};
+use crate::wire::{
+    IdentityLogListResponseBody, IdentityReceiptListResponseBody, IdentityResolveRequestBody,
+};
 
 mod document;
 mod endpoints;

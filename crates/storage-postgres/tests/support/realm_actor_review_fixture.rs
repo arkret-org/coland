@@ -145,7 +145,7 @@ async fn realm_review_footprint(fixture: &Fixture) -> Value {
     for table in [
         "event_approval_private_audit",
         "applet_installations",
-        "capability_grant_current_results",
+        "capability_grant_current_states",
         "agent_producer_signer_keys",
     ] {
         let row = diesel::sql_query(format!(
@@ -162,12 +162,12 @@ async fn realm_review_footprint(fixture: &Fixture) -> Value {
 fn realm_review_submission(
     event: &Event,
     votes: &[arkret_wire::ApprovalSignature],
-) -> arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest {
+) -> arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody {
     let mut submission = arkret_wire::EventAdmissionSubmission::new(event.clone());
     if !votes.is_empty() {
         submission.approval_signatures = Some(votes.to_vec());
     }
-    arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(submission)
+    arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(submission)
 }
 
 struct RealmReviewFixture {
@@ -295,7 +295,7 @@ async fn realm_review_voter_permission(fixture: &Fixture) -> arkret_wire::GrantI
     let event = fixture.admin_event(EventKind::CapabilityGrant, ScopeRef::Realm { realm_id: fixture.realm.clone() }, json!({"grant": {
         "schema":"ak.schema.capability.v1","realm_id":fixture.realm,"issuer_id":account,"subject":account,
         "actions":["ak.realm.admin","ak.message.create"],"resources":[{"kind":"realm","realm_id":fixture.realm,"match_scope":"realm_wide"}],"constraints":[],
-        "issuer_authority_refs":[{"kind":"realm_root","realm_id":fixture.realm,"authority_event_ref":fixture.authority_event_ref,"authority_generation":0}],
+        "issuer_authority_refs":[{"kind":"realm_root","realm_id":fixture.realm,"authority_event_ref":fixture.authority_event_ref,"authority_generation":"0"}],
         "issued_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())
     }}));
     let id = arkret_wire::GrantId::from_event_id(&event.event_id);
@@ -385,7 +385,7 @@ async fn realm_review_creation_grant(
     let original = realm_review_install_grant(context, action);
     let mut payload: CapabilityGrantPayload =
         serde_json::from_value(json!(original.payload)).unwrap();
-    payload.grant.constraints.push(serde_json::from_value(json!({"constraint_kind":"quota","constraint_subkind":"rate","effect":"allow","max_operations":1,"period":"P1D","constraint_scope":"per_realm"})).unwrap());
+    payload.grant.constraints.push(serde_json::from_value(json!({"constraint_kind":"quota","constraint_subkind":"rate","effect":"allow","max_operation_count":1,"period":"P1D","constraint_scope":"per_realm"})).unwrap());
     if with_review {
         payload
             .grant
@@ -439,9 +439,9 @@ fn realm_review_resign_service_original(context: &RealmReviewFixture, mut event:
     )
     .unwrap();
     let signer = Ed25519PayloadSigner::new(
-        applet_service_signing_key(&context.package.webhook_auth.key_ref),
+        applet_service_signing_key(&context.package.webhook_signature_policy.key_ref),
         applet_service_did(&context.package),
-        context.package.webhook_auth.key_ref.clone(),
+        context.package.webhook_signature_policy.key_ref.clone(),
     );
     arkret_signatures::sign_event(
         &mut authored,
@@ -454,7 +454,7 @@ fn realm_review_resign_service_original(context: &RealmReviewFixture, mut event:
     let bytes = arkret_signatures::EventProofBuilder::new()
         .envelope_bytes(&event)
         .unwrap();
-    let key = applet_service_signing_key(&context.package.webhook_auth.key_ref);
+    let key = applet_service_signing_key(&context.package.webhook_signature_policy.key_ref);
     arkret_signatures::verify_ed25519_detached_jws_proof_with_digest_suite(
         proof,
         &bytes,
@@ -548,7 +548,7 @@ async fn realm_review_creation_case(pool: PgPool, bot: bool) {
     // Keep a genuinely valid Service signature while corrupting only the
     // candidate's independent control possession. No retired bundle is built.
     let mut corrupt = event.clone();
-    corrupt.payload.get_mut("control_signature").unwrap()["sig"] =
+    corrupt.payload.get_mut("control_signature").unwrap()["signature"] =
         json!(arkret_canonical::base64url_encode([0_u8; 64]));
     let corrupt = realm_review_resign_service_original(&context, corrupt);
     let bad_candidate: RealmActorCreatePayload =
@@ -834,7 +834,7 @@ async fn realm_review_governance_only_creation(pool: PgPool) {
     let rows = fixture
         .state
         .test_persistence()
-        .capability_grant_current_results()
+        .capability_grant_current_states()
         .snapshot_for_realm(&fixture.realm)
         .await
         .unwrap();
@@ -1072,7 +1072,7 @@ async fn realm_review_join_case(pool: PgPool) {
     use diesel_async::SimpleAsyncConnection as _;
     {
         let mut conn = fixture.pool.get().await.unwrap();
-        conn.batch_execute("CREATE FUNCTION test_realm_join_review_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'reviewed native membership writer failure'; END $$; CREATE TRIGGER test_realm_join_review_failure BEFORE INSERT ON member_state_current_results FOR EACH ROW EXECUTE FUNCTION test_realm_join_review_failure();").await.unwrap();
+        conn.batch_execute("CREATE FUNCTION test_realm_join_review_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'reviewed native membership writer failure'; END $$; CREATE TRIGGER test_realm_join_review_failure BEFORE INSERT ON member_state_current_states FOR EACH ROW EXECUTE FUNCTION test_realm_join_review_failure();").await.unwrap();
     }
     let (status, problem) = boxed_step(|| {
         realm_review_device_submit(&context, &candidate, &device, &event, vec![vote.clone()])
@@ -1080,7 +1080,7 @@ async fn realm_review_join_case(pool: PgPool) {
     .await;
     {
         let mut conn = fixture.pool.get().await.unwrap();
-        conn.batch_execute("DROP TRIGGER test_realm_join_review_failure ON member_state_current_results; DROP FUNCTION test_realm_join_review_failure();").await.unwrap();
+        conn.batch_execute("DROP TRIGGER test_realm_join_review_failure ON member_state_current_states; DROP FUNCTION test_realm_join_review_failure();").await.unwrap();
     }
     assert_eq!(
         status,
@@ -1394,7 +1394,7 @@ async fn realm_review_profile_case(pool: PgPool) {
     let approved = boxed_step(|| realm_review_footprint(fixture)).await;
     use diesel_async::SimpleAsyncConnection as _;
     for table in [
-        "realm_actor_current_results",
+        "realm_actor_current_states",
         "realm_actor_private_signer_facts",
     ] {
         {
@@ -1489,9 +1489,9 @@ fn realm_review_service_event(
     event.applet_id = Some(context.package.applet_id.clone());
     event.authorization_ref = Some(grant.clone().into());
     let signer = Ed25519PayloadSigner::new(
-        applet_service_signing_key(&context.package.webhook_auth.key_ref),
+        applet_service_signing_key(&context.package.webhook_signature_policy.key_ref),
         applet_service_did(&context.package),
-        context.package.webhook_auth.key_ref.clone(),
+        context.package.webhook_signature_policy.key_ref.clone(),
     );
     let mut authored = arkret_wire::AuthoredEvent::finalize_with_digest_suite(
         event,
@@ -1523,7 +1523,7 @@ async fn realm_review_message_grants(
     control.authority_regrant_allowed = Some(false);
     control.max_authority_depth = Some(0);
     control.allowed_managed_actor_roles = vec![ManagedActorRole::Bot, ManagedActorRole::Ghost];
-    let quota: GrantConstraint=serde_json::from_value(json!({"constraint_kind":"quota","constraint_subkind":"rate","effect":"allow","max_operations":1,"period":"P1D","constraint_scope":"per_realm"})).unwrap();
+    let quota: GrantConstraint=serde_json::from_value(json!({"constraint_kind":"quota","constraint_subkind":"rate","effect":"allow","max_operation_count":1,"period":"P1D","constraint_scope":"per_realm"})).unwrap();
     let parent = CapabilityGrantCreateBody {
         schema: arkret_wire::SchemaId::CAPABILITY_V1.into(),
         realm_id: Some(fixture.realm.clone()),
@@ -1602,7 +1602,7 @@ async fn realm_review_message_grants(
         StatusCode::OK,
         "actual approval-constrained terminal child: {result}"
     );
-    let result: AppletTransactionOutcome = serde_json::from_value(result).unwrap();
+    let result: AppletTransactionResponseBody = serde_json::from_value(result).unwrap();
     assert_eq!(result.status(), AppletTransactionStatus::Accepted);
     assert_eq!(
         fixture

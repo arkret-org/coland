@@ -13,8 +13,8 @@
 //! join stream's history floor (`federation.md` section 4.1.1).
 
 use arkret_wire::{
-    AccountId, ActorId, CircleId, CommitStreamRef, CurrentSelector, EventKind, ReadableFloor,
-    RealmId, StreamHistoryFloor, TypedCurrentRow,
+    AccountId, ActorId, CircleId, CommitStreamRef, CurrentSelector, CurrentState, EventKind,
+    ReadableFloor, RealmId, StreamHistoryFloor,
 };
 use diesel::sql_types::Text as SqlText;
 
@@ -111,75 +111,75 @@ pub(crate) fn member_shared_event_kind(kind: &EventKind) -> bool {
 /// Snapshot is signed again.
 const AUDITED_FAMILIES: &[&str] = &[
     // Private control currents are excluded from ordinary snapshot SQL.
-    "realm_actor_current_results",
-    "relation_current_results",
+    "realm_actor_current_states",
+    "relation_current_states",
     // A reaction set is state disclosed with its target Message's exact scope.
-    "message_reactions_current_results",
-    "pin_current_results",
-    "realm_authority_root_current_results",
-    "capability_grant_current_results",
-    "realm_policy_bundle_current_results",
-    "schema_definition_current_results",
+    "message_reactions_current_states",
+    "pin_current_states",
+    "realm_authority_root_current_states",
+    "capability_grant_current_states",
+    "realm_policy_bundle_current_states",
+    "schema_definition_current_states",
     // Exact Realm-bound Access, Moderation and Agent policies are shared state.
-    "policy_current_results",
-    "policy_action_current_results",
+    "policy_current_states",
+    "policy_action_current_states",
     // Controller-PCR confirmation state has no ordinary Realm disclosure carrier.
-    "agent_action_approval_current_results",
-    "mimi_room_binding_current_results",
-    "realm_link_current_results",
-    "member_state_current_results",
-    "member_identity_updates_current_results",
-    "applet_registration_current_results",
+    "agent_action_approval_current_states",
+    "mimi_room_binding_current_states",
+    "realm_link_current_states",
+    "member_state_current_states",
+    "member_identity_updates_current_states",
+    "applet_registration_current_states",
     // Circle membership and Sidecar authority classify their private rows.
-    "circle_current_results",
-    "circle_member_state_current_results",
-    "call_state_current_results",
-    "call_component_current_results",
-    "realm_media_service_current_results",
-    "sidecar_current_results",
-    "sidecar_context_current_results",
-    "sidecar_exchange_controls_current_results",
-    "strand_current_results",
-    "strand_watch_current_results",
-    "strand_position_current_results",
-    "rsvp_current_results",
-    "space_current_results",
-    "space_parent_current_results",
-    "space_child_scope_policy_current_results",
-    "realm_set_default_strand_current_results",
-    "message_revision_current_results",
-    "mls_group_current_results",
-    "object_redaction_current_results",
-    "invite_lifecycle_current_results",
-    "invite_live_target_current_results",
-    "invite_directed_invitee_current_results",
+    "circle_current_states",
+    "circle_member_state_current_states",
+    "call_state_current_states",
+    "call_component_current_states",
+    "realm_media_service_current_states",
+    "sidecar_current_states",
+    "sidecar_context_current_states",
+    "sidecar_exchange_controls_current_states",
+    "strand_current_states",
+    "strand_watch_current_states",
+    "strand_position_current_states",
+    "rsvp_current_states",
+    "space_current_states",
+    "space_parent_current_states",
+    "space_child_scope_policy_current_states",
+    "realm_set_default_strand_current_states",
+    "message_revision_current_states",
+    "mls_group_current_states",
+    "object_redaction_current_states",
+    "invite_lifecycle_current_states",
+    "invite_live_target_current_states",
+    "invite_directed_invitee_current_states",
     // Reports and proofs have a separate exact-scope moderator disclosure gate.
-    "moderation_report_current_results",
-    "moderation_franking_proof_current_results",
-    "moderation_state_current_results",
-    "realm_organization_current_results",
-    "realm_bootstrap_current_results",
-    "scope_read_receipt_policy_current_results",
-    "agent_status_current_results",
-    "agent_interaction_current_results",
-    "agent_key_current_results",
-    "key_backup_active_series_current_results",
+    "moderation_report_current_states",
+    "moderation_franking_proof_current_states",
+    "moderation_state_current_states",
+    "realm_organization_current_states",
+    "realm_bootstrap_current_states",
+    "scope_read_receipt_policy_current_states",
+    "agent_status_current_states",
+    "agent_interaction_current_states",
+    "agent_key_current_states",
+    "key_backup_active_series_current_states",
     // Principal resolution is private PCR state, never ordinary Realm disclosure.
-    "principal_resolution_current_results",
-    "pcr_device_generation_current_results",
-    "pcr_device_authorization_current_results",
+    "principal_resolution_current_states",
+    "pcr_device_generation_current_states",
+    "pcr_device_authorization_current_states",
     // Ordinary scope Profiles are shared; PCR identity remains private.
-    "actor_profile_current_results",
-    "identity_accountability_current_results",
+    "actor_profile_current_states",
+    "identity_accountability_current_states",
     // Controller-PCR Agent provisioning state: likewise never in an ordinary
     // collaboration Realm.
-    "agent_provisioning_current_results",
-    "agent_pcr_genesis_declaration_current_results",
-    "agent_selector_claim_current_results",
+    "agent_provisioning_current_states",
+    "agent_pcr_genesis_declaration_current_states",
+    "agent_selector_claim_current_states",
     // Direct Conversation binding is visible only to its exact participants.
-    "direct_conversation_binding_current_results",
+    "direct_conversation_binding_current_states",
     // Holder-private PCR Consent is outside ordinary Realm disclosure.
-    "consent_current_results",
+    "consent_current_states",
 ];
 
 /// A committed kind of the Realm outside [`DISCLOSED_EVENT_KINDS`].
@@ -320,7 +320,7 @@ pub(crate) async fn account_continuation_heads_covered(
                     .current_state_entries
                     .iter()
                     .find_map(|entry| match entry {
-                        TypedCurrentRow::Value {
+                        CurrentState::Value {
                             selector: CurrentSelector::MemberState { actor_id },
                             value,
                             ..
@@ -328,7 +328,7 @@ pub(crate) async fn account_continuation_heads_covered(
                         _ => None,
                     })
                     .map(|value| {
-                        serde_json::from_value::<arkret_wire::MemberStateCurrent>(value.clone())
+                        serde_json::from_value::<arkret_wire::MemberStateValue>(value.clone())
                     })
                     .transpose()
                     .map_err(PersistenceError::database)?;
@@ -611,9 +611,9 @@ async fn current_bootstrap_join_in_connection(
 ) -> PersistenceResult<Option<JoinPositionRow>> {
     sql_query(
             "SELECT membership.current_stream_position,covering.stream_ref FROM ( \
-             SELECT current_stream_position,current_commit_id FROM member_state_current_results \
+             SELECT current_stream_position,current_commit_id FROM member_state_current_states \
              WHERE realm_id=$1 AND member_id=$2 AND membership='join' AND current_commit_id=$3 \
-             UNION ALL SELECT current_stream_position,current_commit_id FROM circle_member_state_current_results \
+             UNION ALL SELECT current_stream_position,current_commit_id FROM circle_member_state_current_states \
              WHERE realm_id=$1 AND member_id=$2 AND membership='join' AND current_commit_id=$3 \
              AND circle_member_parent_join_current(realm_id,member_id,value) \
              ) membership JOIN realm_commits covering ON covering.realm_id=$1 \
@@ -830,7 +830,7 @@ fn anchor_bootstrap_join(
     }
     floor.oldest_position = floor_position;
     material.current_state_entries.retain(|row| !matches!(row,
-        TypedCurrentRow::Value { selector: CurrentSelector::MessageRevision { .. }, source_stream_ref, revision, .. }
+        CurrentState::Value { selector: CurrentSelector::MessageRevision { .. }, source_stream_ref, revision, .. }
         if source_stream_ref == stream && revision.stream_position < floor_position
     ));
     Ok(())
@@ -959,7 +959,7 @@ pub(crate) async fn actor_snapshot_candidates_in_connection(
     crate::pcr_private_authority::validate_installed_governance(conn, realm_id).await?;
     let families = sql_query(
         "SELECT tablename FROM pg_catalog.pg_tables \
-         WHERE schemaname=current_schema() AND tablename LIKE '%_current_results'",
+         WHERE schemaname=current_schema() AND tablename LIKE '%_current_states'",
     )
     .load::<TableNameRow>(&mut *conn)
     .await
@@ -995,8 +995,7 @@ pub(crate) async fn actor_snapshot_candidates_in_connection(
     let mut materials = Vec::with_capacity(candidates.len());
     let mut sources = Vec::new();
     let mut source_ids = std::collections::BTreeSet::new();
-    let mut cached_disclosure: Option<(Vec<TypedCurrentRow>, SnapshotCandidateDisclosureFacts)> =
-        None;
+    let mut cached_disclosure: Option<(Vec<CurrentState>, SnapshotCandidateDisclosureFacts)> = None;
     for mut candidate in candidates {
         if let Some(candidate) = &mut candidate {
             if candidate.realm_id != *realm_id {
@@ -1048,7 +1047,7 @@ pub(crate) async fn actor_snapshot_candidates_in_connection(
         }
         if controller.is_some() {
             for row in &material.current_state_entries {
-                let TypedCurrentRow::Value {
+                let CurrentState::Value {
                     source_stream_ref,
                     revision,
                     ..
@@ -1173,7 +1172,7 @@ fn disclose_snapshot_candidate_at_facts(
         // inferred from missing rows in the archived object. These internal
         // Realm rows are removed before returning the original row slice.
         for row in &authority_material.current_state_entries {
-            let TypedCurrentRow::Value { selector, .. } = row;
+            let CurrentState::Value { selector, .. } = row;
             let required = matches!(
                 selector,
                 CurrentSelector::RealmGenesis
@@ -1184,7 +1183,7 @@ fn disclose_snapshot_candidate_at_facts(
                         || facts.owner.as_ref().is_some_and(|(owner, _)| actor_id.as_account_id() == Some(owner)));
             if required
                 && !material.current_state_entries.iter().any(|present| {
-                    let TypedCurrentRow::Value {
+                    let CurrentState::Value {
                         selector: actual, ..
                     } = present;
                     actual == selector
@@ -1226,23 +1225,23 @@ async fn disclosure_facts_in_connection(
     material: &coland_storage::RealmStateSnapshotMaterial,
 ) -> PersistenceResult<DisclosureFacts> {
     let undisclosed_family_row = sql_query(
-        "SELECT (EXISTS(SELECT 1 FROM realm_link_current_results WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM mimi_room_binding_current_results WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM policy_current_results WHERE realm_id=$1 \
+        "SELECT (EXISTS(SELECT 1 FROM realm_link_current_states WHERE realm_id=$1) \
+            OR EXISTS(SELECT 1 FROM mimi_room_binding_current_states WHERE realm_id=$1) \
+            OR EXISTS(SELECT 1 FROM policy_current_states WHERE realm_id=$1 \
                 AND (value->>'schema' IS DISTINCT FROM 'ak.schema.policy.v1' \
                     OR COALESCE(value->>'policy_kind','') NOT IN ('access','moderation','agent','applet') \
                     OR value->>'realm_id' IS DISTINCT FROM realm_id)) \
-            OR EXISTS(SELECT 1 FROM agent_status_current_results WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM agent_key_current_results WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM key_backup_active_series_current_results WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM principal_resolution_current_results WHERE pcr_realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM pcr_device_generation_current_results WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM actor_profile_current_results p WHERE p.realm_id=$1 AND NOT EXISTS(SELECT 1 FROM realm_bootstrap_current_results g WHERE g.realm_id=$1 AND g.result_family='realm_genesis' AND g.value->>'purpose'='collaboration')) \
-            OR EXISTS(SELECT 1 FROM agent_pcr_genesis_declaration_current_results WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM agent_selector_claim_current_results WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM pcr_device_authorization_current_results WHERE realm_id=$1) \
+            OR EXISTS(SELECT 1 FROM agent_status_current_states WHERE realm_id=$1) \
+            OR EXISTS(SELECT 1 FROM agent_key_current_states WHERE realm_id=$1) \
+            OR EXISTS(SELECT 1 FROM key_backup_active_series_current_states WHERE realm_id=$1) \
+            OR EXISTS(SELECT 1 FROM principal_resolution_current_states WHERE pcr_realm_id=$1) \
+            OR EXISTS(SELECT 1 FROM pcr_device_generation_current_states WHERE realm_id=$1) \
+            OR EXISTS(SELECT 1 FROM actor_profile_current_states p WHERE p.realm_id=$1 AND NOT EXISTS(SELECT 1 FROM realm_bootstrap_current_states g WHERE g.realm_id=$1 AND g.state_family='realm_genesis' AND g.value->>'purpose'='collaboration')) \
+            OR EXISTS(SELECT 1 FROM agent_pcr_genesis_declaration_current_states WHERE realm_id=$1) \
+            OR EXISTS(SELECT 1 FROM agent_selector_claim_current_states WHERE realm_id=$1) \
+            OR EXISTS(SELECT 1 FROM pcr_device_authorization_current_states WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM pcr_device_revocation_proposals WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM consent_current_results WHERE realm_id=$1)) AS present",
+            OR EXISTS(SELECT 1 FROM consent_current_states WHERE realm_id=$1)) AS present",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<PresenceRow>(&mut *conn)
@@ -1277,7 +1276,7 @@ async fn disclosure_facts_in_connection(
     .await?;
     let mut message_streams = std::collections::BTreeMap::new();
     for entry in &material.current_state_entries {
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             selector: CurrentSelector::MessageRevision { message_id },
             ..
         } = entry
@@ -1293,7 +1292,7 @@ async fn disclosure_facts_in_connection(
     // (`models/strand-and-message.md` section 9.8.2), so its disclosure
     // follows that Message's accepted creation stream.
     for entry in &material.current_state_entries {
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             selector: CurrentSelector::MessageReactions { target_ref },
             ..
         } = entry
@@ -1310,7 +1309,7 @@ async fn disclosure_facts_in_connection(
     }
     let mut call_creations = std::collections::BTreeMap::new();
     for entry in &material.current_state_entries {
-        if let TypedCurrentRow::Value {
+        if let CurrentState::Value {
             selector:
                 CurrentSelector::CallState { call_id }
                 | CurrentSelector::CallFocus { call_id }
@@ -1333,7 +1332,7 @@ async fn disclosure_facts_in_connection(
         .current_state_entries
         .iter()
         .find_map(|entry| match entry {
-            TypedCurrentRow::Value {
+            CurrentState::Value {
                 selector: CurrentSelector::MemberState { actor_id },
                 source_stream_ref,
                 revision,
@@ -1342,14 +1341,14 @@ async fn disclosure_facts_in_connection(
             _ => None,
         })
         .map(|(source, revision, value)| {
-            serde_json::from_value::<arkret_wire::MemberStateCurrent>(value.clone())
+            serde_json::from_value::<arkret_wire::MemberStateValue>(value.clone())
                 .map(|current| (source, revision, current.membership))
         })
         .transpose()
         .map_err(PersistenceError::database)?;
     let mut circle_floors = std::collections::BTreeMap::new();
     for entry in &authority_material.current_state_entries {
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             selector:
                 CurrentSelector::CircleMemberState {
                     circle_id,
@@ -1365,7 +1364,7 @@ async fn disclosure_facts_in_connection(
         if member_actor_id != &caller {
             continue;
         }
-        let membership: arkret_wire::CircleMemberStateCurrent =
+        let membership: arkret_wire::CircleMemberStateValue =
             serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
         if !parent.is_some_and(|(parent_source, parent_revision, parent_membership)| {
             membership.is_effective_under_parent(
@@ -1390,7 +1389,7 @@ async fn disclosure_facts_in_connection(
             .current_state_entries
             .iter()
             .find_map(|entry| match entry {
-                TypedCurrentRow::Value {
+                CurrentState::Value {
                     selector: CurrentSelector::Circle { circle_id: subject },
                     value,
                     ..
@@ -1415,7 +1414,7 @@ async fn disclosure_facts_in_connection(
         } else {
             let page = crate::authority_commit::stream_page_in_connection(
                 conn,
-                &arkret_wire::StreamScanRequest {
+                &arkret_wire::StreamScanRequestBody {
                     realm_id: realm_id.clone(),
                     stream_ref: stream.clone(),
                     direction: arkret_wire::StreamScanDirection::After(None),
@@ -1441,7 +1440,7 @@ async fn disclosure_facts_in_connection(
     let mut report_subjects = std::collections::BTreeSet::new();
     let at = chrono::Utc::now();
     for entry in &material.current_state_entries {
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             selector: CurrentSelector::ModerationReport { event_id },
             source_stream_ref,
             ..
@@ -1466,7 +1465,7 @@ async fn disclosure_facts_in_connection(
             }
             _ => continue,
         };
-        if crate::moderation_report_current_results::scope_moderator(
+        if crate::moderation_report_current_states::scope_moderator(
             conn,
             realm_id,
             &scope,
@@ -1484,7 +1483,7 @@ async fn disclosure_facts_in_connection(
     }
     let mut franking_subjects = std::collections::BTreeSet::new();
     for entry in &material.current_state_entries {
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             selector: CurrentSelector::ModerationFrankingProof { event_id },
             ..
         } = entry
@@ -1492,11 +1491,11 @@ async fn disclosure_facts_in_connection(
             continue;
         };
         let scope =
-            crate::moderation_franking_proof_current_results::franking_target_scope_in_connection(
+            crate::moderation_franking_proof_current_states::franking_target_scope_in_connection(
                 conn, realm_id, event_id,
             )
             .await?;
-        if crate::moderation_report_current_results::scope_moderator(
+        if crate::moderation_report_current_states::scope_moderator(
             conn,
             realm_id,
             &scope,
@@ -1517,7 +1516,7 @@ async fn disclosure_facts_in_connection(
     let mut owned_sidecars = std::collections::BTreeSet::new();
     if caller_floor.is_some() {
         for row in &authority_material.current_state_entries {
-            if let TypedCurrentRow::Value {
+            if let CurrentState::Value {
                 selector: CurrentSelector::Sidecar { sidecar_id },
                 value,
                 ..
@@ -1552,7 +1551,7 @@ async fn disclosure_facts_in_connection(
     }
     let mut relation_subjects = std::collections::BTreeSet::new();
     for entry in &material.current_state_entries {
-        if let TypedCurrentRow::Value {
+        if let CurrentState::Value {
             selector:
                 CurrentSelector::Relation {
                     primary_conflict_domain,
@@ -1577,7 +1576,7 @@ async fn disclosure_facts_in_connection(
         .current_state_entries
         .iter()
         .filter_map(|row| match row {
-            TypedCurrentRow::Value {
+            CurrentState::Value {
                 selector: CurrentSelector::MessageRevision { .. },
                 revision,
                 ..
@@ -1791,7 +1790,7 @@ pub(crate) fn disclose_to_actor(
         .current_state_entries
         .iter()
         .filter_map(|row| match row {
-            TypedCurrentRow::Value {
+            CurrentState::Value {
                 selector: CurrentSelector::Strand { strand_id },
                 value,
                 ..
@@ -1801,7 +1800,7 @@ pub(crate) fn disclose_to_actor(
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut private_applet_policies = std::collections::BTreeSet::new();
     for row in &material.current_state_entries {
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             selector,
             source_stream_ref,
             value,
@@ -1841,7 +1840,7 @@ pub(crate) fn disclose_to_actor(
                         .current_state_entries
                         .iter()
                         .find_map(|row| match row {
-                            TypedCurrentRow::Value {
+                            CurrentState::Value {
                                 selector: CurrentSelector::Space { space_id },
                                 value,
                                 ..
@@ -1893,7 +1892,7 @@ pub(crate) fn disclose_to_actor(
                 Some(source_stream_ref.clone())
             }
             CurrentSelector::Policy { policy_id } => {
-                crate::policy_current_results::management_policy_scope_target(
+                crate::policy_current_states::management_policy_scope_target(
                     &material.realm_id,
                     source_stream_ref,
                 )
@@ -1961,7 +1960,7 @@ pub(crate) fn disclose_to_actor(
         }
     }
     material.current_state_entries.retain(|row| match row {
-        TypedCurrentRow::Value {
+        CurrentState::Value {
             selector,
             source_stream_ref,
             value,
@@ -1991,7 +1990,7 @@ pub(crate) fn disclose_to_actor(
             visible_stream
                 && match selector {
                     // constraint-schema §9.2.6 makes the confirmation nonce
-                    // private. Snapshot §3 and current-results §3 include only
+                    // private. Snapshot §3 and current-state §3 include only
                     // rows disclosed to the requester, never a redacted value.
                     CurrentSelector::AgentActionApproval { .. } => false,
                     // managed-governance section 1 restricts Applet Policy
@@ -2030,7 +2029,7 @@ pub(crate) fn disclose_to_actor(
                 }
         }
     });
-    arkret_models_collaboration::exact_current_results::validate_calendar_current_pairs(
+    arkret_models_collaboration::exact_current_state::validate_calendar_current_pairs(
         &material.realm_id,
         &material.current_state_entries,
     )
@@ -2044,7 +2043,7 @@ pub(crate) fn disclose_to_actor(
     let mut space_families = std::collections::BTreeMap::new();
     let mut position_subjects = Vec::new();
     for row in &material.current_state_entries {
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             selector,
             source_stream_ref,
             revision,
@@ -2101,7 +2100,7 @@ pub(crate) fn disclose_to_actor(
                 sidecar_id,
                 source_context_ref,
             } => {
-                let controls: arkret_models_collaboration::agent_sidecar::AgentSidecarExchangeControlsCurrentValue =
+                let controls: arkret_models_collaboration::agent_sidecar::AgentSidecarExchangeControlsValue =
                     serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
                 controls
                     .validate_for_context(sidecar_id, source_context_ref)
@@ -2222,7 +2221,7 @@ pub(crate) fn disclose_to_actor(
                 }
             }
             CurrentSelector::CircleMemberState { circle_id, .. } => {
-                serde_json::from_value::<arkret_wire::CircleMemberStateCurrent>(value.clone())
+                serde_json::from_value::<arkret_wire::CircleMemberStateValue>(value.clone())
                     .map_err(PersistenceError::database)?;
                 if source_stream_ref
                     != &(CommitStreamRef::Circle {
@@ -2265,7 +2264,7 @@ pub(crate) fn disclose_to_actor(
             }
             CurrentSelector::ModerationState { .. } => {
                 serde_json::from_value::<
-                    arkret_models_collaboration::exact_current_results::ModerationStateCurrentValue,
+                    arkret_models_collaboration::exact_current_state::ModerationStateValue,
                 >(value.clone())
                 .map_err(PersistenceError::database)?;
             }
@@ -2296,7 +2295,8 @@ pub(crate) fn disclose_to_actor(
                     actor_id == &caller && value == &serde_json::json!({"membership":"join"});
             }
             CurrentSelector::StrandWatch { .. } => {
-                let _: arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentValue = serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+                let _: arkret_models_collaboration::strand_watch_operations::StrandWatchValue =
+                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
             }
             CurrentSelector::Strand { .. } => {}
             CurrentSelector::CalendarScheduleSource { .. } => {}
@@ -2450,7 +2450,7 @@ pub(crate) fn disclose_to_actor(
                 )?;
             }
             CurrentSelector::Policy { policy_id } => {
-                crate::policy_current_results::validate_disclosed_shared_policy(
+                crate::policy_current_states::validate_disclosed_shared_policy(
                     &material.realm_id,
                     policy_id,
                     source_stream_ref,
@@ -2511,7 +2511,7 @@ pub(crate) fn disclose_to_actor(
                 .current_state_entries
                 .iter()
                 .find_map(|row| match row {
-                    TypedCurrentRow::Value {
+                    CurrentState::Value {
                         selector, value, ..
                     } if selector == &wanted => Some(value.clone()),
                     _ => None,
@@ -2566,7 +2566,7 @@ pub(crate) fn disclose_to_actor(
         })
         .collect::<std::collections::BTreeSet<_>>();
     material.current_state_entries.retain(|row| {
-        if let TypedCurrentRow::Value {
+        if let CurrentState::Value {
             selector:
                 CurrentSelector::StrandWatch {
                     watcher_actor_id, ..
@@ -2584,7 +2584,7 @@ pub(crate) fn disclose_to_actor(
                         Some("all" | "participating")
                     ));
         }
-        if matches!(row, TypedCurrentRow::Value {
+        if matches!(row, CurrentState::Value {
             selector: CurrentSelector::Rsvp { event_ref, .. },
             ..
         } if redacted_strands.contains(event_ref))
@@ -2593,7 +2593,7 @@ pub(crate) fn disclose_to_actor(
         }
         !matches!(
             row,
-            TypedCurrentRow::Value {
+            CurrentState::Value {
                 selector: CurrentSelector::MessageRevision { message_id },
                 revision,
                 ..
@@ -2663,8 +2663,8 @@ mod tests {
         RealmId::from_event_id(&event_id(0x11))
     }
 
-    fn row(selector: CurrentSelector, position: u64, value: Value) -> TypedCurrentRow {
-        TypedCurrentRow::Value {
+    fn row(selector: CurrentSelector, position: u64, value: Value) -> CurrentState {
+        CurrentState::Value {
             selector,
             source_stream_ref: CommitStreamRef::Realm {
                 realm_id: realm_id(),
@@ -2689,7 +2689,7 @@ mod tests {
                 .next()
                 .unwrap()
                 .trim_start_matches("public.");
-            if table.ends_with("_current_results") {
+            if table.ends_with("_current_states") {
                 assert!(
                     AUDITED_FAMILIES.contains(&table),
                     "unclassified current family: {table}"
@@ -2714,7 +2714,7 @@ mod tests {
                 .current_state_entries
                 .iter()
                 .find_map(|entry| match entry {
-                    TypedCurrentRow::Value {
+                    CurrentState::Value {
                         selector: CurrentSelector::Strand { strand_id },
                         ..
                     } => Some(strand_id.clone()),
@@ -2745,7 +2745,7 @@ mod tests {
                 .filter(|entry| {
                     matches!(
                         entry,
-                        TypedCurrentRow::Value {
+                        CurrentState::Value {
                             selector: CurrentSelector::StrandWatch { .. },
                             ..
                         }
@@ -2774,7 +2774,7 @@ mod tests {
             row(
                 CurrentSelector::RealmAuthorityRoot,
                 0,
-                json!({"controller_actor_id":actor,"controller_epoch":0,"authority_generation":0}),
+                json!({"controller_actor_id":actor,"controller_epoch":0,"authority_generation":"0"}),
             ),
             row(CurrentSelector::RealmProfile, 1, json!({"title":"Example"})),
             row(
@@ -3015,7 +3015,7 @@ mod tests {
         facts
             .message_streams
             .insert(hidden.clone(), circle_stream.clone());
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             selector,
             revision,
             value,
@@ -3028,7 +3028,7 @@ mod tests {
             reaction_set(&hidden, 0x58),
         );
         material.current_state_entries.push(reactions.clone());
-        material.current_state_entries.push(TypedCurrentRow::Value {
+        material.current_state_entries.push(CurrentState::Value {
             selector,
             source_stream_ref: circle_stream,
             revision,
@@ -3043,7 +3043,7 @@ mod tests {
             .filter(|row| {
                 matches!(
                     row,
-                    TypedCurrentRow::Value {
+                    CurrentState::Value {
                         selector: CurrentSelector::MessageReactions { .. },
                         ..
                     }
@@ -3058,7 +3058,7 @@ mod tests {
             json!({"reactions": [{"actor_id": ActorId::account(bob.clone()), "key": "+1"}]}),
         ] {
             let mut drifted = material.clone();
-            let TypedCurrentRow::Value { value, .. } = drifted
+            let CurrentState::Value { value, .. } = drifted
                 .current_state_entries
                 .iter_mut()
                 .find(|row| **row == reactions)
@@ -3169,7 +3169,7 @@ mod tests {
             material.current_state_entries
         );
         let mut null_position = material.clone();
-        if let Some(TypedCurrentRow::Value { value, .. }) =
+        if let Some(CurrentState::Value { value, .. }) =
             null_position.current_state_entries.last_mut()
         {
             *value = Value::Null;
@@ -3185,12 +3185,12 @@ mod tests {
             let mut incomplete = material.clone();
             incomplete.current_state_entries.retain(|entry| {
                 !matches!(entry,
-                TypedCurrentRow::Value { selector, .. } if selector == &missing)
+                CurrentState::Value { selector, .. } if selector == &missing)
             });
             assert!(disclose_to_account(incomplete, &founder, &facts).is_err());
         }
         let mut foreign = material;
-        let TypedCurrentRow::Value { value, .. } = &mut foreign.current_state_entries[8];
+        let CurrentState::Value { value, .. } = &mut foreign.current_state_entries[8];
         value["realm_id"] = json!(RealmId::from_event_id(&event_id(0x68)));
         assert!(disclose_to_account(foreign, &founder, &facts).is_err());
     }
@@ -3249,7 +3249,7 @@ mod tests {
         assert!(disclose_to_account(material, &founder, &facts).is_err());
     }
 
-    fn redaction_row(target: &str, redacted: &MessageId, position: u64) -> TypedCurrentRow {
+    fn redaction_row(target: &str, redacted: &MessageId, position: u64) -> CurrentState {
         row(
             CurrentSelector::ObjectRedaction {
                 target_ref: target.to_owned(),
@@ -3279,7 +3279,7 @@ mod tests {
         assert!(
             !disclosed.current_state_entries.iter().any(|entry| matches!(
                 entry,
-                TypedCurrentRow::Value {
+                CurrentState::Value {
                     selector: CurrentSelector::MessageRevision { .. },
                     ..
                 }
@@ -3320,7 +3320,7 @@ mod tests {
         facts.caller_floor = None;
         assert!(disclose_to_account(material, &founder, &facts).is_err());
         let (founder, mut material, facts) = fixture();
-        let TypedCurrentRow::Value { value, .. } = &mut material.current_state_entries[7];
+        let CurrentState::Value { value, .. } = &mut material.current_state_entries[7];
         *value = json!({"membership":"leave"});
         assert!(disclose_to_account(material, &founder, &facts).is_err());
     }
@@ -3340,7 +3340,7 @@ mod tests {
         let disclosed = disclose_to_account(material, &caller, &facts).unwrap();
         assert!(disclosed.current_state_entries.contains(&policy));
         // Governance current remains available below the caller's content floor.
-        let TypedCurrentRow::Value { revision, .. } = &policy;
+        let CurrentState::Value { revision, .. } = &policy;
         assert!(revision.stream_position < facts.caller_floor.as_ref().unwrap().oldest_position);
     }
 
@@ -3364,7 +3364,7 @@ mod tests {
                     "created_at":"2026-10-05T12:00:00.000Z"});
                 let mut policy = row(CurrentSelector::Policy { policy_id }, 1, value);
                 if circle {
-                    let TypedCurrentRow::Value {
+                    let CurrentState::Value {
                         source_stream_ref, ..
                     } = &mut policy;
                     *source_stream_ref = CommitStreamRef::Circle {
@@ -3393,7 +3393,7 @@ mod tests {
         original.current_state_entries.retain(|row| {
             matches!(
                 row,
-                TypedCurrentRow::Value {
+                CurrentState::Value {
                     source_stream_ref: CommitStreamRef::Circle { .. },
                     selector: CurrentSelector::Strand { .. }
                         | CurrentSelector::CircleMemberState { .. },
@@ -3420,7 +3420,7 @@ mod tests {
         missing.current_state_entries.retain(|row| {
             !matches!(
                 row,
-                TypedCurrentRow::Value {
+                CurrentState::Value {
                     selector: CurrentSelector::RealmHistoryAccess,
                     ..
                 }
@@ -3483,7 +3483,7 @@ mod tests {
                 1,
                 value,
             );
-            let TypedCurrentRow::Value {
+            let CurrentState::Value {
                 source_stream_ref, ..
             } = &mut policy;
             *source_stream_ref = CommitStreamRef::from_scope(&scope, None).unwrap();
@@ -3494,10 +3494,10 @@ mod tests {
                     .current_state_entries
                     .iter()
                     .any(|row| matches!(row,
-                TypedCurrentRow::Value { selector: CurrentSelector::Policy { policy_id: id }, .. }
+                CurrentState::Value { selector: CurrentSelector::Policy { policy_id: id }, .. }
                     if id == &policy_id))
             );
-            let TypedCurrentRow::Value { value, .. } =
+            let CurrentState::Value { value, .. } =
                 material.current_state_entries.last_mut().unwrap();
             value["id"] = json!("ak:policy:0198ff00-0000-7000-8000-000000000002");
             assert!(
@@ -3541,7 +3541,7 @@ mod tests {
         }
         let mut material = base;
         let mut policy = row(CurrentSelector::Policy { policy_id: id }, 1, value);
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             source_stream_ref, ..
         } = &mut policy;
         *source_stream_ref = CommitStreamRef::Realm {
@@ -3571,7 +3571,7 @@ mod tests {
         let disclosed = disclose_to_account(material, &founder, &facts).unwrap();
         assert!(!disclosed.current_state_entries.iter().any(|row| matches!(
             row,
-            TypedCurrentRow::Value {
+            CurrentState::Value {
                 selector: CurrentSelector::ModerationReport { .. },
                 ..
             }
@@ -3594,7 +3594,7 @@ mod tests {
         assert!(
             !disclosed.current_state_entries.iter().any(|entry| matches!(
                 entry,
-                TypedCurrentRow::Value {
+                CurrentState::Value {
                     selector: CurrentSelector::AgentActionApproval { .. },
                     ..
                 }
@@ -3660,7 +3660,7 @@ mod tests {
         let error = disclose_to_account(joined_outsider, &carol, &facts).unwrap_err();
         assert!(error.to_string().contains("exact participant"));
         let binding = material.current_state_entries.last_mut().unwrap();
-        let TypedCurrentRow::Value { selector, .. } = binding;
+        let CurrentState::Value { selector, .. } = binding;
         *selector = CurrentSelector::DirectConversationBinding {
             pair_key: arkret_wire::Hash::new(format!("sha256:{}", "78".repeat(32))).unwrap(),
         };
@@ -3683,13 +3683,13 @@ mod tests {
         assert_eq!(disclosed.visible_stream_heads.len(), 1);
         assert_eq!(disclosed.retention_and_history_floor.stream_floors.len(), 1);
         let (founder, mut material, facts) = fixture();
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             source_stream_ref, ..
         } = &mut material.current_state_entries[10];
         *source_stream_ref = circle;
         assert!(disclose_to_account(material, &founder, &facts).is_err());
         let (founder, mut material, facts) = fixture();
-        let TypedCurrentRow::Value { revision, .. } = &mut material.current_state_entries[10];
+        let CurrentState::Value { revision, .. } = &mut material.current_state_entries[10];
         revision.stream_position = 10;
         assert!(disclose_to_account(material, &founder, &facts).is_err());
         let (founder, mut material, facts) = fixture();
@@ -3700,7 +3700,7 @@ mod tests {
     #[test]
     fn circle_strands_and_missing_anchor_rows_are_refused() {
         let (founder, mut material, facts) = fixture();
-        let TypedCurrentRow::Value { value, .. } = &mut material.current_state_entries[8];
+        let CurrentState::Value { value, .. } = &mut material.current_state_entries[8];
         value["scope_circle_id"] = json!("ak:circle:x");
         assert!(disclose_to_account(material, &founder, &facts).is_err());
         for missing in [0, 1, 5, 7] {
@@ -3732,7 +3732,7 @@ mod tests {
                 "state":"active","created_by":ActorId::account(caller.clone()),"created_at":"2026-09-28T00:00:00.000Z"})));
         let mut circle_row = |selector, position, value| {
             let mut result = row(selector, position, value);
-            let TypedCurrentRow::Value {
+            let CurrentState::Value {
                 source_stream_ref, ..
             } = &mut result;
             *source_stream_ref = stream.clone();
@@ -3789,15 +3789,15 @@ mod tests {
         assert_eq!(disclosed.visible_stream_heads.len(), 2);
         assert_eq!(disclosed.retention_and_history_floor.stream_floors.len(), 2);
         assert!(!disclosed.current_state_entries.iter().any(|row| matches!(row,
-            TypedCurrentRow::Value { selector: CurrentSelector::MessageRevision { message_id }, .. }
+            CurrentState::Value { selector: CurrentSelector::MessageRevision { message_id }, .. }
                 if message_id == &MessageId::from_event_id(&event_id(0x53))
         )));
         assert!(disclosed.current_state_entries.iter().any(|row| matches!(row,
-            TypedCurrentRow::Value { selector: CurrentSelector::MessageRevision { message_id }, .. }
+            CurrentState::Value { selector: CurrentSelector::MessageRevision { message_id }, .. }
                 if message_id == &MessageId::from_event_id(&event_id(0x33))
         )));
         assert!(disclosed.current_state_entries.iter().any(|row| matches!(row,
-            TypedCurrentRow::Value { selector: CurrentSelector::MessageRevision { message_id }, .. }
+            CurrentState::Value { selector: CurrentSelector::MessageRevision { message_id }, .. }
                 if message_id == &MessageId::from_event_id(&event_id(0x54))
         )));
         let mut outsider_facts = facts;
@@ -3807,7 +3807,7 @@ mod tests {
         assert_eq!(outsider.retention_and_history_floor.stream_floors.len(), 1);
         assert!(!outsider.current_state_entries.iter().any(|row| matches!(
             row,
-            TypedCurrentRow::Value {
+            CurrentState::Value {
                 selector: CurrentSelector::Circle { .. }
                     | CurrentSelector::CircleMemberState { .. },
                 ..
@@ -3827,7 +3827,7 @@ mod tests {
             "default_effect":"allow","created_by":ActorId::account(caller.clone()),
             "created_at":"2026-10-05T12:00:00.000Z"});
         let mut policy = row(CurrentSelector::Policy { policy_id }, 1, value);
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             source_stream_ref, ..
         } = &mut policy;
         *source_stream_ref = CommitStreamRef::Circle {
@@ -3843,7 +3843,7 @@ mod tests {
         assert!(!outsider.current_state_entries.contains(&policy));
         assert!(!outsider.current_state_entries.iter().any(|row| matches!(
             row,
-            TypedCurrentRow::Value {
+            CurrentState::Value {
                 selector: CurrentSelector::Policy { .. },
                 ..
             }
@@ -3922,7 +3922,7 @@ mod tests {
             .is_err()
         );
         assert!(disclosed.current_state_entries.iter().any(|row| matches!(row,
-            TypedCurrentRow::Value { selector: CurrentSelector::MessageRevision { message_id }, .. }
+            CurrentState::Value { selector: CurrentSelector::MessageRevision { message_id }, .. }
                 if message_id==&MessageId::from_event_id(&event_id(0x33))
         )));
         assert!(

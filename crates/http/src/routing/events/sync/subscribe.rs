@@ -101,11 +101,11 @@ pub(super) async fn account_response(
     res: &mut Response,
     state: AppState,
     session: SessionIdentityState,
-    body: SyncRequestBody,
+    body: AccountSubscribeParameters,
     grant: Option<String>,
 ) {
     if let Some(token) = body
-        .realm_list
+        .realm_list_parameters
         .as_ref()
         .and_then(|request| request.after.as_ref())
         && let Err(error) = cursor::parse_realm_list_cursor(&state, &session, token.as_str()).await
@@ -604,7 +604,7 @@ pub(super) fn account_unauthorized_frame()
 pub(super) async fn account_read_inputs_current(
     state: &AppState,
     session: &SessionIdentityState,
-    body: &SyncRequestBody,
+    body: &AccountSubscribeParameters,
     wait_for: Option<&str>,
 ) -> Result<(), SyncCursorError> {
     if let Some(after) = body.after.as_deref() {
@@ -619,7 +619,7 @@ pub(super) async fn account_read_inputs_current(
         .await?;
     }
     if let Some(after) = body
-        .realm_list
+        .realm_list_parameters
         .as_ref()
         .and_then(|page| page.after.as_ref())
     {
@@ -773,11 +773,11 @@ pub(crate) async fn account_subscribe_notification_should_wake(
     false
 }
 
-fn account_subscribe_query(req: &mut Request) -> Result<SyncRequestBody, String> {
+fn account_subscribe_query(req: &mut Request) -> Result<AccountSubscribeParameters, String> {
     parse_account_subscribe_query(req.uri().query().unwrap_or_default())
 }
 
-fn parse_account_subscribe_query(query: &str) -> Result<SyncRequestBody, String> {
+fn parse_account_subscribe_query(query: &str) -> Result<AccountSubscribeParameters, String> {
     let mut values = BTreeMap::new();
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -785,7 +785,7 @@ fn parse_account_subscribe_query(query: &str) -> Result<SyncRequestBody, String>
         let value = decode_account_query_component(value)?;
         if !matches!(
             name.as_str(),
-            "after" | "catchup" | "filter" | "realm_list" | "replace_filter"
+            "after" | "catchup" | "filter" | "realm_list_parameters" | "replace_filter"
         ) {
             return Err(format!("unsupported account subscribe parameter {name}"));
         }
@@ -804,11 +804,11 @@ fn parse_account_subscribe_query(query: &str) -> Result<SyncRequestBody, String>
         })
         .transpose()?;
     let realm_list = values
-        .remove("realm_list")
+        .remove("realm_list_parameters")
         .map(|value| {
             require_canonical_query_object(&value)?;
             serde_json::from_str::<
-                arkret_models_collaboration::sync_frames::account_subscribe::RealmListRequest,
+                arkret_models_collaboration::sync_frames::account_subscribe::RealmListParameters,
             >(&value)
             .map_err(|error| format!("invalid Realm list request: {error}"))
         })
@@ -829,11 +829,11 @@ fn parse_account_subscribe_query(query: &str) -> Result<SyncRequestBody, String>
                 .map_err(|_| "invalid replace_filter boolean".to_owned())
         })
         .transpose()?;
-    let body = SyncRequestBody {
+    let body = AccountSubscribeParameters {
         after: values.remove("after"),
         catchup,
         filter,
-        realm_list,
+        realm_list_parameters: realm_list,
         replace_filter,
     };
     body.validate().map_err(|error| error.to_string())?;
@@ -1018,7 +1018,7 @@ fn account_reconnect_control_frame(
 fn account_subscribe_scope_key(
     req: &Request,
     session: Option<&SessionIdentityState>,
-    body: &SyncRequestBody,
+    body: &AccountSubscribeParameters,
 ) -> String {
     let filter_value = sync_filter_value(body.filter.as_ref());
     format!(
@@ -1079,7 +1079,7 @@ mod account_query_tests {
     #[test]
     fn closed_query_preserves_empty_interest_and_rejects_ambiguous_encodings() {
         let empty = parse_account_subscribe_query(
-            "filter=%7B%22realm_ids%22%3A%5B%5D%7D&realm_list=%7B%7D",
+            "filter=%7B%22realm_ids%22%3A%5B%5D%7D&realm_list_parameters=%7B%7D",
         )
         .unwrap();
         assert_eq!(empty.filter.unwrap().realm_ids, Some(Vec::new()));
@@ -1098,7 +1098,7 @@ mod account_query_tests {
             "filter=%7B%20%7D",
             "filter=%FF",
             "filter=%GG",
-            "realm_list=%7B%22limit%22%3A101%7D",
+            "realm_list_parameters=%7B%22limit%22%3A101%7D",
             "replace_filter=true",
         ] {
             assert!(parse_account_subscribe_query(query).is_err(), "{query}");

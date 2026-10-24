@@ -2,7 +2,7 @@
 //! read cut:
 //!
 //! - `GET  /_arkret/self/realms/{realm_id}/streams` (`ak.self.realm.read.streams.v1`)
-//! - `POST /_arkret/self/current-results/exact` (`ak.self.current_results.read.exact.v1`)
+//! - `POST /_arkret/self/current-state/exact` (`ak.self.current_state.read.exact.v1`)
 //! - `POST /_arkret/self/strands/watch/current` (`ak.self.strand.watch.read.current.v1`)
 //! - `POST /_arkret/self/media-service-bindings/query`
 //!   (`ak.self.media_service_binding.read.resolve.v1`)
@@ -12,7 +12,7 @@
 //! confirm fails closed with the registered unresolved code; absence is never
 //! inferred from a missing row, a snapshot omission or local Event order.
 
-use arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadRequestBody;
+use arkret_models_collaboration::exact_current_state::ExactCurrentStateReadRequestBody;
 use arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody;
 use arkret_models_identity::service_binding_results::MediaServiceBindingRequestBody;
 use arkret_wire::{AccountId, ErrorCode, ServiceOperationId};
@@ -27,7 +27,7 @@ mod stream_listing;
 pub(super) fn router() -> Router {
     Router::new()
         .push(Router::with_path("realms/{realm_id}/streams").get(stream_listing::realm_streams))
-        .push(Router::with_path("current-results/exact").post(exact_current_results))
+        .push(Router::with_path("current-state/exact").post(exact_current_state))
         .push(Router::with_path("strands/watch/current").post(strand_watch_current))
         .push(Router::with_path("strands/watch/audit-read").post(strand_watch_audit_read))
         .push(Router::with_path("media-service-bindings/query").post(media_service_binding))
@@ -97,28 +97,28 @@ fn render_unresolved(res: &mut Response, code: ErrorCode, operation: &str, reaso
     );
 }
 
-/// `ak.self.current_results.read.exact.v1`.
+/// `ak.self.current_state.read.exact.v1`.
 #[handler]
-async fn exact_current_results(req: &mut Request, depot: &Depot, res: &mut Response) {
+async fn exact_current_state(req: &mut Request, depot: &Depot, res: &mut Response) {
     let Some(state) = app_state(depot, res) else {
         return;
     };
     if let Ok(device) = depot
         .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
     ) {
-        return native_exact_current_results(state, device, req, res).await;
+        return native_exact_current_state(state, device, req, res).await;
     }
     let Some((session, account)) = authenticated_reader(
         state,
         req,
         res,
-        ServiceOperationId::SELF_CURRENT_RESULTS_READ_EXACT_V1,
+        ServiceOperationId::SELF_CURRENT_STATE_READ_EXACT_V1,
     )
     .await
     else {
         return;
     };
-    let Some(request) = parse_closed_body::<ExactCurrentResultsReadRequestBody>(req, res).await
+    let Some(request) = parse_closed_body::<ExactCurrentStateReadRequestBody>(req, res).await
     else {
         return;
     };
@@ -126,12 +126,12 @@ async fn exact_current_results(req: &mut Request, depot: &Depot, res: &mut Respo
         return crate::error::render_error_code(
             ErrorCode::SchemaViolation,
             res,
-            &format!("invalid exact current-result selector: {error}"),
+            &format!("invalid exact current-state selector: {error}"),
         );
     }
     let result = state
         .authority_commits()
-        .exact_current_result_for_account(&request, &account, &state.service_core_id())
+        .exact_current_state_for_account(&request, &account, &state.service_core_id())
         .await;
     match result {
         Ok(SelfExactCurrentRead::Answer(outcome)) => {
@@ -157,25 +157,25 @@ async fn exact_current_results(req: &mut Request, depot: &Depot, res: &mut Respo
         Ok(SelfExactCurrentRead::Unresolved(reason)) => render_unresolved(
             res,
             ErrorCode::RevisionUnavailable,
-            ServiceOperationId::SELF_CURRENT_RESULTS_READ_EXACT_V1,
+            ServiceOperationId::SELF_CURRENT_STATE_READ_EXACT_V1,
             reason,
         ),
         Err(error) => render_service_error(res, error),
     }
 }
 
-async fn native_exact_current_results(
+async fn native_exact_current_state(
     state: &AppState,
     device: &crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice,
     req: &mut Request,
     res: &mut Response,
 ) {
-    if device.operation != ServiceOperationId::SelfCurrentResultsReadExactV1
+    if device.operation != ServiceOperationId::SelfCurrentStateReadExactV1
         || device.authority.governance_service_id != state.service_core_id()
     {
         return not_found(res);
     }
-    let Some(request) = parse_closed_body::<ExactCurrentResultsReadRequestBody>(req, res).await
+    let Some(request) = parse_closed_body::<ExactCurrentStateReadRequestBody>(req, res).await
     else {
         return;
     };
@@ -188,11 +188,11 @@ async fn native_exact_current_results(
     }
     if &request.realm_id != device.metadata.effective_scope.realm_id()
         || matches!(request.selector,
-            arkret_models_collaboration::exact_current_results::ExactCurrentResultSelector::CapabilityGrant(_) | arkret_models_collaboration::exact_current_results::ExactCurrentResultSelector::AppletRegistration(_))
+            arkret_models_collaboration::exact_current_state::ExactCurrentStateSelector::CapabilityGrant(_) | arkret_models_collaboration::exact_current_state::ExactCurrentStateSelector::AppletRegistration(_))
     { return not_found(res); }
     let result = state
         .authority_commits()
-        .exact_current_result_for_actor(
+        .exact_current_state_for_actor(
             &request,
             &device.authority.actor_id,
             &state.service_core_id(),
@@ -362,7 +362,7 @@ async fn strand_watch_current(req: &mut Request, depot: &Depot, res: &mut Respon
         };
         use arkret_models_collaboration::strand_watch_operations::{
             PEER_STRAND_WATCH_CURRENT_PATH, STRAND_WATCH_CURRENT_MAX_BYTES,
-            StrandWatchCurrentOutcome,
+            StrandWatchCurrentResponseBody,
         };
         let response = match crate::routing::federation::outbox::signed_peer_request(
             state,
@@ -394,7 +394,8 @@ async fn strand_watch_current(req: &mut Request, depot: &Depot, res: &mut Respon
                 "governing Watch read is unresolved",
             );
         }
-        let outcome = match serde_json::from_slice::<StrandWatchCurrentOutcome>(&response.body) {
+        let outcome = match serde_json::from_slice::<StrandWatchCurrentResponseBody>(&response.body)
+        {
             Ok(outcome)
                 if outcome
                     .validate_for_generation(&request, authority.generation)
@@ -632,7 +633,7 @@ async fn strand_watch_audit_read(req: &mut Request, depot: &Depot, res: &mut Res
         return;
     };
     let Some(request) = parse_closed_body::<
-        arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
+        arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequestBody,
     >(req, res)
     .await
     else {
@@ -723,7 +724,7 @@ pub(super) async fn peer_strand_watch_audit_read(
         }
     };
     let Some(request) = parse_closed_body::<
-        arkret_models_collaboration::strand_watch_operations::PeerWatchAuditReadRequest,
+        arkret_models_collaboration::strand_watch_operations::PeerWatchAuditReadRequestBody,
     >(req, res)
     .await
     else {
@@ -780,8 +781,9 @@ async fn resolve_media_binding(
     state: &AppState,
     account: &AccountId,
     request: &MediaServiceBindingRequestBody,
-) -> coland_services::ServiceResult<Option<arkret_models_identity::MediaServiceBindingOutcome>> {
-    use arkret_models_identity::MediaServiceBindingOutcome;
+) -> coland_services::ServiceResult<Option<arkret_models_identity::MediaServiceBindingResponseBody>>
+{
+    use arkret_models_identity::MediaServiceBindingResponseBody;
     use coland_services::ServiceError;
     let unavailable =
         |detail: &str| ServiceError::Conflict(format!("temporarily_unavailable: {detail}"));
@@ -795,7 +797,7 @@ async fn resolve_media_binding(
     let (route, signing_keys, _) =
         super::media_service_binding::resolve_issuer(state, value).await?;
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let outcome = MediaServiceBindingOutcome {
+    let outcome = MediaServiceBindingResponseBody {
         request_id: request.request_id.clone(),
         realm_id: request.realm_id.clone(),
         route,

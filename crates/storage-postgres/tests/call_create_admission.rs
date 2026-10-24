@@ -23,7 +23,7 @@ struct ValueRow {
 
 async fn footprint(pool: &PgPool) -> Value {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT count(*) FROM canonical_events),'commits',(SELECT count(*) FROM realm_commits),'issuer_keys',(SELECT count(*) FROM call_participant_issuer_sources),'calls',(SELECT count(*) FROM call_state_current_results),'axes',(SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY realm_id,call_id,selector),'[]') FROM call_component_current_results t)) AS value")
+    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT count(*) FROM canonical_events),'commits',(SELECT count(*) FROM realm_commits),'issuer_keys',(SELECT count(*) FROM call_participant_issuer_sources),'calls',(SELECT count(*) FROM call_state_current_states),'axes',(SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY realm_id,call_id,selector),'[]') FROM call_component_current_states t)) AS value")
         .get_result::<ValueRow>(&mut *conn).await.unwrap().value
 }
 
@@ -47,7 +47,7 @@ async fn three_initial_states_derive_call_ids_and_exact_replay_preserves_current
         uow.commit_event(request.clone()).await.unwrap();
         assert_eq!(footprint(&pool).await, before);
         let mut conn = pool.get().await.unwrap();
-        let record = diesel::sql_query("SELECT jsonb_build_object('value',value,'source',source_stream_ref,'commit',current_commit_id,'position',current_stream_position,'create',create_event_id) AS value FROM call_state_current_results WHERE realm_id=$1 AND call_id=$2")
+        let record = diesel::sql_query("SELECT jsonb_build_object('value',value,'source',source_stream_ref,'commit',current_commit_id,'position',current_stream_position,'create',create_event_id) AS value FROM call_state_current_states WHERE realm_id=$1 AND call_id=$2")
             .bind::<Text,_>(discussion.realm_id().as_str())
             .bind::<Text,_>(arkret_wire::CallId::from_event_id(&request.authority_commit.event.event_id).as_str())
             .get_result::<ValueRow>(&mut *conn).await.unwrap().value;
@@ -83,7 +83,7 @@ async fn three_initial_states_derive_call_ids_and_exact_replay_preserves_current
             .unwrap()
             .expect("joined caller sees the accepted Call current");
         assert!(snapshot.current_state_entries.iter().any(|entry| matches!(entry,
-            arkret_wire::TypedCurrentRow::Value { selector: arkret_wire::CurrentSelector::CallState {call_id}, value, .. }
+            arkret_wire::CurrentState::Value { selector: arkret_wire::CurrentSelector::CallState {call_id}, value, .. }
             if call_id == &arkret_wire::CallId::from_event_id(&request.authority_commit.event.event_id)
                 && value == &json!({"from":null,"to":state}))));
         head = request;
@@ -217,7 +217,7 @@ async fn joined_account_needs_call_join_grant_and_other_station_cannot_borrow_it
     }
     let mut conn = pool.get().await.unwrap();
     let root = diesel::sql_query(
-        "SELECT authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1",
+        "SELECT authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm.as_str())
     .get_result::<RootRow>(&mut *conn)
@@ -232,7 +232,7 @@ async fn joined_account_needs_call_join_grant_and_other_station_cannot_borrow_it
         json!({"grant":{
         "schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":discussion.unit.transactions[0].event.actor_id,
         "subject":ActorId::account(member.clone()),"actions":["ak.call.join"],"resources":[{"kind":"realm","realm_id":realm}],
-        "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":root,"authority_generation":0}],
+        "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":root,"authority_generation":"0"}],
         "issued_at":arkret_canonical::format_timestamp_canonical(at)}}),
         at,
     );
@@ -469,7 +469,7 @@ async fn moderation_entries_retain_bans_kicks_and_guard_the_whole_axis() {
     let restored = restore(&kick.authority_commit.commit);
     uow.commit_event(restored.clone()).await.unwrap();
     let mut conn = pool.get().await.unwrap();
-    let value = diesel::sql_query("SELECT value FROM call_component_current_results WHERE realm_id=$1 AND call_id=$2 AND selector->>'kind'='call_moderation'")
+    let value = diesel::sql_query("SELECT value FROM call_component_current_states WHERE realm_id=$1 AND call_id=$2 AND selector->>'kind'='call_moderation'")
         .bind::<Text,_>(discussion.realm_id().as_str()).bind::<Text,_>(call_id.as_str())
         .get_result::<ValueRow>(&mut *conn).await.unwrap().value;
     let current: arkret_models_collaboration::events_payloads::call::CallModerationCurrentValue =
@@ -514,7 +514,7 @@ async fn moderation_entries_retain_bans_kicks_and_guard_the_whole_axis() {
         .unwrap()
         .expect("moderator receives the complete accepted current");
     assert!(snapshot.current_state_entries.iter().any(|row| matches!(row,
-        arkret_wire::TypedCurrentRow::Value {
+        arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::CallModeration { call_id: selected }, value, ..
         } if selected == &call_id && value == &serde_json::to_value(&current).unwrap()
     )));
@@ -549,7 +549,7 @@ async fn moderation_entries_retain_bans_kicks_and_guard_the_whole_axis() {
         );
         uow.commit_event(restore.clone()).await.unwrap();
         let mut conn = pool.get().await.unwrap();
-        let value = diesel::sql_query("SELECT value FROM call_component_current_results WHERE realm_id=$1 AND call_id=$2 AND selector->>'kind'='call_moderation'")
+        let value = diesel::sql_query("SELECT value FROM call_component_current_states WHERE realm_id=$1 AND call_id=$2 AND selector->>'kind'='call_moderation'")
             .bind::<Text,_>(discussion.realm_id().as_str()).bind::<Text,_>(call_id.as_str())
             .get_result::<ValueRow>(&mut *conn).await.unwrap().value;
         assert_eq!(value["entries"].as_array().unwrap().len(), 1);
@@ -618,7 +618,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
             principal_endpoint: &endpoint,
             local_id: "service",
             also_known_as: &[],
-            version_time: at - chrono::Duration::seconds(60),
+            version_created_at: at - chrono::Duration::seconds(60),
             did_key_fragment: Some("issuer"),
         },
         &[23; 32],
@@ -654,7 +654,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
             state: &rotated_state,
             current_update_seed: &inception.next_update_key_seed,
             next_update_public_key_multibase: &next_update_public,
-            version_time: at + chrono::Duration::seconds(2),
+            version_created_at: at + chrono::Duration::seconds(2),
         },
     )
     .unwrap();
@@ -718,7 +718,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
                 "actor_id":founder,"device_id":device,"focus_id":"direct-actor",
                 "participant_id":participant,"media":{"audio":true,"video":false,"screen":false},
                 "participant_binding":{"expires_at":arkret_canonical::format_timestamp_canonical(expires_at),
-                    "issuer_kid":issuer_kid,"sig":signature}
+                    "issuer_kid":issuer_kid,"signature":signature}
             }}}),
             at + chrono::Duration::seconds(i64::from(index)),
         );
@@ -857,7 +857,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
         let started = std::time::Instant::now();
         uow.commit_event(next.clone()).await.unwrap();
         let mut conn = pool.get().await.unwrap();
-        let value=diesel::sql_query("SELECT value FROM call_component_current_results WHERE realm_id=$1 AND call_id=$2 AND selector->>'kind'='call_roster'")
+        let value=diesel::sql_query("SELECT value FROM call_component_current_states WHERE realm_id=$1 AND call_id=$2 AND selector->>'kind'='call_roster'")
             .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(call_id.as_str()).get_result::<ValueRow>(&mut *conn).await.unwrap().value;
         let projected: arkret_models_collaboration::events_payloads::call::CallRosterCurrentValue =
             serde_json::from_value(value.clone()).unwrap();
@@ -956,7 +956,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
     );
     uow.commit_event(left.clone()).await.unwrap();
     let mut conn = pool.get().await.unwrap();
-    let retained=diesel::sql_query("SELECT jsonb_build_object('current',(SELECT value FROM call_component_current_results WHERE realm_id=$1 AND call_id=$2 AND selector->>'kind'='call_roster'),'original_keys',(SELECT count(*) FROM call_participant_issuer_sources WHERE realm_id=$1 AND call_id=$2)) AS value")
+    let retained=diesel::sql_query("SELECT jsonb_build_object('current',(SELECT value FROM call_component_current_states WHERE realm_id=$1 AND call_id=$2 AND selector->>'kind'='call_roster'),'original_keys',(SELECT count(*) FROM call_participant_issuer_sources WHERE realm_id=$1 AND call_id=$2)) AS value")
         .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(call_id.as_str()).get_result::<ValueRow>(&mut *conn).await.unwrap().value;
     assert_eq!(retained["current"]["entries"], json!([]));
     assert_eq!(
@@ -964,7 +964,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
         json!(left.authority_commit.commit)
     );
     assert_eq!(retained["original_keys"], json!(34));
-    let original_key=diesel::sql_query("SELECT jsonb_build_object('key',public_key_b64u,'history',issuer_history) AS value FROM call_participant_issuer_sources WHERE source_commit_id=$1")
+    let original_key=diesel::sql_query("SELECT jsonb_build_object('key',public_key_base64url,'history',issuer_history) AS value FROM call_participant_issuer_sources WHERE source_commit_id=$1")
         .bind::<Text,_>(joined.authority_commit.commit.commit_id.as_str()).get_result::<ValueRow>(&mut *conn).await.unwrap().value;
     assert_eq!(
         original_key["key"],

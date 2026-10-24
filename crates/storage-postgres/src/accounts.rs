@@ -73,7 +73,7 @@ impl AccountStore for PgAccountStore {
     async fn put(&self, record: &AccountRecord) -> PersistenceResult<AccountPk> {
         let mut conn = crate::pg_db(&self.pool);
         let payload = serde_json::json!({
-            "bio": record.bio,
+            "biography": record.biography,
             "avatar_blob_ref": record.avatar_blob_ref,
         });
         let row = sql_query(
@@ -764,9 +764,9 @@ impl TryFrom<AccountRow> for AccountRecord {
             station_id: row.station_id,
             localpart: row.localpart,
             display_name: row.display_name,
-            bio: row
+            biography: row
                 .payload
-                .get("bio")
+                .get("biography")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
             avatar_blob_ref: row

@@ -8,7 +8,7 @@ use arkret_models_collaboration::authority_commit::{
     AuditPairedEventUnitKind, AuditPairedEventUnitSubmission,
 };
 use arkret_models_collaboration::strand_watch_operations::{
-    StrandWatchCurrentOutcome, WatchAuditReadRequest,
+    StrandWatchCurrentResponseBody, WatchAuditReadRequestBody,
 };
 use arkret_wire::{ActorId, EventAdmissionSubmission, EventKind, ScopeRef};
 use coland_storage::{
@@ -49,7 +49,7 @@ async fn open(pool: &PgPool, seed: &str) -> ordinary_realm::Discussion {
             "issuer_id":actor, "subject":actor,
             "actions":["ak.strand.watch.set.others","ak.audit.accessed","ak.realm.notification.audit"],
             "resources":[{"kind":"realm","realm_id":realm,"match_scope":"realm_wide"}],"constraints":[],
-            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":realm.event_id(),"authority_generation":0}],
+            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":realm.event_id(),"authority_generation":"0"}],
             "issued_at":arkret_canonical::format_timestamp_canonical(discussion.committed_at())}}),
         discussion.committed_at(),
     );
@@ -172,7 +172,7 @@ async fn read(
         ordinary_realm::request_for_event(previous, event, discussion.committed_at()),
     )
     .await;
-    let request = WatchAuditReadRequest {
+    let request = WatchAuditReadRequestBody {
         audit_submission: EventAdmissionSubmission::new(event.authority_commit.event.clone()),
     };
     request.validate().unwrap();
@@ -329,7 +329,7 @@ async fn audit_read_freezes_never_written_and_replay_does_not_read_later_watch()
     };
     assert!(matches!(
         outcome.current,
-        StrandWatchCurrentOutcome::NeverWritten { .. }
+        StrandWatchCurrentResponseBody::NeverWritten { .. }
     ));
     assert_eq!(
         outcome.audit_commit,
@@ -386,7 +386,7 @@ async fn audit_read_freezes_written_current_and_revoked_permission_hides_replay(
     };
     assert!(matches!(
         outcome.current,
-        StrandWatchCurrentOutcome::Current { .. }
+        StrandWatchCurrentResponseBody::Current { .. }
     ));
     let grant_tx = &discussion.head.authority_commit;
     let revoke = ordinary_realm::event(
@@ -645,7 +645,7 @@ async fn independent_handoff_preserves_unit_fences_and_frozen_reads_and_rejects_
         },
         previous.event.actor_id.signing_principal_id(),
         &ordinary_realm::station(),
-        json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":previous.commit.commit_id,"new_governance_station_id":next}),
+        json!({"expected_governance_generation":"0","expected_realm_stream_commit_id":previous.commit.commit_id,"new_governance_station_id":next}),
         discussion.committed_at(),
     );
     let change = ordinary_realm::source_request(

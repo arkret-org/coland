@@ -92,7 +92,7 @@ impl ProjectionState {
     /// Apply an authority-root CAS transition. Owner transfer rotates the
     /// controller binding; authority reset advances the delegation generation.
     /// Governance-Station handoff is owned by the authority-commit service and
-    /// never reaches this typed-current-result helper.
+    /// never reaches this current-state helper.
     pub(crate) fn apply_realm_authority_transition(
         &mut self,
         operation: &Operation,
@@ -117,10 +117,14 @@ impl ProjectionState {
             .get("controller_epoch")
             .and_then(Value::as_u64)
             .unwrap_or_default();
-        let authority_generation = root
+        let Some(authority_generation) = root
             .get("authority_generation")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
+            .and_then(arkret_canonical::serde_helpers::parse_uint64_decimal_value)
+        else {
+            return ProjectionEffect::Rejected {
+                reason: "realm_authority_root_conflict".to_owned(),
+            };
+        };
         let mut root = match root {
             Value::Object(root) => root,
             _ => {
@@ -130,7 +134,7 @@ impl ProjectionState {
             }
         };
         // Both authority-root transitions compare-and-swap against the exact
-        // typed current result digest carried in their signature.
+        // current state digest carried in their signature.
         if operation.payload.get("realm_id").and_then(Value::as_str) != Some(realm_id.as_str()) {
             return ProjectionEffect::Rejected {
                 reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
@@ -220,7 +224,7 @@ impl ProjectionState {
                         reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
                     };
                 }
-                // Same JSON safe-integer ceiling as the transfer epoch; the
+                // Full-width authority generation exhaustion uses the
                 // registry note on this kind names `realm_authority_root_conflict`
                 // as the fail-closed verdict.
                 let Ok(successor_generation) =
@@ -234,7 +238,7 @@ impl ProjectionState {
                 };
                 root.insert(
                     "authority_generation".to_owned(),
-                    successor_generation.into(),
+                    successor_generation.to_string().into(),
                 );
                 root.insert(
                     "authority_event_ref".to_owned(),

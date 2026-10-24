@@ -95,7 +95,7 @@ fn leased_fixture_persistence_with_pool(
                     did: log.did.clone(),
                     did_document: log.operation["state"].clone(),
                     key_log_head: Some(log.event_digest.clone()),
-                    seq: log.seq,
+                    sequence: log.sequence,
                     method_evidence: serde_json::json!({"version_id":log.operation["versionId"]}),
                     fetched_at: now,
                     expires_at: now,
@@ -151,7 +151,7 @@ async fn seed_demo_data(store: &dyn PersistenceStore) {
                 .expect("demo Station id is canonical"),
             localpart: "alice".to_owned(),
             display_name: Some("Alice Example".to_owned()),
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: now,
         })
@@ -254,7 +254,7 @@ pub async fn app_state_with_persistence(
                 did: log.did.clone(),
                 did_document: log.operation["state"].clone(),
                 key_log_head: Some(log.event_digest.clone()),
-                seq: log.seq,
+                sequence: log.sequence,
                 method_evidence: serde_json::json!({"version_id":log.operation["versionId"]}),
                 fetched_at: now,
                 expires_at: now,
@@ -298,11 +298,11 @@ pub async fn app_state_with_persistence(
 pub fn fixture_content_bound_id(prefix: &str) -> String {
     use sha2::Digest as _;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let sequence = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut hasher = sha2::Sha256::new();
     hasher.update(b"coland:fixture-content-bound-id:v1:");
     hasher.update(prefix.as_bytes());
-    hasher.update(seq.to_be_bytes());
+    hasher.update(sequence.to_be_bytes());
     hasher.update(std::process::id().to_be_bytes());
     let digest: [u8; 32] = hasher.finalize().into();
     let event_id =
@@ -334,7 +334,7 @@ fn fixture_prepared_service_inception(
     rng_seed.update(b"coland:test-fixture-webvh-update:");
     rng_seed.update(config.public_base_url.as_bytes());
     let mut rng = rand_chacha::ChaCha20Rng::from_seed(rng_seed.finalize().into());
-    let version_time = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+    let version_created_at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
         .expect("fixture WebVH timestamp")
         .with_timezone(&chrono::Utc);
     arkret_signatures::webvh::prepare_service_inception_with_did_key_seed(
@@ -343,7 +343,7 @@ fn fixture_prepared_service_inception(
             principal_endpoint: &principal_endpoint.as_url(),
             local_id: "service",
             also_known_as: &[],
-            version_time,
+            version_created_at,
             did_key_fragment: Some("notary-key"),
         },
         &signing_seed,
@@ -361,7 +361,7 @@ fn fixture_service_webvh_log(
     coland_storage::WebvhLogRecord {
         event_digest,
         did: prepared.did.clone(),
-        seq: 1,
+        sequence: 1,
         operation: prepared.log_entry.clone(),
         created_at: chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
             .expect("fixture WebVH timestamp")

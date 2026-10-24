@@ -113,7 +113,7 @@ fn pairing_runtime_identity(
 pub(super) async fn submit_agent_runtime_key_request(
     body: JsonBody<AgentRuntimeApprovalRequestBody>,
     depot: &mut Depot,
-) -> JsonResult<AgentRuntimeApprovalOutcome> {
+) -> JsonResult<AgentRuntimeApprovalResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     body.validate()
@@ -319,7 +319,7 @@ pub(super) async fn submit_agent_runtime_key_request(
         account.account_id,
         state.service_core_id().clone(),
     ));
-    json_ok(AgentRuntimeApprovalOutcome {
+    json_ok(AgentRuntimeApprovalResponseBody {
         approval_request_id,
         status: agent_lifecycle_from_record(&stored),
     })
@@ -338,7 +338,7 @@ pub(super) async fn agent_runtime_key_request_status(
     body: JsonBody<AgentRuntimeApprovalStatusRequestBody>,
     depot: &mut Depot,
     res: &mut Response,
-) -> JsonResult<AgentRuntimeApprovalStatusOutcome> {
+) -> JsonResult<AgentRuntimeApprovalStatusResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     body.validate()
@@ -446,7 +446,7 @@ pub(super) async fn accepted_agent_key_authorization_snapshot(
     let mut lifecycle = None;
     let mut active = BTreeSet::new();
     for entry in &material.current_state_entries {
-        let arkret_wire::TypedCurrentRow::Value {
+        let arkret_wire::CurrentState::Value {
             selector, value, ..
         } = entry;
         match selector {
@@ -875,7 +875,7 @@ pub(super) fn agent_runtime_key_request_status_outcome(
     agent_record: &AgentPrincipalRecord,
     body: &AgentRuntimeApprovalStatusRequestBody,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<AgentRuntimeApprovalStatusOutcome, AppError> {
+) -> Result<AgentRuntimeApprovalStatusResponseBody, AppError> {
     let pairing_code = body.pairing_code.trim();
     if pairing_code.is_empty() {
         return Err(agent_pairing_not_found());
@@ -918,7 +918,7 @@ pub(super) fn agent_runtime_key_request_status_outcome(
     let authorized_event_ref =
         completed_binding.map(|binding| binding.authorized_event_ref.clone());
     let projection = agent_projection_from_record(agent_record, runtime_state);
-    Ok(AgentRuntimeApprovalStatusOutcome {
+    Ok(AgentRuntimeApprovalStatusResponseBody {
         lifecycle,
         runtime_state,
         readiness: projection.readiness,
@@ -951,7 +951,7 @@ pub(super) async fn agent_key_pair(
     body: JsonBody<AgentKeyPairRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AgentKeyPairOutcome> {
+) -> JsonResult<AgentKeyPairResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let service_authorized =
         agent_projection_service_authorized(state, req, PAIR_AGENT_KEY_SERVICE_OPERATION, true)
@@ -1084,7 +1084,7 @@ pub(super) async fn agent_key_pair(
             )
             .await?;
         }
-        return json_ok(AgentKeyPairOutcome {
+        return json_ok(AgentKeyPairResponseBody {
             activation_state: AgentKeyPairActivationState::Active,
             authorize_event_ref: body.authorize_event.event.event_id.clone(),
         });
@@ -1243,7 +1243,7 @@ pub(super) async fn agent_key_pair(
         .map_err(|err| AppError::internal(format!("authorize event id invalid: {err}")))?;
     // The Event is durable, but is intentionally not authorization state yet.
     // Accepted Seal processing reconciles the durable command automatically.
-    json_ok(AgentKeyPairOutcome {
+    json_ok(AgentKeyPairResponseBody {
         activation_state: AgentKeyPairActivationState::AwaitingSourceCommit,
         authorize_event_ref: authorized_event_ref,
     })

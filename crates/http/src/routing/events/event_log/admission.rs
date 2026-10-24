@@ -43,7 +43,7 @@ pub fn frozen_realm_check(realm_frozen: bool, kind: &str, payload: &Value) -> Op
 /// Validate a `ak.realm.policy_bundle` payload against the current media
 /// plaintext authorization dependency.
 ///
-/// When `media_service_decrypts=true`, the service must be explicitly
+/// When `media_service_decryption_allowed=true`, the service must be explicitly
 /// authorized for the `media_plaintext` data class.
 pub fn realm_policy_bundle_check(
     payload: &Value,
@@ -62,14 +62,14 @@ pub fn realm_policy_bundle_check(
 
     // Media plaintext access requires a separately accepted service binding.
     if payload
-        .get("media_service_decrypts")
+        .get("media_service_decryption_allowed")
         .and_then(Value::as_bool)
         == Some(true)
         && !media_plaintext_service_present
     {
         return Err((
             ErrorCode::FailedPrecondition,
-            "media_service_decrypts=true requires the SFU/MCU service DID \
+            "media_service_decryption_allowed=true requires the SFU/MCU service DID \
              to be listed in plaintext_visible_services[] with \
              data_classes[] containing media_plaintext"
                 .to_owned(),

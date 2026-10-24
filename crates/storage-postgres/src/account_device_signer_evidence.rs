@@ -130,7 +130,7 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
 
     async fn prepare_forward_request(
         &self,
-        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
         destination: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<Option<coland_storage::PreparedAccountDeviceForwardSource>> {
         let event = crate::managed_forward_source::event(request)?;
@@ -157,7 +157,7 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
 
     async fn retain_forward_request(
         &self,
-        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
     ) -> PersistenceResult<SignerEvidenceRef> {
         request.validate().map_err(|error| {
             PersistenceError::Conflict(format!(

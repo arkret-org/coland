@@ -22,7 +22,7 @@ struct Original {
     #[diesel(sql_type=Text)]
     issuer_kid: String,
     #[diesel(sql_type=Text)]
-    public_key_b64u: String,
+    public_key_base64url: String,
     #[diesel(sql_type=Nullable<Jsonb>)]
     issuer_history: Option<serde_json::Value>,
 }
@@ -77,7 +77,7 @@ async fn original(
     CallParticipantSigningKey,
     Option<AuthenticatedServiceResolution>,
 )> {
-    let retained=sql_query("SELECT issuer_kid,public_key_b64u,issuer_history FROM call_participant_issuer_sources WHERE realm_id=$1 AND call_id=$2 AND source_commit_id=$3")
+    let retained=sql_query("SELECT issuer_kid,public_key_base64url,issuer_history FROM call_participant_issuer_sources WHERE realm_id=$1 AND call_id=$2 AND source_commit_id=$3")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(call.as_str()).bind::<Text,_>(commit.commit_id.as_str())
         .get_result::<Original>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     let mut history = supplied.and_then(|v| v.issuer_history()).cloned();
@@ -92,13 +92,13 @@ async fn original(
             .map_err(unavailable)?;
         let key = native_key(kid, commit.committed_at, history.as_ref())?;
         if arkret_canonical::base64url_encode(key.ed25519_bytes().map_err(unavailable)?)
-            != retained.public_key_b64u
+            != retained.public_key_base64url
         {
             return Err(unavailable("retained historical key differs"));
         }
         return Ok((
             CallParticipantSigningKey {
-                public_key_b64u: retained.public_key_b64u,
+                public_key_base64url: retained.public_key_base64url,
             },
             history,
         ));
@@ -120,7 +120,7 @@ async fn original(
     let key = native_key(kid, commit.committed_at, history.as_ref())?;
     Ok((
         CallParticipantSigningKey {
-            public_key_b64u: arkret_canonical::base64url_encode(
+            public_key_base64url: arkret_canonical::base64url_encode(
                 key.ed25519_bytes().map_err(unavailable)?,
             ),
         },
@@ -141,8 +141,8 @@ async fn retain(
         .map(serde_json::to_value)
         .transpose()
         .map_err(unavailable)?;
-    let changed=sql_query("INSERT INTO call_participant_issuer_sources(realm_id,call_id,source_commit_id,issuer_kid,public_key_b64u,issuer_history) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(realm_id,call_id,source_commit_id) DO UPDATE SET source_commit_id=EXCLUDED.source_commit_id WHERE call_participant_issuer_sources.issuer_kid=EXCLUDED.issuer_kid AND call_participant_issuer_sources.public_key_b64u=EXCLUDED.public_key_b64u")
-        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(call.as_str()).bind::<Text,_>(commit.commit_id.as_str()).bind::<Text,_>(kid.as_str()).bind::<Text,_>(&key.public_key_b64u).bind::<Nullable<Jsonb>,_>(history)
+    let changed=sql_query("INSERT INTO call_participant_issuer_sources(realm_id,call_id,source_commit_id,issuer_kid,public_key_base64url,issuer_history) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(realm_id,call_id,source_commit_id) DO UPDATE SET source_commit_id=EXCLUDED.source_commit_id WHERE call_participant_issuer_sources.issuer_kid=EXCLUDED.issuer_kid AND call_participant_issuer_sources.public_key_base64url=EXCLUDED.public_key_base64url")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(call.as_str()).bind::<Text,_>(commit.commit_id.as_str()).bind::<Text,_>(kid.as_str()).bind::<Text,_>(&key.public_key_base64url).bind::<Nullable<Jsonb>,_>(history)
         .execute(&mut *conn).await.map_err(PersistenceError::database)?;
     if changed != 1 {
         return Err(unavailable(
@@ -165,8 +165,8 @@ pub(crate) async fn for_join(
         && verified
             .signing_key_for(event)
             .map_err(unavailable)?
-            .public_key_b64u
-            != key.public_key_b64u
+            .public_key_base64url
+            != key.public_key_base64url
     {
         return Err(unavailable(
             "accepted key differs from original native method",
@@ -177,7 +177,8 @@ pub(crate) async fn for_join(
     )
     .map_err(unavailable)?;
     let public = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
-        bytes: arkret_canonical::base64url_decode(&key.public_key_b64u).map_err(unavailable)?,
+        bytes: arkret_canonical::base64url_decode(&key.public_key_base64url)
+            .map_err(unavailable)?,
     };
     VerifiedCallParticipant::verify(event, &issuer, &public)
         .map_err(unavailable)?
@@ -220,8 +221,8 @@ pub(crate) async fn install_roster(
             if entry
                 .participant_signing_key
                 .as_ref()
-                .map(|key| &key.public_key_b64u)
-                != Some(&key.public_key_b64u)
+                .map(|key| &key.public_key_base64url)
+                != Some(&key.public_key_base64url)
             {
                 return Err(unavailable(
                     "Snapshot key differs from independent native method",

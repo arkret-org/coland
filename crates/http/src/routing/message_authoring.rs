@@ -125,7 +125,7 @@ mod tests {
     }
 
     /// Install the scope's accepted `mls_group` current directly.
-    async fn seed_group(state: &AppState, scope: &ScopeRef, value: arkret_wire::MlsGroupCurrent) {
+    async fn seed_group(state: &AppState, scope: &ScopeRef, value: arkret_wire::MlsGroupValue) {
         state
             .mls_groups()
             .seed_test_current(&coland_storage::MlsGroupCurrentRecord {
@@ -139,7 +139,7 @@ mod tests {
             .unwrap();
     }
 
-    async fn current_group(state: &AppState, scope: &ScopeRef) -> arkret_wire::MlsGroupCurrent {
+    async fn current_group(state: &AppState, scope: &ScopeRef) -> arkret_wire::MlsGroupValue {
         state
             .mls_groups()
             .current(scope)
@@ -154,7 +154,7 @@ mod tests {
         seed_group(
             state,
             scope,
-            arkret_wire::MlsGroupCurrent {
+            arkret_wire::MlsGroupValue {
                 effective_scope: scope.clone(),
                 genesis_event_ref: genesis.clone(),
                 cipher_suite: arkret_wire::NonEmptyString::new(
@@ -183,7 +183,7 @@ mod tests {
         seed_group(
             state,
             scope,
-            arkret_wire::MlsGroupCurrent {
+            arkret_wire::MlsGroupValue {
                 current_mls_commit_event_ref: commit.clone(),
                 epoch: current.epoch + 1,
                 ..current
@@ -198,7 +198,7 @@ mod tests {
         seed_group(
             state,
             scope,
-            arkret_wire::MlsGroupCurrent {
+            arkret_wire::MlsGroupValue {
                 current_key_access_revision: current.current_key_access_revision + 1,
                 ..current
             },

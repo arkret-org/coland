@@ -72,7 +72,7 @@ async fn assert_alias(app: &salvo::Service, did: &str, head: &str, entries: &[Va
     let resolved: Value = response.take_json().await.unwrap();
     assert_eq!(status, Some(StatusCode::OK), "{resolved}");
     assert_eq!(resolved["did_document"]["id"], head);
-    assert_eq!(resolved["seq"], entries.len());
+    assert_eq!(resolved["sequence"], entries.len());
     let mut response = TestClient::get("https://a.example/webvh/alice/did.json")
         .send(app)
         .await;
@@ -107,7 +107,7 @@ fn history_document(did: &str, entries: &[Value]) -> WebvhDocumentRecord {
         did: did.into(),
         did_document: entries.last().unwrap()["state"].clone(),
         key_log_head: Some(arkret_canonical::canonical_sha256(entries.last().unwrap()).unwrap()),
-        seq: entries.len() as u64,
+        sequence: entries.len() as u64,
         method_evidence: serde_json::to_value(ResolutionMethodHistoryEvidence::WebvhLog {
             boundary: ResolutionMethodEvidenceBoundary {
                 from_method_history_head: arkret_canonical::canonical_sha256(first).unwrap(),
@@ -153,7 +153,7 @@ async fn root_relocation_serves_current_and_historical_aliases_after_reopen_and_
         principal_endpoint: &endpoint,
         local_id: "alice",
         also_known_as: &[],
-        version_time: at,
+        version_created_at: at,
         root_seed: &[91; 32],
         next_root_public_key_multibase: &public(&[92; 32]),
         witness_policy: None,
@@ -180,7 +180,7 @@ async fn root_relocation_serves_current_and_historical_aliases_after_reopen_and_
             current_did: &current,
             target_did: target,
             previous_entries: &entries,
-            version_time: at + chrono::Duration::seconds(index as i64 + 1),
+            version_created_at: at + chrono::Duration::seconds(index as i64 + 1),
             current_update_seed: &[92 + index as u8; 32],
             next_update_public_key_multibase: &public(&[93 + index as u8; 32]),
             state: &document,
@@ -194,7 +194,7 @@ async fn root_relocation_serves_current_and_historical_aliases_after_reopen_and_
             let driver = tokio::spawn(driver);
             connection.batch_execute(
                 "CREATE FUNCTION refuse_relocation_document() RETURNS trigger LANGUAGE plpgsql AS $$ \
-                 BEGIN IF NEW.seq = 3 THEN RAISE EXCEPTION 'injected document failure'; END IF; RETURN NEW; END $$; \
+                 BEGIN IF NEW.sequence = 3 THEN RAISE EXCEPTION 'injected document failure'; END IF; RETURN NEW; END $$; \
                  CREATE TRIGGER refuse_relocation_document BEFORE INSERT OR UPDATE ON webvh_documents \
                  FOR EACH ROW EXECUTE FUNCTION refuse_relocation_document()"
             ).await.unwrap();
@@ -334,7 +334,7 @@ async fn root_relocation_serves_current_and_historical_aliases_after_reopen_and_
     let mut cache_only = history_document(&c, &entries);
     cache_only.did = unknown.clone();
     cache_only.did_document["id"] = json!(unknown);
-    cache_only.seq = 1_000;
+    cache_only.sequence = 1_000;
     destination.webvh().put_document(cache_only).await.unwrap();
     let poisoned_app = service(
         coland_test_support::app_state_with_persistence(
@@ -364,7 +364,7 @@ async fn root_relocation_serves_current_and_historical_aliases_after_reopen_and_
         current_did: &c,
         target_did: &inception.did,
         previous_entries: &entries,
-        version_time: at + chrono::Duration::seconds(3),
+        version_created_at: at + chrono::Duration::seconds(3),
         current_update_seed: &[94; 32],
         next_update_public_key_multibase: &public(&[95; 32]),
         state: &returned_state,
@@ -403,7 +403,7 @@ async fn root_relocation_serves_current_and_historical_aliases_after_reopen_and_
         current_did: &inception.did,
         target_did: &same_url_alias,
         previous_entries: &entries,
-        version_time: at + chrono::Duration::seconds(4),
+        version_created_at: at + chrono::Duration::seconds(4),
         current_update_seed: &[95; 32],
         next_update_public_key_multibase: &public(&[96; 32]),
         state: &same_url_state,

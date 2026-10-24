@@ -528,7 +528,7 @@ async fn admin_capabilities_accepted_rows_preserve_complete_subjects_and_revisio
         1,
     ))
     .unwrap();
-    let root = json!({"kind":"realm_root","realm_id":realm,"authority_event_ref":realm_event,"authority_generation":0});
+    let root = json!({"kind":"realm_root","realm_id":realm,"authority_event_ref":realm_event,"authority_generation":"0"});
     let revision = CurrentRevision {
         commit_id: commit.clone(),
         stream_position: 41,
@@ -556,7 +556,7 @@ async fn admin_capabilities_accepted_rows_preserve_complete_subjects_and_revisio
             value["revoked_at"] = json!("2026-10-14T00:01:00.000Z");
             value["revoked_by"] = json!(local);
         }
-        diesel::sql_query("INSERT INTO capability_grant_current_results
+        diesel::sql_query("INSERT INTO capability_grant_current_states
             (realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value,updated_at)
             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(grant.as_str())

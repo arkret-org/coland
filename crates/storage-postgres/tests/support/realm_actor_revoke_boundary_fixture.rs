@@ -11,8 +11,8 @@ async fn active_revoke_footprint(fixture: &Fixture) -> Value {
     let mut connection = fixture.pool.get().await.unwrap();
     for table in [
         "applet_installations",
-        "applet_registration_current_results",
-        "capability_grant_current_results",
+        "applet_registration_current_states",
+        "capability_grant_current_states",
         "applet_widget_tokens",
     ] {
         let row = diesel::sql_query(format!(
@@ -43,7 +43,7 @@ async fn active_revoke_device_submit(
         nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
     };
     let fingerprint = arkret_canonical::ed25519_pubkey_to_did_key_multibase(&authority.public_key);
-    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
         arkret_wire::EventAdmissionSubmission::new(event.clone()),
     );
     request.validate().unwrap();
@@ -65,7 +65,7 @@ pub(super) async fn run_active_revoke(
     candidate: &RealmActorCreatePayload,
     creation_commit: &arkret_wire::RealmCommit,
 ) {
-    use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+    use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
     assert!(matches!(candidate.creation_scope, ScopeRef::Realm { .. }));
     let store = PgAppletStore {
         pool: fixture.pool.clone(),
@@ -142,7 +142,7 @@ pub(super) async fn run_active_revoke(
         .admin_post(
             "/_arkret/self/events",
             arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-            &json!(SelfAuthoritySubmitRequest::Event(
+            &json!(SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(strand)
             )),
             None,
@@ -240,7 +240,7 @@ pub(super) async fn run_active_revoke(
         StatusCode::OK,
         "active runtime revoke preview: {preview}"
     );
-    let preview: AppletRevokePreviewOutcome = serde_json::from_value(preview).unwrap();
+    let preview: AppletRevokePreviewResponseBody = serde_json::from_value(preview).unwrap();
     assert_eq!(
         preview.revoke_plan.effective_scope,
         candidate.creation_scope
@@ -305,7 +305,7 @@ pub(super) async fn run_active_revoke(
         StatusCode::OK,
         "actual active runtime revoke: {response}"
     );
-    let outcome: AppletRevokeOutcome = serde_json::from_value(response).unwrap();
+    let outcome: AppletRevokeResponseBody = serde_json::from_value(response).unwrap();
     assert_eq!(
         outcome.status,
         AppletRevokeSagaStatus::Complete,
@@ -326,11 +326,11 @@ pub(super) async fn run_active_revoke(
     let historical_after = boxed_step(|| native_business_footprint(fixture)).await;
     for table in [
         "realm_actor_creations",
-        "realm_actor_current_results",
+        "realm_actor_current_states",
         "realm_actor_private_signer_facts",
         "principal_resolutions",
         "accounts",
-        "actor_profile_current_results",
+        "actor_profile_current_states",
     ] {
         assert_eq!(
             historical_after[table], historical_before[table],
@@ -396,7 +396,7 @@ pub(super) async fn run_active_revoke(
         "exact runtime revoke original: {replay}"
     );
     assert_eq!(
-        serde_json::from_value::<AppletRevokeOutcome>(replay).unwrap(),
+        serde_json::from_value::<AppletRevokeResponseBody>(replay).unwrap(),
         outcome
     );
     assert_eq!(

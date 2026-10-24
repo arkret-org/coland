@@ -1,7 +1,7 @@
 //! Activation of a pre-imported, planned authority migration. The wire body
 //! never substitutes for the complete private durable state transfer.
 
-use arkret_models_collaboration::authority_commit::AuthorityHandoffRequest;
+use arkret_models_collaboration::authority_commit::AuthorityRealmAuthorityHandoffRequestBody;
 use arkret_wire::{DetachedSignatureContext, RealmAuthorityHandoff};
 use coland_services::authority_commit::AuthenticatedPeerContext;
 use coland_services::{ServiceError, ServiceResult};
@@ -61,7 +61,9 @@ fn require_transferable_genesis(
     Ok(())
 }
 
-fn validate_handoff_admission(request: &AuthorityHandoffRequest) -> ServiceResult<()> {
+fn validate_handoff_admission(
+    request: &AuthorityRealmAuthorityHandoffRequestBody,
+) -> ServiceResult<()> {
     // Keep absent/invalid mandatory new-admission material a schema failure.
     request.handoff.validate_shape().map_err(refused)?;
     let entries = request
@@ -115,7 +117,7 @@ fn validate_handoff_admission(request: &AuthorityHandoffRequest) -> ServiceResul
 pub(crate) async fn install(
     state: &AppState,
     peer: &AuthenticatedPeerContext,
-    request: AuthorityHandoffRequest,
+    request: AuthorityRealmAuthorityHandoffRequestBody,
 ) -> ServiceResult<RealmAuthorityHandoff> {
     validate_handoff_admission(&request)?;
     let local = state.service_core_id();
@@ -201,7 +203,7 @@ pub(crate) async fn install(
     request
         .authority_bundle
         .validate_for_request(
-            &arkret_wire::AuthorityBundleRequest {
+            &arkret_wire::RealmAuthorityBundleRequestBody {
                 realm_id: request.handoff.realm_id.clone(),
                 nonce,
             },
@@ -289,7 +291,7 @@ async fn verify_uninventoried_producer(
     originals: &[arkret_wire::CommittedEventFullView],
 ) -> ServiceResult<()> {
     use arkret_models_identity::{
-        HistoricalSignerKeyQuerySender, SignerKeyQueryOutcome, SignerKeyQuerySelector,
+        HistoricalSignerKeyQuerySender, SignerKeyQuerySelector, SignerKeyResolution,
     };
     let event = &full.event;
     let producer = event
@@ -330,7 +332,7 @@ async fn verify_uninventoried_producer(
             .authority_commits()
             .historical_producer_signer_key(&event.realm_id, &selector)
             .await?;
-        let Some(SignerKeyQueryOutcome::HistoricalResolved {
+        let Some(SignerKeyResolution::HistoricalResolved {
             selector: actual,
             key,
             ..
@@ -346,7 +348,7 @@ async fn verify_uninventoried_producer(
             ));
         }
         key.validate().map_err(signature_refused)?;
-        arkret_canonical::base64url_decode(key.public_key_b64u.as_str().as_bytes())
+        arkret_canonical::base64url_decode(key.public_key_base64url.as_str().as_bytes())
             .map_err(signature_refused)?
     } else {
         crate::jws_verify::resolve_ed25519_pubkey_at(

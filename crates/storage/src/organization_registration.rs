@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use arkret_models_identity::{
     OrganizationRegistrationChallenge, OrganizationRegistrationChallengeRequestBody,
-    OrganizationRegistrationOutcome, OrganizationRegistrationScope, OrganizationRegistrationStatus,
-    next_organization_registration_generation, organization_registration_replay_outcome,
+    OrganizationRegistrationResponseBody, OrganizationRegistrationScope,
+    OrganizationRegistrationStatus, next_organization_registration_generation,
+    organization_registration_replay_outcome,
 };
 use arkret_wire::{Did, DidCoreId, Hash};
 use chrono::{DateTime, Utc};
@@ -110,7 +111,7 @@ impl OrganizationRegistrationStateRecord {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OrganizationRegistrationCurrent {
     pub generation: OrganizationRegistrationGenerationRecord,
-    pub outcome: OrganizationRegistrationOutcome,
+    pub outcome: OrganizationRegistrationResponseBody,
 }
 
 #[derive(Clone, Debug)]
@@ -121,7 +122,7 @@ pub struct OrganizationRegistrationEnsureCommit {
     /// Required only when the transition opens a new generation. Receipt
     /// signing and control-proof verification happen outside this storage
     /// owner; this layer validates only state bindings and immutability.
-    pub new_outcome: Option<OrganizationRegistrationOutcome>,
+    pub new_outcome: Option<OrganizationRegistrationResponseBody>,
     pub committed_at: DateTime<Utc>,
 }
 
@@ -131,7 +132,7 @@ pub struct OrganizationRegistrationRefreshCommit {
     pub canonical_request_digest: Hash,
     pub expected_current_generation: u64,
     pub expected_current_outcome_id: String,
-    pub outcome: OrganizationRegistrationOutcome,
+    pub outcome: OrganizationRegistrationResponseBody,
     pub committed_at: DateTime<Utc>,
 }
 
@@ -140,7 +141,7 @@ pub struct OrganizationRegistrationLifecycleCommit {
     pub organization_id: DidCoreId,
     pub expected_current_generation: u64,
     pub expected_current_outcome_id: String,
-    pub outcome: OrganizationRegistrationOutcome,
+    pub outcome: OrganizationRegistrationResponseBody,
     pub reason: OrganizationRegistrationTerminalReason,
     pub committed_at: DateTime<Utc>,
 }
@@ -171,17 +172,17 @@ pub trait OrganizationRegistrationStore: Send + Sync {
     async fn get_outcome(
         &self,
         outcome_id: &str,
-    ) -> PersistenceResult<Option<OrganizationRegistrationOutcome>>;
+    ) -> PersistenceResult<Option<OrganizationRegistrationResponseBody>>;
 
     async fn ensure(
         &self,
         commit: OrganizationRegistrationEnsureCommit,
-    ) -> PersistenceResult<OrganizationRegistrationOutcome>;
+    ) -> PersistenceResult<OrganizationRegistrationResponseBody>;
 
     async fn refresh(
         &self,
         commit: OrganizationRegistrationRefreshCommit,
-    ) -> PersistenceResult<OrganizationRegistrationOutcome>;
+    ) -> PersistenceResult<OrganizationRegistrationResponseBody>;
 
     async fn mark_stale(
         &self,
@@ -194,12 +195,12 @@ pub trait OrganizationRegistrationStore: Send + Sync {
     async fn revoke(
         &self,
         commit: OrganizationRegistrationLifecycleCommit,
-    ) -> PersistenceResult<OrganizationRegistrationOutcome>;
+    ) -> PersistenceResult<OrganizationRegistrationResponseBody>;
 
     async fn deactivate(
         &self,
         commit: OrganizationRegistrationLifecycleCommit,
-    ) -> PersistenceResult<OrganizationRegistrationOutcome>;
+    ) -> PersistenceResult<OrganizationRegistrationResponseBody>;
 }
 
 #[doc(hidden)]
@@ -221,9 +222,9 @@ pub fn validate_prepared_challenge(
 pub fn apply_organization_registration_ensure(
     challenge: &mut OrganizationRegistrationChallengeRecord,
     state: &mut Option<OrganizationRegistrationStateRecord>,
-    outcomes: &mut BTreeMap<String, OrganizationRegistrationOutcome>,
+    outcomes: &mut BTreeMap<String, OrganizationRegistrationResponseBody>,
     commit: OrganizationRegistrationEnsureCommit,
-) -> PersistenceResult<OrganizationRegistrationOutcome> {
+) -> PersistenceResult<OrganizationRegistrationResponseBody> {
     if challenge.challenge.challenge_id != commit.challenge_id {
         return Err(challenge_invalid("challenge id mismatch"));
     }
@@ -357,9 +358,9 @@ pub fn apply_organization_registration_ensure(
 pub fn apply_organization_registration_refresh(
     challenge: &mut OrganizationRegistrationChallengeRecord,
     state: &mut OrganizationRegistrationStateRecord,
-    outcomes: &mut BTreeMap<String, OrganizationRegistrationOutcome>,
+    outcomes: &mut BTreeMap<String, OrganizationRegistrationResponseBody>,
     commit: OrganizationRegistrationRefreshCommit,
-) -> PersistenceResult<OrganizationRegistrationOutcome> {
+) -> PersistenceResult<OrganizationRegistrationResponseBody> {
     if challenge.challenge.challenge_id != commit.challenge_id {
         return Err(challenge_invalid("challenge id mismatch"));
     }
@@ -427,7 +428,7 @@ pub fn apply_organization_registration_refresh(
 #[doc(hidden)]
 pub fn apply_organization_registration_stale(
     state: &mut OrganizationRegistrationStateRecord,
-    outcomes: &BTreeMap<String, OrganizationRegistrationOutcome>,
+    outcomes: &BTreeMap<String, OrganizationRegistrationResponseBody>,
     organization_id: &DidCoreId,
     expected_current_generation: u64,
     expected_current_outcome_id: &str,
@@ -467,10 +468,10 @@ pub fn apply_organization_registration_stale(
 #[doc(hidden)]
 pub fn apply_organization_registration_lifecycle(
     state: &mut OrganizationRegistrationStateRecord,
-    outcomes: &mut BTreeMap<String, OrganizationRegistrationOutcome>,
+    outcomes: &mut BTreeMap<String, OrganizationRegistrationResponseBody>,
     commit: OrganizationRegistrationLifecycleCommit,
     required_reason: Option<OrganizationRegistrationTerminalReason>,
-) -> PersistenceResult<OrganizationRegistrationOutcome> {
+) -> PersistenceResult<OrganizationRegistrationResponseBody> {
     state.validate()?;
     if state.organization_id != commit.organization_id {
         return Err(PersistenceError::NotFound(
@@ -569,7 +570,7 @@ fn validate_current_cas(
 }
 
 fn validate_new_generation_outcome(
-    outcome: &OrganizationRegistrationOutcome,
+    outcome: &OrganizationRegistrationResponseBody,
     challenge: &OrganizationRegistrationChallenge,
     state: Option<&OrganizationRegistrationStateRecord>,
 ) -> PersistenceResult<()> {
@@ -597,7 +598,7 @@ fn validate_new_generation_outcome(
 }
 
 fn validate_same_generation_outcome(
-    outcome: &OrganizationRegistrationOutcome,
+    outcome: &OrganizationRegistrationResponseBody,
     current: &OrganizationRegistrationGenerationRecord,
     required_status: OrganizationRegistrationStatus,
     required_created: bool,
@@ -621,8 +622,8 @@ fn validate_same_generation_outcome(
 }
 
 fn store_immutable_outcome(
-    outcomes: &mut BTreeMap<String, OrganizationRegistrationOutcome>,
-    outcome: &OrganizationRegistrationOutcome,
+    outcomes: &mut BTreeMap<String, OrganizationRegistrationResponseBody>,
+    outcome: &OrganizationRegistrationResponseBody,
 ) -> PersistenceResult<()> {
     let id = outcome.registration_receipt.registration_receipt_id.clone();
     if let Some(existing) = outcomes.get(&id) {
@@ -650,8 +651,8 @@ fn consume_challenge(
 
 fn consumed_outcome(
     challenge: &OrganizationRegistrationChallengeRecord,
-    outcomes: &BTreeMap<String, OrganizationRegistrationOutcome>,
-) -> PersistenceResult<OrganizationRegistrationOutcome> {
+    outcomes: &BTreeMap<String, OrganizationRegistrationResponseBody>,
+) -> PersistenceResult<OrganizationRegistrationResponseBody> {
     let id = challenge
         .consumed_outcome_id
         .as_deref()

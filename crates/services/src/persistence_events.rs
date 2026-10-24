@@ -406,7 +406,7 @@ impl crate::events::AppletPort for PersistenceEventReader {
         command: arkret_models_integration::AppletConfigurationCommand,
         current: &coland_storage::ManagementReviewCurrent,
         ingress: &coland_storage::AppletConfigurationIngress,
-    ) -> crate::ServiceResult<arkret_models_integration::AppletConfigurationOutcome> {
+    ) -> crate::ServiceResult<arkret_models_integration::AppletConfigurationResponseBody> {
         Ok(self
             .0
             .applets()
@@ -417,10 +417,10 @@ impl crate::events::AppletPort for PersistenceEventReader {
         &self,
         governor: &arkret_wire::DidCoreId,
         intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
-        source: &arkret_models_integration::AppletConfigurationExecutionOutcome,
+        source: &arkret_models_integration::AppletConfigurationExecutionResponseBody,
         producer: &coland_storage::AppletEventProducerGuard,
         current: &coland_storage::ManagementReviewCurrent,
-    ) -> crate::ServiceResult<arkret_models_integration::AppletConfigurationOutcome> {
+    ) -> crate::ServiceResult<arkret_models_integration::AppletConfigurationResponseBody> {
         Ok(self
             .0
             .applets()
@@ -852,10 +852,10 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
     async fn retain_realm_claim_source_result(
         &self,
         request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
-        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome,
+        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody,
         histories: &[arkret_models_identity::AuthenticatedServiceResolution],
         governor: &arkret_wire::DidCoreId,
-    ) -> crate::ServiceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome> {
+    ) -> crate::ServiceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody> {
         Ok(self
             .0
             .mls_key_packages()

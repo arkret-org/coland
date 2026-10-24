@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use arkret_identifiers::RealmId;
 use arkret_models_collaboration::governance::third_party_invite::{
-    ThirdPartyInviteAcceptanceAttestationOutcome, ThirdPartyInviteAcceptanceAttestationRequestBody,
+    ThirdPartyInviteAcceptanceAttestationRequestBody,
+    ThirdPartyInviteAcceptanceAttestationResponseBody,
 };
 use coland_storage::{PersistenceResult, PersistenceStore};
 
@@ -44,7 +45,7 @@ impl PersistenceHandle {
         producer: Option<&coland_storage::SelfProducerCommitGuard>,
         current: &coland_storage::ManagementReviewCurrent,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewResponseBody>
     {
         self.persistence
             .agents()
@@ -57,7 +58,7 @@ impl PersistenceHandle {
         request: &arkret_models_integration::management_review::ManagementReviewLookupRequestBody,
         current: &coland_storage::ManagementReviewCurrent,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewResponseBody>
     {
         self.persistence
             .agents()
@@ -93,7 +94,7 @@ impl PersistenceHandle {
         methods: &[coland_storage::ApprovalHistoricalMethod],
         current: &coland_storage::ManagementReviewCurrent,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewResponseBody>
     {
         self.persistence
             .agents()
@@ -163,8 +164,8 @@ impl PersistenceHandle {
         station: &arkret_wire::DidCoreId,
         request: &arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialRequestBody,
     ) -> PersistenceResult<
-        arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialOutcome,
-    > {
+        arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialResponseBody,
+    >{
         self.persistence
             .applets()
             .authority_material(applet, service, station, request)
@@ -281,7 +282,7 @@ impl PersistenceHandle {
     }
     pub async fn project_consent_effect_publication(
         &self,
-        request: &arkret_models_collaboration::consent_private::ConsentPrivateEffectsPublishRequest,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateEffectsPublishRequestBody,
         source: &arkret_wire::DidCoreId,
         receiver: &arkret_wire::DidCoreId,
         authority: &coland_storage::CurrentRealmAuthority,
@@ -295,8 +296,8 @@ impl PersistenceHandle {
 
     pub async fn observe_consent_private_cut(
         &self,
-        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
-        outcome: &arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequestBody,
+        outcome: &arkret_models_collaboration::consent_private::ConsentPrivateProxyResponseBody,
     ) -> PersistenceResult<()> {
         self.persistence
             .consent_current()
@@ -312,8 +313,9 @@ impl PersistenceHandle {
         acceptor: &arkret_wire::DidCoreId,
         quota: &arkret_wire::NewSourceQuotaConstraints,
         prepared: Option<&coland_storage::PreparedPrivateInviteDelivery>,
-    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateCommandOutcome>
-    {
+    ) -> PersistenceResult<
+        arkret_models_collaboration::consent_private::ConsentPrivateCommandResponseBody,
+    > {
         self.persistence
             .consent_current()
             .native_command(holder, context, command, acceptor, quota, prepared)
@@ -321,13 +323,14 @@ impl PersistenceHandle {
     }
     pub async fn consent_private_command_prepared(
         &self,
-        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequestBody,
         source: &arkret_wire::DidCoreId,
         acceptor: &arkret_wire::DidCoreId,
         quota: &arkret_wire::NewSourceQuotaConstraints,
         prepared: Option<&coland_storage::PreparedPrivateInviteDelivery>,
-    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome>
-    {
+    ) -> PersistenceResult<
+        arkret_models_collaboration::consent_private::ConsentPrivateProxyResponseBody,
+    > {
         self.persistence
             .consent_current()
             .private_command_prepared(request, source, acceptor, quota, prepared)
@@ -336,12 +339,13 @@ impl PersistenceHandle {
 
     pub async fn consent_private_command(
         &self,
-        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequestBody,
         source: &arkret_wire::DidCoreId,
         acceptor: &arkret_wire::DidCoreId,
         quota: &arkret_wire::NewSourceQuotaConstraints,
-    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome>
-    {
+    ) -> PersistenceResult<
+        arkret_models_collaboration::consent_private::ConsentPrivateProxyResponseBody,
+    > {
         self.persistence
             .consent_current()
             .private_command(request, source, acceptor, quota)
@@ -397,7 +401,7 @@ impl PersistenceHandle {
 
     pub async fn prepare_forward_request(
         &self,
-        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
         destination: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<Option<coland_storage::PreparedAccountDeviceForwardSource>> {
         self.persistence
@@ -407,7 +411,7 @@ impl PersistenceHandle {
     }
     pub async fn retain_forward_request(
         &self,
-        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
     ) -> PersistenceResult<arkret_wire::SignerEvidenceRef> {
         self.persistence
             .account_device_signer_evidence()
@@ -502,7 +506,7 @@ impl PersistenceHandle {
         owner: &arkret_wire::AccountId,
         realm_id: Option<&RealmId>,
     ) -> PersistenceResult<
-        Vec<arkret_models_collaboration::objects::read_receipts::ReadMarkerOutcome>,
+        Vec<arkret_models_collaboration::objects::read_receipts::ReadMarkerResponseBody>,
     > {
         self.persistence.read_cursors().list(owner, realm_id).await
     }
@@ -623,40 +627,40 @@ impl PersistenceHandle {
             .await
     }
 
-    /// Read the authoritative Relation current-result rows used by exact CAS.
+    /// Read the authoritative Relation current-state rows used by exact CAS.
     ///
     /// The returned records include both the complete materialized Relation
     /// and its accepting RealmCommit revision.  Keeping this behind the
     /// opaque application handle lets private read adapters observe the same
     /// durable truth as admission without exposing the storage registry.
-    pub async fn relation_current_results(
+    pub async fn relation_current_states(
         &self,
-    ) -> PersistenceResult<Vec<coland_storage::RelationCurrentResultRecord>> {
+    ) -> PersistenceResult<Vec<coland_storage::RelationCurrentStateRecord>> {
         self.persistence
-            .relation_current_results()
+            .relation_current_states()
             .snapshot_all()
             .await
     }
 
-    /// Read one Realm's authoritative Capability Grant current-result rows in
+    /// Read one Realm's authoritative Capability Grant current-state rows in
     /// a single storage snapshot. The HTTP effective-grants read derives both
     /// each canonical grant and its exact CAS revision from these same rows.
-    pub async fn capability_grant_current_results(
+    pub async fn capability_grant_current_states(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> PersistenceResult<Vec<coland_storage::CapabilityGrantCurrentResultRecord>> {
+    ) -> PersistenceResult<Vec<coland_storage::CapabilityGrantCurrentStateRecord>> {
         self.persistence
-            .capability_grant_current_results()
+            .capability_grant_current_states()
             .snapshot_for_realm(realm_id)
             .await
     }
 
     /// Every current Capability Grant of every Realm.
-    pub async fn all_capability_grant_current_results(
+    pub async fn all_capability_grant_current_states(
         &self,
-    ) -> PersistenceResult<Vec<coland_storage::CapabilityGrantCurrentResultRecord>> {
+    ) -> PersistenceResult<Vec<coland_storage::CapabilityGrantCurrentStateRecord>> {
         self.persistence
-            .capability_grant_current_results()
+            .capability_grant_current_states()
             .snapshot_all()
             .await
     }
@@ -665,9 +669,9 @@ impl PersistenceHandle {
     pub async fn active_capability_grants_for_subject(
         &self,
         subject: &arkret_wire::ActorId,
-    ) -> PersistenceResult<Vec<coland_storage::CapabilityGrantCurrentResultRecord>> {
+    ) -> PersistenceResult<Vec<coland_storage::CapabilityGrantCurrentStateRecord>> {
         self.persistence
-            .capability_grant_current_results()
+            .capability_grant_current_states()
             .active_for_subject(subject)
             .await
     }
@@ -680,7 +684,7 @@ impl PersistenceHandle {
         realm_id: Option<&arkret_wire::RealmId>,
     ) -> PersistenceResult<Vec<coland_storage::DirectedInviteCurrent>> {
         self.persistence
-            .invite_current_results()
+            .invite_current_states()
             .open_directed_invites_for_invitee(invitee, realm_id)
             .await
     }
@@ -694,9 +698,9 @@ impl PersistenceHandle {
         verification_method: &arkret_wire::DidUrl,
         observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
         sign: &coland_storage::InviteAcceptanceAttestationSigner<'_>,
-    ) -> PersistenceResult<ThirdPartyInviteAcceptanceAttestationOutcome> {
+    ) -> PersistenceResult<ThirdPartyInviteAcceptanceAttestationResponseBody> {
         self.persistence
-            .invite_current_results()
+            .invite_current_states()
             .third_party_invite_acceptance_attestation(
                 request,
                 caller,
@@ -714,7 +718,7 @@ impl PersistenceHandle {
         realm_id: Option<&arkret_wire::RealmId>,
     ) -> PersistenceResult<Vec<coland_storage::InviteCurrent>> {
         self.persistence
-            .invite_current_results()
+            .invite_current_states()
             .invites_in_realm(realm_id)
             .await
     }
@@ -726,7 +730,7 @@ impl PersistenceHandle {
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<coland_storage::AgentSessionAuthorityOutcome> {
         self.persistence
-            .capability_grant_current_results()
+            .capability_grant_current_states()
             .agent_session_authority(request, at)
             .await
     }
@@ -739,7 +743,7 @@ impl PersistenceHandle {
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<coland_storage::ActorRealmAuthorization> {
         self.persistence
-            .capability_grant_current_results()
+            .capability_grant_current_states()
             .actor_authorization(realm_id, actor, at)
             .await
     }
@@ -760,14 +764,19 @@ impl PersistenceHandle {
         &self,
         account_authority_id: &str,
         account_id: &arkret_wire::AccountId,
-        from_status_seq: u64,
+        from_status_sequence: u64,
         limit: u16,
     ) -> crate::ServiceResult<Vec<arkret_models_collaboration::account_status::AccountStatusRecord>>
     {
         Ok(self
             .persistence
             .account_status_replicas()
-            .resolve(account_authority_id, account_id, from_status_seq, limit)
+            .resolve(
+                account_authority_id,
+                account_id,
+                from_status_sequence,
+                limit,
+            )
             .await?)
     }
 
@@ -801,14 +810,14 @@ impl PersistenceHandle {
         &self,
         account_authority_id: &str,
         account_id: &arkret_wire::AccountId,
-        status_seq: u64,
+        status_sequence: u64,
     ) -> crate::ServiceResult<
         Option<arkret_models_collaboration::account_status::AccountStatusReceipt>,
     > {
         Ok(self
             .persistence
             .account_status_replicas()
-            .receipt(account_authority_id, account_id, status_seq)
+            .receipt(account_authority_id, account_id, status_sequence)
             .await?)
     }
 
@@ -1472,7 +1481,7 @@ impl PersistenceHandle {
     pub async fn admit_principal_resolution_update(
         &self,
         write: coland_storage::PrincipalResolutionUpdateWrite,
-    ) -> crate::ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
+    ) -> crate::ServiceResult<arkret_wire::AuthoritySubmitResponseBody> {
         Ok(self
             .persistence
             .principal_resolutions()
@@ -1531,7 +1540,7 @@ impl PersistenceHandle {
         &self,
         key: &arkret_models_identity::service_identity::ServiceRegistrationKey,
     ) -> crate::ServiceResult<
-        Option<arkret_models_identity::service_identity::ServiceRegistrationOutcome>,
+        Option<arkret_models_identity::service_identity::ServiceRegistrationResponseBody>,
     > {
         Ok(self
             .persistence
@@ -1574,7 +1583,7 @@ impl PersistenceHandle {
             .map(|record| DidLogEvent {
                 event_digest: record.event_digest,
                 did: record.did,
-                seq: record.seq,
+                sequence: record.sequence,
                 operation: record.operation,
                 created_at: record.created_at,
             })
@@ -1598,7 +1607,7 @@ impl PersistenceHandle {
             did: document.did,
             did_document: document.did_document,
             key_log_head: document.key_log_head,
-            seq: document.seq,
+            sequence: document.sequence,
             method_evidence: document.method_evidence,
             fetched_at: document.fetched_at,
             expires_at: document.expires_at,
@@ -1607,7 +1616,7 @@ impl PersistenceHandle {
         let event = coland_storage::WebvhLogRecord {
             event_digest: event.event_digest,
             did: event.did,
-            seq: event.seq,
+            sequence: event.sequence,
             operation: event.operation,
             created_at: event.created_at,
         };
@@ -1621,7 +1630,7 @@ impl PersistenceHandle {
     pub async fn commit_service_registration(
         &self,
         key: arkret_models_identity::service_identity::ServiceRegistrationKey,
-        outcome: arkret_models_identity::service_identity::ServiceRegistrationOutcome,
+        outcome: arkret_models_identity::service_identity::ServiceRegistrationResponseBody,
         document: DidDocumentState,
         event: DidLogEvent,
     ) -> crate::ServiceResult<ServiceRegistrationCommitResult> {
@@ -1629,7 +1638,7 @@ impl PersistenceHandle {
             did: document.did,
             did_document: document.did_document,
             key_log_head: document.key_log_head,
-            seq: document.seq,
+            sequence: document.sequence,
             method_evidence: document.method_evidence,
             fetched_at: document.fetched_at,
             expires_at: document.expires_at,
@@ -1638,7 +1647,7 @@ impl PersistenceHandle {
         let event = coland_storage::WebvhLogRecord {
             event_digest: event.event_digest,
             did: event.did,
-            seq: event.seq,
+            sequence: event.sequence,
             operation: event.operation,
             created_at: event.created_at,
         };
@@ -1672,7 +1681,7 @@ impl PersistenceHandle {
                 .expect("demo Station id is canonical"),
             localpart: "alice".to_owned(),
             display_name: Some("Alice Example".to_owned()),
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: now,
         };

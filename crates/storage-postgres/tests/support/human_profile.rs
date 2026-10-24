@@ -132,7 +132,7 @@ async fn admit_fixture_inner(pool: &PgPool, fixture: pcr_genesis::PcrGenesisFixt
         present: bool,
     }
     let present = diesel::sql_query(
-        "SELECT EXISTS (SELECT 1 FROM actor_profile_current_results p \
+        "SELECT EXISTS (SELECT 1 FROM actor_profile_current_states p \
          JOIN realm_commits c ON c.commit_id=p.current_commit_id \
          JOIN canonical_events e ON e.pk=c.event_pk \
          WHERE e.envelope->'actor_id'=$1 AND p.value->>'actor_kind'='user') AS present",

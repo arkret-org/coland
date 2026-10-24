@@ -76,7 +76,7 @@ async fn member_fact(
 ) -> PersistenceResult<Option<FactRow>> {
     sql_query("SELECT e.envelope->>'event_id' AS event_id,c.commit_id,c.stream_position,c.stream_ref, \
         m.value || jsonb_build_object('agent_controller_binding',e.envelope->'payload'->'agent_controller_binding') AS value \
-        FROM member_state_current_results m JOIN realm_commits c \
+        FROM member_state_current_states m JOIN realm_commits c \
           ON c.realm_id=m.realm_id AND c.commit_id=m.current_commit_id AND c.stream_position=m.current_stream_position \
         JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
         WHERE m.realm_id=$1 AND m.member_id=$2 AND m.value->>'membership'=m.membership \
@@ -93,7 +93,7 @@ pub(crate) async fn in_connection(
     sidecar: &SidecarId,
     controller: &AccountId,
 ) -> PersistenceResult<Option<SidecarParticipantAuthorityCut>> {
-    let owner = sql_query("SELECT s.controller_account_id,s.create_event_id FROM sidecar_current_results s \
+    let owner = sql_query("SELECT s.controller_account_id,s.create_event_id FROM sidecar_current_states s \
         JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id \
           AND c.stream_position=s.current_stream_position AND c.stream_ref=s.source_stream_ref \
         JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' AND e.kind='ak.sidecar.create' \
@@ -144,7 +144,7 @@ pub(crate) async fn in_connection(
     // a matching principal string in another Station's PCR is insufficient.
     let agents = sql_query("SELECT p.agent_id,p.value->>'principal_control_realm_id' AS principal_control_realm_id, \
         e.envelope->>'event_id' AS event_id,c.commit_id,c.stream_position,c.stream_ref \
-        FROM agent_provisioning_current_results p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id \
+        FROM agent_provisioning_current_states p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id \
         JOIN realm_commits c ON c.realm_id=p.realm_id AND c.commit_id=p.current_commit_id AND c.stream_position=p.current_stream_position \
         JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
         WHERE g.principal_id=$1 AND g.station_id=$2 AND p.value->>'controller_principal_id'=$1 AND p.realm_id=$3 \
@@ -168,7 +168,7 @@ pub(crate) async fn in_connection(
         remember(&ownership, &mut refs, &mut streams)?;
         let status = sql_query("SELECT e.envelope->>'event_id' AS event_id,c.commit_id,c.stream_position,c.stream_ref, \
             jsonb_build_object('state',s.value,'actor_id',s.actor_id) AS value \
-            FROM agent_status_current_results s JOIN realm_commits c \
+            FROM agent_status_current_states s JOIN realm_commits c \
               ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position \
             JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
             WHERE s.realm_id=$1 AND s.agent_id=$2")
@@ -202,7 +202,7 @@ pub(crate) async fn in_connection(
         }
         let keys = sql_query("SELECT e.envelope->>'event_id' AS event_id,c.commit_id,c.stream_position,c.stream_ref, \
             k.value || jsonb_build_object('key_id',k.agent_key_id) AS value \
-            FROM agent_key_current_results k JOIN realm_commits c \
+            FROM agent_key_current_states k JOIN realm_commits c \
               ON c.realm_id=k.realm_id AND c.commit_id=k.current_commit_id AND c.stream_position=k.current_stream_position \
             JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
             WHERE k.realm_id=$1 AND k.agent_id=$2 ORDER BY k.agent_key_id")
@@ -291,7 +291,7 @@ pub(crate) async fn in_connection(
     for stream in streams {
         let page = crate::authority_commit::stream_page_in_connection(
             conn,
-            &arkret_wire::StreamScanRequest {
+            &arkret_wire::StreamScanRequestBody {
                 realm_id: stream.realm_id().clone(),
                 stream_ref: stream.clone(),
                 direction: arkret_wire::StreamScanDirection::Before(None),
@@ -350,7 +350,7 @@ pub async fn read_access(
     Option<(
         SidecarParticipantAuthorityCut,
         Vec<DidCoreId>,
-        Option<arkret_wire::MlsGroupCurrent>,
+        Option<arkret_wire::MlsGroupValue>,
         bool,
     )>,
 > {
@@ -362,8 +362,8 @@ pub async fn read_access(
         #[derive(QueryableByName)]
         struct GroupValue { #[diesel(sql_type = Jsonb)] value: Value }
         let scope = arkret_wire::ScopeRef::Sidecar { realm_id: realm.clone(), sidecar_id: sidecar.clone() };
-        let key = crate::mls_group_current_results::scope_key(&scope)?;
-        let group = sql_query("SELECT g.value FROM mls_group_current_results g JOIN realm_commits c ON c.realm_id=g.realm_id \
+        let key = crate::mls_group_current_states::scope_key(&scope)?;
+        let group = sql_query("SELECT g.value FROM mls_group_current_states g JOIN realm_commits c ON c.realm_id=g.realm_id \
             AND c.commit_id=g.current_commit_id AND c.stream_position=g.current_stream_position \
             JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE g.scope_key=$1")
             .bind::<Text,_>(key).get_result::<GroupValue>(&mut *conn).await.optional()?
@@ -387,7 +387,7 @@ pub(crate) async fn controller_floor_in_connection(
     let Some(account) = caller.as_account_id() else {
         return Ok(None);
     };
-    let owner = sql_query("SELECT s.controller_account_id,s.create_event_id FROM sidecar_current_results s \
+    let owner = sql_query("SELECT s.controller_account_id,s.create_event_id FROM sidecar_current_states s \
         JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id \
         AND c.stream_position=s.current_stream_position AND c.stream_ref=s.source_stream_ref \
         JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' AND e.kind='ak.sidecar.create' \
@@ -415,7 +415,7 @@ pub(crate) async fn controller_floor_in_connection(
     };
     let first = crate::authority_commit::stream_page_in_connection(
         conn,
-        &arkret_wire::StreamScanRequest {
+        &arkret_wire::StreamScanRequestBody {
             realm_id: realm.clone(),
             stream_ref: stream,
             direction: arkret_wire::StreamScanDirection::After(None),
@@ -614,7 +614,7 @@ pub(crate) async fn locked_in_connection(
         .await
         .map_err(PersistenceError::database)?;
     let owned = sql_query(
-        "SELECT a.realm_id FROM realm_authorities a JOIN agent_provisioning_current_results p \
+        "SELECT a.realm_id FROM realm_authorities a JOIN agent_provisioning_current_states p \
         ON a.realm_id=p.value->>'principal_control_realm_id' WHERE p.realm_id=$1 \
         ORDER BY a.realm_id FOR SHARE OF a",
     )

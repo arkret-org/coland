@@ -2,7 +2,7 @@ use arkret_identifiers::EventId;
 #[cfg(test)]
 use arkret_models_integration::AppletTransactionStatus;
 use arkret_models_integration::applet_models::AppletEventTransactionRequestBody;
-use arkret_models_integration::{AppletEventRejection, AppletTransactionOutcome};
+use arkret_models_integration::{AppletEventRejection, AppletTransactionResponseBody};
 use arkret_wire::{CommittedEventRef, Event};
 use coland_http::error::AppError;
 use coland_services::events::{AppletTransactionReplayResult, AppletTransactionReplayState};
@@ -17,7 +17,7 @@ pub(super) async fn process_verified_transaction(
     transaction: AppletEventTransactionRequestBody,
     idempotency_key: &str,
     verified: VerifiedAppletServiceSignature,
-) -> Result<AppletTransactionOutcome, AppError> {
+) -> Result<AppletTransactionResponseBody, AppError> {
     let applet_id = transaction.applet_id.clone();
     let source_id = transaction.source_id.to_string();
     // applet-integration.md 7.3: a saturated inbound queue is a protocol
@@ -117,18 +117,18 @@ pub(super) async fn process_verified_transaction(
     }
 
     let outcome = if rejected.is_empty() {
-        AppletTransactionOutcome::Accepted {
+        AppletTransactionResponseBody::Accepted {
             committed_event_refs,
             rejections: rejected,
             retry_after_ms: None,
         }
     } else if rejected.len() == event_count {
-        AppletTransactionOutcome::Rejected {
+        AppletTransactionResponseBody::Rejected {
             rejections: rejected,
             retry_after_ms: None,
         }
     } else {
-        AppletTransactionOutcome::Partial {
+        AppletTransactionResponseBody::Partial {
             committed_event_refs,
             rejections: rejected,
             retry_after_ms: None,
@@ -189,7 +189,7 @@ async fn durable_transaction_event_ref(
 fn replayed_transaction_outcome(
     existing: AppletTransactionReplayState,
     verified: &VerifiedAppletServiceSignature,
-) -> Result<AppletTransactionOutcome, AppError> {
+) -> Result<AppletTransactionResponseBody, AppError> {
     let stored: arkret_models_integration::AppletDeliveryAuthenticationRecord =
         serde_json::from_value(existing.delivery_authentication_record.clone()).map_err(
             |error| AppError::internal(format!("stored delivery record is invalid: {error}")),
@@ -294,8 +294,10 @@ const QUEUE_FULL_RETRY_AFTER_MS: u64 = 1_000;
 
 /// Reject every event in the delivery for inbound backpressure, without
 /// consuming the idempotency identity.
-fn queue_full_outcome(transaction: &AppletEventTransactionRequestBody) -> AppletTransactionOutcome {
-    AppletTransactionOutcome::Rejected {
+fn queue_full_outcome(
+    transaction: &AppletEventTransactionRequestBody,
+) -> AppletTransactionResponseBody {
+    AppletTransactionResponseBody::Rejected {
         rejections: transaction
             .events
             .iter()

@@ -6,7 +6,7 @@ use arkret_models_collaboration::events_payloads::message::{
     ContentBlockKind, MessageCreatePayload,
 };
 use arkret_models_collaboration::events_payloads::poll::PollContentBlock;
-use arkret_models_collaboration::poll::{PollPartition, VerifiedPollResponse};
+use arkret_models_collaboration::poll::{PollPartition, VerifiedPollVote};
 use arkret_wire::{CommittedEventRef, Event, EventId, EventKind, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{Binary, Jsonb, Text};
@@ -135,7 +135,7 @@ pub(crate) async fn require_reply_and_mentions_in_connection(
             .map_err(|_| rejected("Reply target is not a Message id"))?;
         let (_, target_commit, _) =
             accepted_message(conn, event, &target.event_id(), commit).await?;
-        if crate::message_revision_current_results::message_is_redacted(
+        if crate::message_revision_current_states::message_is_redacted(
             conn,
             &event.realm_id,
             &target,
@@ -158,7 +158,7 @@ pub(crate) async fn require_reply_and_mentions_in_connection(
                     .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
             for mention in mentions {
                 let actor = arkret_wire::ActorId::account(mention.subject_account_id);
-                crate::moderation_report_current_results::ensure_scope_member(
+                crate::moderation_report_current_states::ensure_scope_member(
                     conn,
                     &event.realm_id,
                     &event.scope_ref,
@@ -256,7 +256,7 @@ pub(crate) async fn require_poll_content_in_connection(
     let (definition_event, definition_commit, definition_payload) =
         accepted_message(conn, event, &poll_id, commit).await?;
     require_reference_visibility(conn, event, &definition_commit).await?;
-    if crate::message_revision_current_results::message_is_redacted(
+    if crate::message_revision_current_states::message_is_redacted(
         conn,
         &event.realm_id,
         &response.poll_response.poll_ref,
@@ -306,12 +306,12 @@ pub(crate) async fn require_poll_content_in_connection(
         .into_iter()
         .map(|answer| answer.id)
         .collect::<BTreeSet<_>>();
-    VerifiedPollResponse::new(
+    VerifiedPollVote::new(
         partition,
         accepted_ref(commit),
         &response.poll_response.selections,
         &answers,
-        usize::try_from(definition.poll.max_selections)
+        usize::try_from(definition.poll.max_selection_count)
             .map_err(|_| rejected("Poll selection maximum is invalid"))?,
         payload.poll_response_heads.clone(),
         |id| heads.get(id).cloned(),

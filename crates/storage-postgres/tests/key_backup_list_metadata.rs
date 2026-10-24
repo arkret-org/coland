@@ -1,9 +1,9 @@
-//! `KeysBackupsList.backups[]` rows have the closed `backup_metadata` shape on
+//! `KeysBackupsPage.backups[]` rows have the closed `backup_metadata` shape on
 //! real PostgreSQL.
 //!
 //! `keys-operations.schema.json#/$defs/backup_metadata` is a closed allowlist
 //! projection of the signed envelope (key-management §7.6.1): the ciphertext,
-//! `domain_separation`, `contents`, `auth_data`, `plaintext_commitment`,
+//! `domain_separation`, `contents`, `signature_proof`, `plaintext_commitment`,
 //! `mixed_secret_storage`, `x_*` extensions and every `encryption` member other
 //! than `recipient_method` / `recipient_key_ref` are withheld. The initial
 //! schema generates the list row from the stored envelope, so every page row
@@ -14,7 +14,7 @@ mod support;
 use std::fs;
 use std::sync::OnceLock;
 
-use arkret_models_crypto::{BackupActiveSeriesPointer, KeyBackupSummary, KeysBackupsList};
+use arkret_models_crypto::{BackupActiveSeriesPointer, KeyBackupSummary, KeysBackupsPage};
 use arkret_schema::ProtocolSchemaRegistry;
 use arkret_schema_conformance::{default_spec_artifacts_dir, schema_registry_from_spec_artifacts};
 use arkret_wire::{AccountId, ActorId, DidCoreId};
@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 static TEST_POOL: OnceLock<PgPool> = OnceLock::new();
 
 const METADATA_SCHEMA: &str = "test:backup_metadata";
-const LIST_SCHEMA: &str = "test:keys_backups_list";
+const LIST_SCHEMA: &str = "test:keys_backups_page";
 const DIGEST: &str = "sha256:709e80c88487a2411e1ee4dfb9f22a861492d20c4765150c0c794abd70f8147c";
 const PRIOR_DIGEST: &str =
     "sha256:1111111111111111111111111111111111111111111111111111111111111111";
@@ -62,7 +62,7 @@ fn registry() -> ProtocolSchemaRegistry {
         .register_fragment(METADATA_SCHEMA, schema.clone(), "#/$defs/backup_metadata")
         .unwrap();
     registry
-        .register_fragment(LIST_SCHEMA, schema, "#/$defs/keys_backups_list")
+        .register_fragment(LIST_SCHEMA, schema, "#/$defs/keys_backups_page")
         .unwrap();
     registry
 }
@@ -75,7 +75,7 @@ fn account() -> AccountId {
     )
 }
 
-fn auth_data() -> Value {
+fn signature_proof() -> Value {
     json!({
         "device_id": DEVICE,
         "verification_method": "did:web:backup.example#device-signer",
@@ -90,7 +90,7 @@ fn genesis(id: &str, actor: &ActorId, series: &str) -> Value {
     json!({
         "backup_id": id, "actor_id": actor, "device_id": DEVICE,
         "backup_kind": "secret_storage", "backup_version": "kb_1",
-        "series_id": series, "series_seq": 0, "supersedes_id": null, "expires_at": null,
+        "series_id": series, "series_sequence": 0, "supersedes_id": null, "expires_at": null,
         "created_at": "2026-09-09T00:00:00.000Z",
         "encryption": {
             "recipient_method": "secret_storage_key", "recipient_key_ref": "backup-key",
@@ -101,7 +101,7 @@ fn genesis(id: &str, actor: &ActorId, series: &str) -> Value {
         "contents": [{"item_kind": "recovery_key_share", "secret_id": "share"}],
         "ciphertext": "AAAA", "ciphertext_digest": DIGEST,
         "plaintext_commitment": DIGEST,
-        "auth_data": auth_data(),
+        "signature_proof": signature_proof(),
         "x_client_hint": {"build": 7}
     })
 }
@@ -111,7 +111,7 @@ fn successor(id: &str, actor: &ActorId, series: &str, prior: &str) -> Value {
     json!({
         "backup_id": id, "actor_id": actor, "device_id": DEVICE,
         "backup_kind": "secret_storage", "backup_version": "kb_2",
-        "series_id": series, "series_seq": 1,
+        "series_id": series, "series_sequence": 1,
         "supersedes_id": prior, "supersedes_digest": PRIOR_DIGEST,
         "source_commit_ref": {
             "realm_commit_id": "ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4",
@@ -131,8 +131,8 @@ fn successor(id: &str, actor: &ActorId, series: &str, prior: &str) -> Value {
         "domain_separation": {"subdomain": "secret_storage"},
         "contents": [{"item_kind": "recovery_key_share", "secret_id": "share"}],
         "ciphertext": "BBBB", "ciphertext_digest": DIGEST,
-        "auth_data": auth_data(),
-        "retention": {"delete_after": null, "legal_hold": false}
+        "signature_proof": signature_proof(),
+        "retention": {"deletion_eligible_at": null, "legal_hold": false}
     })
 }
 
@@ -199,7 +199,7 @@ async fn stored_envelopes_list_as_the_closed_backup_metadata_projection() {
         json!({
             "backup_id": first, "actor_id": actor, "device_id": DEVICE,
             "backup_kind": "secret_storage", "backup_version": "kb_1",
-            "series_id": series, "series_seq": 0, "supersedes_id": null, "expires_at": null,
+            "series_id": series, "series_sequence": 0, "supersedes_id": null, "expires_at": null,
             "created_at": "2026-09-09T00:00:00.000Z", "ciphertext_digest": DIGEST,
             "encryption": {"recipient_method": "secret_storage_key", "recipient_key_ref": "backup-key"}
         })
@@ -209,7 +209,7 @@ async fn stored_envelopes_list_as_the_closed_backup_metadata_projection() {
         "domain_separation",
         "contents",
         "ciphertext",
-        "auth_data",
+        "signature_proof",
         "source_commit_ref",
         "recovery_policy_ref",
     ] {
@@ -235,10 +235,10 @@ async fn stored_envelopes_list_as_the_closed_backup_metadata_projection() {
     assert!(page.payloads[1].get("source_commit_ref").is_none());
     assert!(page.payloads[1].get("recovery_policy_ref").is_none());
 
-    // The whole page is the closed `KeysBackupsList`.
+    // The whole page is the closed `KeysBackupsPage`.
     let wire = list_page(&account, page.payloads.clone());
     registry.validate_value(LIST_SCHEMA, &wire).unwrap();
-    let list = serde_json::from_value::<KeysBackupsList>(wire).unwrap();
+    let list = serde_json::from_value::<KeysBackupsPage>(wire).unwrap();
     assert_eq!(list.backups.len(), 2);
     assert_eq!(
         list.active_series.secret_storage,
@@ -306,7 +306,7 @@ async fn list_row_is_generated_and_cannot_be_supplied_or_widened() {
         "ciphertext",
         "domain_separation",
         "contents",
-        "auth_data",
+        "signature_proof",
         "plaintext_commitment",
         "x_client_hint",
     ] {

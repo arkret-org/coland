@@ -1,6 +1,6 @@
 //! Service-owned dependency material; this read grants no business authority.
 use arkret_models_collaboration::applet_installation_authority::{
-    AppletAuthorityMaterialOutcome, AppletAuthorityMaterialRequestBody,
+    AppletAuthorityMaterialRequestBody, AppletAuthorityMaterialResponseBody,
 };
 use coland_http::error::AppError;
 use coland_http::result::{JsonResult, json_ok};
@@ -16,7 +16,7 @@ use crate::state::AppState;
 pub(super) async fn read(
     body: JsonBody<AppletAuthorityMaterialRequestBody>,
     depot: &mut Depot,
-) -> JsonResult<AppletAuthorityMaterialOutcome> {
+) -> JsonResult<AppletAuthorityMaterialResponseBody> {
     let verified = depot
         .remove_typed::<super::signature::VerifiedAppletAuthorityService>()
         .map_err(|_| AppError::unauthenticated("Applet Service signature missing"))?;

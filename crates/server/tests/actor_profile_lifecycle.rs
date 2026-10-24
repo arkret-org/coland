@@ -109,7 +109,7 @@ fn create_event(state: &AppState, fixture: &PcrGenesisFixture, name: &str) -> ar
             "principal_id": fixture.history.account.principal_id,
             "actor_kind": "user",
             "display_name": name,
-            "profile_fields": {"bio": "ships the reducer"}
+            "profile_fields": {"biography": "ships the reducer"}
         }}),
     )
 }
@@ -182,7 +182,7 @@ async fn create_and_update_share_one_profile_and_a_patch_is_a_delta() {
     assert_eq!(updated["profile"]["id"], json!(profile_id));
     assert_eq!(updated["profile"]["display_name"], "Alice C.");
     assert_eq!(
-        updated["profile"]["profile_fields"]["bio"], "ships the reducer",
+        updated["profile"]["profile_fields"]["biography"], "ships the reducer",
         "a patch is a delta: untouched members survive"
     );
     assert_eq!(updated["profile"]["updated_by"], json!(update.actor_id));
@@ -305,10 +305,11 @@ async fn an_authorized_co_member_resolves_the_exact_signed_profile_event() {
         }
     }
 
-    let request = arkret_models_identity::actor_profile_operations::ActorProfileResolveRequest::new(
-        shared,
-        vec![owner_actor.clone()],
-    );
+    let request =
+        arkret_models_identity::actor_profile_operations::ActorProfileResolveRequestBody::new(
+            shared,
+            vec![owner_actor.clone()],
+        );
     let mut response = TestClient::post("http://server/_arkret/self/actor-profiles/query")
         .add_header("authorization", format!("Bearer {reader_token}"), true)
         .add_header(
@@ -321,7 +322,7 @@ async fn an_authorized_co_member_resolves_the_exact_signed_profile_event() {
         .send(&service(state.clone()))
         .await;
     let status = response.status_code;
-    let outcome: arkret_models_identity::actor_profile_operations::ActorProfileResolveOutcome =
+    let outcome: arkret_models_identity::actor_profile_operations::ActorProfileResolveResponseBody =
         response.take_json().await.expect("resolve outcome");
     assert_eq!(status, Some(StatusCode::OK));
     arkret_models_collaboration::actor_profile_resolution::validate_actor_profile_resolve_outcome(
@@ -344,10 +345,11 @@ async fn pcr_cannot_be_used_as_actor_profile_relationship_selector() {
     let fixture = PcrGenesisFixture::new(state.service_did());
     let token = account_session(&state, &fixture).await;
     let actor = arkret_wire::ActorId::account(fixture.history.account.clone());
-    let request = arkret_models_identity::actor_profile_operations::ActorProfileResolveRequest::new(
-        pcr_of(&fixture),
-        vec![actor],
-    );
+    let request =
+        arkret_models_identity::actor_profile_operations::ActorProfileResolveRequestBody::new(
+            pcr_of(&fixture),
+            vec![actor],
+        );
     let mut response = TestClient::post("http://server/_arkret/self/actor-profiles/query")
         .add_header("authorization", format!("Bearer {token}"), true)
         .add_header(

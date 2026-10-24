@@ -29,7 +29,7 @@ pub(in crate::routing) async fn submit_event_value(
 /// a dedicated self operation.
 ///
 /// A kind enters only when it has a registered durable semantics and a guarded
-/// Event/RealmCommit/current-result unit of work at the current governing
+/// Event/RealmCommit/current-state unit of work at the current governing
 /// Station. `ak.self.moderation.report` (Realm scope) is the one such kind
 /// here. Everything else — including the actor-private `ak.read_cursor.advance`,
 /// which must never take a RealmCommit — stays closed with zero writes.
@@ -61,7 +61,7 @@ pub(in crate::routing) async fn submit_initial_event_submission(
     let outcome = crate::state::submit_self_moderation_report(state, session, submission)
         .await
         .map_err(guarded_unit_error)?;
-    let arkret_wire::AuthoritySubmitOutcome::Accepted { status, .. } = outcome else {
+    let arkret_wire::AuthoritySubmitResponseBody::Accepted { status, .. } = outcome else {
         return Err(SubmitOneError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal_error",
@@ -109,7 +109,7 @@ pub(in crate::routing) fn submit_applet_revoke_event_submission<'a>(
                 "Applet revoke effects require an exact Realm-scope CapabilityRevoke or MemberState Event",
             ));
         }
-        let request = arkret_wire::AuthoritySubmitRequest::Event(submission.clone());
+        let request = arkret_wire::AuthoritySubmitRequestBody::Event(submission.clone());
         let event_id = event.event_id.to_string();
         let outcome = state
             .authority()
@@ -123,7 +123,7 @@ pub(in crate::routing) fn submit_applet_revoke_event_submission<'a>(
                 format!("Applet revoke authority outcome is invalid: {error}"),
             )
         })?;
-        let arkret_wire::AuthoritySubmitOutcome::Accepted { status, .. } = outcome else {
+        let arkret_wire::AuthoritySubmitResponseBody::Accepted { status, .. } = outcome else {
             return Err(SubmitOneError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",

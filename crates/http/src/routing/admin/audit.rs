@@ -62,7 +62,7 @@ pub(super) fn ops_router() -> Router {
 }
 
 /// Operator view over durable `ak.audit.erasure_receipt` Events, including
-/// the canonical `fanout_status`. Receipts deliberately have no current-result
+/// the canonical `fanout_status`. Receipts deliberately have no current-state
 /// projection, so this endpoint derives its list from the immutable Event log.
 ///
 /// The endpoint is authentication-gated; reading the receipt list does

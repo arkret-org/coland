@@ -5,9 +5,9 @@ use arkret_models_crypto::{
     AcceptedSecurityTransactionStep as AcceptedStep, BackupObjectRef, BackupRotationBinding,
     BackupRotationKind, BackupRotationPlan, PreparedEventUnit,
     SecurityRotationRevokeCommandDecision, SecurityRotationRevokeCommandOutcome,
-    SecurityRotationRevokeProposal, SecurityRotationTransactionCreateRequest,
-    SecurityTransactionAcceptor, SecurityTransactionCreateRequest, SecurityTransactionPreparedPlan,
-    SecurityTransactionStep,
+    SecurityRotationRevokeProposal, SecurityRotationTransactionCreateRequestBody,
+    SecurityTransactionAcceptor, SecurityTransactionCreateRequestBody,
+    SecurityTransactionPreparedPlan, SecurityTransactionStep,
 };
 use arkret_wire::{ActorId, BackupSeriesId, CommittedEventRef, EventKind, Hash, TransactionId};
 use coland_storage::{
@@ -54,7 +54,7 @@ fn backup_value(
         "backup_version": "kb_1",
         "created_at": "2026-09-09T00:00:00.000Z",
         "series_id": series_id,
-        "series_seq": 0,
+        "series_sequence": 0,
         "encryption": {
             "recipient_method": "secret_storage_key",
             "recipient_key_ref": "backup-key",
@@ -64,7 +64,7 @@ fn backup_value(
         "contents": [{"item_kind": "recovery_key_share", "secret_id": label}],
         "ciphertext": "AAAA",
         "ciphertext_digest": test_hash(label),
-        "auth_data": {
+        "signature_proof": {
             "device_id": fixture.history.founding_device_id,
             "verification_method": fixture.history.device_verification_method,
             "signature_algorithm": "Ed25519",
@@ -77,7 +77,7 @@ fn backup_value(
         ed25519_dalek::SigningKey::from_bytes(&fixture.history.founding_device_signing_seed)
             .sign(&backup.signing_payload_bytes().unwrap())
             .to_bytes();
-    backup.auth_data.signature =
+    backup.signature_proof.signature =
         arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(signature)).unwrap();
     backup
 }
@@ -209,7 +209,7 @@ async fn erase_fixture() -> EraseFixture {
             ciphertext_digest: old_backup.ciphertext_digest.clone(),
         }],
     };
-    let create = SecurityRotationTransactionCreateRequest::from_prepared_rotations(
+    let create = SecurityRotationTransactionCreateRequestBody::from_prepared_rotations(
         TransactionId::new(format!("ak:transaction:{}", uuid::Uuid::now_v7())).unwrap(),
         account,
         fixture.history.founding_device_id.clone(),
@@ -244,7 +244,7 @@ async fn erase_fixture() -> EraseFixture {
     let prepared_plan =
         SecurityTransactionPreparedPlan::SecurityRotation(create.prepared_plan.clone());
     let (mut resource, canonical_request) =
-        SecurityTransactionCreateRequest::SecurityRotation(create)
+        SecurityTransactionCreateRequestBody::SecurityRotation(create)
             .into_initial_resource(prepared_plan, chrono::Utc::now())
             .unwrap();
     let now = chrono::Utc::now();
@@ -255,7 +255,7 @@ async fn erase_fixture() -> EraseFixture {
     resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
         proposal_event_id: revoke.event_id,
         covering_commit_id: pointer_commit.commit_id.clone(),
-        result: SecurityRotationRevokeCommandDecision::Accepted,
+        outcome: SecurityRotationRevokeCommandDecision::Accepted,
         decided_at: now,
     });
     resource.accepted_steps = (0..3)
@@ -335,10 +335,10 @@ async fn propose_authorizer_revocation(fixture: &mut EraseFixture) -> SecurityTr
         &authorize_event_id,
         "revocation-replacement",
     );
-    replacement.auth_data.device_id = fixture.revoker_id.clone();
-    replacement.auth_data.verification_method = fixture.revoker_verification_method.clone();
-    replacement.auth_data.device_authorize_event_id = authorize_event_id.clone();
-    replacement.auth_data.signature =
+    replacement.signature_proof.device_id = fixture.revoker_id.clone();
+    replacement.signature_proof.verification_method = fixture.revoker_verification_method.clone();
+    replacement.signature_proof.device_authorize_event_id = authorize_event_id.clone();
+    replacement.signature_proof.signature =
         arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
             ed25519_dalek::SigningKey::from_bytes(&fixture.revoker_signing_seed)
                 .sign(&replacement.signing_payload_bytes().unwrap())
@@ -380,7 +380,7 @@ async fn propose_authorizer_revocation(fixture: &mut EraseFixture) -> SecurityTr
         fixture.revoker_verification_method.clone(),
         fixture.revoker_signing_seed,
     );
-    let request = SecurityRotationTransactionCreateRequest::from_prepared_rotations(
+    let request = SecurityRotationTransactionCreateRequestBody::from_prepared_rotations(
         TransactionId::new(format!("ak:transaction:{}", uuid::Uuid::now_v7())).unwrap(),
         account,
         fixture.revoker_id.clone(),
@@ -423,9 +423,10 @@ async fn propose_authorizer_revocation(fixture: &mut EraseFixture) -> SecurityTr
     )
     .unwrap();
     let plan = SecurityTransactionPreparedPlan::SecurityRotation(request.prepared_plan.clone());
-    let (initial, canonical_request) = SecurityTransactionCreateRequest::SecurityRotation(request)
-        .into_initial_resource(plan, covering.committed_at)
-        .unwrap();
+    let (initial, canonical_request) =
+        SecurityTransactionCreateRequestBody::SecurityRotation(request)
+            .into_initial_resource(plan, covering.committed_at)
+            .unwrap();
     let transaction_id = initial.transaction_id.clone();
     let transactions = persistence.security_transactions();
     transactions
@@ -484,7 +485,7 @@ async fn accept_authorizer_revocation(
     accepted.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
         proposal_event_id: proposal.proposal_event_id,
         covering_commit_id: proposal.covering_commit_id,
-        result: SecurityRotationRevokeCommandDecision::Accepted,
+        outcome: SecurityRotationRevokeCommandDecision::Accepted,
         decided_at,
     });
     persistence

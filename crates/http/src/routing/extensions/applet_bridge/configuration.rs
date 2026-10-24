@@ -1,10 +1,12 @@
 //! Account ingress and the governing Station's private configuration execution.
 use arkret_models_integration::{
     AppletConfigurationAdmissionStatus as Admission, AppletConfigurationCommand as Command,
-    AppletConfigurationExecutionIntent as Intent, AppletConfigurationExecutionRequest as Execution,
-    AppletConfigurationOutcome as Outcome, AppletConfigurationPeerRequest as PeerRequest,
-    AppletConfigurationRequest as ConfigurationRequest, AppletConfigurationSignature,
-    AppletEndpointAuth, AppletEndpointMethod,
+    AppletConfigurationExecutionIntent as Intent,
+    AppletConfigurationExecutionRequestBody as Execution,
+    AppletConfigurationPeerRequestBody as PeerRequest,
+    AppletConfigurationRequestBody as ConfigurationRequest,
+    AppletConfigurationResponseBody as Outcome, AppletConfigurationSignature, AppletEndpointAuth,
+    AppletEndpointMethod,
 };
 use arkret_wire::{AccountId, ActorId, AppletId, CommittedEventRef, ServiceOperationId};
 use coland_http::error::AppError;
@@ -270,7 +272,7 @@ async fn route(
     }
     let outcome: Outcome = serde_json::from_slice(&response.body).map_err(unavailable)?;
     if outcome.request_id != peer.request.intent.request_id
-        || outcome.source_outcome.as_ref().is_some_and(|source| {
+        || outcome.source_response_body.as_ref().is_some_and(|source| {
             source.request_id != outcome.request_id || source.intent_digest != outcome.intent_digest
         })
     {
@@ -365,7 +367,7 @@ async fn govern(
         .any(|endpoint| {
             endpoint.path == "/_arkret/edge/applet/configuration"
                 && endpoint.method == AppletEndpointMethod::Post
-                && endpoint.auth == Some(AppletEndpointAuth::WebhookSignature)
+                && endpoint.authentication_kind == Some(AppletEndpointAuth::WebhookSignature)
         })
     {
         return Err(AppError::capability_denied(
@@ -585,7 +587,7 @@ async fn govern(
     .ok_or_else(|| unavailable("current Service authority absent"))?;
     let digest = arkret_wire::Hash::new(
         arkret_canonical::canonical_sha256(
-            &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::Event(
+            &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
                 submission,
             ),
         )

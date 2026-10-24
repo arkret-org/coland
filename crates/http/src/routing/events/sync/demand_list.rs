@@ -39,7 +39,7 @@ fn visible_item(row: &coland_storage::AccountSummaryVersion) -> Option<RealmList
 pub(crate) async fn read(
     state: &AppState,
     session: &SessionIdentityState,
-    body: &SyncRequestBody,
+    body: &AccountSubscribeParameters,
     after: &SyncCursor,
 ) -> Result<AccountSummaryDelta, global_channels::GlobalReadError> {
     let actor =
@@ -52,8 +52,8 @@ pub(crate) async fn read(
     let mut position = after.account_summary_position;
     let mut page = None;
     let mut initial_global_snapshot = None;
-    if initial || body.realm_list.is_some() {
-        let request = body.realm_list.clone().unwrap_or_default();
+    if initial || body.realm_list_parameters.is_some() {
+        let request = body.realm_list_parameters.clone().unwrap_or_default();
         request.validate().map_err(|e| e.to_string())?;
         let frozen = if let Some(token) = &request.after {
             cursor::parse_realm_list_cursor(state, session, token.as_str())
@@ -152,7 +152,7 @@ pub(crate) async fn read(
     }
     // Read a lower bound before scanning. When the bounded scan is exhausted,
     // every summary revision through this cut was considered, including holes
-    // created by current-result publications in the shared revision domain.
+    // created by current-state publications in the shared revision domain.
     let observed_cut = state
         .sync()
         .account_summary_watermark()

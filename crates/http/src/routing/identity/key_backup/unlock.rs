@@ -3,7 +3,7 @@ use super::*;
 fn key_backup_untrusted_signature() -> AppError {
     crate::app_error!(
         SignatureInvalid,
-        "key backup auth_data.signature is not anchored to the actor device trust root",
+        "key backup signature_proof.signature is not anchored to the actor device trust root",
     )
     .with_reason_code("untrusted_backup_signature")
 }
@@ -11,7 +11,7 @@ fn key_backup_untrusted_signature() -> AppError {
 /// key-management.md §7.4.1 (normative): a device signature alone cannot defend
 /// against a malicious/compromised server injecting or substituting a backup
 /// envelope signed by a revoked old device key. Before a receiver trusts an
-/// envelope, it anchors `auth_data.signature` to the accepted
+/// envelope, it anchors `signature_proof.signature` to the accepted
 /// `ak.device.authorize` event for the device.
 pub(super) async fn anchor_key_backup_auth_data_trust_root(
     state: &AppState,
@@ -19,7 +19,7 @@ pub(super) async fn anchor_key_backup_auth_data_trust_root(
     backup: &Value,
 ) -> Result<(), AppError> {
     let auth = backup
-        .get("auth_data")
+        .get("signature_proof")
         .and_then(Value::as_object)
         .ok_or_else(key_backup_untrusted_signature)?;
     let device_id = auth
@@ -249,7 +249,7 @@ pub(super) async fn verify_key_backup_unlock_proof(
             "unlock service, audience or issuance mismatch",
         ));
     }
-    let method = typed.auth_data.verification_method.as_str();
+    let method = typed.signature_proof.verification_method.as_str();
     let key = match &typed.authority {
         KeyBackupUnlockAuthority::CurrentDevice {
             challenge_id,
@@ -384,7 +384,7 @@ pub(super) async fn verify_key_backup_unlock_proof(
     // cannot become an unlock authority even when their signature is valid.
     enforce_unlock_signer_admission(&key, method)?;
     let signature = URL_SAFE_NO_PAD
-        .decode(typed.auth_data.signature.as_str())
+        .decode(typed.signature_proof.signature.as_str())
         .map_err(|_| AppError::capability_denied("invalid unlock signature"))?;
     let signature = Signature::from_slice(&signature)
         .map_err(|_| AppError::capability_denied("invalid unlock signature"))?;

@@ -64,7 +64,7 @@ mod tests {
                         "kind": "realm_root",
                         "realm_id": "ak:realm:AcnJ4V0xcEtprkV1EojkpKLTdP6Jene1sZpnjB6IqB8I",
                         "authority_event_ref": "ak:event:AcnJ4V0xcEtprkV1EojkpKLTdP6Jene1sZpnjB6IqB8I",
-                        "authority_generation": 0
+                        "authority_generation": "0"
                     }]
                 }
             }

@@ -256,9 +256,9 @@ pub(crate) async fn admit_in_connection(
         .get_result::<QuotaCountRow>(&mut *conn)
         .await
         .map_err(PersistenceError::database)?;
-        if u64::try_from(counts.window_count).unwrap_or(u64::MAX) >= quota.new_sources_per_window
+        if u64::try_from(counts.window_count).unwrap_or(u64::MAX) >= quota.source_count_per_window
             || u64::try_from(counts.retention_count).unwrap_or(u64::MAX)
-                >= quota.new_sources_per_retention
+                >= quota.source_count_per_retention
         {
             return Ok(ConsentRequestQuarantineOutcome::Dropped);
         }

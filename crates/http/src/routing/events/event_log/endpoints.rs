@@ -1,5 +1,5 @@
 use arkret_models_collaboration::event_query::{
-    EventDeliveryStatusOutcome, EventDeliveryStatusRequestBody,
+    EventDeliveryStatusRequestBody, EventDeliveryStatusResponseBody,
 };
 use coland_storage::MemberCommittedEventRead;
 
@@ -160,7 +160,7 @@ async fn event_delivery_status(
     body: JsonBody<EventDeliveryStatusRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<EventDeliveryStatusOutcome> {
+) -> JsonResult<EventDeliveryStatusResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     super::super::require_agent_session_scope(
@@ -215,7 +215,7 @@ async fn event_delivery_status(
         }
     }
     let targets = targets.into_values().collect::<Vec<_>>();
-    let outcome = EventDeliveryStatusOutcome {
+    let outcome = EventDeliveryStatusResponseBody {
         event_id: body.event_id,
         targets,
     };

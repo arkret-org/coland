@@ -5,8 +5,8 @@
 mod ordinary_realm;
 
 use arkret_wire::{
-    CircleId, CommitStreamRef, CurrentSelector, EventKind, MessageId, ScopeRef, StrandId,
-    TypedCurrentRow,
+    CircleId, CommitStreamRef, CurrentSelector, CurrentState, EventKind, MessageId, ScopeRef,
+    StrandId,
 };
 use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, EventCommitRequest, EventCommitUnitOfWork,
@@ -37,8 +37,8 @@ async fn counts(pool: &PgPool) -> (i64, i64, i64, i64, i64) {
     let row = diesel::sql_query(
         "SELECT (SELECT count(*) FROM canonical_events) AS events, \
         (SELECT count(*) FROM realm_commits) AS commits, \
-        (SELECT count(*) FROM strand_current_results) AS strands, \
-        (SELECT count(*) FROM message_revision_current_results) AS messages, \
+        (SELECT count(*) FROM strand_current_states) AS strands, \
+        (SELECT count(*) FROM message_revision_current_states) AS messages, \
         (SELECT count(*) FROM poll_response_inputs) AS votes",
     )
     .get_result::<Counts>(&mut *conn)
@@ -204,7 +204,7 @@ async fn circle_strand_and_plaintext_poll_require_exact_scope_and_current_member
     // a Circle-scoped Strand current during process restart.
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "UPDATE strand_current_results SET current_commit_id=$2,current_stream_position=$3 WHERE strand_id=$1",
+        "UPDATE strand_current_states SET current_commit_id=$2,current_stream_position=$3 WHERE strand_id=$1",
     )
     .bind::<diesel::sql_types::Text, _>(strand_id.as_str())
     .bind::<diesel::sql_types::Text, _>(create.authority_commit.commit.commit_id.as_str())
@@ -220,7 +220,7 @@ async fn circle_strand_and_plaintext_poll_require_exact_scope_and_current_member
             .is_err()
     );
     diesel::sql_query(
-        "UPDATE strand_current_results SET current_commit_id=$2,current_stream_position=$3 WHERE strand_id=$1",
+        "UPDATE strand_current_states SET current_commit_id=$2,current_stream_position=$3 WHERE strand_id=$1",
     )
     .bind::<diesel::sql_types::Text, _>(strand_id.as_str())
     .bind::<diesel::sql_types::Text, _>(strand.authority_commit.commit.commit_id.as_str())
@@ -249,7 +249,7 @@ async fn circle_strand_and_plaintext_poll_require_exact_scope_and_current_member
             .current_state_entries
             .iter()
             .any(|row| matches!(row,
-                TypedCurrentRow::Value {
+                CurrentState::Value {
                     selector: CurrentSelector::Strand { strand_id: subject },
                     source_stream_ref,
                     ..
@@ -261,7 +261,7 @@ async fn circle_strand_and_plaintext_poll_require_exact_scope_and_current_member
         &circle,
         EventKind::MessageCreate,
         json!({"strand_id":strand_id,"track_name":"discussion","content":{
-            "kind":"ak.content.poll","body":"Choose","poll":{"kind":"disclosed","max_selections":1,
+            "kind":"ak.content.poll","body":"Choose","poll":{"kind":"disclosed","max_selection_count":1,
             "answers":[{"id":"a","text":{"kind":"ak.content.text","body":"A"}}]}}}),
     );
     uow.commit_event(poll.clone()).await.unwrap();
@@ -361,7 +361,7 @@ async fn circle_strand_and_plaintext_poll_require_exact_scope_and_current_member
             .current_state_entries
             .iter()
             .any(|row| matches!(row,
-                TypedCurrentRow::Value {
+                CurrentState::Value {
                     selector: CurrentSelector::Strand { strand_id: subject },
                     ..
                 } if subject == &strand_id

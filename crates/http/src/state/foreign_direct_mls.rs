@@ -3,7 +3,7 @@
 use arkret_models_collaboration::events_payloads::MlsGenesisPayload;
 use arkret_models_collaboration::mls_group_state_material::MlsMemberGroupStateMaterialReadRequestBody;
 use arkret_models_crypto::MlsCommitPayload;
-use arkret_wire::{ActorId, EventKind, MlsGroupCurrent, RealmId, ScopeRef, TypedCurrentRow};
+use arkret_wire::{ActorId, CurrentState, EventKind, MlsGroupValue, RealmId, ScopeRef};
 use coland_storage::ForeignDirectMlsInput;
 
 use super::AppState;
@@ -45,8 +45,8 @@ pub(crate) async fn refresh(
         let Some(input) = selected else {
             return Ok(false);
         };
-        let TypedCurrentRow::Value { value, .. } = &input.current;
-        let current: MlsGroupCurrent =
+        let CurrentState::Value { value, .. } = &input.current;
+        let current: MlsGroupValue =
             serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
         let (group_info, tree) = if input.base.is_none() {
             let Some((_, genesis)) = input.history.first() else {
@@ -235,7 +235,7 @@ fn replay(
     let scope = ScopeRef::Realm {
         realm_id: input.realm_id.clone(),
     };
-    let TypedCurrentRow::Value {
+    let CurrentState::Value {
         selector,
         source_stream_ref,
         revision,
@@ -252,7 +252,7 @@ fn replay(
     {
         return Err("MLS current source differs from verified cut".into());
     }
-    let current: MlsGroupCurrent =
+    let current: MlsGroupValue =
         serde_json::from_value(value.clone()).map_err(|error| fail(&error))?;
     if current.effective_scope != scope
         || input.participants.len() != 2
@@ -332,7 +332,8 @@ fn replay(
         let leaves = tracker.leaves().map_err(|error| fail(&error))?;
         if leaves.len() != 1
             || leaves[0].actor_id != genesis.actor_id
-            || leaves[0].signature_key != payload.creator_leaf_authority.leaf_signature_key_b64u
+            || leaves[0].signature_key
+                != payload.creator_leaf_authority.leaf_signature_key_base64url
         {
             return Err("Genesis creator public leaf differs".into());
         }
@@ -362,7 +363,7 @@ fn replay(
         {
             return Err("MLS accepted epoch lineage is discontinuous".into());
         }
-        let wire = arkret_canonical::base64url_decode(payload.commit_bytes_b64())
+        let wire = arkret_canonical::base64url_decode(payload.commit_base64url())
             .map_err(|error| fail(&error))?;
         let transition = tracker
             .process_public_handshake(&wire)
@@ -493,7 +494,7 @@ mod tests {
                 ))
                 .unwrap(),
                 created_at: at,
-                sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
+                signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
             },
         }
     }
@@ -530,7 +531,9 @@ mod tests {
             .unwrap(),
             creator_leaf_authority:
                 arkret_models_collaboration::events_payloads::mls::MlsGenesisCreatorLeafAuthority {
-                    leaf_signature_key_b64u: tracker.leaves().unwrap()[0].signature_key.clone(),
+                    leaf_signature_key_base64url: tracker.leaves().unwrap()[0]
+                        .signature_key
+                        .clone(),
                     endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device {
                         device_id: DeviceId::new("ak:device:01904100-0000-7000-8000-000000000001")
                             .unwrap(),
@@ -549,7 +552,7 @@ mod tests {
         )
         .unwrap();
         let mut history = vec![(commit(&genesis, 0), genesis.clone())];
-        let mut value = MlsGroupCurrent {
+        let mut value = MlsGroupValue {
             effective_scope: scope.clone(),
             genesis_event_ref: genesis.event_id.clone(),
             cipher_suite: arkret_wire::NonEmptyString::new(
@@ -608,7 +611,7 @@ mod tests {
                 .unwrap();
             tracker
                 .process_public_handshake(
-                    &arkret_canonical::base64url_decode(payload.commit_bytes_b64()).unwrap(),
+                    &arkret_canonical::base64url_decode(payload.commit_base64url()).unwrap(),
                 )
                 .unwrap();
             if initial.is_none()
@@ -641,7 +644,7 @@ mod tests {
                 service_id: DidCoreId::new("ak:did_core:web:governor.example").unwrap(),
                 generation: 0,
                 head: head.clone(),
-                current: TypedCurrentRow::Value {
+                current: CurrentState::Value {
                     selector: arkret_wire::CurrentSelector::MlsGroup { scope_ref: scope },
                     source_stream_ref: head.stream_ref.clone(),
                     revision: CurrentRevision {
@@ -710,7 +713,7 @@ mod tests {
                     (bad.history[0].0.clone(), bad.history[0].1.clone())
                 }
                 _ => {
-                    let TypedCurrentRow::Value {
+                    let CurrentState::Value {
                         value,
                         source_stream_ref,
                         revision,
@@ -804,7 +807,7 @@ mod tests {
             stream_position: last.stream_position,
         };
         input.replay_head = input.head.clone();
-        let TypedCurrentRow::Value { revision, .. } = &mut input.current;
+        let CurrentState::Value { revision, .. } = &mut input.current;
         *revision = CurrentRevision {
             commit_id: last.commit_id.clone(),
             stream_position: last.stream_position,
@@ -835,7 +838,7 @@ mod tests {
             .bind::<Text,_>(&stream_key).bind::<Text,_>(input.realm_id.as_str()).bind::<Text,_>(opening.commit_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(input.caller.as_account_id().unwrap()).unwrap()).bind::<Text,_>(input.head.commit_id.as_str()).bind::<BigInt,_>(input.head.stream_position as i64).execute(&mut conn).await.unwrap();
         diesel::sql_query("INSERT INTO replica_authorization_cuts(realm_id,source_stream_ref,head_commit_id,head_stream_position,verified_at) VALUES($1,$2,$3,$4,now())")
             .bind::<Text,_>(input.realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&input.head.stream_ref).unwrap()).bind::<Text,_>(input.head.commit_id.as_str()).bind::<BigInt,_>(input.head.stream_position as i64).execute(&mut conn).await.unwrap();
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             selector,
             source_stream_ref,
             revision,
@@ -845,18 +848,18 @@ mod tests {
             .bind::<Text,_>(input.realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(selector).unwrap()).bind::<Jsonb,_>(serde_json::to_value(source_stream_ref).unwrap()).bind::<Text,_>(revision.commit_id.as_str()).bind::<BigInt,_>(revision.stream_position as i64).bind::<Jsonb,_>(value).execute(&mut conn).await.unwrap();
         for actor in &input.participants {
             let member_value = serde_json::json!({"membership":"join","joined_at":arkret_canonical::format_timestamp_canonical(join.created_at)});
-            diesel::sql_query("INSERT INTO member_state_current_results(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join',$3,0,$4,now())")
+            diesel::sql_query("INSERT INTO member_state_current_states(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join',$3,0,$4,now())")
                 .bind::<Text,_>(input.realm_id.as_str()).bind::<Text,_>(actor.to_string()).bind::<Text,_>(opening.commit_id.as_str()).bind::<Jsonb,_>(&member_value).execute(&mut conn).await.unwrap();
             diesel::sql_query("INSERT INTO replica_authorization_rows(realm_id,selector,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,0,$5,now())")
                 .bind::<Text,_>(input.realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(arkret_wire::CurrentSelector::MemberState{actor_id:actor.clone()}).unwrap()).bind::<Jsonb,_>(serde_json::to_value(source_stream_ref).unwrap()).bind::<Text,_>(opening.commit_id.as_str()).bind::<Jsonb,_>(&member_value).execute(&mut conn).await.unwrap();
         }
-        diesel::sql_query("INSERT INTO realm_bootstrap_current_results(realm_id,result_family,current_commit_id,current_stream_position,value,updated_at) VALUES($1,'realm_history_access',$2,0,'\"since_join\"',now())")
+        diesel::sql_query("INSERT INTO realm_bootstrap_current_states(realm_id,state_family,current_commit_id,current_stream_position,value,updated_at) VALUES($1,'realm_history_access',$2,0,'\"since_join\"',now())")
             .bind::<Text,_>(input.realm_id.as_str()).bind::<Text,_>(opening.commit_id.as_str()).execute(&mut conn).await.unwrap();
         let payload:arkret_models_collaboration::events_payloads::direct_conversation::DirectConversationBoundPayload=serde_json::from_value(serde_json::json!({"pair_key":arkret_canonical::sha256_digest(b"pair"),"unordered_participant_ids":input.participants,"realm_id":input.realm_id,"main_strand_id":arkret_wire::StrandId::from_event_id(&id(89)),"founding_unit_digest":arkret_canonical::sha256_digest(b"founding"),"authorization_basis":{"kind":"accepted_contact","event_refs":[id(88),id(87)]},"initial_exact_pair_group_state_ref":input.expected_initial_pair_ref,"created_at":arkret_canonical::format_timestamp_canonical(join.created_at)})).unwrap();
         diesel::sql_query("INSERT INTO direct_conversation_founding_slots(founder_id,trust_domain_id,pair_key,peer_id,founding_unit_digest,realm_id,main_strand_id,authorization_basis,event_ids,commits_json,idempotency_key,accepted_at) VALUES($1,'ak:trust_domain:foreign-direct-fixture',$2,$3,$4,$5,$6,$7,$8,$9,'verified-read-fixture',now())")
             .bind::<Text,_>(input.caller.to_string()).bind::<Text,_>(payload.pair_key.as_str()).bind::<Text,_>(actor("bob").to_string()).bind::<Text,_>(payload.founding_unit_digest.as_str()).bind::<Text,_>(input.realm_id.as_str()).bind::<Text,_>(payload.main_strand_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&payload.authorization_basis).unwrap()).bind::<Jsonb,_>(serde_json::json!([id(83),id(84),id(85),id(86)])).bind::<Jsonb,_>(serde_json::json!([opening,opening,opening,opening])).execute(&mut conn).await.unwrap();
         let binding=arkret_models_collaboration::events_payloads::direct_conversation::DirectConversationBindingCurrentValue{binding_event_ref:id(86),binding:payload};
-        diesel::sql_query("INSERT INTO direct_conversation_binding_current_results(realm_id,pair_key,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,now())")
+        diesel::sql_query("INSERT INTO direct_conversation_binding_current_states(realm_id,pair_key,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,now())")
             .bind::<Text,_>(input.realm_id.as_str()).bind::<Text,_>(arkret_canonical::sha256_digest(b"pair")).bind::<Text,_>(input.head.commit_id.as_str()).bind::<BigInt,_>(input.head.stream_position as i64).bind::<Jsonb,_>(serde_json::to_value(&binding).unwrap()).execute(&mut conn).await.unwrap();
         diesel::sql_query("INSERT INTO replica_authorization_rows(realm_id,selector,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,now())")
             .bind::<Text,_>(input.realm_id.as_str())
@@ -939,7 +942,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        diesel::sql_query("UPDATE replica_authorization_rows r SET value=b.value FROM direct_conversation_binding_current_results b WHERE r.realm_id=b.realm_id AND r.selector->>'kind'='direct_conversation_binding'")
+        diesel::sql_query("UPDATE replica_authorization_rows r SET value=b.value FROM direct_conversation_binding_current_states b WHERE r.realm_id=b.realm_id AND r.selector->>'kind'='direct_conversation_binding'")
             .execute(&mut conn).await.unwrap();
         assert!(
             store
@@ -1056,7 +1059,7 @@ mod tests {
             .execute(&mut conn)
             .await
             .unwrap();
-        diesel::sql_query("UPDATE member_state_current_results SET current_commit_id=$1,current_stream_position=$2 WHERE member_id=$3").bind::<Text,_>(input.head.commit_id.as_str()).bind::<BigInt,_>(input.head.stream_position as i64).bind::<Text,_>(fixture.caller.to_string()).execute(&mut conn).await.unwrap();
+        diesel::sql_query("UPDATE member_state_current_states SET current_commit_id=$1,current_stream_position=$2 WHERE member_id=$3").bind::<Text,_>(input.head.commit_id.as_str()).bind::<BigInt,_>(input.head.stream_position as i64).bind::<Text,_>(fixture.caller.to_string()).execute(&mut conn).await.unwrap();
         assert!(
             store
                 .foreign_direct_mls_input(&fixture.realm_id, &fixture.caller)
@@ -1064,7 +1067,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        diesel::sql_query("UPDATE member_state_current_results SET current_commit_id=$1,current_stream_position=0 WHERE member_id=$2").bind::<Text,_>(RealmCommitId::from_digest([1;32]).as_str()).bind::<Text,_>(fixture.caller.to_string()).execute(&mut conn).await.unwrap();
+        diesel::sql_query("UPDATE member_state_current_states SET current_commit_id=$1,current_stream_position=0 WHERE member_id=$2").bind::<Text,_>(RealmCommitId::from_digest([1;32]).as_str()).bind::<Text,_>(fixture.caller.to_string()).execute(&mut conn).await.unwrap();
         diesel::sql_query("UPDATE realm_authorities SET service_id=$1")
             .bind::<Text, _>(fixture.caller.as_account_id().unwrap().station_id.as_str())
             .execute(&mut conn)
@@ -1081,7 +1084,7 @@ mod tests {
             .execute(&mut conn)
             .await
             .unwrap();
-        diesel::sql_query("UPDATE member_state_current_results SET membership='leave',value=jsonb_set(value,'{membership}','\"leave\"') WHERE member_id=$1").bind::<Text,_>(fixture.caller.to_string()).execute(&mut conn).await.unwrap();
+        diesel::sql_query("UPDATE member_state_current_states SET membership='leave',value=jsonb_set(value,'{membership}','\"leave\"') WHERE member_id=$1").bind::<Text,_>(fixture.caller.to_string()).execute(&mut conn).await.unwrap();
         assert!(
             store
                 .foreign_direct_mls_input(&fixture.realm_id, &fixture.caller)
@@ -1089,7 +1092,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        diesel::sql_query("UPDATE member_state_current_results SET membership='join',value=jsonb_set(value,'{membership}','\"join\"') WHERE member_id=$1").bind::<Text,_>(fixture.caller.to_string()).execute(&mut conn).await.unwrap();
+        diesel::sql_query("UPDATE member_state_current_states SET membership='join',value=jsonb_set(value,'{membership}','\"join\"') WHERE member_id=$1").bind::<Text,_>(fixture.caller.to_string()).execute(&mut conn).await.unwrap();
         diesel::sql_query(
             "UPDATE realm_authorities SET generation=1,last_handoff_ref='accepted-fixture-handoff'",
         )

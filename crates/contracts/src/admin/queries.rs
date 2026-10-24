@@ -204,7 +204,7 @@ impl CapabilityGrantState {
 /// The SDK owns the closed current row, complete Actor/subject and revision.
 /// This operator carrier does not replace the registered effective-grants
 /// read required for authorization or relinquish authoring.
-pub use arkret_models_collaboration::exact_current_results::CapabilityGrantExactCurrentRow as CapabilitySummary;
+pub use arkret_models_collaboration::exact_current_state::CurrentCapabilityGrant as CapabilitySummary;
 
 /// Cursor-paginated admin capabilities page.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -358,7 +358,7 @@ mod tests {
             "ak:did_core:web:station.example".parse().unwrap(),
         ));
         let commit = event.as_str().replacen("ak:event:", "ak:realm_commit:", 1);
-        let root = serde_json::json!({"kind":"realm_root","realm_id":realm,"authority_event_ref":event,"authority_generation":0});
+        let root = serde_json::json!({"kind":"realm_root","realm_id":realm,"authority_event_ref":event,"authority_generation":"0"});
         let wire = serde_json::json!({
             "selector":{"kind":"capability_grant","grant_id":grant},
             "source_stream_ref":{"kind":"realm","realm_id":realm},

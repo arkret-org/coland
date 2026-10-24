@@ -57,7 +57,7 @@ fn genesis_payload(
         "group_info_ref": blob('3'),
         "ratchet_tree_ref": blob('4'),
         "creator_leaf_authority": {
-            "leaf_signature_key_b64u": arkret_canonical::base64url_encode([7_u8; 32]),
+            "leaf_signature_key_base64url": arkret_canonical::base64url_encode([7_u8; 32]),
             "endpoint": {"kind": "device", "device_id": format!("ak:device:{}", uuid::Uuid::now_v7())},
             "authorization_event_ref": arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [8_u8; 32]),
         },
@@ -151,7 +151,7 @@ fn welcome(
             device_id: arkret_wire::DeviceId::new(recipient.device_id.clone()).unwrap(),
         },
         keypackage_claim_ref: arkret_wire::KeypackageClaimId::new(claim_id.to_owned()).unwrap(),
-        ciphertext_b64: arkret_wire::Base64UrlString::new("V2VsY29tZQ".to_owned()).unwrap(),
+        ciphertext_base64url: arkret_wire::Base64UrlString::new("V2VsY29tZQ".to_owned()).unwrap(),
         producer_proof: arkret_wire::DetachedObjectSignature {
             context: arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
             signature_algorithm: arkret_wire::DetachedSignatureAlgorithm::Ed25519,
@@ -163,7 +163,7 @@ fn welcome(
                 .clone(),
             signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "5".repeat(64))).unwrap(),
             created_at: commit.authority_commit.commit.committed_at,
-            sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
+            signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
         },
     }
 }
@@ -213,7 +213,7 @@ async fn join(pool: &PgPool, head: &EventCommitRequest, member: &arkret_wire::Ac
     let basis = &head.authority_commit;
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "INSERT INTO member_state_current_results \
+        "INSERT INTO member_state_current_states \
          (realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) \
          VALUES($1,$2,'join',$3,$4,$5,$6)",
     )
@@ -399,7 +399,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
     let installed = groups.current(&scope).await.unwrap().unwrap();
     assert_eq!(
         installed.value,
-        arkret_wire::MlsGroupCurrent {
+        arkret_wire::MlsGroupValue {
             effective_scope: scope.clone(),
             genesis_event_ref: genesis_ref.clone(),
             cipher_suite: arkret_wire::NonEmptyString::new(
@@ -552,7 +552,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
         .unwrap();
     assert!(matches!(
         refusal,
-        arkret_wire::AuthoritySubmitOutcome::Rejected {
+        arkret_wire::AuthoritySubmitResponseBody::Rejected {
             status: arkret_wire::AuthorityRejectionStatus::Rejected,
             ..
         }
@@ -583,7 +583,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
         .await
         .unwrap();
     assert!(
-        matches!(original, arkret_wire::AuthoritySubmitOutcome::Accepted { status: arkret_wire::AuthorityCommitStatus::Duplicate, commit: original } if original == commit.authority_commit.commit)
+        matches!(original, arkret_wire::AuthoritySubmitResponseBody::Accepted { status: arkret_wire::AuthorityCommitStatus::Duplicate, commit: original } if original == commit.authority_commit.commit)
     );
 }
 
@@ -1029,7 +1029,7 @@ async fn realm_mls_material_peer_uses_joined_target_cut_not_prejoin_genesis_cut(
     .execute(&mut conn)
     .await
     .unwrap();
-    diesel::sql_query("DELETE FROM mls_group_current_results WHERE realm_id=$1")
+    diesel::sql_query("DELETE FROM mls_group_current_states WHERE realm_id=$1")
         .bind::<Text, _>(realm_id.as_str())
         .execute(&mut conn)
         .await
@@ -1317,7 +1317,7 @@ async fn realm_mls_material_read_rejects_target_retention_and_redaction() {
     .await
     .unwrap();
     diesel::sql_query(
-        "INSERT INTO object_redaction_current_results \
+        "INSERT INTO object_redaction_current_states \
          (realm_id,target_ref,current_commit_id,current_stream_position,value,updated_at) \
          VALUES ($1,$2,$3,$4,$5,now())",
     )
@@ -1626,7 +1626,7 @@ async fn grant_message_create(
     let root = {
         let mut conn = pool.get().await.unwrap();
         diesel::sql_query(
-            "SELECT authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1",
+            "SELECT authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1",
         )
         .bind::<Text, _>(realm_id.as_str())
         .get_result::<Root>(&mut *conn)
@@ -1652,7 +1652,7 @@ async fn grant_message_create(
                     "kind": "realm_root",
                     "realm_id": realm_id,
                     "authority_event_ref": root,
-                    "authority_generation": 0
+                    "authority_generation": "0"
                 }],
                 "issued_at": arkret_canonical::format_timestamp_canonical(at),
             }
@@ -1939,7 +1939,7 @@ fn signed_remote_add_attestation(
     };
     use arkret_models_crypto::{
         KeyOperationSignature, KeyPackageClaimRecord, PeerKeyPackageClaimReceipt,
-        PeerKeyPackagesClaimOutcome, PeerKeyPackagesClaimUnsignedRequest,
+        PeerKeyPackagesClaimFields, PeerKeyPackagesClaimResponseBody,
         peer_keypackage_claim_receipt_signing_bytes,
     };
 
@@ -1952,7 +1952,7 @@ fn signed_remote_add_attestation(
     let placeholder = || KeyOperationSignature {
         kid: arkret_wire::NonEmptyString::new(method.clone()).unwrap(),
         signature_algorithm: Some(arkret_wire::NonEmptyString::new("Ed25519").unwrap()),
-        sig: arkret_wire::Base64UrlString::new("AA").unwrap(),
+        signature: arkret_wire::Base64UrlString::new("AA").unwrap(),
     };
     let device_id = match &delivery.recipient_endpoint {
         arkret_wire::MlsWelcomeRecipientEndpoint::Device { device_id } => device_id.clone(),
@@ -1982,19 +1982,17 @@ fn signed_remote_add_attestation(
         last_resort: None,
     };
     record.validate_shape().unwrap();
-    let claim_request: PeerKeyPackagesClaimUnsignedRequest = serde_json::from_value(
-        serde_json::json!({
-            "claim_request_id": uuid::Uuid::now_v7().simple().to_string(),
-            "intended_realm_id": delivery.realm_id,
-            "mls_group_id": delivery.effective_scope.canonical_mls_group_id().unwrap(),
-            "claim_purpose": "realm_membership",
-            "requester_account_id": commit.authority_commit.event.actor_id.as_account_id().unwrap(),
-            "target_account_id": delivery.recipient_actor_id.as_account_id().unwrap(),
-            "target_device_ids": [record.device_id.as_ref().unwrap()],
-            "required_capabilities": [arkret_models_crypto::ARKRET_CONTENT_V1],
-            "expires_at": arkret_canonical::format_timestamp_canonical(at + chrono::Duration::hours(1)),
-        }),
-    )
+    let claim_request: PeerKeyPackagesClaimFields = serde_json::from_value(serde_json::json!({
+        "claim_request_id": uuid::Uuid::now_v7().simple().to_string(),
+        "intended_realm_id": delivery.realm_id,
+        "mls_group_id": delivery.effective_scope.canonical_mls_group_id().unwrap(),
+        "claim_purpose": "realm_membership",
+        "requester_account_id": commit.authority_commit.event.actor_id.as_account_id().unwrap(),
+        "target_account_id": delivery.recipient_actor_id.as_account_id().unwrap(),
+        "target_device_ids": [record.device_id.as_ref().unwrap()],
+        "required_capabilities": [arkret_models_crypto::ARKRET_CONTENT_V1],
+        "expires_at": arkret_canonical::format_timestamp_canonical(at + chrono::Duration::hours(1)),
+    }))
     .unwrap();
     let mut receipt = PeerKeyPackageClaimReceipt {
         claim_authority_ref: None,
@@ -2021,7 +2019,7 @@ fn signed_remote_add_attestation(
         &peer_keypackage_claim_receipt_signing_bytes(&receipt).unwrap(),
     )
     .unwrap();
-    let outcome = PeerKeyPackagesClaimOutcome {
+    let outcome = PeerKeyPackagesClaimResponseBody {
         claim_request_id: receipt.claim_request_id.clone(),
         claims: vec![record],
         claim_receipt: receipt.clone(),
@@ -2045,7 +2043,7 @@ fn signed_remote_add_attestation(
         actor_id: delivery.recipient_actor_id.clone(),
         endpoint: delivery.recipient_endpoint.clone(),
         authorization_event_ref,
-        leaf_signature_key_b64u: leaf_key,
+        leaf_signature_key_base64url: leaf_key,
         claim_record_digest: arkret_wire::Hash::new(
             arkret_canonical::canonical_sha256(&outcome.claims[0]).unwrap(),
         )
@@ -2647,7 +2645,7 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
         "a non-Station historical closure cannot be installed"
     );
     let mut wrong_leaf = verified.clone();
-    wrong_leaf.request.attestation.leaf_signature_key_b64u =
+    wrong_leaf.request.attestation.leaf_signature_key_base64url =
         arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode([8_u8; 32])).unwrap();
     assert!(
         governance
@@ -2684,7 +2682,11 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
             first_welcome,
             &fresh_keypackage,
             &station,
-            verified.request.attestation.leaf_signature_key_b64u.clone(),
+            verified
+                .request
+                .attestation
+                .leaf_signature_key_base64url
+                .clone(),
         ),
     };
     assert!(
@@ -2705,7 +2707,11 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
             &unknown_welcome,
             &member_keypackage,
             &station,
-            verified.request.attestation.leaf_signature_key_b64u.clone(),
+            verified
+                .request
+                .attestation
+                .leaf_signature_key_base64url
+                .clone(),
         ),
     };
     assert!(
@@ -2790,7 +2796,11 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
             first_welcome,
             &member_keypackage,
             &station,
-            verified.request.attestation.leaf_signature_key_b64u.clone(),
+            verified
+                .request
+                .attestation
+                .leaf_signature_key_base64url
+                .clone(),
         ),
     };
     assert!(
@@ -2858,7 +2868,7 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
         item(&payloads[0].1)["welcomes"],
         serde_json::json!(expected)
     );
-    let request: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest =
+    let request: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody =
         serde_json::from_value(payloads[0].1.clone()).unwrap();
     request.validate().unwrap();
     uow.commit_event(commit.clone()).await.unwrap();

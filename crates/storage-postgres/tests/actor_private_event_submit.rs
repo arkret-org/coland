@@ -11,7 +11,7 @@
 mod ordinary_realm;
 
 use arkret_wire::{
-    AccountId, ActorId, ActorPrivateEventSubmitOutcome, DidCoreId, Event, EventKind,
+    AccountId, ActorId, ActorPrivateEventSubmitResponseBody, DidCoreId, Event, EventKind,
 };
 use coland_storage::{
     ActorPrivateEventEffect, ActorPrivateEventRefusal, ActorPrivateEventStore,
@@ -263,7 +263,7 @@ async fn text(pool: &PgPool, query: &str) -> String {
         .value
 }
 
-fn accepted(result: ActorPrivateEventSubmitResult) -> ActorPrivateEventSubmitOutcome {
+fn accepted(result: ActorPrivateEventSubmitResult) -> ActorPrivateEventSubmitResponseBody {
     match result {
         ActorPrivateEventSubmitResult::Accepted(outcome) => outcome,
         other => panic!("expected an accepted submission, got {other:?}"),
@@ -287,7 +287,7 @@ async fn push_route_revision_cas_replays_exactly_and_refuses_stale_writes_with_z
     let first = accepted(store.submit(&create).await.unwrap());
     assert_eq!(
         first,
-        ActorPrivateEventSubmitOutcome::DevicePushRoute {
+        ActorPrivateEventSubmitResponseBody::DevicePushRoute {
             accepted_event_id: create.event.event_id.clone(),
             revision: 1,
         }
@@ -333,7 +333,7 @@ async fn push_route_revision_cas_replays_exactly_and_refuses_stale_writes_with_z
     let revoke = push_route(1, true, 4);
     assert_eq!(
         accepted(store.submit(&revoke).await.unwrap()),
-        ActorPrivateEventSubmitOutcome::DevicePushRoute {
+        ActorPrivateEventSubmitResponseBody::DevicePushRoute {
             accepted_event_id: revoke.event.event_id.clone(),
             revision: 2,
         }
@@ -373,7 +373,7 @@ async fn action_request_and_rejection_are_create_once_and_the_target_state_is_te
     let request = action_request("request-1", 60_000, 2);
     assert_eq!(
         accepted(store.submit(&request).await.unwrap()),
-        ActorPrivateEventSubmitOutcome::AgentActionRequest {
+        ActorPrivateEventSubmitResponseBody::AgentActionRequest {
             accepted_event_id: request.event.event_id.clone(),
         }
     );
@@ -401,7 +401,7 @@ async fn action_request_and_rejection_are_create_once_and_the_target_state_is_te
     let rejection = reject("rejection-1", "request-1", 5);
     assert_eq!(
         accepted(store.submit(&rejection).await.unwrap()),
-        ActorPrivateEventSubmitOutcome::AgentActionReject {
+        ActorPrivateEventSubmitResponseBody::AgentActionReject {
             accepted_event_id: rejection.event.event_id.clone(),
         }
     );
@@ -443,7 +443,7 @@ async fn draft_proposal_creates_one_available_pending_intent_without_a_realm_com
     let proposal = draft_propose("draft-1", 60_000, 1);
     assert_eq!(
         accepted(store.submit(&proposal).await.unwrap()),
-        ActorPrivateEventSubmitOutcome::AgentDraftPropose {
+        ActorPrivateEventSubmitResponseBody::AgentDraftPropose {
             accepted_event_id: proposal.event.event_id.clone(),
         }
     );

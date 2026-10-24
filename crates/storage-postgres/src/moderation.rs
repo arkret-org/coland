@@ -88,7 +88,7 @@ async fn realm_decisions(
 ) -> PersistenceResult<Vec<DecisionRow>> {
     sql_query(
         "SELECT s.target_ref, c.stream_position, c.stream_ref \
-         FROM moderation_state_current_results s \
+         FROM moderation_state_current_states s \
          CROSS JOIN LATERAL jsonb_array_elements(s.value->'assertions') a \
          JOIN realm_commits c ON c.realm_id=s.realm_id \
           AND c.commit_json->>'event_ref'=left(a->>'tag_id', length(a->>'tag_id')-2) \
@@ -108,7 +108,7 @@ async fn realm_queue_items(
 ) -> PersistenceResult<Vec<ModerationQueueItem>> {
     let rows = sql_query(
         "SELECT r.report_event_id, r.value, c.committed_at, r.current_stream_position, c.stream_ref \
-         FROM moderation_report_current_results r \
+         FROM moderation_report_current_states r \
          LEFT JOIN realm_commits c ON c.commit_id=r.current_commit_id \
           AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position \
           AND c.commit_json->>'event_ref'=r.report_event_id \
@@ -193,7 +193,7 @@ async fn pending_review_events(
     let rows = sql_query(
         "SELECT e.envelope, a->'value' AS assertion_value, e.digest_suite::bigint AS digest_suite, \
          CASE e.digest_suite WHEN 1 THEN 'sha256:' WHEN 2 THEN 'blake3:' END || encode(e.digest,'hex') AS digest, \
-         s.target_ref FROM moderation_state_current_results s \
+         s.target_ref FROM moderation_state_current_states s \
          CROSS JOIN LATERAL jsonb_array_elements(s.value->'assertions') a \
          JOIN realm_commits c ON c.realm_id=s.realm_id \
           AND c.commit_json->>'event_ref'=left(a->>'tag_id',length(a->>'tag_id')-2) \
@@ -247,8 +247,8 @@ async fn management_view_in_connection(
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<coland_storage::ModerationManagementView> {
     let realms = sql_query(
-        "SELECT realm_id FROM (SELECT realm_id FROM moderation_report_current_results \
-         UNION SELECT realm_id FROM moderation_state_current_results) realms \
+        "SELECT realm_id FROM (SELECT realm_id FROM moderation_report_current_states \
+         UNION SELECT realm_id FROM moderation_state_current_states) realms \
          WHERE $1::text IS NULL OR realm_id=$1 ORDER BY realm_id",
     )
     .bind::<Nullable<Text>, _>(realm_filter.map(arkret_wire::RealmId::as_str))
@@ -296,7 +296,7 @@ impl ModerationStore for PgModerationStore {
 
     async fn report_count(&self) -> PersistenceResult<u64> {
         let mut conn = crate::pg_db(&self.pool);
-        let count = sql_query("SELECT COUNT(*) AS count FROM moderation_report_current_results")
+        let count = sql_query("SELECT COUNT(*) AS count FROM moderation_report_current_states")
             .get_result::<CountRow>(&mut conn)
             .await
             .map_err(PersistenceError::database)?
@@ -330,7 +330,7 @@ async fn moderator(
     actor: &arkret_wire::ActorId,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<bool> {
-    crate::moderation_report_current_results::scope_moderator(
+    crate::moderation_report_current_states::scope_moderator(
         conn,
         realm,
         scope,

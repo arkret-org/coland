@@ -52,10 +52,10 @@ pub(super) fn claim_outcome(
     authorization: &arkret_wire::EventId,
     scope: &arkret_wire::ScopeRef,
     at: chrono::DateTime<chrono::Utc>,
-) -> arkret_models_crypto::PeerKeyPackagesClaimOutcome {
+) -> arkret_models_crypto::PeerKeyPackagesClaimResponseBody {
     use arkret_models_crypto::{
-        KeyPackageClaimRecord, PeerKeyPackageClaimReceipt, PeerKeyPackagesClaimOutcome,
-        PeerKeyPackagesClaimUnsignedRequest,
+        KeyPackageClaimRecord, PeerKeyPackageClaimReceipt, PeerKeyPackagesClaimFields,
+        PeerKeyPackagesClaimResponseBody,
     };
     let expires_at = at + chrono::TimeDelta::milliseconds(3_000_000);
     let record = KeyPackageClaimRecord {
@@ -75,7 +75,7 @@ pub(super) fn claim_outcome(
         last_resort: None,
     };
     record.validate_shape().unwrap();
-    let request:PeerKeyPackagesClaimUnsignedRequest=serde_json::from_value(serde_json::json!({
+    let request:PeerKeyPackagesClaimFields=serde_json::from_value(serde_json::json!({
         "claim_request_id":request_id,"requester_account_id":controller,"intended_realm_id":scope.realm_id(),
         "mls_group_id":scope.canonical_mls_group_id().unwrap(),"claim_purpose":"realm_membership",
         "required_capabilities":package.capabilities,"expires_at":arkret_canonical::format_timestamp_canonical(expires_at),
@@ -98,7 +98,7 @@ pub(super) fn claim_outcome(
         signature: arkret_models_crypto::KeyOperationSignature {
             kid: arkret_wire::NonEmptyString::new(kid.clone()).unwrap(),
             signature_algorithm: Some(arkret_wire::NonEmptyString::new("Ed25519").unwrap()),
-            sig: arkret_wire::Base64UrlString::new("AA").unwrap(),
+            signature: arkret_wire::Base64UrlString::new("AA").unwrap(),
         },
     };
     receipt.signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
@@ -107,7 +107,7 @@ pub(super) fn claim_outcome(
         &arkret_models_crypto::peer_keypackage_claim_receipt_signing_bytes(&receipt).unwrap(),
     )
     .unwrap();
-    let outcome = PeerKeyPackagesClaimOutcome {
+    let outcome = PeerKeyPackagesClaimResponseBody {
         claim_request_id: request_id.clone(),
         claims: vec![record],
         claim_receipt: receipt,
@@ -117,9 +117,9 @@ pub(super) fn claim_outcome(
 }
 
 pub(super) fn add_witness(
-    outcome: arkret_models_crypto::PeerKeyPackagesClaimOutcome,
+    outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody,
     delivery: &arkret_wire::MlsWelcomeDelivery,
-    base: &arkret_wire::MlsGroupCurrent,
+    base: &arkret_wire::MlsGroupValue,
     position: u64,
     leaf_key: arkret_wire::Base64UrlString,
     resolution: arkret_models_identity::AuthenticatedServiceResolution,
@@ -150,7 +150,7 @@ pub(super) fn add_witness(
             .agent_key_authorize_event_id
             .clone()
             .unwrap(),
-        leaf_signature_key_b64u: leaf_key,
+        leaf_signature_key_base64url: leaf_key,
         claim_record_digest: arkret_wire::Hash::new(
             arkret_canonical::canonical_sha256(&outcome.claims[0]).unwrap(),
         )

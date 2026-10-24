@@ -137,7 +137,7 @@ pub(crate) async fn publish_basis(
     )
     .await?;
     let policies =
-        crate::policy_current_results::read_scoped_applet_management_policies_in_connection(
+        crate::policy_current_states::read_scoped_applet_management_policies_in_connection(
             conn,
             &event.realm_id,
             scope.circle_id(),
@@ -183,13 +183,13 @@ pub(crate) async fn publish_basis(
         .iter()
         .map(|policy| policy.id.to_string())
         .collect::<Vec<_>>();
-    let revisions = sql_query("SELECT to_jsonb(p) AS value FROM policy_current_results p WHERE policy_id=ANY($1) ORDER BY policy_id FOR SHARE")
+    let revisions = sql_query("SELECT to_jsonb(p) AS value FROM policy_current_states p WHERE policy_id=ANY($1) ORDER BY policy_id FOR SHARE")
         .bind::<Array<Text>,_>(ids).load::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    let actor_currents = sql_query("SELECT to_jsonb(r) AS value FROM realm_actor_current_results r WHERE realm_id=$1 AND selector->'actor_id'=$2 AND selector->>'kind' IN ('realm_actor_control','realm_actor_manager','realm_actor_status','realm_actor_profile','realm_actor_recovery') ORDER BY selector::text FOR SHARE")
+    let actor_currents = sql_query("SELECT to_jsonb(r) AS value FROM realm_actor_current_states r WHERE realm_id=$1 AND selector->'actor_id'=$2 AND selector->>'kind' IN ('realm_actor_control','realm_actor_manager','realm_actor_status','realm_actor_profile','realm_actor_recovery') ORDER BY selector::text FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(json!(event.actor_id)).load::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    let root = sql_query("SELECT to_jsonb(r) AS value FROM realm_authority_root_current_results r WHERE realm_id=$1 FOR SHARE")
+    let root = sql_query("SELECT to_jsonb(r) AS value FROM realm_authority_root_current_states r WHERE realm_id=$1 FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    let bundle = sql_query("SELECT to_jsonb(p) AS value FROM realm_policy_bundle_current_results p WHERE realm_id=$1 FOR SHARE")
+    let bundle = sql_query("SELECT to_jsonb(p) AS value FROM realm_policy_bundle_current_states p WHERE realm_id=$1 FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     let mut fact = json!(admission.fact);
     fact.as_object_mut()
@@ -334,7 +334,7 @@ pub(crate) async fn admit_control(
     transaction: &coland_storage::AuthorityCommitTransaction,
     carrier: &coland_storage::AppletControlCarrier,
     prepared: Option<&coland_storage::EventApprovalCommit>,
-) -> Result<arkret_wire::AuthoritySubmitOutcome, crate::PgTransactionError> {
+) -> Result<arkret_wire::AuthoritySubmitResponseBody, crate::PgTransactionError> {
     let event = &transaction.event;
     let commit = &transaction.commit;
     if !is_profile(event)
@@ -370,7 +370,7 @@ pub(crate) async fn admit_control(
         if original.event != *event {
             return Err(denied("duplicate_conflict: Profile original differs").into());
         }
-        return Ok(arkret_wire::AuthoritySubmitOutcome::Accepted {
+        return Ok(arkret_wire::AuthoritySubmitResponseBody::Accepted {
             status: arkret_wire::AuthorityCommitStatus::Duplicate,
             commit: original.commit,
         });
@@ -464,7 +464,7 @@ pub(crate) async fn admit_control(
         &json!({"realm_profile_publish":admission.publish_scope}),
     )
     .await?;
-    Ok(arkret_wire::AuthoritySubmitOutcome::Accepted {
+    Ok(arkret_wire::AuthoritySubmitResponseBody::Accepted {
         status: arkret_wire::AuthorityCommitStatus::Committed,
         commit: commit.clone(),
     })

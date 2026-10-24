@@ -123,7 +123,7 @@ pub(crate) async fn resolve_issuer(
         }
     }
     if value
-        .ice_config_endpoint
+        .ice_configuration_url
         .as_ref()
         .is_some_and(|endpoint| !credential_origin(endpoint))
     {
@@ -155,7 +155,7 @@ pub(crate) async fn resolve_issuer(
         };
         signing_keys.push(ServiceSigningKey {
             verification_method: method,
-            public_key_b64u: arkret_canonical::base64url_encode(bytes),
+            public_key_base64url: arkret_canonical::base64url_encode(bytes),
         });
     }
     signing_keys.sort_by(|a, b| a.verification_method.cmp(&b.verification_method));

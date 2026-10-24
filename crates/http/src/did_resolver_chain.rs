@@ -99,7 +99,7 @@ const LOCAL_DID_SNAPSHOT_CAPACITY: usize = 4_096;
 
 #[derive(Clone)]
 struct CachedDidDocument {
-    seq: u64,
+    sequence: u64,
     document: DidDocument,
 }
 
@@ -164,7 +164,7 @@ impl ColandDidResolver {
         &self,
         did: &Did,
         did_document: Value,
-        seq: u64,
+        sequence: u64,
     ) -> Result<DidDocument, IdentityError> {
         let document: DidDocument = serde_json::from_value(did_document).map_err(|e| {
             IdentityError::Protocol(format!("local DID document decode failed: {e}"))
@@ -183,7 +183,7 @@ impl ColandDidResolver {
         }
         let mut snapshot = self.local_snapshot.write();
         if let Some(cached) = snapshot.get(did)
-            && cached.seq > seq
+            && cached.sequence > sequence
         {
             return Ok(cached.document.clone());
         }
@@ -198,7 +198,7 @@ impl ColandDidResolver {
         snapshot.insert(
             document.id.clone(),
             CachedDidDocument {
-                seq,
+                sequence,
                 document: document.clone(),
             },
         );
@@ -210,7 +210,7 @@ impl ColandDidResolver {
         record: coland_services::identity::DidDocumentState,
     ) -> Result<DidDocument, IdentityError> {
         let did = Did::new(record.did).map_err(IdentityError::from)?;
-        self.document_from_parts(&did, record.did_document, record.seq)
+        self.document_from_parts(&did, record.did_document, record.sequence)
     }
 
     pub async fn resolve_did_async(&self, did: &Did) -> Result<DidDocument, IdentityError> {
@@ -836,14 +836,14 @@ mod tests {
             entries: vec![
                 arkret_identity::DidWebvhLogEntry {
                     version_id: "1-old".to_owned(),
-                    version_time: "2026-07-01T00:00:00Z".parse().unwrap(),
+                    version_created_at: "2026-07-01T00:00:00Z".parse().unwrap(),
                     parameters: json!({"updateKeys": ["old"]}),
                     state: old_document.clone(),
                     proof: Vec::new(),
                 },
                 arkret_identity::DidWebvhLogEntry {
                     version_id: "2-current".to_owned(),
-                    version_time: "2026-07-02T00:00:00Z".parse().unwrap(),
+                    version_created_at: "2026-07-02T00:00:00Z".parse().unwrap(),
                     parameters: json!({"updateKeys": ["current"]}),
                     state: current_document.clone(),
                     proof: Vec::new(),
@@ -1004,7 +1004,7 @@ mod tests {
         let resolver = build_coland_did_resolver(&config);
         let did = Did::new("did:web:cache.example".to_owned()).expect("valid DID");
         let verification_method = format!("{did}#key-1");
-        let record = |seq: u64, key_byte: u8| {
+        let record = |sequence: u64, key_byte: u8| {
             let document = DidDocument {
                 id: did.clone(),
                 verification_methods: BTreeMap::from([(
@@ -1020,7 +1020,7 @@ mod tests {
                 did: did.as_str().to_owned(),
                 did_document: serde_json::to_value(document).expect("document JSON"),
                 key_log_head: None,
-                seq,
+                sequence,
                 method_evidence: json!({"mode": "test"}),
                 fetched_at: now,
                 expires_at: now,
@@ -1079,7 +1079,7 @@ mod tests {
                 did: did.to_string(),
                 did_document: serde_json::to_value(safe_document).unwrap(),
                 key_log_head: None,
-                seq: 1,
+                sequence: 1,
                 method_evidence: json!({"mode": "verified-production-resolution"}),
                 fetched_at: now,
                 expires_at: now,
@@ -1093,7 +1093,7 @@ mod tests {
                 did: did.to_string(),
                 did_document: serde_json::to_value(document).unwrap(),
                 key_log_head: None,
-                seq: 2,
+                sequence: 2,
                 method_evidence: json!({"mode": "verified-production-resolution"}),
                 fetched_at: now,
                 expires_at: now,
@@ -1142,7 +1142,7 @@ mod tests {
                     did: did.to_string(),
                     did_document: serde_json::to_value(document).unwrap(),
                     key_log_head: None,
-                    seq: 1,
+                    sequence: 1,
                     method_evidence: json!({"mode": "verified-production-resolution"}),
                     fetched_at: now,
                     expires_at: now,
@@ -1174,7 +1174,7 @@ mod tests {
                     did: did.to_string(),
                     did_document: serde_json::to_value(document).expect("document JSON"),
                     key_log_head: None,
-                    seq: 1,
+                    sequence: 1,
                     method_evidence: json!({"mode": "test"}),
                     fetched_at: now,
                     expires_at: now,

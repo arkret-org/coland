@@ -37,7 +37,7 @@ use super::signature::{
     applet_delivery_authentication_record_digest, applet_validate_signature_input,
 };
 
-fn params(created: i64, expires: i64) -> String {
+fn parameters(created: i64, expires: i64) -> String {
     format!(
         "(\"@method\" \"@target-uri\" \"@authority\" \"content-digest\" \
          \"source-service-id\" \"destination-service-id\" \"idempotency-key\");\
@@ -62,7 +62,7 @@ fn keyid_mismatch_is_invalid_signature() {
     let now = chrono::Utc::now().timestamp();
     let input = arkret_signatures::http_signature::parse_signature_input(&format!(
         "sig1={}",
-        params(now, now + 60)
+        parameters(now, now + 60)
     ))
     .unwrap();
     let err = applet_validate_signature_input(&input, "did:web:other#applet-service-key")
@@ -79,7 +79,7 @@ fn delivery_authentication_record_digest_binds_closed_verified_material() {
     let rotated_key = ed25519_dalek::SigningKey::from_bytes(&[8; 32]).verifying_key();
     let input = arkret_signatures::http_signature::parse_signature_input(&format!(
         "sig1={}",
-        params(1, 60)
+        parameters(1, 60)
     ))
     .unwrap();
     let digest = |epoch: &str, key: &ed25519_dalek::VerifyingKey| {
@@ -142,7 +142,7 @@ fn refreshed_delivery_time_keeps_stable_binding_after_independent_authentication
     let binding = |created, expires| {
         let input = arkret_signatures::http_signature::parse_signature_input(&format!(
             "sig1={}",
-            params(created, expires)
+            parameters(created, expires)
         ))
         .unwrap();
         applet_delivery_authentication_record_digest(

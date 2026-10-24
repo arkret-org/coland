@@ -112,7 +112,7 @@ pub(crate) async fn lock_mimi_cut(
     conn: &mut AsyncPgConnection,
     request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
     room: &arkret_wire::MimiRoomUri,
-    outcome: &arkret_models_crypto::PeerKeyPackagesClaimOutcome,
+    outcome: &arkret_models_crypto::PeerKeyPackagesClaimResponseBody,
 ) -> PersistenceResult<()> {
     let counterparts = crate::boxed_future(|| {
         crate::mls_keypackage_claim_endpoints::prepare(
@@ -170,7 +170,7 @@ pub(crate) async fn require_mimi_room(
     crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &request.intended_realm_id)
         .await?;
     crate::realm_management_archive::require_unfrozen(conn, &request.intended_realm_id).await?;
-    let row = sql_query("SELECT value AS payload FROM mimi_room_binding_current_results WHERE mimi_room_uri=$1 AND realm_id=$2 FOR SHARE")
+    let row = sql_query("SELECT value AS payload FROM mimi_room_binding_current_states WHERE mimi_room_uri=$1 AND realm_id=$2 FOR SHARE")
         .bind::<Text,_>(room.as_str()).bind::<Text,_>(request.intended_realm_id.as_str())
         .get_result::<JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(|| denied("current MIMI room is unavailable"))?;
@@ -187,7 +187,7 @@ pub(crate) async fn require_mimi_room(
     {
         return Err(denied("MIMI room differs from the native claim target"));
     }
-    let scope = crate::strand_current_results::locked_active_strand_scope(
+    let scope = crate::strand_current_states::locked_active_strand_scope(
         conn,
         &request.intended_realm_id,
         &binding.binding_scope.strand_id,
@@ -224,9 +224,9 @@ async fn member(
     } = scope
     {
         let basis =
-            crate::circle_current_results::locked_circle_basis(conn, realm_id, circle_id).await?;
+            crate::circle_current_states::locked_circle_basis(conn, realm_id, circle_id).await?;
         if basis["value"]["state"] != "active"
-            || !crate::circle_current_results::effective_member_in_connection(
+            || !crate::circle_current_states::effective_member_in_connection(
                 conn, realm_id, circle_id, actor,
             )
             .await?
@@ -388,14 +388,15 @@ pub(crate) async fn require_admission(
         ));
     }
     if let Some(room) = &admission.mimi_room_uri {
-        let outcome: arkret_models_crypto::PeerKeyPackagesClaimOutcome = serde_json::from_value(
-            attempt
-                .ledger
-                .outcome
-                .clone()
-                .ok_or_else(|| denied("claim outcome missing"))?,
-        )
-        .map_err(denied)?;
+        let outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody =
+            serde_json::from_value(
+                attempt
+                    .ledger
+                    .outcome
+                    .clone()
+                    .ok_or_else(|| denied("claim outcome missing"))?,
+            )
+            .map_err(denied)?;
         crate::boxed_future(|| lock_mimi_cut(conn, request, room, &outcome)).await?;
     }
     let mut endpoints = Vec::new();
@@ -408,7 +409,7 @@ pub(crate) async fn require_admission(
     if endpoints.is_empty() {
         return Ok(());
     }
-    let outcome: arkret_models_crypto::PeerKeyPackagesClaimOutcome = serde_json::from_value(
+    let outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody = serde_json::from_value(
         attempt
             .ledger
             .outcome
@@ -595,7 +596,7 @@ pub(crate) async fn require_target(
 }
 
 fn outcome_matches_row(
-    outcome: &arkret_models_crypto::PeerKeyPackagesClaimOutcome,
+    outcome: &arkret_models_crypto::PeerKeyPackagesClaimResponseBody,
     row: &MlsKeyPackageRow,
 ) -> PersistenceResult<()> {
     outcome.validate_shape().map_err(denied)?;
@@ -662,7 +663,7 @@ pub(crate) fn require_outcome(
     let Some(admission) = &attempt.admission else {
         return Ok(());
     };
-    let outcome: arkret_models_crypto::PeerKeyPackagesClaimOutcome = serde_json::from_value(
+    let outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody = serde_json::from_value(
         attempt
             .ledger
             .outcome
@@ -689,7 +690,7 @@ pub(crate) fn require_outcome(
 pub(crate) async fn require_stored_outcome(
     conn: &mut AsyncPgConnection,
     operation: arkret_wire::ServiceOperationId,
-    outcome: &arkret_models_crypto::PeerKeyPackagesClaimOutcome,
+    outcome: &arkret_models_crypto::PeerKeyPackagesClaimResponseBody,
     endpoints: &[AppletManagedDeviceScopeGuard],
     remote_devices: &[coland_storage::MlsClaimRemoteDeviceEvidence],
 ) -> PersistenceResult<chrono::DateTime<Utc>> {

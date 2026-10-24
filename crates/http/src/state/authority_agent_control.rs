@@ -5,7 +5,7 @@
 //! accountability cut, then commits the Event and its registered current
 //! result together. Other delegated self Event kinds keep their own gates.
 
-use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitOutcome, EventAdmissionSubmission};
+use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitResponseBody, EventAdmissionSubmission};
 use chrono::Utc;
 use coland_services::identity::SessionIdentityState;
 use coland_services::{ServiceError, ServiceResult};
@@ -17,7 +17,7 @@ pub(super) async fn submit_self_agent_controller_event(
     state: &AppState,
     session: &SessionIdentityState,
     request: &EventAdmissionSubmission,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     let event = &request.event;
     if !matches!(
         event.kind,
@@ -96,11 +96,11 @@ pub(super) async fn submit_self_agent_controller_event(
             .await?
     };
     Ok(match outcome {
-        AgentControlAdmissionOutcome::Committed(commit) => AuthoritySubmitOutcome::Accepted {
+        AgentControlAdmissionOutcome::Committed(commit) => AuthoritySubmitResponseBody::Accepted {
             status: AuthorityCommitStatus::Committed,
             commit,
         },
-        AgentControlAdmissionOutcome::Duplicate(commit) => AuthoritySubmitOutcome::Accepted {
+        AgentControlAdmissionOutcome::Duplicate(commit) => AuthoritySubmitResponseBody::Accepted {
             status: AuthorityCommitStatus::Duplicate,
             commit,
         },

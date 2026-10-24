@@ -324,7 +324,7 @@ pub struct AppConfig {
     /// because this service also exposes authenticated protocol operations.
     pub cors_allow_origin: Option<String>,
     /// Public Account Authority base URL advertised to browser clients in
-    /// `/_arkret/describe.auth_metadata.account_authority`. Registration,
+    /// `/_arkret/describe.authentication_metadata.account_authority`. Registration,
     /// password recovery, passkey, OIDC, and email verification live there;
     /// coland consumes the resulting session grants and may expose DID provider
     /// primitives for trusted server-to-server calls.
@@ -342,7 +342,7 @@ pub struct AppConfig {
     pub account_authority_public_key_multibase: Option<String>,
     /// OAuth/OIDC `client_id` this coland deployment is registered as at the
     /// Authentication Method Provider, advertised to browser clients in
-    /// `/_arkret/describe.auth_metadata.methods[].oidc.client_id`. The web
+    /// `/_arkret/describe.authentication_metadata.methods[].oidc.client_id`. The web
     /// client uses it verbatim as the `client_id` in its OIDC authorize
     /// request; coauth keys clients by ULID, so this MUST be the registered
     /// client ULID (e.g. the dev `config.dev.yaml` client). When unset the
@@ -1910,20 +1910,20 @@ fn load_new_source_quota(
 ) -> anyhow::Result<Option<arkret_wire::receive_policy::NewSourceQuotaConstraints>> {
     let quota = arkret_wire::receive_policy::NewSourceQuotaConstraints {
         window_seconds: env_u64(values, "COLAND_RECEIVE_POLICY_NEW_SOURCE_WINDOW_SECONDS")?,
-        default_new_sources_per_window: env_u64(
+        default_source_count_per_window: env_u64(
             values,
             "COLAND_RECEIVE_POLICY_NEW_SOURCE_DEFAULT_PER_WINDOW",
         )?,
-        max_new_sources_per_window: env_u64(
+        max_source_count_per_window: env_u64(
             values,
             "COLAND_RECEIVE_POLICY_NEW_SOURCE_MAX_PER_WINDOW",
         )?,
         retention_seconds: env_u64(values, "COLAND_RECEIVE_POLICY_NEW_SOURCE_RETENTION_SECONDS")?,
-        default_new_sources_per_retention: env_u64(
+        default_source_count_per_retention: env_u64(
             values,
             "COLAND_RECEIVE_POLICY_NEW_SOURCE_DEFAULT_PER_RETENTION",
         )?,
-        max_new_sources_per_retention: env_u64(
+        max_source_count_per_retention: env_u64(
             values,
             "COLAND_RECEIVE_POLICY_NEW_SOURCE_MAX_PER_RETENTION",
         )?,

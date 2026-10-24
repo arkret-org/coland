@@ -1,6 +1,6 @@
 //! Realm Device ingress, without a Session or Service producer substitution.
 use arkret_models_collaboration::authority_commit::{
-    SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
+    SelfAuthoritySubmitRequestBody, SelfAuthoritySubmitResponseBody,
 };
 use arkret_models_integration::AppletManagedDeviceMetadata;
 use arkret_wire::EventKind;
@@ -23,8 +23,8 @@ pub(super) fn submit<'a>(
     state: &'a AppState,
     metadata: &'a AppletManagedDeviceMetadata,
     authority: &'a AppletManagedDeviceAuthority,
-    request: SelfAuthoritySubmitRequest,
-) -> impl std::future::Future<Output = ServiceResult<SelfAuthoritySubmitOutcome>> + Send + 'a {
+    request: SelfAuthoritySubmitRequestBody,
+) -> impl std::future::Future<Output = ServiceResult<SelfAuthoritySubmitResponseBody>> + Send + 'a {
     crate::boxed_future(move || submit_inner(state, metadata, authority, request))
 }
 
@@ -32,8 +32,8 @@ async fn submit_inner(
     state: &AppState,
     metadata: &AppletManagedDeviceMetadata,
     authority: &AppletManagedDeviceAuthority,
-    request: SelfAuthoritySubmitRequest,
-) -> ServiceResult<SelfAuthoritySubmitOutcome> {
+    request: SelfAuthoritySubmitRequestBody,
+) -> ServiceResult<SelfAuthoritySubmitResponseBody> {
     request
         .validate()
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
@@ -42,8 +42,8 @@ async fn submit_inner(
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
     let native_mls = mls::NativeMlsRequest::from_request(&request)?;
     let (submission, welcomes, typed_mls) = match request {
-        SelfAuthoritySubmitRequest::Event(submission) => (submission, Vec::new(), false),
-        SelfAuthoritySubmitRequest::MlsCommit(submission) => (
+        SelfAuthoritySubmitRequestBody::Event(submission) => (submission, Vec::new(), false),
+        SelfAuthoritySubmitRequestBody::MlsCommit(submission) => (
             arkret_wire::EventAdmissionSubmission::new(submission.commit_event),
             submission.welcomes,
             true,
@@ -100,7 +100,7 @@ async fn submit_inner(
     // complete stored original may recover its prior outcome before producer
     // or business current is rejudged; no new write follows this return.
     if let Some(original) = unit::exact_replay(state, event).await? {
-        let original = SelfAuthoritySubmitOutcome::Ordinary(original);
+        let original = SelfAuthoritySubmitResponseBody::Ordinary(original);
         return match native_mls.as_ref() {
             Some(context) => context.retain_outcome(state, original).await,
             None => Ok(original),
@@ -187,7 +187,7 @@ async fn submit_inner(
         {
             return Ok(original);
         }
-        let outcome = SelfAuthoritySubmitOutcome::Ordinary(result?);
+        let outcome = SelfAuthoritySubmitResponseBody::Ordinary(result?);
         return match native_mls.as_ref() {
             Some(context) => context.retain_outcome(state, outcome).await,
             None => Ok(outcome),
@@ -200,5 +200,5 @@ async fn submit_inner(
         unit::SelfEventUnitEffects::default(),
     )
     .await
-    .map(SelfAuthoritySubmitOutcome::Ordinary)
+    .map(SelfAuthoritySubmitResponseBody::Ordinary)
 }

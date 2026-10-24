@@ -201,8 +201,8 @@ pub(crate) async fn direct_conversation_realm_in_connection(
     realm_id: &RealmId,
 ) -> PersistenceResult<Option<DirectConversationRealm>> {
     let purpose = sql_query(
-        "SELECT value->>'purpose' AS purpose FROM realm_bootstrap_current_results \
-         WHERE realm_id=$1 AND result_family='realm_genesis'",
+        "SELECT value->>'purpose' AS purpose FROM realm_bootstrap_current_states \
+         WHERE realm_id=$1 AND state_family='realm_genesis'",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<GenesisPurposeRow>(&mut *conn)
@@ -402,7 +402,7 @@ async fn participant_members(
     realm_id: &RealmId,
 ) -> PersistenceResult<Vec<(ActorId, String)>> {
     sql_query(
-        "SELECT member_id,membership FROM member_state_current_results \
+        "SELECT member_id,membership FROM member_state_current_states \
          WHERE realm_id=$1 AND membership IN ('join','leave') ORDER BY member_id FOR SHARE",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -424,7 +424,7 @@ async fn root_controller(
     realm_id: &RealmId,
 ) -> PersistenceResult<Option<ActorId>> {
     sql_query(
-        "SELECT controller_actor_id FROM realm_authority_root_current_results WHERE realm_id=$1",
+        "SELECT controller_actor_id FROM realm_authority_root_current_states WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<RootControllerRow>(&mut *conn)
@@ -489,9 +489,9 @@ async fn read_binding_current_in_connection(
     lock: bool,
 ) -> PersistenceResult<Option<DirectConversationBindingCurrentValue>> {
     let query = if lock {
-        "SELECT value FROM direct_conversation_binding_current_results WHERE realm_id=$1 FOR SHARE"
+        "SELECT value FROM direct_conversation_binding_current_states WHERE realm_id=$1 FOR SHARE"
     } else {
-        "SELECT value FROM direct_conversation_binding_current_results WHERE realm_id=$1"
+        "SELECT value FROM direct_conversation_binding_current_states WHERE realm_id=$1"
     };
     sql_query(query)
         .bind::<Text, _>(realm_id.as_str())
@@ -887,7 +887,7 @@ async fn structure_admits_in_connection(
         .or_else(|| event.payload.get("target_ref"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or(&founding.main_strand_id);
-    let rows = sql_query("SELECT s.value FROM strand_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id IN ($2,$3) AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=s.realm_id FOR SHARE OF s")
+    let rows = sql_query("SELECT s.value FROM strand_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id IN ($2,$3) AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=s.realm_id FOR SHARE OF s")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(&founding.main_strand_id).bind::<Text,_>(target)
         .load::<ObjectRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut strands = BTreeMap::new();
@@ -897,7 +897,7 @@ async fn structure_admits_in_connection(
             strands.insert(id, strand);
         }
     }
-    let rows = sql_query("SELECT s.value || p.value || CASE WHEN q.value='null'::jsonb THEN '{}'::jsonb ELSE jsonb_build_object('child_scope_policy',q.value) END AS value FROM space_current_results s JOIN space_parent_current_results p ON p.space_id=s.space_id AND p.realm_id=s.realm_id JOIN space_child_scope_policy_current_results q ON q.space_id=s.space_id AND q.realm_id=s.realm_id JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position JOIN realm_commits pc ON pc.commit_id=p.current_commit_id AND pc.realm_id=p.realm_id AND pc.stream_position=p.current_stream_position JOIN realm_commits qc ON qc.commit_id=q.current_commit_id AND qc.realm_id=q.realm_id AND qc.stream_position=q.current_stream_position WHERE s.realm_id=$1 AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=s.realm_id AND pc.stream_ref=c.stream_ref AND qc.stream_ref=c.stream_ref FOR SHARE OF s,p,q")
+    let rows = sql_query("SELECT s.value || p.value || CASE WHEN q.value='null'::jsonb THEN '{}'::jsonb ELSE jsonb_build_object('child_scope_policy',q.value) END AS value FROM space_current_states s JOIN space_parent_current_states p ON p.space_id=s.space_id AND p.realm_id=s.realm_id JOIN space_child_scope_policy_current_states q ON q.space_id=s.space_id AND q.realm_id=s.realm_id JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position JOIN realm_commits pc ON pc.commit_id=p.current_commit_id AND pc.realm_id=p.realm_id AND pc.stream_position=p.current_stream_position JOIN realm_commits qc ON qc.commit_id=q.current_commit_id AND qc.realm_id=q.realm_id AND qc.stream_position=q.current_stream_position WHERE s.realm_id=$1 AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=s.realm_id AND pc.stream_ref=c.stream_ref AND qc.stream_ref=c.stream_ref FOR SHARE OF s,p,q")
         .bind::<Text,_>(event.realm_id.as_str()).load::<ObjectRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut spaces = BTreeMap::new();
     for row in rows {
@@ -940,7 +940,7 @@ async fn watch_admits_in_connection(
         #[diesel(sql_type = Jsonb)]
         value: serde_json::Value,
     }
-    let rows = sql_query("SELECT s.value FROM strand_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id IN ($2,$3) AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=s.realm_id FOR SHARE OF s")
+    let rows = sql_query("SELECT s.value FROM strand_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id IN ($2,$3) AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=s.realm_id FOR SHARE OF s")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(main.as_str()).bind::<Text,_>(payload.strand_id.as_str())
         .load::<Row>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut strands = std::collections::BTreeMap::new();
@@ -1155,7 +1155,7 @@ pub(crate) async fn record_group_state_in_connection(
 }
 
 /// Install the sole bound Event and payload in its accepting transaction.
-pub(crate) async fn commit_binding_current_result_in_connection(
+pub(crate) async fn commit_binding_current_state_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
@@ -1186,7 +1186,7 @@ pub(crate) async fn commit_binding_current_result_in_connection(
         binding: payload.clone(),
     };
     let position = i64::try_from(commit.stream_position).map_err(PersistenceError::database)?;
-    let changed = sql_query("INSERT INTO direct_conversation_binding_current_results (realm_id,pair_key,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(realm_id) DO NOTHING")
+    let changed = sql_query("INSERT INTO direct_conversation_binding_current_states (realm_id,pair_key,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(realm_id) DO NOTHING")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(payload.pair_key.as_str())
         .bind::<Text,_>(commit.commit_id.as_str()).bind::<diesel::sql_types::BigInt,_>(position)
         .bind::<Jsonb,_>(serde_json::to_value(value).map_err(PersistenceError::database)?)
@@ -1203,9 +1203,9 @@ pub(crate) async fn commit_binding_current_result_in_connection(
 pub(crate) async fn guard_binding_snapshot_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
-    entry: &arkret_wire::TypedCurrentRow,
+    entry: &arkret_wire::CurrentState,
 ) -> PersistenceResult<()> {
-    let arkret_wire::TypedCurrentRow::Value {
+    let arkret_wire::CurrentState::Value {
         selector,
         source_stream_ref,
         revision,
@@ -1241,7 +1241,7 @@ pub(crate) async fn guard_binding_snapshot_in_connection(
         #[diesel(sql_type=Jsonb)]
         value: serde_json::Value,
     }
-    let retained=sql_query("SELECT current_commit_id,current_stream_position,value FROM direct_conversation_binding_current_results WHERE realm_id=$1 FOR UPDATE")
+    let retained=sql_query("SELECT current_commit_id,current_stream_position,value FROM direct_conversation_binding_current_states WHERE realm_id=$1 FOR UPDATE")
         .bind::<Text,_>(realm_id.as_str()).get_result::<Retained>(conn).await.optional().map_err(PersistenceError::database)?;
     if retained.is_some_and(|old| {
         old.current_commit_id != revision.commit_id.as_str()
@@ -1258,11 +1258,11 @@ pub(crate) async fn guard_binding_snapshot_in_connection(
 pub(crate) async fn install_binding_snapshot_in_connection(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
-    entry: &arkret_wire::TypedCurrentRow,
+    entry: &arkret_wire::CurrentState,
     installed_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     guard_binding_snapshot_in_connection(conn, realm_id, entry).await?;
-    let arkret_wire::TypedCurrentRow::Value {
+    let arkret_wire::CurrentState::Value {
         selector,
         revision,
         value,
@@ -1272,7 +1272,7 @@ pub(crate) async fn install_binding_snapshot_in_connection(
         unreachable!()
     };
     let position = i64::try_from(revision.stream_position).map_err(PersistenceError::database)?;
-    let changed = sql_query("INSERT INTO direct_conversation_binding_current_results(realm_id,pair_key,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(realm_id) DO UPDATE SET value=direct_conversation_binding_current_results.value WHERE direct_conversation_binding_current_results.pair_key=EXCLUDED.pair_key AND direct_conversation_binding_current_results.current_commit_id=EXCLUDED.current_commit_id AND direct_conversation_binding_current_results.current_stream_position=EXCLUDED.current_stream_position AND direct_conversation_binding_current_results.value=EXCLUDED.value")
+    let changed = sql_query("INSERT INTO direct_conversation_binding_current_states(realm_id,pair_key,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(realm_id) DO UPDATE SET value=direct_conversation_binding_current_states.value WHERE direct_conversation_binding_current_states.pair_key=EXCLUDED.pair_key AND direct_conversation_binding_current_states.current_commit_id=EXCLUDED.current_commit_id AND direct_conversation_binding_current_states.current_stream_position=EXCLUDED.current_stream_position AND direct_conversation_binding_current_states.value=EXCLUDED.value")
         .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(pair_key.as_str()).bind::<Text,_>(revision.commit_id.as_str())
         .bind::<diesel::sql_types::BigInt,_>(position).bind::<Jsonb,_>(value)
         .bind::<diesel::sql_types::Timestamptz,_>(installed_at).execute(conn).await.map_err(PersistenceError::database)?;
@@ -1350,7 +1350,7 @@ mod contact_current_tests {
         }
         // Already expired leases do not revoke the original instances.
         for d in &mut current.directions {
-            d.current_proof.as_mut().unwrap().fresh_until = at - Duration::seconds(1);
+            d.current_proof.as_mut().unwrap().cache_expires_at = at - Duration::seconds(1);
         }
         let slots: Vec<_> = bundle
             .current_operations

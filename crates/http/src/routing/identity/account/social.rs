@@ -34,7 +34,7 @@ pub(crate) async fn contact_request(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<ContactOperationRequestBody>,
-) -> JsonResult<ContactOperationOutcome> {
+) -> JsonResult<ContactOperationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     Box::pin(contact_write::request(state, &session, body.into_inner())).await
@@ -51,7 +51,7 @@ pub(crate) async fn contact_respond(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<ContactAcceptRequestBody>,
-) -> JsonResult<ContactOperationOutcome> {
+) -> JsonResult<ContactOperationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     Box::pin(contact_write::respond(state, &session, body.into_inner())).await
@@ -68,7 +68,7 @@ pub(crate) async fn contact_reject(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<ContactRejectRequestBody>,
-) -> JsonResult<ContactOperationOutcome> {
+) -> JsonResult<ContactOperationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     Box::pin(contact_write::reject(state, &session, body.into_inner())).await
@@ -85,7 +85,7 @@ pub(crate) async fn contact_scope_update(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<ContactScopeUpdateRequestBody>,
-) -> JsonResult<ContactOperationOutcome> {
+) -> JsonResult<ContactOperationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     Box::pin(contact_write::scope_update(
@@ -107,7 +107,7 @@ pub(crate) async fn contact_tombstone(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<ContactTombstoneRequestBody>,
-) -> JsonResult<ContactOperationOutcome> {
+) -> JsonResult<ContactOperationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     Box::pin(contact_write::tombstone(state, &session, body.into_inner())).await
@@ -139,7 +139,7 @@ pub(crate) async fn get_invite_receive_policy(
         ));
     }
     use arkret_models_collaboration::consent_private::*;
-    let ConsentPrivateCommandOutcome::Effects(outcome) =
+    let ConsentPrivateCommandResponseBody::Effects(outcome) =
         crate::routing::consent_private::holder_command(
             state,
             &session,
@@ -191,7 +191,7 @@ pub(crate) async fn set_invite_receive_policy(
         ));
     }
     use arkret_models_collaboration::consent_private::*;
-    let ConsentPrivateCommandOutcome::InvitePolicy(outcome) =
+    let ConsentPrivateCommandResponseBody::InvitePolicy(outcome) =
         crate::routing::consent_private::holder_command(
             state,
             &session,
@@ -220,7 +220,7 @@ pub(crate) async fn list_contacts(
     aa: AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<ContactList> {
+) -> JsonResult<ContactPage> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let actor_id = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
@@ -234,7 +234,7 @@ pub(crate) async fn list_contacts(
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
     let contacts = contact_list_rows(state, &actor_id, records).await?;
-    json_ok(ContactList {
+    json_ok(ContactPage {
         contacts,
         has_more: false,
         next_cursor: None,

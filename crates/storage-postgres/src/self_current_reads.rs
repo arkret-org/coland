@@ -1,6 +1,6 @@
 //! Authenticated, non-enumerating self reads decided at one governing read
 //! cut: `ak.self.realm.read.streams.v1`,
-//! `ak.self.current_results.read.exact.v1`,
+//! `ak.self.current_state.read.exact.v1`,
 //! `ak.self.strand.watch.read.current.v1` and the anchor half of
 //! `ak.self.media_service_binding.read.resolve.v1`.
 //!
@@ -13,14 +13,14 @@
 //! unrelated Circle or Sidecar streams do not invalidate a confirmed Realm-scope
 //! Strand. No `never_written` answer is inferred from a missing row alone.
 
-use arkret_models_collaboration::exact_current_results::{
-    ExactCurrentResultEntry, ExactCurrentResultSelector, ExactCurrentResultsReadOutcome,
-    ExactCurrentResultsReadRequestBody, ModerationStateCurrentValue,
-    ModerationStateExactCurrentRow, ModerationStateExactCurrentSelector, RelationExactCurrentRow,
+use arkret_models_collaboration::exact_current_state::{
+    CurrentModerationState, CurrentRelation, ExactCurrentStateEntry,
+    ExactCurrentStateReadRequestBody, ExactCurrentStateReadResponseBody, ExactCurrentStateSelector,
+    ModerationStateExactCurrentSelector, ModerationStateValue,
 };
 use arkret_models_collaboration::objects::relation::Relation;
 use arkret_models_collaboration::strand_watch_operations::{
-    StrandWatchCurrentOutcome, StrandWatchCurrentRequestBody, StrandWatchCurrentRow,
+    CurrentStrandWatch, StrandWatchCurrentRequestBody, StrandWatchCurrentResponseBody,
     StrandWatchCurrentSelector, StrandWatchSelectorKind,
 };
 use arkret_wire::{
@@ -45,13 +45,13 @@ struct TenureRow {
 }
 
 pub(crate) const RELATION_CURRENT_SQL: &str = "SELECT r.current_commit_id, r.current_stream_position, r.value, c.stream_ref \
-             FROM relation_current_results r \
+             FROM relation_current_states r \
              JOIN realm_commits c ON c.commit_id = r.current_commit_id \
              WHERE r.realm_id=$1 AND r.domain_key=$2 AND c.realm_id=r.realm_id \
                AND c.stream_position=r.current_stream_position";
 
 pub(crate) const MODERATION_CURRENT_SQL: &str = "SELECT s.current_commit_id, s.current_stream_position, s.value, c.stream_ref \
-         FROM moderation_state_current_results s \
+         FROM moderation_state_current_states s \
          JOIN realm_commits c ON c.commit_id = s.current_commit_id \
          WHERE s.realm_id=$1 AND s.target_ref=$2 AND c.realm_id=s.realm_id \
            AND c.stream_position=s.current_stream_position";
@@ -61,12 +61,12 @@ pub(crate) const MODERATION_CURRENT_SQL: &str = "SELECT s.current_commit_id, s.c
 // before reaching this member. Test the exact key and join state after LIMIT.
 pub(crate) const MEMBER_PRESENT_SQL: &str = "SELECT COALESCE(( \
      SELECT realm_id=$1 AND member_id=$2 AND membership='join' \
-       FROM member_state_current_results \
+       FROM member_state_current_states \
       WHERE (realm_id,member_id)>=($1,$2) \
       ORDER BY realm_id,member_id LIMIT 1 \
      ), FALSE) AS present";
 
-pub(crate) const WATCH_CURRENT_SQL: &str = "SELECT w.current_commit_id,w.current_stream_position,w.value,c.stream_ref FROM strand_watch_current_results w JOIN realm_commits c ON c.commit_id=w.current_commit_id WHERE w.realm_id=$1 AND w.strand_id=$2 AND w.watcher_actor_id=$3 AND c.realm_id=w.realm_id AND c.stream_position=w.current_stream_position";
+pub(crate) const WATCH_CURRENT_SQL: &str = "SELECT w.current_commit_id,w.current_stream_position,w.value,c.stream_ref FROM strand_watch_current_states w JOIN realm_commits c ON c.commit_id=w.current_commit_id WHERE w.realm_id=$1 AND w.strand_id=$2 AND w.watcher_actor_id=$3 AND c.realm_id=w.realm_id AND c.stream_position=w.current_stream_position";
 
 // Probe the adjacent keys on both sides of the Realm stream. Tuple bounds
 // keep each probe on the Realm-prefixed index. Scalar ORDER BY/LIMIT prevents
@@ -253,12 +253,12 @@ pub(crate) async fn realm_stream_subscription_cut(
         if let AccountRealmStreamList::Listed(streams) = &listing {
             let realm_policy = sql_query(
                 "SELECT jsonb_build_array(h.value,h.current_commit_id,h.current_stream_position,m.current_commit_id,m.current_stream_position,a.generation,a.service_id) AS value \
-                 FROM realm_bootstrap_current_results h \
+                 FROM realm_bootstrap_current_states h \
                  LEFT JOIN realm_commits hc ON hc.realm_id=h.realm_id AND hc.commit_id=h.current_commit_id AND hc.stream_position=h.current_stream_position AND hc.stream_ref=jsonb_build_object('kind','realm','realm_id',h.realm_id) \
-                 JOIN member_state_current_results m ON m.realm_id=h.realm_id AND m.member_id=$2 AND m.membership='join' \
+                 JOIN member_state_current_states m ON m.realm_id=h.realm_id AND m.member_id=$2 AND m.membership='join' \
                  LEFT JOIN realm_commits mc ON mc.realm_id=m.realm_id AND mc.commit_id=m.current_commit_id AND mc.stream_position=m.current_stream_position AND mc.stream_ref=jsonb_build_object('kind','realm','realm_id',m.realm_id) \
                  JOIN realm_authorities a ON a.realm_id=h.realm_id \
-                 WHERE h.realm_id=$1 AND h.result_family='realm_history_access' \
+                 WHERE h.realm_id=$1 AND h.state_family='realm_history_access' \
                  AND (hc.commit_id IS NOT NULL OR EXISTS(SELECT 1 FROM replica_authorization_rows r WHERE r.realm_id=h.realm_id AND r.selector=jsonb_build_object('kind','realm_history_access') AND r.source_stream_ref=jsonb_build_object('kind','realm','realm_id',h.realm_id) AND r.current_commit_id=h.current_commit_id AND r.current_stream_position=h.current_stream_position AND r.value=h.value)) \
                  AND (mc.commit_id IS NOT NULL OR EXISTS(SELECT 1 FROM replica_authorization_rows r WHERE r.realm_id=m.realm_id AND r.selector=jsonb_build_object('kind','member_state','actor_id',$3::jsonb) AND r.source_stream_ref=jsonb_build_object('kind','realm','realm_id',m.realm_id) AND r.current_commit_id=m.current_commit_id AND r.current_stream_position=m.current_stream_position AND r.value=m.value))",
             ).bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(caller.to_string())
@@ -272,9 +272,9 @@ pub(crate) async fn realm_stream_subscription_cut(
                         CommitStreamRef::Realm { .. } => continue,
                         CommitStreamRef::Circle { circle_id, .. } => sql_query(
                             "SELECT jsonb_build_array(c.value->'history_access',c.current_commit_id,c.current_stream_position,m.current_commit_id,m.current_stream_position,m.value->'parent_membership_revision') AS value \
-                             FROM circle_current_results c \
+                             FROM circle_current_states c \
                              LEFT JOIN realm_commits cc ON cc.realm_id=c.realm_id AND cc.commit_id=c.current_commit_id AND cc.stream_position=c.current_stream_position AND cc.stream_ref=c.source_stream_ref \
-                             JOIN circle_member_state_current_results m ON m.realm_id=c.realm_id AND m.circle_id=c.circle_id AND m.member_id=$3 AND m.membership='join' \
+                             JOIN circle_member_state_current_states m ON m.realm_id=c.realm_id AND m.circle_id=c.circle_id AND m.member_id=$3 AND m.membership='join' \
                              LEFT JOIN realm_commits mc ON mc.realm_id=m.realm_id AND mc.commit_id=m.current_commit_id AND mc.stream_position=m.current_stream_position AND mc.stream_ref=m.source_stream_ref \
                              WHERE c.realm_id=$1 AND c.circle_id=$2 AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) \
                              AND (cc.commit_id IS NOT NULL OR EXISTS(SELECT 1 FROM replica_authorization_rows r WHERE r.realm_id=c.realm_id AND r.selector=jsonb_build_object('kind','circle','circle_id',c.circle_id) AND r.source_stream_ref=c.source_stream_ref AND r.current_commit_id=c.current_commit_id AND r.current_stream_position=c.current_stream_position AND r.value=c.value)) \
@@ -284,7 +284,7 @@ pub(crate) async fn realm_stream_subscription_cut(
                             .get_result::<HistoryBindingRow>(&mut *conn).await.optional()?,
                         CommitStreamRef::Sidecar { sidecar_id, .. } => sql_query(
                             "SELECT jsonb_build_array(s.value,s.current_commit_id,s.current_stream_position) AS value \
-                             FROM sidecar_current_results s LEFT JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position AND c.stream_ref=s.source_stream_ref \
+                             FROM sidecar_current_states s LEFT JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position AND c.stream_ref=s.source_stream_ref \
                              WHERE s.realm_id=$1 AND s.sidecar_id=$2 \
                              AND (c.commit_id IS NOT NULL OR EXISTS(SELECT 1 FROM replica_authorization_rows r WHERE r.realm_id=s.realm_id AND r.selector=jsonb_build_object('kind','sidecar','sidecar_id',s.sidecar_id) AND r.source_stream_ref=s.source_stream_ref AND r.current_commit_id=s.current_commit_id AND r.current_stream_position=s.current_stream_position AND r.value=s.value))",
                         ).bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(sidecar_id.as_str())
@@ -383,43 +383,43 @@ async fn list_streams_in_connection(
     Ok(AccountRealmStreamList::Listed(visible))
 }
 
-pub(crate) async fn exact_current_result_for_actor(
+pub(crate) async fn exact_current_state_for_actor(
     pool: &PgPool,
-    request: &ExactCurrentResultsReadRequestBody,
+    request: &ExactCurrentStateReadRequestBody,
     actor: &ActorId,
     issuer: &DidCoreId,
-) -> PersistenceResult<SelfExactCurrentRead<ExactCurrentResultsReadOutcome>> {
+) -> PersistenceResult<SelfExactCurrentRead<ExactCurrentStateReadResponseBody>> {
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
         begin_read_cut(conn).await?;
-        exact_current_result_for_actor_in_connection(conn, request, actor, issuer).await
+        exact_current_state_for_actor_in_connection(conn, request, actor, issuer).await
     })
     .await
     .map_err(PgTransactionError::into_persistence)
 }
 
-pub(crate) async fn exact_current_result_for_account(
+pub(crate) async fn exact_current_state_for_account(
     pool: &PgPool,
-    request: &ExactCurrentResultsReadRequestBody,
+    request: &ExactCurrentStateReadRequestBody,
     account: &AccountId,
     issuer: &DidCoreId,
-) -> PersistenceResult<SelfExactCurrentRead<ExactCurrentResultsReadOutcome>> {
+) -> PersistenceResult<SelfExactCurrentRead<ExactCurrentStateReadResponseBody>> {
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
         begin_read_cut(conn).await?;
-        exact_current_result_in_connection(conn, request, account, issuer).await
+        exact_current_state_in_connection(conn, request, account, issuer).await
     })
     .await
     .map_err(PgTransactionError::into_persistence)
 }
 
-pub(crate) async fn exact_current_result_in_connection(
+pub(crate) async fn exact_current_state_in_connection(
     conn: &mut AsyncPgConnection,
-    request: &ExactCurrentResultsReadRequestBody,
+    request: &ExactCurrentStateReadRequestBody,
     account: &AccountId,
     issuer: &DidCoreId,
-) -> Result<SelfExactCurrentRead<ExactCurrentResultsReadOutcome>, PgTransactionError> {
-    exact_current_result_for_actor_in_connection(
+) -> Result<SelfExactCurrentRead<ExactCurrentStateReadResponseBody>, PgTransactionError> {
+    exact_current_state_for_actor_in_connection(
         conn,
         request,
         &ActorId::account(account.clone()),
@@ -428,17 +428,17 @@ pub(crate) async fn exact_current_result_in_connection(
     .await
 }
 
-pub(crate) async fn exact_current_result_for_actor_in_connection(
+pub(crate) async fn exact_current_state_for_actor_in_connection(
     conn: &mut AsyncPgConnection,
-    request: &ExactCurrentResultsReadRequestBody,
+    request: &ExactCurrentStateReadRequestBody,
     actor: &ActorId,
     issuer: &DidCoreId,
-) -> Result<SelfExactCurrentRead<ExactCurrentResultsReadOutcome>, PgTransactionError> {
+) -> Result<SelfExactCurrentRead<ExactCurrentStateReadResponseBody>, PgTransactionError> {
     request
         .validate()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     let caller = actor.clone();
-    if let ExactCurrentResultSelector::CapabilityGrant(selector) = &request.selector {
+    if let ExactCurrentStateSelector::CapabilityGrant(selector) = &request.selector {
         let Some(account) = actor.as_account_id() else {
             return Ok(SelfExactCurrentRead::NotFound);
         };
@@ -454,7 +454,7 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
         MemberCut::Member {
             scoped_streams: true,
             ..
-        } if matches!(request.selector, ExactCurrentResultSelector::Relation(_)) => {
+        } if matches!(request.selector, ExactCurrentStateSelector::Relation(_)) => {
             return Ok(SelfExactCurrentRead::Unresolved(
                 "Circle and Sidecar scope visibility is not proved at this cut",
             ));
@@ -473,9 +473,9 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
         } => (generation, head),
     };
     let selector = match &request.selector {
-        ExactCurrentResultSelector::AppletRegistration(selector) => {
-            use arkret_models_collaboration::exact_current_results::{
-                AppletRegistrationExactCurrentRow, NeverWrittenExactCurrentSelector,
+        ExactCurrentStateSelector::AppletRegistration(selector) => {
+            use arkret_models_collaboration::exact_current_state::{
+                CurrentAppletRegistration, NeverWrittenExactCurrentSelector,
             };
             if caller.as_account_id().is_none() {
                 return Ok(SelfExactCurrentRead::NotFound);
@@ -502,7 +502,7 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
                 .await?
             {
                 let check =
-                    arkret_models_collaboration::governance::authorization::AuthzCheckRequestBody {
+                    arkret_models_collaboration::governance::authorization::AuthorizationCheckRequestBody {
                         actor_id: caller.clone(),
                         action: arkret_wire::CapabilityActionId::REALM_ADMIN.to_owned(),
                         resource: Some(arkret_wire::WireResourceSelector::realm(
@@ -514,7 +514,7 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
                     conn, &caller, &check,
                 )
                 .await?
-                .is_some_and(|result| result.decision == arkret_wire::AuthzDecision::Allow)
+                .is_some_and(|result| result.decision == arkret_wire::AuthorizationDecision::Allow)
                 {
                     return Ok(SelfExactCurrentRead::NotFound);
                 }
@@ -528,7 +528,7 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
                 #[diesel(sql_type = Jsonb)]
                 value: serde_json::Value,
             }
-            let row = sql_query("SELECT r.current_commit_id,r.current_stream_position,r.value FROM applet_registration_current_results r JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3 AND c.stream_ref->>'kind'='realm'")
+            let row = sql_query("SELECT r.current_commit_id,r.current_stream_position,r.value FROM applet_registration_current_states r JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3 AND c.stream_ref->>'kind'='realm'")
                 .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(selector.applet_id.as_str()).bind::<Text,_>(selector.service_id.as_str())
                 .get_result::<RegistrationRow>(&mut *conn).await.optional()?;
             let outcome = if let Some(row) = row {
@@ -543,30 +543,28 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
                     )
                     .into());
                 }
-                ExactCurrentResultsReadOutcome::Present {
+                ExactCurrentStateReadResponseBody::Present {
                     realm_id: request.realm_id.clone(),
                     governance_generation: generation,
                     effective_stream_head: head.clone(),
-                    entry: ExactCurrentResultEntry::AppletRegistration(
-                        AppletRegistrationExactCurrentRow {
-                            selector: selector.clone(),
-                            source_stream_ref: head.stream_ref.clone(),
-                            revision: CurrentRevision {
-                                commit_id: row
-                                    .current_commit_id
-                                    .parse()
-                                    .map_err(PersistenceError::database)?,
-                                stream_position: to_u64(
-                                    row.current_stream_position,
-                                    "Applet registration current",
-                                )?,
-                            },
-                            value: row.value,
+                    entry: ExactCurrentStateEntry::AppletRegistration(CurrentAppletRegistration {
+                        selector: selector.clone(),
+                        source_stream_ref: head.stream_ref.clone(),
+                        revision: CurrentRevision {
+                            commit_id: row
+                                .current_commit_id
+                                .parse()
+                                .map_err(PersistenceError::database)?,
+                            stream_position: to_u64(
+                                row.current_stream_position,
+                                "Applet registration current",
+                            )?,
                         },
-                    ),
+                        value: row.value,
+                    }),
                 }
             } else {
-                ExactCurrentResultsReadOutcome::NeverWritten {
+                ExactCurrentStateReadResponseBody::NeverWritten {
                     realm_id: request.realm_id.clone(),
                     governance_generation: generation,
                     effective_stream_head: head,
@@ -580,11 +578,11 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
                 .map_err(PersistenceError::database)?;
             return Ok(SelfExactCurrentRead::Answer(outcome));
         }
-        ExactCurrentResultSelector::Policy(selector) => {
+        ExactCurrentStateSelector::Policy(selector) => {
             return policy_exact_read(conn, request, selector, &caller, generation, head).await;
         }
-        ExactCurrentResultSelector::CalendarScheduleSource(selector) => {
-            use arkret_models_collaboration::exact_current_results::CalendarScheduleSourceExactRow;
+        ExactCurrentStateSelector::CalendarScheduleSource(selector) => {
+            use arkret_models_collaboration::exact_current_state::CalendarScheduleSourceExactRow;
             #[derive(QueryableByName)]
             struct CalendarRow {
                 #[diesel(sql_type = Text)]
@@ -596,7 +594,7 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
                 #[diesel(sql_type = Jsonb)]
                 stream_ref: serde_json::Value,
             }
-            let row = sql_query("SELECT s.current_commit_id,s.current_stream_position,s.calendar_schedule_source_value AS value,c.commit_json->'stream_ref' AS stream_ref FROM strand_current_results s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id=$2 AND s.calendar_schedule_source_value IS NOT NULL")
+            let row = sql_query("SELECT s.current_commit_id,s.current_stream_position,s.calendar_schedule_source_value AS value,c.commit_json->'stream_ref' AS stream_ref FROM strand_current_states s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id=$2 AND s.calendar_schedule_source_value IS NOT NULL")
                 .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(selector.strand_id.as_str())
                 .get_result::<CalendarRow>(&mut *conn).await.optional()?;
             let Some(row) = row else {
@@ -606,7 +604,7 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
             };
             let value: arkret_wire::CalendarScheduleSourceValue =
                 serde_json::from_value(row.value).map_err(PersistenceError::database)?;
-            match crate::moderation_report_current_results::ensure_scope_member_snapshot(
+            match crate::moderation_report_current_states::ensure_scope_member_snapshot(
                 conn,
                 &request.realm_id,
                 &value.effective_scope,
@@ -636,7 +634,7 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
                 .validate_for_current(&request.realm_id, &stream, &revision)
                 .map_err(PersistenceError::database)?;
             return Ok(SelfExactCurrentRead::Answer(
-                ExactCurrentResultsReadOutcome::Present {
+                ExactCurrentStateReadResponseBody::Present {
                     realm_id: request.realm_id.clone(),
                     governance_generation: generation,
                     effective_stream_head: CommitStreamHead {
@@ -650,7 +648,7 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
                             "Calendar scope head",
                         )?,
                     },
-                    entry: ExactCurrentResultEntry::CalendarScheduleSource(
+                    entry: ExactCurrentStateEntry::CalendarScheduleSource(
                         CalendarScheduleSourceExactRow {
                             selector: selector.clone(),
                             source_stream_ref: stream,
@@ -661,43 +659,41 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
                 },
             ));
         }
-        ExactCurrentResultSelector::CapabilityGrant(_) => {
+        ExactCurrentStateSelector::CapabilityGrant(_) => {
             unreachable!("handled before membership gate")
         }
-        ExactCurrentResultSelector::AgentInteraction(selector) => {
-            use arkret_models_collaboration::agent_interaction::AgentInteractionExactCurrentRow;
-            use arkret_models_collaboration::exact_current_results::NeverWrittenExactCurrentSelector;
-            if !sql_query("SELECT EXISTS(SELECT 1 FROM member_state_current_results m JOIN realm_commits c ON c.realm_id=m.realm_id AND c.commit_id=m.current_commit_id AND c.stream_position=m.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join' AND e.envelope->'payload' ? 'agent_controller_binding') AS present")
+        ExactCurrentStateSelector::AgentInteraction(selector) => {
+            use arkret_models_collaboration::agent_interaction::CurrentAgentInteraction;
+            use arkret_models_collaboration::exact_current_state::NeverWrittenExactCurrentSelector;
+            if !sql_query("SELECT EXISTS(SELECT 1 FROM member_state_current_states m JOIN realm_commits c ON c.realm_id=m.realm_id AND c.commit_id=m.current_commit_id AND c.stream_position=m.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join' AND e.envelope->'payload' ? 'agent_controller_binding') AS present")
                 .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(ActorId::account(selector.agent_account_id.clone()).to_string()).get_result::<ExistsRow>(&mut *conn).await?.present { return Ok(SelfExactCurrentRead::NotFound); }
-            let result = crate::agent_interaction_current_results::read_in_connection(
+            let result = crate::agent_interaction_current_states::read_in_connection(
                 conn,
                 &request.realm_id,
                 &selector.agent_account_id,
             )
             .await?;
             let outcome = match result {
-                Some(row) => ExactCurrentResultsReadOutcome::Present {
+                Some(row) => ExactCurrentStateReadResponseBody::Present {
                     realm_id: request.realm_id.clone(),
                     governance_generation: generation,
                     effective_stream_head: head.clone(),
-                    entry: ExactCurrentResultEntry::AgentInteraction(
-                        AgentInteractionExactCurrentRow {
-                            selector: selector.clone(),
-                            source_stream_ref: head.stream_ref.clone(),
-                            revision: CurrentRevision {
-                                commit_id: arkret_wire::RealmCommitId::new(row.current_commit_id)
-                                    .map_err(|error| corrupt(error.to_string()))?,
-                                stream_position: to_u64(
-                                    row.current_stream_position,
-                                    "Agent interaction position",
-                                )?,
-                            },
-                            value: serde_json::from_value(row.value)
+                    entry: ExactCurrentStateEntry::AgentInteraction(CurrentAgentInteraction {
+                        selector: selector.clone(),
+                        source_stream_ref: head.stream_ref.clone(),
+                        revision: CurrentRevision {
+                            commit_id: arkret_wire::RealmCommitId::new(row.current_commit_id)
                                 .map_err(|error| corrupt(error.to_string()))?,
+                            stream_position: to_u64(
+                                row.current_stream_position,
+                                "Agent interaction position",
+                            )?,
                         },
-                    ),
+                        value: serde_json::from_value(row.value)
+                            .map_err(|error| corrupt(error.to_string()))?,
+                    }),
                 },
-                None if crate::agent_interaction_current_results::known_never_written(
+                None if crate::agent_interaction_current_states::known_never_written(
                     conn,
                     &request.realm_id,
                     &selector.agent_account_id,
@@ -705,7 +701,7 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
                 )
                 .await? =>
                 {
-                    ExactCurrentResultsReadOutcome::NeverWritten {
+                    ExactCurrentStateReadResponseBody::NeverWritten {
                         realm_id: request.realm_id.clone(),
                         governance_generation: generation,
                         effective_stream_head: head,
@@ -725,8 +721,8 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
                 .map_err(|error| corrupt(error.to_string()))?;
             return Ok(SelfExactCurrentRead::Answer(outcome));
         }
-        ExactCurrentResultSelector::Relation(selector) => selector,
-        ExactCurrentResultSelector::ModerationState(selector) => {
+        ExactCurrentStateSelector::Relation(selector) => selector,
+        ExactCurrentStateSelector::ModerationState(selector) => {
             return moderation_state_read(
                 conn,
                 &request.realm_id,
@@ -778,11 +774,11 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
         stream_position: to_u64(row.current_stream_position, "Relation stream position")?,
     };
     Ok(SelfExactCurrentRead::Answer(
-        ExactCurrentResultsReadOutcome::Present {
+        ExactCurrentStateReadResponseBody::Present {
             realm_id: request.realm_id.clone(),
             governance_generation: generation,
             effective_stream_head: head,
-            entry: ExactCurrentResultEntry::Relation(RelationExactCurrentRow {
+            entry: ExactCurrentStateEntry::Relation(CurrentRelation {
                 selector: selector.clone(),
                 source_stream_ref,
                 revision,
@@ -794,18 +790,18 @@ pub(crate) async fn exact_current_result_for_actor_in_connection(
 
 async fn policy_exact_read(
     conn: &mut AsyncPgConnection,
-    request: &ExactCurrentResultsReadRequestBody,
-    selector: &arkret_models_collaboration::exact_current_results::PolicyExactCurrentSelector,
+    request: &ExactCurrentStateReadRequestBody,
+    selector: &arkret_models_collaboration::exact_current_state::PolicyExactCurrentSelector,
     caller: &ActorId,
     generation: u64,
     realm_head: CommitStreamHead,
-) -> Result<SelfExactCurrentRead<ExactCurrentResultsReadOutcome>, PgTransactionError> {
-    use arkret_models_collaboration::exact_current_results::{
-        NeverWrittenExactCurrentSelector, PolicyExactCurrentRow,
+) -> Result<SelfExactCurrentRead<ExactCurrentStateReadResponseBody>, PgTransactionError> {
+    use arkret_models_collaboration::exact_current_state::{
+        CurrentPolicy, NeverWrittenExactCurrentSelector,
     };
 
-    use crate::policy_current_results::ManagementPolicyCurrentRead;
-    let current = match crate::policy_current_results::read_management_policy_exact_in_connection(
+    use crate::policy_current_states::ManagementPolicyCurrentRead;
+    let current = match crate::policy_current_states::read_management_policy_exact_in_connection(
         conn,
         &request.realm_id,
         &selector.policy_id,
@@ -828,7 +824,7 @@ async fn policy_exact_read(
         ManagementPolicyCurrentRead::Present { source, .. } => source,
     };
     let target =
-        crate::policy_current_results::management_policy_scope_target(&request.realm_id, source)?;
+        crate::policy_current_states::management_policy_scope_target(&request.realm_id, source)?;
     let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
         conn,
         &request.realm_id,
@@ -858,38 +854,41 @@ async fn policy_exact_read(
     {
         // An ordinary grant to the Agent cannot bypass its owner's current
         // upper bound merely because this read does not author an Event.
-        let check = arkret_models_collaboration::governance::authorization::AuthzCheckRequestBody {
-            actor_id: caller.clone(),
-            action: arkret_wire::CapabilityActionId::POLICY_SET.to_owned(),
-            resource: Some(target.clone()),
-            context: None,
-        };
+        let check =
+            arkret_models_collaboration::governance::authorization::AuthorizationCheckRequestBody {
+                actor_id: caller.clone(),
+                action: arkret_wire::CapabilityActionId::POLICY_SET.to_owned(),
+                resource: Some(target.clone()),
+                context: None,
+            };
         if !crate::realm_authorization_cut::owned_agent_authorization_check_in_connection(
             conn, caller, &check,
         )
         .await?
-        .is_some_and(|result| result.decision == arkret_wire::AuthzDecision::Allow)
+        .is_some_and(|result| result.decision == arkret_wire::AuthorizationDecision::Allow)
         {
             return Ok(SelfExactCurrentRead::NotFound);
         }
     }
     let outcome = match current {
-        ManagementPolicyCurrentRead::NeverWritten => ExactCurrentResultsReadOutcome::NeverWritten {
-            realm_id: request.realm_id.clone(),
-            governance_generation: generation,
-            effective_stream_head: realm_head,
-            selector: NeverWrittenExactCurrentSelector::Policy(selector.clone()),
-        },
+        ManagementPolicyCurrentRead::NeverWritten => {
+            ExactCurrentStateReadResponseBody::NeverWritten {
+                realm_id: request.realm_id.clone(),
+                governance_generation: generation,
+                effective_stream_head: realm_head,
+                selector: NeverWrittenExactCurrentSelector::Policy(selector.clone()),
+            }
+        }
         ManagementPolicyCurrentRead::Present {
             source,
             revision,
             payload,
             head,
-        } => ExactCurrentResultsReadOutcome::Present {
+        } => ExactCurrentStateReadResponseBody::Present {
             realm_id: request.realm_id.clone(),
             governance_generation: generation,
             effective_stream_head: *head,
-            entry: ExactCurrentResultEntry::Policy(PolicyExactCurrentRow {
+            entry: ExactCurrentStateEntry::Policy(CurrentPolicy {
                 selector: selector.clone(),
                 source_stream_ref: source,
                 revision,
@@ -907,22 +906,20 @@ async fn policy_exact_read(
 }
 async fn owned_agent_grant_read(
     conn: &mut AsyncPgConnection,
-    request: &ExactCurrentResultsReadRequestBody,
-    selector: &arkret_models_collaboration::exact_current_results::CapabilityGrantExactCurrentSelector,
+    request: &ExactCurrentStateReadRequestBody,
+    selector: &arkret_models_collaboration::exact_current_state::CapabilityGrantExactCurrentSelector,
     account: &AccountId,
     issuer: &DidCoreId,
-) -> Result<SelfExactCurrentRead<ExactCurrentResultsReadOutcome>, PgTransactionError> {
-    use arkret_models_collaboration::exact_current_results::CapabilityGrantExactCurrentRow;
+) -> Result<SelfExactCurrentRead<ExactCurrentStateReadResponseBody>, PgTransactionError> {
+    use arkret_models_collaboration::exact_current_state::CurrentCapabilityGrant;
 
-    use crate::capability_grant_current_results::{
-        CapabilityGrantCurrentResultReadRow, decode_row,
-    };
+    use crate::capability_grant_current_states::{CapabilityGrantCurrentStateReadRow, decode_row};
     let owner = serde_json::to_value(ActorId::account(account.clone()))
         .map_err(PersistenceError::database)?;
-    let current = sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_results WHERE realm_id=$1 AND grant_id=$2 AND value->'issuer_id'=$3 AND value->'issuer_authority_refs'->0->>'kind'='owned_agent'")
+    let current = sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_states WHERE realm_id=$1 AND grant_id=$2 AND value->'issuer_id'=$3 AND value->'issuer_authority_refs'->0->>'kind'='owned_agent'")
         .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(selector.grant_id.as_str())
         .bind::<Jsonb,_>(owner)
-        .get_result::<CapabilityGrantCurrentResultReadRow>(&mut *conn).await.optional()?.map(decode_row).transpose()?;
+        .get_result::<CapabilityGrantCurrentStateReadRow>(&mut *conn).await.optional()?.map(decode_row).transpose()?;
     let Some(current) = current.filter(|row| row.value.owned_agent_issuer() == Some(account))
     else {
         return Ok(SelfExactCurrentRead::NotFound);
@@ -950,7 +947,7 @@ async fn owned_agent_grant_read(
         return Ok(SelfExactCurrentRead::Unresolved("the Realm stream has no established head"));
     };
     let generation = to_u64(tenure.generation, "governance generation")?;
-    let outcome = ExactCurrentResultsReadOutcome::Present {
+    let outcome = ExactCurrentStateReadResponseBody::Present {
         realm_id: request.realm_id.clone(),
         governance_generation: generation,
         effective_stream_head: CommitStreamHead {
@@ -958,7 +955,7 @@ async fn owned_agent_grant_read(
             commit_id: head.commit_id.parse().map_err(PersistenceError::database)?,
             stream_position: to_u64(head.stream_position, "Realm stream position")?,
         },
-        entry: ExactCurrentResultEntry::CapabilityGrant(CapabilityGrantExactCurrentRow {
+        entry: ExactCurrentStateEntry::CapabilityGrant(CurrentCapabilityGrant {
             selector: selector.clone(),
             source_stream_ref: current.source.stream_ref,
             revision: current.revision,
@@ -982,7 +979,7 @@ async fn moderation_state_read(
     head: CommitStreamHead,
     caller: &ActorId,
     selector: &ModerationStateExactCurrentSelector,
-) -> Result<SelfExactCurrentRead<ExactCurrentResultsReadOutcome>, PgTransactionError> {
+) -> Result<SelfExactCurrentRead<ExactCurrentStateReadResponseBody>, PgTransactionError> {
     let Some(row) = sql_query(MODERATION_CURRENT_SQL)
         .bind::<Text, _>(realm_id.as_str())
         .bind::<Text, _>(selector.target_ref.as_str())
@@ -992,12 +989,11 @@ async fn moderation_state_read(
     else {
         return Ok(SelfExactCurrentRead::NotFound);
     };
-    let value =
-        serde_json::from_value::<ModerationStateCurrentValue>(row.value).map_err(|error| {
-            corrupt(format!(
-                "stored moderation_state current value is invalid: {error}"
-            ))
-        })?;
+    let value = serde_json::from_value::<ModerationStateValue>(row.value).map_err(|error| {
+        corrupt(format!(
+            "stored moderation_state current value is invalid: {error}"
+        ))
+    })?;
     let source_stream_ref = serde_json::from_value::<CommitStreamRef>(row.stream_ref)
         .map_err(|error| corrupt(format!("stored RealmCommit stream is invalid: {error}")))?;
     let head = match &source_stream_ref {
@@ -1012,7 +1008,7 @@ async fn moderation_state_read(
                 realm_id: realm_id.clone(),
                 circle_id: circle_id.clone(),
             };
-            match crate::moderation_report_current_results::ensure_scope_member_snapshot(
+            match crate::moderation_report_current_states::ensure_scope_member_snapshot(
                 conn, realm_id, &scope, caller,
             )
             .await
@@ -1060,11 +1056,11 @@ async fn moderation_state_read(
         )?,
     };
     Ok(SelfExactCurrentRead::Answer(
-        ExactCurrentResultsReadOutcome::Present {
+        ExactCurrentStateReadResponseBody::Present {
             realm_id: realm_id.clone(),
             governance_generation: generation,
             effective_stream_head: head,
-            entry: ExactCurrentResultEntry::ModerationState(ModerationStateExactCurrentRow {
+            entry: ExactCurrentStateEntry::ModerationState(CurrentModerationState {
                 selector: selector.clone(),
                 source_stream_ref,
                 revision,
@@ -1079,7 +1075,7 @@ pub(crate) async fn strand_watch_current_for_account(
     request: &StrandWatchCurrentRequestBody,
     account: &AccountId,
     issuer: &DidCoreId,
-) -> PersistenceResult<SelfExactCurrentRead<StrandWatchCurrentOutcome>> {
+) -> PersistenceResult<SelfExactCurrentRead<StrandWatchCurrentResponseBody>> {
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
         begin_read_cut(conn).await?;
@@ -1094,7 +1090,7 @@ pub(crate) async fn strand_watch_current_in_connection(
     request: &StrandWatchCurrentRequestBody,
     account: &AccountId,
     issuer: &DidCoreId,
-) -> Result<SelfExactCurrentRead<StrandWatchCurrentOutcome>, PgTransactionError> {
+) -> Result<SelfExactCurrentRead<StrandWatchCurrentResponseBody>, PgTransactionError> {
     strand_watch_observation_in_connection(conn, request, account, issuer, None).await
 }
 
@@ -1103,8 +1099,8 @@ pub(crate) async fn strand_watch_observation_in_connection(
     request: &StrandWatchCurrentRequestBody,
     account: &AccountId,
     issuer: &DidCoreId,
-    audit: Option<&arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest>,
-) -> Result<SelfExactCurrentRead<StrandWatchCurrentOutcome>, PgTransactionError> {
+    audit: Option<&arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequestBody>,
+) -> Result<SelfExactCurrentRead<StrandWatchCurrentResponseBody>, PgTransactionError> {
     let caller = ActorId::account(account.clone());
     if audit.is_none() && request.watcher_actor_id != caller {
         return Ok(SelfExactCurrentRead::NotFound);
@@ -1135,10 +1131,10 @@ pub(crate) async fn strand_watch_observation_in_connection(
             ));
         }
     };
-    let Some(strand) = sql_query("SELECT s.current_commit_id,s.current_stream_position,s.value,c.stream_ref FROM strand_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE s.realm_id=$1 AND s.strand_id=$2 AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position")
+    let Some(strand) = sql_query("SELECT s.current_commit_id,s.current_stream_position,s.value,c.stream_ref FROM strand_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE s.realm_id=$1 AND s.strand_id=$2 AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position")
         .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str())
         .get_result::<CurrentRow>(&mut *conn).await.optional()? else {
-            let orphan = sql_query("SELECT EXISTS(SELECT 1 FROM strand_current_results WHERE realm_id=$1 AND strand_id=$2) AS present")
+            let orphan = sql_query("SELECT EXISTS(SELECT 1 FROM strand_current_states WHERE realm_id=$1 AND strand_id=$2) AS present")
                 .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str())
                 .get_result::<ExistsRow>(&mut *conn).await?.present;
             return Ok(if orphan { SelfExactCurrentRead::Unresolved("Strand covering Commit is unavailable") } else { SelfExactCurrentRead::NotFound });
@@ -1171,7 +1167,7 @@ pub(crate) async fn strand_watch_observation_in_connection(
         ));
     }
     let head = if let ScopeRef::Circle { circle_id, .. } = &scope {
-        let visible = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_results m JOIN circle_current_results c ON c.realm_id=m.realm_id AND c.circle_id=m.circle_id JOIN realm_commits mc ON mc.commit_id=m.current_commit_id AND mc.realm_id=m.realm_id AND mc.stream_ref=m.source_stream_ref AND mc.stream_position=m.current_stream_position JOIN realm_commits cc ON cc.commit_id=c.current_commit_id AND cc.realm_id=c.realm_id AND cc.stream_ref=c.source_stream_ref AND cc.stream_position=c.current_stream_position WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND c.value->>'state'='active') AS present")
+        let visible = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m JOIN circle_current_states c ON c.realm_id=m.realm_id AND c.circle_id=m.circle_id JOIN realm_commits mc ON mc.commit_id=m.current_commit_id AND mc.realm_id=m.realm_id AND mc.stream_ref=m.source_stream_ref AND mc.stream_position=m.current_stream_position JOIN realm_commits cc ON cc.commit_id=c.current_commit_id AND cc.realm_id=c.realm_id AND cc.stream_ref=c.source_stream_ref AND cc.stream_position=c.current_stream_position WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND c.value->>'state'='active') AS present")
             .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(caller.to_string()).get_result::<ExistsRow>(&mut *conn).await?.present;
         if !visible && audit.is_none() {
             return Ok(SelfExactCurrentRead::NotFound);
@@ -1208,7 +1204,7 @@ pub(crate) async fn strand_watch_observation_in_connection(
         &caller,
     )
     .await?;
-    if let Err(error) = crate::strand_watch_current_results::require_current_basis_in_connection(
+    if let Err(error) = crate::strand_watch_current_states::require_current_basis_in_connection(
         conn,
         &request.realm_id,
         &head,
@@ -1302,11 +1298,11 @@ pub(crate) async fn strand_watch_observation_in_connection(
                 "watch current does not belong to the confirmed stream prefix",
             ));
         }
-        StrandWatchCurrentOutcome::Current {
+        StrandWatchCurrentResponseBody::Current {
             realm_id: request.realm_id.clone(),
             governance_generation: generation,
             stream_head: head,
-            result: StrandWatchCurrentRow {
+            current_state: CurrentStrandWatch {
                 selector,
                 source_stream_ref,
                 revision,
@@ -1314,7 +1310,7 @@ pub(crate) async fn strand_watch_observation_in_connection(
             },
         }
     } else {
-        let previously_written = sql_query(crate::strand_watch_current_results::WATCH_HISTORY_SQL)
+        let previously_written = sql_query(crate::strand_watch_current_states::WATCH_HISTORY_SQL)
             .bind::<Text, _>(request.realm_id.as_str())
             .bind::<Text, _>(request.strand_id.as_str())
             .bind::<Jsonb, _>(
@@ -1325,14 +1321,14 @@ pub(crate) async fn strand_watch_observation_in_connection(
             .get_result::<ExistsRow>(&mut *conn)
             .await?
             .present;
-        let orphan_current = sql_query("SELECT EXISTS(SELECT 1 FROM strand_watch_current_results WHERE realm_id=$1 AND strand_id=$2 AND watcher_actor_id=$3) AS present")
+        let orphan_current = sql_query("SELECT EXISTS(SELECT 1 FROM strand_watch_current_states WHERE realm_id=$1 AND strand_id=$2 AND watcher_actor_id=$3) AS present")
             .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(request.strand_id.as_str()).bind::<Text,_>(request.watcher_actor_id.to_string()).get_result::<ExistsRow>(&mut *conn).await?.present;
         if previously_written || orphan_current {
             return Ok(SelfExactCurrentRead::Unresolved(
                 "written watch current or tenure import is unavailable",
             ));
         }
-        StrandWatchCurrentOutcome::NeverWritten {
+        StrandWatchCurrentResponseBody::NeverWritten {
             realm_id: request.realm_id.clone(),
             governance_generation: generation,
             stream_head: head,
@@ -1366,7 +1362,7 @@ pub(crate) async fn media_service_anchor_for_account(
             .present;
         if !anchored {return Ok(MediaServiceAnchorRead::NotFound);}
         #[derive(QueryableByName)] struct MediaAnchor {#[diesel(sql_type=Jsonb)] value:serde_json::Value,#[diesel(sql_type=Text)] commit_id:String,#[diesel(sql_type=BigInt)] stream_position:i64}
-        let row=sql_query("SELECT value,current_commit_id AS commit_id,current_stream_position AS stream_position FROM realm_media_service_current_results WHERE realm_id=$1")
+        let row=sql_query("SELECT value,current_commit_id AS commit_id,current_stream_position AS stream_position FROM realm_media_service_current_states WHERE realm_id=$1")
             .bind::<Text,_>(realm_id.as_str()).get_result::<MediaAnchor>(&mut *conn).await.optional()?.ok_or_else(||PersistenceError::Conflict("temporarily_unavailable: accepted media current is incomplete".into()))?;
         let value:arkret_models_collaboration::events_payloads::realm::RealmMediaServiceValue=serde_json::from_value(row.value).map_err(PersistenceError::database)?;
         value.validate().map_err(PersistenceError::database)?;

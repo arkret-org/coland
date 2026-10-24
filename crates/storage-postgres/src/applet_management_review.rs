@@ -140,19 +140,16 @@ pub(super) async fn event_pins(
         .iter()
         .map(|p| p.id.to_string())
         .collect::<Vec<_>>();
-    let revisions=sql_query("SELECT to_jsonb(p) AS value FROM policy_current_results p WHERE policy_id=ANY($1) ORDER BY policy_id FOR SHARE")
+    let revisions=sql_query("SELECT to_jsonb(p) AS value FROM policy_current_states p WHERE policy_id=ANY($1) ORDER BY policy_id FOR SHARE")
         .bind::<diesel::sql_types::Array<Text>,_>(ids).load::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    let membership=sql_query("SELECT to_jsonb(m) AS value FROM member_state_current_results m WHERE realm_id=$1 AND member_id=$2 FOR SHARE")
+    let membership=sql_query("SELECT to_jsonb(m) AS value FROM member_state_current_states m WHERE realm_id=$1 AND member_id=$2 FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.actor_id.to_string()).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     let circle = match &event.scope_ref {
         ScopeRef::Circle { circle_id, .. } => {
-            let circle = crate::circle_current_results::locked_circle_basis(
-                conn,
-                &event.realm_id,
-                circle_id,
-            )
-            .await?;
-            let member = crate::circle_current_results::locked_membership_basis(
+            let circle =
+                crate::circle_current_states::locked_circle_basis(conn, &event.realm_id, circle_id)
+                    .await?;
+            let member = crate::circle_current_states::locked_membership_basis(
                 conn,
                 &event.realm_id,
                 circle_id,
@@ -188,7 +185,7 @@ pub(super) async fn event_pins(
         if grants.contains_key(&id) {
             continue;
         }
-        let row=sql_query("SELECT to_jsonb(g) AS value FROM capability_grant_current_results g WHERE realm_id=$1 AND grant_id=$2 FOR SHARE")
+        let row=sql_query("SELECT to_jsonb(g) AS value FROM capability_grant_current_states g WHERE realm_id=$1 AND grant_id=$2 FOR SHARE")
             .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(&id).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(hidden)?;
         let value: arkret_models_collaboration::governance::grant_constraint::CapabilityGrant =
             serde_json::from_value(row.value["value"].clone()).map_err(invalid)?;
@@ -197,7 +194,7 @@ pub(super) async fn event_pins(
         }
         grants.insert(id, row.value);
     }
-    let root=sql_query("SELECT to_jsonb(r) AS value FROM realm_authority_root_current_results r WHERE realm_id=$1 FOR SHARE")
+    let root=sql_query("SELECT to_jsonb(r) AS value FROM realm_authority_root_current_states r WHERE realm_id=$1 FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let identity = crate::realm_actor_control_source::current(conn, &authority.actor_id).await?;
     let profile = crate::realm_actor_control::optional_current_source(
@@ -311,7 +308,7 @@ pub(super) async fn pins(
         .iter()
         .map(|policy| policy.id.to_string())
         .collect::<Vec<_>>();
-    let revisions = sql_query("SELECT to_jsonb(p) AS value FROM policy_current_results p WHERE policy_id=ANY($1) ORDER BY policy_id FOR SHARE")
+    let revisions = sql_query("SELECT to_jsonb(p) AS value FROM policy_current_states p WHERE policy_id=ANY($1) ORDER BY policy_id FOR SHARE")
         .bind::<diesel::sql_types::Array<Text>,_>(ids).load::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut pending =
         std::collections::BTreeSet::from([candidate.creation_authorization_ref.to_string()]);
@@ -320,7 +317,7 @@ pub(super) async fn pins(
         if grants.contains_key(&id) {
             continue;
         }
-        let row = sql_query("SELECT to_jsonb(g) AS value FROM capability_grant_current_results g WHERE realm_id=$1 AND grant_id=$2 FOR SHARE")
+        let row = sql_query("SELECT to_jsonb(g) AS value FROM capability_grant_current_states g WHERE realm_id=$1 AND grant_id=$2 FOR SHARE")
             .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(&id).get_result::<JsonRow>(&mut *conn)
             .await.optional().map_err(PersistenceError::database)?.ok_or_else(hidden)?;
         let grant: arkret_models_collaboration::governance::grant_constraint::CapabilityGrant =
@@ -332,7 +329,7 @@ pub(super) async fn pins(
         }
         grants.insert(id, row.value);
     }
-    let root = sql_query("SELECT to_jsonb(r) AS value FROM realm_authority_root_current_results r WHERE realm_id=$1 FOR SHARE")
+    let root = sql_query("SELECT to_jsonb(r) AS value FROM realm_authority_root_current_states r WHERE realm_id=$1 FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     // Signing time is not a mutable security pin. Keep the verified original
     // producer key and its exact registration/grant source coordinates instead.
@@ -370,7 +367,7 @@ pub(super) async fn select_current_creation(
         _ => None,
     };
     let policies =
-        crate::policy_current_results::read_scoped_applet_management_policies_in_connection(
+        crate::policy_current_states::read_scoped_applet_management_policies_in_connection(
             conn,
             scope.realm_id(),
             circle,

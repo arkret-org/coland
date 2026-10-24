@@ -1,8 +1,8 @@
 use arkret_identifiers::DidCoreId;
 use arkret_models_identity::{
     OrganizationRegistrationChallenge, OrganizationRegistrationChallengeRequestBody,
-    OrganizationRegistrationEnsureRequestBody, OrganizationRegistrationOutcome,
-    OrganizationRegistrationRefreshRequestBody, OrganizationRegistrationRevokeRequestBody,
+    OrganizationRegistrationEnsureRequestBody, OrganizationRegistrationRefreshRequestBody,
+    OrganizationRegistrationResponseBody, OrganizationRegistrationRevokeRequestBody,
     OrganizationRegistrationScope,
 };
 use arkret_signatures::Ed25519DetachedJwsSigner;
@@ -109,7 +109,7 @@ pub(crate) async fn ensure(
     aa: AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<OrganizationRegistrationOutcome> {
+) -> JsonResult<OrganizationRegistrationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     require_registry_admin(state, &aa.authenticated_session(state, req).await?.actor)?;
     let body = parse_registration_body(req).await?;
@@ -132,7 +132,7 @@ pub(crate) async fn get(
     depot: &mut Depot,
     req: &mut Request,
     organization_id: QueryParam<String, true>,
-) -> JsonResult<OrganizationRegistrationOutcome> {
+) -> JsonResult<OrganizationRegistrationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let actor = aa.authenticated_session(state, req).await?.actor;
     let organization_id = DidCoreId::new(organization_id.into_inner())
@@ -165,7 +165,7 @@ pub(crate) async fn refresh(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<OrganizationRegistrationRefreshRequestBody>,
-) -> JsonResult<OrganizationRegistrationOutcome> {
+) -> JsonResult<OrganizationRegistrationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let request = body.into_inner();
     let current = require_registration_manager(state, &aa, req, &request.organization_id).await?;
@@ -188,7 +188,7 @@ pub(crate) async fn revoke(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<OrganizationRegistrationRevokeRequestBody>,
-) -> JsonResult<OrganizationRegistrationOutcome> {
+) -> JsonResult<OrganizationRegistrationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let request = body.into_inner();
     let current = require_registration_manager(state, &aa, req, &request.organization_id).await?;

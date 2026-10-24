@@ -4,8 +4,8 @@
 //! contributes the self and peer stream scans and the open authority bundle.
 //! Planned handoff installs only a complete, verified frozen migration cut.
 
-use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
-use arkret_wire::{AuthorityBundleRequest, ErrorCode, StreamScanRequest};
+use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
+use arkret_wire::{ErrorCode, RealmAuthorityBundleRequestBody, StreamScanRequestBody};
 use coland_services::{ServiceError, ServiceResult};
 use salvo::http::StatusCode;
 use salvo::prelude::*;
@@ -87,7 +87,7 @@ fn trace_stream_read_refusal(
 }
 
 #[cfg(feature = "conformance-harness")]
-fn diagnostic_stream_class(request: &StreamScanRequest) -> &'static str {
+fn diagnostic_stream_class(request: &StreamScanRequestBody) -> &'static str {
     match request.stream_ref {
         arkret_wire::CommitStreamRef::Realm { .. } => "realm",
         arkret_wire::CommitStreamRef::Circle { .. } => "circle",
@@ -510,7 +510,7 @@ async fn submit_managed_device(
         );
     }
     let Some((request, _exact_body)) =
-        parse_exact_closed_body::<SelfAuthoritySubmitRequest>(req, res).await
+        parse_exact_closed_body::<SelfAuthoritySubmitRequestBody>(req, res).await
     else {
         return;
     };
@@ -599,7 +599,7 @@ pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Resp
         );
     }
     let Some((request, exact_request_body)) =
-        parse_exact_closed_body::<SelfAuthoritySubmitRequest>(req, res).await
+        parse_exact_closed_body::<SelfAuthoritySubmitRequestBody>(req, res).await
     else {
         return;
     };
@@ -633,12 +633,14 @@ pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Resp
     #[cfg(feature = "conformance-harness")]
     if let Err(error) = &result {
         let kind_class = match &request {
-            SelfAuthoritySubmitRequest::Event(value) => submission_kind_class(&value.event.kind),
-            SelfAuthoritySubmitRequest::MlsCommit(_) => "mls",
-            SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(_) => "realm_bootstrap",
-            SelfAuthoritySubmitRequest::DirectConversationFounding(_) => "direct_founding",
-            SelfAuthoritySubmitRequest::MembershipCompensation(_) => "membership_compensation",
-            SelfAuthoritySubmitRequest::AuditPairedEvent(_) => "audit_paired_event",
+            SelfAuthoritySubmitRequestBody::Event(value) => {
+                submission_kind_class(&value.event.kind)
+            }
+            SelfAuthoritySubmitRequestBody::MlsCommit(_) => "mls",
+            SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(_) => "realm_bootstrap",
+            SelfAuthoritySubmitRequestBody::DirectConversationFounding(_) => "direct_founding",
+            SelfAuthoritySubmitRequestBody::MembershipCompensation(_) => "membership_compensation",
+            SelfAuthoritySubmitRequestBody::AuditPairedEvent(_) => "audit_paired_event",
         };
         let actor_class = if session.agent_session().is_some() {
             "agent"
@@ -648,8 +650,8 @@ pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Resp
         trace_submission_refusal("authority_dispatch", kind_class, actor_class, Some(error));
     }
     if let Ok(
-        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(
-            arkret_wire::AuthoritySubmitOutcome::Accepted {
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(
+            arkret_wire::AuthoritySubmitResponseBody::Accepted {
                 status: arkret_wire::AuthorityCommitStatus::Committed,
                 ..
             },
@@ -657,10 +659,10 @@ pub(crate) async fn submit_self(req: &mut Request, depot: &Depot, res: &mut Resp
     ) = &result
     {
         let event_id = match &request {
-            SelfAuthoritySubmitRequest::Event(submission) => {
+            SelfAuthoritySubmitRequestBody::Event(submission) => {
                 Some(submission.event.event_id.as_str())
             }
-            SelfAuthoritySubmitRequest::MlsCommit(submission) => {
+            SelfAuthoritySubmitRequestBody::MlsCommit(submission) => {
                 Some(submission.commit_event.event_id.as_str())
             }
             _ => None,
@@ -724,7 +726,8 @@ async fn submit_realm_actor_service(state: &AppState, req: &mut Request, res: &m
                 );
             }
         };
-    let Some((request, _)) = parse_exact_closed_body::<SelfAuthoritySubmitRequest>(req, res).await
+    let Some((request, _)) =
+        parse_exact_closed_body::<SelfAuthoritySubmitRequestBody>(req, res).await
     else {
         return;
     };
@@ -732,7 +735,7 @@ async fn submit_realm_actor_service(state: &AppState, req: &mut Request, res: &m
         request
             .validate()
             .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
-        let SelfAuthoritySubmitRequest::Event(submission) = &request else {
+        let SelfAuthoritySubmitRequestBody::Event(submission) = &request else {
             return Err(ServiceError::SchemaViolation(
                 "Service creation requires one original Event".into(),
             ));
@@ -778,7 +781,7 @@ async fn submit_realm_actor_service(state: &AppState, req: &mut Request, res: &m
                 .await?
         };
         let outcome = if let Some(commit) = replay {
-            arkret_wire::AuthoritySubmitOutcome::Accepted {
+            arkret_wire::AuthoritySubmitResponseBody::Accepted {
                 status: arkret_wire::AuthorityCommitStatus::Duplicate,
                 commit,
             }
@@ -872,7 +875,7 @@ async fn submit_realm_actor_service(state: &AppState, req: &mut Request, res: &m
             }
         };
         let outcome =
-            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(
+            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(
                 outcome,
             );
         outcome
@@ -892,7 +895,8 @@ async fn submit_applet_control(
     res: &mut Response,
 ) {
     let source = &control.carrier;
-    let Some((request, _)) = parse_exact_closed_body::<SelfAuthoritySubmitRequest>(req, res).await
+    let Some((request, _)) =
+        parse_exact_closed_body::<SelfAuthoritySubmitRequestBody>(req, res).await
     else {
         return;
     };
@@ -900,7 +904,7 @@ async fn submit_applet_control(
         request
             .validate()
             .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
-        let SelfAuthoritySubmitRequest::Event(submission) = &request else {
+        let SelfAuthoritySubmitRequestBody::Event(submission) = &request else {
             return Err(ServiceError::SchemaViolation(
                 "Realm control ingress requires one original Event submission".into(),
             ));
@@ -946,7 +950,7 @@ async fn submit_applet_control(
             .realm_actor_control_replay(&submission.event, source, &request_digest)
             .await?;
         let outcome = if let Some(commit) = replay {
-            arkret_wire::AuthoritySubmitOutcome::Accepted {
+            arkret_wire::AuthoritySubmitResponseBody::Accepted {
                 status: arkret_wire::AuthorityCommitStatus::Duplicate,
                 commit,
             }
@@ -1075,13 +1079,13 @@ async fn submit_applet_control(
 
             match outcome {
                 AuthorityEventAdmissionOutcome::Committed(commit) => {
-                    arkret_wire::AuthoritySubmitOutcome::Accepted {
+                    arkret_wire::AuthoritySubmitResponseBody::Accepted {
                         status: arkret_wire::AuthorityCommitStatus::Committed,
                         commit,
                     }
                 }
                 AuthorityEventAdmissionOutcome::Duplicate(commit) => {
-                    arkret_wire::AuthoritySubmitOutcome::Accepted {
+                    arkret_wire::AuthoritySubmitResponseBody::Accepted {
                         status: arkret_wire::AuthorityCommitStatus::Duplicate,
                         commit,
                     }
@@ -1094,7 +1098,7 @@ async fn submit_applet_control(
             }
         };
         let outcome =
-            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(
+            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(
                 outcome,
             );
         outcome
@@ -1120,7 +1124,7 @@ async fn scan_stream(req: &mut Request, depot: &Depot, res: &mut Response) {
     if let Ok(device) = depot
         .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
     ) {
-        let Some(request) = parse_closed_body::<StreamScanRequest>(req, res).await else {
+        let Some(request) = parse_closed_body::<StreamScanRequestBody>(req, res).await else {
             return;
         };
         match native_stream_scan(app_state, device, request).await {
@@ -1179,7 +1183,7 @@ async fn scan_stream(req: &mut Request, depot: &Depot, res: &mut Response) {
             &error.message,
         );
     }
-    let Some(request) = parse_closed_body::<StreamScanRequest>(req, res).await else {
+    let Some(request) = parse_closed_body::<StreamScanRequestBody>(req, res).await else {
         return;
     };
     if let Err(error) = request.validate() {
@@ -1218,8 +1222,8 @@ async fn scan_stream(req: &mut Request, depot: &Depot, res: &mut Response) {
 async fn native_stream_scan(
     state: &AppState,
     device: &crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice,
-    request: StreamScanRequest,
-) -> coland_http::result::GuardedJsonResult<arkret_wire::StreamScanOutcome> {
+    request: StreamScanRequestBody,
+) -> coland_http::result::GuardedJsonResult<arkret_wire::StreamScanResponseBody> {
     let unavailable =
         || coland_http::error::AppError::capability_denied("native stream content is unavailable");
     request
@@ -1271,7 +1275,7 @@ async fn native_stream_scan(
 /// cannot prove fails closed as `temporarily_unavailable`, never as a page.
 fn render_stream_scan(
     res: &mut Response,
-    request: &StreamScanRequest,
+    request: &StreamScanRequestBody,
     result: ServiceResult<coland_storage::AccountStreamScan>,
 ) {
     match result {
@@ -1325,7 +1329,7 @@ fn render_stream_scan(
 }
 fn render_peer_stream_scan(
     res: &mut Response,
-    request: &StreamScanRequest,
+    request: &StreamScanRequestBody,
     result: ServiceResult<coland_storage::PeerStreamScan>,
 ) {
     match result {
@@ -1396,7 +1400,7 @@ async fn peer_scan_stream(req: &mut Request, depot: &mut Depot, res: &mut Respon
         Ok(peer) => peer,
         Err(error) => return error.write(req, depot, res).await,
     };
-    let Some(request) = parse_closed_body::<StreamScanRequest>(req, res).await else {
+    let Some(request) = parse_closed_body::<StreamScanRequestBody>(req, res).await else {
         return;
     };
     if let Err(error) = request.validate() {
@@ -1428,7 +1432,7 @@ async fn peer_handoff(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         Err(error) => return error.write(req, depot, res).await,
     };
     let Some(request) = parse_closed_body::<
-        arkret_models_collaboration::authority_commit::AuthorityHandoffRequest,
+        arkret_models_collaboration::authority_commit::AuthorityRealmAuthorityHandoffRequestBody,
     >(req, res)
     .await
     else {
@@ -1447,7 +1451,7 @@ async fn peer_handoff(req: &mut Request, depot: &mut Depot, res: &mut Response) 
 
 #[handler]
 async fn authority_bundle(req: &mut Request, depot: &Depot, res: &mut Response) {
-    let Some(request) = parse_closed_body::<AuthorityBundleRequest>(req, res).await else {
+    let Some(request) = parse_closed_body::<RealmAuthorityBundleRequestBody>(req, res).await else {
         return;
     };
     if let Err(error) = request.validate() {

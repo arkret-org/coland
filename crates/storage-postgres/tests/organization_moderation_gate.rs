@@ -100,9 +100,9 @@ async fn snapshot(pool: &PgPool) -> serde_json::Value {
         'events',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM canonical_events r), \
         'commits',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM realm_commits r), \
         'authority',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM realm_authorities r), \
-        'relationships',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM realm_organization_current_results r), \
-        'members',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM member_state_current_results r), \
-        'invites',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM invite_lifecycle_current_results r), \
+        'relationships',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM realm_organization_current_states r), \
+        'members',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM member_state_current_states r), \
+        'invites',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM invite_lifecycle_current_states r), \
         'outbox',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM federation_outbox r), \
         'event_outbox',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM event_federation_outbox r)) AS value")
         .get_result::<Snapshot>(&mut *conn).await.unwrap().value

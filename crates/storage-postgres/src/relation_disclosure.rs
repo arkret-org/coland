@@ -180,13 +180,13 @@ async fn endpoint_visible(
     }
     let query = if arkret_wire::StrandId::new(reference).is_ok() {
         Some(
-            "SELECT o.realm_id,o.value,c.stream_ref AS source_stream_ref FROM strand_current_results o \
+            "SELECT o.realm_id,o.value,c.stream_ref AS source_stream_ref FROM strand_current_states o \
               LEFT JOIN realm_commits c ON c.realm_id=o.realm_id AND c.commit_id=o.current_commit_id \
               AND c.stream_position=o.current_stream_position WHERE o.strand_id=$1",
         )
     } else if arkret_wire::SpaceId::new(reference).is_ok() {
         Some(
-            "SELECT o.realm_id,o.value,c.stream_ref AS source_stream_ref FROM space_current_results o \
+            "SELECT o.realm_id,o.value,c.stream_ref AS source_stream_ref FROM space_current_states o \
               LEFT JOIN realm_commits c ON c.realm_id=o.realm_id AND c.commit_id=o.current_commit_id \
               AND c.stream_position=o.current_stream_position WHERE o.space_id=$1",
         )
@@ -277,7 +277,7 @@ async fn endpoint_visible(
         "SELECT e.envelope,c.commit_json FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk \
          WHERE e.id=$1 AND e.state='committed' \
          AND NOT EXISTS(SELECT 1 FROM retention_tombstones t WHERE t.event_id=e.id) \
-         AND NOT EXISTS(SELECT 1 FROM object_redaction_current_results r WHERE r.realm_id=e.realm_id \
+         AND NOT EXISTS(SELECT 1 FROM object_redaction_current_states r WHERE r.realm_id=e.realm_id \
              AND r.target_ref IN ($2,e.envelope->>'event_id'))",
     ).bind::<diesel::sql_types::Binary, _>(token.to_vec()).bind::<Text, _>(reference)
         .get_result::<EventRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?

@@ -39,7 +39,7 @@ fn admission_revoke(
     refs: Vec<String>,
 ) -> KeyPackagesRevokeRequestBody {
     let method = format!("{}#{}", authority.native_did, authority.device_id);
-    let body = KeyPackagesRevokeUnsignedRequest {
+    let body = KeyPackagesRevokeFields {
         key_package_refs: refs,
         device_id: authority.device_id.clone(),
         reason: None,
@@ -384,7 +384,7 @@ pub(super) async fn keypackage_admission(
         StatusCode::OK,
         "real native own-package cleanup: {value}"
     );
-    let result: KeyPackagesRevokeOutcome = serde_json::from_value(value.clone()).unwrap();
+    let result: KeyPackagesRevokeResponseBody = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(result.revoked, revoke.key_package_refs);
     assert!(result.failures.is_empty());
     let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
@@ -655,7 +655,7 @@ async fn admission_native_last_resort(
         StatusCode::OK,
         "negotiated actual native last-resort claim: {value}"
     );
-    let claim: KeyPackagesClaimOutcome = serde_json::from_value(value.clone()).unwrap();
+    let claim: KeyPackagesClaimResponseBody = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(claim.claim_receipt.request, request.unsigned_request());
     assert_eq!(claim.claims.len(), 1);
     assert_eq!(claim.claims[0].keypackage_ref, reference);
@@ -724,7 +724,7 @@ async fn admission_native_last_resort(
             device_id: recipient.device_id.clone(),
         },
         keypackage_claim_ref: added.welcome.keypackage_claim_ref,
-        ciphertext_b64: added.welcome.ciphertext_b64,
+        ciphertext_base64url: added.welcome.ciphertext_base64url,
         producer_proof: arkret_signatures::detached_object::sign_detached_object(
             &Value::Null,
             arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
@@ -742,7 +742,7 @@ async fn admission_native_last_resort(
         &SigningKey::from_bytes(&[79; 32]),
     )
     .unwrap();
-    let submission = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+    let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
         commit_event: event.clone(),
         welcomes: vec![welcome.clone()],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -833,7 +833,7 @@ async fn admission_native_last_resort(
         signature: KeyOperationSignature {
             kid: arkret_wire::NonEmptyString::new(recipient_method.to_string()).unwrap(),
             signature_algorithm: None,
-            sig: arkret_wire::Base64UrlString::new("AA").unwrap(),
+            signature: arkret_wire::Base64UrlString::new("AA").unwrap(),
         },
     };
     let command = restored
@@ -883,7 +883,7 @@ async fn admission_native_last_resort(
         StatusCode::OK,
         "real native last-resort durable consume: {value}"
     );
-    let outcome: KeyPackagesConsumeOutcome = serde_json::from_value(value.clone()).unwrap();
+    let outcome: KeyPackagesConsumeResponseBody = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(outcome.consume_receipt.claim_id, command.claim_id);
     assert_eq!(
         arkret_canonical::canonical_json_bytes(&outcome.consume_receipt.recipient_durable_receipt)
@@ -946,7 +946,7 @@ async fn admission_native_last_resort(
         StatusCode::OK,
         "same published last-resort package has independent second audit: {value}"
     );
-    let second: KeyPackagesClaimOutcome = serde_json::from_value(value).unwrap();
+    let second: KeyPackagesClaimResponseBody = serde_json::from_value(value).unwrap();
     assert_eq!(second.claim_receipt.request, another.unsigned_request());
     assert_eq!(second.claims[0].keypackage_ref, reference);
     assert_ne!(second.claims[0].claim_id, command.claim_id.as_str());
@@ -1104,7 +1104,7 @@ async fn admission_current_mls_policy(
         Some(child),
         &signer,
     );
-    let request = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+    let request = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
         commit_event: event.clone(),
         welcomes: vec![],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -1205,7 +1205,7 @@ async fn admission_accepted_self_update(
         Some(child),
         &signer,
     );
-    let request = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+    let request = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
         commit_event: event.clone(),
         welcomes: vec![],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -1269,11 +1269,11 @@ async fn admission_accepted_self_update(
         StatusCode::OK,
         "exact native self-update recovers original Commit: {replay}"
     );
-    let outcome: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome =
+    let outcome: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody =
         serde_json::from_value(replay).unwrap();
     outcome.validate_for_request(&request).unwrap();
-    let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(
-        arkret_wire::AuthoritySubmitOutcome::Accepted { commit, .. },
+    let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(
+        arkret_wire::AuthoritySubmitResponseBody::Accepted { commit, .. },
     ) = outcome
     else {
         panic!("exact native self-update must recover its accepted original")
@@ -1354,7 +1354,7 @@ async fn admission_claimed_target_fence(
         StatusCode::OK,
         "genuine claim before independent target fence: {value}"
     );
-    let claim: KeyPackagesClaimOutcome = serde_json::from_value(value).unwrap();
+    let claim: KeyPackagesClaimResponseBody = serde_json::from_value(value).unwrap();
     assert_eq!(claim.claim_receipt.request, request.unsigned_request());
     assert_eq!(claim.claims.len(), 1);
     assert_eq!(claim.claims[0].actor_id, target.actor_id);
@@ -1424,7 +1424,7 @@ async fn admission_claimed_target_fence(
             device_id: recipient.device_id.clone(),
         },
         keypackage_claim_ref: added.welcome.keypackage_claim_ref,
-        ciphertext_b64: added.welcome.ciphertext_b64,
+        ciphertext_base64url: added.welcome.ciphertext_base64url,
         producer_proof: arkret_signatures::detached_object::sign_detached_object(
             &Value::Null,
             arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
@@ -1442,7 +1442,7 @@ async fn admission_claimed_target_fence(
         &SigningKey::from_bytes(&[79; 32]),
     )
     .unwrap();
-    let submission = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+    let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
         commit_event: event.clone(),
         welcomes: vec![welcome],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -1540,7 +1540,7 @@ fn admission_verify_snapshot(fixture: &Fixture, snapshot: &arkret_wire::RealmSta
         stream
     );
     assert!(snapshot.current_state_entries.iter().all(|row| match row {
-        arkret_wire::TypedCurrentRow::Value {
+        arkret_wire::CurrentState::Value {
             source_stream_ref, ..
         } => source_stream_ref == &stream,
     }));
@@ -1599,12 +1599,12 @@ async fn admission_read_material_and_snapshot_guards(
     group: &mut arkret_mls::ArkretMlsGroup,
 ) -> GrantId {
     use arkret_models_collaboration::mls_roster_authority::{
-        MlsMemberRosterAuthorityReadRequestBody, MlsSelfRosterAuthorityReadOutcome,
+        MlsMemberRosterAuthorityReadRequestBody, MlsSelfRosterAuthorityReadResponseBody,
     };
     let rows = fixture
         .state
         .test_persistence()
-        .capability_grant_current_results()
+        .capability_grant_current_states()
         .snapshot_for_realm(&fixture.realm)
         .await
         .unwrap();
@@ -1679,7 +1679,7 @@ async fn admission_read_material_and_snapshot_guards(
     })
     .await;
     assert_eq!(response.status_code, Some(StatusCode::OK));
-    let page: MlsSelfRosterAuthorityReadOutcome = response.take_json().await.unwrap();
+    let page: MlsSelfRosterAuthorityReadResponseBody = response.take_json().await.unwrap();
     assert!(page.roster.next_cursor.is_none());
     let pages = vec![page];
     let peer = arkret::verify_mls_member_roster_authority_pages(&pages, &request).unwrap();
@@ -1746,8 +1746,8 @@ async fn admission_read_material_and_snapshot_guards(
     let problem: Value = expired.take_json().await.unwrap();
     assert_eq!(problem["status"], 404);
     assert_eq!(problem["type"], "https://arkret.org/problems/not_found");
-    assert!(problem.get("group_info_bytes_b64").is_none());
-    assert!(problem.get("ratchet_tree_bytes_b64").is_none());
+    assert!(problem.get("group_info_base64url").is_none());
+    assert!(problem.get("ratchet_tree_base64url").is_none());
     assert_eq!(
         boxed_step(|| admission_read_footprint(fixture)).await,
         before

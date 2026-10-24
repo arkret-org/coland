@@ -1,5 +1,5 @@
 //! Real Realm Device transport, remote Account keys and accepted MLS writes.
-use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
 use arkret_models_collaboration::governance::grant_constraint::{
     GrantConstraintEffect, GrantConstraintKind, GrantConstraintSubkind, ManagedActorRole,
 };
@@ -132,9 +132,9 @@ async fn read_service_grants(
         HttpSignatureScenario::ServiceToServiceV1,
         &[],
         "sig1",
-        package.webhook_auth.key_ref.as_str(),
+        package.webhook_signature_policy.key_ref.as_str(),
         chrono::Utc::now().timestamp(),
-        &applet_service_signing_key(&package.webhook_auth.key_ref),
+        &applet_service_signing_key(&package.webhook_signature_policy.key_ref),
     )
     .unwrap();
     if let Some(other) = tamper_subject {
@@ -254,7 +254,7 @@ async fn business_authority(
         .admin_post_network(
             "/_arkret/self/events",
             ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-            &json!(SelfAuthoritySubmitRequest::Event(
+            &json!(SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(event)
             )),
             &parent_request,
@@ -268,7 +268,7 @@ async fn business_authority(
         StatusCode::OK,
         "actual Service effective grant read: {grants}"
     );
-    let grants: arkret_models_collaboration::governance::authorization::GrantList =
+    let grants: arkret_models_collaboration::governance::authorization::EffectiveGrantSnapshot =
         serde_json::from_value(grants).unwrap();
     assert!(grants.grants.iter().any(|row| row.grant.id == parent_id));
     let (status, _) = boxed_step(|| read_service_grants(fixture, package, actor, None)).await;
@@ -314,9 +314,9 @@ async fn business_terminal_child(
         }
     }
     let signer = Ed25519PayloadSigner::new(
-        applet_service_signing_key(&package.webhook_auth.key_ref),
+        applet_service_signing_key(&package.webhook_signature_policy.key_ref),
         applet_service_did(package),
-        package.webhook_auth.key_ref.clone(),
+        package.webhook_signature_policy.key_ref.clone(),
     );
     let event = signed_event(
         package,
@@ -349,7 +349,7 @@ async fn business_terminal_child(
         StatusCode::OK,
         "real terminal business child: {value}"
     );
-    let result: AppletTransactionOutcome = serde_json::from_value(value).unwrap();
+    let result: AppletTransactionResponseBody = serde_json::from_value(value).unwrap();
     assert_eq!(
         result.status(),
         AppletTransactionStatus::Accepted,
@@ -399,7 +399,7 @@ async fn service_cannot_proxy_terminal_child_membership(
             arkret_signatures::SignEventOptions::new().with_created_at(at),
         )
         .unwrap();
-        let request = SelfAuthoritySubmitRequest::Event(
+        let request = SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(authored.into_event()),
         );
         request.validate().unwrap();
@@ -531,7 +531,7 @@ async fn foreign_member(governor: &Fixture, member: &Fixture) {
         .admin_post(
             "/_arkret/self/events",
             ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-            &json!(SelfAuthoritySubmitRequest::Event(
+            &json!(SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(invite.clone())
             )),
             None,
@@ -565,7 +565,7 @@ async fn foreign_member(governor: &Fixture, member: &Fixture) {
         .admin_post(
             "/_arkret/self/events",
             ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-            &json!(SelfAuthoritySubmitRequest::Event(
+            &json!(SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(accept)
             )),
             None,
@@ -738,10 +738,10 @@ pub(super) async fn run(
         StatusCode::OK,
         "accepted Add replay after reservation expiry: {replay}"
     );
-    let replay: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome =
+    let replay: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody =
         serde_json::from_value(replay).unwrap();
-    let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(
-        arkret_wire::AuthoritySubmitOutcome::Accepted { commit, .. },
+    let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(
+        arkret_wire::AuthoritySubmitResponseBody::Accepted { commit, .. },
     ) = replay
     else {
         panic!("accepted Add replay must restore its original Commit");
@@ -799,7 +799,7 @@ async fn genesis(
             "cipher_suite":"MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
             "group_info_ref":info,"ratchet_tree_ref":tree,
             "creator_leaf_authority":{
-                "leaf_signature_key_b64u":arkret_canonical::base64url_encode(key.verifying_key().as_bytes()),
+                "leaf_signature_key_base64url":arkret_canonical::base64url_encode(key.verifying_key().as_bytes()),
                 "endpoint":{"kind":"device","device_id":device},
                 "authorization_event_ref":authority.authorization_ref.event_id
             },"governance_binding":binding,
@@ -821,7 +821,7 @@ async fn genesis(
             authority,
             "/_arkret/self/events",
             ServiceOperationId::SelfEventsCommandSubmitV1,
-            json!(SelfAuthoritySubmitRequest::Event(
+            json!(SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(genesis.clone())
             )),
         )
@@ -981,7 +981,7 @@ async fn submit_human_event(fixture: &Fixture, event: Event) {
             reqwest::Method::POST,
             "/_arkret/self/events",
             ServiceOperationId::SelfEventsCommandSubmitV1,
-            Some(json!(SelfAuthoritySubmitRequest::Event(
+            Some(json!(SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(event)
             ))),
         )
@@ -1026,7 +1026,7 @@ pub(super) async fn human_updates_group(
     )
     .unwrap();
     let event = fixture.admin_event(EventKind::MlsCommit, scope.clone(), json!(payload));
-    let submission = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+    let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
         commit_event: event.clone(),
         welcomes: Vec::new(),
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -1134,15 +1134,15 @@ pub(super) async fn verify_runtime_message(
         StatusCode::OK,
         "ordinary reader verifies native author: {value}"
     );
-    let keys: arkret::SignerKeysQueryOutcome = serde_json::from_value(value).unwrap();
+    let keys: arkret::SignerKeyQueryResponseBody = serde_json::from_value(value).unwrap();
     keys.validate_for_request(&request).unwrap();
     assert!(matches!(
-        keys.results[0],
-        arkret::SignerKeyQueryOutcome::HistoricalRealmDeviceResolved { .. }
+        keys.resolutions[0],
+        arkret::SignerKeyResolution::HistoricalRealmDeviceResolved { .. }
     ));
     assert!(matches!(
-        keys.results[1],
-        arkret::SignerKeyQueryOutcome::Unavailable { .. }
+        keys.resolutions[1],
+        arkret::SignerKeyResolution::Unavailable { .. }
     ));
     let payload = original.event.as_message_create().unwrap();
     assert!(payload.content.is_none());
@@ -1246,7 +1246,7 @@ async fn claim_remote(
     fixture: &Fixture,
     recipient: &Fixture,
     authority: &coland_storage::AppletManagedDeviceAuthority,
-) -> (arkret_mls::ArkretMlsIdentity, KeyPackagesClaimOutcome) {
+) -> (arkret_mls::ArkretMlsIdentity, KeyPackagesClaimResponseBody) {
     boxed_step(|| {
         claim_remote_with_lifetime(
             fixture,
@@ -1265,7 +1265,7 @@ async fn claim_remote_with_lifetime(
     authority: &coland_storage::AppletManagedDeviceAuthority,
     lifetime: chrono::Duration,
     exercise_writer_wait: bool,
-) -> (arkret_mls::ArkretMlsIdentity, KeyPackagesClaimOutcome) {
+) -> (arkret_mls::ArkretMlsIdentity, KeyPackagesClaimResponseBody) {
     eprintln!("native MLS: remote KeyPackage claim");
     let recipient_key = SigningKey::from_bytes(&recipient.pcr.history.founding_device_signing_seed);
     let recipient_identity = arkret_mls::ArkretMlsIdentity::new_human_device(
@@ -1320,7 +1320,7 @@ async fn claim_remote_with_lifetime(
     else {
         unreachable!()
     };
-    signature.sig =
+    signature.signature =
         arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode([0; 64])).unwrap();
     let (status, _) = boxed_step(|| {
         device_post(
@@ -1388,7 +1388,7 @@ async fn claim_remote_with_lifetime(
         StatusCode::OK,
         "Realm requester claims foreign ordinary device: {value}"
     );
-    let claim: KeyPackagesClaimOutcome = serde_json::from_value(value.clone()).unwrap();
+    let claim: KeyPackagesClaimResponseBody = serde_json::from_value(value.clone()).unwrap();
     let (status, replay) = boxed_step(|| {
         device_post(
             fixture,
@@ -1430,9 +1430,9 @@ async fn commit_add(
     child: &GrantId,
     recipient: &Fixture,
     recipient_identity: arkret_mls::ArkretMlsIdentity,
-    claim: KeyPackagesClaimOutcome,
+    claim: KeyPackagesClaimResponseBody,
     group: &mut arkret_mls::ArkretMlsGroup,
-) -> (SelfAuthoritySubmitRequest, arkret_wire::RealmCommit) {
+) -> (SelfAuthoritySubmitRequestBody, arkret_wire::RealmCommit) {
     let scope = candidate.creation_scope.clone();
     let key = SigningKey::from_bytes(&[79; 32]);
     let signer = Ed25519PayloadSigner::new(
@@ -1487,7 +1487,7 @@ async fn commit_add(
             device_id: recipient.pcr.history.founding_device_id.clone(),
         },
         keypackage_claim_ref: added.welcome.keypackage_claim_ref,
-        ciphertext_b64: added.welcome.ciphertext_b64,
+        ciphertext_base64url: added.welcome.ciphertext_base64url,
         producer_proof: arkret_signatures::detached_object::sign_detached_object(
             &Value::Null,
             arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
@@ -1505,7 +1505,7 @@ async fn commit_add(
         &key,
     )
     .unwrap();
-    let submission = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+    let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
         commit_event: event.clone(),
         welcomes: vec![welcome.clone()],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -1600,11 +1600,11 @@ async fn receive_and_consume(
     identity: arkret_mls::ArkretMlsIdentity,
     welcome: &arkret_wire::MlsWelcomeDelivery,
     accepted: &arkret_wire::CommittedEventFullView,
-    claim: &KeyPackagesClaimOutcome,
+    claim: &KeyPackagesClaimResponseBody,
 ) {
     use arkret_models_collaboration::device_messages::{
-        DeviceMessagesAckOutcome, DeviceMessagesAckRequestBody, DeviceMessagesGetOutcome,
-        RecipientDelivery,
+        DeviceMessagesAcknowledgementRequestBody, DeviceMessagesAcknowledgementResponseBody,
+        DeviceMessagesGetResponseBody, RecipientDelivery,
     };
     let sender =
         coland_http::routing::federation::outbox::FederationDispatcher::new(governor.state.clone());
@@ -1627,7 +1627,7 @@ async fn receive_and_consume(
         })
         .await;
         assert_eq!(status, StatusCode::OK, "real recipient queue: {value}");
-        let page: DeviceMessagesGetOutcome = serde_json::from_value(value).unwrap();
+        let page: DeviceMessagesGetResponseBody = serde_json::from_value(value).unwrap();
         assert_ne!(page.lost, Some(true));
         queued = page.deliveries.iter().find_map(|item| match item {
             RecipientDelivery::MlsWelcome { mls_welcome }
@@ -1648,8 +1648,8 @@ async fn receive_and_consume(
     // The authentic recipient acknowledges the delivered prefix. Consume must
     // remain independent of the queue row and recover the retained claim.
     let delivered_page = delivered_page.unwrap();
-    let ack = DeviceMessagesAckRequestBody {
-        ack_token: delivered_page.ack_token.unwrap(),
+    let ack = DeviceMessagesAcknowledgementRequestBody {
+        acknowledgement_token: delivered_page.acknowledgement_token.unwrap(),
     };
     let (status, acknowledged) = boxed_step(|| {
         account_request(
@@ -1662,7 +1662,8 @@ async fn receive_and_consume(
     })
     .await;
     assert_eq!(status, StatusCode::OK, "actual Welcome ACK: {acknowledged}");
-    let acknowledged: DeviceMessagesAckOutcome = serde_json::from_value(acknowledged).unwrap();
+    let acknowledged: DeviceMessagesAcknowledgementResponseBody =
+        serde_json::from_value(acknowledged).unwrap();
     assert!(acknowledged.pruned_count > 0);
     let (status, after_ack) = boxed_step(|| {
         account_request(
@@ -1679,7 +1680,7 @@ async fn receive_and_consume(
         StatusCode::OK,
         "actual queue after ACK: {after_ack}"
     );
-    let after_ack: DeviceMessagesGetOutcome = serde_json::from_value(after_ack).unwrap();
+    let after_ack: DeviceMessagesGetResponseBody = serde_json::from_value(after_ack).unwrap();
     assert!(!after_ack.deliveries.iter().any(|delivery| matches!(delivery,
         RecipientDelivery::MlsWelcome { mls_welcome } if mls_welcome.welcome_id == welcome.welcome_id
     )), "ACK must prune the original even without a continuation cursor");
@@ -1755,7 +1756,7 @@ async fn receive_and_consume(
             )
             .unwrap(),
             signature_algorithm: None,
-            sig: arkret_wire::Base64UrlString::new("AA".to_owned()).unwrap(),
+            signature: arkret_wire::Base64UrlString::new("AA".to_owned()).unwrap(),
         },
     };
     let command = joined
@@ -1860,7 +1861,7 @@ async fn install_received_roster(
     group: &mut arkret_mls::ArkretMlsGroup,
 ) {
     use arkret_models_collaboration::mls_roster_authority::{
-        MlsMemberRosterAuthorityReadRequestBody, MlsSelfRosterAuthorityReadOutcome,
+        MlsMemberRosterAuthorityReadRequestBody, MlsSelfRosterAuthorityReadResponseBody,
     };
     let request = MlsMemberRosterAuthorityReadRequestBody {
         realm_id: accepted.event.realm_id.clone(),
@@ -1885,7 +1886,7 @@ async fn install_received_roster(
         })
         .await;
         assert_eq!(status, StatusCode::OK, "recipient roster: {value}");
-        let page: MlsSelfRosterAuthorityReadOutcome = serde_json::from_value(value).unwrap();
+        let page: MlsSelfRosterAuthorityReadResponseBody = serde_json::from_value(value).unwrap();
         next.cursor = page.roster.next_cursor.clone();
         pages.push(page);
         if next.cursor.is_none() {
@@ -1950,7 +1951,7 @@ async fn human_admits_runtime_in_authority(
             .unwrap()
             .unwrap();
         let parent = snapshot.current_state_entries.iter().find_map(|row| {
-            let arkret_wire::TypedCurrentRow::Value { selector, revision, value, .. } = row;
+            let arkret_wire::CurrentState::Value { selector, revision, value, .. } = row;
             matches!(selector, arkret_wire::CurrentSelector::MemberState { actor_id } if actor_id == &actor)
                 .then_some((revision, value))
         }).expect("the ordinary member has an accepted parent membership");
@@ -1987,7 +1988,7 @@ async fn human_admits_runtime_in_authority(
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let raw = arkret_wire::test_support::raw_event_for_actor_at(EventKind::MlsGenesis.as_str(), scope.clone(), actor.clone(), json!({
         "cipher_suite":"MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519", "group_info_ref":info,"ratchet_tree_ref":tree,
-        "creator_leaf_authority":{"leaf_signature_key_b64u":arkret_canonical::base64url_encode(key.verifying_key().as_bytes()),
+        "creator_leaf_authority":{"leaf_signature_key_base64url":arkret_canonical::base64url_encode(key.verifying_key().as_bytes()),
             "endpoint":{"kind":"device","device_id":history.founding_device_id},"authorization_event_ref":authorization},
         "governance_binding":binding,"created_at":arkret_canonical::format_timestamp_canonical(at)
     }),at).unwrap();
@@ -1998,7 +1999,7 @@ async fn human_admits_runtime_in_authority(
             reqwest::Method::POST,
             "/_arkret/self/events",
             ServiceOperationId::SelfEventsCommandSubmitV1,
-            Some(json!(SelfAuthoritySubmitRequest::Event(
+            Some(json!(SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(genesis)
             ))),
         )
@@ -2111,7 +2112,7 @@ async fn human_adds_runtime_to_group_in_authority(
         StatusCode::OK,
         "ordinary member claims admitted Realm Device: {value}"
     );
-    let claim: KeyPackagesClaimOutcome = serde_json::from_value(value).unwrap();
+    let claim: KeyPackagesClaimResponseBody = serde_json::from_value(value).unwrap();
     assert_eq!(claim.claims.len(), 1);
     let original_claim = arkret_canonical::canonical_json_bytes(&claim).unwrap();
     if let Some(next) = next {
@@ -2191,7 +2192,7 @@ async fn human_adds_runtime_to_group_in_authority(
             device_id: device.device_id.clone(),
         },
         keypackage_claim_ref: added.welcome.keypackage_claim_ref,
-        ciphertext_b64: added.welcome.ciphertext_b64,
+        ciphertext_base64url: added.welcome.ciphertext_base64url,
         producer_proof: arkret_signatures::detached_object::sign_detached_object(
             &Value::Null,
             arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
@@ -2209,7 +2210,7 @@ async fn human_adds_runtime_to_group_in_authority(
         &key,
     )
     .unwrap();
-    let submission = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+    let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
         commit_event: event.clone(),
         welcomes: vec![welcome],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -2336,7 +2337,7 @@ pub(super) async fn human_rotates_out_runtime(
             .unwrap()
         ),
     );
-    let submission = SelfAuthoritySubmitRequest::MlsCommit(arkret_wire::MlsCommitSubmission {
+    let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
         commit_event: event.clone(),
         welcomes: vec![],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),

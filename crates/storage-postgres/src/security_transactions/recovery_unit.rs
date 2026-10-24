@@ -67,7 +67,7 @@ pub(super) async fn commit_recovery_unit_in_connection(
                 .into());
             }
         }
-        crate::pcr_device_current_results::project_pcr_device_current_in_connection(
+        crate::pcr_device_current_states::project_pcr_device_current_in_connection(
             conn,
             &commit.event,
             &commit.commit,

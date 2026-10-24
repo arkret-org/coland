@@ -75,7 +75,7 @@ async fn every_bootstrap_write_rolls_back_and_restart_replays_the_exact_unit() {
     let mut different = unit.clone();
     different.submission.idempotency_key = arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap();
     different.exact_request_body = serde_json::to_vec(
-        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(different.submission.clone()),
+        &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(different.submission.clone()),
     )
     .unwrap();
     assert_eq!(
@@ -91,7 +91,7 @@ async fn every_bootstrap_write_rolls_back_and_restart_replays_the_exact_unit() {
     let mut conflicting = super::unit(&pool).await;
     conflicting.submission.idempotency_key = unit.submission.idempotency_key;
     conflicting.exact_request_body = serde_json::to_vec(
-        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(conflicting.submission.clone()),
+        &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(conflicting.submission.clone()),
     )
     .unwrap();
     let before = sql_fault_matrix::snapshot(&pool).await;
@@ -170,7 +170,7 @@ fn approvals(unit: &mut OrdinaryRealmBootstrapCommitUnit, slot: usize) {
     });
     unit.submission.events[slot].approval_signatures = Some(vec![signature]);
     unit.exact_request_body = serde_json::to_vec(
-        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(unit.submission.clone()),
+        &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(unit.submission.clone()),
     )
     .unwrap();
 }
@@ -203,7 +203,7 @@ fn resign_approval(
         .unwrap();
     unit.submission.events[slot].approval_signatures = Some(vec![method.signature.clone()]);
     unit.exact_request_body = serde_json::to_vec(
-        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(unit.submission.clone()),
+        &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(unit.submission.clone()),
     )
     .unwrap();
     unit.validate().unwrap();
@@ -215,9 +215,9 @@ fn original_bootstrap_digest(unit: &OrdinaryRealmBootstrapCommitUnit) -> arkret_
         event.approval_signatures = None;
     }
     arkret_wire::Hash::new(
-        arkret_canonical::canonical_sha256(&SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(
-            original,
-        ))
+        arkret_canonical::canonical_sha256(
+            &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(original),
+        )
         .unwrap(),
     )
     .unwrap()
@@ -373,7 +373,7 @@ async fn operation_approval_binds_the_entire_bootstrap_and_replays_after_restart
     wrong_identity.submission.idempotency_key =
         arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap();
     wrong_identity.exact_request_body = serde_json::to_vec(
-        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(wrong_identity.submission.clone()),
+        &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(wrong_identity.submission.clone()),
     )
     .unwrap();
     wrong_identity.validate().unwrap();

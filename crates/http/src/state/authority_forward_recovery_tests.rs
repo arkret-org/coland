@@ -19,7 +19,7 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 
 use arkret_models_collaboration::authority_commit::{
-    PeerStreamScanOutcome, SelfAuthoritySubmitRequest,
+    PeerStreamScanResponseBody, SelfAuthoritySubmitRequestBody,
 };
 use arkret_models_identity::ResolutionCommitment;
 use arkret_models_identity::session_credential::{
@@ -27,7 +27,7 @@ use arkret_models_identity::session_credential::{
 };
 use arkret_wire::{
     AccountId, ActorId, Base64UrlString, DidUrl, EventAdmissionSubmission, EventKind,
-    StreamScanDirection, StreamScanRequest,
+    StreamScanDirection, StreamScanRequestBody,
 };
 use chrono::{Duration, Utc};
 use coland_services::identity::{
@@ -156,14 +156,14 @@ async fn foreign_request(
         }
         request.authority_commit.commit.stream_ref = stream;
     }
-    let unsigned = arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequest {
+    let unsigned = arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequestBody {
         branch: arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
         event_submission: EventAdmissionSubmission::new(request.authority_commit.event.clone()),
         producer_device_evidence: None,
         producer_agent_evidence: None,
         mls_genesis_material: None,
     };
-    let mut forward = PeerAuthoritySubmitRequest::AuthorityForwardEvent(unsigned);
+    let mut forward = PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(unsigned);
     super::fresh_device_request(
         origin,
         &governor.pcr.history.account.station_id,
@@ -171,7 +171,7 @@ async fn foreign_request(
     )
     .await
     .unwrap();
-    let PeerAuthoritySubmitRequest::AuthorityForwardEvent(forward) = forward else {
+    let PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(forward) = forward else {
         unreachable!("constructed an Event forward");
     };
     let evidence = forward.producer_device_evidence.unwrap();
@@ -218,7 +218,7 @@ async fn authenticated_context(
             station_id: account.station_id.clone(),
             localpart: format!("forward-recovery-{}", uuid::Uuid::now_v7().simple()),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: Utc::now(),
         })
@@ -298,7 +298,7 @@ fn bootstrap_admission_on_default_worker_stack(operation_target: bool) {
                 },
                 request_canonical_digest: arkret_wire::Hash::new(if operation_target {
                     arkret_canonical::canonical_sha256(
-                        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(
+                        &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(
                             human.unit.submission.clone(),
                         ),
                     )
@@ -334,7 +334,7 @@ fn bootstrap_admission_on_default_worker_stack(operation_target: bool) {
         }
         human.unit.submission.events[1].approval_signatures = Some(vec![approval]);
         human.unit.exact_request_body = serde_json::to_vec(
-            &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(human.unit.submission.clone()),
+            &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(human.unit.submission.clone()),
         )
         .unwrap();
         let session = authenticated_context(&pool, &human).await;
@@ -344,7 +344,7 @@ fn bootstrap_admission_on_default_worker_stack(operation_target: bool) {
     runtime.block_on(async {
         tokio::spawn(async move {
             let request =
-                SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(human.unit.submission.clone());
+                SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(human.unit.submission.clone());
             let response = salvo::test::TestClient::post("http://server/_arkret/self/events")
                 .add_header(
                     "Arkret-Operation",
@@ -360,7 +360,7 @@ fn bootstrap_admission_on_default_worker_stack(operation_target: bool) {
             );
             let mut wrong = human.unit.submission.clone();
             wrong.events[1].approval_signatures.as_mut().unwrap()[0].proof.jws = "eyJhbGciOiJFZDI1NTE5In0..bad".into();
-            let wrong_request = SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(wrong);
+            let wrong_request = SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(wrong);
             let wrong_body = serde_json::to_vec(&wrong_request).unwrap();
             assert!(state.authority().submit_self(&session, wrong_request, &wrong_body).await.unwrap_err().to_string().contains("signature_invalid"));
             for item in &human.unit.submission.events {
@@ -392,7 +392,7 @@ fn bootstrap_admission_on_default_worker_stack(operation_target: bool) {
                 vote.validate().unwrap();
                 arkret_signatures::Ed25519DetachedJwsVerifier::new().verify_detached_jws(&vote.proof.jws, &bytes,
                     &arkret_signatures::PublicKeyMaterial::Ed25519Raw { bytes: signer.verifying_key().to_bytes().to_vec() }).unwrap();
-                let wrong_request = SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(wrong);
+                let wrong_request = SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(wrong);
                 wrong_request.validate().unwrap();
                 let body = serde_json::to_vec(&wrong_request).unwrap();
                 let error = state.authority().submit_self(&session, wrong_request, &body).await.unwrap_err();
@@ -409,7 +409,7 @@ fn bootstrap_admission_on_default_worker_stack(operation_target: bool) {
                 vote.proof.jws = signer.sign_detached_jws(&bytes);
                 arkret_signatures::Ed25519DetachedJwsVerifier::new().verify_detached_jws(&vote.proof.jws, &bytes,
                     &arkret_signatures::PublicKeyMaterial::Ed25519Raw { bytes: signer.verifying_key().to_bytes().to_vec() }).unwrap();
-                let wrong = SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(wrong);
+                let wrong = SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(wrong);
                 wrong.validate().unwrap();
                 let body = serde_json::to_vec(&wrong).unwrap();
                 assert!(state.authority().submit_self(&session, wrong, &body).await.unwrap_err().to_string().contains("approval_nonce_reused"));
@@ -425,8 +425,8 @@ fn bootstrap_admission_on_default_worker_stack(operation_target: bool) {
             }).await;
             outcome.validate_for_request(&request).unwrap();
             let replay = state.authority().submit_self(&session, request.clone(), &human.unit.exact_request_body).await.unwrap();
-            let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::OrdinaryRealmBootstrap(first) = outcome else {panic!("bootstrap outcome");};
-            let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::OrdinaryRealmBootstrap(replay) = replay else {panic!("bootstrap replay");};
+            let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::OrdinaryRealmBootstrap(first) = outcome else {panic!("bootstrap outcome");};
+            let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::OrdinaryRealmBootstrap(replay) = replay else {panic!("bootstrap replay");};
             assert_eq!(first.commits, replay.commits);
             assert_eq!(replay.status, arkret_models_collaboration::authority_commit::AggregateAcceptanceStatus::Duplicate);
             let accepted = sql_fault_matrix::snapshot(&pool).await;
@@ -443,7 +443,7 @@ fn bootstrap_admission_on_default_worker_stack(operation_target: bool) {
             previous.commit = committed.commit;
             previous.event = committed.event;
             let next = human.next(&previous, human.pcr.history.founding_device_signing_seed);
-            let submission = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(
+            let submission = SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
                 next.authority_commit.event,
             ));
             let body = serde_json::to_vec(&submission).unwrap();
@@ -454,8 +454,8 @@ fn bootstrap_admission_on_default_worker_stack(operation_target: bool) {
                 .unwrap();
             assert!(matches!(
                 outcome,
-                arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(
-                    arkret_wire::AuthoritySubmitOutcome::Accepted {
+                arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(
+                    arkret_wire::AuthoritySubmitResponseBody::Accepted {
                         status: arkret_wire::AuthorityCommitStatus::Committed,
                         ..
                     }
@@ -659,8 +659,8 @@ async fn registered_history_until_stop(
 
 async fn tcp_scan(
     listener: Arc<RegisteredTlsPeer>,
-    page: PeerStreamScanOutcome,
-    expected: StreamScanRequest,
+    page: PeerStreamScanResponseBody,
+    expected: StreamScanRequestBody,
     from: AccountId,
     to: DidCoreId,
 ) -> usize {
@@ -693,7 +693,7 @@ async fn tcp_scan(
         assert!(n > 0);
         bytes.extend_from_slice(&buf[..n]);
     }
-    let actual: StreamScanRequest = serde_json::from_slice(&bytes[end..end + length]).unwrap();
+    let actual: StreamScanRequestBody = serde_json::from_slice(&bytes[end..end + length]).unwrap();
     assert_eq!(actual, expected);
     let body = arkret_canonical::canonical_json_bytes(&page).unwrap();
     let response = format!(
@@ -789,7 +789,7 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
             EventAdmissionSubmission::new(transaction.event.clone());
     }
     governor.unit.exact_request_body = serde_json::to_vec(
-        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(governor.unit.submission.clone()),
+        &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(governor.unit.submission.clone()),
     )
     .unwrap();
     governor.admit(&governor_pool).await;
@@ -838,7 +838,7 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
         let mut conn = governor_pool.get().await.unwrap();
         diesel::sql_query(
             "SELECT controller_actor_id, authority_event_ref, authority_generation \
-             FROM realm_authority_root_current_results WHERE realm_id=$1",
+             FROM realm_authority_root_current_states WHERE realm_id=$1",
         )
         .bind::<diesel::sql_types::Text, _>(strand.authority_commit.event.realm_id.as_str())
         .get_result::<RootCut>(&mut *conn)
@@ -863,7 +863,7 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
             "issuer_authority_refs":[{
                 "kind":"realm_root","realm_id":previous.event.realm_id,
                 "authority_event_ref":root_cut.authority_event_ref,
-                "authority_generation":root_generation
+                "authority_generation":(root_generation).to_string()
             }],
             "issued_at":arkret_canonical::format_timestamp_canonical(grant_at)
         }}))
@@ -981,7 +981,8 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
             .unwrap()
             .is_none()
     );
-    let intent = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.clone()));
+    let intent =
+        SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(event.clone()));
     store.queue_event(event, commit.committed_at).await.unwrap();
     store
         .retain_forwarded_submission(event, &intent, commit.committed_at)
@@ -1042,7 +1043,7 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
         .await
         .unwrap();
     let mut keys = arkret_identity::RealmAuthorityKeyMap::new();
-    for sig in [
+    for signature in [
         &bundle.genesis_commit.signature,
         &bundle.current_assertion.signature,
         &commit.signature,
@@ -1050,8 +1051,8 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
         &suffix.authority_commit.commit.signature,
     ] {
         keys.insert_at(
-            &sig.verification_method,
-            sig.created_at,
+            &signature.verification_method,
+            signature.created_at,
             arkret_signatures::PublicKeyMaterial::Ed25519Raw {
                 bytes: key.verifying_key().to_bytes().to_vec(),
             },
@@ -1068,7 +1069,7 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
         authority,
         keys,
     };
-    let scan = StreamScanRequest {
+    let scan = StreamScanRequestBody {
         realm_id: realm.clone(),
         stream_ref: commit.stream_ref.clone(),
         direction: StreamScanDirection::After(Some(join.authority_commit.commit.stream_position)),
@@ -1156,7 +1157,7 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
                 else {
                     panic!("real suffix is Full");
                 };
-                last.commit.signature.sig =
+                last.commit.signature.signature =
                     Base64UrlString::new(arkret_canonical::base64url_encode([0u8; 64])).unwrap();
             }
             12 => {
@@ -1591,7 +1592,7 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
             EventAdmissionSubmission::new(transaction.event.clone());
     }
     governor.unit.exact_request_body = serde_json::to_vec(
-        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(governor.unit.submission.clone()),
+        &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(governor.unit.submission.clone()),
     )
     .unwrap();
     governor.admit(&governor_pool).await;
@@ -1642,7 +1643,7 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         let mut conn = governor_pool.get().await.unwrap();
         diesel::sql_query(
             "SELECT controller_actor_id, authority_event_ref, authority_generation \
-             FROM realm_authority_root_current_results WHERE realm_id=$1",
+             FROM realm_authority_root_current_states WHERE realm_id=$1",
         )
         .bind::<diesel::sql_types::Text, _>(strand.authority_commit.event.realm_id.as_str())
         .get_result::<RootCut>(&mut *conn)
@@ -1667,7 +1668,7 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
             "issuer_authority_refs":[{
                 "kind":"realm_root","realm_id":previous.event.realm_id,
                 "authority_event_ref":root_cut.authority_event_ref,
-                "authority_generation":root_generation
+                "authority_generation":(root_generation).to_string()
             }],
             "issued_at":arkret_canonical::format_timestamp_canonical(grant_at)
         }}))
@@ -1750,14 +1751,14 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         .await
         .unwrap();
     let mut keys = arkret_identity::RealmAuthorityKeyMap::new();
-    for sig in [
+    for signature in [
         &bundle.genesis_commit.signature,
         &bundle.current_assertion.signature,
         &commit.signature,
     ] {
         keys.insert_at(
-            &sig.verification_method,
-            sig.created_at,
+            &signature.verification_method,
+            signature.created_at,
             arkret_signatures::PublicKeyMaterial::Ed25519Raw {
                 bytes: key.verifying_key().to_bytes().to_vec(),
             },
@@ -1779,7 +1780,8 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         .await
         .unwrap();
     store.queue_event(event, commit.committed_at).await.unwrap();
-    let intent = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.clone()));
+    let intent =
+        SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(event.clone()));
     store
         .retain_forwarded_submission(event, &intent, commit.committed_at)
         .await
@@ -1837,7 +1839,7 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         .is_err()
     );
     assert_eq!(opening_footprint(&origin_pool, realm).await, no_write);
-    let scan = StreamScanRequest {
+    let scan = StreamScanRequestBody {
         realm_id: realm.clone(),
         stream_ref: commit.stream_ref.clone(),
         direction: StreamScanDirection::Before(Some(commit.stream_position + 1)),
@@ -2061,7 +2063,7 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         .await
         .unwrap();
     let bob_intent =
-        SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(bob_event.clone()));
+        SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(bob_event.clone()));
     store
         .retain_forwarded_submission(bob_event, &bob_intent, bob_commit.committed_at)
         .await
@@ -2070,13 +2072,13 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         .retain_forwarded_acceptance(bob_event, bob_commit, bob_commit.committed_at)
         .await
         .unwrap();
-    let opening_scan = StreamScanRequest {
+    let opening_scan = StreamScanRequestBody {
         realm_id: realm.clone(),
         stream_ref: commit.stream_ref.clone(),
         direction: StreamScanDirection::Before(Some(bob_commit.stream_position + 1)),
         limit: 1,
     };
-    let continuous_scan = StreamScanRequest {
+    let continuous_scan = StreamScanRequestBody {
         direction: StreamScanDirection::After(Some(commit.stream_position)),
         limit: 128,
         ..opening_scan.clone()
@@ -2322,10 +2324,11 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             governor.unit.submission.events[index] =
                 EventAdmissionSubmission::new(transaction.event.clone());
         }
-        governor.unit.exact_request_body = serde_json::to_vec(
-            &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(governor.unit.submission.clone()),
-        )
-        .unwrap();
+        governor.unit.exact_request_body =
+            serde_json::to_vec(&SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(
+                governor.unit.submission.clone(),
+            ))
+            .unwrap();
         governor.admit(&governor_pool).await;
         assert_eq!(
             source
@@ -2400,7 +2403,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             let mut conn = governor_pool.get().await.unwrap();
             diesel::sql_query(
                 "SELECT controller_actor_id, authority_event_ref, authority_generation \
-             FROM realm_authority_root_current_results WHERE realm_id=$1",
+             FROM realm_authority_root_current_states WHERE realm_id=$1",
             )
             .bind::<diesel::sql_types::Text, _>(strand.authority_commit.event.realm_id.as_str())
             .get_result::<RootCut>(&mut *conn)
@@ -2425,7 +2428,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             "issuer_authority_refs":[{
                 "kind":"realm_root","realm_id":previous.event.realm_id,
                 "authority_event_ref":root_cut.authority_event_ref,
-                "authority_generation":root_generation
+                "authority_generation":(root_generation).to_string()
             }],
             "issued_at":arkret_canonical::format_timestamp_canonical(grant_at)
         }}))
@@ -2512,14 +2515,14 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
                 .await
                 .unwrap();
         let mut keys = arkret_identity::RealmAuthorityKeyMap::new();
-        for sig in [
+        for signature in [
             &bundle.genesis_commit.signature,
             &bundle.current_assertion.signature,
             &commit.signature,
         ] {
             keys.insert_at(
-                &sig.verification_method,
-                sig.created_at,
+                &signature.verification_method,
+                signature.created_at,
                 arkret_signatures::PublicKeyMaterial::Ed25519Raw {
                     bytes: key.verifying_key().to_bytes().to_vec(),
                 },
@@ -2542,7 +2545,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             .unwrap();
         store.queue_event(event, commit.committed_at).await.unwrap();
         let intent =
-            SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.clone()));
+            SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(event.clone()));
         store
             .retain_forwarded_submission(event, &intent, commit.committed_at)
             .await
@@ -2601,7 +2604,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             .is_err()
         );
         assert_eq!(opening_footprint(&origin_pool, realm).await, no_write);
-        let scan = StreamScanRequest {
+        let scan = StreamScanRequestBody {
             realm_id: realm.clone(),
             stream_ref: commit.stream_ref.clone(),
             direction: StreamScanDirection::Before(Some(commit.stream_position + 1)),
@@ -2835,7 +2838,8 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             leave.authority_commit.producer_signer_fact
         );
         store.queue_event(le, lc.committed_at).await.unwrap();
-        let intent = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(le.clone()));
+        let intent =
+            SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(le.clone()));
         store
             .retain_forwarded_submission(le, &intent, lc.committed_at)
             .await
@@ -2844,7 +2848,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             .retain_forwarded_acceptance(le, lc, lc.committed_at)
             .await
             .unwrap();
-        let scan = StreamScanRequest {
+        let scan = StreamScanRequestBody {
             realm_id: realm.clone(),
             stream_ref: lc.stream_ref.clone(),
             direction: StreamScanDirection::After(Some(final_parent.commit.stream_position)),
@@ -2931,7 +2935,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
                 .await
                 .unwrap()
         );
-        let read = StreamScanRequest {
+        let read = StreamScanRequestBody {
             realm_id: realm.clone(),
             stream_ref: lc.stream_ref.clone(),
             direction: StreamScanDirection::Before(Some(lc.stream_position + 1)),
@@ -2979,7 +2983,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
         scenario_future(|| async { uow.commit_event(future.clone()).await })
             .await
             .unwrap();
-        let future_read = StreamScanRequest {
+        let future_read = StreamScanRequestBody {
             realm_id: realm.clone(),
             stream_ref: lc.stream_ref.clone(),
             direction: StreamScanDirection::After(Some(lc.stream_position)),
@@ -3175,7 +3179,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             .execute(&mut *conn)
             .await
             .unwrap();
-            diesel::sql_query("UPDATE member_state_current_results SET current_commit_id=$3,current_stream_position=$4 WHERE realm_id=$1 AND member_id=$2")
+            diesel::sql_query("UPDATE member_state_current_states SET current_commit_id=$3,current_stream_position=$4 WHERE realm_id=$1 AND member_id=$2")
           .bind::<diesel::sql_types::Text,_>(realm.as_str()).bind::<diesel::sql_types::Text,_>(actor.to_string()).bind::<diesel::sql_types::Text,_>(commit.commit_id.as_str()).bind::<diesel::sql_types::BigInt,_>(i64::try_from(commit.stream_position).unwrap()).execute(&mut *conn).await.unwrap();
         }
         assert!(
@@ -3191,7 +3195,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
         );
         {
             let mut conn = origin_pool.get().await.unwrap();
-            diesel::sql_query("UPDATE member_state_current_results SET current_commit_id=$3,current_stream_position=$4 WHERE realm_id=$1 AND member_id=$2")
+            diesel::sql_query("UPDATE member_state_current_states SET current_commit_id=$3,current_stream_position=$4 WHERE realm_id=$1 AND member_id=$2")
           .bind::<diesel::sql_types::Text,_>(realm.as_str()).bind::<diesel::sql_types::Text,_>(actor.to_string()).bind::<diesel::sql_types::Text,_>(lc.commit_id.as_str()).bind::<diesel::sql_types::BigInt,_>(i64::try_from(lc.stream_position).unwrap()).execute(&mut *conn).await.unwrap();
         }
         assert_eq!(opening_footprint(&origin_pool, realm).await, before);
@@ -3282,7 +3286,9 @@ async fn circle_own_leave_bound_result_cases(
         store
             .retain_forwarded_submission(
                 event,
-                &SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.clone())),
+                &SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
+                    event.clone(),
+                )),
                 commit.committed_at,
             )
             .await
@@ -3305,7 +3311,7 @@ async fn circle_own_leave_bound_result_cases(
             ))
             .await;
         }
-        let scan = StreamScanRequest {
+        let scan = StreamScanRequestBody {
             realm_id: event.realm_id.clone(),
             stream_ref: commit.stream_ref.clone(),
             direction: if state == "leave" {
@@ -3384,7 +3390,7 @@ async fn circle_own_leave_bound_result_cases(
                     .await
                     .unwrap()
             );
-            let read = StreamScanRequest {
+            let read = StreamScanRequestBody {
                 realm_id: event.realm_id.clone(),
                 stream_ref: commit.stream_ref.clone(),
                 direction: StreamScanDirection::Before(Some(commit.stream_position + 1)),
@@ -3471,7 +3477,7 @@ async fn circle_own_leave_bound_result_cases(
             drop(conn);
             // A changed parent cut cannot borrow the old Circle opening proof.
             let mut conn = origin_pool.get().await.unwrap();
-            diesel::sql_query("UPDATE member_state_current_results SET current_stream_position=current_stream_position+1 WHERE realm_id=$1 AND member_id=$2")
+            diesel::sql_query("UPDATE member_state_current_states SET current_stream_position=current_stream_position+1 WHERE realm_id=$1 AND member_id=$2")
                 .bind::<diesel::sql_types::Text,_>(event.realm_id.as_str()).bind::<diesel::sql_types::Text,_>(actor.to_string()).execute(&mut *conn).await.unwrap();
             drop(conn);
             assert!(
@@ -3486,7 +3492,7 @@ async fn circle_own_leave_bound_result_cases(
                     .unwrap()
             );
             let mut conn = origin_pool.get().await.unwrap();
-            diesel::sql_query("UPDATE member_state_current_results SET current_stream_position=current_stream_position-1 WHERE realm_id=$1 AND member_id=$2")
+            diesel::sql_query("UPDATE member_state_current_states SET current_stream_position=current_stream_position-1 WHERE realm_id=$1 AND member_id=$2")
                 .bind::<diesel::sql_types::Text,_>(event.realm_id.as_str()).bind::<diesel::sql_types::Text,_>(actor.to_string()).execute(&mut *conn).await.unwrap();
             drop(conn);
             assert!(
@@ -3569,7 +3575,9 @@ async fn circle_cleanup_parent_rejoin(
         store
             .retain_forwarded_submission(
                 event,
-                &SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.clone())),
+                &SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(
+                    event.clone(),
+                )),
                 commit.committed_at,
             )
             .await
@@ -3578,7 +3586,7 @@ async fn circle_cleanup_parent_rejoin(
             .retain_forwarded_acceptance(event, commit, commit.committed_at)
             .await
             .unwrap();
-        let scan = StreamScanRequest {
+        let scan = StreamScanRequestBody {
             realm_id: event.realm_id.clone(),
             stream_ref: commit.stream_ref.clone(),
             direction: if membership == "leave" {
@@ -3721,7 +3729,7 @@ async fn circle_cleanup_install_refusals(
         .bind::<diesel::sql_types::Binary,_>(event.event_id.token_bytes().to_vec()).get_result::<Witness>(&mut *conn).await.unwrap().parent;
     assert!(old.is_some());
     let original_intent =
-        SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.clone()));
+        SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(event.clone()));
     for keep_original in [true, false] {
         diesel::sql_query("UPDATE authority_forward_attempts SET accepted_commit_json=NULL,original_submission_json=$2 WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1)")
             .bind::<diesel::sql_types::Binary,_>(event.event_id.token_bytes().to_vec())
@@ -3744,7 +3752,7 @@ async fn circle_cleanup_install_refusals(
             .bind::<diesel::sql_types::Jsonb,_>(serde_json::to_value(commit).unwrap())
             .execute(&mut *conn).await.unwrap();
     }
-    diesel::sql_query("UPDATE member_state_current_results SET current_stream_position=current_stream_position+1 WHERE realm_id=$1 AND member_id=$2")
+    diesel::sql_query("UPDATE member_state_current_states SET current_stream_position=current_stream_position+1 WHERE realm_id=$1 AND member_id=$2")
         .bind::<diesel::sql_types::Text,_>(event.realm_id.as_str()).bind::<diesel::sql_types::Text,_>(event.actor_id.to_string()).execute(&mut *conn).await.unwrap();
     drop(conn);
     store
@@ -3766,7 +3774,7 @@ async fn circle_cleanup_install_refusals(
         unchanged, old,
         "a replay must not replace its first parent cut"
     );
-    diesel::sql_query("UPDATE member_state_current_results SET current_stream_position=current_stream_position-1 WHERE realm_id=$1 AND member_id=$2")
+    diesel::sql_query("UPDATE member_state_current_states SET current_stream_position=current_stream_position-1 WHERE realm_id=$1 AND member_id=$2")
         .bind::<diesel::sql_types::Text,_>(event.realm_id.as_str()).bind::<diesel::sql_types::Text,_>(event.actor_id.to_string()).execute(&mut *conn).await.unwrap();
     #[derive(diesel::QueryableByName)]
     struct CleanupCut {
@@ -3779,10 +3787,10 @@ async fn circle_cleanup_install_refusals(
         'join_payload',j.envelope->'payload','active',circle.value->>'state') AS value \
         FROM canonical_events e JOIN authority_forward_attempts f ON f.event_pk=e.pk \
         LEFT JOIN replica_stream_anchors a ON a.realm_id=e.envelope->>'realm_id' AND a.stream_key=(SELECT stream_key FROM realm_commits WHERE commit_id=$2) \
-        LEFT JOIN circle_member_state_current_results m ON m.realm_id=a.realm_id AND m.circle_id=e.envelope->'scope_ref'->>'circle_id' AND m.member_id=$3 \
-        LEFT JOIN member_state_current_results p ON p.realm_id=a.realm_id AND p.member_id=$3 \
+        LEFT JOIN circle_member_state_current_states m ON m.realm_id=a.realm_id AND m.circle_id=e.envelope->'scope_ref'->>'circle_id' AND m.member_id=$3 \
+        LEFT JOIN member_state_current_states p ON p.realm_id=a.realm_id AND p.member_id=$3 \
         LEFT JOIN canonical_events j ON j.pk=(SELECT event_pk FROM realm_commits WHERE commit_id=a.join_commit_id) \
-        LEFT JOIN circle_current_results circle ON circle.circle_id=e.envelope->'scope_ref'->>'circle_id' WHERE e.id=$1")
+        LEFT JOIN circle_current_states circle ON circle.circle_id=e.envelope->'scope_ref'->>'circle_id' WHERE e.id=$1")
         .bind::<diesel::sql_types::Binary,_>(event.event_id.token_bytes().to_vec())
         .bind::<diesel::sql_types::Text,_>(commit.previous_commit_ref.as_ref().unwrap().as_str())
         .bind::<diesel::sql_types::Text,_>(event.actor_id.to_string())
@@ -3811,7 +3819,7 @@ async fn circle_cleanup_install_refusals(
     store
         .retain_forwarded_submission(
             event,
-            &SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(event.clone())),
+            &SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(event.clone())),
             commit.committed_at,
         )
         .await
@@ -3855,11 +3863,12 @@ async fn circle_cleanup_missing_parent_is_frozen(
     );
     let store = origin.authority_commits();
     store.queue_event(&queued, queued.created_at).await.unwrap();
-    let intent = SelfAuthoritySubmitRequest::Event(EventAdmissionSubmission::new(queued.clone()));
+    let intent =
+        SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(queued.clone()));
     let mut conn = pool.get().await.unwrap();
     // Model a local parent cut whose declared revision has no held source.
     // A forwarding intent may be retained, but cannot freeze a proven join.
-    diesel::sql_query("UPDATE member_state_current_results SET current_stream_position=current_stream_position+1 WHERE realm_id=$1 AND member_id=$2")
+    diesel::sql_query("UPDATE member_state_current_states SET current_stream_position=current_stream_position+1 WHERE realm_id=$1 AND member_id=$2")
         .bind::<diesel::sql_types::Text,_>(event.realm_id.as_str()).bind::<diesel::sql_types::Text,_>(event.actor_id.to_string()).execute(&mut *conn).await.unwrap();
     drop(conn);
     store
@@ -3870,7 +3879,7 @@ async fn circle_cleanup_missing_parent_is_frozen(
     let absent=diesel::sql_query("SELECT circle_leave_parent_revision AS parent FROM authority_forward_attempts WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1)")
         .bind::<diesel::sql_types::Binary,_>(queued.event_id.token_bytes().to_vec()).get_result::<Witness>(&mut *conn).await.unwrap().parent;
     assert_eq!(absent, None);
-    diesel::sql_query("UPDATE member_state_current_results SET current_stream_position=current_stream_position-1 WHERE realm_id=$1 AND member_id=$2")
+    diesel::sql_query("UPDATE member_state_current_states SET current_stream_position=current_stream_position-1 WHERE realm_id=$1 AND member_id=$2")
         .bind::<diesel::sql_types::Text,_>(event.realm_id.as_str()).bind::<diesel::sql_types::Text,_>(event.actor_id.to_string()).execute(&mut *conn).await.unwrap();
     drop(conn);
     store
@@ -3980,7 +3989,7 @@ async fn tcp_opening_bootstrap(
         let authority_bundle = crate::routing::realm_join::local_authority_bundle(
             &governor, &actual.realm_id, &nonce,
         ).await.unwrap();
-        arkret_models_collaboration::governance::realm_join_intake::PeerRealmJoinBootstrapOutcome {
+        arkret_models_collaboration::governance::realm_join_intake::PeerRealmJoinBootstrapResponseBody {
             request_id: actual.request_id, visible_stream_heads: snapshot.visible_stream_heads.clone(), snapshot, authority_bundle,
         }
     });
@@ -4082,8 +4091,8 @@ async fn recovery_acceptance_rows(pool: &PgPool) -> serde_json::Value {
         'anchors',(SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]') FROM replica_stream_anchors r),\
         'facts',(SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]') FROM agent_producer_signer_keys r),\
         'authority',(SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]') FROM realm_authorities r),\
-        'current_heads',(SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]') FROM current_result_heads r),\
-        'current',(SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]') FROM current_result_versions r)\
+        'current_heads',(SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]') FROM current_state_heads r),\
+        'current',(SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]') FROM current_state_versions r)\
     ) AS value").get_result::<Row>(&mut *conn).await.unwrap().value
 }
 

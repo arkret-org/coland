@@ -502,8 +502,8 @@ fn agent_recipient_operation(method: &str, path: &str) -> Option<&'static str> {
         ("POST", "/_arkret/self/streams/scan") => {
             Some(ServiceOperationId::SELF_COMMITTED_EVENT_READ_SCAN_V1)
         }
-        ("POST", "/_arkret/self/current-results/exact") => {
-            Some(ServiceOperationId::SELF_CURRENT_RESULTS_READ_EXACT_V1)
+        ("POST", "/_arkret/self/current-state/exact") => {
+            Some(ServiceOperationId::SELF_CURRENT_STATE_READ_EXACT_V1)
         }
         ("POST", "/_arkret/self/events") => Some(ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1),
         ("POST", "/_arkret/self/strands/watch/audit-read") => {
@@ -1179,8 +1179,8 @@ mod tests {
             ),
             (
                 "POST",
-                "/_arkret/self/current-results/exact",
-                ServiceOperationId::SELF_CURRENT_RESULTS_READ_EXACT_V1,
+                "/_arkret/self/current-state/exact",
+                ServiceOperationId::SELF_CURRENT_STATE_READ_EXACT_V1,
             ),
             (
                 "POST",
@@ -1256,9 +1256,9 @@ mod tests {
                 "/_arkret/self/realm-state-snapshot/ak:realm_snapshot:example",
             ),
             ("GET", "/_arkret/self/realm-state-snapshot/head/extra"),
-            ("GET", "/_arkret/self/current-results/exact"),
-            ("POST", "/_arkret/self/current-results"),
-            ("POST", "/_arkret/self/current-results/exact/extra"),
+            ("GET", "/_arkret/self/current-state/exact"),
+            ("POST", "/_arkret/self/current-state"),
+            ("POST", "/_arkret/self/current-state/exact/extra"),
             ("GET", "/_arkret/self/signer-keys/query"),
             ("POST", "/_arkret/self/signer-keys/query/other"),
         ] {

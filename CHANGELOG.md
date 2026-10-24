@@ -196,7 +196,7 @@ below. Producers on the old wire MUST upgrade.
   hard-rejects above 300 000 ms (`relaxed_window_exceeds_ceiling`);
   `ak.profile.e2ee_relaxed.v1` is mutually exclusive with the audit
   compliance profiles (`e2ee_relaxed_disallowed_in_compliance_profile`);
-  `media_service_decrypts=true` requires the triple binding
+  `media_service_decryption_allowed=true` requires the triple binding
   (policy_bundle ∧ plaintext_visible_services ∧ MLS governance
   policy_root) or surfaces `media_plaintext_service_not_authorised` /
   `mls_governance_binding_stale` (T09 + T12).

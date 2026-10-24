@@ -133,10 +133,10 @@ async fn media_plaintext_service_is_not_read_from_the_realm_meta_mirror() {
         .await
         .unwrap();
 
-    let undeclared = json!({ "media_service_decrypts": true });
+    let undeclared = json!({ "media_service_decryption_allowed": true });
     assert!(!projected_media_plaintext_service_present(&state, realm_id, &undeclared).await);
     let declared = json!({
-        "media_service_decrypts": true,
+        "media_service_decryption_allowed": true,
         "plaintext_visible_services": [{
             "service_id": state.service_id(),
             "data_classes": ["media_plaintext"],
@@ -468,7 +468,7 @@ async fn applet_registration_requires_realm_admin() {
     let now = chrono::Utc::now();
     state
         .test_persistence()
-        .capability_grant_current_results()
+        .capability_grant_current_states()
         .seed_test_realm_root(
             &arkret_identifiers::RealmId::new(realm_id).unwrap(),
             &projected_fixture_actor("ak:did_core:web:root-controller.example"),
@@ -525,7 +525,7 @@ async fn applet_registration_requires_realm_admin() {
     // metadata owner mirror is never the authority root.
     let realm = arkret_identifiers::RealmId::new(realm_id.to_owned()).unwrap();
     let store = state.test_persistence();
-    let grants = store.capability_grant_current_results();
+    let grants = store.capability_grant_current_states();
     grants
         .seed_test_realm_root(
             &realm,

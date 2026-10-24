@@ -80,7 +80,7 @@ impl RecoveryPolicyStore for PgRecoveryPolicyStore {
         sql_query(
             "SELECT id AS policy_id, principal_id, station_id, version, acceptance_basis, trust_domain, supersedes, \
                     expires_at, issued_at, verification_method, raw_payload, accepted_at \
-             FROM recovery_policies p JOIN policy_current_results c \
+             FROM recovery_policies p JOIN policy_current_states c \
                ON c.policy_id=('ak:policy:' || p.id::text) \
               AND c.current_commit_id=(p.acceptance_basis #>> '{}') \
               AND c.value=p.raw_payload \
@@ -102,7 +102,7 @@ impl RecoveryPolicyStore for PgRecoveryPolicyStore {
         sql_query(
             "SELECT id AS policy_id, principal_id, station_id, version, acceptance_basis, trust_domain, supersedes, \
                     expires_at, issued_at, verification_method, raw_payload, accepted_at \
-             FROM recovery_policies p JOIN policy_current_results c \
+             FROM recovery_policies p JOIN policy_current_states c \
                ON c.policy_id=('ak:policy:' || p.id::text) \
               AND c.current_commit_id=(p.acceptance_basis #>> '{}') \
               AND c.value=p.raw_payload \

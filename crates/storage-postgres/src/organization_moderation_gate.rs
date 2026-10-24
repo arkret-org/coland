@@ -164,7 +164,7 @@ async fn relationships(
 ) -> PersistenceResult<Vec<RelationshipRow>> {
     diesel::sql_query(
         "SELECT r.organization_id,r.relationship,r.value,r.organization_public_key,e.envelope,c.commit_json,r.current_stream_position,r.current_commit_id \
-         FROM realm_organization_current_results r \
+         FROM realm_organization_current_states r \
          LEFT JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id \
              AND c.stream_position=r.current_stream_position \
          LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
@@ -279,7 +279,7 @@ pub(crate) async fn require_organization_moderation_authority_in_connection(
     Ok(())
 }
 
-pub(crate) async fn commit_realm_organization_current_result_in_connection(
+pub(crate) async fn commit_realm_organization_current_state_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
@@ -329,7 +329,7 @@ pub(crate) async fn commit_realm_organization_current_result_in_connection(
         .ok_or_else(|| corrupt("relationship is not a string"))?;
     let previous: Option<RelationshipRow> = diesel::sql_query(
         "SELECT r.organization_id,r.relationship,r.value,r.organization_public_key,e.envelope,c.commit_json,r.current_stream_position,r.current_commit_id \
-         FROM realm_organization_current_results r LEFT JOIN realm_commits c ON c.commit_id=r.current_commit_id \
+         FROM realm_organization_current_states r LEFT JOIN realm_commits c ON c.commit_id=r.current_commit_id \
          AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position \
          LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
          WHERE r.realm_id=$1 AND r.organization_id=$2 AND r.relationship=$3 FOR UPDATE OF r",
@@ -375,7 +375,7 @@ pub(crate) async fn commit_realm_organization_current_result_in_connection(
         }
     }
     let serialized = serde_json::to_value(value).map_err(corrupt)?;
-    diesel::sql_query("INSERT INTO realm_organization_current_results \
+    diesel::sql_query("INSERT INTO realm_organization_current_states \
         (realm_id,organization_id,relationship,value,current_commit_id,current_stream_position,organization_public_key,updated_at) \
         VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(realm_id,organization_id,relationship) DO UPDATE SET \
         value=EXCLUDED.value,current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position, \

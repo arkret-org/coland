@@ -258,7 +258,7 @@ async fn install_constrained_grant(
 ) -> SeededGrant {
     let realm_id = arkret_identifiers::RealmId::new(realm_id).expect("fixture Realm id");
     let store = state.test_persistence();
-    let grants = store.capability_grant_current_results();
+    let grants = store.capability_grant_current_states();
     grants
         .seed_test_realm_root(&realm_id, &fixture_actor(&issuer))
         .await
@@ -457,7 +457,7 @@ async fn register_agent_selection(
     realm_id: &arkret_identifiers::RealmId,
     agent_id: &str,
     reply: bool,
-    act_on_behalf: bool,
+    acting_on_behalf_allowed: bool,
 ) {
     let mut record = coland_services::identity::AgentPairingState::new(
         agent_id.to_owned(),
@@ -485,11 +485,11 @@ async fn register_agent_selection(
                     "realm_id": realm_id.as_str(),
                     "scope": { "kind": "realm", "realm_id": realm_id.as_str() },
                     "version": 1,
-                    "reply_message": reply,
-                    "reaction_add": false,
-                    "reaction_remove": false,
-                    "accept_third_party_mention": false,
-                    "act_on_behalf": act_on_behalf,
+                    "message_creation_allowed": reply,
+                    "reaction_addition_allowed": false,
+                    "reaction_removal_allowed": false,
+                    "third_party_mention_delivery_allowed": false,
+                    "acting_on_behalf_allowed": acting_on_behalf_allowed,
                 }),
                 0
             )
@@ -507,7 +507,7 @@ fn agent_context(agent_id: &str, authorization_ref: &str) -> serde_json::Value {
     })
 }
 
-fn reply_message(
+fn message_creation_allowed(
     realm_id: arkret_identifiers::RealmId,
     seed: &str,
     agent_id: &str,
@@ -985,7 +985,8 @@ async fn reply_agent_lifecycle_state_blocks_writes_even_with_participation() {
         .save_agent(record)
         .await
         .expect("agent record update");
-    let operation = reply_message(realm_id, "0000000007c7", agent, grant.grant_id.as_str());
+    let operation =
+        message_creation_allowed(realm_id, "0000000007c7", agent, grant.grant_id.as_str());
 
     assert_eq!(
         validate_agent_reply_participation(&state, &[operation], covering_committed_at())
@@ -1013,7 +1014,8 @@ async fn reply_agent_projected_deactivation_blocks_writes_even_with_active_recor
         vec![arkret_wire::EventKind::MessageCreate.as_str().to_owned()],
     )
     .await;
-    let operation = reply_message(realm_id, "0000000007c8", agent, grant.grant_id.as_str());
+    let operation =
+        message_creation_allowed(realm_id, "0000000007c8", agent, grant.grant_id.as_str());
     state.test_projection().lock().agent_lifecycles.insert(
         operation.context.sender.canonical_key().unwrap(),
         arkret_models_collaboration::agent_operations::AgentLifecycleState::Deactivated,
@@ -1319,7 +1321,7 @@ async fn circle_member_manage_rejects_without_grant() {
     install_collaboration_realm(&state, &realm_id);
     state
         .test_persistence()
-        .capability_grant_current_results()
+        .capability_grant_current_states()
         .seed_test_realm_root(&realm_id, &fixture_actor("ak:did_core:web:owner.example"))
         .await
         .unwrap();
@@ -1389,7 +1391,7 @@ async fn circle_lifecycle_requires_circle_manage_grant() {
     install_collaboration_realm(&state, &realm_id);
     state
         .test_persistence()
-        .capability_grant_current_results()
+        .capability_grant_current_states()
         .seed_test_realm_root(&realm_id, &fixture_actor("ak:did_core:web:owner.example"))
         .await
         .unwrap();
@@ -2121,7 +2123,7 @@ async fn call_recording_start_defaults_to_record_capability() {
             "capture_kind": "recording",
             "mode": "audio_video",
             "visible_notice": true,
-            "result": {
+            "capture_metadata": {
                 "retention": {"consent_confirmed": true}
             }
         }),
@@ -2159,7 +2161,7 @@ async fn call_recording_start_transcript_requires_transcribe_capability() {
             "capture_kind": "transcript",
             "mode": "audio",
             "visible_notice": true,
-            "result": {
+            "capture_metadata": {
                 "retention": {"consent_confirmed": true}
             }
         }),
@@ -2207,7 +2209,7 @@ async fn call_recording_start_transcript_allows_transcribe_capability() {
             "capture_kind": "transcript",
             "mode": "audio",
             "visible_notice": true,
-            "result": {
+            "capture_metadata": {
                 "retention": {"consent_confirmed": true}
             }
         }),
@@ -2240,7 +2242,7 @@ async fn call_recording_start_rejects_missing_mode_and_noncanonical_recording_id
         "recording_agent_id": "ak:did_core:web:recorder.example",
         "capture_kind": "recording",
         "visible_notice": true,
-        "result": {
+        "capture_metadata": {
             "recording_start_event_id": "ak:event:ATruBVw3F7e6GxSCTOAQ52Yh0RbzPwJS39bQb-Jz3JJt",
             "retention": {"consent_confirmed": true}
         }

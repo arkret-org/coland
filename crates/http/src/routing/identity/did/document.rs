@@ -110,7 +110,7 @@ pub(super) async fn run_webvh_resolution_checks(
         || current.version_id != version_id.as_str()
         || current.log_head_digest != log_head_digest
         || document.key_log_head.as_deref() != Some(log_head_digest.as_str())
-        || document.seq != persisted_head.seq
+        || document.sequence != persisted_head.sequence
         || document.did_document != current.document
     {
         return Err(crate::app_error!(

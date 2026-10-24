@@ -31,27 +31,37 @@ pub(super) async fn lock_source(
     Ok(())
 }
 
-pub(super) fn event(request: &PeerAuthoritySubmitRequest) -> PersistenceResult<&Event> {
+pub(super) fn event(request: &PeerAuthoritySubmitRequestBody) -> PersistenceResult<&Event> {
     match request {
-        PeerAuthoritySubmitRequest::AuthorityForwardEvent(v) => Ok(&v.event_submission.event),
-        PeerAuthoritySubmitRequest::AuthorityForwardMls(v) => Ok(&v.mls_submission.commit_event),
+        PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(v) => Ok(&v.event_submission.event),
+        PeerAuthoritySubmitRequestBody::AuthorityForwardMls(v) => {
+            Ok(&v.mls_submission.commit_event)
+        }
         _ => Err(invalid("source requested for a non-forward branch")),
     }
 }
 pub(super) fn device(
-    request: &PeerAuthoritySubmitRequest,
+    request: &PeerAuthoritySubmitRequestBody,
 ) -> PersistenceResult<&arkret_models_identity::ForwardAccountDeviceSignerEvidence> {
     match request {
-        PeerAuthoritySubmitRequest::AuthorityForwardEvent(v) => v.producer_device_evidence.as_ref(),
-        PeerAuthoritySubmitRequest::AuthorityForwardMls(v) => v.producer_device_evidence.as_ref(),
+        PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(v) => {
+            v.producer_device_evidence.as_ref()
+        }
+        PeerAuthoritySubmitRequestBody::AuthorityForwardMls(v) => {
+            v.producer_device_evidence.as_ref()
+        }
         _ => None,
     }
     .ok_or_else(|| invalid("forward request has no Device evidence"))
 }
-pub(super) fn digest(request: &PeerAuthoritySubmitRequest) -> PersistenceResult<arkret_wire::Hash> {
+pub(super) fn digest(
+    request: &PeerAuthoritySubmitRequestBody,
+) -> PersistenceResult<arkret_wire::Hash> {
     match request {
-        PeerAuthoritySubmitRequest::AuthorityForwardEvent(v) => authority_forward_body_digest(v),
-        PeerAuthoritySubmitRequest::AuthorityForwardMls(v) => authority_forward_body_digest(v),
+        PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(v) => {
+            authority_forward_body_digest(v)
+        }
+        PeerAuthoritySubmitRequestBody::AuthorityForwardMls(v) => authority_forward_body_digest(v),
         _ => return Err(invalid("non-forward digest")),
     }
     .map_err(invalid)

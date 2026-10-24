@@ -1,10 +1,10 @@
 //! Real RFC application carriers through the governing PostgreSQL transaction.
 
-use arkret_models_collaboration::agent_sidecar::AgentSidecarExchangeControlsCurrentValue;
+use arkret_models_collaboration::agent_sidecar::AgentSidecarExchangeControlsValue;
 use arkret_models_crypto::EncryptedEnvelope;
 use arkret_wire::{
-    ActorId, CommitStreamRef, CurrentSelector, EncryptedPayloadScheme, EventKind, ScopeRef,
-    SemanticRef, SidecarId, TypedCurrentRow,
+    ActorId, CommitStreamRef, CurrentSelector, CurrentState, EncryptedPayloadScheme, EventKind,
+    ScopeRef, SemanticRef, SidecarId,
 };
 use coland_storage::{AuthorityCommitStore, MlsGroupCurrentStore};
 use coland_storage_postgres::{PgAuthorityCommitStore, PgPool};
@@ -36,7 +36,7 @@ pub(super) async fn assert_current(
         .current_state_entries
         .iter()
         .find_map(|row| match row {
-            TypedCurrentRow::Value {
+            CurrentState::Value {
                 selector:
                     CurrentSelector::SidecarContext {
                         sidecar_id,
@@ -165,7 +165,7 @@ pub(super) async fn assert_current(
         .unwrap()
         .unwrap();
     assert!(messages.current_state_entries.iter().any(|row| matches!(row,
-        TypedCurrentRow::Value { selector: CurrentSelector::MessageRevision { message_id }, source_stream_ref, revision, .. }
+        CurrentState::Value { selector: CurrentSelector::MessageRevision { message_id }, source_stream_ref, revision, .. }
         if message_id == &arkret_wire::MessageId::from_event_id(&request.authority_commit.event.event_id)
             && source_stream_ref == &stream && revision.commit_id == request.authority_commit.commit.commit_id
     )));
@@ -209,8 +209,8 @@ pub(super) async fn assert_current(
         .await
         .unwrap()
         .unwrap();
-    let row = material.current_state_entries.iter().find(|row| matches!(row, TypedCurrentRow::Value {selector:CurrentSelector::AgentSidecarExchangeControls {sidecar_id,source_context_ref},..} if sidecar_id == sidecar && source_context_ref == &context)).unwrap();
-    let TypedCurrentRow::Value {
+    let row = material.current_state_entries.iter().find(|row| matches!(row, CurrentState::Value {selector:CurrentSelector::AgentSidecarExchangeControls {sidecar_id,source_context_ref},..} if sidecar_id == sidecar && source_context_ref == &context)).unwrap();
+    let CurrentState::Value {
         source_stream_ref,
         revision,
         value,
@@ -225,8 +225,7 @@ pub(super) async fn assert_current(
         revision.stream_position,
         accepted.authority_commit.commit.stream_position
     );
-    let set: AgentSidecarExchangeControlsCurrentValue =
-        serde_json::from_value(value.clone()).unwrap();
+    let set: AgentSidecarExchangeControlsValue = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(set.assertions().len(), 1);
     assert_eq!(
         set.assertions()[0].tag_id.event_id(),

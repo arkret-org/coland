@@ -682,8 +682,8 @@ pub(super) fn ensure_key_backup_delete_is_series_tail(
         .get("series_id")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let series_seq = backup
-        .get("series_seq")
+    let series_sequence = backup
+        .get("series_sequence")
         .and_then(Value::as_u64)
         .unwrap_or_default();
     if series_id.is_empty() {
@@ -697,9 +697,9 @@ pub(super) fn ensure_key_backup_delete_is_series_tail(
             continue;
         }
         if existing
-            .get("series_seq")
+            .get("series_sequence")
             .and_then(Value::as_u64)
-            .is_some_and(|seq| seq > series_seq)
+            .is_some_and(|sequence| sequence > series_sequence)
         {
             // key-management.md §7.8: active-series non-tail envelopes MUST
             // NOT be individually deleted. No dedicated registry code exists

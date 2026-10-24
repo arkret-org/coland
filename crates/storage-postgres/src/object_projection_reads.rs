@@ -4,8 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use arkret_models_collaboration::objects::query_projection::{
-    ProjectionAssignedToRelation, ProjectionSpaceList, ProjectionSpaceRow, ProjectionStrandList,
-    ProjectionStrandRow,
+    ProjectionAssignedToRelation, SpacePage, SpaceRow, StrandPage, StrandRow,
 };
 use arkret_models_collaboration::objects::relation::Relation;
 use arkret_models_collaboration::objects::space::Space;
@@ -126,10 +125,10 @@ impl ObjectCurrentSnapshotStore for PgObjectCurrentSnapshotStore {
             diesel::sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 .execute(&mut *conn).await?;
             let orphan_sibling: crate::ExistsRow = diesel::sql_query(
-                "SELECT EXISTS(SELECT 1 FROM space_parent_current_results p \
-                 LEFT JOIN space_current_results s ON s.realm_id=p.realm_id AND s.space_id=p.space_id \
-                 WHERE s.space_id IS NULL UNION ALL SELECT 1 FROM space_child_scope_policy_current_results c \
-                 LEFT JOIN space_current_results s ON s.realm_id=c.realm_id AND s.space_id=c.space_id \
+                "SELECT EXISTS(SELECT 1 FROM space_parent_current_states p \
+                 LEFT JOIN space_current_states s ON s.realm_id=p.realm_id AND s.space_id=p.space_id \
+                 WHERE s.space_id IS NULL UNION ALL SELECT 1 FROM space_child_scope_policy_current_states c \
+                 LEFT JOIN space_current_states s ON s.realm_id=c.realm_id AND s.space_id=c.space_id \
                  WHERE s.space_id IS NULL) AS present",
             ).get_result(&mut *conn).await?;
             if orphan_sibling.present {
@@ -149,15 +148,15 @@ impl ObjectCurrentSnapshotStore for PgObjectCurrentSnapshotStore {
                    AND NOT (s.value ? 'parent_space_id') AND NOT (s.value ? 'child_scope_policy') \
                    AND jsonb_typeof(p.value)='object' AND p.value ? 'parent_space_id' \
                    AND p.value - 'parent_space_id'='{{}}'::jsonb) AS proved \
-                 FROM space_current_results s \
-                 LEFT JOIN space_parent_current_results p ON p.realm_id=s.realm_id AND p.space_id=s.space_id \
-                 LEFT JOIN space_child_scope_policy_current_results c ON c.realm_id=s.realm_id AND c.space_id=s.space_id \
+                 FROM space_current_states s \
+                 LEFT JOIN space_parent_current_states p ON p.realm_id=s.realm_id AND p.space_id=s.space_id \
+                 LEFT JOIN space_child_scope_policy_current_states c ON c.realm_id=s.realm_id AND c.space_id=s.space_id \
                  ORDER BY s.realm_id,s.space_id",
             )).load::<CurrentObjectRow>(&mut *conn).await?;
             let strand_source = hydration_source_sql("s", "jsonb_build_object('kind','strand','strand_id',s.strand_id)");
             let strands = diesel::sql_query(format!(
                 "SELECT s.strand_id AS id,s.realm_id,s.value, \
-                 {strand_source} AS source_stream_ref FROM strand_current_results s \
+                 {strand_source} AS source_stream_ref FROM strand_current_states s \
                  ORDER BY s.realm_id,s.strand_id",
             )).load::<StrandSnapshotRow>(&mut *conn).await?;
             Ok((spaces,strands))
@@ -225,7 +224,7 @@ pub(crate) async fn lists_for_actor(
     realm_id: &RealmId,
     actor: &ActorId,
     include_terminal: bool,
-) -> PersistenceResult<Option<(ProjectionSpaceList, ProjectionStrandList)>> {
+) -> PersistenceResult<Option<(SpacePage, StrandPage)>> {
     let mut conn = pool.get().await.map_err(PersistenceError::database)?;
     conn.transaction::<_, PgTransactionError, _>(async move |conn| {
         diesel::sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -243,26 +242,29 @@ pub(crate) async fn lists_for_actor_in_connection(
     realm_id: &RealmId,
     actor: &ActorId,
     include_terminal: bool,
-) -> Result<Option<(ProjectionSpaceList, ProjectionStrandList)>, PgTransactionError> {
+) -> Result<Option<(SpacePage, StrandPage)>, PgTransactionError> {
     if !crate::authority_commit::accepted_current_member_joined_in_connection(conn, realm_id, actor)
         .await?
     {
         return Ok(None);
     }
     let terminal = diesel::sql_query(
-            "SELECT EXISTS(SELECT 1 FROM realm_bootstrap_current_results \
-             WHERE realm_id=$1 AND result_family IN ('realm_tombstone','realm_destroy')) AS present",
-        ).bind::<Text,_>(realm_id.as_str()).get_result::<crate::ExistsRow>(&mut *conn).await?;
+        "SELECT EXISTS(SELECT 1 FROM realm_bootstrap_current_states \
+             WHERE realm_id=$1 AND state_family IN ('realm_tombstone','realm_destroy')) AS present",
+    )
+    .bind::<Text, _>(realm_id.as_str())
+    .get_result::<crate::ExistsRow>(&mut *conn)
+    .await?;
     if terminal.present {
         return Ok(Some((
-            ProjectionSpaceList {
+            SpacePage {
                 realm_id: realm_id.clone(),
                 total: 0,
                 spaces: Vec::new(),
                 next_cursor: None,
                 has_more: false,
             },
-            ProjectionStrandList {
+            StrandPage {
                 realm_id: realm_id.clone(),
                 total: 0,
                 strands: Vec::new(),
@@ -272,8 +274,8 @@ pub(crate) async fn lists_for_actor_in_connection(
         )));
     }
     let circle_rows = diesel::sql_query(
-        "SELECT m.circle_id FROM circle_member_state_current_results m \
-             JOIN circle_current_results c ON c.circle_id=m.circle_id AND c.realm_id=m.realm_id \
+        "SELECT m.circle_id FROM circle_member_state_current_states m \
+             JOIN circle_current_states c ON c.circle_id=m.circle_id AND c.realm_id=m.realm_id \
              JOIN realm_commits rc ON rc.commit_id=m.current_commit_id \
                AND rc.realm_id=m.realm_id AND rc.stream_position=m.current_stream_position \
                AND rc.stream_ref=m.source_stream_ref \
@@ -295,18 +297,18 @@ pub(crate) async fn lists_for_actor_in_connection(
         })
         .collect::<PersistenceResult<BTreeSet<_>>>()?;
     let incomplete_space = diesel::sql_query(
-            "SELECT EXISTS(SELECT 1 FROM space_current_results s \
-             LEFT JOIN space_parent_current_results p ON p.realm_id=s.realm_id AND p.space_id=s.space_id \
-             LEFT JOIN space_child_scope_policy_current_results c ON c.realm_id=s.realm_id AND c.space_id=s.space_id \
+            "SELECT EXISTS(SELECT 1 FROM space_current_states s \
+             LEFT JOIN space_parent_current_states p ON p.realm_id=s.realm_id AND p.space_id=s.space_id \
+             LEFT JOIN space_child_scope_policy_current_states c ON c.realm_id=s.realm_id AND c.space_id=s.space_id \
              WHERE s.realm_id=$1 AND (p.space_id IS NULL OR c.space_id IS NULL \
                OR s.value ? 'parent_space_id' OR s.value ? 'child_scope_policy' \
                OR jsonb_typeof(p.value)<>'object' OR NOT p.value ? 'parent_space_id' \
                OR p.value - 'parent_space_id' <> '{}'::jsonb)) \
-             OR EXISTS(SELECT 1 FROM space_parent_current_results p \
-               LEFT JOIN space_current_results s ON s.realm_id=p.realm_id AND s.space_id=p.space_id \
+             OR EXISTS(SELECT 1 FROM space_parent_current_states p \
+               LEFT JOIN space_current_states s ON s.realm_id=p.realm_id AND s.space_id=p.space_id \
                WHERE p.realm_id=$1 AND s.space_id IS NULL) \
-             OR EXISTS(SELECT 1 FROM space_child_scope_policy_current_results c \
-               LEFT JOIN space_current_results s ON s.realm_id=c.realm_id AND s.space_id=c.space_id \
+             OR EXISTS(SELECT 1 FROM space_child_scope_policy_current_states c \
+               LEFT JOIN space_current_states s ON s.realm_id=c.realm_id AND s.space_id=c.space_id \
                WHERE c.realm_id=$1 AND s.space_id IS NULL) AS present",
         ).bind::<Text,_>(realm_id.as_str()).get_result::<crate::ExistsRow>(&mut *conn).await?;
     if incomplete_space.present {
@@ -316,9 +318,9 @@ pub(crate) async fn lists_for_actor_in_connection(
     }
     let space_rows = diesel::sql_query(
             "SELECT s.value || jsonb_build_object('parent_space_id',p.value->'parent_space_id', \
-             'child_scope_policy',c.value) AS value FROM space_current_results s \
-             JOIN space_parent_current_results p ON p.realm_id=s.realm_id AND p.space_id=s.space_id \
-             JOIN space_child_scope_policy_current_results c ON c.realm_id=s.realm_id AND c.space_id=s.space_id \
+             'child_scope_policy',c.value) AS value FROM space_current_states s \
+             JOIN space_parent_current_states p ON p.realm_id=s.realm_id AND p.space_id=s.space_id \
+             JOIN space_child_scope_policy_current_states c ON c.realm_id=s.realm_id AND c.space_id=s.space_id \
              WHERE s.realm_id=$1 ORDER BY s.space_id",
         ).bind::<Text,_>(realm_id.as_str()).load::<ValueRow>(&mut *conn).await?;
     let mut spaces = Vec::new();
@@ -337,7 +339,7 @@ pub(crate) async fn lists_for_actor_in_connection(
         if !include_terminal && state == SpaceState::Tombstoned {
             continue;
         }
-        spaces.push(ProjectionSpaceRow {
+        spaces.push(SpaceRow {
             space_id: space.id.ok_or_else(|| corrupt("Space id absent"))?,
             realm_id: space.realm_id,
             kind: space.kind,
@@ -353,7 +355,7 @@ pub(crate) async fn lists_for_actor_in_connection(
         });
     }
     let default: Option<ValueRow> = diesel::sql_query(
-        "SELECT value FROM realm_set_default_strand_current_results WHERE realm_id=$1",
+        "SELECT value FROM realm_set_default_strand_current_states WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result(&mut *conn)
@@ -373,7 +375,7 @@ pub(crate) async fn lists_for_actor_in_connection(
         .flatten();
     let mut assignments: BTreeMap<StrandId, Vec<ProjectionAssignedToRelation>> = BTreeMap::new();
     let relations = diesel::sql_query(
-        "SELECT value FROM relation_current_results WHERE realm_id=$1 AND state='active' \
+        "SELECT value FROM relation_current_states WHERE realm_id=$1 AND state='active' \
              AND value->>'relation_kind'='assigned_to' ORDER BY relation_id",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -423,7 +425,7 @@ pub(crate) async fn lists_for_actor_in_connection(
         "jsonb_build_object('kind','strand_position','board_space_id',p.board_space_id,'strand_id',p.strand_id)",
     );
     let unproved_position = diesel::sql_query(format!(
-            "SELECT EXISTS(SELECT 1 FROM strand_position_current_results p \
+            "SELECT EXISTS(SELECT 1 FROM strand_position_current_states p \
              WHERE p.realm_id=$1 AND NOT COALESCE(\
                {position_source}=jsonb_build_object('kind','realm','realm_id',p.realm_id),false)) AS present",
         )).bind::<Text,_>(realm_id.as_str()).get_result::<crate::ExistsRow>(&mut *conn).await?;
@@ -431,7 +433,7 @@ pub(crate) async fn lists_for_actor_in_connection(
         return Err(corrupt("position current has no covering RealmCommit").into());
     }
     let position_rows = diesel::sql_query(
-        "SELECT board_space_id,strand_id,value FROM strand_position_current_results \
+        "SELECT board_space_id,strand_id,value FROM strand_position_current_states \
              WHERE realm_id=$1 ORDER BY strand_id,board_space_id",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -454,7 +456,7 @@ pub(crate) async fn lists_for_actor_in_connection(
         }
     }
     let strand_rows = diesel::sql_query(
-        "SELECT value FROM strand_current_results WHERE realm_id=$1 ORDER BY strand_id",
+        "SELECT value FROM strand_current_states WHERE realm_id=$1 ORDER BY strand_id",
     )
     .bind::<Text, _>(realm_id.as_str())
     .load::<ValueRow>(&mut *conn)
@@ -521,7 +523,7 @@ pub(crate) async fn lists_for_actor_in_connection(
             .collect::<Vec<_>>();
         actors.sort_by_key(ToString::to_string);
         actors.dedup();
-        strands.push(ProjectionStrandRow {
+        strands.push(StrandRow {
             is_default: default.as_ref() == Some(&id),
             strand_id: id,
             realm_id: strand.realm_id,
@@ -552,14 +554,14 @@ pub(crate) async fn lists_for_actor_in_connection(
         });
     }
     Ok(Some((
-        ProjectionSpaceList {
+        SpacePage {
             realm_id: realm_id.clone(),
             total: spaces.len() as u64,
             spaces,
             next_cursor: None,
             has_more: false,
         },
-        ProjectionStrandList {
+        StrandPage {
             realm_id: realm_id.clone(),
             total: strands.len() as u64,
             strands,
@@ -578,9 +580,9 @@ pub(crate) async fn delivery_for_actor(
     include_terminal: bool,
 ) -> PersistenceResult<
     Option<(
-        ProjectionSpaceList,
-        ProjectionStrandList,
-        arkret_models_collaboration::sync_frames::current_results::AccountCurrentView,
+        SpacePage,
+        StrandPage,
+        arkret_models_collaboration::sync_frames::current_states::AccountStateView,
     )>,
 > {
     let mut conn = pool.get().await.map_err(PersistenceError::database)?;
@@ -601,7 +603,7 @@ pub(crate) async fn delivery_for_actor(
         strands.validate().map_err(PersistenceError::database)?;
         let entries = list_dependencies(&spaces, &strands, &material.current_state_entries)?;
         for row in &entries {
-            let arkret_wire::TypedCurrentRow::Value {
+            let arkret_wire::CurrentState::Value {
                 source_stream_ref,
                 revision,
                 ..
@@ -621,7 +623,7 @@ pub(crate) async fn delivery_for_actor(
         let streams = entries
             .iter()
             .map(|row| {
-                let arkret_wire::TypedCurrentRow::Value {
+                let arkret_wire::CurrentState::Value {
                     source_stream_ref, ..
                 } = row;
                 source_stream_ref.clone()
@@ -638,7 +640,7 @@ pub(crate) async fn delivery_for_actor(
         {
             return Err(corrupt("projection dependency has no held stream head").into());
         }
-        let view = arkret_models_collaboration::sync_frames::current_results::AccountCurrentView {
+        let view = arkret_models_collaboration::sync_frames::current_states::AccountStateView {
             realm_id: realm_id.clone(),
             governance_generation: material.governance_generation,
             stream_heads,
@@ -658,8 +660,8 @@ pub(crate) async fn projection_lists_match_in_connection(
     realm: &RealmId,
     actor: &ActorId,
     include_terminal: bool,
-    spaces: &ProjectionSpaceList,
-    strands: &ProjectionStrandList,
+    spaces: &SpacePage,
+    strands: &StrandPage,
     owner: &arkret_wire::AccountId,
 ) -> PersistenceResult<bool> {
     let Some(current) = lists_for_actor_in_connection(conn, realm, actor, include_terminal)
@@ -728,21 +730,18 @@ pub(crate) async fn projection_lists_match_in_connection(
     Ok(true)
 }
 
-fn canonical_pair(
-    spaces: &ProjectionSpaceList,
-    strands: &ProjectionStrandList,
-) -> PersistenceResult<Vec<u8>> {
+fn canonical_pair(spaces: &SpacePage, strands: &StrandPage) -> PersistenceResult<Vec<u8>> {
     arkret_canonical::canonical_json_bytes(&(spaces, strands)).map_err(PersistenceError::database)
 }
 
 /// Select original registered rows; no parent/placement field is synthesized as
 /// a metadata value and no missing provenance is replaced by a cache snapshot.
 fn list_dependencies(
-    spaces: &ProjectionSpaceList,
-    strands: &ProjectionStrandList,
-    rows: &[arkret_wire::TypedCurrentRow],
-) -> PersistenceResult<Vec<arkret_wire::TypedCurrentRow>> {
-    use arkret_wire::{CurrentSelector as Selector, TypedCurrentRow as Row};
+    spaces: &SpacePage,
+    strands: &StrandPage,
+    rows: &[arkret_wire::CurrentState],
+) -> PersistenceResult<Vec<arkret_wire::CurrentState>> {
+    use arkret_wire::{CurrentSelector as Selector, CurrentState as Row};
     let mut space_ids = spaces
         .spaces
         .iter()
@@ -900,7 +899,7 @@ pub(crate) async fn visible_strand_scope_for_actor(
             return Ok(None);
         }
         let row: Option<ValueRow> = diesel::sql_query(
-            "SELECT value FROM strand_current_results WHERE realm_id=$1 AND strand_id=$2",
+            "SELECT value FROM strand_current_states WHERE realm_id=$1 AND strand_id=$2",
         )
         .bind::<Text, _>(realm_id.as_str())
         .bind::<Text, _>(strand_id.as_str())
@@ -924,8 +923,8 @@ pub(crate) async fn visible_strand_scope_for_actor(
             }));
         };
         let joined = diesel::sql_query(
-            "SELECT EXISTS(SELECT 1 FROM circle_member_state_current_results m \
-             JOIN circle_current_results c ON c.circle_id=m.circle_id AND c.realm_id=m.realm_id \
+            "SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m \
+             JOIN circle_current_states c ON c.circle_id=m.circle_id AND c.realm_id=m.realm_id \
              JOIN realm_commits rc ON rc.commit_id=m.current_commit_id \
                AND rc.realm_id=m.realm_id AND rc.stream_position=m.current_stream_position \
                AND rc.stream_ref=m.source_stream_ref \
@@ -953,7 +952,7 @@ use horme::OptionalExtension as _;
 #[cfg(test)]
 mod tests {
     use arkret_wire::{
-        CommitStreamHead, CurrentRevision, CurrentSelector, RealmCommitId, TypedCurrentRow,
+        CommitStreamHead, CurrentRevision, CurrentSelector, CurrentState, RealmCommitId,
     };
     use diesel::sql_types::{BigInt, Timestamptz};
 
@@ -981,12 +980,12 @@ mod tests {
             "accepted",
             actor.clone(),
         );
-        let output = ProjectionSpaceList {
+        let output = SpacePage {
             realm_id: realm.clone(),
             total: 1,
             next_cursor: None,
             has_more: false,
-            spaces: vec![ProjectionSpaceRow {
+            spaces: vec![SpaceRow {
                 space_id: space_id.clone(),
                 realm_id: realm.clone(),
                 kind: space.kind.clone(),
@@ -1001,14 +1000,14 @@ mod tests {
                 updated_at: None,
             }],
         };
-        let strands = ProjectionStrandList {
+        let strands = StrandPage {
             realm_id: realm.clone(),
             strands: vec![],
             total: 0,
             next_cursor: None,
             has_more: false,
         };
-        let make = |selector, value| TypedCurrentRow::Value {
+        let make = |selector, value| CurrentState::Value {
             selector,
             value,
             source_stream_ref: CommitStreamRef::Realm {
@@ -1047,7 +1046,7 @@ mod tests {
             list_dependencies(&output, &strands, &rows[..2]).is_err(),
             "metadata and parent alone cannot replace a missing policy family"
         );
-        let TypedCurrentRow::Value { value, .. } = &mut rows[1];
+        let CurrentState::Value { value, .. } = &mut rows[1];
         *value = serde_json::json!({"parent_space_id":parent_id});
         let mut parent_output = output.clone();
         parent_output.spaces[0].parent_space_id = Some(parent_id);
@@ -1091,7 +1090,7 @@ mod tests {
             .bind::<Jsonb,_>(serde_json::json!({"stream_ref":source_json}))
             .bind::<Timestamptz,_>(now).execute(&mut *conn).await.unwrap();
         for member in [&actor, &owner_actor] {
-            diesel::sql_query("INSERT INTO member_state_current_results(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join',$3,0,$4,$5)")
+            diesel::sql_query("INSERT INTO member_state_current_states(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join',$3,0,$4,$5)")
                 .bind::<Text,_>(realm.as_str()).bind::<Text,_>(member.to_string())
                 .bind::<Text,_>(commit.as_str()).bind::<Jsonb,_>(serde_json::json!({"membership":"join"}))
                 .bind::<Timestamptz,_>(now).execute(&mut *conn).await.unwrap();
@@ -1127,13 +1126,13 @@ mod tests {
             actor.clone(),
         );
         let space_value = serde_json::to_value(&space).unwrap();
-        diesel::sql_query("INSERT INTO space_current_results(realm_id,space_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,0,$4,$5)")
+        diesel::sql_query("INSERT INTO space_current_states(realm_id,space_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,0,$4,$5)")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(space_id.as_str()).bind::<Text,_>(commit.as_str())
             .bind::<Jsonb,_>(&space_value).bind::<Timestamptz,_>(now).execute(&mut *conn).await.unwrap();
-        diesel::sql_query("INSERT INTO space_parent_current_results(realm_id,space_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,0,$4,$5)")
+        diesel::sql_query("INSERT INTO space_parent_current_states(realm_id,space_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,0,$4,$5)")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(space_id.as_str()).bind::<Text,_>(commit.as_str())
             .bind::<Jsonb,_>(serde_json::json!({"parent_space_id":null})).bind::<Timestamptz,_>(now).execute(&mut *conn).await.unwrap();
-        diesel::sql_query("INSERT INTO space_child_scope_policy_current_results(realm_id,space_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,0,'null'::jsonb,$4)")
+        diesel::sql_query("INSERT INTO space_child_scope_policy_current_states(realm_id,space_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,0,'null'::jsonb,$4)")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(space_id.as_str()).bind::<Text,_>(commit.as_str())
             .bind::<Timestamptz,_>(now).execute(&mut *conn).await.unwrap();
         assert!(
@@ -1172,7 +1171,7 @@ mod tests {
             .unwrap(),
             "total is part of exact output"
         );
-        diesel::sql_query("UPDATE space_current_results SET value=jsonb_set(value,'{title}','\"updated title\"'::jsonb) WHERE space_id=$1")
+        diesel::sql_query("UPDATE space_current_states SET value=jsonb_set(value,'{title}','\"updated title\"'::jsonb) WHERE space_id=$1")
             .bind::<Text,_>(space_id.as_str()).execute(&mut *conn).await.unwrap();
         assert!(
             !projection_lists_match_in_connection(
@@ -1194,7 +1193,7 @@ mod tests {
             .await
             .unwrap()
         );
-        diesel::sql_query("UPDATE member_state_current_results SET membership='leave',value=jsonb_build_object('membership','leave') WHERE realm_id=$1 AND member_id=$2")
+        diesel::sql_query("UPDATE member_state_current_states SET membership='leave',value=jsonb_build_object('membership','leave') WHERE realm_id=$1 AND member_id=$2")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(owner_actor.to_string()).execute(&mut *conn).await.unwrap();
         assert!(
             !projection_lists_match_in_connection(
@@ -1230,7 +1229,7 @@ mod tests {
             stream_position: revision.stream_position,
         };
         let mut conn = pool.get().await.unwrap();
-        diesel::sql_query("INSERT INTO strand_current_results(realm_id,strand_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6)")
+        diesel::sql_query("INSERT INTO strand_current_states(realm_id,strand_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6)")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(id.as_str())
             .bind::<Text,_>(revision.commit_id.as_str()).bind::<BigInt,_>(revision.stream_position as i64)
             .bind::<Jsonb,_>(&value).bind::<Timestamptz,_>(chrono::Utc::now())
@@ -1247,7 +1246,7 @@ mod tests {
             store.snapshot().await.is_err(),
             "a head alone does not prove the current value"
         );
-        let entry = TypedCurrentRow::Value {
+        let entry = CurrentState::Value {
             selector: CurrentSelector::Strand {
                 strand_id: id.clone(),
             },
@@ -1263,13 +1262,13 @@ mod tests {
             Some(&id)
         );
 
-        diesel::sql_query("UPDATE strand_current_results SET value=jsonb_set(value,'{metadata,title}','\"forged\"') WHERE strand_id=$1")
+        diesel::sql_query("UPDATE strand_current_states SET value=jsonb_set(value,'{metadata,title}','\"forged\"') WHERE strand_id=$1")
             .bind::<Text,_>(id.as_str()).execute(&mut *conn).await.unwrap();
         assert!(
             store.snapshot().await.is_err(),
             "verified evidence cannot cover another value"
         );
-        diesel::sql_query("UPDATE strand_current_results SET value=$2 WHERE strand_id=$1")
+        diesel::sql_query("UPDATE strand_current_states SET value=$2 WHERE strand_id=$1")
             .bind::<Text, _>(id.as_str())
             .bind::<Jsonb, _>(&value)
             .execute(&mut *conn)
@@ -1332,20 +1331,20 @@ mod tests {
             "jsonb_build_object('kind','strand','strand_id',s.strand_id)",
         );
         let live_read: crate::ExistsRow = diesel::sql_query(format!(
-            "SELECT EXISTS(SELECT 1 FROM strand_current_results s WHERE s.realm_id=$1 AND {live} IS NOT NULL) AS present"
+            "SELECT EXISTS(SELECT 1 FROM strand_current_states s WHERE s.realm_id=$1 AND {live} IS NOT NULL) AS present"
         )).bind::<Text,_>(realm.as_str()).get_result(&mut *conn).await.unwrap();
         assert!(
             !live_read.present,
             "historical cache evidence cannot restore a live cut"
         );
 
-        diesel::sql_query("UPDATE strand_current_results SET value=jsonb_set(value,'{metadata,title}','\"forged\"') WHERE strand_id=$1")
+        diesel::sql_query("UPDATE strand_current_states SET value=jsonb_set(value,'{metadata,title}','\"forged\"') WHERE strand_id=$1")
             .bind::<Text,_>(id.as_str()).execute(&mut *conn).await.unwrap();
         assert!(
             store.snapshot().await.is_err(),
             "an anchor cannot cover another value"
         );
-        diesel::sql_query("UPDATE strand_current_results SET value=$2 WHERE strand_id=$1")
+        diesel::sql_query("UPDATE strand_current_states SET value=$2 WHERE strand_id=$1")
             .bind::<Text, _>(id.as_str())
             .bind::<Jsonb, _>(&value)
             .execute(&mut *conn)
@@ -1416,7 +1415,7 @@ pub(crate) async fn realm_link_list_in_connection(
         .require_realm_projection_read(chrono::Utc::now())?;
     let rows = diesel::sql_query(
         "SELECT l.realm_id,l.target_realm_id,l.link_kind,l.status,l.value,e.envelope,c.commit_json \
-         FROM realm_link_current_results l \
+         FROM realm_link_current_states l \
          LEFT JOIN realm_commits c ON c.realm_id=l.realm_id AND c.commit_id=l.current_commit_id \
            AND c.stream_position=l.current_stream_position \
            AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',l.realm_id) \

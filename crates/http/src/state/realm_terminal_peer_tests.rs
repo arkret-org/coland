@@ -17,7 +17,7 @@ pub(super) async fn terminal_persistent_rows(
         value: serde_json::Value,
     }
     let mut conn = pool.get().await.unwrap();
-    let tables = diesel::sql_query("SELECT tablename::text AS tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE '%current_results' OR tablename IN ('canonical_events','realm_commits','realm_authorities','federation_outbox','event_federation_outbox','replica_stream_anchors','replica_authorization_rows','replica_authorization_cuts','account_summary_current','account_summary_versions','account_summary_clock','current_result_heads','current_result_versions','direct_conversation_founding_slots','agent_producer_signer_keys','account_device_signer_evidence','account_device_committed_evidence','forwarded_producer_device_evidence','forwarded_producer_agent_evidence','governance_unscoped_signer_evidence')) ORDER BY tablename")
+    let tables = diesel::sql_query("SELECT tablename::text AS tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE '%current_states' OR tablename IN ('canonical_events','realm_commits','realm_authorities','federation_outbox','event_federation_outbox','replica_stream_anchors','replica_authorization_rows','replica_authorization_cuts','account_summary_current','account_summary_versions','account_summary_clock','current_state_heads','current_state_versions','direct_conversation_founding_slots','agent_producer_signer_keys','account_device_signer_evidence','account_device_committed_evidence','forwarded_producer_device_evidence','forwarded_producer_agent_evidence','governance_unscoped_signer_evidence')) ORDER BY tablename")
         .load::<Table>(&mut *conn).await.unwrap();
     let mut snapshot = serde_json::Map::new();
     for table in tables {
@@ -43,7 +43,7 @@ pub(super) async fn terminal_persistent_rows(
         "realm_authorities",
         "federation_outbox",
         "event_federation_outbox",
-        "realm_bootstrap_current_results",
+        "realm_bootstrap_current_states",
         "replica_stream_anchors",
         "replica_authorization_rows",
         "replica_authorization_cuts",
@@ -62,7 +62,8 @@ pub(super) async fn terminal_persistent_rows(
 #[tokio::test]
 async fn peer_forwarded_destroy_reaches_the_shared_cut_and_leaves_zero_writes() {
     use arkret_models_collaboration::authority_commit::{
-        AuthorityForwardBranch, PeerAuthorityForwardEventRequest, PeerAuthoritySubmitRequest,
+        AuthorityForwardBranch, PeerAuthorityForwardEventRequestBody,
+        PeerAuthoritySubmitRequestBody,
     };
 
     let (governor_state, governor_pool, _governor_lease) =
@@ -89,7 +90,7 @@ async fn peer_forwarded_destroy_reaches_the_shared_cut_and_leaves_zero_writes() 
         serde_json::json!({"reason":"no registered confirmation carrier"}),
     ))
     .await;
-    let request = PeerAuthorityForwardEventRequest {
+    let request = PeerAuthorityForwardEventRequestBody {
         branch: AuthorityForwardBranch::AuthorityForward,
         event_submission: EventAdmissionSubmission::new(candidate.authority_commit.event.clone()),
         producer_device_evidence: Some(
@@ -114,7 +115,7 @@ async fn peer_forwarded_destroy_reaches_the_shared_cut_and_leaves_zero_writes() 
         .authority()
         .submit_peer(
             &peer,
-            PeerAuthoritySubmitRequest::AuthorityForwardEvent(request),
+            PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(request),
         )
         .await
         .unwrap_err();

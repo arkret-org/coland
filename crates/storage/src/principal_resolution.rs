@@ -70,7 +70,7 @@ pub trait PrincipalResolutionStore: Send + Sync {
     async fn admit_update(
         &self,
         _write: PrincipalResolutionUpdateWrite,
-    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
         Err(super::PersistenceError::Conflict(
             "temporarily_unavailable: PCR resolution admission unavailable".into(),
         ))

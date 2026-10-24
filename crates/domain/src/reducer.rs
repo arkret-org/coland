@@ -76,7 +76,7 @@ pub use projections::{
     InviteProjection, KeyPackageLifetimeProjection, MessageState, MlsKeyPackageProjection,
     MorphProjection, ObjectLifecycleState, PendingReplayEntry, PinProjection, PollState,
     ProjectedMessageView, ReactionState, RealmLinkState, RealmOrganizationStatementState,
-    RedactionCellValue, RelationCurrentResultProjection, RsvpProjection, SidecarContextProjection,
+    RedactionCellValue, RelationCurrentStateProjection, RsvpProjection, SidecarContextProjection,
     SidecarProjection, SpaceContainerLifecycleState, SpaceContainerProjection, StrandProjection,
     object_stage_from_wire_value, object_stage_wire_value,
 };

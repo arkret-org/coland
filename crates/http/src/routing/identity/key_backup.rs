@@ -20,7 +20,8 @@ use super::append_audit_log;
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
 use crate::wire::{
-    KeyBackupPutStatus, KeysBackupsDeleteOutcome, KeysBackupsList, KeysBackupsReplaceOutcome,
+    KeyBackupPutStatus, KeysBackupsDeleteResponseBody, KeysBackupsPage,
+    KeysBackupsReplaceResponseBody,
 };
 
 mod delete;
@@ -177,7 +178,7 @@ mod tests {
             "backup_version": "kb_1",
             "created_at": "2026-05-30T00:00:00.000Z",
             "series_id": "ak:backup_series:01964137-0000-7000-8000-000000000001",
-            "series_seq": 0,
+            "series_sequence": 0,
             "encryption": encryption,
             "contents": [{
                 "item_kind": "recovery_key_share",
@@ -188,7 +189,7 @@ mod tests {
             "domain_separation": {
                 "subdomain": "test"
             },
-            "auth_data": {
+            "signature_proof": {
                 "device_id": DEVICE_ID,
                 "verification_method": "did:web:alice.example#device",
                 "signature_algorithm": "Ed25519",
@@ -215,7 +216,7 @@ mod tests {
             "kdf": {
                 "name": "argon2id",
                 "salt": "MDAwMDAwMDAwMDAwMDAwMA",
-                "params": {
+                "parameters": {
                     "memory_kib": 65_536,
                     "iterations": 3,
                     "parallelism": 1
@@ -269,13 +270,13 @@ mod tests {
     #[test]
     fn auth_data_rejects_missing_device_trust_anchor() {
         let mut body = key_backup_body("secret_storage", passphrase_encryption());
-        body["auth_data"]
+        body["signature_proof"]
             .as_object_mut()
             .unwrap()
             .remove("device_authorize_event_id");
 
         let err = validate_key_backup_body(BACKUP_ID, ACTOR, &body)
-            .expect_err("key backup auth_data must have a device trust anchor");
+            .expect_err("key backup signature_proof must have a device trust anchor");
         assert_eq!(err.code, ErrorCode::SchemaViolation);
         assert!(err.message.contains("device_authorize_event_id"));
     }

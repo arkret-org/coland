@@ -50,7 +50,7 @@ async fn controller(
 ) -> PersistenceResult<ActorId> {
     let agent_account = AccountId::new(agent.clone(), expected.station_id.clone());
     if crate::boxed_future(|| {
-        crate::agent_interaction_current_results::owned_provenance_in_connection(
+        crate::agent_interaction_current_states::owned_provenance_in_connection(
             conn,
             &agent_account,
             expected,
@@ -112,7 +112,7 @@ pub(crate) async fn admit_confirmation(
     // Lock and verify the same accepted ownership/member generation as mode writes.
     crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;
     let agent = AccountId::new(payload.agent_id.clone(), expected.station_id.clone());
-    if crate::agent_interaction_current_results::controller_in_connection(
+    if crate::agent_interaction_current_states::controller_in_connection(
         conn,
         &event.realm_id,
         &agent,
@@ -221,7 +221,7 @@ pub(crate) async fn commit_confirmation(
     let value = serde_json::to_value(&event.payload).map_err(PersistenceError::database)?;
     let payload: AgentActionApprovePayload = serde_json::from_value(value.clone())
         .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
-    let inserted=sql_query("INSERT INTO agent_action_approval_current_results(realm_id,approval_id,controller_actor_key,approval_nonce,approved_event_id,current_event_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING")
+    let inserted=sql_query("INSERT INTO agent_action_approval_current_states(realm_id,approval_id,controller_actor_key,approval_nonce,approved_event_id,current_event_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(&payload.approval_id).bind::<Text,_>(event.actor_id.to_string())
         .bind::<Text,_>(&payload.approval_nonce).bind::<Text,_>(payload.approved_event_id.as_str()).bind::<Text,_>(event.event_id.as_str())
         .bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(commit.stream_position as i64).bind::<Jsonb,_>(value)
@@ -263,7 +263,7 @@ pub(crate) async fn require_publication(
             #[diesel(sql_type=diesel::sql_types::Bool)]
             present: bool,
         }
-        let selected = sql_query("SELECT EXISTS(SELECT 1 FROM agent_action_approval_current_results WHERE realm_id=$1 AND approved_event_id=$2) AS present")
+        let selected = sql_query("SELECT EXISTS(SELECT 1 FROM agent_action_approval_current_states WHERE realm_id=$1 AND approved_event_id=$2) AS present")
             .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.event_id.as_str())
             .get_result::<Present>(&mut *conn).await.map_err(PersistenceError::database)?;
         if selected.present {
@@ -331,7 +331,7 @@ pub(crate) async fn require_publication(
         {
             continue;
         }
-        let rows=sql_query("SELECT a.value,c.committed_at,e.envelope->'actor_id' AS controller_actor_id FROM agent_action_approval_current_results a JOIN realm_commits c ON c.commit_id=a.current_commit_id AND c.realm_id=a.realm_id AND c.stream_position=a.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE a.realm_id=$1 AND a.approved_event_id=$2 AND a.controller_actor_key=$3 AND e.state='committed' AND e.kind='ak.agent.action_approve' AND e.envelope->>'event_id'=a.current_event_id AND e.envelope->'payload'=a.value AND e.envelope->'actor_id'=$4 FOR SHARE OF a")
+        let rows=sql_query("SELECT a.value,c.committed_at,e.envelope->'actor_id' AS controller_actor_id FROM agent_action_approval_current_states a JOIN realm_commits c ON c.commit_id=a.current_commit_id AND c.realm_id=a.realm_id AND c.stream_position=a.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE a.realm_id=$1 AND a.approved_event_id=$2 AND a.controller_actor_key=$3 AND e.state='committed' AND e.kind='ak.agent.action_approve' AND e.envelope->>'event_id'=a.current_event_id AND e.envelope->'payload'=a.value AND e.envelope->'actor_id'=$4 FOR SHARE OF a")
             .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.event_id.as_str()).bind::<Text,_>(current_controller.to_string())
             .bind::<Jsonb,_>(serde_json::to_value(&current_controller).map_err(PersistenceError::database)?)
             .load::<Confirmation>(&mut *conn).await.map_err(PersistenceError::database)?;
@@ -477,7 +477,7 @@ async fn require_draft_publication(
     event: &Event,
     commit: &RealmCommit,
 ) -> PersistenceResult<()> {
-    let rows = sql_query("SELECT a.value,c.committed_at,e.envelope->'actor_id' AS controller_actor_id FROM agent_action_approval_current_results a JOIN realm_commits c ON c.commit_id=a.current_commit_id AND c.realm_id=a.realm_id AND c.stream_position=a.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE a.realm_id=$1 AND a.approved_event_id=$2 AND e.state='committed' AND e.kind='ak.agent.action_approve' AND e.envelope->>'event_id'=a.current_event_id AND e.envelope->'payload'=a.value AND e.actor_id=a.controller_actor_key AND NOT (e.envelope ? 'executed_by') FOR SHARE OF a")
+    let rows = sql_query("SELECT a.value,c.committed_at,e.envelope->'actor_id' AS controller_actor_id FROM agent_action_approval_current_states a JOIN realm_commits c ON c.commit_id=a.current_commit_id AND c.realm_id=a.realm_id AND c.stream_position=a.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE a.realm_id=$1 AND a.approved_event_id=$2 AND e.state='committed' AND e.kind='ak.agent.action_approve' AND e.envelope->>'event_id'=a.current_event_id AND e.envelope->'payload'=a.value AND e.actor_id=a.controller_actor_key AND NOT (e.envelope ? 'executed_by') FOR SHARE OF a")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.event_id.as_str())
         .load::<Confirmation>(&mut *conn).await.map_err(PersistenceError::database)?;
     for confirmation in rows {

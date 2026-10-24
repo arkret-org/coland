@@ -53,7 +53,7 @@ impl ContactCompletionIntent {
     }
     pub fn finalized_carrier(
         &self,
-        outcome: &ContactAcceptedOutcome,
+        outcome: &ContactAcceptedResponseBody,
     ) -> PersistenceResult<PeerContactSubmitRequestBody> {
         self.validate_finalized_outcome(outcome)?;
         let target = &self.plan.target;
@@ -61,7 +61,7 @@ impl ContactCompletionIntent {
         let contact_address = target.contact_address.clone();
         let idempotency_key = target.idempotency_key.clone();
         Ok(match outcome {
-            ContactAcceptedOutcome::Request {
+            ContactAcceptedResponseBody::Request {
                 request_acceptance_receipt,
                 ..
             } => PeerContactSubmitRequestBody::Request {
@@ -75,7 +75,7 @@ impl ContactCompletionIntent {
                     .ok_or_else(|| invalid("Contact request introduction missing"))?,
                 current_proof: None,
             },
-            ContactAcceptedOutcome::Response {
+            ContactAcceptedResponseBody::Response {
                 normal_response_acceptance_receipt,
                 current_proof,
                 ..
@@ -86,7 +86,7 @@ impl ContactCompletionIntent {
                 contact_address,
                 current_proof: Some(current_proof.clone()),
             },
-            ContactAcceptedOutcome::Reject {
+            ContactAcceptedResponseBody::Reject {
                 reject_acceptance_receipt,
                 ..
             } => PeerContactSubmitRequestBody::Reject {
@@ -95,7 +95,7 @@ impl ContactCompletionIntent {
                 reject_receipt: reject_acceptance_receipt.clone(),
                 contact_address,
             },
-            ContactAcceptedOutcome::ScopeUpdate {
+            ContactAcceptedResponseBody::ScopeUpdate {
                 lineage,
                 current_proof,
                 ..
@@ -106,7 +106,7 @@ impl ContactCompletionIntent {
                 current_proof: current_proof.clone(),
                 contact_address,
             },
-            ContactAcceptedOutcome::Tombstone {
+            ContactAcceptedResponseBody::Tombstone {
                 lineage,
                 current_proof,
                 ..
@@ -121,7 +121,7 @@ impl ContactCompletionIntent {
     }
     pub fn validate_finalized_outcome(
         &self,
-        outcome: &ContactAcceptedOutcome,
+        outcome: &ContactAcceptedResponseBody,
     ) -> PersistenceResult<()> {
         self.validate_event_binding()?;
         let accepted_at = self.accepted_at()?;
@@ -132,7 +132,7 @@ impl ContactCompletionIntent {
         let valid = match (&self.plan.action, outcome) {
             (
                 ContactCompletionAction::Request { .. },
-                ContactAcceptedOutcome::Request {
+                ContactAcceptedResponseBody::Request {
                     operation_id,
                     request_acceptance_receipt: receipt,
                 },
@@ -147,7 +147,7 @@ impl ContactCompletionIntent {
                     request_receipt,
                     absence,
                 },
-                ContactAcceptedOutcome::Response {
+                ContactAcceptedResponseBody::Response {
                     operation_id,
                     normal_response_acceptance_receipt: receipt,
                     lineage,
@@ -179,7 +179,7 @@ impl ContactCompletionIntent {
             }
             (
                 ContactCompletionAction::Reject { request_receipt },
-                ContactAcceptedOutcome::Reject {
+                ContactAcceptedResponseBody::Reject {
                     operation_id,
                     reject_acceptance_receipt: receipt,
                 },
@@ -193,7 +193,7 @@ impl ContactCompletionIntent {
             }
             (
                 ContactCompletionAction::ScopeUpdate,
-                ContactAcceptedOutcome::ScopeUpdate {
+                ContactAcceptedResponseBody::ScopeUpdate {
                     operation_id,
                     lineage,
                     current_proof,
@@ -216,7 +216,7 @@ impl ContactCompletionIntent {
             }
             (
                 ContactCompletionAction::Tombstone,
-                ContactAcceptedOutcome::Tombstone {
+                ContactAcceptedResponseBody::Tombstone {
                     operation_id,
                     lineage,
                     current_proof,

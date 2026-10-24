@@ -391,7 +391,7 @@ pub(super) async fn require_provision_preview_signature(
 /// Covered RFC 9421 components (MUST, symmetric with `federation.md` §3.2):
 /// `@method`, `@target-uri`, `@authority`, `content-digest`,
 /// `source-service-id`, `destination-service-id`, `idempotency-key`, plus the
-/// `created` / `expires` signature params. Failure codes (all 401 with the
+/// `created` / `expires` signature parameters. Failure codes (all 401 with the
 /// discriminating `reason`, `error.code` stays generic `unauthenticated`):
 /// - missing `Signature` / bearer-only → `http_signature_required`
 /// - bad signature / `content-digest` mismatch / `source_id` header↔body mismatch →
@@ -675,14 +675,14 @@ fn select_one_signed_scope_candidate<T>(
 /// Resolve the verification method to verify the inbound signature against.
 ///
 /// §7.3.1 anchor: the Applet registration `service_id`'s installed
-/// `webhook_auth.key_ref` must name the source service DID's method and the
+/// `webhook_signature_policy.key_ref` must name the source service DID's method and the
 /// installed auth metadata must accept the algorithm this verifier implements.
 pub(super) fn applet_registration_verification_method(
     install: &AppletRecord,
     source_id: &str,
 ) -> Result<String, AppError> {
     let package = &install.package;
-    let key_ref = package.webhook_auth.key_ref.trim();
+    let key_ref = package.webhook_signature_policy.key_ref.trim();
     let key_controller = key_ref
         .split_once('#')
         .map(|(controller, _)| controller)
@@ -691,21 +691,21 @@ pub(super) fn applet_registration_verification_method(
         .and_then(|did| arkret_identifiers::project_did_to_core_id(&did))
         .map_err(|_| {
             applet_signature_error_invalid(
-                "Applet webhook_auth.key_ref must name a resolvable DID verification method",
+                "Applet webhook_signature_policy.key_ref must name a resolvable DID verification method",
             )
         })?;
     if key_ref.is_empty() || key_controller.as_str() != source_id {
         return Err(applet_signature_error_invalid(
-            "Applet webhook_auth.key_ref must be controlled by Source-Service-ID",
+            "Applet webhook_signature_policy.key_ref must be controlled by Source-Service-ID",
         ));
     }
     if !package
-        .webhook_auth
+        .webhook_signature_policy
         .accepted_signature_algorithms
         .contains(&HttpMessageSignatureAlgorithm::Ed25519)
     {
         return Err(applet_signature_error_invalid(
-            "Applet webhook_auth.accepted_signature_algorithms must include ed25519 for inbound transaction signatures",
+            "Applet webhook_signature_policy.accepted_signature_algorithms must include ed25519 for inbound transaction signatures",
         ));
     }
     Ok(key_ref.to_owned())

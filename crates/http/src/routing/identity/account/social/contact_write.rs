@@ -24,7 +24,7 @@ const CONTACT_RESERVATION_TTL_MINUTES: i64 = 10;
 const CONTACT_OUTCOME_TTL_HOURS: i64 = 24;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "result_kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "operation_kind", rename_all = "snake_case", deny_unknown_fields)]
 enum ContactReservationBranch {
     Request {
         peer: ContactPeer,
@@ -546,7 +546,7 @@ fn contact_event_draft(
     let unsigned_bytes = arkret_canonical::canonical_json_bytes(&digest_payload)
         .map_err(|error| AppError::internal(format!("Contact Event draft bytes: {error}")))?;
     Ok(PreparedEventDraft {
-        unsigned_event_bytes: Base64UrlString::new(URL_SAFE_NO_PAD.encode(unsigned_bytes))
+        unsigned_event_base64url: Base64UrlString::new(URL_SAFE_NO_PAD.encode(unsigned_bytes))
             .map_err(|error| AppError::internal(format!("Contact draft encode: {error}")))?,
         event_digest: Hash::new(
             event
@@ -557,7 +557,7 @@ fn contact_event_draft(
     })
 }
 
-fn prepared_outcome(reservation: &ContactReservation) -> ContactOperationOutcome {
+fn prepared_outcome(reservation: &ContactReservation) -> ContactOperationResponseBody {
     let fields = (
         reservation.operation_id.clone(),
         reservation.reservation_handle.clone(),
@@ -565,38 +565,38 @@ fn prepared_outcome(reservation: &ContactReservation) -> ContactOperationOutcome
         reservation.event_draft.clone(),
     );
     let outcome = match reservation.branch {
-        ContactReservationBranch::Request { .. } => ContactPreparedOutcome::Request {
+        ContactReservationBranch::Request { .. } => ContactPreparedResponseBody::Request {
             operation_id: fields.0,
             reservation_handle: fields.1,
             expires_at: fields.2,
             event_draft: fields.3,
         },
-        ContactReservationBranch::Response { .. } => ContactPreparedOutcome::Response {
+        ContactReservationBranch::Response { .. } => ContactPreparedResponseBody::Response {
             operation_id: fields.0,
             reservation_handle: fields.1,
             expires_at: fields.2,
             event_draft: fields.3,
         },
-        ContactReservationBranch::Reject { .. } => ContactPreparedOutcome::Reject {
+        ContactReservationBranch::Reject { .. } => ContactPreparedResponseBody::Reject {
             operation_id: fields.0,
             reservation_handle: fields.1,
             expires_at: fields.2,
             event_draft: fields.3,
         },
-        ContactReservationBranch::ScopeUpdate { .. } => ContactPreparedOutcome::ScopeUpdate {
+        ContactReservationBranch::ScopeUpdate { .. } => ContactPreparedResponseBody::ScopeUpdate {
             operation_id: fields.0,
             reservation_handle: fields.1,
             expires_at: fields.2,
             event_draft: fields.3,
         },
-        ContactReservationBranch::Tombstone { .. } => ContactPreparedOutcome::Tombstone {
+        ContactReservationBranch::Tombstone { .. } => ContactPreparedResponseBody::Tombstone {
             operation_id: fields.0,
             reservation_handle: fields.1,
             expires_at: fields.2,
             event_draft: fields.3,
         },
     };
-    ContactOperationOutcome::Prepared { outcome }
+    ContactOperationResponseBody::Prepared { outcome }
 }
 
 async fn store_prepare(
@@ -684,7 +684,7 @@ async fn persist_final(
     operation_id: &str,
     key: &str,
     request_hash: &str,
-    outcome: &ContactOperationOutcome,
+    outcome: &ContactOperationResponseBody,
 ) -> Result<(), AppError> {
     let created_at = now();
     let principal_id = DidCoreId::new(principal.to_owned())
@@ -723,7 +723,7 @@ async fn prepare_context<K: arkret_event_draft::EventSpec, T: Serialize>(
     request: &T,
     idempotency_key: &IdempotencyKey,
     peer: &ContactPeer,
-) -> Result<(PrepareContext<K>, Option<ContactOperationOutcome>), AppError> {
+) -> Result<(PrepareContext<K>, Option<ContactOperationResponseBody>), AppError> {
     let holder = holder_peer(state, session).await?;
     validate_distinct_peer(&holder, peer)?;
     materialize_contact_completions(state).await?;
@@ -761,7 +761,7 @@ async fn prepare_context<K: arkret_event_draft::EventSpec, T: Serialize>(
         "request": request,
     }))
     .map_err(|error| AppError::internal(format!("Contact prepare digest: {error}")))?;
-    let outcome = replay::<ContactOperationOutcome>(
+    let outcome = replay::<ContactOperationResponseBody>(
         state,
         &session.actor,
         "org.arkret.coland.contact.prepare.v1",
@@ -787,7 +787,7 @@ async fn prepare<K: arkret_event_draft::EventSpec>(
     idempotency_key: IdempotencyKey,
     branch: ContactReservationBranch,
     payload: K::Payload,
-) -> JsonResult<ContactOperationOutcome> {
+) -> JsonResult<ContactOperationResponseBody> {
     let PrepareContext {
         holder,
         request_hash,
@@ -998,7 +998,7 @@ fn validate_signed_event(event: &Event, draft: &PreparedEventDraft) -> Result<()
     )
     .map_err(|error| AppError::param_invalid(format!("signed Contact Event bytes: {error}")))?;
     let expected = URL_SAFE_NO_PAD
-        .decode(draft.unsigned_event_bytes.as_str())
+        .decode(draft.unsigned_event_base64url.as_str())
         .map_err(|_| AppError::internal("stored Contact draft bytes are invalid"))?;
     let digest_suite = draft
         .event_digest
@@ -1355,7 +1355,7 @@ fn signed_lineage(
                 ),
             )
             .map_err(|error| AppError::internal(error.to_string()))?,
-            public_key_b64u: Base64UrlString::new(
+            public_key_base64url: Base64UrlString::new(
                 URL_SAFE_NO_PAD.encode(state.notary_signing_key().verifying_key().as_bytes()),
             )
             .map_err(|error| AppError::internal(error.to_string()))?,
@@ -1501,7 +1501,7 @@ fn commit<'a>(
     state: &'a AppState,
     session: &'a SessionRecord,
     body: ContactCommitRequestBody,
-) -> impl std::future::Future<Output = JsonResult<ContactOperationOutcome>> + Send + 'a {
+) -> impl std::future::Future<Output = JsonResult<ContactOperationResponseBody>> + Send + 'a {
     // Keep construction of this large state machine out of its caller's poll frame.
     Box::pin(async move {
         let request_hash = arkret_canonical::canonical_sha256(&body)
@@ -1533,7 +1533,7 @@ fn commit<'a>(
             }
             return Box::pin(completion::resolve_completion(state, &response_binding)).await;
         }
-        if let Some(outcome) = replay::<ContactOperationOutcome>(
+        if let Some(outcome) = replay::<ContactOperationResponseBody>(
             state,
             &session.actor,
             "org.arkret.coland.contact.commit.v1",
@@ -1598,7 +1598,7 @@ fn commit<'a>(
         .await?
         {
             ContactCommitPlan::Failed(failed) => {
-                let outcome = ContactOperationOutcome::Failed { outcome: failed };
+                let outcome = ContactOperationResponseBody::Failed { outcome: failed };
                 persist_final(
                     state,
                     &session.actor,
@@ -1667,7 +1667,7 @@ fn contact_admission_error(error: coland_services::ServiceError) -> AppError {
 }
 
 enum ContactCommitPlan {
-    Failed(ContactFailedOutcome),
+    Failed(ContactFailedResponseBody),
     Ready {
         projection: Box<coland_services::events::CommitContactProjection>,
         action: Box<coland_storage::ContactCompletionAction>,
@@ -1725,8 +1725,8 @@ fn plan_contact_commit<'a>(
                                 .iter()
                                 .any(|q| q.core.holder.contact_actor_id() == holder))
                 }) {
-                    return Ok(ContactCommitPlan::Failed(ContactFailedOutcome {
-                        result_kind: ContactResultKind::Request,
+                    return Ok(ContactCommitPlan::Failed(ContactFailedResponseBody {
+                        operation_kind: ContactResultKind::Request,
                         operation_id: reservation.operation_id.clone(),
                         reason: ContactOperationRejectReason::ContactRoundConflict,
                     }));
@@ -2350,7 +2350,7 @@ async fn require_widening_current(
             .as_str()
             != state.service_id()
             && direction.current_proof.as_ref().is_none_or(|proof| {
-                proof.fresh_until <= now()
+                proof.cache_expires_at <= now()
                     || proof.contact_round_id.as_ref() != record.contact_round_id.as_ref()
             })
         {
@@ -2383,7 +2383,7 @@ async fn require_request_current(
         .and_then(|d| d.current_proof.as_ref())
         .is_some_and(|proof| {
             proof.head_event_ref == receipt.core.request_event_ref
-                && proof.fresh_until > now()
+                && proof.cache_expires_at > now()
                 && proof.scope_instances.is_empty()
         })
     {
@@ -2426,7 +2426,7 @@ pub(super) async fn request(
     state: &AppState,
     session: &SessionRecord,
     body: ContactOperationRequestBody,
-) -> JsonResult<ContactOperationOutcome> {
+) -> JsonResult<ContactOperationResponseBody> {
     match body {
         ContactOperationRequestBody::Prepare(body) => {
             let (context, replayed) =
@@ -2563,7 +2563,7 @@ pub(super) async fn respond(
     state: &AppState,
     session: &SessionRecord,
     body: ContactAcceptRequestBody,
-) -> JsonResult<ContactOperationOutcome> {
+) -> JsonResult<ContactOperationResponseBody> {
     match body {
         ContactAcceptRequestBody::Prepare(body) => {
             let (context, replayed) =
@@ -2632,7 +2632,7 @@ pub(super) async fn reject(
     state: &AppState,
     session: &SessionRecord,
     body: ContactRejectRequestBody,
-) -> JsonResult<ContactOperationOutcome> {
+) -> JsonResult<ContactOperationResponseBody> {
     match body {
         ContactRejectRequestBody::Prepare(body) => {
             let (context, replayed) =
@@ -2695,7 +2695,7 @@ pub(super) async fn scope_update(
     state: &AppState,
     session: &SessionRecord,
     body: ContactScopeUpdateRequestBody,
-) -> JsonResult<ContactOperationOutcome> {
+) -> JsonResult<ContactOperationResponseBody> {
     match body {
         ContactScopeUpdateRequestBody::Prepare(body) => {
             let (context, replayed) = prepare_context::<
@@ -2752,7 +2752,7 @@ pub(super) async fn tombstone(
     state: &AppState,
     session: &SessionRecord,
     body: ContactTombstoneRequestBody,
-) -> JsonResult<ContactOperationOutcome> {
+) -> JsonResult<ContactOperationResponseBody> {
     match body {
         ContactTombstoneRequestBody::Prepare(body) => {
             let (context, replayed) =

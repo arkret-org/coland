@@ -10,7 +10,8 @@ use arkret_models_collaboration::governance::realm_join_intake::{
 };
 use arkret_signatures::PublicKeyMaterial;
 use arkret_wire::{
-    AuthorityBundleRequest, Base64UrlString, Did, DidUrl, RealmAuthorityBundle, RealmId, RequestId,
+    Base64UrlString, Did, DidUrl, RealmAuthorityBundle, RealmAuthorityBundleRequestBody, RealmId,
+    RequestId,
 };
 use chrono::{DateTime, Utc};
 
@@ -134,7 +135,7 @@ pub(crate) async fn verified_keys(
 async fn fetch_candidate(
     state: &AppState,
     endpoint: &str,
-    request: &AuthorityBundleRequest,
+    request: &RealmAuthorityBundleRequestBody,
 ) -> Result<RealmAuthorityBundle, AppError> {
     let target = format!(
         "{}/_arkret/open/realm-authority/bundle",
@@ -220,7 +221,7 @@ impl LocatedRealmAuthority {
 async fn verify_candidate(
     state: &AppState,
     locator: &str,
-    request: &AuthorityBundleRequest,
+    request: &RealmAuthorityBundleRequestBody,
     fetched: Result<RealmAuthorityBundle, AppError>,
 ) -> Option<LocatedRealmAuthority> {
     let verified = async {
@@ -291,7 +292,7 @@ pub(crate) async fn fetch_authority_bundle_of_service(
     fetch_candidate(
         state,
         &endpoint,
-        &AuthorityBundleRequest {
+        &RealmAuthorityBundleRequestBody {
             realm_id: realm_id.clone(),
             nonce: nonce.clone(),
         },
@@ -308,7 +309,7 @@ pub(crate) async fn resolve_verified_authority_of_service(
         rand::random::<[u8; 32]>(),
     ))
     .map_err(unavailable)?;
-    let request = AuthorityBundleRequest {
+    let request = RealmAuthorityBundleRequestBody {
         realm_id: realm_id.clone(),
         nonce,
     };
@@ -354,7 +355,7 @@ pub(crate) async fn resolve_verified_authority(
     // because a locator is used only after the consumer itself proved the
     // whole array is bounded, ordered and free of repeated service ids.
     validate_authority_locator_hints(hints).map_err(invalid_request)?;
-    let request = AuthorityBundleRequest {
+    let request = RealmAuthorityBundleRequestBody {
         realm_id: realm_id.clone(),
         nonce: nonce.clone(),
     };
@@ -406,7 +407,7 @@ pub(crate) async fn resolve_verified_authority(
 async fn fetch_remote_candidate(
     state: &AppState,
     candidate: &RealmJoinCandidate,
-    request: &AuthorityBundleRequest,
+    request: &RealmAuthorityBundleRequestBody,
 ) -> Result<RealmAuthorityBundle, AppError> {
     let endpoint = match &candidate.endpoint_url {
         Some(url) => url.clone(),

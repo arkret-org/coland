@@ -614,7 +614,7 @@ pub struct PollState {
     /// response of an actor replaces the previous one outright.
     pub votes: BTreeMap<arkret_wire::ActorId, Vec<String>>,
     pub responses:
-        BTreeMap<arkret_wire::EventId, arkret_models_collaboration::poll::VerifiedPollResponse>,
+        BTreeMap<arkret_wire::EventId, arkret_models_collaboration::poll::VerifiedPollVote>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -640,7 +640,7 @@ pub struct ColandRelationState {
 /// a typed primary conflict domain. It is a read cache of the durable
 /// authority row, never a second CAS authority.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RelationCurrentResultProjection {
+pub struct RelationCurrentStateProjection {
     pub relation_id: String,
     pub primary_conflict_domain:
         arkret_models_collaboration::objects::relation::RelationPrimaryConflictDomain,

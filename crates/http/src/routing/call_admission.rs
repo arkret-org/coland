@@ -128,7 +128,7 @@ pub(crate) async fn holder_location(
 async fn current_at_authority(
     state: &AppState,
     request: &ConsentCurrentReadRequestBody,
-) -> Result<ConsentCurrentReadOutcome, AppError> {
+) -> Result<ConsentCurrentReadResponseBody, AppError> {
     let cut = targeted_cut(state, request).await?;
     if cut.service_id != state.service_core_id() {
         return Err(unavailable("this Station no longer governs holder PCR"));
@@ -138,14 +138,14 @@ async fn current_at_authority(
             "exact peer has multiple Consent current values",
         ));
     }
-    let mut outcome = ConsentCurrentReadOutcome {
+    let mut outcome = ConsentCurrentReadResponseBody {
         request_digest: canonical_request_digest(request).map_err(invalid)?,
         realm_id: cut.realm_id,
         governance_generation: cut.generation,
         effective_stream_head: cut.head,
         current: match cut.records.into_iter().next() {
-            Some(r) => ConsentCurrentState::Present {
-                result: ConsentCurrentRow {
+            Some(r) => ConsentCurrentReadState::Present {
+                current_state: CurrentConsent {
                     selector: ConsentCurrentSelector {
                         kind: ConsentCurrentSelectorKind::Consent,
                         peer_id: r.peer.actor_id().clone(),
@@ -158,7 +158,7 @@ async fn current_at_authority(
                     value: r.value,
                 },
             },
-            None => ConsentCurrentState::NeverWritten,
+            None => ConsentCurrentReadState::NeverWritten,
         },
         evaluated_at: cut.evaluated_at,
         expires_at: cut.evaluated_at + Duration::seconds(30),
@@ -258,7 +258,7 @@ async fn verify_verdict(
 pub(crate) async fn read_current_for_holder(
     state: &AppState,
     request: &ConsentCurrentReadRequestBody,
-) -> Result<ConsentCurrentReadOutcome, AppError> {
+) -> Result<ConsentCurrentReadResponseBody, AppError> {
     let (realm, service) = holder_location(state, &request.holder_account_id).await?;
     let outcome = if service == state.service_core_id() {
         current_at_authority(state, request).await?
@@ -299,7 +299,7 @@ async fn self_current(
     aa: AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<ConsentCurrentReadOutcome> {
+) -> JsonResult<ConsentCurrentReadResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let request: ConsentCurrentReadRequestBody = req.parse_json().await.map_err(invalid)?;
@@ -319,7 +319,7 @@ async fn self_current(
 async fn peer_current(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<ConsentCurrentReadOutcome> {
+) -> JsonResult<ConsentCurrentReadResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let peer = super::events::peer::authenticated_peer_context(state, req, true).await?;
     let request: ConsentCurrentReadRequestBody = req.parse_json().await.map_err(invalid)?;
@@ -335,7 +335,7 @@ async fn peer_current(
 async fn admission_at_authority(
     state: &AppState,
     request: &CallInvitationAdmissionRequestBody,
-) -> Result<CallInvitationAdmissionOutcome, AppError> {
+) -> Result<CallInvitationAdmissionDecision, AppError> {
     request.validate().map_err(invalid)?;
     let peer = ConsentPeer::Actor {
         actor_id: request.invitation.inviter_actor_id.clone(),
@@ -364,7 +364,7 @@ async fn admission_at_authority(
             ),
             _ => false,
         };
-    let mut outcome = CallInvitationAdmissionOutcome {
+    let mut outcome = CallInvitationAdmissionDecision {
         request_digest: canonical_request_digest(request).map_err(invalid)?,
         admitted,
         authority_generation: cut.generation,
@@ -387,11 +387,11 @@ async fn admission_at_authority(
 pub(crate) async fn fresh_admission(
     state: &AppState,
     request: &CallInvitationAdmissionRequestBody,
-) -> Result<CallInvitationAdmissionOutcome, AppError> {
+) -> Result<CallInvitationAdmissionDecision, AppError> {
     request.validate().map_err(invalid)?;
     let holder = &request.invitation.holder_account_id;
     if holder.station_id != state.service_core_id() {
-        let outcome: CallInvitationAdmissionOutcome = remote_post(
+        let outcome: CallInvitationAdmissionDecision = remote_post(
             state,
             &holder.station_id,
             "/_arkret/peer/rtc/invitation-admission",
@@ -554,7 +554,7 @@ pub(crate) async fn fresh_admission(
 async fn peer_admission(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<CallInvitationAdmissionOutcome> {
+) -> JsonResult<CallInvitationAdmissionDecision> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let peer = super::events::peer::authenticated_peer_context(state, req, true).await?;
     let request: CallInvitationAdmissionRequestBody = req.parse_json().await.map_err(invalid)?;
@@ -629,7 +629,7 @@ pub(crate) async fn validate_relation(
         )
         .await?;
         let key = PublicKeyMaterial::Ed25519Raw {
-            bytes: arkret_canonical::base64url_decode(key.public_key_b64u.as_str())
+            bytes: arkret_canonical::base64url_decode(key.public_key_base64url.as_str())
                 .map_err(invalid)?,
         };
         arkret_signatures::verify_ed25519_signal_proof(&request.envelope, &key).map_err(invalid)?;
@@ -665,8 +665,8 @@ pub(crate) async fn validate_relation(
     Ok(())
 }
 
-fn deferred() -> CallInvitationSendOutcome {
-    CallInvitationSendOutcome {
+fn deferred() -> CallInvitationSendResponseBody {
+    CallInvitationSendResponseBody {
         status: CallInvitationSendStatus::Deferred,
     }
 }
@@ -700,7 +700,7 @@ async fn self_send(
     aa: AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<CallInvitationSendOutcome> {
+) -> JsonResult<CallInvitationSendResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let request: CallInvitationSendRequestBody = req.parse_json().await.map_err(invalid)?;
@@ -717,7 +717,7 @@ async fn self_send(
         let destination = request.invitation.holder_account_id.station_id.clone();
         let state = state.clone();
         tokio::spawn(async move {
-            let result: Result<CallInvitationSendOutcome, _> = remote_post(
+            let result: Result<CallInvitationSendResponseBody, _> = remote_post(
                 &state,
                 &destination,
                 "/_arkret/peer/rtc/invitation",
@@ -733,7 +733,10 @@ async fn self_send(
 }
 
 #[endpoint(operation_id = "ak.peer.call.invitation.command.relay")]
-async fn peer_relay(depot: &mut Depot, req: &mut Request) -> JsonResult<CallInvitationSendOutcome> {
+async fn peer_relay(
+    depot: &mut Depot,
+    req: &mut Request,
+) -> JsonResult<CallInvitationSendResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let peer = super::events::peer::authenticated_peer_context(state, req, true).await?;
     let request: CallInvitationSendRequestBody = req.parse_json().await.map_err(invalid)?;
@@ -795,7 +798,7 @@ pub(crate) async fn delivery_for_device(
         Box::new(CallInvitationDeliveryView {
             invitation: request.invitation,
             request: admission,
-            outcome,
+            decision: outcome,
         })
     }))
 }

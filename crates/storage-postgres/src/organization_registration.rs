@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use arkret_models_identity::{OrganizationRegistrationChallenge, OrganizationRegistrationOutcome};
+use arkret_models_identity::{
+    OrganizationRegistrationChallenge, OrganizationRegistrationResponseBody,
+};
 use arkret_wire::{DidCoreId, Hash};
 use coland_storage::{
     OrganizationRegistrationChallengeRecord, OrganizationRegistrationCurrent,
@@ -117,11 +119,11 @@ struct OutcomeRow {
     outcome: Value,
 }
 
-impl TryFrom<OutcomeRow> for OrganizationRegistrationOutcome {
+impl TryFrom<OutcomeRow> for OrganizationRegistrationResponseBody {
     type Error = PersistenceError;
 
     fn try_from(row: OutcomeRow) -> Result<Self, Self::Error> {
-        let outcome: OrganizationRegistrationOutcome = serde_json::from_value(row.outcome)
+        let outcome: OrganizationRegistrationResponseBody = serde_json::from_value(row.outcome)
             .map_err(|error| {
                 PersistenceError::Internal(format!(
                     "organization registration outcome row: {error}"
@@ -219,7 +221,7 @@ impl OrganizationRegistrationStore for PgOrganizationRegistrationStore {
     async fn get_outcome(
         &self,
         outcome_id: &str,
-    ) -> PersistenceResult<Option<OrganizationRegistrationOutcome>> {
+    ) -> PersistenceResult<Option<OrganizationRegistrationResponseBody>> {
         let mut conn = pg_conn(&self.pool).await?;
         load_outcome(&mut conn, outcome_id).await
     }
@@ -227,7 +229,7 @@ impl OrganizationRegistrationStore for PgOrganizationRegistrationStore {
     async fn ensure(
         &self,
         commit: OrganizationRegistrationEnsureCommit,
-    ) -> PersistenceResult<OrganizationRegistrationOutcome> {
+    ) -> PersistenceResult<OrganizationRegistrationResponseBody> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             let mut challenge = load_challenge(conn, &commit.challenge_id, true)
@@ -256,7 +258,7 @@ impl OrganizationRegistrationStore for PgOrganizationRegistrationStore {
     async fn refresh(
         &self,
         commit: OrganizationRegistrationRefreshCommit,
-    ) -> PersistenceResult<OrganizationRegistrationOutcome> {
+    ) -> PersistenceResult<OrganizationRegistrationResponseBody> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             let mut challenge = load_challenge(conn, &commit.challenge_id, true)
@@ -321,14 +323,14 @@ impl OrganizationRegistrationStore for PgOrganizationRegistrationStore {
     async fn revoke(
         &self,
         commit: OrganizationRegistrationLifecycleCommit,
-    ) -> PersistenceResult<OrganizationRegistrationOutcome> {
+    ) -> PersistenceResult<OrganizationRegistrationResponseBody> {
         self.apply_lifecycle(commit, None).await
     }
 
     async fn deactivate(
         &self,
         commit: OrganizationRegistrationLifecycleCommit,
-    ) -> PersistenceResult<OrganizationRegistrationOutcome> {
+    ) -> PersistenceResult<OrganizationRegistrationResponseBody> {
         self.apply_lifecycle(
             commit,
             Some(OrganizationRegistrationTerminalReason::ExternalDidDeactivated),
@@ -342,7 +344,7 @@ impl PgOrganizationRegistrationStore {
         &self,
         commit: OrganizationRegistrationLifecycleCommit,
         required_reason: Option<OrganizationRegistrationTerminalReason>,
-    ) -> PersistenceResult<OrganizationRegistrationOutcome> {
+    ) -> PersistenceResult<OrganizationRegistrationResponseBody> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             lock_organization(conn, &commit.organization_id).await?;
@@ -421,7 +423,7 @@ async fn load_state(
 async fn load_outcome(
     conn: &mut diesel_async::AsyncPgConnection,
     outcome_id: &str,
-) -> PersistenceResult<Option<OrganizationRegistrationOutcome>> {
+) -> PersistenceResult<Option<OrganizationRegistrationResponseBody>> {
     sql_query(
         "SELECT outcome_id, organization_id, registration_generation, outcome \
          FROM organization_registration_outcomes WHERE outcome_id = $1",
@@ -431,14 +433,14 @@ async fn load_outcome(
     .await
     .optional()
     .map_err(PersistenceError::database)?
-    .map(OrganizationRegistrationOutcome::try_from)
+    .map(OrganizationRegistrationResponseBody::try_from)
     .transpose()
 }
 
 async fn load_organization_outcomes(
     conn: &mut diesel_async::AsyncPgConnection,
     organization_id: &DidCoreId,
-) -> PersistenceResult<BTreeMap<String, OrganizationRegistrationOutcome>> {
+) -> PersistenceResult<BTreeMap<String, OrganizationRegistrationResponseBody>> {
     let rows = sql_query(
         "SELECT outcome_id, organization_id, registration_generation, outcome \
          FROM organization_registration_outcomes WHERE organization_id = $1",
@@ -450,7 +452,7 @@ async fn load_organization_outcomes(
     let mut outcomes = BTreeMap::new();
     for row in rows {
         let id = row.outcome_id.clone();
-        outcomes.insert(id, OrganizationRegistrationOutcome::try_from(row)?);
+        outcomes.insert(id, OrganizationRegistrationResponseBody::try_from(row)?);
     }
     Ok(outcomes)
 }
@@ -521,7 +523,7 @@ async fn persist_state(
 
 async fn persist_outcomes(
     conn: &mut diesel_async::AsyncPgConnection,
-    outcomes: &BTreeMap<String, OrganizationRegistrationOutcome>,
+    outcomes: &BTreeMap<String, OrganizationRegistrationResponseBody>,
     committed_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     for (outcome_id, outcome) in outcomes {

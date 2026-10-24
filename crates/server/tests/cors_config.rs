@@ -206,10 +206,12 @@ fn browser_metadata_advertises_configured_account_authority_and_oidc() {
         let _: arkret_models_discovery::ServiceDescribe =
             serde_json::from_value(description.clone()).unwrap();
         assert_eq!(
-            description["auth_metadata"]["account_authority"]["gate_account_base_url"],
+            description["authentication_metadata"]["account_authority"]["gate_account_base_url"],
             "https://auth.example.com/_arkret/gate/account"
         );
-        let methods = description["auth_metadata"]["methods"].as_array().unwrap();
+        let methods = description["authentication_metadata"]["methods"]
+            .as_array()
+            .unwrap();
         let oidc = methods
             .iter()
             .find(|method| method["method"] == "oidc")

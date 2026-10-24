@@ -127,7 +127,7 @@ fn reserved_material_and_identifiers_leave_no_pg_cache_binding_or_auth_state() {
                 did: did.to_string(),
                 did_document: serde_json::to_value(&document).unwrap(),
                 key_log_head: Some(arkret_canonical::canonical_sha256(&document).unwrap()),
-                seq: 1,
+                sequence: 1,
                 method_evidence: serde_json::json!({"mode":"verified-production-resolution"}),
                 fetched_at: now,
                 expires_at: now + chrono::Duration::minutes(5),
@@ -135,7 +135,7 @@ fn reserved_material_and_identifiers_leave_no_pg_cache_binding_or_auth_state() {
             };
             let event = DidLogEvent {
                 did: did.to_string(),
-                seq: 1,
+                sequence: 1,
                 event_digest: arkret_canonical::canonical_sha256(&document).unwrap(),
                 operation: serde_json::json!({"state": document}),
                 created_at: now,
@@ -196,7 +196,7 @@ fn reserved_material_and_identifiers_leave_no_pg_cache_binding_or_auth_state() {
             did: did.to_string(),
             did_document: serde_json::to_value(&document).unwrap(),
             key_log_head: Some(arkret_canonical::canonical_sha256(&document).unwrap()),
-            seq: 1,
+            sequence: 1,
             method_evidence: serde_json::json!({"mode":"verified-production-resolution"}),
             fetched_at: now,
             expires_at: now + chrono::Duration::minutes(5),
@@ -210,7 +210,7 @@ fn reserved_material_and_identifiers_leave_no_pg_cache_binding_or_auth_state() {
             .unwrap();
         let event = DidLogEvent {
             did: did.to_string(),
-            seq: 1,
+            sequence: 1,
             event_digest: arkret_canonical::canonical_sha256(&document).unwrap(),
             operation: serde_json::json!({"state": document}),
             created_at: now,

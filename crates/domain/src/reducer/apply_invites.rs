@@ -287,8 +287,8 @@ fn validate_third_party_invite(third_party_invite: &Value) -> Result<(), &'stati
     {
         return Err("verification_public_key_required");
     }
-    if let Some(max_claims) = object.get("max_claims").and_then(Value::as_u64)
-        && max_claims > 1
+    if let Some(max_claim_count) = object.get("max_claim_count").and_then(Value::as_u64)
+        && max_claim_count > 1
     {
         return Err("unsupported_max_claims");
     }

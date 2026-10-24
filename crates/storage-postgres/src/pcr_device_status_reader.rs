@@ -185,7 +185,7 @@ pub(crate) async fn confirmed_pcr_device_status_from_authority(
             return Err(incomplete("PCR revoke typed transaction changed its proposal").into());
         }
         let decision = match resource.revoke_command_outcome.as_ref() {
-            Some(outcome) if outcome.result == SecurityRotationRevokeCommandDecision::Accepted => {
+            Some(outcome) if outcome.outcome == SecurityRotationRevokeCommandDecision::Accepted => {
                 if durable_step.is_none() || resource.accepted_steps.is_empty() {
                     return Err(incomplete(
                         "PCR revoke accepted step is absent from the durable terminal outcome",
@@ -194,7 +194,7 @@ pub(crate) async fn confirmed_pcr_device_status_from_authority(
                 }
                 RevokeCommandDecision::Accepted
             }
-            Some(outcome) if outcome.result == SecurityRotationRevokeCommandDecision::Rejected => {
+            Some(outcome) if outcome.outcome == SecurityRotationRevokeCommandDecision::Rejected => {
                 if durable_step.is_some() {
                     return Err(
                         incomplete("PCR rejected revoke has an accepted step outcome").into(),
@@ -288,7 +288,7 @@ pub(crate) async fn confirmed_pcr_generation(
                            WHERE realm_id=p.realm_id \
                              AND stream_ref=jsonb_build_object('kind','realm','realm_id',p.realm_id) \
                            ORDER BY stream_position DESC LIMIT 1) h ON TRUE \
-             LEFT JOIN pcr_device_generation_current_results g ON g.realm_id=p.realm_id \
+             LEFT JOIN pcr_device_generation_current_states g ON g.realm_id=p.realm_id \
              WHERE p.principal_id=$1 AND p.station_id=$2 AND p.result_json<>'{}'::jsonb",
         )
         .bind::<Text, _>(account.principal_id.as_str())

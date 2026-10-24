@@ -79,8 +79,8 @@ mod profile_admission_spy {
 
 use arkret_models_collaboration::authority_commit::{
     AggregateAcceptanceStatus, CommittedEventSubmission,
-    DirectConversationFoundingFederationSubmission, PeerAuthoritySubmitRequest,
-    PeerRegisteredAtomicUnit, PeerRegisteredAtomicUnitRequest, RegisteredAtomicUnitBranch,
+    DirectConversationFoundingFederationSubmission, PeerAuthoritySubmitRequestBody,
+    PeerRegisteredAtomicUnit, PeerRegisteredAtomicUnitRequestBody, RegisteredAtomicUnitBranch,
 };
 use arkret_models_collaboration::contact_operations::{ContactRound, GlareConcurrencyAttestation};
 use arkret_models_collaboration::objects::direct_conversation::{
@@ -267,7 +267,7 @@ async fn verify_agent_founding_authority(
     let lock_clause = if lock_current { " FOR SHARE" } else { "" };
     let current = sql_query(format!(
         "SELECT current_commit_id,current_stream_position,value \
-         FROM agent_provisioning_current_results \
+         FROM agent_provisioning_current_states \
          WHERE realm_id=$1 AND agent_id=$2{lock_clause}",
     ))
     .bind::<Text, _>(provision_event.realm_id.as_str())
@@ -299,7 +299,7 @@ async fn verify_agent_founding_authority(
     }
 
     let status = sql_query(format!(
-        "SELECT value FROM agent_status_current_results \
+        "SELECT value FROM agent_status_current_states \
          WHERE realm_id=$1 AND agent_id=$2{lock_clause}",
     ))
     .bind::<Text, _>(payload.principal_control_realm_id.as_str())
@@ -313,7 +313,7 @@ async fn verify_agent_founding_authority(
     }
 
     let key_rows = sql_query(format!(
-        "SELECT value FROM agent_key_current_results \
+        "SELECT value FROM agent_key_current_states \
          WHERE realm_id=$1 AND agent_id=$2{lock_clause}",
     ))
     .bind::<Text, _>(payload.principal_control_realm_id.as_str())
@@ -577,7 +577,7 @@ async fn verify_contact_round_founding_authority(
             .current_state
             .direction(&proof.holder)
             .ok_or_else(|| stale("current direction missing"))?;
-        if proof.contact_round_id.as_ref()!=Some(&evidence.contact_round_id) || proof.closed_round.as_ref().is_some_and(|c|c.contact_round_id==evidence.contact_round_id) || actual.head_operation.event().event_id!=proof.head_event_ref || actual.head_operation.version()!=proof.version || actual.scope_instances!=proof.scope_instances || !proof.scope_instances.iter().any(|i|i.contact_scope==arkret_models_collaboration::contact_operations::ContactScope::DirectMessage) || (&proof.issuer_id!=local_station && proof.fresh_until<=at) {return Err(stale("Contact current original head, exact scope instance, closure or freshness mismatch"));}
+        if proof.contact_round_id.as_ref()!=Some(&evidence.contact_round_id) || proof.closed_round.as_ref().is_some_and(|c|c.contact_round_id==evidence.contact_round_id) || actual.head_operation.event().event_id!=proof.head_event_ref || actual.head_operation.version()!=proof.version || actual.scope_instances!=proof.scope_instances || !proof.scope_instances.iter().any(|i|i.contact_scope==arkret_models_collaboration::contact_operations::ContactScope::DirectMessage) || (&proof.issuer_id!=local_station && proof.cache_expires_at<=at) {return Err(stale("Contact current original head, exact scope instance, closure or freshness mismatch"));}
     }
     if contact.current_state.initial_identity.as_ref() != Some(&evidence.initial_identity) {
         return Err(stale("Contact immutable first identity mismatch"));
@@ -797,18 +797,18 @@ pub(crate) async fn admit_self_direct_conversation_founding_unit(
             }
             let event = &transaction.event;
             let commit = &transaction.commit;
-            crate::capability_grant_current_results::commit_realm_authority_root_current_result_in_connection(
+            crate::capability_grant_current_states::commit_realm_authority_root_current_state_in_connection(
                 conn, event, commit,
             )
             .await?;
-            crate::realm_bootstrap_current_results::commit_ordinary_bootstrap_singleton_current_result_in_connection(
+            crate::realm_bootstrap_current_states::commit_ordinary_bootstrap_singleton_current_state_in_connection(
                 conn, event, commit,
             )
             .await?;
-            crate::unit_of_work::commit_parent_membership_current_results(conn, event, commit)
+            crate::unit_of_work::commit_parent_membership_current_states(conn, event, commit)
                 .await?;
             if event.kind == arkret_wire::EventKind::StrandCreate {
-                crate::strand_current_results::commit_direct_conversation_founding_strand_in_connection(
+                crate::strand_current_states::commit_direct_conversation_founding_strand_in_connection(
                     conn, event, commit,
                  None)
                 .await?;
@@ -842,8 +842,8 @@ pub(crate) async fn admit_self_direct_conversation_founding_unit(
         .execute(&mut *conn)
         .await?;
         if peer_station != authority.service_id {
-            let request = PeerAuthoritySubmitRequest::RegisteredAtomicUnit(
-                PeerRegisteredAtomicUnitRequest {
+            let request = PeerAuthoritySubmitRequestBody::RegisteredAtomicUnit(
+                PeerRegisteredAtomicUnitRequestBody {
                     branch: RegisteredAtomicUnitBranch::RegisteredAtomicUnit,
                     unit: PeerRegisteredAtomicUnit::DirectConversationFounding(
                         DirectConversationFoundingFederationSubmission {

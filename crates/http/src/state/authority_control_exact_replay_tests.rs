@@ -3,7 +3,7 @@
 //! it never treats a staged candidate as an accepted original. Middleware/TCP
 //! authentication itself is outside this selector's proof scope.
 use arkret_wire::{
-    ActorId, AuthorityCommitStatus, AuthoritySubmitOutcome, Did, DidUrl, Event,
+    ActorId, AuthorityCommitStatus, AuthoritySubmitResponseBody, Did, DidUrl, Event,
     EventAdmissionSubmission, EventKind, RealmCommit, ScopeRef,
 };
 use chrono::{DateTime, Duration, Utc};
@@ -121,7 +121,7 @@ impl Fixture {
                 station_id: controller.station_id.clone(),
                 localpart: "native-replay-controller".into(),
                 display_name: None,
-                bio: None,
+                biography: None,
                 avatar_blob_ref: None,
                 created_at: Utc::now(),
             })
@@ -152,7 +152,7 @@ impl Fixture {
                 principal_endpoint: &"https://native-replay-agent.example/".parse().unwrap(),
                 local_id: "native-replay-agent",
                 controller_principal_id: &controller.principal_id,
-                version_time: at,
+                version_created_at: at,
                 root_seed: &[101; 32],
                 next_root_public_key_multibase: &next,
             },
@@ -396,7 +396,7 @@ async fn native_control_exact_replay_uses_originals_after_runtime_revocation_and
             .await
             .unwrap();
         assert!(
-            matches!(outcome,AuthoritySubmitOutcome::Accepted {status:AuthorityCommitStatus::Duplicate,commit:ref original} if original==commit)
+            matches!(outcome,AuthoritySubmitResponseBody::Accepted {status:AuthorityCommitStatus::Duplicate,commit:ref original} if original==commit)
         );
     }
     assert_eq!(
@@ -477,7 +477,7 @@ async fn complete_database_digest(pool: &PgPool) -> serde_json::Value {
 async fn accepted_agent_pcr_rejects_every_independent_handoff_entry_without_effects() {
     use arkret_models_collaboration::authority_commit::{
         ManagementPrivateHandoffManifest, PcrPrivateHandoffManifest,
-        PeerAuthorityForwardEventRequest,
+        PeerAuthorityForwardEventRequestBody,
     };
     use arkret_wire::{
         CommitStreamHead, DetachedSignatureContext, Hash, RealmAuthorityHandoff,
@@ -499,7 +499,7 @@ async fn accepted_agent_pcr_rejects_every_independent_handoff_entry_without_effe
     let change = f.control(
         EventKind::RealmGovernanceStationChange,
         serde_json::json!({
-            "expected_governance_generation":0,"expected_realm_stream_commit_id":tail.commit_id,
+            "expected_governance_generation":"0","expected_realm_stream_commit_id":tail.commit_id,
             "new_governance_station_id":"ak:did_core:web:other.example"
         }),
     );
@@ -541,7 +541,7 @@ async fn accepted_agent_pcr_rejects_every_independent_handoff_entry_without_effe
         source_service_id: f.agent.station_id.clone(),
         replay_receipt: None,
     };
-    let forward = PeerAuthorityForwardEventRequest::new(submission, None, None).unwrap();
+    let forward = PeerAuthorityForwardEventRequestBody::new(submission, None, None).unwrap();
     let error = super::super::authority_pcr::admit_forwarded(&f.state, &peer, &forward)
         .await
         .unwrap_err();
@@ -565,23 +565,23 @@ async fn accepted_agent_pcr_rejects_every_independent_handoff_entry_without_effe
         "realm_authority_handoffs",
         "pcr_private_handoff_imports",
         "realm_state_snapshots",
-        "realm_bootstrap_current_results",
-        "realm_authority_root_current_results",
-        "realm_policy_bundle_current_results",
-        "member_state_current_results",
-        "current_result_heads",
-        "current_result_versions",
-        "relation_current_results",
+        "realm_bootstrap_current_states",
+        "realm_authority_root_current_states",
+        "realm_policy_bundle_current_states",
+        "member_state_current_states",
+        "current_state_heads",
+        "current_state_versions",
+        "relation_current_states",
         "governance_current_ready",
         "realm_meta",
         "principal_resolutions",
         "principal_resolution_events",
-        "pcr_device_generation_current_results",
-        "pcr_device_authorization_current_results",
+        "pcr_device_generation_current_states",
+        "pcr_device_authorization_current_states",
         "pcr_device_revocation_proposals",
-        "actor_profile_current_results",
+        "actor_profile_current_states",
         "actor_profile_result_versions",
-        "consent_current_results",
+        "consent_current_states",
         "consent_result_versions",
         "agent_producer_signer_keys",
         "account_datas",
@@ -789,7 +789,7 @@ async fn accepted_agent_pcr_rejects_every_independent_handoff_entry_without_effe
         .await
         .unwrap();
     assert!(
-        matches!(outcome,AuthoritySubmitOutcome::Accepted {status:AuthorityCommitStatus::Duplicate,commit} if commit==expected)
+        matches!(outcome,AuthoritySubmitResponseBody::Accepted {status:AuthorityCommitStatus::Duplicate,commit} if commit==expected)
     );
     assert_eq!(complete_database_digest(&f.pool).await, after_control);
 }
@@ -832,7 +832,7 @@ async fn accepted_agent_rejects_private_proxy_and_effect_publication_without_eff
     assert!(error.to_string().contains("Agent PCR"), "{error}");
     assert_eq!(complete_database_digest(&f.pool).await, before);
     let at = arkret_canonical::normalize_timestamp_canonical(Utc::now());
-    let publication = ConsentPrivateEffectsPublishRequest {
+    let publication = ConsentPrivateEffectsPublishRequestBody {
         holder_account_id: f.agent.clone(),
         realm_id: f.genesis.realm_id.clone(),
         governance_generation: 0,

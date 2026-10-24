@@ -19,7 +19,7 @@ async fn member_snapshot(
         value: serde_json::Value,
     }
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT COALESCE(jsonb_agg(to_jsonb(m) ORDER BY m.member_id),'[]'::jsonb) AS value FROM member_state_current_results m WHERE realm_id=$1")
+    diesel::sql_query("SELECT COALESCE(jsonb_agg(to_jsonb(m) ORDER BY m.member_id),'[]'::jsonb) AS value FROM member_state_current_states m WHERE realm_id=$1")
         .bind::<Text, _>(realm.as_str()).get_result::<Snapshot>(&mut *conn).await.unwrap().value
 }
 
@@ -174,7 +174,7 @@ async fn native_subject_claim_binds_prepared_history_to_the_exact_commit_time() 
         principal_endpoint: &endpoint,
         local_id: "native-claim-subject",
         also_known_as: &[],
-        version_time: at - chrono::TimeDelta::hours(1),
+        version_created_at: at - chrono::TimeDelta::hours(1),
         root_seed: &subject_key.to_bytes(),
         next_root_public_key_multibase: &successor_public,
         witness_policy: None,
@@ -199,7 +199,7 @@ async fn native_subject_claim_binds_prepared_history_to_the_exact_commit_time() 
         &policy,
         &creator,
         arkret_wire::EventKind::InviteThirdParty,
-        serde_json::json!({"third_party_invite":{"oob_code_kind":"offline_token","token_commitment":format!("sha256:{}","d".repeat(64)),"token_salt_id":"native-claim-cut-salt","token_entropy_bits":128,"max_claims":1,"verification_id":verifier,"verification_public_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(verifier_key.verifying_key().as_bytes())},"expires_at":arkret_canonical::format_timestamp_canonical(at+chrono::TimeDelta::hours(12))}),
+        serde_json::json!({"third_party_invite":{"oob_code_kind":"offline_token","token_commitment":format!("sha256:{}","d".repeat(64)),"token_salt_id":"native-claim-cut-salt","token_entropy_bits":128,"max_claim_count":1,"verification_id":verifier,"verification_public_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(verifier_key.verifying_key().as_bytes())},"expires_at":arkret_canonical::format_timestamp_canonical(at+chrono::TimeDelta::hours(12))}),
     );
     uow.commit_event(create.clone()).await.unwrap();
     let (request, mut proof) = claim_request(
@@ -280,7 +280,7 @@ async fn native_subject_claim_binds_prepared_history_to_the_exact_commit_time() 
         did: did.as_str(),
         local_id: &inception.local_id,
         previous_entries: std::slice::from_ref(&inception.log_entry),
-        version_time: proof.committed_at + chrono::TimeDelta::seconds(1),
+        version_created_at: proof.committed_at + chrono::TimeDelta::seconds(1),
         current_root_seed: &successor_key.to_bytes(),
         next_root_public_key_multibase: &next_public,
         state: &inception.log_entry["state"],
@@ -296,7 +296,7 @@ async fn native_subject_claim_binds_prepared_history_to_the_exact_commit_time() 
             .append_log_event(coland_storage::WebvhLogRecord {
                 event_digest: arkret_canonical::canonical_sha256(&entry).unwrap(),
                 did: did.to_string(),
-                seq: index as u64 + 1,
+                sequence: index as u64 + 1,
                 created_at: entry["versionTime"].as_str().unwrap().parse().unwrap(),
                 operation: entry,
             })
@@ -311,7 +311,7 @@ async fn native_subject_claim_binds_prepared_history_to_the_exact_commit_time() 
         1
     );
     assert_eq!(member_snapshot(&pool, realm).await, members);
-    let invites = PgInviteCurrentResultStore { pool: pool.clone() }
+    let invites = PgInviteCurrentStateStore { pool: pool.clone() }
         .invites_in_realm(Some(realm))
         .await
         .unwrap();
@@ -362,7 +362,7 @@ async fn prepared_claim_racing_verifier_withdrawal_preserves_the_accepting_cut()
         &policy,
         &creator,
         arkret_wire::EventKind::InviteThirdParty,
-        serde_json::json!({"third_party_invite":{"oob_code_kind":"offline_token","token_commitment":format!("sha256:{}","c".repeat(64)),"token_salt_id":"salt-claim-policy-race","token_entropy_bits":128,"max_claims":1,"verification_id":verifier,"verification_public_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(verifier_key.verifying_key().as_bytes())},"expires_at":arkret_canonical::format_timestamp_canonical(at+chrono::TimeDelta::hours(12))}),
+        serde_json::json!({"third_party_invite":{"oob_code_kind":"offline_token","token_commitment":format!("sha256:{}","c".repeat(64)),"token_salt_id":"salt-claim-policy-race","token_entropy_bits":128,"max_claim_count":1,"verification_id":verifier,"verification_public_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(verifier_key.verifying_key().as_bytes())},"expires_at":arkret_canonical::format_timestamp_canonical(at+chrono::TimeDelta::hours(12))}),
     );
     uow.commit_event(create.clone()).await.unwrap();
     let realm = &create.authority_commit.event.realm_id;
@@ -486,7 +486,7 @@ async fn third_party_claim_case() {
         &policy,
         &creator,
         arkret_wire::EventKind::InviteThirdParty,
-        serde_json::json!({"third_party_invite":{"oob_code_kind":"offline_token","token_commitment":format!("sha256:{}","a".repeat(64)),"token_salt_id":"salt-2162","token_entropy_bits":128,"max_claims":1,"verification_id":verifier,"verification_public_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(verifier_key.verifying_key().as_bytes())},"expires_at":arkret_canonical::format_timestamp_canonical(at+chrono::TimeDelta::hours(12))}),
+        serde_json::json!({"third_party_invite":{"oob_code_kind":"offline_token","token_commitment":format!("sha256:{}","a".repeat(64)),"token_salt_id":"salt-2162","token_entropy_bits":128,"max_claim_count":1,"verification_id":verifier,"verification_public_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(verifier_key.verifying_key().as_bytes())},"expires_at":arkret_canonical::format_timestamp_canonical(at+chrono::TimeDelta::hours(12))}),
     );
     uow.commit_event(create.clone()).await.unwrap();
     let realm = &create.authority_commit.event.realm_id;
@@ -570,15 +570,15 @@ async fn third_party_claim_case() {
         assert_eq!(member_snapshot(&pool, realm).await, member_before, "{case}");
     }
     // Exercise the cut inputs directly: membership and root controller are
-    // current-result authority, so neither can be inherited from the create.
+    // current-state authority, so neither can be inherited from the create.
     for loss in ["inviter_left", "capability_loss"] {
         let mut conn = pool.get().await.unwrap();
         if loss == "inviter_left" {
-            assert_eq!(diesel::sql_query("UPDATE member_state_current_results SET membership='leave', value='{\"membership\":\"leave\"}'::jsonb WHERE realm_id=$1 AND member_id=$2")
+            assert_eq!(diesel::sql_query("UPDATE member_state_current_states SET membership='leave', value='{\"membership\":\"leave\"}'::jsonb WHERE realm_id=$1 AND member_id=$2")
                 .bind::<Text,_>(realm.as_str()).bind::<Text,_>(arkret_wire::ActorId::account(creator.clone()).to_string())
                 .execute(&mut conn).await.unwrap(), 1, "authority cut fixture must change one exact Actor row");
         } else {
-            assert_eq!(diesel::sql_query("UPDATE realm_authority_root_current_results SET controller_actor_id=$2 WHERE realm_id=$1")
+            assert_eq!(diesel::sql_query("UPDATE realm_authority_root_current_states SET controller_actor_id=$2 WHERE realm_id=$1")
                 .bind::<Text,_>(realm.as_str()).bind::<diesel::sql_types::Jsonb,_>(serde_json::to_value(arkret_wire::ActorId::account(subject.clone())).unwrap())
                 .execute(&mut conn).await.unwrap(), 1, "authority cut fixture must change one exact Actor row");
         }
@@ -613,11 +613,11 @@ async fn third_party_claim_case() {
         );
         let mut conn = pool.get().await.unwrap();
         if loss == "inviter_left" {
-            assert_eq!(diesel::sql_query("UPDATE member_state_current_results SET membership='join', value='{\"membership\":\"join\"}'::jsonb WHERE realm_id=$1 AND member_id=$2")
+            assert_eq!(diesel::sql_query("UPDATE member_state_current_states SET membership='join', value='{\"membership\":\"join\"}'::jsonb WHERE realm_id=$1 AND member_id=$2")
                 .bind::<Text,_>(realm.as_str()).bind::<Text,_>(arkret_wire::ActorId::account(creator.clone()).to_string())
                 .execute(&mut conn).await.unwrap(), 1, "authority cut fixture must change one exact Actor row");
         } else {
-            assert_eq!(diesel::sql_query("UPDATE realm_authority_root_current_results SET controller_actor_id=$2 WHERE realm_id=$1")
+            assert_eq!(diesel::sql_query("UPDATE realm_authority_root_current_states SET controller_actor_id=$2 WHERE realm_id=$1")
                 .bind::<Text,_>(realm.as_str()).bind::<diesel::sql_types::Jsonb,_>(serde_json::to_value(arkret_wire::ActorId::account(creator.clone())).unwrap())
                 .execute(&mut conn).await.unwrap(), 1, "authority cut fixture must change one exact Actor row");
         }
@@ -765,7 +765,7 @@ async fn third_party_claim_case() {
         0
     );
     assert_eq!(invite_families(&pool, realm).await, before_reused);
-    let current = PgInviteCurrentResultStore { pool: pool.clone() }
+    let current = PgInviteCurrentStateStore { pool: pool.clone() }
         .invites_in_realm(Some(realm))
         .await
         .unwrap();
@@ -802,7 +802,7 @@ async fn third_party_claim_case() {
     );
     uow.commit_event(accept).await.unwrap();
     assert_eq!(
-        PgInviteCurrentResultStore { pool: pool.clone() }
+        PgInviteCurrentStateStore { pool: pool.clone() }
             .invites_in_realm(Some(realm))
             .await
             .unwrap()[0]

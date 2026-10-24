@@ -205,7 +205,7 @@ impl ProjectionState {
         let target_ref_key = target_ref.clone();
         let mut items = self.moderation_entries(&realm_id, &target_ref);
         // The element tag is the accepting Event's canonical `<event_id>:0`
-        // dot (`typed-current-result.schema.json#/$defs/canonical_event_dot`);
+        // dot (`current-state.schema.json#/$defs/canonical_event_dot`);
         // no payload member, issuer or digest enters set identity.
         let tag = format!("{decision_id}:0");
         let Ok(decision) = operation.typed_payload::<arkret_wire::event_spec::ModerationDecision>()

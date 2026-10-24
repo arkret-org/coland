@@ -253,7 +253,7 @@ pub(crate) async fn require_member_event_read_in_connection(
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     let policies =
-        crate::policy_current_results::read_scoped_agent_management_policy_snapshot_in_connection(
+        crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(
             conn, realm, circle,
         )
         .await?;
@@ -523,7 +523,7 @@ pub(crate) async fn require_content_snapshot_in_connection(
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     let policies =
-        crate::policy_current_results::read_scoped_agent_management_policy_snapshot_in_connection(
+        crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(
             conn, realm, circle,
         )
         .await?;
@@ -583,7 +583,7 @@ pub(crate) async fn require_join_in_connection(
     review: Option<&crate::agent_management_review::ReviewAdmission>,
 ) -> PersistenceResult<()> {
     let policies =
-        crate::policy_current_results::read_scoped_agent_management_policies_in_connection(
+        crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
             conn, realm, None,
         )
         .await?;
@@ -603,7 +603,7 @@ pub(crate) async fn require_circle_join_in_connection(
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     let policies =
-        crate::policy_current_results::read_scoped_agent_management_policies_in_connection(
+        crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
             conn,
             realm,
             Some(circle),
@@ -653,7 +653,7 @@ pub(crate) fn require_publish_in_connection<'a>(
     // future, which already contains the other same-cut admission consumers.
     Box::pin(async move {
         let policies =
-            crate::policy_current_results::read_scoped_agent_management_policies_in_connection(
+            crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
                 conn, realm, None,
             )
             .await?;
@@ -786,7 +786,7 @@ pub(crate) async fn require_authorization_in_connection(
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     let domains =
-        crate::policy_current_results::read_agent_management_authorization_domains_in_connection(
+        crate::policy_current_states::read_agent_management_authorization_domains_in_connection(
             conn, realm,
         )
         .await?;
@@ -839,7 +839,7 @@ pub(crate) async fn require_authorization_in_connection(
     }
     for resource in resources {
         let scope = if need_circle_scope {
-            crate::policy_current_results::authorization_object_scope_in_connection(
+            crate::policy_current_states::authorization_object_scope_in_connection(
                 conn, realm, resource,
             )
             .await?
@@ -1251,8 +1251,8 @@ pub(crate) async fn executable_actions_in_connection<'a>(
     event: &arkret_wire::Event,
 ) -> PersistenceResult<Vec<&'a str>> {
     require_execution_event_scope(realm, operation, event)?;
-    if crate::agent_interaction_current_results::requires_shared_public_mode(event) {
-        crate::agent_interaction_current_results::require_current_public_in_connection(
+    if crate::agent_interaction_current_states::requires_shared_public_mode(event) {
+        crate::agent_interaction_current_states::require_current_public_in_connection(
             conn, realm, controller, agent,
         )
         .await?;
@@ -1274,7 +1274,7 @@ pub(crate) async fn executable_actions_in_connection<'a>(
         return Err(unavailable("Agent management Circle facts conflict"));
     }
     let policies =
-        crate::policy_current_results::read_scoped_agent_management_policies_in_connection(
+        crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
             conn,
             realm,
             operation.target.circle_id.as_ref().or(fact_circle.as_ref()),
@@ -1326,7 +1326,7 @@ fn executable_actions<'a>(
         ));
     }
     let gates: &[AgentPolicyOperation] =
-        if crate::agent_interaction_current_results::requires_shared_public_mode(event) {
+        if crate::agent_interaction_current_states::requires_shared_public_mode(event) {
             &[AgentPolicyOperation::Execute, AgentPolicyOperation::Serve]
         } else {
             &[AgentPolicyOperation::Execute]
@@ -1448,7 +1448,7 @@ fn executable_actions<'a>(
             ));
         }
         let gates: &[AgentPolicyOperation] =
-            if crate::agent_interaction_current_results::requires_shared_public_mode(event) {
+            if crate::agent_interaction_current_states::requires_shared_public_mode(event) {
                 &[AgentPolicyOperation::Execute, AgentPolicyOperation::Serve]
             } else {
                 &[AgentPolicyOperation::Execute]
@@ -1586,7 +1586,7 @@ pub(crate) async fn require_policy_write_with_approvals(
 ) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
     use arkret_models_collaboration::governance::operation_wire::PolicySetStatePayload;
 
-    use crate::policy_current_results::ManagementPolicyCurrentRead;
+    use crate::policy_current_states::ManagementPolicyCurrentRead;
     let mut targets = vec![new_target.clone()];
     if event.kind == arkret_wire::EventKind::PolicySet {
         let payload: PolicySetStatePayload =
@@ -1596,14 +1596,14 @@ pub(crate) async fn require_policy_write_with_approvals(
         if let Some(expected) = payload.expected_revision {
             let source = arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, None)
                 .map_err(unavailable)?;
-            let actual = crate::policy_current_results::management_policy_scope_target(
+            let actual = crate::policy_current_states::management_policy_scope_target(
                 &event.realm_id,
                 &source,
             )?;
             if actual != *new_target {
                 return Err(unavailable("Policy write target differs from actual scope"));
             }
-            match crate::policy_current_results::read_management_policy_exact_in_connection(
+            match crate::policy_current_states::read_management_policy_exact_in_connection(
                 conn,
                 &event.realm_id,
                 &payload.policy_id,
@@ -1614,7 +1614,7 @@ pub(crate) async fn require_policy_write_with_approvals(
                 ManagementPolicyCurrentRead::Present {
                     source, revision, ..
                 } if expected.as_ref() == Some(&revision) => {
-                    let previous = crate::policy_current_results::management_policy_scope_target(
+                    let previous = crate::policy_current_states::management_policy_scope_target(
                         &event.realm_id,
                         &source,
                     )?;
@@ -2004,7 +2004,7 @@ mod key_scope_content_tests {
             GrantConstraint::new(GrantConstraintKind::Quota, GrantConstraintEffect::Allow);
         quota.constraint_subkind = Some(GrantConstraintSubkind::Rate);
         quota.constraint_scope = Some(GrantConstraintScope::PerActor);
-        quota.max_operations = Some(3);
+        quota.max_operation_count = Some(3);
         quota.period = Some("PT1H".into());
         scoped.constraints.push(quota);
         assert!(check(&scoped, &target, &facts).is_err());

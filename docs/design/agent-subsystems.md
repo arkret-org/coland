@@ -88,7 +88,7 @@ pub(crate) async fn dispatch_message_notifications(
    - 去重:同 `(actor, source_event_id, type=mention)` 最多一条。
    - 发送者自我 mention 默认不通知。
    - `level=muted` / 个人 blocklist / DND / `dont_notify` push rule 覆盖。
-   - **Agent 第三方 mention gate(AKP-0016 §9.4.5)**:若 recipient 经已验证的 Agent principal / accountability 历史证明为 Agent，且 mention 作者 ≠ 该 Agent 的 controller(经 `ak.identity.accountability_grant` 解析)且 effective `accept_third_party_mention=false`(读 `agent_participation` selection ∩ `agent_participation_ceiling`,即复用 `resolve_effective_ceiling` + selection)→ **跳过该 recipient**,不写 notification、不入队。Actor Profile `actor_kind` 仅供显示，不参与该 gate。
+   - **Agent 第三方 mention gate(AKP-0016 §9.4.5)**:若 recipient 经已验证的 Agent principal / accountability 历史证明为 Agent，且 mention 作者 ≠ 该 Agent 的 controller(经 `ak.identity.accountability_grant` 解析)且 effective `third_party_mention_delivery_allowed=false`(读 `agent_participation` selection ∩ `agent_participation_ceiling`,即复用 `resolve_effective_ceiling` + selection)→ **跳过该 recipient**,不写 notification、不入队。Actor Profile `actor_kind` 仅供显示，不参与该 gate。
 3. **落库**:`NotificationStore::put`(合并 reason set;reply/assignment/reaction/watch 与 mention 命中同 recipient 时合并为单行)。
 4. **入队 push**:对有 push device 的 recipient,构造 frame 调用既有 `routing/interop/push_outbound`(floria),受 `max_recipients` / rate-limit / review gate(audience mention)约束;不得先推后撤。
 
@@ -100,7 +100,7 @@ pub(crate) async fn dispatch_message_notifications(
 
 ### 验收
 - alice @bob(普通)→ bob 收到 notification + push。
-- carol @alice 的 agent,agent 在该 scope `accept_third_party_mention=false` → agent **无** notification、无 subscribe 投影;`=true` → 有。
+- carol @alice 的 agent,agent 在该 scope `third_party_mention_delivery_allowed=false` → agent **无** notification、无 subscribe 投影;`=true` → 有。
 - controller alice @自己的 agent → 不受 gate(始终投递)。
 
 ---
@@ -118,7 +118,7 @@ pub(crate) async fn dispatch_message_notifications(
 "scope_details": {
   "realm_ids": [...], "strand_ids": [...],
   "participation": [ { "participation_scope": {...}, "reply": true,
-                      "accept_third_party_mention": false, "act_on_behalf": false } ]
+                      "third_party_mention_delivery_allowed": false, "acting_on_behalf_allowed": false } ]
 }
 ```
 

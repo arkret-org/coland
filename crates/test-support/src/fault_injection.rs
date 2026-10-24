@@ -265,14 +265,14 @@ impl WebvhStore for FaultWebvhStore {
         &self,
         key: &arkret_models_identity::service_identity::ServiceRegistrationKey,
     ) -> PersistenceResult<
-        Option<arkret_models_identity::service_identity::ServiceRegistrationOutcome>,
+        Option<arkret_models_identity::service_identity::ServiceRegistrationResponseBody>,
     > {
         self.inner.webvh().get_service_registration(key).await
     }
     async fn commit_service_registration(
         &self,
         key: arkret_models_identity::service_identity::ServiceRegistrationKey,
-        outcome: arkret_models_identity::service_identity::ServiceRegistrationOutcome,
+        outcome: arkret_models_identity::service_identity::ServiceRegistrationResponseBody,
         document: WebvhDocumentRecord,
         event: WebvhLogRecord,
     ) -> PersistenceResult<ServiceRegistrationCommitOutcome> {
@@ -574,17 +574,17 @@ impl coland_storage::EventProjectionStoreRegistry for FaultInjectingStore {
     fn morph_projections(&self) -> &dyn coland_storage::MorphProjectionStore {
         self.inner.morph_projections()
     }
-    fn relation_current_results(&self) -> &dyn coland_storage::RelationCurrentResultStore {
-        self.inner.relation_current_results()
+    fn relation_current_states(&self) -> &dyn coland_storage::RelationCurrentStateStore {
+        self.inner.relation_current_states()
     }
-    fn capability_grant_current_results(
+    fn capability_grant_current_states(
         &self,
-    ) -> &dyn coland_storage::CapabilityGrantCurrentResultStore {
-        self.inner.capability_grant_current_results()
+    ) -> &dyn coland_storage::CapabilityGrantCurrentStateStore {
+        self.inner.capability_grant_current_states()
     }
 
-    fn invite_current_results(&self) -> &dyn coland_storage::InviteCurrentResultStore {
-        self.inner.invite_current_results()
+    fn invite_current_states(&self) -> &dyn coland_storage::InviteCurrentStateStore {
+        self.inner.invite_current_states()
     }
     fn publication_evidence(&self) -> &dyn coland_storage::PublicationEvidenceStore {
         self.inner.publication_evidence()

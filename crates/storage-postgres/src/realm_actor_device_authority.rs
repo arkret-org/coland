@@ -235,16 +235,14 @@ pub(crate) async fn current_in_connection(
             stream_position: commit.stream_position,
         };
         match crate::realm_actor_device_revoke::read(conn, actor, &reference).await? {
-            arkret_models_integration::RealmActorOperationOutcome::DeviceRevoke {
-                state, ..
-            } => {
-                use arkret_models_integration::RealmActorDeviceRevokeState;
+            arkret_models_integration::RealmActorRequestStatus::DeviceRevoke { state, .. } => {
+                use arkret_models_integration::RealmActorDeviceRevocationState;
                 match state {
-                    RealmActorDeviceRevokeState::Rejected => {}
-                    RealmActorDeviceRevokeState::Accepted => {
+                    RealmActorDeviceRevocationState::Rejected => {}
+                    RealmActorDeviceRevocationState::Accepted => {
                         return Err(denied("Realm Device permanently revoked"));
                     }
-                    RealmActorDeviceRevokeState::Pending => {
+                    RealmActorDeviceRevocationState::Pending => {
                         return Err(denied("Realm Device revocation pending"));
                     }
                 }
@@ -338,9 +336,9 @@ pub(crate) async fn signer_fact(
             .ok_or_else(|| denied("producer proof absent"))?
             .verification_method
             .clone(),
-        public_key_b64u: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
-            authority.public_key,
-        ))
+        public_key_base64url: arkret_wire::Base64UrlString::new(
+            arkret_canonical::base64url_encode(authority.public_key),
+        )
         .map_err(invalid)?,
         accepted_at: at,
         device_id: authority.device_id,

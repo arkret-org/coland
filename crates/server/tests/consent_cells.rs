@@ -227,7 +227,7 @@ async fn consent_wire_footprint(pool: &coland_storage_postgres::PgPool) -> Value
         value: Value,
     }
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT jsonb_build_array((SELECT count(*) FROM canonical_events),(SELECT count(*) FROM realm_commits),(SELECT jsonb_agg(to_jsonb(r) ORDER BY peer_id) FROM consent_current_results r),(SELECT count(*) FROM consent_result_versions),(SELECT count(*) FROM account_data_changes),(SELECT count(*) FROM mimi_consent_correlations),(SELECT count(*) FROM mimi_consent_decision_attempts),(SELECT count(*) FROM federation_outbox),(SELECT count(*) FROM event_federation_outbox)) AS value")
+    diesel::sql_query("SELECT jsonb_build_array((SELECT count(*) FROM canonical_events),(SELECT count(*) FROM realm_commits),(SELECT jsonb_agg(to_jsonb(r) ORDER BY peer_id) FROM consent_current_states r),(SELECT count(*) FROM consent_result_versions),(SELECT count(*) FROM account_data_changes),(SELECT count(*) FROM mimi_consent_correlations),(SELECT count(*) FROM mimi_consent_decision_attempts),(SELECT count(*) FROM federation_outbox),(SELECT count(*) FROM event_federation_outbox)) AS value")
         .get_result::<Row>(&mut conn).await.unwrap().value
 }
 

@@ -79,7 +79,7 @@ pub(super) fn validate_key_backup_session_device(
     backup: &KeyBackup,
     session_device_id: &str,
 ) -> Result<(), AppError> {
-    if backup.auth_data.device_id.as_str() != session_device_id {
+    if backup.signature_proof.device_id.as_str() != session_device_id {
         return Err(AppError::capability_denied(
             "key backup signer device must match the authenticated session device",
         ));
@@ -213,34 +213,40 @@ pub(super) fn validate_key_backup_kdf_typed(backup: &KeyBackup) -> Result<(), Ap
             };
             let iteration_floor = if memory_floor == 262_144 { 4 } else { 3 };
             if kdf
-                .params
+                .parameters
                 .memory_kib
                 .is_none_or(|value| value < memory_floor)
             {
                 return Err(schema_error(format!(
-                    "argon2id params.memory_kib must be >= {memory_floor}"
+                    "argon2id parameters.memory_kib must be >= {memory_floor}"
                 )));
             }
             if kdf
-                .params
+                .parameters
                 .iterations
                 .is_none_or(|value| value < iteration_floor)
             {
                 return Err(schema_error(format!(
-                    "argon2id params.iterations must be >= {iteration_floor}"
+                    "argon2id parameters.iterations must be >= {iteration_floor}"
                 )));
             }
-            if kdf.params.parallelism.is_none_or(|value| value < 1) {
-                return Err(schema_error("argon2id params.parallelism must be >= 1"));
+            if kdf.parameters.parallelism.is_none_or(|value| value < 1) {
+                return Err(schema_error("argon2id parameters.parallelism must be >= 1"));
             }
         }
         KeyBackupKdfName::Pbkdf2 => {
-            if kdf.params.iterations.is_none_or(|value| value < 600_000) {
-                return Err(schema_error("pbkdf2 params.iterations must be >= 600000"));
-            }
-            if kdf.params.digest_algorithm.is_none() {
+            if kdf
+                .parameters
+                .iterations
+                .is_none_or(|value| value < 600_000)
+            {
                 return Err(schema_error(
-                    "pbkdf2 params.digest_algorithm must be sha256, sha384, or sha512",
+                    "pbkdf2 parameters.iterations must be >= 600000",
+                ));
+            }
+            if kdf.parameters.digest_algorithm.is_none() {
+                return Err(schema_error(
+                    "pbkdf2 parameters.digest_algorithm must be sha256, sha384, or sha512",
                 ));
             }
             if kdf
@@ -286,7 +292,7 @@ pub(super) fn validate_recovery_policy_ref_shape_typed(backup: &KeyBackup) -> Re
 }
 
 pub(super) fn validate_key_backup_auth_data_typed(backup: &KeyBackup) -> Result<(), AppError> {
-    if backup.auth_data.signature.as_str().is_empty() {
+    if backup.signature_proof.signature.as_str().is_empty() {
         return Err(schema_error("key backup signature is required"));
     }
     Ok(())
@@ -296,14 +302,14 @@ pub(super) fn validate_series_genesis_shape_typed(backup: &KeyBackup) -> Result<
     if backup.supersedes_id.is_some() {
         return Err(crate::app_error!(
             Conflict,
-            "series_chain_broken: genesis envelope (series_seq=0) must not carry `supersedes_id`",
+            "series_chain_broken: genesis envelope (series_sequence=0) must not carry `supersedes_id`",
         )
         .with_reason_code(arkret_wire::ReasonCode::SERIES_CHAIN_BROKEN));
     }
     if backup.supersedes_digest.is_some() {
         return Err(crate::app_error!(
             Conflict,
-            "series_chain_broken: genesis envelope (series_seq=0) must not carry `supersedes_digest`",
+            "series_chain_broken: genesis envelope (series_sequence=0) must not carry `supersedes_digest`",
         )
         .with_reason_code(arkret_wire::ReasonCode::SERIES_CHAIN_BROKEN));
     }

@@ -60,7 +60,7 @@ pub struct AccountStatusPropagationProjection {
     pub account_authority_id: arkret_wire::DidCoreId,
     pub account_id: arkret_wire::AccountId,
     pub account_status_record_id: arkret_wire::AccountStatusRecordId,
-    pub status_seq: u64,
+    pub status_sequence: u64,
     pub state: AccountStatusPropagationProjectionState,
     pub pending_destination_count: u64,
     pub deadline_at: chrono::DateTime<chrono::Utc>,
@@ -88,7 +88,7 @@ pub enum AccountStatusReplicaAppend {
     Duplicate(AccountStatusReceipt),
     DependencyMissing {
         current_record: Option<AccountStatusRecord>,
-        required_status_seq: u64,
+        required_status_sequence: u64,
     },
     Stale {
         current_record: AccountStatusRecord,
@@ -117,7 +117,7 @@ pub trait AccountStatusReplicaStore: Send + Sync {
         &self,
         account_authority_id: &str,
         account_id: &arkret_wire::AccountId,
-        from_status_seq: u64,
+        from_status_sequence: u64,
         limit: u16,
     ) -> PersistenceResult<Vec<AccountStatusRecord>>;
 
@@ -127,7 +127,7 @@ pub trait AccountStatusReplicaStore: Send + Sync {
         &self,
         account_authority_id: &str,
         account_id: &arkret_wire::AccountId,
-        status_seq: u64,
+        status_sequence: u64,
     ) -> PersistenceResult<Option<AccountStatusReceipt>>;
 
     /// Merge newly observed holders into the durable affected-service index
@@ -199,10 +199,10 @@ pub fn classify_account_status_replica_append(
 ) -> Option<AccountStatusReplicaAppend> {
     let Some((head_record, head_receipt)) = head else {
         // genesis_gap: an absent head requires the genesis record first.
-        if record.status_seq > 1 {
+        if record.status_sequence > 1 {
             return Some(AccountStatusReplicaAppend::DependencyMissing {
                 current_record: None,
-                required_status_seq: 1,
+                required_status_sequence: 1,
             });
         }
         // genesis_admission.
@@ -216,7 +216,7 @@ pub fn classify_account_status_replica_append(
             AccountStatusReplicaConflictKind::BindingRollback,
         ));
     }
-    if record.status_seq == head_record.status_seq + 1 {
+    if record.status_sequence == head_record.status_sequence + 1 {
         // fork_predecessor_mismatch, otherwise advance.
         if record.previous_account_status_record_id.as_ref()
             != Some(&head_record.account_status_record_id)
@@ -228,7 +228,7 @@ pub fn classify_account_status_replica_append(
         }
         return admission_conflict(record, head_record).map(|kind| conflict(head_record, kind));
     }
-    if record.status_seq == head_record.status_seq {
+    if record.status_sequence == head_record.status_sequence {
         // duplicate is the terminal ack only when the head already is the
         // submitted record; a different record at the head sequence forks.
         return Some(
@@ -239,7 +239,7 @@ pub fn classify_account_status_replica_append(
             },
         );
     }
-    if record.status_seq < head_record.status_seq {
+    if record.status_sequence < head_record.status_sequence {
         // stale is unconditional. How much history this receiver still retains
         // for the submitted sequence is a local retention decision and must not
         // turn a below-head submission into a duplicate.
@@ -250,7 +250,7 @@ pub fn classify_account_status_replica_append(
     // sequence_gap.
     Some(AccountStatusReplicaAppend::DependencyMissing {
         current_record: Some(head_record.clone()),
-        required_status_seq: head_record.status_seq + 1,
+        required_status_sequence: head_record.status_sequence + 1,
     })
 }
 

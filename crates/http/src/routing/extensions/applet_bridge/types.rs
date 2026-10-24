@@ -7,7 +7,7 @@ use arkret_models_collaboration::governance::grant_constraint::{
     CapabilitySubject, GrantConstraint, GrantConstraintSubkind, IssuerAuthorityRef,
 };
 use arkret_models_integration::{
-    AppletInstallEffectiveStatus, AppletInstallOutcome, AppletPackage,
+    AppletInstallEffectiveStatus, AppletInstallResponseBody, AppletPackage,
 };
 use arkret_wire::{
     ActorId, AppletId, DidCoreId, Event, GrantId, Hash, RealmId, ResourceMatchScope, ScopeRef,
@@ -56,7 +56,7 @@ pub struct AppletRecord {
     pub idempotency_key: String,
     pub install_body_digest: Hash,
     pub install_id: String,
-    pub install_response: AppletInstallOutcome,
+    pub install_response: AppletInstallResponseBody,
     pub registration_event: Event,
     pub capability_grant_events: Vec<Event>,
     pub install_execution: Value,
@@ -90,7 +90,7 @@ pub(super) struct AppletInstallationRecord {
     pub idempotency_key: String,
     pub install_body_digest: Hash,
     pub install_id: String,
-    pub install_response: AppletInstallOutcome,
+    pub install_response: AppletInstallResponseBody,
     pub registration_event: Event,
     pub capability_grant_events: Vec<Event>,
     pub install_execution: Value,

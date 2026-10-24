@@ -580,7 +580,7 @@ mod test_construction {
                     .expect("demo Station id is canonical"),
                     localpart: "alice".to_owned(),
                     display_name: Some("Alice Example".to_owned()),
-                    bio: None,
+                    biography: None,
                     avatar_blob_ref: None,
                     created_at: now,
                 })
@@ -961,7 +961,7 @@ impl AppState {
     /// Public Ed25519 verifying key for the current notary signing key.
     ///
     /// Used by the `ak.call.state` participant_binding verifier: in the
-    /// arkret_native self-signed deployment the binding `sig` is minted with
+    /// arkret_native self-signed deployment the binding `signature` is minted with
     /// the notary signing key (`routing::interop::webrtc`), so the receiver
     /// verifies against this key after anchoring `issuer_kid` to the current
     /// media_service epoch.
@@ -1813,7 +1813,7 @@ impl AppState {
         let policy = &self.config().rate_limiter;
         self.runtime_guards.peer_device_lookup_rate_limited(
             keys,
-            policy.max_requests,
+            policy.max_request_count,
             chrono::Duration::from_std(policy.window)
                 .unwrap_or_else(|_| chrono::Duration::seconds(60)),
         )

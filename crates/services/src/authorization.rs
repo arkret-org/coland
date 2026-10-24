@@ -118,7 +118,7 @@ mod tests {
                 arkret_canonical::DigestSuite::Sha256,
                 [0x55; 32],
             ),
-            "authority_generation":0
+            "authority_generation":"0"
         })
     }
 

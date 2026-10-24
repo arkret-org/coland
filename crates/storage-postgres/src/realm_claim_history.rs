@@ -103,7 +103,7 @@ pub(crate) async fn retain(
         .claim_issuer_resolution
         .as_ref()
         .ok_or_else(|| invalid("issuing Station history is absent"))?;
-    let outcome: arkret_models_crypto::PeerKeyPackagesClaimOutcome = serde_json::from_value(
+    let outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody = serde_json::from_value(
         attempt
             .ledger
             .outcome
@@ -146,7 +146,7 @@ pub(crate) async fn read(
         .bind::<Text,_>(source_id).bind::<Text,_>(claim_request_id)
         .get_result::<History>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     let Some(row) = row else { return Ok(None) };
-    let outcome: arkret_models_crypto::PeerKeyPackagesClaimOutcome =
+    let outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody =
         serde_json::from_value(row.outcome).map_err(invalid)?;
     let resolution: AuthenticatedServiceResolution =
         serde_json::from_value(row.resolution).map_err(invalid)?;

@@ -54,7 +54,7 @@ pub(crate) async fn commit_service_mapping_in_connection(
         .bind::<Text, _>(stored.identity.service_id.as_str())
         .execute(&mut *conn)
         .await?;
-    let head=sql_query("SELECT id AS event_digest,did,seq,operation,created_at FROM webvh_log_events WHERE split_part(did,':',3)=split_part($1,':',3) ORDER BY seq DESC LIMIT 1")
+    let head=sql_query("SELECT id AS event_digest,did,sequence,operation,created_at FROM webvh_log_events WHERE split_part(did,':',3)=split_part($1,':',3) ORDER BY sequence DESC LIMIT 1")
         .bind::<Text,_>(stored.identity.did.as_str()).get_result::<WebvhLogRow>(&mut *conn).await?;
     if head.event_digest != stored.registration_receipt.log_head_digest
         || head.operation.get("state")
@@ -89,7 +89,7 @@ pub(crate) async fn commit_service_mapping_in_connection(
             return Ok(());
         }
     }
-    let outcome = arkret_models_identity::service_identity::ServiceRegistrationOutcome {
+    let outcome = arkret_models_identity::service_identity::ServiceRegistrationResponseBody {
         did_document: stored.did_document.clone(),
         registration_receipt: stored.registration_receipt.clone(),
         created: false,
@@ -110,7 +110,7 @@ struct WebvhDocumentRow {
     #[diesel(sql_type = Nullable<Text>)]
     key_log_head: Option<String>,
     #[diesel(sql_type = BigInt)]
-    seq: i64,
+    sequence: i64,
     #[diesel(sql_type = Jsonb)]
     method_evidence: Value,
     #[diesel(sql_type = Timestamptz)]
@@ -126,7 +126,7 @@ impl From<WebvhDocumentRow> for WebvhDocumentRecord {
             did: row.did,
             did_document: row.did_document,
             key_log_head: row.key_log_head,
-            seq: row.seq.max(0) as u64,
+            sequence: row.sequence.max(0) as u64,
             method_evidence: row.method_evidence,
             fetched_at: row.fetched_at,
             expires_at: row.expires_at,
@@ -141,7 +141,7 @@ struct WebvhLogRow {
     #[diesel(sql_type = Text)]
     did: String,
     #[diesel(sql_type = BigInt)]
-    seq: i64,
+    sequence: i64,
     #[diesel(sql_type = Jsonb)]
     operation: Value,
     #[diesel(sql_type = Timestamptz)]
@@ -172,7 +172,7 @@ impl From<WebvhLogRow> for WebvhLogRecord {
         Self {
             event_digest: row.event_digest,
             did: row.did,
-            seq: row.seq.max(0) as u64,
+            sequence: row.sequence.max(0) as u64,
             operation: row.operation,
             created_at: row.created_at,
         }
@@ -187,7 +187,7 @@ impl WebvhStore for PgWebvhStore {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_,PgTransactionError,_>(async move |conn| {
             for receipt in receipts {
-                let entry=sql_query("SELECT id AS event_digest,did,seq,operation,created_at FROM webvh_log_events WHERE id=$1")
+                let entry=sql_query("SELECT id AS event_digest,did,sequence,operation,created_at FROM webvh_log_events WHERE id=$1")
                     .bind::<Text,_>(&receipt.log_head_digest).get_result::<WebvhLogRow>(&mut *conn).await?;
                 let document: arkret_models_identity::service_identity::ServiceDidDocument=serde_json::from_value(entry.operation["state"].clone()).map_err(PersistenceError::database)?;
                 receipt.validate_for(&receipt.registration_key,&arkret_wire::project_did_to_core_id(&document.id).map_err(PersistenceError::database)?,&document.id).map_err(PersistenceError::database)?;
@@ -209,7 +209,7 @@ impl WebvhStore for PgWebvhStore {
             receipt: Value,
         }
         let mut conn = crate::pg_db(&self.pool);
-        sql_query("SELECT r.receipt FROM service_registration_receipts r JOIN webvh_log_events e ON e.id=r.event_digest WHERE r.service_id=$1 ORDER BY e.seq")
+        sql_query("SELECT r.receipt FROM service_registration_receipts r JOIN webvh_log_events e ON e.id=r.event_digest WHERE r.service_id=$1 ORDER BY e.sequence")
             .bind::<Text,_>(service_id.as_str()).load::<Receipt>(&mut conn).await.map_err(PersistenceError::database)?
             .into_iter().map(|row|serde_json::from_value(row.receipt).map_err(PersistenceError::database)).collect()
     }
@@ -217,17 +217,17 @@ impl WebvhStore for PgWebvhStore {
         let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "WITH head AS ( \
-                SELECT operation #>> '{state,id}' AS did, seq, id AS event_digest, operation->'state' AS state FROM webvh_log_events \
+                SELECT operation #>> '{state,id}' AS did, sequence, id AS event_digest, operation->'state' AS state FROM webvh_log_events \
                 WHERE did LIKE 'did:webvh:%' AND $1 LIKE 'did:webvh:%' \
                   AND split_part(did, ':', 3) = split_part($1, ':', 3) \
                   AND EXISTS (SELECT 1 FROM webvh_log_events alias \
                               WHERE alias.operation #>> '{state,id}' = $1) \
-                ORDER BY seq DESC LIMIT 1 \
-             ) SELECT id AS did, did_document, key_log_head, seq, method_evidence, \
+                ORDER BY sequence DESC LIMIT 1 \
+             ) SELECT id AS did, did_document, key_log_head, sequence, method_evidence, \
              fetched_at, expires_at, updated_at \
              FROM webvh_documents WHERE id = COALESCE((SELECT did FROM head), $1) \
                AND (NOT EXISTS (SELECT 1 FROM head) OR \
-                    (seq = (SELECT seq FROM head) AND key_log_head = (SELECT event_digest FROM head) \
+                    (sequence = (SELECT sequence FROM head) AND key_log_head = (SELECT event_digest FROM head) \
                      AND did_document = (SELECT state FROM head)))",
         )
         .bind::<Text, _>(did)
@@ -291,13 +291,13 @@ impl WebvhStore for PgWebvhStore {
         let (fetched_at, expires_at) = webvh_freshness_on_put();
         sql_query(
             "INSERT INTO webvh_documents \
-             (id, did_document, key_log_head, seq, method_evidence, \
+             (id, did_document, key_log_head, sequence, method_evidence, \
               fetched_at, expires_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
              ON CONFLICT (id) DO UPDATE SET \
                 did_document = EXCLUDED.did_document, \
                 key_log_head = EXCLUDED.key_log_head, \
-                seq = EXCLUDED.seq, \
+                sequence = EXCLUDED.sequence, \
                 method_evidence = EXCLUDED.method_evidence, \
                 fetched_at = EXCLUDED.fetched_at, \
                 expires_at = EXCLUDED.expires_at, \
@@ -306,7 +306,7 @@ impl WebvhStore for PgWebvhStore {
         .bind::<Text, _>(&record.did)
         .bind::<Jsonb, _>(&record.did_document)
         .bind::<Nullable<Text>, _>(&record.key_log_head)
-        .bind::<BigInt, _>(record.seq as i64)
+        .bind::<BigInt, _>(record.sequence as i64)
         .bind::<Jsonb, _>(&record.method_evidence)
         .bind::<Timestamptz, _>(fetched_at)
         .bind::<Timestamptz, _>(expires_at)
@@ -321,13 +321,13 @@ impl WebvhStore for PgWebvhStore {
         let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "INSERT INTO webvh_log_events \
-             (id, did, seq, operation, created_at) \
+             (id, did, sequence, operation, created_at) \
              VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (id) DO NOTHING",
         )
         .bind::<Text, _>(&event.event_digest)
         .bind::<Text, _>(&event.did)
-        .bind::<BigInt, _>(event.seq as i64)
+        .bind::<BigInt, _>(event.sequence as i64)
         .bind::<Jsonb, _>(&event.operation)
         .bind::<Timestamptz, _>(event.created_at)
         .execute(&mut conn)
@@ -339,8 +339,8 @@ impl WebvhStore for PgWebvhStore {
     async fn list_log_events(&self, did: &str) -> PersistenceResult<Vec<WebvhLogRecord>> {
         let mut conn = crate::pg_db(&self.pool);
         sql_query(
-            "SELECT id AS event_digest, did, seq, operation, created_at \
-             FROM webvh_log_events WHERE (did = $1 OR (did LIKE 'did:webvh:%' AND $1 LIKE 'did:webvh:%' AND split_part(did, ':', 3) = split_part($1, ':', 3))) ORDER BY seq ASC, id ASC",
+            "SELECT id AS event_digest, did, sequence, operation, created_at \
+             FROM webvh_log_events WHERE (did = $1 OR (did LIKE 'did:webvh:%' AND $1 LIKE 'did:webvh:%' AND split_part(did, ':', 3) = split_part($1, ':', 3))) ORDER BY sequence ASC, id ASC",
         )
         .bind::<Text, _>(did)
         .load::<WebvhLogRow>(&mut conn)
@@ -366,7 +366,7 @@ impl WebvhStore for PgWebvhStore {
         service_identity: Option<ServiceIdentitySuccessor>,
     ) -> PersistenceResult<WebvhLogCommitOutcome> {
         if document.did != event.did
-            || document.seq != event.seq
+            || document.sequence != event.sequence
             || document.key_log_head.as_deref() != Some(event.event_digest.as_str())
         {
             return Ok(WebvhLogCommitOutcome::Conflict);
@@ -426,8 +426,8 @@ impl WebvhStore for PgWebvhStore {
 
                 let current = sql_query(
                     "WITH head AS (SELECT operation #>> '{state,id}' AS did FROM webvh_log_events \
-                     WHERE (did=$1 OR (did LIKE 'did:webvh:%' AND $1 LIKE 'did:webvh:%' AND split_part(did, ':', 3)=split_part($1, ':', 3))) ORDER BY seq DESC LIMIT 1) \
-                     SELECT id AS did, did_document, key_log_head, seq, method_evidence, \
+                     WHERE (did=$1 OR (did LIKE 'did:webvh:%' AND $1 LIKE 'did:webvh:%' AND split_part(did, ':', 3)=split_part($1, ':', 3))) ORDER BY sequence DESC LIMIT 1) \
+                     SELECT id AS did, did_document, key_log_head, sequence, method_evidence, \
                      fetched_at, expires_at, updated_at \
                      FROM webvh_documents WHERE id=COALESCE((SELECT did FROM head),$1) FOR UPDATE",
                 )
@@ -436,8 +436,8 @@ impl WebvhStore for PgWebvhStore {
                 .await
                 .optional().map_err(PersistenceError::database)?;
                 let existing_events = sql_query(
-                    "SELECT id AS event_digest, did, seq, operation, created_at \
-                     FROM webvh_log_events WHERE (did = $1 OR (did LIKE 'did:webvh:%' AND $1 LIKE 'did:webvh:%' AND split_part(did, ':', 3) = split_part($1, ':', 3))) ORDER BY seq ASC, id ASC FOR UPDATE",
+                    "SELECT id AS event_digest, did, sequence, operation, created_at \
+                     FROM webvh_log_events WHERE (did = $1 OR (did LIKE 'did:webvh:%' AND $1 LIKE 'did:webvh:%' AND split_part(did, ':', 3) = split_part($1, ':', 3))) ORDER BY sequence ASC, id ASC FOR UPDATE",
                 )
                 .bind::<Text, _>(&event.did)
                 .load::<WebvhLogRow>(&mut *conn)
@@ -457,7 +457,7 @@ impl WebvhStore for PgWebvhStore {
                     .get("versionId")
                     .and_then(Value::as_str);
                 if let Some(existing) = existing_events.iter().find(|existing| {
-                    existing.seq.max(0) as u64 == event.seq
+                    existing.sequence.max(0) as u64 == event.sequence
                         || version_id.is_some_and(|version_id| {
                             existing
                                 .operation
@@ -476,14 +476,14 @@ impl WebvhStore for PgWebvhStore {
                     });
                 }
                 let Some(expected_seq) = current.as_ref().map_or(Some(1), |record| {
-                    (record.seq.max(0) as u64).checked_add(1)
+                    (record.sequence.max(0) as u64).checked_add(1)
                 }) else {
                     return Ok(WebvhLogCommitOutcome::Conflict);
                 };
                 let stored_state_matches_log = match (current.as_ref(), existing_events.last()) {
                     (None, None) => true,
                     (Some(document), Some(head)) => {
-                        document.seq.max(0) as u64 == head.seq.max(0) as u64
+                        document.sequence.max(0) as u64 == head.sequence.max(0) as u64
                             && document.key_log_head.as_deref()
                                 == Some(head.event_digest.as_str())
                             && head.operation.get("state") == Some(&document.did_document)
@@ -497,7 +497,7 @@ impl WebvhStore for PgWebvhStore {
                 let current_head = current.and_then(|record| record.key_log_head);
                 if !stored_state_matches_log
                     || current_head != expected_current_head
-                    || event.seq != expected_seq
+                    || event.sequence != expected_seq
                     || identity_current == Some(true)
                 {
                     return Ok(WebvhLogCommitOutcome::Conflict);
@@ -505,11 +505,11 @@ impl WebvhStore for PgWebvhStore {
 
                 sql_query(
                     "INSERT INTO webvh_log_events \
-                     (id, did, seq, operation, created_at) VALUES ($1, $2, $3, $4, $5)",
+                     (id, did, sequence, operation, created_at) VALUES ($1, $2, $3, $4, $5)",
                 )
                 .bind::<Text, _>(&event.event_digest)
                 .bind::<Text, _>(&event.did)
-                .bind::<BigInt, _>(event.seq as i64)
+                .bind::<BigInt, _>(event.sequence as i64)
                 .bind::<Jsonb, _>(&event.operation)
                 .bind::<Timestamptz, _>(event.created_at)
                 .execute(&mut *conn)
@@ -517,13 +517,13 @@ impl WebvhStore for PgWebvhStore {
                 let (fetched_at, expires_at) = webvh_freshness_on_put();
                 sql_query(
                     "INSERT INTO webvh_documents \
-                     (id, did_document, key_log_head, seq, method_evidence, \
+                     (id, did_document, key_log_head, sequence, method_evidence, \
                       fetched_at, expires_at, updated_at) \
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
                      ON CONFLICT (id) DO UPDATE SET \
                         did_document = EXCLUDED.did_document, \
                         key_log_head = EXCLUDED.key_log_head, \
-                        seq = EXCLUDED.seq, \
+                        sequence = EXCLUDED.sequence, \
                         method_evidence = EXCLUDED.method_evidence, \
                         fetched_at = EXCLUDED.fetched_at, \
                         expires_at = EXCLUDED.expires_at, \
@@ -532,7 +532,7 @@ impl WebvhStore for PgWebvhStore {
                 .bind::<Text, _>(&document.did)
                 .bind::<Jsonb, _>(&document.did_document)
                 .bind::<Nullable<Text>, _>(&document.key_log_head)
-                .bind::<BigInt, _>(document.seq as i64)
+                .bind::<BigInt, _>(document.sequence as i64)
                 .bind::<Jsonb, _>(&document.method_evidence)
                 .bind::<Timestamptz, _>(fetched_at)
                 .bind::<Timestamptz, _>(expires_at)
@@ -565,7 +565,7 @@ impl WebvhStore for PgWebvhStore {
         &self,
         key: &arkret_models_identity::service_identity::ServiceRegistrationKey,
     ) -> PersistenceResult<
-        Option<arkret_models_identity::service_identity::ServiceRegistrationOutcome>,
+        Option<arkret_models_identity::service_identity::ServiceRegistrationResponseBody>,
     > {
         let mut conn = crate::pg_db(&self.pool);
         sql_query(
@@ -585,7 +585,7 @@ impl WebvhStore for PgWebvhStore {
     async fn commit_service_registration(
         &self,
         key: arkret_models_identity::service_identity::ServiceRegistrationKey,
-        outcome: arkret_models_identity::service_identity::ServiceRegistrationOutcome,
+        outcome: arkret_models_identity::service_identity::ServiceRegistrationResponseBody,
         document: WebvhDocumentRecord,
         event: WebvhLogRecord,
     ) -> PersistenceResult<ServiceRegistrationCommitOutcome> {
@@ -682,11 +682,11 @@ impl WebvhStore for PgWebvhStore {
 
                 sql_query(
                     "INSERT INTO webvh_log_events \
-                     (id, did, seq, operation, created_at) VALUES ($1, $2, $3, $4, $5)",
+                     (id, did, sequence, operation, created_at) VALUES ($1, $2, $3, $4, $5)",
                 )
                 .bind::<Text, _>(&event.event_digest)
                 .bind::<Text, _>(&event.did)
-                .bind::<BigInt, _>(event.seq as i64)
+                .bind::<BigInt, _>(event.sequence as i64)
                 .bind::<Jsonb, _>(&event.operation)
                 .bind::<Timestamptz, _>(event.created_at)
                 .execute(&mut *conn)
@@ -695,14 +695,14 @@ impl WebvhStore for PgWebvhStore {
                 let (fetched_at, expires_at) = webvh_freshness_on_put();
                 sql_query(
                     "INSERT INTO webvh_documents \
-                     (id, did_document, key_log_head, seq, method_evidence, \
+                     (id, did_document, key_log_head, sequence, method_evidence, \
                       fetched_at, expires_at, updated_at) \
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 )
                 .bind::<Text, _>(&document.did)
                 .bind::<Jsonb, _>(&document.did_document)
                 .bind::<Nullable<Text>, _>(&document.key_log_head)
-                .bind::<BigInt, _>(document.seq as i64)
+                .bind::<BigInt, _>(document.sequence as i64)
                 .bind::<Jsonb, _>(&document.method_evidence)
                 .bind::<Timestamptz, _>(fetched_at)
                 .bind::<Timestamptz, _>(expires_at)
@@ -795,13 +795,13 @@ impl PgWebvhStore {
                     .and_then(Value::as_str)
                     .ok_or_else(|| invalid("native entry omits its original DID".into()))?
                     .to_owned(),
-                seq: index as u64 + 1,
+                sequence: index as u64 + 1,
                 operation: raw.clone(),
-                created_at: entry.version_time,
+                created_at: entry.version_created_at,
             });
         }
         if events.is_empty()
-            || document.seq != events.len() as u64
+            || document.sequence != events.len() as u64
             || document.key_log_head.as_deref() != events.last().map(|e| e.event_digest.as_str())
             || document.did_document != verified.log.head_state
         {
@@ -816,29 +816,29 @@ impl PgWebvhStore {
             let lock = sql_query("SELECT 1 AS ok FROM (SELECT pg_advisory_xact_lock(hashtextextended($1, 0))) AS held")
                 .bind::<Text,_>(core.as_str()).get_result::<WebvhCommitLockRow>(&mut *conn).await.map_err(PersistenceError::database)?;
             let _ = lock.ok;
-            let current = sql_query("WITH head AS (SELECT operation #>> '{state,id}' AS did FROM webvh_log_events WHERE (did=$1 OR (did LIKE 'did:webvh:%' AND split_part(did, ':', 3)=split_part($1, ':', 3))) ORDER BY seq DESC LIMIT 1) SELECT id AS did,did_document,key_log_head,seq,method_evidence,fetched_at,expires_at,updated_at FROM webvh_documents WHERE id=COALESCE((SELECT did FROM head),$1) FOR UPDATE")
+            let current = sql_query("WITH head AS (SELECT operation #>> '{state,id}' AS did FROM webvh_log_events WHERE (did=$1 OR (did LIKE 'did:webvh:%' AND split_part(did, ':', 3)=split_part($1, ':', 3))) ORDER BY sequence DESC LIMIT 1) SELECT id AS did,did_document,key_log_head,sequence,method_evidence,fetched_at,expires_at,updated_at FROM webvh_documents WHERE id=COALESCE((SELECT did FROM head),$1) FOR UPDATE")
                 .bind::<Text,_>(&document.did).get_result::<WebvhDocumentRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
             if current.as_ref().and_then(|row|row.key_log_head.as_ref()) != expected_current_head.as_ref()
                 || current.as_ref().is_some_and(|row| {
-                    let prior = usize::try_from(row.seq).ok().and_then(|seq|seq.checked_sub(1)).and_then(|index|events.get(index));
+                    let prior = usize::try_from(row.sequence).ok().and_then(|sequence|sequence.checked_sub(1)).and_then(|index|events.get(index));
                     !prior.is_some_and(|prior|prior.event_digest.as_str()==row.key_log_head.as_deref().unwrap_or_default() && prior.operation.get("state")==Some(&row.did_document))
                 }) {
                 return Ok(WebvhLogCommitOutcome::Conflict);
             }
-            let existing = sql_query("SELECT id AS event_digest,did,seq,operation,created_at FROM webvh_log_events WHERE (did=$1 OR (did LIKE 'did:webvh:%' AND split_part(did, ':', 3)=split_part($1, ':', 3))) ORDER BY seq ASC,id ASC FOR UPDATE")
+            let existing = sql_query("SELECT id AS event_digest,did,sequence,operation,created_at FROM webvh_log_events WHERE (did=$1 OR (did LIKE 'did:webvh:%' AND split_part(did, ':', 3)=split_part($1, ':', 3))) ORDER BY sequence ASC,id ASC FOR UPDATE")
                 .bind::<Text,_>(&document.did).load::<WebvhLogRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-            if existing.len() > events.len() || existing.iter().zip(&events).any(|(old,new)|old.seq != new.seq as i64 || old.event_digest != new.event_digest || old.operation != new.operation) {
+            if existing.len() > events.len() || existing.iter().zip(&events).any(|(old,new)|old.sequence != new.sequence as i64 || old.event_digest != new.event_digest || old.operation != new.operation) {
                 return Ok(WebvhLogCommitOutcome::Conflict);
             }
             for event in events.iter().skip(existing.len()) {
-                let count = sql_query("INSERT INTO webvh_log_events(id,did,seq,operation,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET id=EXCLUDED.id WHERE webvh_log_events.did=EXCLUDED.did AND webvh_log_events.seq=EXCLUDED.seq AND webvh_log_events.operation=EXCLUDED.operation")
-                    .bind::<Text,_>(&event.event_digest).bind::<Text,_>(&event.did).bind::<BigInt,_>(event.seq as i64).bind::<Jsonb,_>(&event.operation).bind::<Timestamptz,_>(event.created_at)
+                let count = sql_query("INSERT INTO webvh_log_events(id,did,sequence,operation,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET id=EXCLUDED.id WHERE webvh_log_events.did=EXCLUDED.did AND webvh_log_events.sequence=EXCLUDED.sequence AND webvh_log_events.operation=EXCLUDED.operation")
+                    .bind::<Text,_>(&event.event_digest).bind::<Text,_>(&event.did).bind::<BigInt,_>(event.sequence as i64).bind::<Jsonb,_>(&event.operation).bind::<Timestamptz,_>(event.created_at)
                     .execute(&mut *conn).await.map_err(PersistenceError::database)?;
                 if count != 1 { return Err(PersistenceError::Conflict("native history ingestion collided with another original".into()).into()); }
             }
             let (fetched_at,expires_at) = webvh_freshness_on_put();
-            sql_query("INSERT INTO webvh_documents(id,did_document,key_log_head,seq,method_evidence,fetched_at,expires_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO UPDATE SET did_document=EXCLUDED.did_document,key_log_head=EXCLUDED.key_log_head,seq=EXCLUDED.seq,method_evidence=EXCLUDED.method_evidence,fetched_at=EXCLUDED.fetched_at,expires_at=EXCLUDED.expires_at,updated_at=EXCLUDED.updated_at")
-                .bind::<Text,_>(&document.did).bind::<Jsonb,_>(&document.did_document).bind::<Nullable<Text>,_>(&document.key_log_head).bind::<BigInt,_>(document.seq as i64).bind::<Jsonb,_>(&document.method_evidence).bind::<Timestamptz,_>(fetched_at).bind::<Timestamptz,_>(expires_at).bind::<Timestamptz,_>(fetched_at)
+            sql_query("INSERT INTO webvh_documents(id,did_document,key_log_head,sequence,method_evidence,fetched_at,expires_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO UPDATE SET did_document=EXCLUDED.did_document,key_log_head=EXCLUDED.key_log_head,sequence=EXCLUDED.sequence,method_evidence=EXCLUDED.method_evidence,fetched_at=EXCLUDED.fetched_at,expires_at=EXCLUDED.expires_at,updated_at=EXCLUDED.updated_at")
+                .bind::<Text,_>(&document.did).bind::<Jsonb,_>(&document.did_document).bind::<Nullable<Text>,_>(&document.key_log_head).bind::<BigInt,_>(document.sequence as i64).bind::<Jsonb,_>(&document.method_evidence).bind::<Timestamptz,_>(fetched_at).bind::<Timestamptz,_>(expires_at).bind::<Timestamptz,_>(fetched_at)
                 .execute(&mut *conn).await.map_err(PersistenceError::database)?;
             Ok(WebvhLogCommitOutcome::Accepted)
         }).await.map_err(PgTransactionError::into_persistence)

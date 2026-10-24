@@ -133,7 +133,7 @@ pub trait ConsentCurrentStore: Send + Sync {
     }
     async fn project_effect_publication(
         &self,
-        _request:&arkret_models_collaboration::consent_private::ConsentPrivateEffectsPublishRequest,
+        _request:&arkret_models_collaboration::consent_private::ConsentPrivateEffectsPublishRequestBody,
         _source: &arkret_wire::DidCoreId,
         _receiver: &arkret_wire::DidCoreId,
         _authority: &crate::CurrentRealmAuthority,
@@ -146,8 +146,8 @@ pub trait ConsentCurrentStore: Send + Sync {
     /// A hosting projection can only reject rollback; it never authorizes effects.
     async fn observe_private_cut(
         &self,
-        _request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
-        _outcome: &arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome,
+        _request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequestBody,
+        _outcome: &arkret_models_collaboration::consent_private::ConsentPrivateProxyResponseBody,
     ) -> PersistenceResult<()> {
         Err(crate::PersistenceError::Conflict(
             "temporarily_unavailable: private proxy high water is unavailable".into(),
@@ -161,21 +161,23 @@ pub trait ConsentCurrentStore: Send + Sync {
         _acceptor: &arkret_wire::DidCoreId,
         _quota: &arkret_wire::NewSourceQuotaConstraints,
         _prepared: Option<&PreparedPrivateInviteDelivery>,
-    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateCommandOutcome>
-    {
+    ) -> PersistenceResult<
+        arkret_models_collaboration::consent_private::ConsentPrivateCommandResponseBody,
+    > {
         Err(crate::PersistenceError::Conflict(
             "native Human commands are unavailable".into(),
         ))
     }
     async fn private_command_prepared(
         &self,
-        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequestBody,
         source: &arkret_wire::DidCoreId,
         acceptor: &arkret_wire::DidCoreId,
         quota: &arkret_wire::NewSourceQuotaConstraints,
         prepared: Option<&PreparedPrivateInviteDelivery>,
-    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome>
-    {
+    ) -> PersistenceResult<
+        arkret_models_collaboration::consent_private::ConsentPrivateProxyResponseBody,
+    > {
         if prepared.is_some() {
             return Err(crate::PersistenceError::Conflict(
                 "temporarily_unavailable: verified private Invite admission is unavailable".into(),
@@ -186,12 +188,13 @@ pub trait ConsentCurrentStore: Send + Sync {
     /// Execute a closed private command at the current accepting PCR authority.
     async fn private_command(
         &self,
-        _request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        _request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequestBody,
         _source_service: &arkret_wire::DidCoreId,
         _acceptor_service: &arkret_wire::DidCoreId,
         _quota_constraints: &arkret_wire::NewSourceQuotaConstraints,
-    ) -> PersistenceResult<arkret_models_collaboration::consent_private::ConsentPrivateProxyOutcome>
-    {
+    ) -> PersistenceResult<
+        arkret_models_collaboration::consent_private::ConsentPrivateProxyResponseBody,
+    > {
         Err(crate::PersistenceError::Conflict(
             "temporarily_unavailable: native private command is unavailable".into(),
         ))
@@ -228,7 +231,7 @@ pub struct PreparedPrivateInviteDelivery {
 }
 impl PreparedPrivateInviteDelivery {
     pub fn from_verified_receipt(
-        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequestBody,
         fact: &arkret_identity::account_device_signer_evidence::VerifiedAccountDeviceHistoricalSignerFact,
         locator_verified: bool,
         constraints: Option<arkret_wire::ReceivePolicyConstraints>,
@@ -293,7 +296,7 @@ impl PreparedPrivateInviteDelivery {
     }
     pub fn matches(
         &self,
-        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequestBody,
     ) -> bool {
         request
             .digest()
@@ -301,7 +304,7 @@ impl PreparedPrivateInviteDelivery {
     }
     pub fn bind_proxy(
         mut self,
-        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequest,
+        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequestBody,
     ) -> PersistenceResult<Self> {
         if !self.matches_native(&request.holder_account_id, &request.command) {
             return Err(crate::PersistenceError::SchemaViolation(
@@ -335,9 +338,11 @@ impl PreparedPrivateInviteDelivery {
 
 pub struct PrivateEffectsPublication {
     pub sequence: u64,
-    pub request: arkret_models_collaboration::consent_private::ConsentPrivateEffectsPublishRequest,
+    pub request:
+        arkret_models_collaboration::consent_private::ConsentPrivateEffectsPublishRequestBody,
 }
 pub struct PrivateEffectsProjection {
-    pub outcome: arkret_models_collaboration::consent_private::ConsentPrivateEffectsPublishOutcome,
+    pub outcome:
+        arkret_models_collaboration::consent_private::ConsentPrivateEffectsPublishResponseBody,
     pub updates: Vec<crate::AccountDataRecord>,
 }

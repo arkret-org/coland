@@ -32,8 +32,8 @@
 use arkret_identifiers::{CircleId, EventId, RealmId};
 use arkret_models_collaboration::governance::circle::{
     Circle, CircleCreateRequestBody, CircleList, CircleMemberDeleteRequestBody,
-    CircleMemberRequestBody, CircleMembership, CircleMembershipOutcome, CircleReadView,
-    CircleScopeRotateOutcome, CircleScopeRotateRequestBody, CircleState, CircleView,
+    CircleMemberRequestBody, CircleMembership, CircleMembershipResponseBody, CircleReadView,
+    CircleScopeRotateRequestBody, CircleScopeRotateResponseBody, CircleState, CircleView,
 };
 use arkret_wire::{ActorId, Event};
 use coland_http::error::AppError;
@@ -408,7 +408,7 @@ async fn post_circle_member(
     body: JsonBody<CircleMemberRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<CircleMembershipOutcome> {
+) -> JsonResult<CircleMembershipResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let actor =
@@ -418,7 +418,7 @@ async fn post_circle_member(
     // The Event unit decides membership against the accepted parent and Circle cut.
     let target = caller_signed_circle_member_target(&actor, &circle_id, &submission.event)?;
     submit_caller_signed_circle_event(state, &session, submission).await?;
-    json_ok(CircleMembershipOutcome {
+    json_ok(CircleMembershipResponseBody {
         circle_id: CircleId::new(circle_id)
             .map_err(|e| AppError::param_invalid(format!("circle_id: {e}")))?,
         member_id: target.actor_id,
@@ -530,7 +530,7 @@ async fn delete_circle_member(
     body: JsonBody<CircleMemberDeleteRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<CircleMembershipOutcome> {
+) -> JsonResult<CircleMembershipResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let actor =
@@ -546,7 +546,7 @@ async fn delete_circle_member(
         &submission.event,
     )?;
     submit_caller_signed_circle_event(state, &session, submission).await?;
-    json_ok(CircleMembershipOutcome {
+    json_ok(CircleMembershipResponseBody {
         circle_id: CircleId::new(circle_id)
             .map_err(|e| AppError::param_invalid(format!("circle_id: {e}")))?,
         member_id: target.actor_id,
@@ -566,7 +566,7 @@ async fn post_scope_rotate(
     body: JsonBody<CircleScopeRotateRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<CircleScopeRotateOutcome> {
+) -> JsonResult<CircleScopeRotateResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let circle_id = circle_id.into_inner();
@@ -627,7 +627,7 @@ async fn post_scope_rotate(
         .await?
         .mls_group_id;
 
-    json_ok(CircleScopeRotateOutcome {
+    json_ok(CircleScopeRotateResponseBody {
         circle_id: CircleId::new(circle_id)
             .map_err(|e| AppError::param_invalid(format!("circle_id: {e}")))?,
         mls_group_id: mls_group_ref,

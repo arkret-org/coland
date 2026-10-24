@@ -13,10 +13,10 @@ use super::{
     PersistenceError, PersistenceResult, PgPool, PgTransactionError, QueryableByName, RunQueryDsl,
     Text, Timestamptz, Value, async_trait, ids, pg_conn, sql_query,
 };
-use crate::agent_current_results::lock_agent_producer_current;
-use crate::capability_grant_current_results::{
-    commit_capability_grant_current_result_in_connection,
-    commit_realm_authority_root_current_result_in_connection,
+use crate::agent_current_states::lock_agent_producer_current;
+use crate::capability_grant_current_states::{
+    commit_capability_grant_current_state_in_connection,
+    commit_realm_authority_root_current_state_in_connection,
 };
 
 mod handoff_replica;
@@ -307,8 +307,8 @@ async fn verify_mimi_migration_in_connection(
         let scope = arkret_wire::ScopeRef::Realm {
             realm_id: payload.binding_scope.realm_id.clone(),
         };
-        let key = crate::mls_group_current_results::scope_key(&scope)?;
-        let current = crate::mls_group_current_results::locked_group(conn, &key)
+        let key = crate::mls_group_current_states::scope_key(&scope)?;
+        let current = crate::mls_group_current_states::locked_group(conn, &key)
             .await?
             .ok_or_else(invalid_mimi_migration)?;
         let derived = scope
@@ -338,7 +338,7 @@ async fn verify_mimi_migration_in_connection(
     Ok(())
 }
 
-pub(crate) async fn commit_mimi_room_binding_current_result_in_connection(
+pub(crate) async fn commit_mimi_room_binding_current_state_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
@@ -363,7 +363,7 @@ pub(crate) async fn commit_mimi_room_binding_current_result_in_connection(
     let room_uri = payload.mimi_room_uri.as_str();
     let previous = sql_query(
         "SELECT mimi_room_uri,realm_id,current_commit_id,current_stream_position,current_event_id,value \
-         FROM mimi_room_binding_current_results WHERE mimi_room_uri=$1 FOR UPDATE",
+         FROM mimi_room_binding_current_states WHERE mimi_room_uri=$1 FOR UPDATE",
     )
     .bind::<Text, _>(room_uri)
     .get_result::<MimiRoomBindingCurrentRow>(&mut *conn)
@@ -403,7 +403,7 @@ pub(crate) async fn commit_mimi_room_binding_current_result_in_connection(
         PersistenceError::SchemaViolation("MIMI current stream position exceeds i64".to_owned())
     })?;
     sql_query(
-        "INSERT INTO mimi_room_binding_current_results \
+        "INSERT INTO mimi_room_binding_current_states \
          (mimi_room_uri,realm_id,current_commit_id,current_stream_position,current_event_id,value,updated_at) \
          VALUES ($1,$2,$3,$4,$5,$6,$7) \
          ON CONFLICT (mimi_room_uri) DO UPDATE SET \
@@ -612,8 +612,8 @@ pub(crate) const STREAM_PAGE_NEWEST_SQL: &str = "SELECT c.commit_json, e.envelop
 /// decision; public callers go through the Account-scoped scan.
 pub(crate) async fn stream_page_in_connection(
     conn: &mut AsyncPgConnection,
-    request: &arkret_wire::StreamScanRequest,
-) -> PersistenceResult<arkret_wire::StreamScanOutcome> {
+    request: &arkret_wire::StreamScanRequestBody,
+) -> PersistenceResult<arkret_wire::StreamScanResponseBody> {
     request.validate().map_err(invalid)?;
     let key = stream_key(&request.stream_ref)?;
     let floor = sql_query(STREAM_FLOOR_SQL)
@@ -646,9 +646,9 @@ pub(crate) async fn stream_page_in_connection(
 /// has no Commit yet.
 pub(crate) async fn stream_page_above_floor_in_connection(
     conn: &mut AsyncPgConnection,
-    request: &arkret_wire::StreamScanRequest,
+    request: &arkret_wire::StreamScanRequestBody,
     readable_floor: Option<arkret_wire::ReadableFloor>,
-) -> PersistenceResult<arkret_wire::StreamScanOutcome> {
+) -> PersistenceResult<arkret_wire::StreamScanResponseBody> {
     request.validate().map_err(invalid)?;
     let key = stream_key(&request.stream_ref)?;
     let limit = i64::from(request.limit) + 1;
@@ -726,7 +726,7 @@ pub(crate) async fn stream_page_above_floor_in_connection(
         .into_iter()
         .take(usize::from(request.limit))
         .collect();
-    let outcome = arkret_wire::StreamScanOutcome {
+    let outcome = arkret_wire::StreamScanResponseBody {
         committed_events,
         readable_floor,
         truncated,
@@ -753,203 +753,203 @@ fn authority_from_row(row: AuthorityRow) -> PersistenceResult<CurrentRealmAuthor
 // to materialize a small current cut. LIMIT 1 preserves the unique-id lookup
 // and the LEFT JOIN still exposes missing provenance as NULL for validation.
 pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_ref AS source_stream_ref FROM ( \
-         SELECT result_family AS selector_kind, NULL::jsonb AS selector_subject, \
+         SELECT state_family AS selector_kind, NULL::jsonb AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM realm_bootstrap_current_results WHERE realm_id = $1 \
+           FROM realm_bootstrap_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'scope_read_receipt_policy'::text AS selector_kind, scope_ref AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM scope_read_receipt_policy_current_results WHERE realm_id = $1 \
+           FROM scope_read_receipt_policy_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'realm_authority_root'::text AS selector_kind, NULL::jsonb AS selector_subject, \
                 current_commit_id, current_stream_position, \
                 jsonb_build_object('controller_actor_id',controller_actor_id, \
                     'controller_epoch',controller_epoch,'authority_generation',authority_generation, \
                     'authority_event_ref',authority_event_ref) AS value \
-           FROM realm_authority_root_current_results WHERE realm_id = $1 \
+           FROM realm_authority_root_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'realm_policy_bundle'::text AS selector_kind, NULL::jsonb AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM realm_policy_bundle_current_results WHERE realm_id = $1 \
+           FROM realm_policy_bundle_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'schema_definition'::text AS selector_kind, to_jsonb(schema_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM schema_definition_current_results WHERE realm_id = $1 \
+           FROM schema_definition_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'pin'::text AS selector_kind, pin_scope AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM pin_current_results WHERE realm_id = $1 \
+           FROM pin_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'policy'::text AS selector_kind, to_jsonb(policy_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM policy_current_results WHERE realm_id = $1 \
+           FROM policy_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'actor_profile'::text AS selector_kind, to_jsonb(actor_profile_id) AS selector_subject, \
                 current_commit_id,current_stream_position,value \
-           FROM actor_profile_current_results WHERE realm_id=$1 \
-             AND EXISTS(SELECT 1 FROM realm_bootstrap_current_results g WHERE g.realm_id=$1 AND g.result_family='realm_genesis' AND g.value->>'purpose'='collaboration') \
+           FROM actor_profile_current_states WHERE realm_id=$1 \
+             AND EXISTS(SELECT 1 FROM realm_bootstrap_current_states g WHERE g.realm_id=$1 AND g.state_family='realm_genesis' AND g.value->>'purpose'='collaboration') \
          UNION ALL \
          SELECT 'member_state'::text AS selector_kind, member_id::jsonb AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM member_state_current_results WHERE realm_id = $1 \
+           FROM member_state_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'direct_conversation_binding'::text AS selector_kind, to_jsonb(pair_key) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM direct_conversation_binding_current_results WHERE realm_id = $1 \
+           FROM direct_conversation_binding_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'applet_registration'::text AS selector_kind, jsonb_build_object('kind','applet_registration','applet_id',applet_id,'service_id',service_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM applet_registration_current_results WHERE realm_id = $1 \
+           FROM applet_registration_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'member_identity_updates'::text AS selector_kind, \
                 jsonb_build_object('kind','member_identity_updates','member_id',member_id::jsonb,'segment',segment) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM member_identity_updates_current_results WHERE realm_id = $1 \
+           FROM member_identity_updates_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'sidecar'::text AS selector_kind, to_jsonb(sidecar_id) AS selector_subject, \
                 current_commit_id,current_stream_position,value \
-           FROM sidecar_current_results WHERE realm_id=$1 \
+           FROM sidecar_current_states WHERE realm_id=$1 \
          UNION ALL \
          SELECT 'policy_action'::text AS selector_kind, \
                 CASE subject_kind WHEN 'realm_action' THEN jsonb_build_object('kind','policy_action','branch','realm_action','action_id',subject_id) \
                   ELSE jsonb_build_object('kind','policy_action','branch','policy_ref','policy_id',subject_id,'action',action_key) END AS selector_subject, \
-                current_commit_id,current_stream_position,value FROM policy_action_current_results WHERE realm_id=$1 \
+                current_commit_id,current_stream_position,value FROM policy_action_current_states WHERE realm_id=$1 \
          UNION ALL \
          SELECT 'sidecar_context'::text AS selector_kind, \
                 jsonb_build_object('kind','sidecar_context','sidecar_id',sidecar_id,'source_context_ref',context_ref) AS selector_subject, \
                 current_commit_id,current_stream_position,value \
-           FROM sidecar_context_current_results WHERE realm_id=$1 \
+           FROM sidecar_context_current_states WHERE realm_id=$1 \
          UNION ALL \
          SELECT 'agent_sidecar_exchange_controls'::text AS selector_kind, \
                 jsonb_build_object('kind','agent_sidecar_exchange_controls','sidecar_id',sidecar_id,'source_context_ref',context_ref) AS selector_subject, \
                 current_commit_id,current_stream_position,value \
-           FROM sidecar_exchange_controls_current_results WHERE realm_id=$1 \
+           FROM sidecar_exchange_controls_current_states WHERE realm_id=$1 \
          UNION ALL \
          SELECT 'circle'::text AS selector_kind, to_jsonb(circle_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM circle_current_results WHERE realm_id = $1 \
+           FROM circle_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'circle_member_state'::text AS selector_kind, \
                 jsonb_build_object('kind','circle_member_state','circle_id',circle_id,'member_actor_id',member_id::jsonb) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM circle_member_state_current_results WHERE realm_id = $1 \
+           FROM circle_member_state_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'call_state'::text AS selector_kind, to_jsonb(call_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM call_state_current_results WHERE realm_id = $1 \
+           FROM call_state_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT selector->>'kind' AS selector_kind,selector AS selector_subject, \
                 current_commit_id,current_stream_position,value \
-           FROM call_component_current_results WHERE realm_id=$1 \
+           FROM call_component_current_states WHERE realm_id=$1 \
          UNION ALL \
          SELECT 'realm_media_service'::text AS selector_kind,NULL::jsonb AS selector_subject, \
                 current_commit_id,current_stream_position,value \
-           FROM realm_media_service_current_results WHERE realm_id=$1 \
+           FROM realm_media_service_current_states WHERE realm_id=$1 \
          UNION ALL \
          SELECT 'strand'::text AS selector_kind, to_jsonb(strand_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM strand_current_results WHERE realm_id = $1 \
+           FROM strand_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'calendar_schedule_source'::text AS selector_kind, to_jsonb(strand_id) AS selector_subject, \
                 current_commit_id,current_stream_position,calendar_schedule_source_value AS value \
-           FROM strand_current_results WHERE realm_id=$1 AND calendar_schedule_source_value IS NOT NULL \
+           FROM strand_current_states WHERE realm_id=$1 AND calendar_schedule_source_value IS NOT NULL \
          UNION ALL \
          SELECT 'rsvp'::text AS selector_kind, \
                 jsonb_build_object('kind','rsvp','event_ref',event_ref, \
                     'occurrence',occurrence,'responder_actor_id',responder_actor_id) AS selector_subject, \
                 current_commit_id,current_stream_position,value \
-           FROM rsvp_current_results WHERE realm_id = $1 \
+           FROM rsvp_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'strand_watch'::text AS selector_kind, \
                 jsonb_build_object('kind','strand_watch','strand_id',strand_id,'watcher_actor_id',watcher_actor_id::jsonb) AS selector_subject, \
                 current_commit_id,current_stream_position,value \
-           FROM strand_watch_current_results WHERE realm_id=$1 \
+           FROM strand_watch_current_states WHERE realm_id=$1 \
          UNION ALL \
          SELECT 'strand_position'::text AS selector_kind, \
                 jsonb_build_object('kind','strand_position','board_space_id',board_space_id,'strand_id',strand_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM strand_position_current_results WHERE realm_id = $1 \
+           FROM strand_position_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'space'::text AS selector_kind, to_jsonb(space_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM space_current_results WHERE realm_id = $1 \
+           FROM space_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'space_parent'::text AS selector_kind, to_jsonb(space_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM space_parent_current_results WHERE realm_id = $1 \
+           FROM space_parent_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'space_child_scope_policy'::text AS selector_kind, to_jsonb(space_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM space_child_scope_policy_current_results WHERE realm_id = $1 \
+           FROM space_child_scope_policy_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'realm_set_default_strand'::text AS selector_kind, NULL::jsonb AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM realm_set_default_strand_current_results WHERE realm_id = $1 \
+           FROM realm_set_default_strand_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'message_revision'::text AS selector_kind, to_jsonb(message_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM message_revision_current_results WHERE realm_id = $1 \
+           FROM message_revision_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'mls_group'::text AS selector_kind, value->'effective_scope' AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM mls_group_current_results WHERE realm_id = $1 \
+           FROM mls_group_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'moderation_report'::text AS selector_kind, to_jsonb(report_event_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM moderation_report_current_results WHERE realm_id = $1 \
+           FROM moderation_report_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'moderation_franking_proof'::text AS selector_kind, to_jsonb(target_event_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM moderation_franking_proof_current_results WHERE realm_id = $1 \
+           FROM moderation_franking_proof_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'moderation_state'::text AS selector_kind, to_jsonb(target_ref) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM moderation_state_current_results WHERE realm_id = $1 \
+           FROM moderation_state_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'object_redaction'::text AS selector_kind, to_jsonb(target_ref) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM object_redaction_current_results WHERE realm_id = $1 \
+           FROM object_redaction_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'message_reactions'::text AS selector_kind, to_jsonb(target_ref) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM message_reactions_current_results WHERE realm_id = $1 \
+           FROM message_reactions_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'invite_lifecycle'::text AS selector_kind, to_jsonb(invite_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM invite_lifecycle_current_results WHERE realm_id = $1 \
+           FROM invite_lifecycle_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'invite_live_target'::text AS selector_kind, invitee_account_id::jsonb AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM invite_live_target_current_results WHERE realm_id = $1 \
+           FROM invite_live_target_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'invite_directed_invitee'::text AS selector_kind, to_jsonb(invite_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM invite_directed_invitee_current_results WHERE realm_id = $1 \
+           FROM invite_directed_invitee_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'capability_grant'::text AS selector_kind, to_jsonb(grant_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM capability_grant_current_results WHERE realm_id = $1 \
+           FROM capability_grant_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'realm_organization'::text AS selector_kind, \
                 jsonb_build_object('kind','realm_organization','organization_id',organization_id,'relationship',relationship) AS selector_subject, \
                 current_commit_id,current_stream_position,value \
-           FROM realm_organization_current_results WHERE realm_id = $1 \
+           FROM realm_organization_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'mimi_room_binding'::text AS selector_kind, to_jsonb(mimi_room_uri) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM mimi_room_binding_current_results WHERE realm_id = $1 \
+           FROM mimi_room_binding_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'agent_interaction'::text AS selector_kind, jsonb_build_object('kind','agent_interaction','agent_account_id',agent_account_id) AS selector_subject, \
                 current_commit_id,current_stream_position,value \
-           FROM agent_interaction_current_results WHERE realm_id = $1 \
+           FROM agent_interaction_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'agent_status'::text AS selector_kind, to_jsonb(agent_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM agent_status_current_results WHERE realm_id = $1 \
+           FROM agent_status_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT 'agent_key'::text AS selector_kind, jsonb_build_object('agent_id',agent_id,'agent_key_id',agent_key_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM agent_key_current_results WHERE realm_id = $1 \
+           FROM agent_key_current_states WHERE realm_id = $1 \
          ) result LEFT JOIN LATERAL ( \
            SELECT stream_ref FROM realm_commits \
            WHERE commit_id=result.current_commit_id \
@@ -1283,7 +1283,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
             let source_stream_ref = match row.source_stream_ref {
                 Some(source) => decode_json(source, "current source stream ref")?,
                 None => replica_evidence.iter().find_map(|entry| {
-                    let arkret_wire::TypedCurrentRow::Value {
+                    let arkret_wire::CurrentState::Value {
                         selector: proved_selector, source_stream_ref, revision: proved_revision, value,
                     } = entry;
                     (proved_selector == &selector && proved_revision == &revision && value == &row.value)
@@ -1292,7 +1292,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                     "snapshot current result has neither its covering Commit nor exact verified replica evidence".to_owned(),
                 ))?,
             };
-            Ok(arkret_wire::TypedCurrentRow::Value {
+            Ok(arkret_wire::CurrentState::Value {
                 selector, source_stream_ref, revision,
                 value: row.value,
             })
@@ -1302,7 +1302,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
     // not carry the private admission provenance required by governing tables.
     // Preserve them as read evidence without manufacturing those tables.
     for entry in replica_evidence {
-        let arkret_wire::TypedCurrentRow::Value { selector, .. } = &entry;
+        let arkret_wire::CurrentState::Value { selector, .. } = &entry;
         if matches!(
             selector,
             arkret_wire::CurrentSelector::RealmAuthorityRoot
@@ -1313,7 +1313,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 | arkret_wire::CurrentSelector::MlsGroup { .. }
                 | arkret_wire::CurrentSelector::ActorProfile { .. }
         ) && !current_state_entries.iter().any(|current| {
-            let arkret_wire::TypedCurrentRow::Value {
+            let arkret_wire::CurrentState::Value {
                 selector: current_selector,
                 ..
             } = current;
@@ -1322,9 +1322,8 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
             current_state_entries.push(entry);
         }
     }
-    current_state_entries.extend(
-        crate::relation_current_results::snapshot_rows_in_connection(conn, realm_id).await?,
-    );
+    current_state_entries
+        .extend(crate::relation_current_states::snapshot_rows_in_connection(conn, realm_id).await?);
     let mut keyed_entries = current_state_entries
         .into_iter()
         .map(|entry| {
@@ -1338,7 +1337,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
     let history_access = current_state_entries
         .iter()
         .find_map(|entry| match entry {
-            arkret_wire::TypedCurrentRow::Value {
+            arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::RealmHistoryAccess,
                 value,
                 ..
@@ -2231,7 +2230,7 @@ async fn commit_transaction_with_device_guard_inner(
     )
     .await?;
 
-    crate::realm_lifecycle_current_results::commit_in_connection(
+    crate::realm_lifecycle_current_states::commit_in_connection(
         conn,
         &transaction.event,
         &transaction.commit,
@@ -2436,20 +2435,22 @@ pub(crate) async fn check_agent_endpoint_current_in_connection(
         ));
     }
     lock_agent_producer_current(conn, pcr_realm_id, agent_id).await?;
-    let status = sql_query("SELECT value FROM agent_status_current_results WHERE realm_id=$1 AND agent_id=$2 FOR SHARE")
-        .bind::<Text, _>(pcr_realm_id.as_str())
-        .bind::<Text, _>(agent_id.as_str())
-        .get_result::<ProducerCurrentValueRow>(&mut *conn)
-        .await
-        .optional()
-        .map_err(PersistenceError::database)?;
+    let status = sql_query(
+        "SELECT value FROM agent_status_current_states WHERE realm_id=$1 AND agent_id=$2 FOR SHARE",
+    )
+    .bind::<Text, _>(pcr_realm_id.as_str())
+    .bind::<Text, _>(agent_id.as_str())
+    .get_result::<ProducerCurrentValueRow>(&mut *conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?;
     if status.as_ref().and_then(|row| row.value.as_str()) != Some("active") {
         return Err(PersistenceError::Conflict(
             "Agent producer is no longer active".to_owned(),
         ));
     }
     let rows = sql_query(
-        "SELECT value FROM agent_key_current_results WHERE realm_id=$1 AND agent_id=$2 FOR SHARE",
+        "SELECT value FROM agent_key_current_states WHERE realm_id=$1 AND agent_id=$2 FOR SHARE",
     )
     .bind::<Text, _>(pcr_realm_id.as_str())
     .bind::<Text, _>(agent_id.as_str())
@@ -2648,31 +2649,31 @@ impl PgAuthorityCommitStore {
                         conn, &transaction.event, &transaction.commit, Some(&guards[index]),
                     ).await?;
                 }
-                commit_realm_authority_root_current_result_in_connection(
+                commit_realm_authority_root_current_state_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
                 )
                 .await?;
-                crate::realm_bootstrap_current_results::commit_ordinary_bootstrap_singleton_current_result_in_connection(
+                crate::realm_bootstrap_current_states::commit_ordinary_bootstrap_singleton_current_state_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
                 )
                 .await?;
-                crate::unit_of_work::commit_parent_membership_current_results(
+                crate::unit_of_work::commit_parent_membership_current_states(
                     conn,
                     &transaction.event,
                     &transaction.commit,
                 )
                 .await?;
-                commit_capability_grant_current_result_in_connection(
+                commit_capability_grant_current_state_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
                  None)
                 .await?;
-                commit_mimi_room_binding_current_result_in_connection(
+                commit_mimi_room_binding_current_state_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
@@ -2719,7 +2720,7 @@ pub(crate) async fn accepted_current_member_joined_in_connection(
         // bootstrap snapshot the held replica is anchored on, whose rows
         // name Commits below the replica's floor (decision 0116).
         "SELECT EXISTS (\
-            SELECT 1 FROM member_state_current_results m \
+            SELECT 1 FROM member_state_current_states m \
             WHERE m.realm_id = $1 AND m.member_id = $2 AND m.membership = 'join' \
               AND (EXISTS (SELECT 1 FROM realm_commits c \
                            WHERE c.commit_id = m.current_commit_id \
@@ -2757,7 +2758,7 @@ pub(crate) async fn parent_join_at_revision_in_connection(
 ) -> PersistenceResult<bool> {
     let row = sql_query(
         "SELECT EXISTS (\
-            SELECT 1 FROM member_state_current_results m \
+            SELECT 1 FROM member_state_current_states m \
             WHERE m.realm_id = $1 AND m.member_id = $2 AND m.membership = 'join' \
               AND m.current_commit_id = $4 AND m.current_stream_position = $5 \
               AND (EXISTS (SELECT 1 FROM realm_commits c \
@@ -2839,7 +2840,7 @@ pub(crate) async fn accepted_realm_roster_in_connection(
     realm_id: &arkret_wire::RealmId,
 ) -> PersistenceResult<Option<coland_storage::AcceptedRealmRoster>> {
     let Some(controller) = sql_query(
-        "SELECT controller_actor_id FROM realm_authority_root_current_results WHERE realm_id = $1 \
+        "SELECT controller_actor_id FROM realm_authority_root_current_states WHERE realm_id = $1 \
          UNION ALL \
          SELECT value->'controller_actor_id' AS controller_actor_id FROM replica_authorization_rows \
           WHERE realm_id = $1 AND selector->>'kind' = 'realm_authority_root' \
@@ -2859,7 +2860,7 @@ pub(crate) async fn accepted_realm_roster_in_connection(
         })?;
     let rows = sql_query(
         // The same backing rule as `accepted_current_member_joined_in_connection`.
-        "SELECT m.member_id FROM member_state_current_results m \
+        "SELECT m.member_id FROM member_state_current_states m \
           WHERE m.realm_id = $1 AND m.membership = 'join' \
             AND (EXISTS (SELECT 1 FROM realm_commits c \
                          WHERE c.commit_id = m.current_commit_id \
@@ -2905,7 +2906,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_,PgTransactionError,_>(async |conn| {
-            if !crate::call_state_current_results::release_in_connection(conn,request,issuer).await? {
+            if !crate::call_state_current_states::release_in_connection(conn,request,issuer).await? {
                 return Ok(false);
             }
             // The release cut orders once-only voluntary intent with the
@@ -2931,7 +2932,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            crate::call_state_current_results::read_in_connection(conn, realm, call, actor)
+            crate::call_state_current_states::read_in_connection(conn, realm, call, actor)
                 .await
                 .map_err(Into::into)
         })
@@ -2947,7 +2948,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        crate::call_state_current_results::media_in_connection(&mut conn, realm).await
+        crate::call_state_current_states::media_in_connection(&mut conn, realm).await
     }
     async fn ordinary_realm_bootstrap_replay(
         &self,
@@ -2955,8 +2956,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         exact_request_body: &[u8],
     ) -> PersistenceResult<Option<Vec<arkret_wire::RealmCommit>>> {
         submission.validate().map_err(invalid)?;
-        match serde_json::from_slice::<arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest>(exact_request_body) {
-            Ok(arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(parsed)) if parsed == *submission => {},
+        match serde_json::from_slice::<arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody>(exact_request_body) {
+            Ok(arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(parsed)) if parsed == *submission => {},
             _ => return Err(invalid("ordinary Realm bootstrap exact body differs")),
         }
         let mut conn = crate::pg_db(&self.pool);
@@ -3005,9 +3006,11 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         &self,
         caller: &arkret_wire::ActorId,
         station: &arkret_wire::DidCoreId,
-        request: &arkret_models_collaboration::governance::authorization::AuthzCheckRequestBody,
+        request: &arkret_models_collaboration::governance::authorization::AuthorizationCheckRequestBody,
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::governance::authorization::AuthzCheckOutcome>,
+        Option<
+            arkret_models_collaboration::governance::authorization::AuthorizationCheckResponseBody,
+        >,
     > {
         let Some(realm) = request
             .resource
@@ -3200,7 +3203,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             {
                 return Err(invalid("control replay has no retained signing original").into());
             }
-            let outcome = arkret_wire::AuthoritySubmitOutcome::Accepted {
+            let outcome = arkret_wire::AuthoritySubmitResponseBody::Accepted {
                 status: arkret_wire::AuthorityCommitStatus::Committed,
                 commit: original.commit.clone(),
             };
@@ -3221,11 +3224,11 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn read_realm_actor_material(
         &self,
-        request: &arkret_models_integration::RealmActorMaterialRequest,
+        request: &arkret_models_integration::RealmActorMaterialRequestBody,
         caller: &coland_storage::RealmActorMaterialCaller,
         governor: &arkret_wire::DidCoreId,
         sign: coland_storage::RealmActorMaterialSigner<'_>,
-    ) -> PersistenceResult<arkret_models_integration::RealmActorMaterialOutcome> {
+    ) -> PersistenceResult<arkret_models_integration::RealmActorMaterialResponseBody> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async |conn| {
             crate::realm_actor_material::read(conn, request, caller, governor, sign)
@@ -3382,7 +3385,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         realm_id: &arkret_wire::RealmId,
         selector: &arkret_models_identity::SignerKeyQuerySelector,
         recipient: &arkret_wire::AccountId,
-    ) -> PersistenceResult<Option<arkret_models_identity::SignerKeyQueryOutcome>> {
+    ) -> PersistenceResult<Option<arkret_models_identity::SignerKeyResolution>> {
         crate::agent_producer_signer_keys::read_self_pcr(&self.pool, realm_id, selector, recipient)
             .await
     }
@@ -3391,7 +3394,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         &self,
         realm_id: &arkret_wire::RealmId,
         selector: &arkret_models_identity::SignerKeyQuerySelector,
-    ) -> PersistenceResult<Option<arkret_models_identity::SignerKeyQueryOutcome>> {
+    ) -> PersistenceResult<Option<arkret_models_identity::SignerKeyResolution>> {
         crate::agent_producer_signer_keys::read(&self.pool, realm_id, selector).await
     }
 
@@ -3416,8 +3419,9 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         &self,
         verified: &coland_storage::VerifiedMlsAddAuthorityAttestation,
         issuer: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<arkret_models_collaboration::mls_roster_authority::MlsAttestAddOutcome>
-    {
+    ) -> PersistenceResult<
+        arkret_models_collaboration::mls_roster_authority::MlsAttestAddResponseBody,
+    > {
         crate::mls_roster_attest_add::install(&self.pool, verified, issuer).await
     }
 
@@ -3504,7 +3508,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         producer: &coland_storage::AppletEventProducerGuard,
         prepared: Option<&coland_storage::EventApprovalCommit>,
         digest: &arkret_wire::Hash,
-    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
         transaction.validate().map_err(invalid)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async |conn| {
@@ -3533,7 +3537,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         producer: &coland_storage::AppletEventProducerGuard,
         publication: Option<&arkret_models_identity::ResolutionCommitment>,
         digest: &arkret_wire::Hash,
-    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
         transaction.validate().map_err(invalid)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async |conn| {
@@ -3552,7 +3556,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         manager: Option<&coland_storage::AppletEventProducerGuard>,
         prepared: Option<&coland_storage::EventApprovalCommit>,
         digest: &arkret_wire::Hash,
-    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
         transaction.validate().map_err(invalid)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async |conn| {
@@ -3587,7 +3591,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         &self,
         actor: &arkret_wire::ActorId,
         authority: &CurrentRealmAuthority,
-        terminal: &arkret_models_integration::RealmActorOperationOutcome,
+        terminal: &arkret_models_integration::RealmActorRequestStatus,
     ) -> PersistenceResult<()> {
         let subject = actor
             .as_realm_actor_id()
@@ -3608,17 +3612,17 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         carrier: &coland_storage::AppletControlCarrier,
         prepared: Option<&coland_storage::EventApprovalCommit>,
         request_digest: &arkret_wire::Hash,
-    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
         transaction.validate().map_err(invalid)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async |conn| {
             let outcome =
                 crate::applet_scope_profiles::admit_control(conn, transaction, carrier, prepared)
                     .await?;
-            let arkret_wire::AuthoritySubmitOutcome::Accepted { commit, .. } = &outcome else {
+            let arkret_wire::AuthoritySubmitResponseBody::Accepted { commit, .. } = &outcome else {
                 return Err(invalid("Profile admission has no accepted Commit").into());
             };
-            let stored = arkret_wire::AuthoritySubmitOutcome::Accepted {
+            let stored = arkret_wire::AuthoritySubmitResponseBody::Accepted {
                 status: arkret_wire::AuthorityCommitStatus::Committed,
                 commit: commit.clone(),
             };
@@ -3650,7 +3654,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 crate::realm_actor_device_control::admit(conn, transaction, carrier).await?;
             let (AcceptedDeviceAuthorizationOutcome::Committed(commit)
             | AcceptedDeviceAuthorizationOutcome::Duplicate(commit)) = &outcome;
-            let stored = arkret_wire::AuthoritySubmitOutcome::Accepted {
+            let stored = arkret_wire::AuthoritySubmitResponseBody::Accepted {
                 status: arkret_wire::AuthorityCommitStatus::Committed,
                 commit: commit.clone(),
             };
@@ -3693,9 +3697,9 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         submission: &arkret_models_collaboration::principal_operations::PcrGenesisAdmissionInput,
         exact_request_body: &[u8],
     ) -> PersistenceResult<
-        Option<arkret_models_collaboration::principal_operations::PcrGenesisAdmissionOutcome>,
+        Option<arkret_models_collaboration::principal_operations::PcrGenesisAdmissionResponseBody>,
     > {
-        use arkret_models_collaboration::principal_operations::PcrGenesisAdmissionOutcome;
+        use arkret_models_collaboration::principal_operations::PcrGenesisAdmissionResponseBody;
 
         let mut conn = pg_conn(&self.pool).await?;
         let key = submission.idempotency_key.to_string();
@@ -3719,7 +3723,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         {
             return Err(PersistenceError::Conflict("duplicate_conflict".to_owned()));
         }
-        let stored: PcrGenesisAdmissionOutcome =
+        let stored: PcrGenesisAdmissionResponseBody =
             decode_json(existing.result_json, "PCR genesis result")?;
         stored.validate_against(submission).map_err(invalid)?;
         Ok(Some(stored))
@@ -3731,7 +3735,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         queued_at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<PcrGenesisCommitOutcome> {
         use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
-        use arkret_models_collaboration::principal_operations::PcrGenesisAdmissionOutcome;
+        use arkret_models_collaboration::principal_operations::PcrGenesisAdmissionResponseBody;
 
         unit.validate().map_err(invalid)?;
         let submission = &unit.submission;
@@ -3751,7 +3755,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             .transactions
             .clone()
             .map(|transaction| transaction.commit);
-        let result = PcrGenesisAdmissionOutcome {
+        let result = PcrGenesisAdmissionResponseBody {
             principal_id: submission.principal_id.clone(),
             pcr_realm_id: submission.pcr_realm_id.clone(),
             accepted_device_id: authorize_payload.device_id.clone(),
@@ -3828,7 +3832,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 if existing.realm_id != realm_id || existing.idempotency_key != key || existing.exact_request_body != unit.exact_request_body {
                     return Err(PersistenceError::Conflict("duplicate_conflict".to_owned()).into());
                 }
-                let stored: PcrGenesisAdmissionOutcome = decode_json(existing.result_json, "PCR genesis result")?;
+                let stored: PcrGenesisAdmissionResponseBody = decode_json(existing.result_json, "PCR genesis result")?;
                 stored.validate_against(submission).map_err(invalid)?;
                 return Ok(PcrGenesisCommitOutcome::Duplicate(stored));
             }
@@ -3856,9 +3860,9 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                         return Err(PersistenceError::Conflict("stale_realm_authority".to_owned()).into());
                     }
                 }
-                commit_realm_authority_root_current_result_in_connection(conn, &transaction.event, &transaction.commit).await?;
-                commit_capability_grant_current_result_in_connection(conn, &transaction.event, &transaction.commit, None).await?;
-                crate::pcr_device_current_results::project_pcr_device_current_in_connection(
+                commit_realm_authority_root_current_state_in_connection(conn, &transaction.event, &transaction.commit).await?;
+                commit_capability_grant_current_state_in_connection(conn, &transaction.event, &transaction.commit, None).await?;
+                crate::pcr_device_current_states::project_pcr_device_current_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
@@ -4281,7 +4285,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         receiver: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<Vec<coland_storage::PendingFrankingProof>> {
         let mut conn = pg_conn(&self.pool).await?;
-        crate::moderation_franking_proof_current_results::pending_franking_in_connection(
+        crate::moderation_franking_proof_current_states::pending_franking_in_connection(
             &mut conn, receiver,
         )
         .await
@@ -4294,7 +4298,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             Ok(
-                crate::moderation_franking_proof_current_results::fix_franking_in_connection(
+                crate::moderation_franking_proof_current_states::fix_franking_in_connection(
                     conn, prepared,
                 )
                 .await?,
@@ -4311,7 +4315,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         proof_event: &arkret_wire::EventId,
     ) -> PersistenceResult<()> {
         let mut conn = pg_conn(&self.pool).await?;
-        crate::moderation_franking_proof_current_results::complete_franking_in_connection(
+        crate::moderation_franking_proof_current_states::complete_franking_in_connection(
             &mut conn,
             realm,
             target,
@@ -4338,7 +4342,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         local_service: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<bool> {
         use arkret_models_collaboration::authority_commit::{
-            AccountDeviceHistoricalSignerFact, SelfAuthoritySubmitRequest,
+            AccountDeviceHistoricalSignerFact, SelfAuthoritySubmitRequestBody,
         };
         use arkret_models_collaboration::events_payloads::CircleMemberStatePayload;
         use arkret_models_collaboration::governance::circle::CircleMembership;
@@ -4450,9 +4454,9 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                  JOIN authority_forward_attempts f ON f.event_pk=e.pk \
                  JOIN (SELECT realm_id,member_id,membership,current_commit_id,current_stream_position,value, \
                        jsonb_build_object('kind','realm','realm_id',realm_id) AS source_stream_ref \
-                       FROM member_state_current_results \
+                       FROM member_state_current_states \
                        UNION ALL SELECT realm_id,member_id,membership,current_commit_id,current_stream_position,value, \
-                       source_stream_ref FROM circle_member_state_current_results \
+                       source_stream_ref FROM circle_member_state_current_states \
                        WHERE source_stream_ref->>'circle_id'=circle_id) m \
                    ON m.realm_id=c.realm_id AND m.member_id=$2 AND m.source_stream_ref=c.stream_ref \
                  JOIN replica_stream_anchors a ON a.realm_id=c.realm_id AND a.stream_key=c.stream_key \
@@ -4495,24 +4499,24 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             let held_event: arkret_wire::Event = decode_json(row.envelope, "bound leave Event")?;
             let held_commit: arkret_wire::RealmCommit = decode_json(row.commit_json, "bound leave Commit")?;
             let accepted: arkret_wire::RealmCommit = decode_json(row.accepted_json, "bound leave accepted witness")?;
-            let submission: SelfAuthoritySubmitRequest = decode_json(row.submission_json, "bound leave original intent")?;
+            let submission: SelfAuthoritySubmitRequestBody = decode_json(row.submission_json, "bound leave original intent")?;
             let fact: AccountDeviceHistoricalSignerFact = decode_json(row.fact_json, "bound leave original fact")?;
             let join_event: arkret_wire::Event = decode_json(row.join_envelope, "bound leave opening Event")?;
             let join_commit: arkret_wire::RealmCommit = decode_json(row.join_commit_json, "bound leave opening Commit")?;
-            let SelfAuthoritySubmitRequest::Event(submitted) = submission else { return Ok(false); };
+            let SelfAuthoritySubmitRequestBody::Event(submitted) = submission else { return Ok(false); };
             if held_event != *event || held_commit != *commit || accepted != *commit || submitted.event != *event
                 || join_event.actor_id != actor || join_event.realm_id != event.realm_id
                 || join_event.scope_ref != event.scope_ref || join_commit.event_ref != join_event.event_id
                 || join_commit.stream_ref != stream
             { return Ok(false); }
             let current_matches = if let Some(payload) = &circle_leave {
-                let member: arkret_wire::CircleMemberStateCurrent = decode_json(row.member_value, "bound Circle leave effective membership")?;
+                let member: arkret_wire::CircleMemberStateValue = decode_json(row.member_value, "bound Circle leave effective membership")?;
                 member.membership == arkret_wire::MembershipState::Leave
                     && member.parent_membership_revision.is_none()
                     && member.effective_at == payload.effective_at.unwrap_or(event.created_at)
             } else {
-                let member: arkret_wire::MemberStateCurrent = decode_json(row.member_value, "bound leave effective membership")?;
-                member == (arkret_wire::MemberStateCurrent { membership: arkret_wire::MembershipState::Leave, joined_at: None })
+                let member: arkret_wire::MemberStateValue = decode_json(row.member_value, "bound leave effective membership")?;
+                member == (arkret_wire::MemberStateValue { membership: arkret_wire::MembershipState::Leave, joined_at: None })
             };
             if !current_matches { return Ok(false); }
             let own_join = match join_event.kind {
@@ -4674,8 +4678,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn watch_audit_read_delivery_guard(
         &self,
-        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
-        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequestBody,
+        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadResponseBody,
         issuer: &arkret_wire::DidCoreId,
         expires_at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<Box<dyn coland_storage::AccountContentDeliveryGuard>> {
@@ -4687,8 +4691,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn watch_audit_read_disclosure(
         &self,
-        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
-        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequestBody,
+        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadResponseBody,
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<()> {
         outcome
@@ -4768,7 +4772,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         let row = sql_query(
             "SELECT EXISTS (\
                 SELECT 1 FROM realm_authorities a \
-                JOIN member_state_current_results m ON m.realm_id = a.realm_id \
+                JOIN member_state_current_states m ON m.realm_id = a.realm_id \
                 JOIN realm_commits c ON c.commit_id = m.current_commit_id \
                 WHERE a.realm_id = $1 AND a.service_id = $2 \
                   AND m.member_id = $3 AND m.membership = 'join' \
@@ -4836,7 +4840,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 .await?
                 .is_some()
             {
-                crate::realm_lifecycle_current_results::require_replica_live_in_connection(
+                crate::realm_lifecycle_current_states::require_replica_live_in_connection(
                     conn, event,
                 )
                 .await?;
@@ -4854,8 +4858,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         use arkret_models_collaboration::events_payloads::realm::{RealmGenesis, RealmPurpose};
         let mut conn = pg_conn(&self.pool).await?;
         let row = sql_query(
-            "SELECT g.value FROM realm_bootstrap_current_results g \
-             WHERE g.realm_id=$1 AND g.result_family='realm_genesis' \
+            "SELECT g.value FROM realm_bootstrap_current_states g \
+             WHERE g.realm_id=$1 AND g.state_family='realm_genesis' \
                AND (EXISTS(SELECT 1 FROM realm_commits c \
                     WHERE c.commit_id=g.current_commit_id AND c.realm_id=g.realm_id \
                       AND c.stream_position=g.current_stream_position \
@@ -4903,14 +4907,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             serde_json::to_value(controller).map_err(PersistenceError::database)?;
         let row = sql_query(
             "SELECT EXISTS (\
-               SELECT 1 FROM member_state_current_results agent_member \
+               SELECT 1 FROM member_state_current_states agent_member \
                JOIN realm_commits agent_commit \
                  ON agent_commit.commit_id=agent_member.current_commit_id \
                 AND agent_commit.realm_id=agent_member.realm_id \
                 AND agent_commit.stream_position=agent_member.current_stream_position \
                 AND agent_commit.stream_ref->>'kind'='realm' \
                JOIN canonical_events agent_event ON agent_event.pk=agent_commit.event_pk \
-               JOIN member_state_current_results controller_member \
+               JOIN member_state_current_states controller_member \
                  ON controller_member.realm_id=agent_member.realm_id \
                JOIN realm_commits controller_commit \
                  ON controller_commit.commit_id=controller_member.current_commit_id \
@@ -4968,8 +4972,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         }
         let mut conn = crate::pg_db(&self.pool);
         sql_query(
-            "SELECT b.value FROM realm_bootstrap_current_results b \
-             WHERE b.realm_id = $1 AND b.result_family = 'realm_plaintext_visible_services' \
+            "SELECT b.value FROM realm_bootstrap_current_states b \
+             WHERE b.realm_id = $1 AND b.state_family = 'realm_plaintext_visible_services' \
                AND (EXISTS (SELECT 1 FROM realm_commits c \
                             WHERE c.commit_id = b.current_commit_id \
                               AND c.realm_id = b.realm_id \
@@ -5008,10 +5012,10 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn retain_forwarded_submission(
         &self,
         event: &arkret_wire::Event,
-        submission: &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest,
+        submission: &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<()> {
-        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+        use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
         submission.validate().map_err(|e| invalid(e.to_string()))?;
         event
             .verify_event_id_matches_content_with_digest_suite(
@@ -5019,8 +5023,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             )
             .map_err(invalid)?;
         let submitted = match submission {
-            SelfAuthoritySubmitRequest::Event(value) => &value.event,
-            SelfAuthoritySubmitRequest::MlsCommit(value) => &value.commit_event,
+            SelfAuthoritySubmitRequestBody::Event(value) => &value.event,
+            SelfAuthoritySubmitRequestBody::MlsCommit(value) => &value.commit_event,
             _ => {
                 return Err(invalid(
                     "only an Event or MLS forwarding intent may be retained",
@@ -5059,7 +5063,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             "INSERT INTO authority_forward_attempts (event_pk,status,reason_code,attempted_at,original_submission_json,circle_leave_parent_revision) \
              SELECT e.pk,'forwarding',NULL,$3,$2, \
                  CASE WHEN $5 THEN (SELECT jsonb_build_object('commit_id',m.current_commit_id,'stream_position',m.current_stream_position) \
-                    FROM member_state_current_results m WHERE m.realm_id=$6 AND m.member_id=$7 AND m.membership='join' \
+                    FROM member_state_current_states m WHERE m.realm_id=$6 AND m.member_id=$7 AND m.membership='join' \
                       AND (EXISTS(SELECT 1 FROM realm_commits c WHERE c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id \
                            AND c.stream_position=m.current_stream_position AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',m.realm_id)) \
                         OR EXISTS(SELECT 1 FROM replica_stream_anchors a WHERE a.realm_id=m.realm_id AND a.stream_key=$8 \
@@ -5086,13 +5090,13 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     async fn freeze_forwarded_peer_request(
         &self,
         event: &arkret_wire::Event,
-        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<
-        Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest>,
+        Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody>,
     > {
         use arkret_models_collaboration::authority_commit::{
-            PeerAuthoritySubmitRequest as P, SelfAuthoritySubmitRequest as S,
+            PeerAuthoritySubmitRequestBody as P, SelfAuthoritySubmitRequestBody as S,
         };
         request.validate().map_err(invalid)?;
         let original = match request {
@@ -5220,7 +5224,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             coland_storage::ManagedMlsRefusalSource<'_>,
             &coland_storage::IdempotencyRecord,
         )>,
-    ) -> PersistenceResult<arkret_wire::AuthoritySubmitOutcome> {
+    ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
         if event.kind != arkret_wire::EventKind::MlsCommit || event.realm_id != authority.realm_id {
             return Err(invalid(
                 "only an exact ordinary MLS Commit can receive this refusal fence",
@@ -5249,7 +5253,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             let existing = sql_query("SELECT c.commit_json FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE e.id=$1")
                 .bind::<Binary,_>(token.to_vec()).get_result::<CommitRow>(&mut *conn).await.optional()?;
             if let Some(existing) = existing {
-                return Ok(arkret_wire::AuthoritySubmitOutcome::Accepted {
+                return Ok(arkret_wire::AuthoritySubmitResponseBody::Accepted {
                     status: arkret_wire::AuthorityCommitStatus::Duplicate,
                     commit: decode_json(existing.commit_json, "original MLS Commit")?,
                 });
@@ -5262,8 +5266,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 // A formerly stale key-access coordinate may have caught up
                 // while this refusal waited for the exclusive authority cut.
                 // Such a request must retry, never acquire a false finality fence.
-                let key = crate::mls_group_current_results::scope_key(&event.scope_ref)?;
-                let group = crate::mls_group_current_results::locked_group(conn, &key).await?
+                let key = crate::mls_group_current_states::scope_key(&event.scope_ref)?;
+                let group = crate::mls_group_current_states::locked_group(conn, &key).await?
                     .ok_or_else(|| PersistenceError::Conflict("failed_precondition: native MLS refusal has no current group".into()))?;
                 let payload: arkret_models_crypto::MlsCommitPayload = serde_json::from_value(serde_json::to_value(&event.payload).map_err(PersistenceError::database)?).map_err(PersistenceError::database)?;
                 let binding = payload.governance_binding();
@@ -5286,13 +5290,13 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 .execute(&mut *conn).await?;
             let refused = sql_query("SELECT rejection_reason FROM canonical_events WHERE id=$1 AND state='rejected'")
                 .bind::<Binary,_>(token.to_vec()).get_result::<RefusalRow>(&mut *conn).await?;
-            let outcome = arkret_wire::AuthoritySubmitOutcome::Rejected {
+            let outcome = arkret_wire::AuthoritySubmitResponseBody::Rejected {
                 status: arkret_wire::AuthorityRejectionStatus::Rejected,
                 reason_code: refused.rejection_reason,
             };
             if let Some((source, record)) = native {
                 let mut record = record.clone();
-                record.response_body = serde_json::to_value(arkret_models_collaboration::authority_commit::SelfAuthoritySubmitOutcome::Ordinary(outcome.clone())).map_err(PersistenceError::database)?;
+                record.response_body = serde_json::to_value(arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(outcome.clone())).map_err(PersistenceError::database)?;
                 crate::idempotency::record_native_mls_idempotency_in_connection(conn, &record).await?;
                 crate::boxed_future(|| crate::applet_device_admission::require_mls_permission_source(conn, event, source.into(), chrono::Utc::now(), false)).await?;
             }
@@ -5396,14 +5400,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 commit_transaction_in_connection(conn, transaction).await?,
             )?;
             if matches!(outcome, AuthorityCommitWriteOutcome::Committed) {
-                commit_capability_grant_current_result_in_connection(
+                commit_capability_grant_current_state_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
                     None,
                 )
                 .await?;
-                commit_mimi_room_binding_current_result_in_connection(
+                commit_mimi_room_binding_current_state_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
@@ -5479,14 +5483,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     )
                     .await?;
                 }
-                commit_capability_grant_current_result_in_connection(
+                commit_capability_grant_current_state_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
                     None,
                 )
                 .await?;
-                commit_mimi_room_binding_current_result_in_connection(
+                commit_mimi_room_binding_current_state_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
@@ -5508,14 +5512,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             let outcome = commit_transaction_in_connection(conn, transaction).await?;
             if matches!(outcome, AuthorityCommitWriteOutcome::Committed) {
-                commit_capability_grant_current_result_in_connection(
+                commit_capability_grant_current_state_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
                     None,
                 )
                 .await?;
-                commit_mimi_room_binding_current_result_in_connection(
+                commit_mimi_room_binding_current_state_in_connection(
                     conn,
                     &transaction.event,
                     &transaction.commit,
@@ -5619,7 +5623,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT mimi_room_uri,realm_id,current_commit_id,current_stream_position,current_event_id,value \
-             FROM mimi_room_binding_current_results WHERE mimi_room_uri=$1",
+             FROM mimi_room_binding_current_states WHERE mimi_room_uri=$1",
         )
         .bind::<Text, _>(room_uri.as_str())
         .get_result::<MimiRoomBindingCurrentRow>(&mut conn)
@@ -5637,7 +5641,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         controller: &arkret_wire::AccountId,
     ) -> PersistenceResult<bool> {
         let mut conn = pg_conn(&self.pool).await?;
-        crate::agent_interaction_current_results::owner_direct_in_connection(
+        crate::agent_interaction_current_states::owner_direct_in_connection(
             &mut conn, realm, agent, controller,
         )
         .await
@@ -5647,16 +5651,15 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         &self,
         realm_id: &arkret_wire::RealmId,
         selector: &arkret_wire::CurrentSelector,
-    ) -> PersistenceResult<Option<arkret_wire::TypedCurrentRow>> {
-        crate::agent_current_results::read_agent_current_result(&self.pool, realm_id, selector)
-            .await
+    ) -> PersistenceResult<Option<arkret_wire::CurrentState>> {
+        crate::agent_current_states::read_agent_current_state(&self.pool, realm_id, selector).await
     }
 
     async fn realm_default_strand_current(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> PersistenceResult<Option<arkret_wire::TypedCurrentRow>> {
-        crate::realm_default_strand_current_results::read_current(&self.pool, realm_id).await
+    ) -> PersistenceResult<Option<arkret_wire::CurrentState>> {
+        crate::realm_default_strand_current_states::read_current(&self.pool, realm_id).await
     }
 
     async fn signal_scope_authority(
@@ -5888,7 +5891,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             Option<coland_storage::AgentSidecarContextRecord>,
         )>,
     > {
-        crate::sidecar_current_results::prepare_context_current(
+        crate::sidecar_current_states::prepare_context_current(
             &self.pool, realm, controller, context,
         )
         .await
@@ -5904,7 +5907,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         Option<(
             arkret_models_collaboration::agent_sidecar::SidecarParticipantAuthorityCut,
             Vec<arkret_wire::DidCoreId>,
-            Option<arkret_wire::MlsGroupCurrent>,
+            Option<arkret_wire::MlsGroupValue>,
             bool,
         )>,
     > {
@@ -5919,8 +5922,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         include_terminal: bool,
     ) -> PersistenceResult<
         Option<(
-            arkret_models_collaboration::objects::query_projection::ProjectionSpaceList,
-            arkret_models_collaboration::objects::query_projection::ProjectionStrandList,
+            arkret_models_collaboration::objects::query_projection::SpacePage,
+            arkret_models_collaboration::objects::query_projection::StrandPage,
         )>,
     > {
         crate::object_projection_reads::lists_for_actor(
@@ -5939,9 +5942,9 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         include_terminal: bool,
     ) -> PersistenceResult<
         Option<(
-            arkret_models_collaboration::objects::query_projection::ProjectionSpaceList,
-            arkret_models_collaboration::objects::query_projection::ProjectionStrandList,
-            arkret_models_collaboration::sync_frames::current_results::AccountCurrentView,
+            arkret_models_collaboration::objects::query_projection::SpacePage,
+            arkret_models_collaboration::objects::query_projection::StrandPage,
+            arkret_models_collaboration::sync_frames::current_states::AccountStateView,
         )>,
     > {
         crate::object_projection_reads::delivery_for_actor(
@@ -5959,9 +5962,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         actor: &arkret_wire::ActorId,
         station: &arkret_wire::DidCoreId,
         include_terminal: bool,
-    ) -> PersistenceResult<
-        Option<arkret_models_collaboration::objects::query_projection::ProjectionMorphList>,
-    > {
+    ) -> PersistenceResult<Option<arkret_models_collaboration::objects::query_projection::MorphPage>>
+    {
         crate::morph_projection_reads::list_for_actor(
             &self.pool,
             realm,
@@ -5979,9 +5981,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         actor: &arkret_wire::ActorId,
         station: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
-        Option<
-            arkret_models_collaboration::objects::query_projection::DocumentMorphProjectionOutcome,
-        >,
+        Option<arkret_models_collaboration::objects::query_projection::DocumentMorphView>,
     > {
         crate::morph_projection_reads::document_for_actor(&self.pool, realm, morph, actor, station)
             .await
@@ -6167,15 +6167,15 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn scan_stream(
         &self,
-        request: &arkret_wire::StreamScanRequest,
-    ) -> PersistenceResult<arkret_wire::StreamScanOutcome> {
+        request: &arkret_wire::StreamScanRequestBody,
+    ) -> PersistenceResult<arkret_wire::StreamScanResponseBody> {
         let mut conn = pg_conn(&self.pool).await?;
         stream_page_in_connection(&mut conn, request).await
     }
 
     async fn scan_stream_for_actor(
         &self,
-        request: &arkret_wire::StreamScanRequest,
+        request: &arkret_wire::StreamScanRequestBody,
         actor: &arkret_wire::ActorId,
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<coland_storage::AccountStreamScan> {
@@ -6184,7 +6184,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn scan_stream_for_account(
         &self,
-        request: &arkret_wire::StreamScanRequest,
+        request: &arkret_wire::StreamScanRequestBody,
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<coland_storage::AccountStreamScan> {
@@ -6214,7 +6214,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 
     async fn scan_stream_for_peer(
         &self,
-        request: &arkret_wire::StreamScanRequest,
+        request: &arkret_wire::StreamScanRequestBody,
         peer: &arkret_wire::DidCoreId,
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<coland_storage::PeerStreamScan> {
@@ -6245,33 +6245,31 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .await
     }
 
-    async fn exact_current_result_for_actor(
+    async fn exact_current_state_for_actor(
         &self,
-        request: &arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadRequestBody,
+        request: &arkret_models_collaboration::exact_current_state::ExactCurrentStateReadRequestBody,
         actor: &arkret_wire::ActorId,
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
         coland_storage::SelfExactCurrentRead<
-            arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome,
+            arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody,
         >,
     > {
-        crate::self_current_reads::exact_current_result_for_actor(
-            &self.pool, request, actor, issuer,
-        )
-        .await
+        crate::self_current_reads::exact_current_state_for_actor(&self.pool, request, actor, issuer)
+            .await
     }
 
-    async fn exact_current_result_for_account(
+    async fn exact_current_state_for_account(
         &self,
-        request: &arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadRequestBody,
+        request: &arkret_models_collaboration::exact_current_state::ExactCurrentStateReadRequestBody,
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
         coland_storage::SelfExactCurrentRead<
-            arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome,
+            arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody,
         >,
     > {
-        crate::self_current_reads::exact_current_result_for_account(
+        crate::self_current_reads::exact_current_state_for_account(
             &self.pool, request, account, issuer,
         )
         .await
@@ -6284,7 +6282,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<
         coland_storage::SelfExactCurrentRead<
-            arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentOutcome,
+            arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentResponseBody,
         >,
     > {
         crate::self_current_reads::strand_watch_current_for_account(
@@ -6651,7 +6649,7 @@ impl PgAuthorityCommitStore {
                 }
             }
             for row in &snapshot.current_state_entries {
-                let arkret_wire::TypedCurrentRow::Value { selector, source_stream_ref, .. } = row;
+                let arkret_wire::CurrentState::Value { selector, source_stream_ref, .. } = row;
                 if let arkret_wire::CurrentSelector::StrandWatch { strand_id, watcher_actor_id } = selector {
                     watch_cells.insert((source_stream_ref.clone(), strand_id.clone(), watcher_actor_id.clone()));
                 }
@@ -6659,7 +6657,7 @@ impl PgAuthorityCommitStore {
             for (stream, strand, actor) in watch_cells {
                 let head = final_stream_heads.iter().find(|head| head.stream_ref == stream)
                     .ok_or_else(|| invalid("handoff Watch namespace has no final head"))?;
-                crate::strand_watch_current_results::require_current_basis_in_connection(
+                crate::strand_watch_current_states::require_current_basis_in_connection(
                     conn, &handoff.realm_id, head, &strand, &actor, ""
                 ).await?;
             }

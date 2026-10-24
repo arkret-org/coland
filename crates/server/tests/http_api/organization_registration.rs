@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use arkret_models_identity::{
     OrganizationRegistrationChallenge, OrganizationRegistrationEnsureRequestBody,
-    OrganizationRegistrationOutcome, OrganizationRegistrationRefreshRequestBody,
+    OrganizationRegistrationRefreshRequestBody, OrganizationRegistrationResponseBody,
     OrganizationRegistrationRevokeRequestBody, OrganizationRegistrationScope,
     OrganizationRegistrationStatus,
 };
@@ -138,7 +138,7 @@ async fn organization_registration_http_round_trip_and_get_are_non_enumerable_bo
         requested_scopes: vec![OrganizationRegistrationScope::OrganizationProfileManage],
         handle_attestation: None,
     };
-    let outcome: OrganizationRegistrationOutcome =
+    let outcome: OrganizationRegistrationResponseBody =
         TestClient::post("http://server/_arkret/root/identity/organization-registrations:ensure")
             .add_header("authorization", format!("Bearer {alice_token}"), true)
             .add_header("content-type", "application/json", true)
@@ -152,7 +152,7 @@ async fn organization_registration_http_round_trip_and_get_are_non_enumerable_bo
     assert_eq!(outcome.registration_generation(), 1);
     outcome.validate().unwrap();
 
-    let visible: OrganizationRegistrationOutcome = TestClient::get(format!(
+    let visible: OrganizationRegistrationResponseBody = TestClient::get(format!(
         "http://server/_arkret/root/identity/organization-registrations?organization_id={organization_id}"
     ))
     .add_header(
@@ -182,7 +182,7 @@ async fn organization_registration_http_round_trip_and_get_are_non_enumerable_bo
             .take_json()
             .await
             .unwrap();
-    let refreshed: OrganizationRegistrationOutcome =
+    let refreshed: OrganizationRegistrationResponseBody =
         TestClient::post("http://server/_arkret/root/identity/organization-registrations:refresh")
             .add_header("authorization", format!("Bearer {alice_token}"), true)
             .add_header("content-type", "application/json", true)
@@ -211,7 +211,7 @@ async fn organization_registration_http_round_trip_and_get_are_non_enumerable_bo
         OrganizationRegistrationStatus::Active
     );
 
-    let revoked: OrganizationRegistrationOutcome =
+    let revoked: OrganizationRegistrationResponseBody =
         TestClient::post("http://server/_arkret/root/identity/organization-registrations:revoke")
             .add_header("authorization", format!("Bearer {alice_token}"), true)
             .add_header("content-type", "application/json", true)

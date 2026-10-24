@@ -366,7 +366,7 @@ fn arkret_protocol_router(
                 .push(events::router())
                 // self/streams/scan (ak.self.committed_event.read.scan.v1).
                 .push(authority_commit::self_router())
-                // self/realms/{realm_id}/streams, self/current-results/exact,
+                // self/realms/{realm_id}/streams, self/current-state/exact,
                 // self/strands/watch/current, self/media-service-bindings/query.
                 .push(self_current_reads::router())
                 .push(call_admission::self_router())
@@ -751,8 +751,8 @@ mod tests {
                 TestClient::get(format!("http://server/_arkret/self/realms/{realm}/streams")),
             ),
             (
-                arkret_wire::ServiceOperationId::SELF_CURRENT_RESULTS_READ_EXACT_V1,
-                TestClient::post("http://server/_arkret/self/current-results/exact")
+                arkret_wire::ServiceOperationId::SELF_CURRENT_STATE_READ_EXACT_V1,
+                TestClient::post("http://server/_arkret/self/current-state/exact")
                     .json(&serde_json::json!({})),
             ),
             (

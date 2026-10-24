@@ -148,7 +148,7 @@ pub(crate) async fn embedded_webvh_log(depot: &mut Depot, req: &mut Request, res
 pub(crate) async fn identity_resolve(
     body: JsonBody<IdentityResolveRequestBody>,
     depot: &mut Depot,
-) -> JsonResult<IdentityResolveOutcome> {
+) -> JsonResult<IdentityResolveResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     json_ok(resolve_identity(state, body.into_inner()).await?)
 }
@@ -156,7 +156,7 @@ pub(crate) async fn identity_resolve(
 async fn resolve_identity(
     state: &AppState,
     body: IdentityResolveRequestBody,
-) -> Result<IdentityResolveOutcome, AppError> {
+) -> Result<IdentityResolveResponseBody, AppError> {
     let requires_webvh_evidence = body
         .requested_evidence_kinds
         .contains(&IdentityMethodEvidenceKind::DidWebvh);
@@ -185,7 +185,7 @@ async fn resolve_identity(
             body.did,
             record.did_document,
             key_log_head_hash(record.key_log_head)?,
-            Some(record.seq),
+            Some(record.sequence),
             method_evidence,
         ));
     }
@@ -239,7 +239,7 @@ fn require_requested_webvh_evidence(
 pub(crate) async fn identity_document(
     did: salvo::oapi::extract::QueryParam<String, true>,
     depot: &mut Depot,
-) -> JsonResult<IdentityDocumentViewOutcome> {
+) -> JsonResult<IdentityDocumentView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let did = did.into_inner();
     if validate_did(&did).is_err() {
@@ -254,11 +254,11 @@ pub(crate) async fn identity_document(
         },
     )
     .await?;
-    json_ok(IdentityDocumentViewOutcome(IdentityDocumentView {
+    json_ok(IdentityDocumentView {
         did_document: resolved.did_document,
-        seq: resolved.seq,
+        sequence: resolved.sequence,
         receipts: Vec::new(),
-    }))
+    })
 }
 
 fn key_log_head_hash(value: Option<String>) -> Result<Option<Hash>, AppError> {
@@ -277,18 +277,18 @@ fn identity_resolve_outcome(
     did: Did,
     document: Value,
     key_log_head: Option<Hash>,
-    seq: Option<u64>,
+    sequence: Option<u64>,
     method_evidence: Option<IdentityMethodEvidence>,
-) -> IdentityResolveOutcome {
+) -> IdentityResolveResponseBody {
     let mut did_document =
         serde_json::from_value::<BTreeMap<String, Value>>(document).unwrap_or_default();
     did_document
         .entry("id".to_owned())
         .or_insert_with(|| Value::String(did.as_str().to_owned()));
-    IdentityResolveOutcome {
+    IdentityResolveResponseBody {
         did_document,
         key_log_head,
-        seq,
+        sequence,
         method_evidence,
         receipts: Vec::new(),
     }
@@ -299,7 +299,7 @@ fn identity_resolve_outcome(
 pub(crate) async fn identity_log(
     did: salvo::oapi::extract::QueryParam<String, true>,
     depot: &mut Depot,
-) -> JsonResult<IdentityLogListOutcome> {
+) -> JsonResult<IdentityLogListResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let did = did.into_inner();
     if validate_did(&did).is_err() {
@@ -334,7 +334,7 @@ pub(crate) async fn identity_log(
             ));
         }
     };
-    json_ok(IdentityLogListOutcome {
+    json_ok(IdentityLogListResponseBody {
         did: Did::new(did).map_err(|error| AppError::internal(error.to_string()))?,
         method,
         native_history,
@@ -374,12 +374,12 @@ mod identity_log_tests {
 pub(crate) async fn identity_receipts(
     did: salvo::oapi::extract::QueryParam<String, true>,
     _depot: &mut Depot,
-) -> JsonResult<IdentityReceiptListOutcome> {
+) -> JsonResult<IdentityReceiptListResponseBody> {
     let did = did.into_inner();
     if validate_did(&did).is_err() {
         return Err(AppError::param_invalid("invalid did"));
     }
-    json_ok(IdentityReceiptListOutcome {
+    json_ok(IdentityReceiptListResponseBody {
         receipts: Vec::new(),
         threshold_met: None,
     })
@@ -396,7 +396,7 @@ pub(crate) async fn identity_receipts(
 pub(crate) async fn identity_submit_did_operation(
     depot: &mut Depot,
     body: JsonBody<DidOperationSubmitRequestBody>,
-) -> JsonResult<DidOperationSubmitOutcome> {
+) -> JsonResult<DidOperationSubmitResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     let did = body.did.as_str().to_owned();
@@ -416,15 +416,15 @@ pub(crate) async fn identity_submit_did_operation(
         ));
     }
     let next_seq = body
-        .seq
-        .ok_or_else(|| AppError::param_invalid("seq is required for did:webvh submission"))?;
+        .sequence
+        .ok_or_else(|| AppError::param_invalid("sequence is required for did:webvh submission"))?;
     if next_seq > i64::MAX as u64 {
         return Err(AppError::param_invalid(
-            "seq exceeds the supported persistence range",
+            "sequence exceeds the supported persistence range",
         ));
     }
     let expected_previous_head = body
-        .prev_event_digest
+        .previous_event_digest
         .as_ref()
         .map(|digest| digest.as_str().to_owned());
     let operation = Value::Object(body.operation.into_iter().collect());
@@ -437,11 +437,11 @@ pub(crate) async fn identity_submit_did_operation(
         .split_once('-')
         .and_then(|(sequence, hash)| (!hash.is_empty()).then_some(sequence))
         .and_then(|sequence| sequence.parse::<u64>().ok())
-        .ok_or_else(|| AppError::param_invalid("operation.versionId must be <seq>-<hash>"))?;
+        .ok_or_else(|| AppError::param_invalid("operation.versionId must be <sequence>-<hash>"))?;
     if operation_seq != next_seq {
         return Err(crate::app_error!(
             CasConflict,
-            "request seq must equal the native operation versionId sequence",
+            "request sequence must equal the native operation versionId sequence",
         ));
     }
     let document = operation
@@ -470,7 +470,7 @@ pub(crate) async fn identity_submit_did_operation(
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
     if let Some(existing_event) = events.iter().find(|event| {
-        event.seq == next_seq
+        event.sequence == next_seq
             || event.operation.get("versionId").and_then(Value::as_str) == Some(version_id.as_str())
     }) {
         if existing_event.event_digest == event_digest && existing_event.operation == operation {
@@ -489,14 +489,14 @@ pub(crate) async fn identity_submit_did_operation(
     }
     let expected_next_seq = match events.last() {
         None => 1,
-        Some(event) => event.seq.checked_add(1).ok_or_else(|| {
+        Some(event) => event.sequence.checked_add(1).ok_or_else(|| {
             crate::app_error!(CasConflict, "current DID operation sequence cannot advance",)
         })?,
     };
     if next_seq != expected_next_seq {
         return Err(crate::app_error!(
             CasConflict,
-            "DID operation seq must advance the current log head exactly once",
+            "DID operation sequence must advance the current log head exactly once",
         ));
     }
     let current_head = events.last().map(|event| event.event_digest.clone());
@@ -506,13 +506,13 @@ pub(crate) async fn identity_submit_did_operation(
     {
         return Err(crate::app_error!(
             CasConflict,
-            "prev_event_digest does not match the current log head",
+            "previous_event_digest does not match the current log head",
         ));
     }
     let stored_state_matches_log = match (existing.as_ref(), events.last()) {
         (None, None) => true,
         (Some(document), Some(head)) => {
-            document.seq == head.seq
+            document.sequence == head.sequence
                 && document.key_log_head.as_deref() == Some(head.event_digest.as_str())
         }
         _ => false,
@@ -543,7 +543,7 @@ pub(crate) async fn identity_submit_did_operation(
         did: did.clone(),
         did_document: document.clone(),
         key_log_head: Some(event_digest.clone()),
-        seq: next_seq,
+        sequence: next_seq,
         method_evidence: json!({
             "mode": "submitted_operation",
             "source": arkret_wire::ServiceOperationId::ROOT_IDENTITY_COMMAND_SUBMIT_DID_OPERATION_V1,
@@ -573,7 +573,7 @@ pub(crate) async fn identity_submit_did_operation(
             WebvhLogRecord {
                 event_digest: event_digest.clone(),
                 did: did.clone(),
-                seq: next_seq,
+                sequence: next_seq,
                 operation: operation.clone(),
                 created_at: submitted_at,
             },
@@ -627,7 +627,7 @@ pub(crate) async fn identity_submit_did_operation(
         "identity.submit_did_operation",
         json!({
             "did": did.clone(),
-            "seq": next_seq,
+            "sequence": next_seq,
             "accepted_entry_digest": event_digest.clone(),
         }),
         "accepted",
@@ -645,16 +645,16 @@ pub(crate) async fn identity_submit_did_operation(
 fn did_operation_submit_outcome(
     status: arkret_models_identity::identity::DidOperationSubmitStatus,
     did: Did,
-    seq: u64,
+    sequence: u64,
     version_id: &str,
     accepted_at: chrono::DateTime<chrono::Utc>,
-) -> JsonResult<DidOperationSubmitOutcome> {
+) -> JsonResult<DidOperationSubmitResponseBody> {
     let operation_ref = format!("{did}?versionId={version_id}");
-    json_ok(DidOperationSubmitOutcome {
+    json_ok(DidOperationSubmitResponseBody {
         status,
         did,
         accepted_at,
-        seq: Some(seq),
+        sequence: Some(sequence),
         operation_ref,
         receipts: Vec::new(),
     })

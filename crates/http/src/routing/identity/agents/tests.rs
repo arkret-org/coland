@@ -21,7 +21,7 @@ async fn save_service_pairing_controller(state: &AppState, account_id: arkret_wi
             localpart: format!("controller-{}", account_id.station_id),
             account_id,
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: chrono::Utc::now(),
         })
@@ -1487,7 +1487,7 @@ impl QualifiedAgentHistoryFixture {
             principal_endpoint: &endpoint,
             local_id: "qualified-agent",
             controller_principal_id: &controller,
-            version_time: "2026-07-01T00:00:00Z".parse().unwrap(),
+            version_created_at: "2026-07-01T00:00:00Z".parse().unwrap(),
             root_seed: &update_seeds[0],
             next_root_public_key_multibase: &public(1),
         })
@@ -1503,7 +1503,7 @@ impl QualifiedAgentHistoryFixture {
             did: did.as_str(),
             local_id: "qualified-agent",
             previous_entries: &raw,
-            version_time: "2026-07-01T00:00:01Z".parse().unwrap(),
+            version_created_at: "2026-07-01T00:00:01Z".parse().unwrap(),
             current_root_seed: &update_seeds[1],
             next_root_public_key_multibase: &public(2),
             controller_principal_id: &controller,
@@ -1533,7 +1533,7 @@ impl QualifiedAgentHistoryFixture {
                 state: &document,
                 current_update_seed: &self.update_seeds[index],
                 next_update_public_key_multibase: &next_public,
-                version_time: "2026-07-01T00:00:00Z"
+                version_created_at: "2026-07-01T00:00:00Z"
                     .parse::<chrono::DateTime<chrono::Utc>>()
                     .unwrap()
                     + chrono::Duration::seconds(index as i64),
@@ -1727,7 +1727,7 @@ pub(super) fn imported_scope_custody_fixture(
         did: fixture.did.as_str(),
         local_id: "qualified-agent",
         previous_entries: &fixture.raw,
-        version_time: "2026-07-01T00:00:01Z".parse().unwrap(),
+        version_created_at: "2026-07-01T00:00:01Z".parse().unwrap(),
         current_root_seed: &fixture.update_seeds[1],
         next_root_public_key_multibase: &qualified_agent_update_public(&fixture.update_seeds[2]),
         controller_principal_id: &fixture.controller,

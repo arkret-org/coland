@@ -61,8 +61,8 @@ fn input(
     scope: ConsentRequestScope,
 ) -> ConsentRequestQuarantineInput {
     let mut quota_constraints = NewSourceQuotaConstraints::default();
-    quota_constraints.default_new_sources_per_window = Some(1);
-    quota_constraints.max_new_sources_per_window = Some(1);
+    quota_constraints.default_source_count_per_window = Some(1);
+    quota_constraints.max_source_count_per_window = Some(1);
     ConsentRequestQuarantineInput {
         holder: holder.clone(),
         acceptor_service_id: holder.station_id.clone(),
@@ -101,7 +101,7 @@ async fn holder_fixture() -> (TestDatabase, PgPool, AccountId) {
             station_id: holder.station_id.clone(),
             localpart: String::new(),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: Utc::now(),
         })

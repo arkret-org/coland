@@ -16,7 +16,7 @@ use arkret_models_collaboration::events_payloads::agent::{
 };
 use arkret_models_identity::device_push_route::DevicePushRoutePayload;
 use arkret_wire::{
-    AccountId, ActorId, ActorPrivateEventSubmitOutcome, ActorPrivateEventSubmitRequestBody,
+    AccountId, ActorId, ActorPrivateEventSubmitRequestBody, ActorPrivateEventSubmitResponseBody,
     DidCoreId, Event, EventKind,
 };
 use coland_http::error::AppError;
@@ -39,7 +39,7 @@ use crate::{JsonResult, json_ok};
 pub(super) async fn submit_actor_private_event(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<ActorPrivateEventSubmitOutcome> {
+) -> JsonResult<ActorPrivateEventSubmitResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = AuthArgs.authenticated_session(state, req).await?;
     crate::routing::events::require_agent_session_scope(

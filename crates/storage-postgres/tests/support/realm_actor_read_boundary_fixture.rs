@@ -25,12 +25,12 @@ async fn realm_native_read_boundaries(
     event_id: &EventId,
 ) {
     use arkret_models_identity::{
-        RealmDeviceSignerKind, SignerKeyQueryOutcome, SignerKeyQuerySelector,
+        RealmDeviceSignerKind, SignerKeyResolution, SignerKeyQuerySelector,
         SignerKeysQueryRequestBody,
     };
     use arkret_wire::{
         CommitStreamRef, CommittedEventRef, CommittedEventView, ErrorCode, ReadableFloorReason,
-        StreamScanDirection, StreamScanRequest,
+        StreamScanDirection, StreamScanRequestBody,
     };
 
     assert!(matches!(circle.effective_scope(), ScopeRef::Circle { .. }));
@@ -138,19 +138,19 @@ async fn realm_native_read_boundaries(
         .await
         .unwrap();
     keys.validate_for_request(&query).unwrap();
-    let SignerKeyQueryOutcome::HistoricalRealmDeviceResolved {
+    let SignerKeyResolution::HistoricalRealmDeviceResolved {
         key, accepted_at, ..
-    } = &keys.results[0]
+    } = &keys.resolutions[0]
     else {
         panic!("own-scope exact historical native signer must resolve");
     };
     assert_eq!(*accepted_at, original.commit.committed_at);
     assert!(
-        matches!(&keys.results[1], SignerKeyQueryOutcome::Unavailable { .. }),
+        matches!(&keys.resolutions[1], SignerKeyResolution::Unavailable { .. }),
         "current selector has no independently authoritative target scope"
     );
     assert!(
-        matches!(&keys.results[2], SignerKeyQueryOutcome::Unavailable { .. }),
+        matches!(&keys.resolutions[2], SignerKeyResolution::Unavailable { .. }),
         "wrong Commit coordinate cannot resolve a live projection"
     );
     let expected = fixture
@@ -161,7 +161,7 @@ async fn realm_native_read_boundaries(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(keys.results[0], expected);
+    assert_eq!(keys.resolutions[0], expected);
     let fact = fixture
         .state
         .test_persistence()
@@ -179,7 +179,7 @@ async fn realm_native_read_boundaries(
     )
     .unwrap();
     let material = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
-        bytes: arkret_canonical::base64url_decode(key.public_key_b64u.as_str()).unwrap(),
+        bytes: arkret_canonical::base64url_decode(key.public_key_base64url.as_str()).unwrap(),
     };
     let signed = arkret_signatures::EventProofBuilder::new()
         .envelope_bytes(&original.event)
@@ -215,7 +215,7 @@ async fn realm_native_read_boundaries(
     );
 
     let stream = CommitStreamRef::from_scope(circle.effective_scope(), None).unwrap();
-    let mut request = StreamScanRequest {
+    let mut request = StreamScanRequestBody {
         realm_id: fixture.realm.clone(),
         stream_ref: stream.clone(),
         direction: StreamScanDirection::After(None),
@@ -318,7 +318,7 @@ async fn realm_native_read_boundaries(
             realm_id: fixture.realm.clone(),
         },
     ] {
-        let request = StreamScanRequest {
+        let request = StreamScanRequestBody {
             realm_id: fixture.realm.clone(),
             stream_ref: wrong_stream,
             direction: StreamScanDirection::After(None),
@@ -390,7 +390,7 @@ async fn realm_native_read_boundaries(
         401,
         ErrorCode::Unauthenticated,
     );
-    let request = StreamScanRequest {
+    let request = StreamScanRequestBody {
         realm_id: fixture.realm.clone(),
         stream_ref: stream,
         direction: StreamScanDirection::After(None),

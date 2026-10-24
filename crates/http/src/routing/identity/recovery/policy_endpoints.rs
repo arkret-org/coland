@@ -80,10 +80,10 @@ pub(super) fn recovery_policy_ref_from_summary(
         })
 }
 
-fn recovery_policy_publish_outcome(
+fn recovery_policy_publish_response_body(
     record: &RecoveryPolicyState,
-) -> Result<RecoveryPolicyPublishOutcome, AppError> {
-    Ok(RecoveryPolicyPublishOutcome {
+) -> Result<RecoveryPolicyPublishResponseBody, AppError> {
+    Ok(RecoveryPolicyPublishResponseBody {
         policy_id: PolicyId::new(record.policy_id.clone())
             .map_err(|error| stored_recovery_type_error("policy id", error))?,
         account_id: record.account_id.clone(),
@@ -106,7 +106,7 @@ pub(super) async fn recovery_policy_get(
     account_id: QueryParam<String, false>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<RecoveryPolicyActiveOutcome> {
+) -> JsonResult<RecoveryPolicyStatusView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let account = resolve_recovery_read_account(&aa, state, req, account_id.into_inner()).await?;
     let active = state
@@ -119,11 +119,11 @@ pub(super) async fn recovery_policy_get(
         .map(typed_recovery_policy_summary)
         .transpose()?;
     let recovery_policy_ref = active_policy.as_ref().map(recovery_policy_ref_from_summary);
-    json_ok(RecoveryPolicyActiveOutcome {
+    json_ok(RecoveryPolicyStatusView {
         account_id: Some(account),
         active_policy,
         recovery_policy_ref,
-        as_of: active.as_ref().map(|record| record.accepted_at),
+        evaluated_at: active.as_ref().map(|record| record.accepted_at),
         authority_stream_head: None,
     })
 }
@@ -166,10 +166,10 @@ pub(super) async fn recovery_policies_get(
 )]
 pub(super) async fn recovery_policy_put(
     aa: AuthArgs,
-    body: JsonBody<RecoveryPolicyPublishRequest>,
+    body: JsonBody<RecoveryPolicyPublishRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<RecoveryPolicyPublishOutcome> {
+) -> JsonResult<RecoveryPolicyPublishResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let request = body.into_inner();
@@ -238,7 +238,7 @@ pub(super) async fn recovery_policy_put(
         coland_storage::RecoveryPolicyPublicationOutcome::Committed(record)
         | coland_storage::RecoveryPolicyPublicationOutcome::Duplicate(record) => record,
     };
-    json_ok(recovery_policy_publish_outcome(&record)?)
+    json_ok(recovery_policy_publish_response_body(&record)?)
 }
 
 fn recovery_policy_publication_error(error: coland_services::ServiceError) -> AppError {

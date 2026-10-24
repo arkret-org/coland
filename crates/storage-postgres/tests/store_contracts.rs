@@ -29,7 +29,7 @@ use coland_storage::{
     AgentPrincipalRecord, AgentStore, AppletAuthoringPreviewRecord, AppletStore,
     AuthorityCommitStore, AuthorityCommitTransaction, CurrentRealmAuthority, MlsKeyPackageStore,
     NotificationStore, PeerKeyPackageClaimLedgerRecord, PeerKeyPackageClaimLedgerWriteResult,
-    RelationCurrentResultStore, SyncCursorStore,
+    RelationCurrentStateStore, SyncCursorStore,
 };
 use coland_storage_postgres::{
     PgAccountDataStore, PgAccountLocalpartStore, PgAccountStore, PgAgentStore, PgAppletStore,
@@ -37,7 +37,7 @@ use coland_storage_postgres::{
     PgEventCommitUnitOfWork, PgEventStore, PgFederationOutboxStore, PgIdempotencyStore,
     PgInviteNewSourceLedgerStore, PgInviteReceivePolicyStore, PgMimiConsentCorrelationStore,
     PgMlsKeyPackageStore, PgNotificationStore, PgOrganizationRegistrationStore, PgPool,
-    PgProjectionEventStore, PgRelationCurrentResultStore, PgSyncCursorStore,
+    PgProjectionEventStore, PgRelationCurrentStateStore, PgSyncCursorStore,
 };
 
 #[tokio::test]
@@ -70,8 +70,8 @@ async fn postgres_agent_participation_cas_mismatch_has_zero_effect_and_serialize
         serde_json::json!({
             "agent_id":agent,"scope_kind":"realm","scope_key":format!("realm:{realm}"),
             "realm_id":realm,"scope":{"kind":"realm","realm_id":realm},"version":version,
-            "reply_message":allowed,"reaction_add":allowed,"reaction_remove":allowed,
-            "accept_third_party_mention":allowed,"act_on_behalf":allowed
+            "message_creation_allowed":allowed,"reaction_addition_allowed":allowed,"reaction_removal_allowed":allowed,
+            "third_party_mention_delivery_allowed":allowed,"acting_on_behalf_allowed":allowed
         })
     };
     #[derive(diesel::QueryableByName)]
@@ -117,7 +117,7 @@ async fn postgres_agent_participation_cas_mismatch_has_zero_effect_and_serialize
     let rows = store.list_selections(&agent).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["version"], 2);
-    assert_eq!(rows[0]["reply_message"], false);
+    assert_eq!(rows[0]["message_creation_allowed"], false);
 }
 
 #[tokio::test]
@@ -141,7 +141,7 @@ async fn postgres_agent_participation_ceiling_reads_accepted_governance_and_refu
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["scope_key"], scope);
-    assert_eq!(rows[0]["reply_message"], true);
+    assert_eq!(rows[0]["message_creation_allowed"], true);
     let absent = format!(
         "strand:{}:{}",
         discussion.realm_id(),
@@ -617,12 +617,12 @@ fn backup_page_envelope(
     id: &str,
     actor: &arkret_wire::ActorId,
     series: &str,
-    seq: u64,
+    sequence: u64,
     supersedes: Option<&str>,
 ) -> serde_json::Value {
     let mut page = serde_json::json!({
         "backup_id":id, "actor_id":actor, "backup_kind":"secret_storage", "backup_version":"kb_1",
-        "created_at":"2026-09-09T00:00:00.000Z", "series_id":series, "series_seq":seq,
+        "created_at":"2026-09-09T00:00:00.000Z", "series_id":series, "series_sequence":sequence,
         "encryption":{"recipient_method":"secret_storage_key", "recipient_key_ref":"backup-key", "aead":{"name":"xchacha20_poly1305", "nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
         "domain_separation":{"subdomain":"secret_storage"},
         "contents":[{"item_kind":"recovery_key_share", "secret_id":"share"}],
@@ -630,7 +630,7 @@ fn backup_page_envelope(
         // A stored page names the device that signed it and the committed
         // authorization that device held, so the page is attributable after
         // the fact rather than anonymous bytes.
-        "auth_data":{
+        "signature_proof":{
             "device_id":"ak:device:01904100-0000-7000-8000-000000000001",
             "verification_method":"did:web:backup.example#device-signer",
             "signature_algorithm":"Ed25519",
@@ -665,10 +665,15 @@ async fn postgres_key_backup_pages_are_ordered_bounded_and_revisioned() {
     let series = format!("ak:backup_series:{}", uuid::Uuid::now_v7());
     let store = PgKeyBackupStore { pool: pool.clone() };
     let mut ids: Vec<String> = Vec::new();
-    for seq in 0..5 {
+    for sequence in 0..5 {
         let id = format!("ak:backup:{}", uuid::Uuid::now_v7());
-        let mut body =
-            backup_page_envelope(&id, &actor, &series, seq, ids.last().map(String::as_str));
+        let mut body = backup_page_envelope(
+            &id,
+            &actor,
+            &series,
+            sequence,
+            ids.last().map(String::as_str),
+        );
         body["ciphertext"] = "A".repeat(100_000).into();
         store.put(id.clone(), body).await.unwrap();
         ids.push(id);
@@ -684,8 +689,8 @@ async fn postgres_key_backup_pages_are_ordered_bounded_and_revisioned() {
     assert_eq!(first.revision, 5);
     assert_eq!(first.payloads.len(), 2);
     assert!(!first.byte_limited);
-    assert_eq!(first.payloads[0]["series_seq"], 0);
-    assert_eq!(first.payloads[1]["series_seq"], 1);
+    assert_eq!(first.payloads[0]["series_sequence"], 0);
+    assert_eq!(first.payloads[1]["series_sequence"], 1);
     assert!(
         first
             .payloads
@@ -695,15 +700,15 @@ async fn postgres_key_backup_pages_are_ordered_bounded_and_revisioned() {
     query.after = Some(KeyBackupListPosition {
         backup_kind: "secret_storage".into(),
         series_id: series,
-        series_seq: 1,
+        series_sequence: 1,
         backup_id: ids[1].clone(),
     });
     let reopened = PgKeyBackupStore { pool: pool.clone() };
     reopened.get(&ids[0]).await.unwrap();
     let second = reopened.list_page(&query).await.unwrap();
     assert_eq!(second.revision, first.revision);
-    assert_eq!(second.payloads[0]["series_seq"], 2);
-    assert_eq!(second.payloads[1]["series_seq"], 3);
+    assert_eq!(second.payloads[0]["series_sequence"], 2);
+    assert_eq!(second.payloads[1]["series_sequence"], 3);
     reopened.delete(&ids[4]).await.unwrap();
     assert_eq!(reopened.list_page(&query).await.unwrap().revision, 6);
     let mut replacement = reopened.get(&ids[3]).await.unwrap().unwrap();
@@ -740,7 +745,7 @@ struct LedgerCountRow {
 }
 
 #[derive(diesel::QueryableByName)]
-struct RelationCurrentResultContractRow {
+struct RelationCurrentStateContractRow {
     #[diesel(sql_type = diesel::sql_types::Text)]
     relation_id: String,
     #[diesel(sql_type = diesel::sql_types::Text)]
@@ -882,7 +887,7 @@ fn fixture_authority_signature(
         signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "3".repeat(64)))
             .expect("fixture authority signed digest"),
         created_at,
-        sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned())
+        signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned())
             .expect("fixture authority signature bytes"),
     }
 }
@@ -1096,9 +1101,9 @@ async fn postgres_oversized_realm_snapshot_rejects_the_commit_without_writes() {
     // transaction back.
     let mut conn = pool.get().await.unwrap();
     let grown = diesel::sql_query(
-        "UPDATE realm_bootstrap_current_results \
+        "UPDATE realm_bootstrap_current_states \
          SET value = jsonb_set(value, '{name}', to_jsonb(repeat('x', $2::int))) \
-         WHERE realm_id = $1 AND result_family = 'realm_profile'",
+         WHERE realm_id = $1 AND state_family = 'realm_profile'",
     )
     .bind::<Text, _>(realm_id.as_str())
     .bind::<BigInt, _>(8 * 1024 * 1024_i64)
@@ -1131,7 +1136,7 @@ async fn postgres_oversized_realm_snapshot_rejects_the_commit_without_writes() {
 }
 
 #[tokio::test]
-async fn postgres_relation_current_result_is_exact_commit_cas_and_atomic() {
+async fn postgres_relation_current_state_is_exact_commit_cas_and_atomic() {
     use coland_storage::{EventCommitUnitOfWork, PersistenceError};
     use diesel::sql_types::{Jsonb, Text};
     use diesel_async::RunQueryDsl;
@@ -1194,10 +1199,10 @@ async fn postgres_relation_current_result_is_exact_commit_cas_and_atomic() {
         let mut conn = pool.get().await.unwrap();
         diesel::sql_query(
             "SELECT relation_id,state,current_commit_id,current_stream_position,value \
-             FROM relation_current_results WHERE realm_id=$1",
+             FROM relation_current_states WHERE realm_id=$1",
         )
         .bind::<Text, _>(realm_id.as_str())
-        .get_result::<RelationCurrentResultContractRow>(&mut *conn)
+        .get_result::<RelationCurrentStateContractRow>(&mut *conn)
         .await
         .unwrap()
     };
@@ -1401,7 +1406,7 @@ async fn postgres_relation_current_result_is_exact_commit_cas_and_atomic() {
 
     // The restart reader must expose the same authoritative row written by
     // the RealmCommit transaction, including its exact CAS revision.
-    let stored = PgRelationCurrentResultStore { pool: pool.clone() }
+    let stored = PgRelationCurrentStateStore { pool: pool.clone() }
         .snapshot_all()
         .await
         .unwrap()
@@ -1428,7 +1433,7 @@ async fn postgres_relation_current_result_is_exact_commit_cas_and_atomic() {
     let healthy_value = row.value.clone();
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "UPDATE relation_current_results \
+        "UPDATE relation_current_states \
          SET value=jsonb_set(value,'{from_ref}',to_jsonb($2::text),false) WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -1461,7 +1466,7 @@ async fn postgres_relation_current_result_is_exact_commit_cas_and_atomic() {
     ));
     assert_event_and_commit_absent(&pool, rejected_event_id, rejected_commit_id).await;
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("UPDATE relation_current_results SET value=$2 WHERE realm_id=$1")
+    diesel::sql_query("UPDATE relation_current_states SET value=$2 WHERE realm_id=$1")
         .bind::<Text, _>(realm_id.as_str())
         .bind::<Jsonb, _>(&healthy_value)
         .execute(&mut *conn)
@@ -1473,7 +1478,7 @@ async fn postgres_relation_current_result_is_exact_commit_cas_and_atomic() {
     // active by a subsequent update. The failed admission also rolls back its
     // queued Event and RealmCommit.
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("UPDATE relation_current_results SET value=value-'state' WHERE realm_id=$1")
+    diesel::sql_query("UPDATE relation_current_states SET value=value-'state' WHERE realm_id=$1")
         .bind::<Text, _>(realm_id.as_str())
         .execute(&mut *conn)
         .await
@@ -1508,13 +1513,13 @@ async fn postgres_relation_current_result_is_exact_commit_cas_and_atomic() {
     assert_event_and_commit_absent(&pool, rejected_event_id, rejected_commit_id).await;
     assert!(load().await.value.get("state").is_none());
     assert!(matches!(
-        PgRelationCurrentResultStore { pool: pool.clone() }
+        PgRelationCurrentStateStore { pool: pool.clone() }
             .snapshot_all()
             .await,
         Err(PersistenceError::Database(_))
     ));
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("UPDATE relation_current_results SET value=$2 WHERE realm_id=$1")
+    diesel::sql_query("UPDATE relation_current_states SET value=$2 WHERE realm_id=$1")
         .bind::<Text, _>(realm_id.as_str())
         .bind::<Jsonb, _>(&healthy_value)
         .execute(&mut *conn)
@@ -2593,7 +2598,7 @@ async fn postgres_local_current_member_read_requires_matching_authority_and_comm
     .await
     .unwrap();
     diesel::sql_query(
-        "INSERT INTO member_state_current_results \
+        "INSERT INTO member_state_current_states \
          (realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) \
          VALUES ($1,$2,'join',$3,0,$4,$5)",
     )
@@ -2627,7 +2632,7 @@ async fn postgres_local_current_member_read_requires_matching_authority_and_comm
 
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "UPDATE member_state_current_results SET current_stream_position=1 \
+        "UPDATE member_state_current_states SET current_stream_position=1 \
          WHERE realm_id=$1 AND member_id=$2",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -2644,7 +2649,7 @@ async fn postgres_local_current_member_read_requires_matching_authority_and_comm
     );
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "UPDATE member_state_current_results SET current_stream_position=0, \
+        "UPDATE member_state_current_states SET current_stream_position=0, \
          membership='leave',value=$3 WHERE realm_id=$1 AND member_id=$2",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -3194,7 +3199,7 @@ async fn postgres_adapter_satisfies_invite_new_source_ledger_contract() {
             station_id: holder.station_id.clone(),
             localpart: String::new(),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: chrono::Utc::now(),
         })

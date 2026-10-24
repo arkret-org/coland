@@ -109,7 +109,7 @@ pub(crate) async fn commit_mimi_event(
     event: Event,
     guard: SelfProducerCommitGuard,
     idempotency: Option<coland_services::events::IdempotentResponse>,
-) -> ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
+) -> ServiceResult<arkret_wire::AuthoritySubmitResponseBody> {
     let payload: serde_json::Value = serde_json::to_value(&event.payload)
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
     let franking_replay_nonce = if event.kind == EventKind::SelfModerationReport {

@@ -33,7 +33,7 @@ pub(super) async fn set_agent_participation(
     body: JsonBody<ParticipationReplaceRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AgentParticipationOutcome> {
+) -> JsonResult<AgentParticipationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let agent_id = agent_id.into_inner();
@@ -63,11 +63,11 @@ pub(super) async fn set_agent_participation(
                 "realm_id": body.target_scope.realm_id().as_str(),
                 "scope": scope_value.clone(),
                 "version": accepted_version,
-                "reply_message": body.selection.reply_message,
-                "reaction_add": body.selection.reaction_add,
-                "reaction_remove": body.selection.reaction_remove,
-                "accept_third_party_mention": body.selection.accept_third_party_mention,
-                "act_on_behalf": body.selection.act_on_behalf,
+                "message_creation_allowed": body.selection.message_creation_allowed,
+                "reaction_addition_allowed": body.selection.reaction_addition_allowed,
+                "reaction_removal_allowed": body.selection.reaction_removal_allowed,
+                "third_party_mention_delivery_allowed": body.selection.third_party_mention_delivery_allowed,
+                "acting_on_behalf_allowed": body.selection.acting_on_behalf_allowed,
             }),
             body.expected_version,
         )
@@ -110,7 +110,7 @@ pub(super) async fn get_agent_participation(
     agent_id: PathParam<String>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AgentParticipationOutcome> {
+) -> JsonResult<AgentParticipationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let agent_id = agent_id.into_inner();
@@ -127,7 +127,7 @@ pub(super) async fn get_agent_participation(
 pub(crate) async fn load_agent_participation_outcome(
     state: &AppState,
     agent_id: &str,
-) -> Result<AgentParticipationOutcome, AppError> {
+) -> Result<AgentParticipationResponseBody, AppError> {
     let selections = state
         .agent_participations()
         .selections(agent_id)
@@ -156,11 +156,11 @@ pub(crate) async fn load_agent_participation_outcome(
             || row.get("scope_kind").and_then(Value::as_str)
                 != Some(participation_scope_kind(&scope))
             || [
-                "reply_message",
-                "reaction_add",
-                "reaction_remove",
-                "accept_third_party_mention",
-                "act_on_behalf",
+                "message_creation_allowed",
+                "reaction_addition_allowed",
+                "reaction_removal_allowed",
+                "third_party_mention_delivery_allowed",
+                "acting_on_behalf_allowed",
             ]
             .iter()
             .any(|key| row.get(*key).and_then(Value::as_bool).is_none())
@@ -173,12 +173,12 @@ pub(crate) async fn load_agent_participation_outcome(
             scope,
             selection,
             version,
-            next_replace_input: ParticipationNextReplaceInput {
+            next_replace_input: (version <= arkret_models_collaboration::governance::agent_participation::MAX_PARTICIPATION_REPLACE_EXPECTED_VERSION).then_some(ParticipationNextReplaceInput {
                 expected_version: version,
-            },
+            }),
         });
     }
-    Ok(AgentParticipationOutcome {
+    Ok(AgentParticipationResponseBody {
         agent_id: agent_id.to_owned(),
         agent_participation_entries: entries,
     })

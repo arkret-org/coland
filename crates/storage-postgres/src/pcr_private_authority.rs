@@ -54,7 +54,7 @@ pub(crate) async fn accepted_governance(
                     .ok_or_else(|| refused("Human ordered genesis unit is missing"))?,
             )
             .map_err(refused)?;
-        let outcome: arkret_models_collaboration::principal_operations::PcrGenesisAdmissionOutcome =
+        let outcome: arkret_models_collaboration::principal_operations::PcrGenesisAdmissionResponseBody =
             serde_json::from_value(
                 row.result_json
                     .ok_or_else(|| refused("Human accepted receipt is missing"))?,
@@ -197,7 +197,7 @@ pub(crate) async fn admit_governance_change(
         authority_event_ref: String,
     }
     let root = sql_query(
-        "SELECT authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1",
+        "SELECT authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1",
     )
     .bind::<Text, _>(event.realm_id.as_str())
     .get_result::<Root>(&mut *conn)
@@ -276,7 +276,7 @@ async fn lock_holder_mode(
     expected_acceptor: Option<&DidCoreId>,
     require_frozen: bool,
 ) -> PersistenceResult<PrivateAuthorityCut> {
-    let authority=sql_query("SELECT a.realm_id,a.generation,a.service_id FROM principal_resolutions p JOIN realm_authorities a ON a.realm_id=p.pcr_realm_id JOIN realm_authority_root_current_results root ON root.realm_id=a.realm_id WHERE p.principal_id=$1 AND p.station_id=$2 AND root.controller_actor_id=$3 AND (EXISTS(SELECT 1 FROM pcr_genesis_units g WHERE g.realm_id=p.pcr_realm_id AND g.principal_id=p.principal_id AND g.station_id=p.station_id) OR EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk JOIN agent_producer_signer_keys s ON s.commit_id=c.commit_id WHERE e.envelope->>'event_id'=p.genesis_event_id AND e.state='committed' AND e.kind='ak.realm.create' AND e.envelope->'actor_id'=$3 AND e.envelope->'payload'->'object'->>'purpose'='agent_control' AND c.realm_id=p.pcr_realm_id AND c.stream_position=0 AND c.governance_generation=0 AND s.self_admission_kind='agent_pcr_genesis')) FOR UPDATE OF a")
+    let authority=sql_query("SELECT a.realm_id,a.generation,a.service_id FROM principal_resolutions p JOIN realm_authorities a ON a.realm_id=p.pcr_realm_id JOIN realm_authority_root_current_states root ON root.realm_id=a.realm_id WHERE p.principal_id=$1 AND p.station_id=$2 AND root.controller_actor_id=$3 AND (EXISTS(SELECT 1 FROM pcr_genesis_units g WHERE g.realm_id=p.pcr_realm_id AND g.principal_id=p.principal_id AND g.station_id=p.station_id) OR EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk JOIN agent_producer_signer_keys s ON s.commit_id=c.commit_id WHERE e.envelope->>'event_id'=p.genesis_event_id AND e.state='committed' AND e.kind='ak.realm.create' AND e.envelope->'actor_id'=$3 AND e.envelope->'payload'->'object'->>'purpose'='agent_control' AND c.realm_id=p.pcr_realm_id AND c.stream_position=0 AND c.governance_generation=0 AND s.self_admission_kind='agent_pcr_genesis')) FOR UPDATE OF a")
         .bind::<Text,_>(holder.principal_id.as_str()).bind::<Text,_>(holder.station_id.as_str())
         .bind::<Jsonb,_>(serde_json::to_value(ActorId::account(holder.clone())).map_err(PersistenceError::database)?)
         .get_result::<AuthorityRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
@@ -414,7 +414,7 @@ async fn accepted_replica_governance(
         #[diesel(sql_type = Jsonb)]
         value: serde_json::Value,
     }
-    let row = sql_query("SELECT g.value FROM realm_bootstrap_current_results g WHERE g.realm_id=$1 AND g.result_family='realm_genesis' AND g.current_stream_position=0 AND EXISTS(SELECT 1 FROM replica_stream_anchors a WHERE a.realm_id=g.realm_id AND a.stream_key=$2 AND a.anchor_stream_position>=g.current_stream_position)")
+    let row = sql_query("SELECT g.value FROM realm_bootstrap_current_states g WHERE g.realm_id=$1 AND g.state_family='realm_genesis' AND g.current_stream_position=0 AND EXISTS(SELECT 1 FROM replica_stream_anchors a WHERE a.realm_id=g.realm_id AND a.stream_key=$2 AND a.anchor_stream_position>=g.current_stream_position)")
         .bind::<Text,_>(realm.as_str())
         .bind::<Text,_>(crate::authority_commit::stream_key(&arkret_wire::CommitStreamRef::Realm { realm_id: realm.clone() })?)
         .get_result::<Genesis>(&mut *conn).await.optional().map_err(PersistenceError::database)?

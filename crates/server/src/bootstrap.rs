@@ -20,8 +20,8 @@ use arkret_identity::service_identity::{
 use arkret_keystore::KeyStore;
 use arkret_models_identity::service_identity::{
     ACCOUNT_AUTHORITY_ASSERTION_METHOD_FRAGMENT, CanonicalServiceUrl,
-    ServiceRegistrationEnsureRequestBody, ServiceRegistrationKey, ServiceRegistrationOutcome,
-    ServiceRegistrationReceipt,
+    ServiceRegistrationEnsureRequestBody, ServiceRegistrationKey, ServiceRegistrationReceipt,
+    ServiceRegistrationResponseBody,
 };
 use arkret_wire::{PayloadProof, ServiceKind, project_did_to_core_id, proof_kind};
 use coland_http::config::{AppConfig, CONFIGURED_SIGNING_KEY_REF, SERVICE_IDENTITY_KEYSTORE_APP};
@@ -417,7 +417,7 @@ async fn accept_external_outcome(
     material: &ExternalIdentityMaterial,
     prior: Option<&StoredDidCoreIdentity>,
     account_authority_key: Option<&str>,
-    outcome: ServiceRegistrationOutcome,
+    outcome: ServiceRegistrationResponseBody,
 ) -> anyhow::Result<DidCoreIdentityState> {
     if let Some(prior) = prior
         && prior.identity.service_id != *outcome.service_id()
@@ -529,7 +529,7 @@ fn external_identity_material(
                 provider_endpoint: &provider.endpoint.as_url(),
                 registration_key,
                 also_known_as: &[],
-                version_time: chrono::Utc::now(),
+                version_created_at: chrono::Utc::now(),
                 did_key_fragment: Some("notary-key"),
             },
             &signing_seed,
@@ -566,7 +566,7 @@ fn stored_external_identity_from_outcome(
     provider: &DidCoreIdentityProviderRef,
     registration_key: &ServiceRegistrationKey,
     material: &ExternalIdentityMaterial,
-    outcome: ServiceRegistrationOutcome,
+    outcome: ServiceRegistrationResponseBody,
 ) -> anyhow::Result<StoredDidCoreIdentity> {
     outcome
         .validate_for(registration_key)
@@ -890,7 +890,7 @@ async fn restore_identity_bundle(
         .find(|receipt| receipt.version_id == inception.version_id)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("identity bundle has no inception receipt"))?;
-    let outcome = ServiceRegistrationOutcome {
+    let outcome = ServiceRegistrationResponseBody {
         did_document: inception.state.clone(),
         registration_receipt: inception_receipt,
         created: true,
@@ -904,7 +904,7 @@ async fn restore_identity_bundle(
         did: inception.state.id.to_string(),
         did_document: serde_json::to_value(&outcome.did_document)?,
         key_log_head: Some(event_digest.clone()),
-        seq: 1,
+        sequence: 1,
         method_evidence: json!({
             "mode": "service_identity_bundle_restore",
             "operation": arkret_wire::ServiceOperationId::ROOT_IDENTITY_SERVICE_REGISTRATION_COMMAND_ENSURE_V1,
@@ -919,7 +919,7 @@ async fn restore_identity_bundle(
     let event = WebvhLogRecord {
         event_digest,
         did: inception.state.id.to_string(),
-        seq: 1,
+        sequence: 1,
         operation: inception_value,
         created_at: now,
     };
@@ -937,7 +937,7 @@ async fn restore_identity_bundle(
 
     let mut previous_digest = event_digest_for_restore(&bundle.webvh_history_entries[0])?;
     for (index, operation) in bundle.webvh_history_entries.iter().enumerate().skip(1) {
-        let seq = u64::try_from(index + 1)
+        let sequence = u64::try_from(index + 1)
             .map_err(|_| anyhow::anyhow!("identity bundle WebVH sequence overflow"))?;
         let event_digest = event_digest_for_restore(operation)?;
         let version_id = operation
@@ -962,7 +962,7 @@ async fn restore_identity_bundle(
             did: entry_did.clone(),
             did_document: state,
             key_log_head: Some(event_digest.clone()),
-            seq,
+            sequence,
             method_evidence: json!({
                 "mode": "service_identity_bundle_restore",
                 "version_id": version_id,
@@ -974,7 +974,7 @@ async fn restore_identity_bundle(
         let event = WebvhLogRecord {
             event_digest: event_digest.clone(),
             did: entry_did.clone(),
-            seq,
+            sequence,
             operation: operation.clone(),
             created_at,
         };
@@ -1148,7 +1148,7 @@ fn stored_identity_from_outcome(
     config: &AppConfig,
     key_store: Option<&dyn KeyStore>,
     registration_key: ServiceRegistrationKey,
-    outcome: ServiceRegistrationOutcome,
+    outcome: ServiceRegistrationResponseBody,
 ) -> anyhow::Result<StoredDidCoreIdentity> {
     outcome
         .validate_for(&registration_key)
@@ -1481,16 +1481,16 @@ fn next_webvh_version_time(head: &Value) -> anyhow::Result<chrono::DateTime<chro
 }
 
 async fn wait_for_service_webvh_version_time(
-    version_time: chrono::DateTime<chrono::Utc>,
+    version_created_at: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<()> {
     const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
     let deadline = tokio::time::Instant::now() + MAX_WAIT;
     loop {
         let wall_now = chrono::Utc::now();
-        if wall_now >= version_time {
+        if wall_now >= version_created_at {
             return Ok(());
         }
-        let remaining = (version_time - wall_now)
+        let remaining = (version_created_at - wall_now)
             .to_std()
             .map_err(|error| anyhow::anyhow!("invalid service WebVH versionTime wait: {error}"))?;
         if remaining > MAX_WAIT || tokio::time::Instant::now() >= deadline {
@@ -1966,7 +1966,7 @@ async fn publish_service_document_successor_impl(
         .iter()
         .map(|entry| entry.operation.clone())
         .collect();
-    let version_time = next_webvh_version_time(&head.operation)?;
+    let version_created_at = next_webvh_version_time(&head.operation)?;
     let (log_entry, version_id, current_update_public_key_multibase) = if did == predecessor_did {
         let rotation = arkret_signatures::webvh::prepare_service_rotation(
             &arkret_signatures::webvh::ServiceRotationInput {
@@ -1975,7 +1975,7 @@ async fn publish_service_document_successor_impl(
                 state: &state,
                 current_update_seed: &signing_seed,
                 next_update_public_key_multibase: &following_public_key,
-                version_time,
+                version_created_at,
             },
         )?;
         (
@@ -1992,7 +1992,7 @@ async fn publish_service_document_successor_impl(
                 state: &state,
                 current_update_seed: &signing_seed,
                 next_update_public_key_multibase: &following_public_key,
-                version_time,
+                version_created_at,
             },
         )?;
         (
@@ -2020,7 +2020,7 @@ async fn publish_service_document_successor_impl(
 
     let event_digest = arkret_canonical::canonical_sha256(&log_entry)
         .map_err(|error| anyhow::anyhow!("Station DID successor digest failed: {error}"))?;
-    let seq = u64::try_from(entries.len())
+    let sequence = u64::try_from(entries.len())
         .ok()
         .and_then(|len| len.checked_add(1))
         .ok_or_else(|| anyhow::anyhow!("Station WebVH sequence overflow"))?;
@@ -2028,13 +2028,13 @@ async fn publish_service_document_successor_impl(
     // signing instant. A same-second successor may have a versionTime one
     // second ahead of the wall clock; wait before signing its receipt or
     // committing the new active signer, rather than backdating evidence.
-    wait_for_service_webvh_version_time(version_time).await?;
+    wait_for_service_webvh_version_time(version_created_at).await?;
     let now = chrono::Utc::now();
     let document = WebvhDocumentRecord {
         did: did.to_string(),
         did_document: state.clone(),
         key_log_head: Some(event_digest.clone()),
-        seq,
+        sequence,
         method_evidence: json!({
             "mode": "self_hosted_service_rotation",
             "reason": "service_document_update",
@@ -2088,7 +2088,7 @@ async fn publish_service_document_successor_impl(
     let event = WebvhLogRecord {
         event_digest,
         did: did.to_string(),
-        seq,
+        sequence,
         operation: log_entry.clone(),
         created_at: now,
     };
@@ -2151,7 +2151,7 @@ async fn mint_local_service_identity(
                 provider_endpoint: &provider_endpoint,
                 registration_key: &registration_key,
                 also_known_as: &[],
-                version_time: chrono::Utc::now(),
+                version_created_at: chrono::Utc::now(),
                 did_key_fragment: Some("notary-key"),
             },
             &service_signing_seed,
@@ -2190,7 +2190,7 @@ async fn mint_local_service_identity(
         &service_signing_seed,
         issued_at,
     )?;
-    let outcome = ServiceRegistrationOutcome {
+    let outcome = ServiceRegistrationResponseBody {
         did_document: request.inception_operation.state.clone(),
         registration_receipt: receipt,
         created: true,
@@ -2203,7 +2203,7 @@ async fn mint_local_service_identity(
         did: service_did.to_string(),
         did_document: serde_json::to_value(&outcome.did_document)?,
         key_log_head: Some(event_digest.clone()),
-        seq: 1,
+        sequence: 1,
         method_evidence: json!({
             "mode": "service_registration_provider",
             "operation": arkret_wire::ServiceOperationId::ROOT_IDENTITY_SERVICE_REGISTRATION_COMMAND_ENSURE_V1,
@@ -2219,7 +2219,7 @@ async fn mint_local_service_identity(
     let event = WebvhLogRecord {
         event_digest,
         did: service_did.to_string(),
-        seq: 1,
+        sequence: 1,
         operation: serde_json::to_value(&request.inception_operation)?,
         created_at: issued_at,
     };
@@ -2680,7 +2680,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap()
-                .seq,
+                .sequence,
             1
         );
 
@@ -2705,7 +2705,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(document.seq, 2);
+        assert_eq!(document.sequence, 2);
         assert_eq!(
             next.identity.version_id,
             history[1].operation["versionId"].as_str().unwrap()
@@ -2721,7 +2721,7 @@ mod tests {
                 coland_storage::WebvhLogRecord {
                     event_digest: history[1].event_digest.clone(),
                     did: history[1].did.clone(),
-                    seq: history[1].seq,
+                    sequence: history[1].sequence,
                     operation: history[1].operation.clone(),
                     created_at: history[1].created_at,
                 },
@@ -3438,7 +3438,7 @@ mod tests {
                 current_did: &old_did,
                 target_did: &new_did,
                 previous_entries: &logs,
-                version_time: next_webvh_version_time(&logs[0]).unwrap(),
+                version_created_at: next_webvh_version_time(&logs[0]).unwrap(),
                 current_update_seed: &seed,
                 next_update_public_key_multibase: &seed_public_multibase(&following_seed),
                 state: &state,

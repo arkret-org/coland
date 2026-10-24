@@ -302,7 +302,7 @@ fn policy_declares_audience_quota(policy: &Value, audience_policy: Option<&Value
         .any(|entry| {
             let quota = entry.get("quota").unwrap_or(entry);
             quota
-                .get("max_operations")
+                .get("max_operation_count")
                 .and_then(Value::as_u64)
                 .is_some_and(|value| value > 0)
                 && quota

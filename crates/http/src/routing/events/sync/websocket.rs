@@ -37,13 +37,13 @@ const MAX_USED_CHANNEL_IDS: usize = 4096;
 fn limits() -> WebSocketConnectionLimits {
     WebSocketConnectionLimits {
         max_frame_bytes: MAX_FRAME,
-        max_channels: MAX_CHANNELS,
+        max_channel_count: MAX_CHANNELS,
         max_connection_pending_bytes: u64::from(MAX_FRAME)
             * u64::from(QUEUE_FRAMES)
             * u64::from(MAX_CHANNELS),
         max_channel_pending_bytes: u64::from(MAX_FRAME) * u64::from(QUEUE_FRAMES),
-        max_connection_pending_frames: QUEUE_FRAMES * MAX_CHANNELS,
-        max_channel_pending_frames: QUEUE_FRAMES,
+        max_connection_pending_frame_count: QUEUE_FRAMES * MAX_CHANNELS,
+        max_channel_pending_frame_count: QUEUE_FRAMES,
         heartbeat_interval_ms: HEARTBEAT_MS,
     }
 }
@@ -367,11 +367,11 @@ async fn current_read_inputs(
 ) -> Result<(), ErrorCode> {
     let result = match parameters {
         WebSocketOpenParameters::Account(p) => {
-            let body = SyncRequestBody {
+            let body = AccountSubscribeParameters {
                 after: p.after.clone(),
                 catchup: p.catchup,
                 filter: p.filter.clone(),
-                realm_list: p.realm_list.clone(),
+                realm_list_parameters: p.realm_list_parameters.clone(),
                 replace_filter: p.replace_filter,
             };
             super::subscribe::account_read_inputs_current(
@@ -620,11 +620,11 @@ async fn response_for(
                 ));
             }
             let request = Request::new();
-            let body = SyncRequestBody {
+            let body = AccountSubscribeParameters {
                 after: p.after.clone(),
                 catchup: p.catchup,
                 filter: p.filter.clone(),
-                realm_list: p.realm_list.clone(),
+                realm_list_parameters: p.realm_list_parameters.clone(),
                 replace_filter: p.replace_filter,
             };
             super::subscribe::account_response(
@@ -966,7 +966,7 @@ async fn connection_inner(
                     return WebSocketCloseCode::GoingAway;
                 }
                 if drain_deadline.is_none() && started.elapsed().as_secs()>=state.config().websocket_max_lifetime_seconds {
-                    let frame=WebSocketServerFrame::ConnectionControl {frame_scope:WebSocketConnectionScope::Connection,payload:WebSocketConnectionDrainPayload {kind:WebSocketDrainMarker::Drain,reconnect_after_ms:250,deadline:Utc::now()+chrono::Duration::seconds(1),reason:None}};
+                    let frame=WebSocketServerFrame::ConnectionControl {frame_scope:WebSocketConnectionScope::Connection,payload:WebSocketConnectionDrainPayload {kind:WebSocketDrainMarker::Drain,reconnect_after_ms:250,close_at:Utc::now()+chrono::Duration::seconds(1),reason:None}};
                     if let Err(code)=send(socket,&mut outgoing,&frame).await {return code;}
                     drain_deadline=Some(tokio::time::Instant::now()+Duration::from_secs(1));
                 }
@@ -1077,7 +1077,7 @@ async fn connection_inner(
                         lease_renewed=tokio::time::Instant::now();
                         if let Some(tx)=credential_updates.as_ref(){watch::Sender::<Credential>::send_replace(tx,next.clone());}
                         else {let (tx,_)=watch::channel(next.clone());credential_updates=Some(tx);}
-                        if let Err(code)=send(socket,&mut outgoing,&WebSocketServerFrame::Welcome {connection_id:id.clone(),limits:limits(),auth_expires_at:next.session.expires_at}).await{return code;}
+                        if let Err(code)=send(socket,&mut outgoing,&WebSocketServerFrame::Welcome {connection_id:id.clone(),limits:limits(),authentication_expires_at:next.session.expires_at}).await{return code;}
                         credential=Some(next);challenge=None;
                     }
                     WebSocketClientIngress::Frame(WebSocketClientFrame::Open {channel_id,operation_id,parameters})=>{

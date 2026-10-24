@@ -47,7 +47,7 @@ pub trait AppletStore: Send + Sync {
         _command: arkret_models_integration::AppletConfigurationCommand,
         _current: &crate::ManagementReviewCurrent,
         _ingress: &crate::AppletConfigurationIngress,
-    ) -> PersistenceResult<arkret_models_integration::AppletConfigurationOutcome> {
+    ) -> PersistenceResult<arkret_models_integration::AppletConfigurationResponseBody> {
         Err(super::PersistenceError::Internal(
             "configuration ledger unavailable".into(),
         ))
@@ -56,10 +56,10 @@ pub trait AppletStore: Send + Sync {
         &self,
         _governor: &arkret_wire::DidCoreId,
         _intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
-        _source: &arkret_models_integration::AppletConfigurationExecutionOutcome,
+        _source: &arkret_models_integration::AppletConfigurationExecutionResponseBody,
         _producer: &crate::AppletEventProducerGuard,
         _current: &crate::ManagementReviewCurrent,
-    ) -> PersistenceResult<arkret_models_integration::AppletConfigurationOutcome> {
+    ) -> PersistenceResult<arkret_models_integration::AppletConfigurationResponseBody> {
         Err(super::PersistenceError::Internal(
             "configuration ledger unavailable".into(),
         ))
@@ -71,8 +71,8 @@ pub trait AppletStore: Send + Sync {
         _station: &arkret_wire::DidCoreId,
         _request: &arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialRequestBody,
     ) -> PersistenceResult<
-        arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialOutcome,
-    > {
+        arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialResponseBody,
+    >{
         Err(super::PersistenceError::Conflict(
             "failed_precondition: Applet authority material is unavailable".into(),
         ))
@@ -367,7 +367,7 @@ pub type AppletResolutionAttester = std::sync::Arc<
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AppletConfigurationIngress {
     pub requester_account_id: arkret_wire::AccountId,
-    pub request: arkret_models_integration::AppletConfigurationRequest,
+    pub request: arkret_models_integration::AppletConfigurationRequestBody,
     pub source: AppletConfigurationIngressSource,
 }
 

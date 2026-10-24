@@ -2,8 +2,9 @@
 //! All writers share the Realm authority lock with candidate admission.
 use arkret_models_integration::{
     AppletConfigurationAdmissionStatus as Admission, AppletConfigurationCommand as Command,
-    AppletConfigurationExecutionIntent as Intent, AppletConfigurationExecutionOutcome as Source,
-    AppletConfigurationExecutionStatus as SourceStatus, AppletConfigurationOutcome as Outcome,
+    AppletConfigurationExecutionIntent as Intent,
+    AppletConfigurationExecutionResponseBody as Source,
+    AppletConfigurationExecutionStatus as SourceStatus, AppletConfigurationResponseBody as Outcome,
 };
 use arkret_wire::{CapabilityActionId, DidCoreId, Event, EventId, WireResourceSelector};
 use coland_storage::{AppletEventProducerGuard, PersistenceError, PersistenceResult};
@@ -144,7 +145,7 @@ async fn read(conn: &mut AsyncPgConnection, intent: &Intent) -> PersistenceResul
                 "duplicate_conflict: configuration original intent differs",
             ));
         }
-        if let Some(source) = &outcome.source_outcome {
+        if let Some(source) = &outcome.source_response_body {
             source.validate_for(intent).map_err(invalid)?;
         }
         Ok(outcome)
@@ -212,7 +213,7 @@ async fn write(
     crate::realm_management_archive::require_unfrozen(conn, intent.effective_scope.realm_id())
         .await?;
     let candidate = outcome
-        .source_outcome
+        .source_response_body
         .as_ref()
         .and_then(|source| source.create_event.as_ref())
         .map(|event| serde_json::to_value(event).map_err(invalid))
@@ -306,7 +307,7 @@ pub(crate) async fn command(
     let mut outcome = existing.unwrap_or(Outcome {
         request_id: intent.request_id.clone(),
         intent_digest: intent.digest().map_err(invalid)?,
-        source_outcome: None,
+        source_response_body: None,
         admission_status: Admission::NotStarted,
         review_request_id: None,
     });
@@ -382,7 +383,7 @@ pub(crate) async fn source(
     let mut outcome = read(conn, intent)
         .await?
         .ok_or_else(|| invalid("configuration result has no frozen administrator intent"))?;
-    if let Some(original) = &outcome.source_outcome
+    if let Some(original) = &outcome.source_response_body
         && arkret_canonical::canonical_json_bytes(original).map_err(invalid)?
             != arkret_canonical::canonical_json_bytes(source).map_err(invalid)?
         && original.status != SourceStatus::Pending
@@ -412,7 +413,7 @@ pub(crate) async fn source(
             ));
         }
     }
-    outcome.source_outcome = Some(source.clone());
+    outcome.source_response_body = Some(source.clone());
     if matches!(
         outcome.admission_status,
         Admission::NotStarted | Admission::Pending

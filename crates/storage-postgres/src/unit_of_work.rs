@@ -24,7 +24,7 @@ use crate::agent_draft_pending_intents::{
 use crate::authority_commit::{
     queue_event_in_connection, realm_state_snapshot_material_in_connection,
 };
-use crate::capability_grant_current_results::commit_realm_authority_root_current_result_in_connection;
+use crate::capability_grant_current_states::commit_realm_authority_root_current_state_in_connection;
 use crate::device_revocations::{
     commit_revocation_in_connection, ensure_gate_allowed_in_transaction,
 };
@@ -108,7 +108,7 @@ async fn enforce_realm_snapshot_capacity_in_connection(
             signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "00".repeat(32)))
                 .map_err(|error| PersistenceError::Internal(error.to_string()))?,
             created_at: arkret_canonical::normalize_timestamp_canonical(created_at),
-            sig: arkret_wire::Base64UrlString::new("A".repeat(86))
+            signature: arkret_wire::Base64UrlString::new("A".repeat(86))
                 .map_err(|error| PersistenceError::Internal(error.to_string()))?,
         },
     };
@@ -141,7 +141,7 @@ mod snapshot_capacity_tests {
                 stream_position: 0,
                 commit_id: arkret_wire::RealmCommitId::from_digest([3; 32]),
             }],
-            current_state_entries: vec![arkret_wire::TypedCurrentRow::Value {
+            current_state_entries: vec![arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::RealmProfile,
                 source_stream_ref: stream_ref.clone(),
                 revision: arkret_wire::CurrentRevision {
@@ -168,7 +168,7 @@ mod snapshot_capacity_tests {
                 signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "00".repeat(32)))
                     .unwrap(),
                 created_at,
-                sig: arkret_wire::Base64UrlString::new("A".repeat(86)).unwrap(),
+                signature: arkret_wire::Base64UrlString::new("A".repeat(86)).unwrap(),
             },
         }
     }
@@ -213,7 +213,7 @@ struct AppletAdmissionRecordRow {
 }
 
 #[derive(diesel::QueryableByName)]
-struct RelationCurrentResultRow {
+struct RelationCurrentStateRow {
     #[diesel(sql_type = Text)]
     relation_id: String,
     #[diesel(sql_type = Text)]
@@ -252,7 +252,7 @@ struct ParentMembershipMemberRow {
     membership: String,
 }
 
-enum RelationCurrentResultMutation {
+enum RelationCurrentStateMutation {
     Create(arkret_models_collaboration::events_payloads::RelationCreatePayload),
     Update(arkret_models_collaboration::events_payloads::RelationUpdatePayload),
     Tombstone(arkret_models_collaboration::events_payloads::RelationTombstonePayload),
@@ -492,7 +492,7 @@ async fn locked_member_state(
     )
     .await?;
     sql_query(
-        "SELECT membership FROM member_state_current_results \
+        "SELECT membership FROM member_state_current_states \
          WHERE realm_id=$1 AND member_id=$2 FOR UPDATE",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -522,7 +522,7 @@ async fn validate_parent_membership_dependencies(
         )
         .await?;
         let row = sql_query(
-            "SELECT status FROM realm_link_current_results \
+            "SELECT status FROM realm_link_current_states \
              WHERE realm_id=$1 AND target_realm_id=$2 AND link_kind='join_gate_from' FOR UPDATE",
         )
         .bind::<Text, _>(target.as_str())
@@ -557,7 +557,7 @@ async fn validate_parent_membership_dependencies(
 
 /// Lock and revalidate the complete co-governed `parent_membership` cut before
 /// the canonical Event is queued. Any error therefore rolls back with zero
-/// Event, RealmCommit, or current-result writes.
+/// Event, RealmCommit, or current-state writes.
 async fn prepare_parent_membership_transaction(
     conn: &mut AsyncPgConnection,
     request: &EventCommitRequest,
@@ -615,7 +615,7 @@ async fn prepare_parent_membership_transaction(
     // advisory + row lock and digest comparison make a concurrent policy
     // change a fail-closed retry rather than a mixed transaction cut.
     let candidate =
-        sql_query("SELECT value FROM realm_policy_bundle_current_results WHERE realm_id=$1")
+        sql_query("SELECT value FROM realm_policy_bundle_current_states WHERE realm_id=$1")
             .bind::<Text, _>(event.realm_id.as_str())
             .get_result::<ParentMembershipPolicyRow>(&mut *conn)
             .await
@@ -688,7 +688,7 @@ async fn prepare_parent_membership_transaction(
     )
     .await?;
     let current = sql_query(
-        "SELECT value FROM realm_policy_bundle_current_results WHERE realm_id=$1 FOR UPDATE",
+        "SELECT value FROM realm_policy_bundle_current_states WHERE realm_id=$1 FOR UPDATE",
     )
     .bind::<Text, _>(event.realm_id.as_str())
     .get_result::<ParentMembershipPolicyRow>(&mut *conn)
@@ -719,9 +719,9 @@ async fn prepare_parent_membership_transaction(
     .await
 }
 
-fn relation_current_result_mutation(
+fn relation_current_state_mutation(
     event: &arkret_wire::Event,
-) -> PersistenceResult<Option<RelationCurrentResultMutation>> {
+) -> PersistenceResult<Option<RelationCurrentStateMutation>> {
     let payload = serde_json::to_value(&event.payload).map_err(|error| {
         PersistenceError::Internal(format!("Relation payload serialization failed: {error}"))
     })?;
@@ -732,15 +732,15 @@ fn relation_current_result_mutation(
     };
     match event.kind {
         arkret_wire::EventKind::RelationCreate => serde_json::from_value(payload)
-            .map(RelationCurrentResultMutation::Create)
+            .map(RelationCurrentStateMutation::Create)
             .map(Some)
             .map_err(invalid),
         arkret_wire::EventKind::RelationUpdate => serde_json::from_value(payload)
-            .map(RelationCurrentResultMutation::Update)
+            .map(RelationCurrentStateMutation::Update)
             .map(Some)
             .map_err(invalid),
         arkret_wire::EventKind::RelationTombstone => serde_json::from_value(payload)
-            .map(RelationCurrentResultMutation::Tombstone)
+            .map(RelationCurrentStateMutation::Tombstone)
             .map(Some)
             .map_err(invalid),
         _ => Ok(None),
@@ -764,7 +764,7 @@ fn relation_domain_matches_value(
 }
 
 fn relation_revision_matches(
-    row: &RelationCurrentResultRow,
+    row: &RelationCurrentStateRow,
     expected: &arkret_wire::CurrentRevision,
 ) -> bool {
     row.current_commit_id == expected.commit_id.as_str()
@@ -802,34 +802,34 @@ fn relation_current_value_for_create(
 /// verdict, source stream, Circle author and the scope/endpoint rules of
 /// `relation.md` sections 3.2 and 4.4. A verified replica fold passes `false`
 /// and only replays the primary-domain CAS the authority already decided.
-pub(crate) async fn commit_relation_current_result_in_connection(
+pub(crate) async fn commit_relation_current_state_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     authorize: bool,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
-    let Some(mutation) = relation_current_result_mutation(event)? else {
+    let Some(mutation) = relation_current_state_mutation(event)? else {
         return Ok(());
     };
     if authorize {
-        crate::relation_current_results::authorize_relation_write_in_connection(
+        crate::relation_current_states::authorize_relation_write_in_connection(
             conn, event, commit, prepared,
         )
         .await?;
     }
-    let created = matches!(mutation, RelationCurrentResultMutation::Create(_));
+    let created = matches!(mutation, RelationCurrentStateMutation::Create(_));
     let lifecycle_time = std::cmp::max(event.created_at, commit.committed_at);
     let (domain, expected_revision) = match &mutation {
-        RelationCurrentResultMutation::Create(payload) => (
+        RelationCurrentStateMutation::Create(payload) => (
             payload.primary_conflict_domain.clone(),
             payload.expected_revision.clone(),
         ),
-        RelationCurrentResultMutation::Update(payload) => (
+        RelationCurrentStateMutation::Update(payload) => (
             payload.primary_conflict_domain.clone(),
             Some(payload.expected_revision.clone()),
         ),
-        RelationCurrentResultMutation::Tombstone(payload) => (
+        RelationCurrentStateMutation::Tombstone(payload) => (
             payload.primary_conflict_domain.clone(),
             Some(payload.expected_revision.clone()),
         ),
@@ -853,17 +853,17 @@ pub(crate) async fn commit_relation_current_result_in_connection(
 
     let current = sql_query(
         "SELECT relation_id,state,current_commit_id,current_stream_position,value \
-         FROM relation_current_results WHERE realm_id=$1 AND domain_key=$2 FOR UPDATE",
+         FROM relation_current_states WHERE realm_id=$1 AND domain_key=$2 FOR UPDATE",
     )
     .bind::<Text, _>(event.realm_id.as_str())
     .bind::<Text, _>(&domain_key)
-    .get_result::<RelationCurrentResultRow>(&mut *conn)
+    .get_result::<RelationCurrentStateRow>(&mut *conn)
     .await
     .optional()
     .map_err(PersistenceError::database)?;
 
     let value = match (mutation, current.as_ref()) {
-        (RelationCurrentResultMutation::Create(payload), None) => {
+        (RelationCurrentStateMutation::Create(payload), None) => {
             if expected_revision.is_some() {
                 return Err(conflict(
                     "failed_precondition: Relation current revision is absent",
@@ -871,7 +871,7 @@ pub(crate) async fn commit_relation_current_result_in_connection(
             }
             relation_current_value_for_create(event, payload, lifecycle_time)
         }
-        (RelationCurrentResultMutation::Create(payload), Some(row)) => {
+        (RelationCurrentStateMutation::Create(payload), Some(row)) => {
             if row.state != "tombstoned"
                 || expected_revision
                     .as_ref()
@@ -902,7 +902,7 @@ pub(crate) async fn commit_relation_current_result_in_connection(
             }
             relation_current_value_for_create(event, payload, lifecycle_time)
         }
-        (RelationCurrentResultMutation::Update(payload), Some(row)) => {
+        (RelationCurrentStateMutation::Update(payload), Some(row)) => {
             if row.state != "active"
                 || row.relation_id != payload.relation_id.as_str()
                 || !relation_revision_matches(row, &payload.expected_revision)
@@ -960,7 +960,7 @@ pub(crate) async fn commit_relation_current_result_in_connection(
                 ))
             })?
         }
-        (RelationCurrentResultMutation::Tombstone(payload), Some(row)) => {
+        (RelationCurrentStateMutation::Tombstone(payload), Some(row)) => {
             if row.state != "active"
                 || row.relation_id != payload.relation_id.as_str()
                 || !relation_revision_matches(row, &payload.expected_revision)
@@ -994,8 +994,8 @@ pub(crate) async fn commit_relation_current_result_in_connection(
             current.updated_at = Some(lifecycle_time);
             current
         }
-        (RelationCurrentResultMutation::Update(_), None)
-        | (RelationCurrentResultMutation::Tombstone(_), None) => {
+        (RelationCurrentStateMutation::Update(_), None)
+        | (RelationCurrentStateMutation::Tombstone(_), None) => {
             return Err(conflict(
                 "failed_precondition: Relation current value does not exist",
             ));
@@ -1015,7 +1015,7 @@ pub(crate) async fn commit_relation_current_result_in_connection(
             ),
             _ => None,
         };
-        crate::relation_current_results::require_relation_value_scope_in_connection(
+        crate::relation_current_states::require_relation_value_scope_in_connection(
             conn,
             event,
             before.as_ref(),
@@ -1045,7 +1045,7 @@ pub(crate) async fn commit_relation_current_result_in_connection(
         PersistenceError::Internal("Relation stream position exceeds PostgreSQL BIGINT".to_owned())
     })?;
     sql_query(
-        "INSERT INTO relation_current_results \
+        "INSERT INTO relation_current_states \
          (realm_id,domain_key,domain,relation_id,state,current_commit_id,current_stream_position,value,updated_at) \
          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) \
          ON CONFLICT(realm_id,domain_key) DO UPDATE SET \
@@ -1068,15 +1068,13 @@ pub(crate) async fn commit_relation_current_result_in_connection(
     Ok(())
 }
 
-pub(crate) async fn commit_parent_membership_current_results(
+pub(crate) async fn commit_parent_membership_current_states(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
 ) -> PersistenceResult<()> {
     let stream_position = i64::try_from(commit.stream_position).map_err(|_| {
-        PersistenceError::Internal(
-            "current-result stream position exceeds PostgreSQL BIGINT".into(),
-        )
+        PersistenceError::Internal("current-state stream position exceeds PostgreSQL BIGINT".into())
     })?;
     let updated_at = std::cmp::max(event.created_at, commit.committed_at);
     let payload_value = serde_json::to_value(&event.payload).map_err(|error| {
@@ -1095,9 +1093,14 @@ pub(crate) async fn commit_parent_membership_current_results(
             bundle
                 .validate()
                 .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-            let previous = sql_query("SELECT value FROM realm_policy_bundle_current_results WHERE realm_id=$1 FOR UPDATE")
-                .bind::<Text,_>(event.realm_id.as_str()).get_result::<ParentMembershipPolicyRow>(&mut *conn)
-                .await.optional().map_err(PersistenceError::database)?;
+            let previous = sql_query(
+                "SELECT value FROM realm_policy_bundle_current_states WHERE realm_id=$1 FOR UPDATE",
+            )
+            .bind::<Text, _>(event.realm_id.as_str())
+            .get_result::<ParentMembershipPolicyRow>(&mut *conn)
+            .await
+            .optional()
+            .map_err(PersistenceError::database)?;
             let previous = previous.map(|row| serde_json::from_value::<arkret_models_collaboration::events_payloads::realm::RealmPolicyBundlePayload>(row.value))
                 .transpose().map_err(PersistenceError::database)?.map_or(0, |bundle| bundle.policy_revision);
             let expected = previous.checked_add(1).ok_or_else(|| {
@@ -1115,7 +1118,7 @@ pub(crate) async fn commit_parent_membership_current_results(
                     "policy_revision_gap: policy revision must advance by one".to_owned(),
                 ));
             }
-            let join_rule = sql_query("SELECT value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='realm_join_rule' FOR SHARE")
+            let join_rule = sql_query("SELECT value FROM realm_bootstrap_current_states WHERE realm_id=$1 AND state_family='realm_join_rule' FOR SHARE")
                 .bind::<Text,_>(event.realm_id.as_str()).get_result::<ParentMembershipPolicyRow>(&mut *conn)
                 .await.optional().map_err(PersistenceError::database)?;
             if let Some(policy) = payload_value.get("join_policy") {
@@ -1135,7 +1138,7 @@ pub(crate) async fn commit_parent_membership_current_results(
                         .to_owned(),
                 ));
             }
-            let genesis = sql_query("SELECT value FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='realm_genesis' FOR SHARE")
+            let genesis = sql_query("SELECT value FROM realm_bootstrap_current_states WHERE realm_id=$1 AND state_family='realm_genesis' FOR SHARE")
                 .bind::<Text,_>(event.realm_id.as_str()).get_result::<ParentMembershipPolicyRow>(&mut *conn)
                 .await.optional().map_err(PersistenceError::database)?;
             if genesis
@@ -1155,7 +1158,7 @@ pub(crate) async fn commit_parent_membership_current_results(
                 ));
             }
             sql_query(
-                "INSERT INTO realm_policy_bundle_current_results \
+                "INSERT INTO realm_policy_bundle_current_states \
                  (realm_id,current_commit_id,current_stream_position,value,updated_at) \
                  VALUES($1,$2,$3,$4,$5) ON CONFLICT(realm_id) DO UPDATE SET \
                  current_commit_id=EXCLUDED.current_commit_id, \
@@ -1190,7 +1193,7 @@ pub(crate) async fn commit_parent_membership_current_results(
             )
             .await?;
             sql_query(
-                "INSERT INTO realm_link_current_results \
+                "INSERT INTO realm_link_current_states \
                  (realm_id,target_realm_id,link_kind,status,current_commit_id,current_stream_position,value,updated_at) \
                  VALUES($1,$2,$3,$4,$5,$6,$7,$8) \
                  ON CONFLICT(realm_id,target_realm_id,link_kind) DO UPDATE SET \
@@ -1216,7 +1219,7 @@ pub(crate) async fn commit_parent_membership_current_results(
             };
             locked_member_state(conn, &event.realm_id, &member_id).await?;
             sql_query(
-                "INSERT INTO member_state_current_results \
+                "INSERT INTO member_state_current_states \
                  (realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) \
                  VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(realm_id,member_id) DO UPDATE SET \
                  membership=EXCLUDED.membership,current_commit_id=EXCLUDED.current_commit_id, \
@@ -1858,7 +1861,7 @@ async fn cascade_membership_prestate(
     }
 
     let rows = sql_query(
-        "SELECT e.envelope FROM member_state_current_results m \
+        "SELECT e.envelope FROM member_state_current_states m \
          JOIN realm_commits c ON c.commit_id = m.current_commit_id \
          JOIN canonical_events e ON e.pk = c.event_pk \
          WHERE m.realm_id = $1 AND m.membership = 'join' \
@@ -2882,7 +2885,7 @@ async fn commit_prepared_event_inner(
             .into());
         }
         crate::boxed_future(|| {
-            crate::agent_interaction_current_results::admit_in_connection(
+            crate::agent_interaction_current_states::admit_in_connection(
                 conn,
                 event,
                 &request.authority_commit.commit,
@@ -2904,7 +2907,7 @@ async fn commit_prepared_event_inner(
     .await?;
 
     crate::boxed_future(|| {
-        crate::agent_interaction_current_results::require_shared_producer_in_connection(
+        crate::agent_interaction_current_states::require_shared_producer_in_connection(
             conn,
             event,
             &request.authority_commit.commit,
@@ -2931,7 +2934,7 @@ async fn commit_prepared_event_inner(
 
     crate::boxed_future(|| prepare_parent_membership_transaction(conn, &request)).await?;
     crate::boxed_future(|| {
-        crate::sidecar_current_results::admit_in_connection(
+        crate::sidecar_current_states::admit_in_connection(
             conn,
             event,
             &request.authority_commit.commit,
@@ -2946,7 +2949,7 @@ async fn commit_prepared_event_inner(
         .await?;
 
     let policy_approvals = if let Some(target) = crate::boxed_future(|| {
-        crate::policy_current_results::admit_in_connection(
+        crate::policy_current_states::admit_in_connection(
             conn,
             event,
             &request.authority_commit.commit,
@@ -3073,7 +3076,7 @@ async fn commit_prepared_event_inner(
     crate::approval_admission::validate_candidate(event, commit, event_approvals)?;
     if matches!(authority_write, AuthorityCommitWriteOutcome::Committed) {
         crate::boxed_future(|| {
-            crate::circle_current_results::admit_with_audit_in_connection(
+            crate::circle_current_states::admit_with_audit_in_connection(
                 conn,
                 event,
                 &request.authority_commit.commit,
@@ -3159,7 +3162,7 @@ async fn commit_prepared_event_inner(
             .await?;
         }
 
-        crate::policy_current_results::commit_in_connection(conn, event, commit).await?;
+        crate::policy_current_states::commit_in_connection(conn, event, commit).await?;
         crate::agent_confirmation_admission::commit_confirmation(conn, event, commit).await?;
         crate::approval_admission::consume_and_audit(
             conn,
@@ -3202,7 +3205,7 @@ async fn commit_prepared_event_inner(
             .await?;
         }
 
-        Box::pin(commit_event_current_results_in_connection(
+        Box::pin(commit_event_current_states_in_connection(
             conn,
             &request,
             realm_organization_proof,
@@ -3319,14 +3322,14 @@ async fn commit_prepared_event_inner(
         for welcome in &request.authority_commit.welcomes {
             if welcome.applet_device_scope_guard.is_some() {
                 crate::boxed_future(|| {
-                    crate::mls_group_current_results::require_native_welcome_target(conn, welcome)
+                    crate::mls_group_current_states::require_native_welcome_target(conn, welcome)
                 })
                 .await?;
             }
         }
         fresh_claim_deadlines.extend(
             crate::boxed_future(|| {
-                crate::mls_group_current_results::fresh_claim_deadlines_in_connection(
+                crate::mls_group_current_states::fresh_claim_deadlines_in_connection(
                     conn,
                     &request.authority_commit,
                 )
@@ -3339,7 +3342,7 @@ async fn commit_prepared_event_inner(
 }
 
 // This phase stays inside the caller's transaction and preserves writer order.
-fn commit_event_current_results_in_connection<'a>(
+fn commit_event_current_states_in_connection<'a>(
     conn: &'a mut AsyncPgConnection,
     request: &'a EventCommitRequest,
     realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
@@ -3348,7 +3351,7 @@ fn commit_event_current_results_in_connection<'a>(
     audit_unit: Option<&'a coland_storage::RegisteredAuditCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
-    Box::pin(commit_event_current_results_inner(
+    Box::pin(commit_event_current_states_inner(
         conn,
         request,
         realm_organization_proof,
@@ -3358,7 +3361,7 @@ fn commit_event_current_results_in_connection<'a>(
     ))
 }
 
-async fn commit_event_current_results_inner(
+async fn commit_event_current_states_inner(
     conn: &mut AsyncPgConnection,
     request: &EventCommitRequest,
     realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
@@ -3366,7 +3369,7 @@ async fn commit_event_current_results_inner(
     event_approvals: Option<&coland_storage::EventApprovalCommit>,
     audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
 ) -> Result<(), PgTransactionError> {
-    Box::pin(commit_scope_current_results(
+    Box::pin(commit_scope_current_states(
         conn,
         request,
         realm_organization_proof,
@@ -3376,14 +3379,9 @@ async fn commit_event_current_results_inner(
     ))
     .await?;
 
-    Box::pin(commit_object_current_results(
-        conn,
-        request,
-        event_approvals,
-    ))
-    .await?;
+    Box::pin(commit_object_current_states(conn, request, event_approvals)).await?;
 
-    Box::pin(commit_content_current_results(
+    Box::pin(commit_content_current_states(
         conn,
         request,
         event_approvals,
@@ -3392,7 +3390,7 @@ async fn commit_event_current_results_inner(
     Ok(())
 }
 
-fn commit_scope_current_results<'a>(
+fn commit_scope_current_states<'a>(
     conn: &'a mut AsyncPgConnection,
     request: &'a EventCommitRequest,
     realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
@@ -3401,7 +3399,7 @@ fn commit_scope_current_results<'a>(
     prepared: Option<&'a coland_storage::EventApprovalCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
-    Box::pin(commit_scope_current_results_inner(
+    Box::pin(commit_scope_current_states_inner(
         conn,
         request,
         realm_organization_proof,
@@ -3411,7 +3409,7 @@ fn commit_scope_current_results<'a>(
     ))
 }
 
-async fn commit_scope_current_results_inner(
+async fn commit_scope_current_states_inner(
     conn: &mut AsyncPgConnection,
     request: &EventCommitRequest,
     realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
@@ -3422,25 +3420,25 @@ async fn commit_scope_current_results_inner(
     let event = &request.authority_commit.event;
     let commit = &request.authority_commit.commit;
 
-    Box::pin(commit_realm_authority_root_current_result_in_connection(
+    Box::pin(commit_realm_authority_root_current_state_in_connection(
         conn, event, commit,
     ))
     .await?;
 
-    Box::pin(crate::realm_bootstrap_current_results::commit_realm_join_rule_authority_current_result_in_connection(conn, event, commit, prepared)).await?;
+    Box::pin(crate::realm_bootstrap_current_states::commit_realm_join_rule_authority_current_state_in_connection(conn, event, commit, prepared)).await?;
 
-    Box::pin(crate::realm_bootstrap_current_results::commit_realm_history_access_authority_current_result_in_connection(conn, event, commit, prepared)).await?;
-    Box::pin(crate::realm_bootstrap_current_results::commit_plaintext_services_authority_current_result_in_connection(conn, event, commit, prepared)).await?;
+    Box::pin(crate::realm_bootstrap_current_states::commit_realm_history_access_authority_current_state_in_connection(conn, event, commit, prepared)).await?;
+    Box::pin(crate::realm_bootstrap_current_states::commit_plaintext_services_authority_current_state_in_connection(conn, event, commit, prepared)).await?;
 
-    Box::pin(crate::realm_bootstrap_current_results::commit_realm_profile_authority_current_result_in_connection(
+    Box::pin(crate::realm_bootstrap_current_states::commit_realm_profile_authority_current_state_in_connection(
         conn, event, commit,
      prepared)).await?;
 
-    Box::pin(crate::scope_read_receipt_policy_current_results::commit_read_receipt_policy_authority_current_result_in_connection(conn, event, commit, prepared)).await?;
-    Box::pin(crate::realm_bootstrap_current_results::commit_preview_policy_authority_current_result_in_connection(conn, event, commit, prepared)).await?;
+    Box::pin(crate::scope_read_receipt_policy_current_states::commit_read_receipt_policy_authority_current_state_in_connection(conn, event, commit, prepared)).await?;
+    Box::pin(crate::realm_bootstrap_current_states::commit_preview_policy_authority_current_state_in_connection(conn, event, commit, prepared)).await?;
 
     Box::pin(
-        crate::organization_moderation_gate::commit_realm_organization_current_result_in_connection(
+        crate::organization_moderation_gate::commit_realm_organization_current_state_in_connection(
             conn,
             event,
             commit,
@@ -3450,7 +3448,7 @@ async fn commit_scope_current_results_inner(
     )
     .await?;
 
-    Box::pin(crate::call_state_current_results::commit_in_connection(
+    Box::pin(crate::call_state_current_states::commit_in_connection(
         conn,
         event,
         commit,
@@ -3459,22 +3457,22 @@ async fn commit_scope_current_results_inner(
     ))
     .await?;
 
-    Box::pin(crate::circle_current_results::commit_in_connection(
+    Box::pin(crate::circle_current_states::commit_in_connection(
         conn, event, commit,
     ))
     .await?;
 
     Box::pin(
-        crate::strand_watch_current_results::commit_with_audit_in_connection(
+        crate::strand_watch_current_states::commit_with_audit_in_connection(
             conn, event, commit, audit_unit, prepared,
         ),
     )
     .await?;
 
-    Box::pin(crate::agent_interaction_current_results::project_in_connection(conn, event, commit))
+    Box::pin(crate::agent_interaction_current_states::project_in_connection(conn, event, commit))
         .await?;
 
-    Box::pin(crate::sidecar_current_results::commit_in_connection(
+    Box::pin(crate::sidecar_current_states::commit_in_connection(
         conn, event, commit,
     ))
     .await?;
@@ -3484,12 +3482,12 @@ async fn commit_scope_current_results_inner(
     ))
     .await?;
 
-    Box::pin(commit_relation_current_result_in_connection(
+    Box::pin(commit_relation_current_state_in_connection(
         conn, event, commit, true, prepared,
     ))
     .await?;
 
-    Box::pin(crate::capability_grant_current_results::commit_qualified_capability_grant_current_result_in_connection(
+    Box::pin(crate::capability_grant_current_states::commit_qualified_capability_grant_current_state_in_connection(
         conn, event, commit, request.agent_grant_scope_evidence.as_ref(),
      prepared))
     .await?;
@@ -3497,7 +3495,7 @@ async fn commit_scope_current_results_inner(
     // edge against the member row before that row is written.
 
     Box::pin(
-        crate::invite_current_results::commit_invite_current_results_in_connection(
+        crate::invite_current_states::commit_invite_current_states_in_connection(
             conn,
             event,
             commit,
@@ -3517,20 +3515,20 @@ async fn commit_scope_current_results_inner(
     Ok(())
 }
 
-fn commit_object_current_results<'a>(
+fn commit_object_current_states<'a>(
     conn: &'a mut AsyncPgConnection,
     request: &'a EventCommitRequest,
     event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
-    Box::pin(commit_object_current_results_inner(
+    Box::pin(commit_object_current_states_inner(
         conn,
         request,
         event_approvals,
     ))
 }
 
-async fn commit_object_current_results_inner(
+async fn commit_object_current_states_inner(
     conn: &mut AsyncPgConnection,
     request: &EventCommitRequest,
     event_approvals: Option<&coland_storage::EventApprovalCommit>,
@@ -3544,10 +3542,7 @@ async fn commit_object_current_results_inner(
         event_approvals,
     ))
     .await?;
-    Box::pin(commit_parent_membership_current_results(
-        conn, event, commit,
-    ))
-    .await?;
+    Box::pin(commit_parent_membership_current_states(conn, event, commit)).await?;
     Box::pin(commit_schema_definition_in_connection(
         conn,
         event,
@@ -3557,13 +3552,13 @@ async fn commit_object_current_results_inner(
     ))
     .await?;
     Box::pin(
-        crate::mls_group_current_results::advance_key_access_revision_in_connection(
+        crate::mls_group_current_states::advance_key_access_revision_in_connection(
             conn, event, commit,
         ),
     )
     .await?;
     Box::pin(
-        crate::mls_group_current_results::commit_mls_group_current_result_in_connection(
+        crate::mls_group_current_states::commit_mls_group_current_state_in_connection(
             conn,
             &request.authority_commit,
             event_approvals,
@@ -3571,13 +3566,13 @@ async fn commit_object_current_results_inner(
     )
     .await?;
     Box::pin(
-        crate::direct_conversation_admission::commit_binding_current_result_in_connection(
+        crate::direct_conversation_admission::commit_binding_current_state_in_connection(
             conn, event, commit,
         ),
     )
     .await?;
     Box::pin(
-        crate::authority_commit::commit_mimi_room_binding_current_result_in_connection(
+        crate::authority_commit::commit_mimi_room_binding_current_state_in_connection(
             conn,
             event,
             commit,
@@ -3586,7 +3581,7 @@ async fn commit_object_current_results_inner(
     )
     .await?;
     Box::pin(
-        crate::strand_current_results::commit_strand_create_current_result_in_connection(
+        crate::strand_current_states::commit_strand_create_current_state_in_connection(
             conn,
             event,
             commit,
@@ -3595,7 +3590,7 @@ async fn commit_object_current_results_inner(
     )
     .await?;
     Box::pin(
-        crate::strand_current_results::commit_strand_update_authority_current_result_in_connection(
+        crate::strand_current_states::commit_strand_update_authority_current_state_in_connection(
             conn,
             event,
             commit,
@@ -3603,11 +3598,11 @@ async fn commit_object_current_results_inner(
         ),
     )
     .await?;
-    Box::pin(crate::strand_current_results::commit_strand_tracks_update_authority_current_result_in_connection(
+    Box::pin(crate::strand_current_states::commit_strand_tracks_update_authority_current_state_in_connection(
         conn, event, commit,
      event_approvals)).await?;
     Box::pin(
-        crate::strand_current_results::commit_strand_transition_in_connection(
+        crate::strand_current_states::commit_strand_transition_in_connection(
             conn,
             event,
             commit,
@@ -3617,7 +3612,7 @@ async fn commit_object_current_results_inner(
     )
     .await?;
     Box::pin(
-        crate::strand_position_current_results::commit_authority_position_in_connection(
+        crate::strand_position_current_states::commit_authority_position_in_connection(
             conn,
             event,
             commit,
@@ -3626,7 +3621,7 @@ async fn commit_object_current_results_inner(
     )
     .await?;
     Box::pin(
-        crate::space_current_results::commit_space_create_current_results_in_connection(
+        crate::space_current_states::commit_space_create_current_states_in_connection(
             conn,
             event,
             commit,
@@ -3635,7 +3630,7 @@ async fn commit_object_current_results_inner(
     )
     .await?;
     Box::pin(
-        crate::space_current_results::commit_space_transition_in_connection(
+        crate::space_current_states::commit_space_transition_in_connection(
             conn,
             event,
             commit,
@@ -3645,7 +3640,7 @@ async fn commit_object_current_results_inner(
     )
     .await?;
     Box::pin(
-        crate::space_current_results::commit_space_update_in_connection(
+        crate::space_current_states::commit_space_update_in_connection(
             conn,
             event,
             commit,
@@ -3655,7 +3650,7 @@ async fn commit_object_current_results_inner(
     )
     .await?;
     Box::pin(
-        crate::space_current_results::commit_space_parent_in_connection(
+        crate::space_current_states::commit_space_parent_in_connection(
             conn,
             event,
             commit,
@@ -3664,7 +3659,7 @@ async fn commit_object_current_results_inner(
     )
     .await?;
     Box::pin(
-        crate::rsvp_current_results::commit_rsvp_current_result_in_connection(
+        crate::rsvp_current_states::commit_rsvp_current_state_in_connection(
             conn,
             event,
             commit,
@@ -3672,38 +3667,40 @@ async fn commit_object_current_results_inner(
         ),
     )
     .await?;
-    Box::pin(crate::realm_default_strand_current_results::commit_realm_default_strand_current_result_in_connection(
+    Box::pin(crate::realm_default_strand_current_states::commit_realm_default_strand_current_state_in_connection(
         conn, event, commit,
     )).await?;
     Ok(())
 }
 
-fn commit_content_current_results<'a>(
+fn commit_content_current_states<'a>(
     conn: &'a mut AsyncPgConnection,
     request: &'a EventCommitRequest,
     event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
 {
-    Box::pin(commit_content_current_results_inner(
+    Box::pin(commit_content_current_states_inner(
         conn,
         request,
         event_approvals,
     ))
 }
 
-async fn commit_content_current_results_inner(
+async fn commit_content_current_states_inner(
     conn: &mut AsyncPgConnection,
     request: &EventCommitRequest,
     event_approvals: Option<&coland_storage::EventApprovalCommit>,
 ) -> Result<(), PgTransactionError> {
     let event = &request.authority_commit.event;
     let commit = &request.authority_commit.commit;
-    Box::pin(crate::mls_group_current_results::require_mls_send_gate_in_connection(conn, event))
+    Box::pin(crate::mls_group_current_states::require_mls_send_gate_in_connection(conn, event))
         .await?;
-    Box::pin(crate::member_identity_current_results::commit_in_connection(conn, event, commit))
-        .await?;
+    Box::pin(crate::member_identity_current_states::commit_in_connection(
+        conn, event, commit,
+    ))
+    .await?;
     Box::pin(
-        crate::message_revision_current_results::commit_message_create_current_result_in_connection(
+        crate::message_revision_current_states::commit_message_create_current_state_in_connection(
             conn,
             event,
             commit,
@@ -3712,7 +3709,7 @@ async fn commit_content_current_results_inner(
     )
     .await?;
     Box::pin(
-        crate::message_revision_current_results::commit_message_revise_current_result_in_connection(
+        crate::message_revision_current_states::commit_message_revise_current_state_in_connection(
             conn,
             event,
             commit,
@@ -3721,7 +3718,7 @@ async fn commit_content_current_results_inner(
     )
     .await?;
     Box::pin(
-        crate::object_redaction_current_results::commit_message_redact_current_result_in_connection(
+        crate::object_redaction_current_states::commit_message_redact_current_state_in_connection(
             conn,
             event,
             commit,
@@ -3730,7 +3727,7 @@ async fn commit_content_current_results_inner(
     )
     .await?;
     Box::pin(
-        crate::message_reactions_current_results::commit_reaction_current_result_in_connection(
+        crate::message_reactions_current_states::commit_reaction_current_state_in_connection(
             conn,
             event,
             commit,
@@ -3739,7 +3736,7 @@ async fn commit_content_current_results_inner(
         ),
     )
     .await?;
-    Box::pin(crate::pin_current_results::commit_pin_in_connection(
+    Box::pin(crate::pin_current_states::commit_pin_in_connection(
         conn,
         event,
         commit,
@@ -3747,17 +3744,23 @@ async fn commit_content_current_results_inner(
         event_approvals,
     ))
     .await?;
-    Box::pin(crate::moderation_report_current_results::commit_moderation_report_current_result_in_connection(
-        conn, event, commit,
-    )).await?;
-    Box::pin(crate::moderation_state_current_results::commit_moderation_state_current_result_in_connection(
-        conn, event, commit, event_approvals,
-    )).await?;
-    Box::pin(crate::moderation_franking_proof_current_results::commit_franking_current_result_in_connection(
+    Box::pin(crate::moderation_report_current_states::commit_moderation_report_current_state_in_connection(
         conn, event, commit,
     )).await?;
     Box::pin(
-        crate::moderation_franking_proof_current_results::enqueue_franking_in_connection(
+        crate::moderation_state_current_states::commit_moderation_state_current_state_in_connection(
+            conn,
+            event,
+            commit,
+            event_approvals,
+        ),
+    )
+    .await?;
+    Box::pin(crate::moderation_franking_proof_current_states::commit_franking_current_state_in_connection(
+        conn, event, commit,
+    )).await?;
+    Box::pin(
+        crate::moderation_franking_proof_current_states::enqueue_franking_in_connection(
             conn,
             event,
             &request.authority_commit.expected_authority.service_id,
@@ -3905,7 +3908,7 @@ async fn commit_batch_in_connection(
             .await?,
         );
     }
-    crate::mls_group_current_results::require_live_claim_deadlines(conn, &fresh_claim_deadlines)
+    crate::mls_group_current_states::require_live_claim_deadlines(conn, &fresh_claim_deadlines)
         .await?;
     Ok(outcome)
 }
@@ -4116,7 +4119,7 @@ mod agent_draft_consumption_tests {
     ) -> Result<(), PersistenceError> {
         let bytes =
             arkret_canonical::canonical_json_bytes(event).map_err(PersistenceError::database)?;
-        let outcome = arkret_wire::ActorPrivateEventSubmitOutcome::AgentDraftPropose {
+        let outcome = arkret_wire::ActorPrivateEventSubmitResponseBody::AgentDraftPropose {
             accepted_event_id: event.event_id.clone(),
         };
         sql_query("INSERT INTO actor_private_events(id,event_id,actor_id,kind,canonical_event_digest,envelope,outcome,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
@@ -4469,7 +4472,7 @@ pub(crate) async fn commit_schema_definition_in_connection(
         .await?;
     }
     let document = serde_json::Value::Object(payload.value.clone());
-    let previous = sql_query("SELECT value FROM schema_definition_current_results WHERE realm_id=$1 AND schema_id=$2 FOR UPDATE")
+    let previous = sql_query("SELECT value FROM schema_definition_current_states WHERE realm_id=$1 AND schema_id=$2 FOR UPDATE")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(subject)
         .get_result::<ParentMembershipPolicyRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     if let Some(previous) = previous {
@@ -4479,7 +4482,7 @@ pub(crate) async fn commit_schema_definition_in_connection(
         return Ok(());
     }
     let position = i64::try_from(commit.stream_position).map_err(PersistenceError::database)?;
-    sql_query("INSERT INTO schema_definition_current_results (realm_id,schema_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6)")
+    sql_query("INSERT INTO schema_definition_current_states (realm_id,schema_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6)")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(subject)
         .bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(position)
         .bind::<Jsonb,_>(&document).bind::<Timestamptz,_>(commit.committed_at)

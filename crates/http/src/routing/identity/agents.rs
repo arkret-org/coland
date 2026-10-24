@@ -31,26 +31,26 @@ use std::collections::BTreeSet;
 use arkret_identifiers::Did;
 use arkret_identifiers::{BlobRef, DidCoreId, EventId, Hash, RealmId};
 use arkret_models_collaboration::agent_operations::{
-    AgentDeactivateRequestBody, AgentKeyPairActivationState, AgentKeyPairOutcome,
-    AgentKeyPairRequestBody, AgentLifecycleOutcome, AgentLifecycleState, AgentList,
+    AgentDeactivateRequestBody, AgentKeyPairActivationState, AgentKeyPairRequestBody,
+    AgentKeyPairResponseBody, AgentLifecycleState, AgentOperationStatusView, AgentPage,
     AgentPairingBootstrap, AgentPairingResolveRequestBody, AgentPauseRequestBody, AgentPresence,
     AgentPresenceState, AgentProjection, AgentProvisionAwaitingControllerEvent,
     AgentProvisionAwaitingControllerEventStatus, AgentProvisionAwaitingDidBinding,
     AgentProvisionAwaitingDidBindingStatus, AgentProvisionAwaitingPcrGenesis,
     AgentProvisionAwaitingPcrGenesisStatus, AgentProvisionComplete, AgentProvisionCompleteStatus,
-    AgentProvisionOutcome, AgentProvisionPreparePhase, AgentProvisionRequestBody, AgentReadiness,
-    AgentReadinessBlocker, AgentReadinessState, AgentRenewPairingOutcome,
-    AgentRenewPairingRequestBody, AgentResumeRequestBody, AgentRuntimeApprovalOutcome,
-    AgentRuntimeApprovalStatusOutcome, AgentRuntimeApprovalStatusRequestBody, AgentRuntimeState,
-    AgentView, KeyState,
+    AgentProvisionPreparePhase, AgentProvisionRequestBody, AgentProvisionResponseBody,
+    AgentReadiness, AgentReadinessBlocker, AgentReadinessState, AgentRenewPairingRequestBody,
+    AgentRenewPairingResponseBody, AgentResumeRequestBody, AgentRuntimeApprovalResponseBody,
+    AgentRuntimeApprovalStatusRequestBody, AgentRuntimeApprovalStatusResponseBody,
+    AgentRuntimeState, AgentView, KeyState,
 };
 use arkret_models_collaboration::agent_scope::AgentRuntimeApprovalRequestBody;
 use arkret_models_collaboration::events_payloads::agent::AgentKeyScope;
 use arkret_models_collaboration::governance::agent_artifacts::{GrantSnapshot, PublicKey};
 use arkret_models_collaboration::governance::agent_participation::{
-    AgentParticipationEntry, AgentParticipationOutcome, MAX_PARTICIPATION_REPLACE_EXPECTED_VERSION,
-    ParticipationBits, ParticipationNextReplaceInput, ParticipationReplaceRequestBody,
-    ParticipationScope,
+    AgentParticipationEntry, AgentParticipationResponseBody,
+    MAX_PARTICIPATION_REPLACE_EXPECTED_VERSION, ParticipationBits, ParticipationNextReplaceInput,
+    ParticipationReplaceRequestBody, ParticipationScope,
 };
 use arkret_models_identity::validate_agent_slug;
 use base64::Engine as _;

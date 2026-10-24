@@ -24,7 +24,7 @@ fn confirmed_contact_receipt_uses_historical_key_after_rotation_and_keystore_reo
             principal_endpoint: &endpoint,
             local_id: "service",
             also_known_as: &[],
-            version_time: started,
+            version_created_at: started,
             did_key_fragment: Some("receipt-key"),
         },
     )
@@ -50,7 +50,7 @@ fn confirmed_contact_receipt_uses_historical_key_after_rotation_and_keystore_reo
         state: &document,
         current_update_seed: &inception.next_update_key_seed,
         next_update_public_key_multibase: &following_multibase,
-        version_time: rotated_at,
+        version_created_at: rotated_at,
     })
     .unwrap();
     let history = vec![inception.log_entry.clone(), rotation.log_entry];
@@ -132,9 +132,9 @@ fn confirmed_contact_receipt_uses_historical_key_after_rotation_and_keystore_reo
                 arkret_models_collaboration::contact_operations::ContactProducerSigner::Direct(
                     arkret_models_collaboration::contact_operations::ContactDirectProducerSigner {
                         verification_method: method.clone(),
-                        public_key_b64u: Base64UrlString::new(arkret_canonical::base64url_encode(
-                            old.verifying_key().to_bytes(),
-                        ))
+                        public_key_base64url: Base64UrlString::new(
+                            arkret_canonical::base64url_encode(old.verifying_key().to_bytes()),
+                        )
                         .unwrap(),
                     },
                 ),

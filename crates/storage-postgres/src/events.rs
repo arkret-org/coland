@@ -341,12 +341,12 @@ impl EventStore for PgEventStore {
                     g.initial_exact_pair_group_state_ref,\
                     COALESCE((SELECT jsonb_agg(jsonb_build_object(\
                         'member_id',ms.member_id,'membership',ms.membership) ORDER BY ms.member_id)\
-                      FROM member_state_current_results ms WHERE ms.realm_id=s.realm_id),\
+                      FROM member_state_current_states ms WHERE ms.realm_id=s.realm_id),\
                       '[]'::jsonb) AS members \
              FROM direct_conversation_founding_slots s \
-             LEFT JOIN direct_conversation_binding_current_results b ON b.realm_id=s.realm_id \
+             LEFT JOIN direct_conversation_binding_current_states b ON b.realm_id=s.realm_id \
              LEFT JOIN direct_conversation_group_states g ON g.realm_id=s.realm_id AND NOT EXISTS (SELECT 1 FROM replica_stream_anchors WHERE realm_id=s.realm_id) \
-             LEFT JOIN mls_group_current_results m ON m.realm_id=s.realm_id \
+             LEFT JOIN mls_group_current_states m ON m.realm_id=s.realm_id \
                 AND m.value->'effective_scope'->>'kind'='realm' AND NOT EXISTS (SELECT 1 FROM replica_stream_anchors WHERE realm_id=s.realm_id) \
              WHERE s.trust_domain_id=$1 AND s.pair_key=$2",
         )
@@ -395,12 +395,12 @@ impl EventStore for PgEventStore {
                     g.initial_exact_pair_group_state_ref,\
                     COALESCE((SELECT jsonb_agg(jsonb_build_object(\
                         'member_id',ms.member_id,'membership',ms.membership) ORDER BY ms.member_id)\
-                      FROM member_state_current_results ms WHERE ms.realm_id=s.realm_id),\
+                      FROM member_state_current_states ms WHERE ms.realm_id=s.realm_id),\
                       '[]'::jsonb) AS members \
              FROM direct_conversation_founding_slots s \
-             LEFT JOIN direct_conversation_binding_current_results b ON b.realm_id=s.realm_id \
+             LEFT JOIN direct_conversation_binding_current_states b ON b.realm_id=s.realm_id \
              LEFT JOIN direct_conversation_group_states g ON g.realm_id=s.realm_id AND NOT EXISTS (SELECT 1 FROM replica_stream_anchors WHERE realm_id=s.realm_id) \
-             LEFT JOIN mls_group_current_results m ON m.realm_id=s.realm_id \
+             LEFT JOIN mls_group_current_states m ON m.realm_id=s.realm_id \
                 AND m.value->'effective_scope'->>'kind'='realm' AND NOT EXISTS (SELECT 1 FROM replica_stream_anchors WHERE realm_id=s.realm_id) \
              WHERE s.realm_id=$1",
         )

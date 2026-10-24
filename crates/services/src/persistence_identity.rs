@@ -60,7 +60,7 @@ impl crate::identity::AccountLookupPort for PersistenceAccountLookup {
             station_id: command.account_id.station_id.clone(),
             localpart: command.localpart.clone(),
             display_name: command.display_name,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: command.created_at,
         };
@@ -219,7 +219,7 @@ fn application_account_profile(
         principal_id: account.principal_id,
         localpart: account.localpart,
         display_name: account.display_name,
-        bio: account.bio,
+        biography: account.biography,
         avatar_blob_ref: account.avatar_blob_ref,
         created_at: account.created_at,
     }
@@ -234,7 +234,7 @@ fn persistence_account_profile(
         station_id: account.account_id.station_id,
         localpart: account.localpart,
         display_name: account.display_name,
-        bio: account.bio,
+        biography: account.biography,
         avatar_blob_ref: account.avatar_blob_ref,
         created_at: account.created_at,
     }
@@ -1687,7 +1687,7 @@ impl crate::identity::DidDocumentPort for PersistenceDidDocuments {
         &self,
         key: &arkret_models_identity::service_identity::ServiceRegistrationKey,
     ) -> crate::ServiceResult<
-        Option<arkret_models_identity::service_identity::ServiceRegistrationOutcome>,
+        Option<arkret_models_identity::service_identity::ServiceRegistrationResponseBody>,
     > {
         Ok(self.0.webvh().get_service_registration(key).await?)
     }
@@ -1695,7 +1695,7 @@ impl crate::identity::DidDocumentPort for PersistenceDidDocuments {
     async fn commit_service_registration(
         &self,
         key: arkret_models_identity::service_identity::ServiceRegistrationKey,
-        outcome: arkret_models_identity::service_identity::ServiceRegistrationOutcome,
+        outcome: arkret_models_identity::service_identity::ServiceRegistrationResponseBody,
         document: crate::identity::DidDocumentState,
         event: crate::identity::DidLogEvent,
     ) -> crate::ServiceResult<crate::identity::ServiceRegistrationCommitResult> {

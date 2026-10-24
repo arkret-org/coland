@@ -111,7 +111,7 @@ async fn prepare_inner(pool: &PgPool, label: &str) -> FrankingFixture {
             fixture.history.founding_device_signing_seed,
         );
     }
-    let body=serde_json::to_vec(&arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(submission.clone())).unwrap();
+    let body=serde_json::to_vec(&arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(submission.clone())).unwrap();
     let unit = ordinary_realm::case_future(|| {
         app.prepare_ordinary_realm_bootstrap_unit(
             submission,
@@ -197,7 +197,7 @@ async fn prepare_inner(pool: &PgPool, label: &str) -> FrankingFixture {
             "group_info_ref":format!("ak:blob:{}",arkret_canonical::sha256_digest(&group_info)),
             "ratchet_tree_ref":format!("ak:blob:{}",arkret_canonical::sha256_digest(&tree)),
             "creator_leaf_authority": arkret_models_collaboration::events_payloads::MlsGenesisCreatorLeafAuthority {
-                leaf_signature_key_b64u: leaves[0].signature_key.clone(),
+                leaf_signature_key_base64url: leaves[0].signature_key.clone(),
                 endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device {
                     device_id: fixture.history.founding_device_id.clone(),
                 },

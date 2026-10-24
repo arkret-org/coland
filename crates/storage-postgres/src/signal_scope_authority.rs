@@ -21,7 +21,7 @@ use diesel::sql_types::{Jsonb, Nullable, Text};
 use diesel_async::{AsyncConnection, AsyncPgConnection};
 use horme::RunQueryDsl;
 
-use crate::capability_grant_current_results::RealmAuthorityRootCurrent;
+use crate::capability_grant_current_states::RealmAuthorityRootCurrent;
 use crate::{OptionalExtension, PgPool, PgTransactionError, pg_conn};
 
 fn unavailable(detail: impl std::fmt::Display) -> PersistenceError {
@@ -292,7 +292,7 @@ struct Cut {
         arkret_wire::CircleId,
         arkret_models_collaboration::governance::circle::CircleState,
     >,
-    mls_current: Option<arkret_wire::MlsGroupCurrent>,
+    mls_current: Option<arkret_wire::MlsGroupValue>,
     members: BTreeMap<String, (ActorId, String)>,
     member_revisions: BTreeMap<String, arkret_wire::CurrentRevision>,
     circle_parent_joins: BTreeMap<String, arkret_wire::CurrentRevision>,
@@ -315,7 +315,7 @@ impl Cut {
         stream: &CommitStreamRef,
         head: &arkret_wire::CommitStreamHead,
     ) -> PersistenceResult<Self> {
-        use arkret_wire::{CurrentSelector as S, TypedCurrentRow};
+        use arkret_wire::{CurrentSelector as S, CurrentState};
         let mut cut = Self::default();
         let mut genesis_present = false;
         if snapshot.realm_id != *stream.realm_id()
@@ -326,7 +326,7 @@ impl Cut {
         }
         let mut selectors = BTreeSet::new();
         for entry in &snapshot.current_state_entries {
-            let TypedCurrentRow::Value {
+            let CurrentState::Value {
                 selector,
                 source_stream_ref,
                 revision,
@@ -356,7 +356,7 @@ impl Cut {
                     cut.snapshot_root_generation = Some(
                         value
                             .get("authority_generation")
-                            .and_then(serde_json::Value::as_u64)
+                            .and_then(arkret_canonical::serde_helpers::parse_uint64_decimal_value)
                             .ok_or_else(|| unavailable("snapshot root omits generation"))?,
                     );
                     let controller: ActorId = serde_json::from_value(
@@ -376,7 +376,7 @@ impl Cut {
                     cut.policy = Some(serde_json::from_value(value.clone()).map_err(unavailable)?)
                 }
                 S::MemberState { actor_id } => {
-                    let current: arkret_wire::MemberStateCurrent =
+                    let current: arkret_wire::MemberStateValue =
                         serde_json::from_value(value.clone()).map_err(unavailable)?;
                     cut.members.insert(
                         actor_id.to_string(),
@@ -400,7 +400,7 @@ impl Cut {
                     {
                         return Err(unavailable("snapshot Circle membership source differs"));
                     }
-                    let current: arkret_wire::CircleMemberStateCurrent =
+                    let current: arkret_wire::CircleMemberStateValue =
                         serde_json::from_value(value.clone()).map_err(unavailable)?;
                     cut.members.insert(
                         member_actor_id.to_string(),
@@ -448,7 +448,7 @@ impl Cut {
                     {
                         return Err(unavailable("snapshot MLS source differs"));
                     }
-                    let current: arkret_wire::MlsGroupCurrent =
+                    let current: arkret_wire::MlsGroupValue =
                         serde_json::from_value(value.clone()).map_err(unavailable)?;
                     if current.effective_scope != *scope_ref {
                         return Err(unavailable("snapshot MLS scope differs"));
@@ -908,7 +908,7 @@ fn qualified_chain(
     };
     let valid = cut.grants.get(id).is_some_and(|grant| {
         grant.realm_id.as_ref() == Some(realm)
-        && crate::capability_grant_current_results::grant_is_active_at(grant, at)
+        && crate::capability_grant_current_states::grant_is_active_at(grant, at)
         && !grant.issuer_authority_refs.is_empty() && !grant.authority_root_refs.is_empty()
         && grant.authority_root_refs.iter().all(root_matches)
         && grant.issuer_authority_refs.iter().all(|reference| match reference {
@@ -1435,7 +1435,7 @@ async fn read_in_connection(
             )
             .map_err(unavailable)?;
             let row =
-                diesel::sql_query("SELECT value FROM mls_group_current_results WHERE scope_key=$1")
+                diesel::sql_query("SELECT value FROM mls_group_current_states WHERE scope_key=$1")
                     .bind::<Text, _>(&key)
                     .get_result::<ValueRow>(conn)
                     .await
@@ -1537,7 +1537,7 @@ pub(crate) async fn recipient_realms(
     let mut conn = pg_conn(pool).await?;
     conn.transaction::<_,PgTransactionError,_>(async move |conn| {
         diesel::sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY").execute(conn).await.map_err(PersistenceError::database)?;
-        let rows=diesel::sql_query("SELECT realm_id FROM member_state_current_results WHERE member_id=$1 AND membership='join' ORDER BY realm_id")
+        let rows=diesel::sql_query("SELECT realm_id FROM member_state_current_states WHERE member_id=$1 AND membership='join' ORDER BY realm_id")
             .bind::<Text,_>(actor.to_string()).load::<RealmRow>(&mut *conn).await.map_err(PersistenceError::database)?;
         let mut result=Vec::new();
         for row in rows {
@@ -1620,7 +1620,7 @@ mod typed_replay_tests {
             commit_id: RealmCommitId::from_digest([0x62; 32]),
             stream_position: 0,
         };
-        let row = |selector, value| arkret_wire::TypedCurrentRow::Value {
+        let row = |selector, value| arkret_wire::CurrentState::Value {
             selector,
             source_stream_ref: stream.clone(),
             revision: arkret_wire::CurrentRevision {
@@ -1714,13 +1714,13 @@ mod typed_replay_tests {
         ] {
             let mut snapshot = scope_snapshot(true, false);
             snapshot.current_state_entries.retain(|row| {
-                let arkret_wire::TypedCurrentRow::Value { selector, .. } = row;
+                let arkret_wire::CurrentState::Value { selector, .. } = row;
                 selector != &removed
             });
             assert!(snapshot_cut(&snapshot).is_err(), "missing {removed:?}");
         }
         let mut snapshot = scope_snapshot(true, false);
-        let arkret_wire::TypedCurrentRow::Value { revision, .. } =
+        let arkret_wire::CurrentState::Value { revision, .. } =
             &mut snapshot.current_state_entries[1];
         revision.commit_id = RealmCommitId::from_digest([0x64; 32]);
         assert!(snapshot_cut(&snapshot).is_err());
@@ -1730,14 +1730,13 @@ mod typed_replay_tests {
     fn direct_snapshot_cannot_infer_profile_from_missing_or_malformed_genesis() {
         for replacement in [json!("ak.schema.unregistered.v1"), serde_json::Value::Null] {
             let mut snapshot = scope_snapshot(true, false);
-            let arkret_wire::TypedCurrentRow::Value { value, .. } =
+            let arkret_wire::CurrentState::Value { value, .. } =
                 &mut snapshot.current_state_entries[1];
             value["schema"] = replacement;
             assert!(snapshot_cut(&snapshot).is_err());
         }
         let mut snapshot = scope_snapshot(true, false);
-        let arkret_wire::TypedCurrentRow::Value { value, .. } =
-            &mut snapshot.current_state_entries[1];
+        let arkret_wire::CurrentState::Value { value, .. } = &mut snapshot.current_state_entries[1];
         value["purpose"] = serde_json::to_value(
             arkret_models_collaboration::events_payloads::realm::RealmPurpose::PrincipalControl,
         )
@@ -1806,7 +1805,7 @@ mod typed_replay_tests {
             [7; 32],
         ));
         let root_event = EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [8; 32]);
-        let root_ref = json!({"kind":"realm_root", "realm_id":realm_id(), "authority_event_ref":root_event, "authority_generation":0});
+        let root_ref = json!({"kind":"realm_root", "realm_id":realm_id(), "authority_event_ref":root_event, "authority_generation":"0"});
         let grant: CapabilityGrant = serde_json::from_value(json!({"id":id,"schema":"ak.schema.capability.v1","realm_id":realm_id(),"issuer_id":actor,"subject":actor,"actions":PRODUCT_ACTIONS,"resources":[{"kind":"realm","realm_id":realm_id()}],"issuer_authority_refs":[root_ref],"authority_root_refs":[root_ref],"authority_depth":1,"status":"active","issued_at":arkret_canonical::format_timestamp_canonical(at())})).unwrap();
         let mut cut = Cut {
             snapshot_root_generation: Some(0),

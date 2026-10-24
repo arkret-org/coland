@@ -19,7 +19,7 @@ pub(crate) async fn cut_in_connection(
     sidecar: &SidecarId,
 ) -> PersistenceResult<Option<crate::sidecar_authority_cut::SidecarParticipantAuthorityCut>> {
     let Some(controller) = sql_query(
-        "SELECT s.controller_account_id FROM sidecar_current_results s \
+        "SELECT s.controller_account_id FROM sidecar_current_states s \
         JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id \
           AND c.stream_position=s.current_stream_position \
         JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \

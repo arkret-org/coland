@@ -8,7 +8,7 @@
 //! storage unit, which writes the `identity_accountability` row with the
 //! Commit (`zh/models/actor.md` section 3.3.1).
 
-use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitOutcome, EventAdmissionSubmission};
+use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitResponseBody, EventAdmissionSubmission};
 use chrono::Utc;
 use coland_services::{ServiceError, ServiceResult};
 use coland_storage::{AccountabilityGrantAdmissionOutcome, AccountabilityGrantAdmissionWrite};
@@ -18,7 +18,7 @@ use super::AppState;
 pub(super) async fn submit_self_accountability_grant(
     state: &AppState,
     request: &EventAdmissionSubmission,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     let event = &request.event;
     if event.kind != arkret_wire::EventKind::IdentityAccountabilityGrant {
         return Err(ServiceError::Internal(
@@ -56,13 +56,13 @@ pub(super) async fn submit_self_accountability_grant(
         .await?;
     Ok(match outcome {
         AccountabilityGrantAdmissionOutcome::Committed(record) => {
-            AuthoritySubmitOutcome::Accepted {
+            AuthoritySubmitResponseBody::Accepted {
                 status: AuthorityCommitStatus::Committed,
                 commit: record.commit,
             }
         }
         AccountabilityGrantAdmissionOutcome::Duplicate(record) => {
-            AuthoritySubmitOutcome::Accepted {
+            AuthoritySubmitResponseBody::Accepted {
                 status: AuthorityCommitStatus::Duplicate,
                 commit: record.commit,
             }

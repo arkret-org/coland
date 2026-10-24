@@ -80,18 +80,18 @@ impl NativeRecipientStoreFault {
 }
 
 fn strict_empty_native_page(
-    page: &arkret_models_collaboration::device_messages::DeviceMessagesGetOutcome,
+    page: &arkret_models_collaboration::device_messages::DeviceMessagesGetResponseBody,
 ) {
     assert!(page.deliveries.is_empty());
     assert!(!page.has_more);
-    assert!(page.ack_token.is_none());
+    assert!(page.acknowledgement_token.is_none());
     assert!(page.next_cursor.is_none());
     assert_eq!(page.limited, Some(false));
     assert_eq!(page.lost, Some(false));
 }
 
 fn welcome_ids(
-    page: &arkret_models_collaboration::device_messages::DeviceMessagesGetOutcome,
+    page: &arkret_models_collaboration::device_messages::DeviceMessagesGetResponseBody,
     scope: &ScopeRef,
     actor: &ActorId,
     device: &arkret_wire::DeviceId,
@@ -122,7 +122,7 @@ async fn same_device_cross_circle_queue(
     scope_a: &ScopeRef,
 ) {
     use arkret_bridge_runtime::managed_device::InitialManagedDevicePlan;
-    use arkret_models_collaboration::device_messages::DeviceMessagesAckRequestBody;
+    use arkret_models_collaboration::device_messages::DeviceMessagesAcknowledgementRequestBody;
     assert!(matches!(scope_a, ScopeRef::Circle { .. }));
     let install_b =
         boxed_step(|| factory.prepare_install(&package.applet_id, "native-queue:scope-conflict"))
@@ -244,8 +244,8 @@ async fn same_device_cross_circle_queue(
     let b_ids = welcome_ids(&b_before, &scope_b, actor, &b.device_id);
     assert_eq!(b_ids.len(), 1);
     assert!(!first_ids.contains(&b_ids[0]) && !second_ids.contains(&b_ids[0]));
-    let ack = DeviceMessagesAckRequestBody {
-        ack_token: second.ack_token.clone().unwrap(),
+    let ack = DeviceMessagesAcknowledgementRequestBody {
+        acknowledgement_token: second.acknowledgement_token.clone().unwrap(),
     };
     let before_wrong_ack = boxed_step(|| native_queue_handoff_footprint(&factory.fixture)).await;
     let denied = b.client().ack_device_messages(&ack).await.unwrap_err();
@@ -326,8 +326,8 @@ async fn same_device_cross_circle_queue(
     );
     let done = b
         .client()
-        .ack_device_messages(&DeviceMessagesAckRequestBody {
-            ack_token: b_after.ack_token.unwrap(),
+        .ack_device_messages(&DeviceMessagesAcknowledgementRequestBody {
+            acknowledgement_token: b_after.acknowledgement_token.unwrap(),
         })
         .await
         .unwrap();
@@ -547,7 +547,7 @@ async fn welcome_checkpoint_consume_and_ack_recovery<F>(
         "canonical_events",
         "realm_commits",
         "realm_actor_creations",
-        "realm_actor_current_results",
+        "realm_actor_current_states",
         "realm_actor_private_signer_facts",
     ] {
         assert_eq!(
@@ -679,7 +679,7 @@ async fn native_queue_handoff_footprint(fixture: &Fixture) -> Value {
         "device_message_ack_tokens",
         "sync_cursor_handles",
         "sync_cursor_revocations",
-        "mls_group_current_results",
+        "mls_group_current_states",
         "device_messages",
     ] {
         let row=diesel::sql_query(format!("SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]'::jsonb) AS value FROM {table} r"))
@@ -743,13 +743,13 @@ pub(super) async fn native_prepared_queue_handoff_boundaries(
     })
     .await;
     assert_eq!(initial.status_code, Some(StatusCode::OK));
-    let page: arkret_models_collaboration::device_messages::DeviceMessagesGetOutcome =
+    let page: arkret_models_collaboration::device_messages::DeviceMessagesGetResponseBody =
         initial.take_json().await.unwrap();
     assert_eq!(
         welcome_ids(&page, scope, &authority.actor_id, &authority.device_id),
         vec![welcome.welcome_id.clone()]
     );
-    assert!(page.ack_token.is_some());
+    assert!(page.acknowledgement_token.is_some());
     assert!(page.next_cursor.is_some());
     let before = boxed_step(|| native_queue_handoff_footprint(fixture)).await;
     let mut observer = fixture.pool.get().await.unwrap();
@@ -811,7 +811,7 @@ pub(super) async fn native_prepared_queue_handoff_boundaries(
     })
     .await;
     assert_eq!(recovered.status_code, Some(StatusCode::OK));
-    let page: arkret_models_collaboration::device_messages::DeviceMessagesGetOutcome =
+    let page: arkret_models_collaboration::device_messages::DeviceMessagesGetResponseBody =
         recovered.take_json().await.unwrap();
     assert_eq!(
         welcome_ids(&page, scope, &authority.actor_id, &authority.device_id),

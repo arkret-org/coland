@@ -83,7 +83,7 @@ pub(super) async fn push_register(
     body: JsonBody<PushRegisterDeviceRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<arkret_models_integration::models_push::PushRegisterDeviceOutcome> {
+) -> JsonResult<arkret_models_integration::models_push::PushRegisterDeviceResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let auth_result = authenticated_session(state, req);
     let body = body.into_inner();

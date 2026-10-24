@@ -1,7 +1,7 @@
 //! Deployment-local source supply; never an Arkret operation or evidence carrier.
 
 use arkret_identifiers::{EventId, Hash, RealmId, StrandId};
-use arkret_models_collaboration::session_grants::SessionGrantAgentScopeRequest;
+use arkret_models_collaboration::session_grants::RequestedAgentSessionGrantScope;
 use arkret_wire::{AccountId, DidUrl};
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +20,7 @@ pub struct AgentSessionAuthorityRequest {
     pub verification_method: DidUrl,
     pub intent_digest: Hash,
     pub requested_scope: Vec<String>,
-    pub resource_scope: SessionGrantAgentScopeRequest,
+    pub resource_scope: RequestedAgentSessionGrantScope,
     pub approval_evidence_refs: Vec<EventId>,
 }
 

@@ -26,7 +26,7 @@
 
 use arkret_wire::{
     AccountId, ActorId, CommitStreamRef, CommittedEventView, DidCoreId, ReadableFloor,
-    ReadableFloorReason, StreamScanOutcome, StreamScanRequest,
+    ReadableFloorReason, StreamScanRequestBody, StreamScanResponseBody,
 };
 use coland_storage::AccountStreamScan;
 
@@ -52,7 +52,7 @@ struct MemberRow {
 
 pub(crate) async fn scan_stream_for_actor(
     pool: &PgPool,
-    request: &StreamScanRequest,
+    request: &StreamScanRequestBody,
     actor: &ActorId,
     issuer: &DidCoreId,
 ) -> PersistenceResult<AccountStreamScan> {
@@ -72,7 +72,7 @@ pub(crate) async fn scan_stream_for_actor(
 
 pub(crate) async fn scan_stream_for_account(
     pool: &PgPool,
-    request: &StreamScanRequest,
+    request: &StreamScanRequestBody,
     account: &AccountId,
     issuer: &DidCoreId,
 ) -> PersistenceResult<AccountStreamScan> {
@@ -92,7 +92,7 @@ pub(crate) async fn scan_stream_for_account(
 
 pub(crate) async fn scan_stream_for_account_in_connection(
     conn: &mut AsyncPgConnection,
-    request: &StreamScanRequest,
+    request: &StreamScanRequestBody,
     account: &AccountId,
     issuer: &DidCoreId,
 ) -> Result<AccountStreamScan, PgTransactionError> {
@@ -102,7 +102,7 @@ pub(crate) async fn scan_stream_for_account_in_connection(
 
 pub(crate) async fn scan_stream_for_actor_in_connection(
     conn: &mut AsyncPgConnection,
-    request: &StreamScanRequest,
+    request: &StreamScanRequestBody,
     actor: &ActorId,
     issuer: &DidCoreId,
 ) -> Result<AccountStreamScan, PgTransactionError> {
@@ -124,7 +124,7 @@ pub(crate) async fn scan_stream_for_actor_in_connection(
         return Ok(AccountStreamScan::NotAuthorized);
     }
     let members = sql_query(
-        "SELECT member_id, membership FROM member_state_current_results \
+        "SELECT member_id, membership FROM member_state_current_states \
          WHERE realm_id=$1 ORDER BY member_id",
     )
     .bind::<Text, _>(request.realm_id.as_str())
@@ -211,7 +211,7 @@ pub(crate) async fn scan_stream_for_actor_in_connection(
     // keeps its Commit so the page stays one verifiable chain.
     let committed_events =
         disclose_page_to_member(conn, page.committed_events.clone(), &caller_actor).await?;
-    Ok(AccountStreamScan::Page(StreamScanOutcome {
+    Ok(AccountStreamScan::Page(StreamScanResponseBody {
         committed_events,
         ..page
     }))
@@ -273,8 +273,8 @@ async fn realm_history_access(
     realm_id: &arkret_wire::RealmId,
 ) -> PersistenceResult<Option<String>> {
     Ok(sql_query(
-        "SELECT value FROM realm_bootstrap_current_results \
-         WHERE realm_id=$1 AND result_family='realm_history_access'",
+        "SELECT value FROM realm_bootstrap_current_states \
+         WHERE realm_id=$1 AND state_family='realm_history_access'",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<ValueRow>(&mut *conn)
@@ -289,8 +289,8 @@ pub(crate) async fn realm_purpose(
     realm_id: &arkret_wire::RealmId,
 ) -> PersistenceResult<Option<arkret_models_collaboration::events_payloads::realm::RealmPurpose>> {
     let row = sql_query(
-        "SELECT value->'purpose' AS value FROM realm_bootstrap_current_results \
-         WHERE realm_id=$1 AND result_family='realm_genesis'",
+        "SELECT value->'purpose' AS value FROM realm_bootstrap_current_states \
+         WHERE realm_id=$1 AND state_family='realm_genesis'",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<ValueRow>(&mut *conn)
@@ -313,7 +313,7 @@ async fn genesis_floor_in_connection(
 ) -> PersistenceResult<Option<ReadableFloor>> {
     Ok(crate::authority_commit::stream_page_in_connection(
         conn,
-        &StreamScanRequest {
+        &StreamScanRequestBody {
             realm_id: realm_id.clone(),
             stream_ref: CommitStreamRef::Realm {
                 realm_id: realm_id.clone(),
@@ -587,7 +587,7 @@ async fn current_join(
 ) -> PersistenceResult<Option<JoinRow>> {
     Ok(sql_query(
         "SELECT membership, current_commit_id, current_stream_position \
-         FROM member_state_current_results WHERE realm_id=$1 AND member_id=$2",
+         FROM member_state_current_states WHERE realm_id=$1 AND member_id=$2",
     )
     .bind::<Text, _>(realm_id.as_str())
     .bind::<Text, _>(member.to_string())
@@ -688,7 +688,7 @@ async fn circle_history_access(
     circle_id: &arkret_wire::CircleId,
 ) -> PersistenceResult<Option<arkret_wire::HistoryAccess>> {
     let Some(row) =
-        sql_query("SELECT value FROM circle_current_results WHERE realm_id=$1 AND circle_id=$2")
+        sql_query("SELECT value FROM circle_current_states WHERE realm_id=$1 AND circle_id=$2")
             .bind::<Text, _>(realm_id.as_str())
             .bind::<Text, _>(circle_id.as_str())
             .get_result::<ValueRow>(&mut *conn)
@@ -722,7 +722,7 @@ async fn current_circle_join(
     };
     sql_query(
         "SELECT m.membership,m.current_commit_id,m.current_stream_position \
-        FROM circle_member_state_current_results m \
+        FROM circle_member_state_current_states m \
         WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' \
         AND m.value->>'membership'='join' AND m.source_stream_ref=$5 \
         AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) \
@@ -768,7 +768,7 @@ async fn circle_join_floor(
     }
     let Some(genesis) = crate::authority_commit::stream_page_in_connection(
         conn,
-        &StreamScanRequest {
+        &StreamScanRequestBody {
             realm_id: stream.realm_id().clone(),
             stream_ref: stream.clone(),
             direction: arkret_wire::StreamScanDirection::After(None),
@@ -1108,7 +1108,7 @@ async fn peer_intervals(
 ) -> PersistenceResult<(Vec<PeerInterval>, Vec<ActorId>)> {
     let rows = sql_query(
         "SELECT member_id, membership, current_commit_id, current_stream_position \
-         FROM member_state_current_results WHERE realm_id=$1 ORDER BY member_id",
+         FROM member_state_current_states WHERE realm_id=$1 ORDER BY member_id",
     )
     .bind::<Text, _>(realm_id.as_str())
     .load::<HostedMemberRow>(&mut *conn)
@@ -1196,7 +1196,7 @@ async fn peer_circle_intervals(
     };
     let rows = sql_query(
         "SELECT m.member_id,m.membership,m.current_commit_id,m.current_stream_position \
-         FROM circle_member_state_current_results m JOIN realm_commits c \
+         FROM circle_member_state_current_states m JOIN realm_commits c \
            ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id \
            AND c.stream_position=m.current_stream_position AND c.stream_ref=m.source_stream_ref \
          WHERE m.realm_id=$1 AND m.circle_id=$2 AND c.stream_key=$3 \
@@ -1292,7 +1292,7 @@ async fn peer_stream_intervals(
                 #[diesel(sql_type = Jsonb)]
                 controller_account_id: serde_json::Value,
             }
-            let owner = sql_query("SELECT controller_account_id FROM sidecar_current_results WHERE realm_id=$1 AND sidecar_id=$2")
+            let owner = sql_query("SELECT controller_account_id FROM sidecar_current_states WHERE realm_id=$1 AND sidecar_id=$2")
                 .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(sidecar_id.as_str())
                 .get_result::<Owner>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
             let Some(owner) = owner else {
@@ -1341,8 +1341,8 @@ async fn peer_holds_full_event(
     let event = &row.event;
     if crate::realm_fanout::plaintext_message(event) {
         let services = sql_query(
-            "SELECT value FROM realm_bootstrap_current_results \
-             WHERE realm_id=$1 AND result_family='realm_plaintext_visible_services'",
+            "SELECT value FROM realm_bootstrap_current_states \
+             WHERE realm_id=$1 AND state_family='realm_plaintext_visible_services'",
         )
         .bind::<Text, _>(event.realm_id.as_str())
         .get_result::<ValueRow>(&mut *conn)
@@ -1748,7 +1748,7 @@ pub(crate) async fn committed_event_for_member_in_connection(
 
 pub(crate) async fn scan_stream_for_peer(
     pool: &PgPool,
-    request: &StreamScanRequest,
+    request: &StreamScanRequestBody,
     peer: &DidCoreId,
     issuer: &DidCoreId,
 ) -> PersistenceResult<coland_storage::PeerStreamScan> {
@@ -1863,7 +1863,7 @@ pub(crate) async fn scan_stream_for_peer(
                     });
                 }
         }
-        let outcome = arkret_models_collaboration::authority_commit::PeerStreamScanOutcome {
+        let outcome = arkret_models_collaboration::authority_commit::PeerStreamScanResponseBody {
             committed_events, readable_floor: page.readable_floor, truncated: page.truncated, producer_signer_facts,
         };
         outcome.validate_for_request(request).map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;

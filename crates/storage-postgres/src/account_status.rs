@@ -56,7 +56,7 @@ struct PropagationProjectionRow {
     #[diesel(sql_type = Text)]
     account_status_record_id: String,
     #[diesel(sql_type = BigInt)]
-    status_seq: i64,
+    status_sequence: i64,
     #[diesel(sql_type = Text)]
     state: String,
     #[diesel(sql_type = BigInt)]
@@ -98,7 +98,7 @@ fn decode_propagation_projection(
             row.account_status_record_id,
         )
         .map_err(|error| PersistenceError::Internal(error.to_string()))?,
-        status_seq: u64::try_from(row.status_seq).map_err(|_| {
+        status_sequence: u64::try_from(row.status_sequence).map_err(|_| {
             PersistenceError::Internal(
                 "stored account-status propagation sequence is negative".to_owned(),
             )
@@ -197,7 +197,7 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
             let head = sql_query(
                 "SELECT record, receipt FROM account_status_replica_records \
                  WHERE account_authority_id = $1 AND account_id = $2 \
-                 ORDER BY status_seq DESC LIMIT 1",
+                 ORDER BY status_sequence DESC LIMIT 1",
             )
             .bind::<Text, _>(&authority)
             .bind::<Jsonb, _>(&account)
@@ -216,12 +216,12 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
 
             sql_query(
                 "INSERT INTO account_status_replica_records \
-                 (account_authority_id, account_id, status_seq, record_id, record, receipt) \
+                 (account_authority_id, account_id, status_sequence, record_id, record, receipt) \
                  VALUES ($1, $2, $3, $4, $5, $6)",
             )
             .bind::<Text, _>(&authority)
             .bind::<Jsonb, _>(&account)
-            .bind::<BigInt, _>(i64::try_from(record.status_seq).map_err(|_| {
+            .bind::<BigInt, _>(i64::try_from(record.status_sequence).map_err(|_| {
                 PersistenceError::SchemaViolation(
                     "account-status sequence exceeds PostgreSQL bigint".to_owned(),
                 )
@@ -255,7 +255,7 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
         sql_query(
             "SELECT record, receipt FROM account_status_replica_records \
              WHERE account_authority_id = $1 AND account_id = $2 \
-             ORDER BY status_seq DESC LIMIT 1",
+             ORDER BY status_sequence DESC LIMIT 1",
         )
         .bind::<Text, _>(account_authority_id)
         .bind::<Jsonb, _>(encode_account_id(account_id)?)
@@ -271,18 +271,18 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
         &self,
         account_authority_id: &str,
         account_id: &arkret_wire::AccountId,
-        from_status_seq: u64,
+        from_status_sequence: u64,
         limit: u16,
     ) -> PersistenceResult<Vec<AccountStatusRecord>> {
         let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(
             "SELECT record, receipt FROM account_status_replica_records \
-             WHERE account_authority_id = $1 AND account_id = $2 AND status_seq >= $3 \
-             ORDER BY status_seq ASC LIMIT $4",
+             WHERE account_authority_id = $1 AND account_id = $2 AND status_sequence >= $3 \
+             ORDER BY status_sequence ASC LIMIT $4",
         )
         .bind::<Text, _>(account_authority_id)
         .bind::<Jsonb, _>(encode_account_id(account_id)?)
-        .bind::<BigInt, _>(i64::try_from(from_status_seq).map_err(|_| {
+        .bind::<BigInt, _>(i64::try_from(from_status_sequence).map_err(|_| {
             PersistenceError::SchemaViolation(
                 "account-status sequence exceeds PostgreSQL bigint".to_owned(),
             )
@@ -299,7 +299,7 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
         let rows = sql_query(
             "SELECT record, receipt FROM account_status_replica_records \
              WHERE record #>> '{status}' = 'erasure_pending' \
-             ORDER BY accepted_at, account_authority_id, account_id, status_seq LIMIT $1",
+             ORDER BY accepted_at, account_authority_id, account_id, status_sequence LIMIT $1",
         )
         .bind::<BigInt, _>(i64::from(limit))
         .load::<RecordRow>(&mut conn)
@@ -312,16 +312,16 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
         &self,
         account_authority_id: &str,
         account_id: &arkret_wire::AccountId,
-        status_seq: u64,
+        status_sequence: u64,
     ) -> PersistenceResult<Option<AccountStatusReceipt>> {
         let mut conn = crate::pg_db(&self.pool);
         sql_query(
             "SELECT record, receipt FROM account_status_replica_records \
-             WHERE account_authority_id = $1 AND account_id = $2 AND status_seq = $3",
+             WHERE account_authority_id = $1 AND account_id = $2 AND status_sequence = $3",
         )
         .bind::<Text, _>(account_authority_id)
         .bind::<Jsonb, _>(encode_account_id(account_id)?)
-        .bind::<BigInt, _>(i64::try_from(status_seq).map_err(|_| {
+        .bind::<BigInt, _>(i64::try_from(status_sequence).map_err(|_| {
             PersistenceError::SchemaViolation(
                 "account-status sequence exceeds PostgreSQL bigint".to_owned(),
             )
@@ -447,7 +447,7 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
         // rebuilt. A bare locator or unproven product row is not a relationship.
         let governance = sql_query(
             "SELECT DISTINCT 'realm_membership'::text AS source, a.service_id AS candidate \
-             FROM member_state_current_results m JOIN realm_authorities a ON a.realm_id=m.realm_id \
+             FROM member_state_current_states m JOIN realm_authorities a ON a.realm_id=m.realm_id \
              LEFT JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position \
              WHERE m.member_id=$1 AND m.membership='join' AND (c.commit_id IS NOT NULL OR EXISTS( \
                  SELECT 1 FROM replica_authorization_rows r WHERE r.realm_id=m.realm_id \
@@ -576,7 +576,7 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
                 .await
                 .map_err(PersistenceError::database)?;
             let existing = sql_query(
-                "SELECT p.account_authority_id, p.account_id, p.account_status_record_id, p.status_seq, \
+                "SELECT p.account_authority_id, p.account_id, p.account_status_record_id, p.status_sequence, \
                  p.state, (SELECT COUNT(*) FROM account_status_propagation_targets t WHERE \
                  t.account_status_record_id = p.account_status_record_id AND t.acknowledged_at IS NULL) \
                  AS pending_destination_count, p.deadline_at, p.updated_at \
@@ -614,13 +614,13 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
             };
             sql_query(
                 "INSERT INTO account_status_propagations \
-                 (account_authority_id, account_id, account_status_record_id, status_seq, state, \
+                 (account_authority_id, account_id, account_status_record_id, status_sequence, state, \
                   deadline_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)",
             )
             .bind::<Text, _>(record.account_authority_id.as_str())
             .bind::<Jsonb, _>(&account)
             .bind::<Text, _>(record.account_status_record_id.as_str())
-            .bind::<BigInt, _>(i64::try_from(record.status_seq).map_err(|_| {
+            .bind::<BigInt, _>(i64::try_from(record.status_sequence).map_err(|_| {
                 PersistenceError::SchemaViolation(
                     "account-status propagation sequence exceeds PostgreSQL bigint".to_owned(),
                 )
@@ -646,7 +646,7 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
                 account_authority_id: record.account_authority_id,
                 account_id: record.account_id,
                 account_status_record_id: record.account_status_record_id,
-                status_seq: record.status_seq,
+                status_sequence: record.status_sequence,
                 state,
                 pending_destination_count: destinations.len() as u64,
                 deadline_at,
@@ -667,7 +667,7 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
         let record_id = account_status_record_id.to_string();
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             let previous = sql_query(
-                "SELECT p.account_authority_id, p.account_id, p.account_status_record_id, p.status_seq, \
+                "SELECT p.account_authority_id, p.account_id, p.account_status_record_id, p.status_sequence, \
                  p.state, (SELECT COUNT(*) FROM account_status_propagation_targets t WHERE \
                  t.account_status_record_id = p.account_status_record_id AND t.acknowledged_at IS NULL) \
                  AS pending_destination_count, p.deadline_at, p.updated_at \
@@ -760,12 +760,12 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
         let account = encode_account_id(account_id)?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             let current = sql_query(
-                "SELECT p.account_authority_id, p.account_id, p.account_status_record_id, p.status_seq, \
+                "SELECT p.account_authority_id, p.account_id, p.account_status_record_id, p.status_sequence, \
                  p.state, (SELECT COUNT(*) FROM account_status_propagation_targets t WHERE \
                  t.account_status_record_id = p.account_status_record_id AND t.acknowledged_at IS NULL) \
                  AS pending_destination_count, p.deadline_at, p.updated_at \
                  FROM account_status_propagations p WHERE p.account_id = $1 \
-                 ORDER BY p.status_seq DESC LIMIT 1 FOR UPDATE",
+                 ORDER BY p.status_sequence DESC LIMIT 1 FOR UPDATE",
             )
             .bind::<Jsonb, _>(&account)
             .get_result::<PropagationProjectionRow>(&mut *conn)
@@ -878,7 +878,7 @@ mod tests {
             )
             .unwrap(),
             binding_version: 1,
-            status_seq: 1,
+            status_sequence: 1,
             previous_account_status_record_id: None,
             status: AccountStatus::Active,
             reason_code: None,
@@ -892,7 +892,7 @@ mod tests {
             account_id,
             principal_control_realm_id: genesis.principal_control_realm_id.clone(),
             binding_version: 1,
-            status_seq: 2,
+            status_sequence: 2,
             previous_account_status_record_id: Some(genesis.account_status_record_id),
             status: AccountStatus::Deactivated,
             reason_code: None,

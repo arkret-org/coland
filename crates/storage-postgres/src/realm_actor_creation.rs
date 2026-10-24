@@ -1,5 +1,5 @@
 //! Private Service-authored creation, without member replication or Account projections.
-use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitOutcome, Event, RealmCommit};
+use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitResponseBody, Event, RealmCommit};
 use coland_storage::{
     AppletEventProducerGuard, AuthorityCommitTransaction, EventApprovalCommit, PersistenceError,
 };
@@ -46,7 +46,7 @@ pub(crate) async fn replay(
     {
         return Err(invalid("creation signing original is unavailable"));
     }
-    let outcome = AuthoritySubmitOutcome::Accepted {
+    let outcome = AuthoritySubmitResponseBody::Accepted {
         status: AuthorityCommitStatus::Committed,
         commit: original.commit.clone(),
     };
@@ -68,7 +68,7 @@ pub(crate) async fn admit(
     producer: &AppletEventProducerGuard,
     prepared: Option<&EventApprovalCommit>,
     digest: &arkret_wire::Hash,
-) -> Result<AuthoritySubmitOutcome, PgTransactionError> {
+) -> Result<AuthoritySubmitResponseBody, PgTransactionError> {
     let event = &transaction.event;
     let commit = &transaction.commit;
     let candidate = crate::realm_actor_control::creation(event)?
@@ -90,7 +90,7 @@ pub(crate) async fn admit(
     )
     .await?
     {
-        return Ok(AuthoritySubmitOutcome::Accepted {
+        return Ok(AuthoritySubmitResponseBody::Accepted {
             status: AuthorityCommitStatus::Duplicate,
             commit,
         });
@@ -152,7 +152,7 @@ pub(crate) async fn admit(
         &json!({"realm_actor_creation":candidate.actor_id}),
     )
     .await?;
-    let outcome = AuthoritySubmitOutcome::Accepted {
+    let outcome = AuthoritySubmitResponseBody::Accepted {
         status: AuthorityCommitStatus::Committed,
         commit: commit.clone(),
     };
@@ -197,7 +197,7 @@ pub(crate) async fn joined_memberships(
     for original in actors {
         let candidate = crate::realm_actor_control::creation(&original.event)?
             .ok_or_else(|| invalid("managed membership inventory has no creation"))?;
-        let row = sql_query("SELECT jsonb_build_object('event',e.envelope,'commit',c.commit_json) AS value FROM member_state_current_results m LEFT JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=m.realm_id LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join'")
+        let row = sql_query("SELECT jsonb_build_object('event',e.envelope,'commit',c.commit_json) AS value FROM member_state_current_states m LEFT JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=m.realm_id LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join'")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(candidate.actor_id.to_string())
             .get_result::<Row>(&mut *conn).await.optional()?;
         let Some(row) = row else { continue };

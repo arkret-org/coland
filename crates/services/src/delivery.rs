@@ -192,7 +192,7 @@ pub trait DeviceMessagePort: Send + Sync {
         &self,
         recipient: &str,
         device_id: &str,
-        ack_token: &str,
+        acknowledgement_token: &str,
     ) -> ServiceResult<Option<usize>>;
     async fn messages_after(
         &self,
@@ -215,7 +215,7 @@ pub trait DeviceMessagePort: Send + Sync {
     async fn acknowledge_recipient_deliveries(
         &self,
         selector: &RecipientQueueSelector,
-        ack_token: &str,
+        acknowledgement_token: &str,
     ) -> ServiceResult<Option<usize>>;
     async fn lost_watermark(&self, recipient: &str, device_id: &str) -> ServiceResult<Option<i64>>;
 }
@@ -418,10 +418,10 @@ impl DeliveryService {
         &self,
         recipient: &str,
         device_id: &str,
-        ack_token: &str,
+        acknowledgement_token: &str,
     ) -> ServiceResult<Option<usize>> {
         self.device_messages
-            .acknowledge(recipient, device_id, ack_token)
+            .acknowledge(recipient, device_id, acknowledgement_token)
             .await
     }
 
@@ -474,10 +474,10 @@ impl DeliveryService {
     pub async fn acknowledge_recipient_deliveries(
         &self,
         selector: &RecipientQueueSelector,
-        ack_token: &str,
+        acknowledgement_token: &str,
     ) -> ServiceResult<Option<usize>> {
         self.device_messages
-            .acknowledge_recipient_deliveries(selector, ack_token)
+            .acknowledge_recipient_deliveries(selector, acknowledgement_token)
             .await
     }
 

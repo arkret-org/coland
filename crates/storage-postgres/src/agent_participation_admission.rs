@@ -60,7 +60,7 @@ async fn selection_at_cut(
     scopes: &[String],
     locked: bool,
 ) -> PersistenceResult<Option<ParticipationBits>> {
-    let mut query = "SELECT jsonb_build_object('target_scope',scope,'selection',jsonb_build_object('reply_message',reply_message,'reaction_add',reaction_add,'reaction_remove',reaction_remove,'accept_third_party_mention',accept_third_party_mention,'act_on_behalf',act_on_behalf),'version',version,'next_replace_input',jsonb_build_object('expected_version',version)) AS value FROM agent_participation WHERE agent_id=$1 AND scope_key=ANY($2)".to_owned();
+    let mut query = "SELECT jsonb_build_object('target_scope',scope,'selection',jsonb_build_object('message_creation_allowed',message_creation_allowed,'reaction_addition_allowed',reaction_addition_allowed,'reaction_removal_allowed',reaction_removal_allowed,'third_party_mention_delivery_allowed',third_party_mention_delivery_allowed,'acting_on_behalf_allowed',acting_on_behalf_allowed),'version',version,'next_replace_input',jsonb_build_object('expected_version',version)) AS value FROM agent_participation WHERE agent_id=$1 AND scope_key=ANY($2)".to_owned();
     if locked {
         query.push_str(" FOR SHARE");
     }
@@ -93,12 +93,12 @@ pub(crate) async fn require_current(
     deployment: ParticipationBits,
 ) -> PersistenceResult<()> {
     let mode = if event.executed_by.is_some() {
-        "act_on_behalf"
+        "acting_on_behalf_allowed"
     } else {
         match event.kind {
-            EventKind::MessageCreate => "reply_message",
-            EventKind::ReactionAdd => "reaction_add",
-            EventKind::ReactionRemove => "reaction_remove",
+            EventKind::MessageCreate => "message_creation_allowed",
+            EventKind::ReactionAdd => "reaction_addition_allowed",
+            EventKind::ReactionRemove => "reaction_removal_allowed",
             _ => return Ok(()),
         }
     };
@@ -150,7 +150,7 @@ pub(crate) async fn require_current(
         _ => None,
     };
     let strand_id = if let Some(message) = message_id {
-        let target = crate::message_revision_current_results::locked_message_target(
+        let target = crate::message_revision_current_states::locked_message_target(
             conn,
             &event.realm_id,
             &message,
@@ -184,7 +184,7 @@ pub(crate) async fn require_current(
             })
     };
     if let Some(strand) = strand_id.as_deref() {
-        let row = sql_query("SELECT s.value FROM strand_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id=$2 FOR SHARE OF s")
+        let row = sql_query("SELECT s.value FROM strand_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id=$2 FOR SHARE OF s")
             .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(strand)
             .get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unresolved)?;
         if let Some(circle) = row.value.get("scope_circle_id").and_then(Value::as_str) {
@@ -205,18 +205,18 @@ pub(crate) async fn require_current(
         }
     }
     let allowed = match mode {
-        "reply_message" => effective.reply_message,
-        "reaction_add" => effective.reaction_add,
-        "reaction_remove" => effective.reaction_remove,
-        _ => effective.act_on_behalf,
+        "message_creation_allowed" => effective.message_creation_allowed,
+        "reaction_addition_allowed" => effective.reaction_addition_allowed,
+        "reaction_removal_allowed" => effective.reaction_removal_allowed,
+        _ => effective.acting_on_behalf_allowed,
     };
     if !allowed {
         return Err(PersistenceError::Conflict(format!(
             "failed_precondition: {}",
             match mode {
-                "reply_message" => "agent_reply_not_permitted",
-                "reaction_add" => "agent_reaction_add_not_permitted",
-                "reaction_remove" => "agent_reaction_remove_not_permitted",
+                "message_creation_allowed" => "agent_reply_not_permitted",
+                "reaction_addition_allowed" => "agent_reaction_add_not_permitted",
+                "reaction_removal_allowed" => "agent_reaction_remove_not_permitted",
                 _ => "agent_act_on_behalf_not_permitted",
             }
         )));
@@ -258,7 +258,7 @@ pub(crate) async fn require_native_reply_current(
             effective = effective.intersect(ceiling);
         }
     }
-    if !effective.reply_message || !effective.accept_third_party_mention {
+    if !effective.message_creation_allowed || !effective.third_party_mention_delivery_allowed {
         return Err(unresolved());
     }
     Ok(())
@@ -271,18 +271,18 @@ async fn require_owner_current(
     conn: &mut AsyncPgConnection,
     agent: &arkret_wire::AccountId,
 ) -> PersistenceResult<()> {
-    let row = sql_query("SELECT p.value FROM agent_provisioning_current_results p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id JOIN realm_commits c ON c.commit_id=p.current_commit_id AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position WHERE p.agent_id=$1 AND g.station_id=$2 AND p.value->>'controller_principal_id'=g.principal_id FOR SHARE OF p")
+    let row = sql_query("SELECT p.value FROM agent_provisioning_current_states p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id JOIN realm_commits c ON c.commit_id=p.current_commit_id AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position WHERE p.agent_id=$1 AND g.station_id=$2 AND p.value->>'controller_principal_id'=g.principal_id FOR SHARE OF p")
         .bind::<Text,_>(agent.principal_id.as_str()).bind::<Text,_>(agent.station_id.as_str())
         .get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unresolved)?;
     let provision: arkret_models_collaboration::events_payloads::agent::AgentProvisioningValue =
         serde_json::from_value(row.value).map_err(|_| unresolved())?;
-    crate::agent_current_results::lock_agent_producer_current(
+    crate::agent_current_states::lock_agent_producer_current(
         conn,
         &provision.principal_control_realm_id,
         &agent.principal_id,
     )
     .await?;
-    let row = sql_query("SELECT s.value FROM agent_status_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position JOIN principal_resolutions r ON r.pcr_realm_id=s.realm_id AND r.principal_id=s.agent_id WHERE s.realm_id=$1 AND s.agent_id=$2 AND r.station_id=$3 FOR SHARE OF s")
+    let row = sql_query("SELECT s.value FROM agent_status_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position JOIN principal_resolutions r ON r.pcr_realm_id=s.realm_id AND r.principal_id=s.agent_id WHERE s.realm_id=$1 AND s.agent_id=$2 AND r.station_id=$3 FOR SHARE OF s")
         .bind::<Text,_>(provision.principal_control_realm_id.as_str()).bind::<Text,_>(agent.principal_id.as_str()).bind::<Text,_>(agent.station_id.as_str())
         .get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unresolved)?;
     if row.value != Value::String("active".into()) {
@@ -318,11 +318,11 @@ async fn governance_component_at_cut(
     lock: bool,
 ) -> PersistenceResult<Option<ParticipationBits>> {
     let query = if scope.starts_with("realm:") {
-        "SELECT s.value FROM realm_policy_bundle_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'realm:'||s.realm_id=$2"
+        "SELECT s.value FROM realm_policy_bundle_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'realm:'||s.realm_id=$2"
     } else if scope.starts_with("circle:") {
-        "SELECT s.value FROM circle_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'circle:'||s.realm_id||':'||s.circle_id=$2"
+        "SELECT s.value FROM circle_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'circle:'||s.realm_id||':'||s.circle_id=$2"
     } else if scope.starts_with("strand:") {
-        "SELECT s.value FROM strand_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'strand:'||s.realm_id||':'||s.strand_id=$2"
+        "SELECT s.value FROM strand_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND 'strand:'||s.realm_id||':'||s.strand_id=$2"
     } else {
         return Err(unresolved());
     };
@@ -346,11 +346,11 @@ async fn governance_component_at_cut(
     // for a missing ordinary policy bundle. Require the exact four-Commit unit
     // and the genesis current's covering Commit before interpreting omission.
     let row = sql_query(format!(
-        "SELECT s.value FROM realm_bootstrap_current_results s \
+        "SELECT s.value FROM realm_bootstrap_current_states s \
          JOIN realm_commits c ON c.commit_id=s.current_commit_id \
            AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position \
          JOIN direct_conversation_founding_slots f ON f.realm_id=s.realm_id \
-         WHERE s.realm_id=$1 AND s.result_family='realm_genesis' \
+         WHERE s.realm_id=$1 AND s.state_family='realm_genesis' \
            AND c.stream_position=0 AND jsonb_array_length(f.event_ids)=4 \
            AND f.event_ids->>0=c.commit_json->>'event_ref' \
            AND NOT EXISTS ( \

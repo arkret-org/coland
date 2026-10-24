@@ -65,15 +65,15 @@ struct AgentParticipationRow {
     #[diesel(sql_type = BigInt)]
     version: i64,
     #[diesel(sql_type = Bool)]
-    reply_message: bool,
+    message_creation_allowed: bool,
     #[diesel(sql_type = Bool)]
-    reaction_add: bool,
+    reaction_addition_allowed: bool,
     #[diesel(sql_type = Bool)]
-    reaction_remove: bool,
+    reaction_removal_allowed: bool,
     #[diesel(sql_type = Bool)]
-    accept_third_party_mention: bool,
+    third_party_mention_delivery_allowed: bool,
     #[diesel(sql_type = Bool)]
-    act_on_behalf: bool,
+    acting_on_behalf_allowed: bool,
 }
 impl From<AgentParticipationRow> for Value {
     fn from(row: AgentParticipationRow) -> Self {
@@ -84,11 +84,11 @@ impl From<AgentParticipationRow> for Value {
             "realm_id": row.realm_id,
             "scope": row.scope,
             "version": row.version,
-            "reply_message": row.reply_message,
-            "reaction_add": row.reaction_add,
-            "reaction_remove": row.reaction_remove,
-            "accept_third_party_mention": row.accept_third_party_mention,
-            "act_on_behalf": row.act_on_behalf,
+            "message_creation_allowed": row.message_creation_allowed,
+            "reaction_addition_allowed": row.reaction_addition_allowed,
+            "reaction_removal_allowed": row.reaction_removal_allowed,
+            "third_party_mention_delivery_allowed": row.third_party_mention_delivery_allowed,
+            "acting_on_behalf_allowed": row.acting_on_behalf_allowed,
         })
     }
 }
@@ -129,11 +129,13 @@ impl AgentParticipationStore for PgAgentParticipationStore {
         };
         let bits =
             arkret_models_collaboration::governance::agent_participation::ParticipationBits {
-                reply_message: get_bool("reply_message")?,
-                reaction_add: get_bool("reaction_add")?,
-                reaction_remove: get_bool("reaction_remove")?,
-                accept_third_party_mention: get_bool("accept_third_party_mention")?,
-                act_on_behalf: get_bool("act_on_behalf")?,
+                message_creation_allowed: get_bool("message_creation_allowed")?,
+                reaction_addition_allowed: get_bool("reaction_addition_allowed")?,
+                reaction_removal_allowed: get_bool("reaction_removal_allowed")?,
+                third_party_mention_delivery_allowed: get_bool(
+                    "third_party_mention_delivery_allowed",
+                )?,
+                acting_on_behalf_allowed: get_bool("acting_on_behalf_allowed")?,
             };
         let accepted_version = expected_version.checked_add(1).ok_or_else(|| {
             PersistenceError::Internal("agent participation version overflow".to_owned())
@@ -167,16 +169,16 @@ impl AgentParticipationStore for PgAgentParticipationStore {
             crate::realm_identity::ensure_realm_pk(conn, &realm_id).await?;
         sql_query(
             "INSERT INTO agent_participation \
-             (id, agent_id, scope_kind, scope_key, realm_id, scope, version, reply_message, \
-               reaction_add, reaction_remove, accept_third_party_mention, act_on_behalf, updated_at) \
+             (id, agent_id, scope_kind, scope_key, realm_id, scope, version, message_creation_allowed, \
+               reaction_addition_allowed, reaction_removal_allowed, third_party_mention_delivery_allowed, acting_on_behalf_allowed, updated_at) \
              SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW() WHERE $13=0 OR EXISTS(SELECT 1 FROM agent_participation WHERE agent_id=$2 AND scope_key=$4 AND version=$13) \
              ON CONFLICT (agent_id, scope_key) DO UPDATE SET \
              scope_kind = EXCLUDED.scope_kind, realm_id = EXCLUDED.realm_id, \
              scope = EXCLUDED.scope, version = EXCLUDED.version, \
-             reply_message = EXCLUDED.reply_message, reaction_add = EXCLUDED.reaction_add, \
-             reaction_remove = EXCLUDED.reaction_remove, \
-             accept_third_party_mention = EXCLUDED.accept_third_party_mention, \
-             act_on_behalf = EXCLUDED.act_on_behalf, updated_at = NOW() \
+             message_creation_allowed = EXCLUDED.message_creation_allowed, reaction_addition_allowed = EXCLUDED.reaction_addition_allowed, \
+             reaction_removal_allowed = EXCLUDED.reaction_removal_allowed, \
+             third_party_mention_delivery_allowed = EXCLUDED.third_party_mention_delivery_allowed, \
+             acting_on_behalf_allowed = EXCLUDED.acting_on_behalf_allowed, updated_at = NOW() \
              WHERE agent_participation.version = $13",
         )
         .bind::<diesel::sql_types::Uuid, _>(uuid::Uuid::now_v7())
@@ -186,11 +188,11 @@ impl AgentParticipationStore for PgAgentParticipationStore {
         .bind::<Text, _>(&realm_id)
         .bind::<Jsonb, _>(&scope)
         .bind::<BigInt, _>(accepted_version)
-        .bind::<Bool, _>(bits.reply_message)
-        .bind::<Bool, _>(bits.reaction_add)
-        .bind::<Bool, _>(bits.reaction_remove)
-        .bind::<Bool, _>(bits.accept_third_party_mention)
-        .bind::<Bool, _>(bits.act_on_behalf)
+        .bind::<Bool, _>(bits.message_creation_allowed)
+        .bind::<Bool, _>(bits.reaction_addition_allowed)
+        .bind::<Bool, _>(bits.reaction_removal_allowed)
+        .bind::<Bool, _>(bits.third_party_mention_delivery_allowed)
+        .bind::<Bool, _>(bits.acting_on_behalf_allowed)
         .bind::<BigInt, _>(expected_version)
         .execute(&mut *conn)
         .await
@@ -202,8 +204,8 @@ impl AgentParticipationStore for PgAgentParticipationStore {
     async fn list_selections(&self, agent_id: &str) -> PersistenceResult<Vec<Value>> {
         let mut conn = crate::pg_db(&self.pool);
         sql_query(
-            "SELECT agent_id, scope_kind, scope_key, realm_id, scope, version, reply_message, \
-             reaction_add, reaction_remove, accept_third_party_mention, act_on_behalf \
+            "SELECT agent_id, scope_kind, scope_key, realm_id, scope, version, message_creation_allowed, \
+             reaction_addition_allowed, reaction_removal_allowed, third_party_mention_delivery_allowed, acting_on_behalf_allowed \
              FROM agent_participation \
              WHERE agent_id = $1 ORDER BY scope_key",
         )
@@ -283,7 +285,7 @@ impl AgentStore for PgAgentStore {
         producer: Option<&coland_storage::SelfProducerCommitGuard>,
         current: &coland_storage::ManagementReviewCurrent,
         _at: chrono::DateTime<Utc>,
-    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewResponseBody>
     {
         let mut conn = pg_conn(&self.pool)
             .await
@@ -303,7 +305,7 @@ impl AgentStore for PgAgentStore {
         request: &arkret_models_integration::management_review::ManagementReviewLookupRequestBody,
         current: &coland_storage::ManagementReviewCurrent,
         _at: chrono::DateTime<Utc>,
-    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewResponseBody>
     {
         let mut conn = pg_conn(&self.pool)
             .await
@@ -368,7 +370,7 @@ impl AgentStore for PgAgentStore {
         methods: &[coland_storage::ApprovalHistoricalMethod],
         current: &coland_storage::ManagementReviewCurrent,
         _at: chrono::DateTime<Utc>,
-    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewOutcome>
+    ) -> PersistenceResult<arkret_models_integration::management_review::ManagementReviewResponseBody>
     {
         let mut conn = pg_conn(&self.pool)
             .await
@@ -430,7 +432,7 @@ impl AgentStore for PgAgentStore {
                 pairing_request_id: OpaqueLocalId::new(row.pairing_request_id).map_err(PersistenceError::database)?,
                 approval_request_id: OpaqueLocalId::new(row.approval_request_id).map_err(PersistenceError::database)?,
                 runtime_key_binding_digest: row.runtime_key_binding_digest,
-                outcome: arkret_models_collaboration::agent_operations::AgentKeyPairOutcome {
+                outcome: arkret_models_collaboration::agent_operations::AgentKeyPairResponseBody {
                     activation_state,
                     authorize_event_ref,
                 },

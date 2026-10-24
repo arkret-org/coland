@@ -8,15 +8,15 @@
 use std::collections::BTreeMap;
 
 use arkret_wire::{
-    CommitStreamHead, CommitStreamRef, CommittedEventFullView, Event, EventId, RealmStateSnapshot,
-    TypedCurrentRow,
+    CommitStreamHead, CommitStreamRef, CommittedEventFullView, CurrentState, Event, EventId,
+    RealmStateSnapshot,
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CommitStreamProjection {
     stream_heads: BTreeMap<CommitStreamRef, CommitStreamHead>,
     committed_items: BTreeMap<EventId, CommittedEventFullView>,
-    current_state_entries: Vec<TypedCurrentRow>,
+    current_state_entries: Vec<CurrentState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,7 +124,7 @@ impl CommitStreamProjection {
     }
 
     #[must_use]
-    pub fn current_state_entries(&self) -> &[TypedCurrentRow] {
+    pub fn current_state_entries(&self) -> &[CurrentState] {
         &self.current_state_entries
     }
 }
@@ -154,7 +154,7 @@ mod tests {
             signed_digest: arkret_identifiers::Hash::new(format!("sha256:{}", "11".repeat(32)))
                 .unwrap(),
             created_at: Utc.timestamp_opt(1_800_000_000, 0).unwrap(),
-            sig: Base64UrlString::new("AQ").unwrap(),
+            signature: Base64UrlString::new("AQ").unwrap(),
         }
     }
 

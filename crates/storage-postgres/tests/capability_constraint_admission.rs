@@ -117,7 +117,7 @@ async fn root_event_ref(pool: &PgPool, realm_id: &arkret_wire::RealmId) -> Strin
     }
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "SELECT authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1",
+        "SELECT authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<RootRow>(&mut *conn)
@@ -151,7 +151,7 @@ fn grant<'a>(
                         "kind": "realm_root",
                         "realm_id": realm_id,
                         "authority_event_ref": discussion.root_event_ref,
-                        "authority_generation": 0
+                        "authority_generation": "0"
                     }],
                     "issued_at": arkret_canonical::format_timestamp_canonical(
                         previous.commit.committed_at
@@ -360,7 +360,7 @@ async fn a_rate_quota_is_reserved_with_the_event_it_admits() {
             "constraint_kind": "quota",
             "constraint_subkind": "rate",
             "effect": "allow",
-            "max_operations": 1,
+            "max_operation_count": 1,
             "period": "P1D",
             "constraint_scope": "per_realm"
         }]),
@@ -635,7 +635,7 @@ async fn an_admission_waiting_on_the_realm_lock_observes_a_concurrent_revocation
         .await
         .unwrap();
     diesel::sql_query(
-        "UPDATE capability_grant_current_results \
+        "UPDATE capability_grant_current_states \
          SET status='revoked',value=jsonb_set(value,'{status}','\"revoked\"') \
          WHERE realm_id=$1 AND grant_id=$2",
     )

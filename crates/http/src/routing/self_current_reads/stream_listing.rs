@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use arkret_server::{CursorAuthority, CursorAuthorityError, CursorBindingContext};
-use arkret_wire::{RealmId, RealmStreamList, RealmStreamRow};
+use arkret_wire::{RealmId, RealmStreamPage, RealmStreamRow};
 use coland_http::error::AppError;
 use coland_services::sync::CursorState;
 use coland_storage::AccountRealmStreamList;
@@ -127,7 +127,7 @@ async fn page(
     req: &mut Request,
     session: &coland_services::identity::SessionIdentityState,
     account: &AccountId,
-) -> Result<RealmStreamList, AppError> {
+) -> Result<RealmStreamPage, AppError> {
     let realm = req
         .param::<String>("realm_id")
         .and_then(|id| RealmId::new(id).ok())
@@ -381,7 +381,7 @@ fn select_page(
     after: usize,
     limit: usize,
     byte_limit: usize,
-) -> Result<(RealmStreamList, usize), AppError> {
+) -> Result<(RealmStreamPage, usize), AppError> {
     if after > frozen.len() {
         return Err(invalid_cursor());
     }
@@ -389,7 +389,7 @@ fn select_page(
         .iter()
         .map(|row| (&row.stream_ref, row))
         .collect::<BTreeMap<_, _>>();
-    let mut page = RealmStreamList {
+    let mut page = RealmStreamPage {
         realm_id: realm.clone(),
         streams: Vec::new(),
         next_cursor: None,

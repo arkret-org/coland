@@ -535,12 +535,12 @@ fn undisclosable(reason: &str) -> PersistenceError {
 
 /// Compare rows by their complete typed subject within their source stream.
 fn indexed_cut_rows(
-    entries: &[arkret_wire::TypedCurrentRow],
-) -> PersistenceResult<std::collections::BTreeMap<String, &arkret_wire::TypedCurrentRow>> {
+    entries: &[arkret_wire::CurrentState],
+) -> PersistenceResult<std::collections::BTreeMap<String, &arkret_wire::CurrentState>> {
     entries
         .iter()
         .map(|row| {
-            let arkret_wire::TypedCurrentRow::Value {
+            let arkret_wire::CurrentState::Value {
                 selector,
                 source_stream_ref,
                 ..
@@ -560,7 +560,7 @@ fn require_observed_cut(
     minimum: &coland_storage::RealmStateSnapshotMaterial,
     current: &coland_storage::RealmStateSnapshotMaterial,
 ) -> PersistenceResult<()> {
-    use arkret_wire::TypedCurrentRow::Value;
+    use arkret_wire::CurrentState::Value;
     let project = |material: &coland_storage::RealmStateSnapshotMaterial| {
         let mut selected = material.clone();
         if let Some(basis) = &snapshot.history_basis {
@@ -968,9 +968,9 @@ pub(crate) async fn recheck_actor_disclosure_in_connection(
         .await?
         .ok_or_else(|| undisclosable("missing current context"))?;
         for historical in &snapshot.current_state_entries {
-            let arkret_wire::TypedCurrentRow::Value { selector, .. } = historical;
+            let arkret_wire::CurrentState::Value { selector, .. } = historical;
             context.current_state_entries.retain(|row| {
-                let arkret_wire::TypedCurrentRow::Value {
+                let arkret_wire::CurrentState::Value {
                     selector: actual, ..
                 } = row;
                 actual != selector
@@ -1044,7 +1044,7 @@ pub(crate) async fn recheck_actor_disclosure_in_connection(
     for row in &snapshot.current_state_entries {
         // An old publication flag cannot outlive the watcher's current opt-in.
         // The watcher still reads its own historical state after changing it.
-        if let arkret_wire::TypedCurrentRow::Value {
+        if let arkret_wire::CurrentState::Value {
             selector: selector @ arkret_wire::CurrentSelector::StrandWatch { watcher_actor_id, .. },
             source_stream_ref,
             ..
@@ -1052,7 +1052,7 @@ pub(crate) async fn recheck_actor_disclosure_in_connection(
             && watcher_actor_id != &actor.clone()
             && !current_material.current_state_entries.iter().any(|current| matches!(
                 current,
-                arkret_wire::TypedCurrentRow::Value { selector: actual, source_stream_ref: source, .. }
+                arkret_wire::CurrentState::Value { selector: actual, source_stream_ref: source, .. }
                     if actual == selector && source == source_stream_ref
             ))
         {
@@ -1250,7 +1250,7 @@ async fn disclosed_basis_from_snapshot(
 ) -> PersistenceResult<
     Option<arkret_models_collaboration::sync_frames::account_sync::StreamWindowStartBasis>,
 > {
-    use arkret_wire::{CommitStreamRef, CurrentSelector, TypedCurrentRow};
+    use arkret_wire::{CommitStreamRef, CurrentSelector, CurrentState};
 
     let Some(mut basis) = basis_from_snapshot(snapshot, stream_ref, anchor, floor) else {
         return Ok(None);
@@ -1303,12 +1303,12 @@ async fn disclosed_basis_from_snapshot(
     };
     let mut dependencies = Vec::with_capacity(selectors.len());
     for selector in selectors {
-        let Some(TypedCurrentRow::Value {
+        let Some(CurrentState::Value {
             source_stream_ref,
             revision,
             ..
         }) = snapshot.current_state_entries.iter().find(|row| {
-            matches!(row, TypedCurrentRow::Value { selector: actual, .. } if actual == &selector)
+            matches!(row, CurrentState::Value { selector: actual, .. } if actual == &selector)
         }) else {
             return Ok(None);
         };
@@ -1432,7 +1432,7 @@ pub(crate) async fn issue_stream_history_snapshot(
                 return Ok(None);
             };
             if let Some(expected) = expected_membership
-                && !material.current_state_entries.iter().any(|row| matches!(row, arkret_wire::TypedCurrentRow::Value { selector: arkret_wire::CurrentSelector::MemberState { actor_id }, revision, .. } if actor_id.as_account_id() == Some(account) && &revision.commit_id == expected)) {
+                && !material.current_state_entries.iter().any(|row| matches!(row, arkret_wire::CurrentState::Value { selector: arkret_wire::CurrentSelector::MemberState { actor_id }, revision, .. } if actor_id.as_account_id() == Some(account) && &revision.commit_id == expected)) {
                     return Err(undisclosable("history request no longer names the current opening join").into());
                 }
             require_snapshot_serving_cut(conn, account, issuer, &tenure.service_id, &material)
@@ -1494,7 +1494,7 @@ async fn stream_history_original(
     sign: coland_storage::RealmStateSnapshotSigner<'_>,
 ) -> PersistenceResult<Option<arkret_wire::RealmStateSnapshot>> {
     use arkret_wire::{
-        CurrentSelector, RealmSnapshotHistoryBasis, RealmSnapshotPurpose, TypedCurrentRow,
+        CurrentSelector, CurrentState, RealmSnapshotHistoryBasis, RealmSnapshotPurpose,
     };
     if derived_snapshot_id(snapshot)? != snapshot.snapshot_id {
         return Ok(None);
@@ -1535,7 +1535,7 @@ async fn stream_history_original(
         .current_state_entries
         .iter()
         .filter(|row| {
-            let TypedCurrentRow::Value {
+            let CurrentState::Value {
                 selector,
                 source_stream_ref,
                 ..
@@ -1551,7 +1551,7 @@ async fn stream_history_original(
         .collect();
     let mut sources = std::collections::BTreeSet::from([stream.clone()]);
     for row in &entries {
-        let TypedCurrentRow::Value {
+        let CurrentState::Value {
             source_stream_ref, ..
         } = row;
         sources.insert(source_stream_ref.clone());
@@ -2017,7 +2017,7 @@ pub(crate) async fn freeze_account_realm_window(
             // issuance. Coverage repeats the current heads in an initial
             // baseline; reserve them even on subsequent detail turns.
             let current =
-                arkret_models_collaboration::sync_frames::current_results::AccountCurrentView {
+                arkret_models_collaboration::sync_frames::current_states::AccountStateView {
                     realm_id: request.realm_id.clone(),
                     governance_generation: generation,
                     stream_heads: material.visible_stream_heads.clone(),
@@ -2333,7 +2333,7 @@ mod tests {
                 realm_id: base.realm_id.clone(),
                 governance_generation: 0,
                 visible_stream_heads: base.visible_stream_heads.clone(),
-                current_state_entries: vec![arkret_wire::TypedCurrentRow::Value {
+                current_state_entries: vec![arkret_wire::CurrentState::Value {
                     selector: arkret_wire::CurrentSelector::RealmProfile,
                     source_stream_ref: base.visible_stream_heads[0].stream_ref.clone(),
                     revision: arkret_wire::CurrentRevision {
@@ -2706,7 +2706,7 @@ mod tests {
         }
 
         let mut forged_same_ref = snapshot.clone();
-        forged_same_ref.signature.sig = arkret_wire::Base64UrlString::new("AA").unwrap();
+        forged_same_ref.signature.signature = arkret_wire::Base64UrlString::new("AA").unwrap();
         assert!(matches!(
             archive.issue(&alice, &forged_same_ref).await,
             Err(PersistenceError::Conflict(_)),

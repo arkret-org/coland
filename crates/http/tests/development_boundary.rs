@@ -89,7 +89,7 @@ async fn stored_local_session_cannot_gain_synthetic_admin_scopes_in_a_normal_art
             station_id: state.service_core_id(),
             localpart: "development-boundary".to_owned(),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: now,
         })

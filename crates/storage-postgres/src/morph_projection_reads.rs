@@ -3,9 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use arkret_event_draft::ProjectedEventOperation;
-use arkret_models_collaboration::objects::query_projection::{
-    DocumentMorphProjectionOutcome, ProjectionMorphList,
-};
+use arkret_models_collaboration::objects::query_projection::{DocumentMorphView, MorphPage};
 use arkret_wire::{
     ActorId, CommitStreamHead, CommitStreamRef, CommittedEventFullView, DidCoreId, EventKind,
     RealmId,
@@ -594,9 +592,9 @@ async fn visible(
 
 fn morph_row(
     morph: &coland_storage::MorphProjection,
-) -> PersistenceResult<arkret_models_collaboration::objects::query_projection::ProjectionMorphRow> {
+) -> PersistenceResult<arkret_models_collaboration::objects::query_projection::MorphRow> {
     use coland_storage::ObjectLifecycleState;
-    let row = arkret_models_collaboration::objects::query_projection::ProjectionMorphRow {
+    let row = arkret_models_collaboration::objects::query_projection::MorphRow {
         morph_id: morph.morph_id.parse().map_err(unavailable)?,
         realm_id: morph.realm_id.parse().map_err(unavailable)?,
         morph_kind: morph.morph_kind.clone(),
@@ -624,7 +622,7 @@ pub(crate) async fn list_in_connection(
     station: &DidCoreId,
     include_terminal: bool,
     at: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<Option<(ProjectionMorphList, Vec<NativeReadFact>)>> {
+) -> PersistenceResult<Option<(MorphPage, Vec<NativeReadFact>)>> {
     if !crate::authority_commit::accepted_current_member_joined_in_connection(conn, realm, actor)
         .await?
     {
@@ -653,7 +651,7 @@ pub(crate) async fn list_in_connection(
         facts.extend([fact, metadata]);
     }
     rows.sort_by(|left, right| left.morph_id.cmp(&right.morph_id));
-    let output = ProjectionMorphList {
+    let output = MorphPage {
         realm_id: realm.clone(),
         total: u64::try_from(rows.len()).map_err(unavailable)?,
         morphs: rows,
@@ -745,7 +743,7 @@ pub(crate) async fn document_in_connection(
     actor: &ActorId,
     station: &DidCoreId,
     at: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<Option<(DocumentMorphProjectionOutcome, Vec<NativeReadFact>)>> {
+) -> PersistenceResult<Option<(DocumentMorphView, Vec<NativeReadFact>)>> {
     if !crate::authority_commit::accepted_current_member_joined_in_connection(conn, realm, actor)
         .await?
     {
@@ -825,7 +823,7 @@ pub(crate) async fn document_in_connection(
         comments_for_document(conn, &material, morph, &body, actor, at).await?;
     extra_facts.extend(comment_facts);
     extra_facts.extend(version_facts);
-    let output = DocumentMorphProjectionOutcome {
+    let output = DocumentMorphView {
         document,
         versions,
         relations,
@@ -1158,7 +1156,7 @@ pub(crate) async fn list_for_actor(
     actor: &ActorId,
     station: &DidCoreId,
     include_terminal: bool,
-) -> PersistenceResult<Option<ProjectionMorphList>> {
+) -> PersistenceResult<Option<MorphPage>> {
     use diesel_async::AsyncConnection as _;
     let mut conn = crate::pg_conn(pool).await?;
     conn.transaction::<_, crate::PgTransactionError, _>(async move |conn| {
@@ -1184,7 +1182,7 @@ pub(crate) async fn document_for_actor(
     morph: &arkret_wire::MorphId,
     actor: &ActorId,
     station: &DidCoreId,
-) -> PersistenceResult<Option<DocumentMorphProjectionOutcome>> {
+) -> PersistenceResult<Option<DocumentMorphView>> {
     use diesel_async::AsyncConnection as _;
     let mut conn = crate::pg_conn(pool).await?;
     conn.transaction::<_, crate::PgTransactionError, _>(async move |conn| {
@@ -1284,8 +1282,8 @@ fn canonical_same<T: serde::Serialize>(left: &T, right: &T) -> PersistenceResult
 }
 
 pub(crate) fn owner_covers_document(
-    output: &DocumentMorphProjectionOutcome,
-    owner: &DocumentMorphProjectionOutcome,
+    output: &DocumentMorphView,
+    owner: &DocumentMorphView,
 ) -> PersistenceResult<bool> {
     if !canonical_same(&output.document, &owner.document)? {
         return Ok(false);
@@ -1412,7 +1410,7 @@ pub(crate) async fn human_realm_in_connection(
     conn: &mut AsyncPgConnection,
     account: &arkret_wire::AccountId,
 ) -> PersistenceResult<RealmId> {
-    let row = sql_query("SELECT r.pcr_realm_id FROM principal_resolution_current_results r JOIN pcr_genesis_units g ON g.realm_id=r.pcr_realm_id AND g.principal_id=r.principal_id AND g.station_id=r.station_id WHERE r.principal_id=$1 AND r.station_id=$2")
+    let row = sql_query("SELECT r.pcr_realm_id FROM principal_resolution_current_states r JOIN pcr_genesis_units g ON g.realm_id=r.pcr_realm_id AND g.principal_id=r.principal_id AND g.station_id=r.station_id WHERE r.principal_id=$1 AND r.station_id=$2")
         .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
         .get_result::<HumanRealmRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(|| unavailable("ordinary Morph caller has no accepted human registration anchor"))?;
@@ -1436,12 +1434,12 @@ pub(crate) async fn require_accepted_human_pcr_in_connection(
     held_pcr: &RealmId,
 ) -> PersistenceResult<()> {
     use arkret_models_collaboration::principal_operations::{
-        PcrGenesisAdmissionInput, PcrGenesisAdmissionOutcome,
+        PcrGenesisAdmissionInput, PcrGenesisAdmissionResponseBody,
     };
     // Positive closed human registration evidence, not an absent Agent row or
     // a non-authoritative Actor Profile classification.
     let row = sql_query("SELECT g.exact_request_body,g.result_json,r.pcr_realm_id,r.genesis_event_id,r.value->>'resolution_event_ref' AS current_event_id,r.value AS projection FROM pcr_genesis_units g \
-        JOIN principal_resolution_current_results r ON r.principal_id=g.principal_id AND r.station_id=g.station_id AND r.pcr_realm_id=g.realm_id \
+        JOIN principal_resolution_current_states r ON r.principal_id=g.principal_id AND r.station_id=g.station_id AND r.pcr_realm_id=g.realm_id \
         WHERE g.principal_id=$1 AND g.station_id=$2 FOR SHARE OF g,r")
         .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
         .get_result::<HumanGenesisRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
@@ -1453,7 +1451,7 @@ pub(crate) async fn require_accepted_human_pcr_in_connection(
     let (request, result) = tokio::task::spawn_blocking(move || -> PersistenceResult<_> {
         let request: Box<PcrGenesisAdmissionInput> =
             serde_json::from_slice(&exact_request_body).map_err(unavailable)?;
-        let result: Box<PcrGenesisAdmissionOutcome> =
+        let result: Box<PcrGenesisAdmissionResponseBody> =
             serde_json::from_value(result_json).map_err(unavailable)?;
         result.validate_against(&request).map_err(unavailable)?;
         Ok((request, result))
@@ -1608,7 +1606,7 @@ pub(crate) async fn require_observed_account_status_binding_in_connection(
         .execute(&mut *conn)
         .await
         .map_err(PersistenceError::database)?;
-    let status = sql_query("SELECT record,receipt FROM account_status_replica_records WHERE account_authority_id=$1 AND account_id=$2 ORDER BY status_seq DESC LIMIT 1")
+    let status = sql_query("SELECT record,receipt FROM account_status_replica_records WHERE account_authority_id=$1 AND account_id=$2 ORDER BY status_sequence DESC LIMIT 1")
         .bind::<Text,_>(account.station_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(account).map_err(unavailable)?)
         .get_result::<StatusHeadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     let status = status
@@ -1918,7 +1916,7 @@ mod tests {
                 signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "aa".repeat(32)))
                     .unwrap(),
                 created_at: event.created_at,
-                sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
+                signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl").unwrap(),
             },
         }
     }
@@ -1971,7 +1969,7 @@ mod tests {
         sql_query("INSERT INTO realm_authorities(realm_id,generation,service_id,authority_ref) VALUES($1,0,$2,'{}')")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(station().as_str()).execute(&mut *conn).await.unwrap();
         insert_history(conn, &opening, 0).await;
-        sql_query("INSERT INTO realm_authority_root_current_results(realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref,current_commit_id,current_stream_position,updated_at) VALUES($1,$2,0,0,$3,$4,0,$5)")
+        sql_query("INSERT INTO realm_authority_root_current_states(realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref,current_commit_id,current_stream_position,updated_at) VALUES($1,$2,0,0,$3,$4,0,$5)")
             .bind::<Text,_>(realm.as_str()).bind::<Jsonb,_>(json!(opening.actor_id))
             .bind::<Text,_>(opening.event_id.as_str()).bind::<Text,_>(commit(&opening,0).commit_id.as_str())
             .bind::<Timestamptz,_>(at(0)).execute(&mut *conn).await.unwrap();
@@ -1985,7 +1983,7 @@ mod tests {
         );
         arkret_schema::validate_event_wire_schema(&history).unwrap();
         insert_history_at(conn, &history, 1).await;
-        crate::realm_bootstrap_current_results::commit_ordinary_bootstrap_singleton_current_result_in_connection(
+        crate::realm_bootstrap_current_states::commit_ordinary_bootstrap_singleton_current_state_in_connection(
             conn, &history, &commit_at(&history, 1),
         ).await.unwrap();
         let member = event(
@@ -1996,7 +1994,7 @@ mod tests {
         );
         arkret_schema::validate_event_wire_schema(&member).unwrap();
         insert_history_at(conn, &member, 2).await;
-        crate::unit_of_work::commit_parent_membership_current_results(
+        crate::unit_of_work::commit_parent_membership_current_states(
             conn,
             &member,
             &commit_at(&member, 2),
@@ -2015,13 +2013,13 @@ mod tests {
             arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [51; 32]);
         let grant = arkret_wire::GrantId::from_event_id(&source);
         let root = json!({"kind":"realm_root","realm_id":opening.realm_id,
-            "authority_event_ref":opening.event_id,"authority_generation":0});
+            "authority_event_ref":opening.event_id,"authority_generation":"0"});
         let value = json!({"id":grant,"schema":"ak.schema.capability.v1","realm_id":opening.realm_id,
             "issuer_id":opening.actor_id,"subject":reader,"actions":actions,
             "resources":[{"kind":"realm","realm_id":opening.realm_id}],
             "issuer_authority_refs":[root],"authority_depth":1,"authority_root_refs":[root],
             "issued_at":arkret_canonical::format_timestamp_canonical(at(0)),"status":"active"});
-        sql_query("INSERT INTO capability_grant_current_results(realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value,updated_at) VALUES($1,$2,'active',$3,$4,$5,0,$6,$7) ON CONFLICT(realm_id,grant_id) DO UPDATE SET value=EXCLUDED.value")
+        sql_query("INSERT INTO capability_grant_current_states(realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value,updated_at) VALUES($1,$2,'active',$3,$4,$5,0,$6,$7) ON CONFLICT(realm_id,grant_id) DO UPDATE SET value=EXCLUDED.value")
             .bind::<Text,_>(opening.realm_id.as_str()).bind::<Text,_>(grant.as_str())
             .bind::<Text,_>(source.as_str()).bind::<Text,_>(commit(opening,0).commit_id.as_str())
             .bind::<Jsonb,_>(json!(CommitStreamRef::Realm {realm_id:opening.realm_id.clone()}))
@@ -2055,7 +2053,7 @@ mod tests {
         super::pcr_genesis::PcrGenesisFixture,
         Event,
         Event,
-        DocumentMorphProjectionOutcome,
+        DocumentMorphView,
     ) {
         let persistence = crate::PgPersistenceStore::new(database.pool());
         let identity = super::pcr_genesis::PcrGenesisFixture::new(
@@ -2188,7 +2186,7 @@ mod tests {
         let database = morph_database().await;
         let (identity, opening, created, output) = human_document_fixture(&database).await;
         let mut conn = database.pool().get().await.unwrap();
-        sql_query("UPDATE member_state_current_results SET membership='leave',value=jsonb_set(value,'{membership}','\"leave\"'::jsonb) WHERE realm_id=$1")
+        sql_query("UPDATE member_state_current_states SET membership='leave',value=jsonb_set(value,'{membership}','\"leave\"'::jsonb) WHERE realm_id=$1")
             .bind::<Text, _>(opening.realm_id.as_str())
             .execute(&mut *conn)
             .await
@@ -2823,7 +2821,7 @@ mod tests {
         .unwrap();
         assert_eq!(list.total, 1);
         assert_eq!(facts.len(), 2);
-        sql_query("UPDATE member_state_current_results SET membership='leave',value=jsonb_set(value,'{membership}','\"leave\"'::jsonb)")
+        sql_query("UPDATE member_state_current_states SET membership='leave',value=jsonb_set(value,'{membership}','\"leave\"'::jsonb)")
             .execute(&mut *conn)
             .await
             .unwrap();
@@ -2898,7 +2896,7 @@ mod tests {
 
     async fn constraints(conn: &mut AsyncPgConnection, value: serde_json::Value) {
         sql_query(
-            "UPDATE capability_grant_current_results SET value=jsonb_set(value,'{constraints}',$1)",
+            "UPDATE capability_grant_current_states SET value=jsonb_set(value,'{constraints}',$1)",
         )
         .bind::<Jsonb, _>(value)
         .execute(&mut *conn)
@@ -2927,7 +2925,7 @@ mod tests {
         let mut quota =
             GrantConstraint::new(GrantConstraintKind::Quota, GrantConstraintEffect::Allow);
         quota.constraint_subkind = Some(GrantConstraintSubkind::Rate);
-        quota.max_operations = Some(3);
+        quota.max_operation_count = Some(3);
         quota.period = Some("PT1H".to_owned());
         quota.constraint_scope = Some(GrantConstraintScope::PerRealm);
         constraints(&mut conn, json!([quota])).await;
@@ -3155,7 +3153,7 @@ mod tests {
         crate::realm_authorization_cut::lock_realm_authorization_cut(&mut conn, &opening.realm_id)
             .await
             .unwrap();
-        sql_query("UPDATE member_state_current_results SET membership='leave',value=jsonb_set(value,'{membership}','\"leave\"'::jsonb) WHERE realm_id=$1")
+        sql_query("UPDATE member_state_current_states SET membership='leave',value=jsonb_set(value,'{membership}','\"leave\"'::jsonb) WHERE realm_id=$1")
             .bind::<Text, _>(opening.realm_id.as_str())
             .execute(&mut *conn)
             .await
@@ -3173,7 +3171,7 @@ mod tests {
             .is_err()
         );
         let mut conn = database.pool().get().await.unwrap();
-        sql_query("UPDATE member_state_current_results SET membership='join',value=jsonb_set(value,'{membership}','\"join\"'::jsonb) WHERE realm_id=$1")
+        sql_query("UPDATE member_state_current_states SET membership='join',value=jsonb_set(value,'{membership}','\"join\"'::jsonb) WHERE realm_id=$1")
             .bind::<Text, _>(opening.realm_id.as_str())
             .execute(&mut *conn)
             .await
@@ -3220,7 +3218,7 @@ mod tests {
         let tail = create_morph(&mut conn, &opening.realm_id).await;
         // The original registered current port retains its accepted exact
         // source. A truncated history must not reinterpret it as absent.
-        sql_query("UPDATE member_state_current_results SET current_commit_id=$2,current_stream_position=3 WHERE realm_id=$1")
+        sql_query("UPDATE member_state_current_states SET current_commit_id=$2,current_stream_position=3 WHERE realm_id=$1")
             .bind::<Text,_>(opening.realm_id.as_str()).bind::<Text,_>(commit(&tail,1).commit_id.as_str())
             .execute(&mut *conn).await.unwrap();
         sql_query("DELETE FROM realm_commits WHERE realm_id=$1 AND stream_position=3")
@@ -3454,7 +3452,7 @@ mod tests {
                 account_id: account.clone(),
                 principal_control_realm_id: pcr.clone(),
                 binding_version: 1,
-                status_seq: previous.map_or(1, |record| record.status_seq + 1),
+                status_sequence: previous.map_or(1, |record| record.status_sequence + 1),
                 previous_account_status_record_id: previous
                     .map(|record| record.account_status_record_id.clone()),
                 status: if previous.is_some() {
@@ -3482,7 +3480,7 @@ mod tests {
                 record_digest: record.payload_digest().unwrap(),
                 account_authority_id: account.station_id.clone(),
                 account_id: account.clone(),
-                status_seq: record.status_seq,
+                status_sequence: record.status_sequence,
                 receiver_id: station(),
                 accepted_at: chrono::Utc::now(),
                 verification_method: method,

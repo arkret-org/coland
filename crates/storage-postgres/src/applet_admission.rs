@@ -537,9 +537,9 @@ async fn admit_in_connection(
             .await?;
         }
         if event.kind == EventKind::CapabilityGrant {
-            crate::capability_grant_current_results::commit_capability_grant_current_result_in_connection(conn,event,&commit, None).await?;
+            crate::capability_grant_current_states::commit_capability_grant_current_state_in_connection(conn,event,&commit, None).await?;
         }
-        crate::applet_current_results::project_applet_event_in_connection(conn, event, &commit)
+        crate::applet_current_states::project_applet_event_in_connection(conn, event, &commit)
             .await?;
         refs.push(arkret_wire::CommittedEventRef {
             event_id: event.event_id.clone(),
@@ -659,7 +659,7 @@ fn validate_finalized_refs(
 ) -> PersistenceResult<()> {
     match &input.request {
         coland_storage::AppletAdmissionRequest::Install(body) => {
-            let outcome: arkret_models_integration::AppletInstallOutcome =
+            let outcome: arkret_models_integration::AppletInstallResponseBody =
                 decode(response.clone())?;
             let grants = body
                 .authoring_request_basis

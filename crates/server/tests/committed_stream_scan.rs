@@ -8,7 +8,7 @@ mod ordinary_realm;
 
 use arkret_wire::{
     CommitStreamRef, CommittedEventView, EventKind, MessageId, StrandId, StreamScanDirection,
-    StreamScanOutcome, StreamScanRequest,
+    StreamScanRequestBody, StreamScanResponseBody,
 };
 use coland_http::config::AppConfig;
 use coland_http::service;
@@ -57,7 +57,7 @@ async fn authority_bundle_unknown_refuses_and_unavailable_remote_locator_fails_c
             "not_found",
         ),
     ] {
-        let request = arkret_wire::AuthorityBundleRequest {
+        let request = arkret_wire::RealmAuthorityBundleRequestBody {
             realm_id,
             nonce: arkret_wire::Base64UrlString::new("a".repeat(32)).unwrap(),
         };
@@ -133,7 +133,7 @@ async fn dev_session(
 async fn scan(
     state: &coland_http::state::AppState,
     token: &str,
-    request: &StreamScanRequest,
+    request: &StreamScanRequestBody,
 ) -> (StatusCode, Value) {
     let canonical_body = String::from_utf8(
         arkret_canonical::canonical_json_bytes(request).expect("canonical scan request"),
@@ -235,7 +235,7 @@ async fn canonical_scan_withholds_redacted_message_without_skipping_commit() {
         &arkret_wire::DidCoreId::new("ak:did_core:web:scan-outsider.example").unwrap(),
     )
     .await;
-    let request = StreamScanRequest {
+    let request = StreamScanRequestBody {
         realm_id: realm_id.clone(),
         stream_ref: CommitStreamRef::Realm {
             realm_id: realm_id.clone(),
@@ -302,7 +302,7 @@ async fn canonical_scan_withholds_redacted_message_without_skipping_commit() {
 
     let (status, before_body) = scan(&state, &token, &request).await;
     assert_eq!(status, StatusCode::OK, "{before_body}");
-    let before: StreamScanOutcome =
+    let before: StreamScanResponseBody =
         serde_json::from_value(before_body).expect("typed pre-redaction scan");
     before
         .validate_for_request(&request)
@@ -332,7 +332,7 @@ async fn canonical_scan_withholds_redacted_message_without_skipping_commit() {
 
     let (status, after_body) = scan(&state, &token, &request).await;
     assert_eq!(status, StatusCode::OK, "{after_body}");
-    let after: StreamScanOutcome =
+    let after: StreamScanResponseBody =
         serde_json::from_value(after_body).expect("typed post-redaction scan");
     after
         .validate_for_request(&request)

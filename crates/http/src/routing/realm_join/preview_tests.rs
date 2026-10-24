@@ -78,7 +78,7 @@ fn commit_signature(
         verification_method: method.clone(),
         signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "3".repeat(64))).unwrap(),
         created_at: at,
-        sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
+        signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
     }
 }
 
@@ -200,7 +200,7 @@ impl GovernedRealm {
     ) -> Self {
         use arkret_models_collaboration::authority_commit::{
             OrdinaryRealmBootstrapUnitKind, OrdinaryRealmBootstrapUnitSubmission,
-            SelfAuthoritySubmitRequest,
+            SelfAuthoritySubmitRequestBody,
         };
 
         let at = at();
@@ -296,7 +296,7 @@ impl GovernedRealm {
         let unit = OrdinaryRealmBootstrapCommitUnit {
             event_approvals: Vec::new(),
             exact_request_body: serde_json::to_vec(
-                &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(submission.clone()),
+                &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(submission.clone()),
             )
             .unwrap(),
             submission,
@@ -694,7 +694,7 @@ fn disclose_requires_the_committed_required_members() {
     let stream = CommitStreamRef::Realm {
         realm_id: realm_id.clone(),
     };
-    let current = |selector: CurrentSelector, value: serde_json::Value| TypedCurrentRow::Value {
+    let current = |selector: CurrentSelector, value: serde_json::Value| CurrentState::Value {
         selector,
         source_stream_ref: stream.clone(),
         revision: CurrentRevision {

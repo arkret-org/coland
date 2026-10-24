@@ -23,7 +23,7 @@ struct Counts {
 }
 async fn counts(pool: &coland_storage_postgres::PgPool, realm: &str) -> Counts {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT (SELECT count(*) FROM canonical_events WHERE realm_id=$1) AS events,(SELECT count(*) FROM realm_commits WHERE realm_id=$1) AS commits,(SELECT count(*) FROM mimi_room_binding_current_results WHERE realm_id=$1) AS bindings,(SELECT count(*) FROM federation_outbox) AS outbox")
+    diesel::sql_query("SELECT (SELECT count(*) FROM canonical_events WHERE realm_id=$1) AS events,(SELECT count(*) FROM realm_commits WHERE realm_id=$1) AS commits,(SELECT count(*) FROM mimi_room_binding_current_states WHERE realm_id=$1) AS bindings,(SELECT count(*) FROM federation_outbox) AS outbox")
         .bind::<Text,_>(realm).get_result(&mut conn).await.unwrap()
 }
 async fn next(
@@ -120,7 +120,7 @@ async fn completed_and_rolled_back_use_exact_lineage_and_topology_at_cut() {
             value: Value,
         }
         let row: Current = diesel::sql_query(
-            "SELECT value FROM mimi_room_binding_current_results WHERE realm_id=$1",
+            "SELECT value FROM mimi_room_binding_current_states WHERE realm_id=$1",
         )
         .bind::<Text, _>(realm.as_str())
         .get_result(&mut conn)

@@ -7,7 +7,7 @@ use arkret_models_collaboration::events_payloads::MlsGenesisPayload;
 use arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody;
 use arkret_wire::{
     ActorId, CommitStreamRef, CommittedEventFullView, CommittedEventView, DidCoreId, EventId,
-    EventKind, MlsGroupCurrent, MlsGroupId, RealmId, ScopeRef,
+    EventKind, MlsGroupId, MlsGroupValue, RealmId, ScopeRef,
 };
 use coland_storage::MlsMemberGroupStateMaterialRead as Read;
 use diesel::sql_types::{Binary, Jsonb, Nullable};
@@ -236,7 +236,7 @@ pub(crate) async fn read_in_connection(
         } else if let ScopeRef::Circle { circle_id, .. } = &request.effective_scope {
             let Some(join) = sql_query(
                 "SELECT membership,current_stream_position,current_commit_id \
-             FROM circle_member_state_current_results WHERE realm_id=$1 AND circle_id=$2 \
+             FROM circle_member_state_current_states WHERE realm_id=$1 AND circle_id=$2 \
              AND member_id=$3 AND membership='join' AND source_stream_ref=$4 \
              AND circle_member_parent_join_current(realm_id,member_id,value)",
             )
@@ -303,7 +303,7 @@ pub(crate) async fn read_in_connection(
         } else {
             let Some(join) = sql_query(
                 "SELECT membership,current_stream_position,current_commit_id \
-         FROM member_state_current_results WHERE realm_id=$1 AND member_id=$2",
+         FROM member_state_current_states WHERE realm_id=$1 AND member_id=$2",
             )
             .bind::<Text, _>(realm_id.as_str())
             .bind::<Text, _>(caller.to_string())
@@ -427,7 +427,7 @@ pub(crate) async fn read_in_connection(
     )
     .map_err(PersistenceError::database)?;
     let Some(group_row) =
-        sql_query("SELECT mls_group_id,value FROM mls_group_current_results WHERE scope_key=$1")
+        sql_query("SELECT mls_group_id,value FROM mls_group_current_states WHERE scope_key=$1")
             .bind::<Text, _>(&scope_key)
             .get_result::<GroupRow>(&mut *conn)
             .await
@@ -436,7 +436,7 @@ pub(crate) async fn read_in_connection(
     else {
         return Ok(Read::RevisionUnavailable);
     };
-    let group: MlsGroupCurrent = serde_json::from_value(group_row.value).map_err(|error| {
+    let group: MlsGroupValue = serde_json::from_value(group_row.value).map_err(|error| {
         PersistenceError::Internal(format!("stored MLS group current is invalid: {error}"))
     })?;
     if group_row.mls_group_id != request.mls_group_id.as_str()

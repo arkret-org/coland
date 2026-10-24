@@ -3,7 +3,7 @@ use arkret_wire::{AuthorityCommitStatus, AuthorityRejectionStatus, RealmId, Scop
 use super::*;
 use crate::routing::federation::outbox::PeerSubmitResponse;
 
-fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequest {
+fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequestBody {
     use arkret_models_crypto::{
         AccountDeviceEventAuthorization, DeviceAuthorizationWindow, DeviceStatus,
         ForwardDeviceProjectionAttestationCore,
@@ -28,7 +28,7 @@ fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequest {
             provider_endpoint: &"https://identity.example/".parse().unwrap(),
             registration_key: &registration,
             also_known_as: &[],
-            version_time: at - chrono::Duration::days(1),
+            version_created_at: at - chrono::Duration::days(1),
             did_key_fragment: None,
         },
     )
@@ -65,7 +65,7 @@ fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequest {
         [0x71; 32],
     );
     let producer = event.account_device_producer().unwrap().unwrap();
-    let draft = PeerAuthorityForwardEventRequest {
+    let draft = PeerAuthorityForwardEventRequestBody {
         branch:
             arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
         event_submission: EventAdmissionSubmission::new(event.clone()),
@@ -140,8 +140,8 @@ fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequest {
     evidence
         .validate_binding(&producer.account_id, &producer.device_id)
         .unwrap();
-    PeerAuthoritySubmitRequest::AuthorityForwardEvent(
-        PeerAuthorityForwardEventRequest::new(
+    PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(
+        PeerAuthorityForwardEventRequestBody::new(
             EventAdmissionSubmission::new(event),
             None,
             Some(evidence),
@@ -150,15 +150,15 @@ fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequest {
     )
 }
 
-fn commit_event(request: &PeerAuthoritySubmitRequest) -> Event {
-    let PeerAuthoritySubmitRequest::AuthorityForwardEvent(request) = request else {
+fn commit_event(request: &PeerAuthoritySubmitRequestBody) -> Event {
+    let PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(request) = request else {
         unreachable!("fixture forwards one ordinary Event")
     };
     request.event_submission.event.clone()
 }
 
-fn commit_for(request: &PeerAuthoritySubmitRequest) -> arkret_wire::RealmCommit {
-    let PeerAuthoritySubmitRequest::AuthorityForwardEvent(request) = request else {
+fn commit_for(request: &PeerAuthoritySubmitRequestBody) -> arkret_wire::RealmCommit {
+    let PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(request) = request else {
         unreachable!("fixture forwards one ordinary Event")
     };
     let event = &request.event_submission.event;
@@ -187,7 +187,7 @@ fn commit_for(request: &PeerAuthoritySubmitRequest) -> arkret_wire::RealmCommit 
                 .unwrap(),
             signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "3".repeat(64))).unwrap(),
             created_at: at,
-            sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
+            signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
         },
     }
 }
@@ -199,11 +199,11 @@ fn answer(status: u16, body: serde_json::Value) -> PeerSubmitResponse {
     }
 }
 
-fn forward_outcome(outcome: AuthoritySubmitOutcome) -> serde_json::Value {
-    serde_json::to_value(PeerAuthoritySubmitOutcome::AuthorityForward(
-        arkret_models_collaboration::authority_commit::PeerAuthorityForwardOutcome {
+fn forward_outcome(outcome: AuthoritySubmitResponseBody) -> serde_json::Value {
+    serde_json::to_value(PeerAuthoritySubmitResponseBody::AuthorityForward(
+        arkret_models_collaboration::authority_commit::PeerAuthorityForwardResponseBody {
             branch: arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
-            outcome: arkret_models_collaboration::authority_commit::PeerAuthorityForwardOutcomeValue::Ordinary(outcome),
+            response_body: arkret_models_collaboration::authority_commit::ForwardedAuthorityResponseBody::Ordinary(outcome),
         },
     ))
     .unwrap()
@@ -277,7 +277,7 @@ fn relayed_governance_refusals_keep_their_registered_codes() {
 fn relayed_outcome_must_cover_the_forwarded_event() {
     let request = forwarded_request(0x42);
     let commit = commit_for(&request);
-    let accepted = AuthoritySubmitOutcome::Accepted {
+    let accepted = AuthoritySubmitResponseBody::Accepted {
         status: AuthorityCommitStatus::Committed,
         commit: commit.clone(),
     };
@@ -286,7 +286,7 @@ fn relayed_outcome_must_cover_the_forwarded_event() {
             .unwrap(),
         accepted
     );
-    let rejected = AuthoritySubmitOutcome::Rejected {
+    let rejected = AuthoritySubmitResponseBody::Rejected {
         status: AuthorityRejectionStatus::Rejected,
         reason_code: "capability_denied".to_owned(),
     };
@@ -296,7 +296,7 @@ fn relayed_outcome_must_cover_the_forwarded_event() {
         rejected
     );
     let other = commit_for(&forwarded_request(0x43));
-    let foreign = AuthoritySubmitOutcome::Accepted {
+    let foreign = AuthoritySubmitResponseBody::Accepted {
         status: AuthorityCommitStatus::Committed,
         commit: other,
     };
@@ -396,7 +396,7 @@ async fn a_forwarded_genesis_carries_its_local_blobs_only_when_they_address_thei
         ratchet_tree_ref: arkret_wire::BlobRef::new(blob_ref(&tree)).unwrap(),
         creator_leaf_authority:
             arkret_models_collaboration::events_payloads::MlsGenesisCreatorLeafAuthority {
-                leaf_signature_key_b64u: leaves[0].signature_key.clone(),
+                leaf_signature_key_base64url: leaves[0].signature_key.clone(),
                 endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device { device_id: device },
                 // This transport test does not install or admit PCR authority.
                 authorization_event_ref: arkret_wire::EventId::from_digest(

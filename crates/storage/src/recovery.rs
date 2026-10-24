@@ -53,7 +53,7 @@ impl RevokeCommandTerminalWrite {
         let outcome = resource.revoke_command_outcome.as_ref().ok_or_else(|| {
             PersistenceError::SchemaViolation("revoke command outcome is missing".to_owned())
         })?;
-        match outcome.result {
+        match outcome.outcome {
             SecurityRotationRevokeCommandDecision::Accepted => {
                 let step = self.step_outcome.as_ref().ok_or_else(|| {
                     PersistenceError::SchemaViolation(
@@ -381,7 +381,7 @@ impl RecoveryUnitCommitWrite {
         let authorize_payload: arkret_models_collaboration::events_payloads::DeviceAuthorizePayload = serde_json::from_value(
             serde_json::to_value(&authorize.event.payload).map_err(PersistenceError::database)?,
         ).map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        let request: arkret_models_crypto::SecurityTransactionContinueRequest =
+        let request: arkret_models_crypto::SecurityTransactionContinueRequestBody =
             serde_json::from_slice(&self.step_outcome.canonical_request).map_err(|error| {
                 PersistenceError::SchemaViolation(format!(
                     "invalid recovery terminal request: {error}"
@@ -479,7 +479,7 @@ impl RecoveryUnitCommitWrite {
             || receipt.reanchor_event_id != reanchor.event.event_id
             || receipt.authorization_event_id != authorize.event.event_id
             || receipt.previous_model_generation_ref != plan.previous_model_generation_ref
-            || receipt.result_model_generation_ref != plan.result_model_generation_ref
+            || receipt.new_model_generation_ref != plan.new_model_generation_ref
             || receipt.proof_summary.proof_digest != plan.proof_digest
             || receipt.recovery_authority_kind != arkret_models_crypto::RecoveryAuthorityKind::PcrPolicy
             || receipt.outcome != arkret_models_crypto::RecoveryReceiptOutcome::Completed
@@ -492,15 +492,15 @@ impl RecoveryUnitCommitWrite {
             || reanchor_payload.recovery_authority_kind != arkret_models_crypto::RecoveryAuthorityKind::PcrPolicy
             || reanchor_payload.recovery_session_id != plan.binding.recovery_session_id
             || reanchor_payload.previous_device_generation != plan.previous_model_generation_ref
-            || reanchor_payload.new_device_generation != plan.result_model_generation_ref
+            || reanchor_payload.new_device_generation != plan.new_model_generation_ref
             || reanchor_payload.replacement_authorize_payload_digest != authorize_digest
             || authorize_payload.device_id != plan.binding.replacement_device_id
             || authorize_payload.recovery_session_id.as_ref() != Some(&plan.binding.recovery_session_id)
             || authorize_payload.authorization_binding_kind != arkret_models_collaboration::events_payloads::DeviceAuthorizationBindingKind::PcrRecovery
-            || authorize_payload.authorized_generation_ref != plan.result_model_generation_ref
+            || authorize_payload.authorized_generation_ref != plan.new_model_generation_ref
             || reanchor.event.producer_proof.as_ref().is_none_or(|proof|
-                proof.verification_method != request.client_attestation.auth_data.verification_method
-                || proof.verification_method != receipt.auth_data.verification_method)
+                proof.verification_method != request.client_attestation.signature_proof.verification_method
+                || proof.verification_method != receipt.signature_proof.verification_method)
         {
             return Err(PersistenceError::SchemaViolation(
                 "recovery unit does not bind the exact ordered Event/Commit pair and terminal result"

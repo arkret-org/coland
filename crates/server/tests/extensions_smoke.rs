@@ -23,7 +23,7 @@ async fn applet_protocol_describe_smoke() {
 
     // applet-integration.md 7 fixes the ping response fields; there is no
     // free-form `ok` flag to assert.
-    let ping: arkret_models_integration::AppletPingOutcome =
+    let ping: arkret_models_integration::AppletPingResponseBody =
         TestClient::get("http://server/_arkret/edge/applet/ping")
             .add_header("Arkret-Operation", "ak.edge.applet.read.ping.v1", true)
             .send(&app)

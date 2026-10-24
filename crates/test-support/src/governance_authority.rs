@@ -57,7 +57,7 @@ fn placeholder_signature(
         verification_method: method(STATION_A),
         signed_digest: hash('1'),
         created_at: at,
-        sig: Base64UrlString::new("A".repeat(86)).expect("placeholder signature"),
+        signature: Base64UrlString::new("A".repeat(86)).expect("placeholder signature"),
     }
 }
 
@@ -276,7 +276,7 @@ impl GovernanceChain {
         let change_event = arkret_wire::test_support::raw_event_at(
             EventKind::RealmGovernanceStationChange.as_str(), ScopeRef::Realm { realm_id: realm_id.clone() },
             DidCoreId::new("ak:did_core:web:founder.example").expect("founder"), core_id(STATION_A),
-            json!({"expected_governance_generation":0,"expected_realm_stream_commit_id":genesis_commit.commit_id,"new_governance_station_id":core_id(STATION_B)}),
+            json!({"expected_governance_generation":"0","expected_realm_stream_commit_id":genesis_commit.commit_id,"new_governance_station_id":core_id(STATION_B)}),
             at - Duration::seconds(9),
         ).expect("fixture governance change");
         let change_commit = seal_commit(

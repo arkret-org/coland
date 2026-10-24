@@ -35,10 +35,10 @@ async fn grant_boundary_assert_rejected(
         "per-Event business refusal: {value}"
     );
     assert!(value.get("committed_event_refs").is_none());
-    let outcome: AppletTransactionOutcome = serde_json::from_value(value).unwrap();
+    let outcome: AppletTransactionResponseBody = serde_json::from_value(value).unwrap();
     assert_eq!(
         outcome,
-        AppletTransactionOutcome::Rejected {
+        AppletTransactionResponseBody::Rejected {
             rejections: vec![arkret_models_integration::AppletEventRejection {
                 event_id: Some(event.event_id.clone()),
                 reason_code: arkret_wire::ReasonCode::from_wire(reason),
@@ -64,8 +64,8 @@ async fn grant_boundary_assert_accepted(
     fixture: &Fixture,
     event: &Event,
     value: Value,
-) -> AppletTransactionOutcome {
-    let outcome: AppletTransactionOutcome = serde_json::from_value(value).unwrap();
+) -> AppletTransactionResponseBody {
+    let outcome: AppletTransactionResponseBody = serde_json::from_value(value).unwrap();
     let original = fixture
         .state
         .test_persistence()
@@ -77,7 +77,7 @@ async fn grant_boundary_assert_accepted(
     assert_eq!(&original.event, event);
     assert_eq!(
         outcome,
-        AppletTransactionOutcome::Accepted {
+        AppletTransactionResponseBody::Accepted {
             committed_event_refs: vec![arkret_wire::CommittedEventRef {
                 event_id: event.event_id.clone(),
                 commit_id: original.commit.commit_id,
@@ -173,9 +173,9 @@ async fn grant_boundary_historical_source(
         StatusCode::OK,
         "historical Service signer source: {value}"
     );
-    let result: arkret_models_identity::SignerKeysQueryOutcome =
+    let result: arkret_models_identity::SignerKeyQueryResponseBody =
         serde_json::from_value(value).unwrap();
-    assert_eq!(result.results, vec![expected]);
+    assert_eq!(result.resolutions, vec![expected]);
     fact
 }
 
@@ -190,7 +190,7 @@ pub(super) async fn grant_authority_boundaries(
     let rows = fixture
         .state
         .test_persistence()
-        .capability_grant_current_results()
+        .capability_grant_current_states()
         .snapshot_for_realm(&fixture.realm)
         .await
         .unwrap();
@@ -236,7 +236,7 @@ pub(super) async fn grant_authority_boundaries(
         .admin_post(
             "/_arkret/self/events",
             ServiceOperationId::SelfEventsCommandSubmitV1.as_str(),
-            &json!(SelfAuthoritySubmitRequest::Event(
+            &json!(SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(event)
             )),
             None,
@@ -257,9 +257,9 @@ pub(super) async fn grant_authority_boundaries(
     );
 
     let signer = Ed25519PayloadSigner::new(
-        applet_service_signing_key(&package.webhook_auth.key_ref),
+        applet_service_signing_key(&package.webhook_signature_policy.key_ref),
         applet_service_did(package),
-        package.webhook_auth.key_ref.clone(),
+        package.webhook_signature_policy.key_ref.clone(),
     );
     let service = ActorId::service(package.service_id.clone());
     let scope = ScopeRef::Realm {
@@ -312,7 +312,7 @@ pub(super) async fn grant_authority_boundaries(
     let rows = fixture
         .state
         .test_persistence()
-        .capability_grant_current_results()
+        .capability_grant_current_states()
         .snapshot_for_realm(&fixture.realm)
         .await
         .unwrap();
@@ -329,7 +329,7 @@ pub(super) async fn grant_authority_boundaries(
         StatusCode::OK,
         "exact issuer cleanup retry: {replay}"
     );
-    let replay: AppletTransactionOutcome = serde_json::from_value(replay).unwrap();
+    let replay: AppletTransactionResponseBody = serde_json::from_value(replay).unwrap();
     assert_eq!(
         replay, accepted_revoke,
         "exact retry must recover the original Commit refs"
@@ -433,7 +433,7 @@ pub(super) async fn grant_authority_boundaries(
     let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
     let (status, replay) = boxed_step(|| grant_boundary_send(fixture, package, &event)).await;
     assert_eq!(status, StatusCode::OK, "BridgeError exact retry: {replay}");
-    let replay: AppletTransactionOutcome = serde_json::from_value(replay).unwrap();
+    let replay: AppletTransactionResponseBody = serde_json::from_value(replay).unwrap();
     assert_eq!(
         replay, accepted_audit,
         "exact audit retry must retain its original Commit refs"

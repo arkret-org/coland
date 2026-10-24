@@ -998,7 +998,7 @@ fn spawn_federation_peer_discovery(state: AppState) {
                             did: document.id.to_string(),
                             did_document: document_value,
                             key_log_head: None,
-                            seq: document_view.seq.unwrap_or_default(),
+                            sequence: document_view.sequence.unwrap_or_default(),
                             method_evidence: serde_json::json!({
                                 "source": "peer_identity_document",
                                 "receipts": document_view.receipts,

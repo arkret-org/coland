@@ -23,9 +23,9 @@ use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
 use crate::wire::{
     AuthorizedDeviceSigningKey, DeviceSigningKeyDirectoryOutcome,
-    DeviceSigningKeyDirectoryQueryRequestBody, DeviceStatus, KeysClaimOutcome,
-    KeysClaimRequestBody, KeysQueryOutcome, KeysQueryRequestBody, KeysUploadOutcome,
-    KeysUploadRequestBody, KeysUploadUnsignedRequest, PeerQueryDeviceRecord, QueryDeviceRecord,
+    DeviceSigningKeyDirectoryQueryRequestBody, DeviceStatus, KeysClaimRequestBody,
+    KeysClaimResponseBody, KeysQueryRequestBody, KeysQueryResponseBody, KeysUploadFields,
+    KeysUploadRequestBody, KeysUploadResponseBody, PeerQueryDeviceRecord, QueryDeviceRecord,
 };
 
 pub(crate) fn peer_router() -> Router {
@@ -55,7 +55,7 @@ async fn keys_upload(
     body: JsonBody<KeysUploadRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeysUploadOutcome> {
+) -> JsonResult<KeysUploadResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     // Session admission already required the device to be `active` at the
     // PCR status cut; the device mirror is not a revocation authority.
@@ -180,7 +180,7 @@ async fn keys_upload(
         arkret_wire::NonEmptyString::new("total").expect("total is non-empty"),
         one_time_key_count,
     );
-    json_ok(KeysUploadOutcome {
+    json_ok(KeysUploadResponseBody {
         one_time_key_counts: one_time_key_alg_counts,
         fallback_keys,
     })
@@ -438,7 +438,7 @@ async fn keys_query(
     body: JsonBody<KeysQueryRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeysQueryOutcome> {
+) -> JsonResult<KeysQueryResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
@@ -615,7 +615,7 @@ async fn keys_query(
             };
             match proxy_peer_keys_query(state, &peer_request, &destination).await {
                 Ok(outcome) => {
-                    let arkret_models_crypto::PeerKeysQueryOutcome {
+                    let arkret_models_crypto::PeerKeysQueryResponseBody {
                         device_keys: peer_entries,
                         device_generations: peer_generations,
                         failures: peer_failures,
@@ -685,7 +685,7 @@ async fn keys_query(
             }
         }
     }
-    json_ok(KeysQueryOutcome {
+    json_ok(KeysQueryResponseBody {
         device_keys: result,
         failures,
         device_generations,
@@ -731,7 +731,7 @@ async fn proxy_peer_keys_query(
     state: &AppState,
     request: &arkret_models_crypto::PeerKeysQueryRequestBody,
     destination: &arkret_wire::DidCoreId,
-) -> Result<arkret_models_crypto::PeerKeysQueryOutcome, AppError> {
+) -> Result<arkret_models_crypto::PeerKeysQueryResponseBody, AppError> {
     request
         .validate()
         .map_err(|error| AppError::param_invalid(error.to_string()))?;
@@ -805,8 +805,9 @@ async fn proxy_peer_keys_query(
         }
         bytes.extend_from_slice(&chunk);
     }
-    let outcome: arkret_models_crypto::PeerKeysQueryOutcome = serde_json::from_slice(&bytes)
-        .map_err(|_| AppError::not_found("peer device directory is unavailable"))?;
+    let outcome: arkret_models_crypto::PeerKeysQueryResponseBody =
+        serde_json::from_slice(&bytes)
+            .map_err(|_| AppError::not_found("peer device directory is unavailable"))?;
     outcome
         .validate_for_request(request)
         .map_err(|_| AppError::not_found("peer device directory is unavailable"))?;
@@ -946,7 +947,7 @@ pub(crate) async fn current_device_projection_for_signer(
 async fn peer_keys_query(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<arkret_models_crypto::PeerKeysQueryOutcome> {
+) -> JsonResult<arkret_models_crypto::PeerKeysQueryResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     crate::routing::federation::verify_inbound_peer_http_signature(state, req, true).await?;
     let source_service_id = req
@@ -1078,7 +1079,7 @@ async fn peer_keys_query(
             });
         }
     }
-    let outcome = arkret_models_crypto::PeerKeysQueryOutcome {
+    let outcome = arkret_models_crypto::PeerKeysQueryResponseBody {
         request_id: body.request_id.clone(),
         requester_account_id: body.requester_account_id.clone(),
         requester_actor_id: body.requester_actor_id.clone(),
@@ -1204,7 +1205,7 @@ pub(crate) fn device_signature_kid_points_to_device_key(
 fn verify_keys_upload_device_signature(
     actor: &str,
     current_device: Option<&DeviceIdentity>,
-    unsigned: &KeysUploadUnsignedRequest,
+    unsigned: &KeysUploadFields,
     device_signature: &arkret_models_crypto::artifacts_keys::KeyOperationSignature,
 ) -> Result<(), AppError> {
     let record = current_device.ok_or_else(|| {
@@ -1243,7 +1244,7 @@ fn verify_keys_upload_device_signature(
     let signing_input = arkret_models_crypto::keys_upload_signing_input(unsigned)
         .map_err(|error| AppError::param_invalid(format!("keys/upload canonicalize: {error}")))?;
     let signature_bytes = URL_SAFE_NO_PAD
-        .decode(device_signature.sig.as_bytes())
+        .decode(device_signature.signature.as_bytes())
         .map_err(|_| AppError::param_invalid("keys/upload signature is not base64url"))?;
     let signature = Signature::from_slice(&signature_bytes)
         .map_err(|_| AppError::param_invalid("keys/upload signature must be 64 bytes"))?;
@@ -1265,7 +1266,7 @@ async fn keys_claim(
     body: JsonBody<KeysClaimRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeysClaimOutcome> {
+) -> JsonResult<KeysClaimResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let requester = super::session_actor::validated_session_actor(state, &session).await?;
@@ -1324,7 +1325,7 @@ async fn keys_claim(
             device_keys: device_map,
         });
     }
-    json_ok(KeysClaimOutcome {
+    json_ok(KeysClaimResponseBody {
         one_time_keys: claimed,
         failures: Vec::new(),
     })

@@ -1,6 +1,6 @@
 //! Realm-owned outbound recovery, separate from recipient allocation/consume.
 use arkret_models_crypto::{
-    PeerKeyPackagesClaimQueryOutcome as Outcome, PeerKeyPackagesClaimQueryState as State,
+    PeerKeyPackagesClaimQueryResponseBody as Outcome, PeerKeyPackagesClaimQueryState as State,
     PeerKeyPackagesClaimRequestBody as Request, RecipientMlsDurableSigner,
 };
 use arkret_models_identity::AuthenticatedServiceResolution;

@@ -149,7 +149,7 @@ async fn message_write_counts(pool: &PgPool, realm: &arkret_wire::RealmId) -> Ve
     for table in [
         "canonical_events",
         "realm_commits",
-        "message_revision_current_results",
+        "message_revision_current_states",
         "event_approval_private_audit",
     ] {
         counts.push(count(pool, realm, table).await);
@@ -193,7 +193,7 @@ async fn message_create_approval_transaction(pool: PgPool, setup: Box<GrantSetup
             &head, arkret_wire::EventKind::CapabilityGrant, &founder(),
             json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,
                 "issuer_id":actor,"subject":approver,"actions":["ak.message.create"],"resources":[target],"constraints":[],
-                "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":0}],
+                "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],
                 "issued_at":arkret_canonical::format_timestamp_canonical(at)}}), at,
         ))).await;
         uow.commit_event(grant.clone()).await.unwrap();
@@ -205,7 +205,7 @@ async fn message_create_approval_transaction(pool: PgPool, setup: Box<GrantSetup
             "issuer_id":actor,"subject":actor,"actions":["ak.message.create"],"resources":[target],
             "constraints":[{"constraint_kind":"claim_based","constraint_subkind":"approval","effect":"require_review","approval_required":true,
                 "approval_mode":"before_commit","approval_actor_ids":roster,"approval_threshold":"majority","timeout":"PT60S"}],
-            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":0}],
+            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],
             "issued_at":arkret_canonical::format_timestamp_canonical(at)}}), at,
     ))).await;
     let grant_id = GrantId::from_event_id(&requirement.authority_commit.event.event_id);
@@ -377,7 +377,7 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
         let (approver, ..) = approver(seed, &head.expected_authority.service_id);
         roster.push(approver.signing_principal_id().clone());
         let mut conn = pool.get().await.unwrap();
-        diesel::sql_query("INSERT INTO member_state_current_results(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join',$3,$4,'{\"membership\":\"join\"}'::jsonb,$5)")
+        diesel::sql_query("INSERT INTO member_state_current_states(realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,'join',$3,$4,'{\"membership\":\"join\"}'::jsonb,$5)")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(approver.to_string()).bind::<Text,_>(head.commit.commit_id.as_str())
             .bind::<BigInt,_>(head.commit.stream_position as i64).bind::<diesel::sql_types::Timestamptz,_>(at).execute(&mut conn).await.unwrap();
         drop(conn);
@@ -387,7 +387,7 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
             &founder(),
             json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,
             "issuer_id":actor,"subject":approver,"actions":["ak.strand.move"],"resources":[target],"constraints":[],
-            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":opened.unit.transactions[0].event.event_id,"authority_generation":0}],
+            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],
             "issued_at":arkret_canonical::format_timestamp_canonical(at)}}),
             at,
         ))).await;
@@ -402,7 +402,7 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
         "issuer_id":actor,"subject":actor,"actions":["ak.strand.move"],"resources":[target],
         "constraints":[{"constraint_kind":"claim_based","constraint_subkind":"approval","effect":"require_review","approval_required":true,"approval_mode":"before_commit","approval_actor_ids":roster,"approval_threshold":"majority","timeout":"PT60S"},
             {"constraint_kind":"temporal","effect":"allow","not_before":arkret_canonical::format_timestamp_canonical(at+chrono::TimeDelta::seconds(10))}],
-        "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":opened.unit.transactions[0].event.event_id,"authority_generation":0}],
+        "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],
         "issued_at":arkret_canonical::format_timestamp_canonical(at)}}),
         at,
     ))).await;
@@ -678,8 +678,8 @@ fn ordinary_command_payload(
 async fn ordinary_writer_counts(pool: &PgPool, realm: &arkret_wire::RealmId) -> Vec<i64> {
     let mut values = message_write_counts(pool, realm).await;
     for table in [
-        "message_reactions_current_results",
-        "object_redaction_current_results",
+        "message_reactions_current_states",
+        "object_redaction_current_states",
     ] {
         values.push(count(pool, realm, table).await);
     }
@@ -736,7 +736,7 @@ async fn ordinary_writer_approval_transaction(
             &head, arkret_wire::EventKind::CapabilityGrant, &founder(),
             json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,
                 "issuer_id":actor,"subject":approver,"actions":[action.as_str()],"resources":[target],"constraints":[],
-                "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":0}],
+                "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],
                 "issued_at":arkret_canonical::format_timestamp_canonical(at)}}), at,
         ))).await;
         uow.commit_event(grant.clone()).await.unwrap();
@@ -748,7 +748,7 @@ async fn ordinary_writer_approval_transaction(
             "issuer_id":actor,"subject":actor,"actions":[action.as_str()],"resources":[target],
             "constraints":[{"constraint_kind":"claim_based","constraint_subkind":"approval","effect":if alternative { "allow" } else { "require_review" },"approval_required":true,
                 "approval_mode":"before_commit","approval_actor_ids":roster,"approval_threshold":if scoped { json!(1) } else { json!("majority") },"timeout":"PT60S"}],
-            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":0}],
+            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],
             "issued_at":arkret_canonical::format_timestamp_canonical(at)}}), at,
     ))).await;
     let grant_id = GrantId::from_event_id(&requirement.authority_commit.event.event_id);

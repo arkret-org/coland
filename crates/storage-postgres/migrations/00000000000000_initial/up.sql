@@ -319,16 +319,16 @@ CREATE INDEX account_lifecycle_state_idx ON public.account_lifecycle USING btree
 CREATE TABLE public.account_status_replica_records (
     account_authority_id text NOT NULL CHECK (account_authority_id LIKE 'ak:did_core:%'),
     account_id jsonb NOT NULL,
-    status_seq bigint NOT NULL CHECK (status_seq >= 1),
+    status_sequence bigint NOT NULL CHECK (status_sequence >= 1),
     record_id text NOT NULL UNIQUE CHECK (record_id LIKE 'ak:account_status_record:%'),
     record jsonb NOT NULL,
     receipt jsonb NOT NULL,
     accepted_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (account_authority_id, account_id, status_seq)
+    PRIMARY KEY (account_authority_id, account_id, status_sequence)
 );
 
 CREATE INDEX account_status_replica_records_range_idx
-    ON public.account_status_replica_records (account_authority_id, account_id, status_seq);
+    ON public.account_status_replica_records (account_authority_id, account_id, status_sequence);
 
 -- Durable, exact-AccountId affected-service evidence. One service can be
 -- evidenced by several independent state families; rows are never inferred
@@ -353,16 +353,16 @@ CREATE TABLE public.account_status_propagations (
     account_authority_id text NOT NULL CHECK (account_authority_id LIKE 'ak:did_core:%'),
     account_id jsonb NOT NULL,
     account_status_record_id text PRIMARY KEY,
-    status_seq bigint NOT NULL CHECK (status_seq >= 1),
+    status_sequence bigint NOT NULL CHECK (status_sequence >= 1),
     state text NOT NULL CHECK (state IN ('scheduled', 'complete', 'incomplete')),
     deadline_at timestamptz NOT NULL,
     created_at timestamptz NOT NULL,
     updated_at timestamptz NOT NULL,
-    UNIQUE (account_authority_id, account_id, status_seq)
+    UNIQUE (account_authority_id, account_id, status_sequence)
 );
 
 CREATE INDEX account_status_propagations_account_current_idx
-    ON public.account_status_propagations (account_id, status_seq DESC);
+    ON public.account_status_propagations (account_id, status_sequence DESC);
 
 CREATE TABLE public.account_status_propagation_targets (
     account_status_record_id text NOT NULL REFERENCES public.account_status_propagations(account_status_record_id) ON DELETE CASCADE,
@@ -388,11 +388,11 @@ CREATE TABLE public.agent_participation (
     realm_id text NOT NULL,
     scope jsonb NOT NULL,
     version bigint DEFAULT 0 NOT NULL,
-    reply_message boolean DEFAULT false NOT NULL,
-    reaction_add boolean DEFAULT false NOT NULL,
-    reaction_remove boolean DEFAULT false NOT NULL,
-    accept_third_party_mention boolean DEFAULT false NOT NULL,
-    act_on_behalf boolean DEFAULT false NOT NULL,
+    message_creation_allowed boolean DEFAULT false NOT NULL,
+    reaction_addition_allowed boolean DEFAULT false NOT NULL,
+    reaction_removal_allowed boolean DEFAULT false NOT NULL,
+    third_party_mention_delivery_allowed boolean DEFAULT false NOT NULL,
+    acting_on_behalf_allowed boolean DEFAULT false NOT NULL,
     updated_at timestamp with time zone NOT NULL,
     CONSTRAINT agent_participation_scope_kind_check CHECK ((scope_kind = ANY (ARRAY['realm'::text, 'circle'::text, 'strand'::text])))
 );
@@ -587,8 +587,8 @@ CREATE TABLE public.applet_configurations (
         AND outcome->>'request_id' = request_id),
     CHECK (candidate_event_id IS NOT DISTINCT FROM
         candidate->>'event_id'),
-    CHECK (outcome#>'{source_outcome,create_event}' IS NULL OR
-        outcome#>'{source_outcome,create_event}' = candidate)
+    CHECK (outcome#>'{source_response_body,create_event}' IS NULL OR
+        outcome#>'{source_response_body,create_event}' = candidate)
 );
 
 CREATE TABLE public.applet_namespace_claims (
@@ -1281,7 +1281,7 @@ CREATE TABLE public.event_collision_variants (
 CREATE INDEX event_collision_variants_event_pk_idx
     ON public.event_collision_variants USING btree (event_pk);
 
-CREATE TABLE public.consent_current_results (
+CREATE TABLE public.consent_current_states (
     holder_account_id jsonb NOT NULL,
     peer_id jsonb NOT NULL,
     realm_id text NOT NULL REFERENCES public.realm_authorities(realm_id),
@@ -1670,7 +1670,7 @@ CREATE TABLE public.device_message_idempotency (
 );
 
 CREATE TABLE public.device_message_ack_tokens (
-    ack_token text PRIMARY KEY,
+    acknowledgement_token text PRIMARY KEY,
     recipient text NOT NULL,
     device_id text NOT NULL,
     recipient_device_authorization jsonb NOT NULL,
@@ -1691,7 +1691,7 @@ CREATE TABLE public.device_message_ack_tokens (
 CREATE INDEX device_message_ack_tokens_device_idx ON public.device_message_ack_tokens USING btree (recipient, device_id, expires_at);
 
 CREATE TABLE public.agent_recipient_delivery_ack_tokens (
-    ack_token text PRIMARY KEY,
+    acknowledgement_token text PRIMARY KEY,
     agent_id text NOT NULL,
     verification_method text NOT NULL,
     authorization_event_ref text NOT NULL,
@@ -1944,7 +1944,7 @@ CREATE TABLE public.server_settings (
 -- are copied only when present, with their stored value (the tristate
 -- `supersedes_id` / `expires_at` keep an explicit null), and `encryption` keeps
 -- only `recipient_method` / `recipient_key_ref`. The ciphertext,
--- `domain_separation`, `contents`, `auth_data`, `plaintext_commitment`,
+-- `domain_separation`, `contents`, `signature_proof`, `plaintext_commitment`,
 -- `mixed_secret_storage`, AEAD/KDF material and `x_*` extensions never reach a
 -- list row.
 CREATE FUNCTION public.key_backup_list_metadata(payload jsonb) RETURNS jsonb
@@ -1959,7 +1959,7 @@ LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
     FROM jsonb_each(payload) AS member
     WHERE member.key IN (
         'backup_id', 'actor_id', 'device_id', 'backup_kind', 'backup_version',
-        'series_id', 'series_seq', 'supersedes_id', 'supersedes_digest',
+        'series_id', 'series_sequence', 'supersedes_id', 'supersedes_digest',
         'expires_at', 'created_at',
         'updated_at', 'ciphertext_digest', 'encryption', 'retention'
     )
@@ -1972,7 +1972,7 @@ CREATE TABLE public.key_backups (
     backup_kind text GENERATED ALWAYS AS ((payload ->> 'backup_kind')) STORED,
     backup_version text,
     payload jsonb NOT NULL,
-    -- The `KeysBackupsList.backups[]` row. Generated, so no writer can store
+    -- The `KeysBackupsPage.backups[]` row. Generated, so no writer can store
     -- anything but the closed projection of the envelope it sits beside.
     metadata jsonb GENERATED ALWAYS AS (public.key_backup_list_metadata(payload)) STORED NOT NULL,
     last_accessed_at timestamp with time zone,
@@ -1982,36 +1982,36 @@ CREATE TABLE public.key_backups (
     key_material_encrypted bytea,
     -- SOL-02-004: identity of the backup series this envelope belongs to,
     -- projected out of the JSONB payload as stored generated columns. They
-    -- back the UNIQUE(series_actor_id, series_id, series_seq) constraint below
+    -- back the UNIQUE(series_actor_id, series_id, series_sequence) constraint below
     -- which makes the §7.6 series-monotonicity check race-free: two concurrent
-    -- successor PUTs that both compute the same series_seq can no longer both
+    -- successor PUTs that both compute the same series_sequence can no longer both
     -- land — the second insert is rejected by the unique violation rather than
     -- relying on a read-then-write (TOCTOU) snapshot check.
     series_actor_id text GENERATED ALWAYS AS ((payload ->> 'actor_id')) STORED,
     series_id text GENERATED ALWAYS AS ((payload ->> 'series_id')) STORED,
-    series_seq bigint GENERATED ALWAYS AS (((payload ->> 'series_seq'))::bigint) STORED,
+    series_sequence bigint GENERATED ALWAYS AS (((payload ->> 'series_sequence'))::bigint) STORED,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     -- v1 registers exactly one backup class (key-management §7.5.0 / §7.6.1).
     -- `mls_history`, private classes and envelopes without a class never
-    -- reach the metadata page that `KeysBackupsList` serves.
+    -- reach the metadata page that `KeysBackupsPage` serves.
     CONSTRAINT key_backups_backup_kind_check CHECK (
         backup_kind IS NOT NULL AND backup_kind = 'secret_storage'
     )
 );
 
--- SOL-02-004: enforce series_seq monotonicity at the storage layer. A given
+-- SOL-02-004: enforce series_sequence monotonicity at the storage layer. A given
 -- (actor, series) may hold at most one envelope per sequence number; the
 -- receive path depends on this constraint so concurrent successor PUTs cannot
--- double-write the same seq (TOCTOU). NULLs (non-series backups) are exempt
+-- double-write the same sequence (TOCTOU). NULLs (non-series backups) are exempt
 -- because Postgres treats NULL as distinct in a UNIQUE index.
 ALTER TABLE ONLY public.key_backups
-    ADD CONSTRAINT key_backups_series_seq_key UNIQUE (series_actor_id, series_id, series_seq);
+    ADD CONSTRAINT key_backups_series_seq_key UNIQUE (series_actor_id, series_id, series_sequence);
 
 -- Metadata pages use keyset reads and an actor-local mutation revision.
 CREATE INDEX key_backups_ordered_page_idx ON public.key_backups
-    (actor_id, backup_kind COLLATE "C", series_id COLLATE "C", series_seq, id);
+    (actor_id, backup_kind COLLATE "C", series_id COLLATE "C", series_sequence, id);
 CREATE INDEX key_backups_series_page_idx ON public.key_backups
-    (actor_id, series_id COLLATE "C", backup_kind COLLATE "C", series_seq, id);
+    (actor_id, series_id COLLATE "C", backup_kind COLLATE "C", series_sequence, id);
 CREATE TABLE public.key_backup_list_revisions (
     actor_id text PRIMARY KEY,
     revision bigint NOT NULL CHECK (revision > 0)
@@ -3125,7 +3125,7 @@ CREATE TABLE public.webvh_documents (
     id text PRIMARY KEY,
     did_document jsonb NOT NULL,
     key_log_head text,
-    seq bigint DEFAULT 0 NOT NULL,
+    sequence bigint DEFAULT 0 NOT NULL,
     method_evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
     fetched_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone DEFAULT (now() + '00:15:00'::interval) NOT NULL,
@@ -3137,18 +3137,18 @@ CREATE INDEX webvh_documents_expires_at_idx ON public.webvh_documents USING btre
 CREATE TABLE public.webvh_log_events (
     id text PRIMARY KEY,
     did text NOT NULL,
-    seq bigint NOT NULL,
+    sequence bigint NOT NULL,
     operation jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 ALTER TABLE ONLY public.webvh_log_events
-    ADD CONSTRAINT webvh_log_events_did_seq_key UNIQUE (did, seq);
+    ADD CONSTRAINT webvh_log_events_did_seq_key UNIQUE (did, sequence);
 
-CREATE INDEX webvh_log_events_did_seq_idx ON public.webvh_log_events USING btree (did, seq);
-CREATE INDEX webvh_log_events_scid_seq_idx ON public.webvh_log_events ((split_part(did, ':', 3)), seq) WHERE did LIKE 'did:webvh:%';
+CREATE INDEX webvh_log_events_did_seq_idx ON public.webvh_log_events USING btree (did, sequence);
+CREATE INDEX webvh_log_events_scid_seq_idx ON public.webvh_log_events ((split_part(did, ':', 3)), sequence) WHERE did LIKE 'did:webvh:%';
 CREATE INDEX webvh_log_events_subject_idx ON public.webvh_log_events ((operation #>> '{state,id}'));
-CREATE INDEX webvh_documents_scid_seq_idx ON public.webvh_documents ((split_part(id, ':', 3)), seq DESC) WHERE id LIKE 'did:webvh:%';
+CREATE INDEX webvh_documents_scid_seq_idx ON public.webvh_documents ((split_part(id, ':', 3)), sequence DESC) WHERE id LIKE 'did:webvh:%';
 
 -- The deployment's own authoritative service identity (identity-did.md §3.7).
 -- Singleton: at most one row keyed by the fixed id 'self'. `identity` is the
@@ -3172,7 +3172,7 @@ END;
 $$;
 CREATE TRIGGER service_identity_device_station BEFORE INSERT OR UPDATE ON service_identity FOR EACH ROW EXECUTE FUNCTION bind_device_inventory_station();
 
-CREATE TABLE public.principal_resolution_current_results (
+CREATE TABLE public.principal_resolution_current_states (
     principal_id text NOT NULL CHECK (principal_id LIKE 'ak:did_core:%'),
     station_id text NOT NULL CHECK (station_id LIKE 'ak:did_core:%'),
     pcr_realm_id text UNIQUE NOT NULL CHECK (pcr_realm_id LIKE 'ak:realm:%'),
@@ -3345,7 +3345,7 @@ CREATE TABLE public.direct_conversation_group_states (
 );
 
 -- Immutable original Direct Conversation binding and its covering Commit.
-CREATE TABLE public.direct_conversation_binding_current_results (
+CREATE TABLE public.direct_conversation_binding_current_states (
     realm_id text PRIMARY KEY,
     pair_key text NOT NULL UNIQUE,
     current_commit_id text NOT NULL,
@@ -3450,7 +3450,7 @@ CREATE TABLE public.applet_grant_registration_sources (
         REFERENCES public.applet_registration_instances (realm_id, applet_id, registration_event_ref)
 );
 
-CREATE TABLE public.applet_registration_current_results (
+CREATE TABLE public.applet_registration_current_states (
     realm_id text NOT NULL,
     applet_id text NOT NULL,
     service_id text NOT NULL,
@@ -3464,7 +3464,7 @@ CREATE TABLE public.applet_registration_current_results (
 );
 
 -- Registered append-only member identity assertions and their covering Commit.
-CREATE TABLE public.member_identity_updates_current_results (
+CREATE TABLE public.member_identity_updates_current_states (
     realm_id text NOT NULL,
     member_id text NOT NULL,
     segment text NOT NULL CHECK (segment = 'member_identity'),
@@ -3483,7 +3483,7 @@ CREATE TABLE public.member_identity_handle_claims (
     audience text,
     status text NOT NULL,
     revocation_digest text,
-    fresh_until timestamp with time zone NOT NULL,
+    cache_expires_at timestamp with time zone NOT NULL,
     visibility text,
     expires_at timestamp with time zone,
     envelope jsonb NOT NULL,
@@ -3789,15 +3789,15 @@ END;
 $$;
 
 
-CREATE TABLE current_result_heads (
+CREATE TABLE current_state_heads (
  realm_id TEXT NOT NULL, selector_key TEXT COLLATE "C" NOT NULL,
  revision BIGINT NOT NULL CHECK(revision BETWEEN 0 AND 9007199254740991),
  target_kind TEXT NOT NULL CHECK(target_kind IN ('realm','strand','member','event')),
  target_key TEXT COLLATE "C" NOT NULL, payload JSONB NOT NULL,
  PRIMARY KEY(realm_id,selector_key)
 );
-CREATE INDEX current_result_head_target ON current_result_heads(realm_id,target_kind,target_key,selector_key);
-CREATE TABLE current_result_versions (
+CREATE INDEX current_state_head_target ON current_state_heads(realm_id,target_kind,target_key,selector_key);
+CREATE TABLE current_state_versions (
  realm_id TEXT NOT NULL, selector_key TEXT COLLATE "C" NOT NULL,
  revision BIGINT NOT NULL CHECK(revision BETWEEN 0 AND 9007199254740991),
  valid_until BIGINT CHECK(valid_until>revision),
@@ -3805,14 +3805,14 @@ CREATE TABLE current_result_versions (
  target_key TEXT COLLATE "C" NOT NULL, payload JSONB NOT NULL,
  PRIMARY KEY(realm_id,selector_key,revision)
 );
-CREATE INDEX current_result_version_scan ON current_result_versions(realm_id,target_kind,target_key,revision,selector_key);
-CREATE INDEX current_result_version_changes ON current_result_versions(realm_id,revision,selector_key);
-CREATE INDEX current_result_version_gc ON current_result_versions(valid_until) WHERE valid_until IS NOT NULL;
+CREATE INDEX current_state_version_scan ON current_state_versions(realm_id,target_kind,target_key,revision,selector_key);
+CREATE INDEX current_state_version_changes ON current_state_versions(realm_id,revision,selector_key);
+CREATE INDEX current_state_version_gc ON current_state_versions(valid_until) WHERE valid_until IS NOT NULL;
 
 -- Relation is a single current result per typed primary conflict domain.  The
 -- exact RealmCommit identity is the CAS revision; the materialized object is
 -- updated in the same transaction as that commit.
-CREATE TABLE relation_current_results (
+CREATE TABLE relation_current_states (
  realm_id TEXT NOT NULL, domain_key TEXT COLLATE "C" NOT NULL,
  domain JSONB NOT NULL, relation_id TEXT NOT NULL,
  state TEXT NOT NULL CHECK(state IN ('active','tombstoned')),
@@ -3823,13 +3823,13 @@ CREATE TABLE relation_current_results (
  CHECK(value->>'id'=relation_id),
  CHECK(value->>'state'=state)
 );
-CREATE INDEX relation_current_result_identity ON relation_current_results(realm_id,relation_id);
+CREATE INDEX relation_current_state_identity ON relation_current_states(realm_id,relation_id);
 
 -- Realm delegation authority is distinct from the governance Station tenure
 -- in realm_authorities. Capability issuance locks this row in the accepting
 -- transaction; it must never infer the controller or delegation generation
 -- from a process-local reducer projection.
-CREATE TABLE realm_authority_root_current_results (
+CREATE TABLE realm_authority_root_current_states (
  realm_id TEXT PRIMARY KEY,
  controller_actor_id JSONB NOT NULL,
  controller_epoch BIGINT NOT NULL CHECK(controller_epoch BETWEEN 0 AND 9007199254740991),
@@ -3842,10 +3842,10 @@ CREATE TABLE realm_authority_root_current_results (
 );
 
 -- Capability Grant lifecycle and its exact accepting RealmCommit are one
--- authoritative typed current result.  The effective-list read path consumes
+-- authoritative current state.  The effective-list read path consumes
 -- this row atomically; process-local facet counters and list digests are not
 -- revisions.
-CREATE TABLE capability_grant_current_results (
+CREATE TABLE capability_grant_current_states (
  realm_id TEXT NOT NULL, grant_id TEXT NOT NULL,
  status TEXT NOT NULL CHECK(status IN ('active','revoked','relinquished')),
  current_event_id TEXT NOT NULL,
@@ -3860,8 +3860,8 @@ CREATE TABLE capability_grant_current_results (
  CHECK(value ? 'status' AND value->>'status'=status),
  CHECK(NOT (value ? 'realm_id') OR value->>'realm_id'=realm_id)
 );
-CREATE INDEX capability_grant_current_result_status
- ON capability_grant_current_results(realm_id,status,grant_id);
+CREATE INDEX capability_grant_current_state_status
+ ON capability_grant_current_states(realm_id,status,grant_id);
 
 -- The logical quota authority of hard grant quotas (constraint-schema.md
 -- section 8.1): one linearizable counter per (grant, constraint, counter key,
@@ -3877,7 +3877,7 @@ CREATE TABLE capability_quota_counters (
  PRIMARY KEY(grant_id,constraint_key,counter_key,window_id)
 );
 -- The token bucket a `burst` adds on the same authority; `level` counts
--- tokens in units of 1/period_ms and refills at max_operations per ms.
+-- tokens in units of 1/period_ms and refills at max_operation_count per ms.
 CREATE TABLE capability_quota_buckets (
  grant_id TEXT NOT NULL,
  constraint_key TEXT NOT NULL,
@@ -3899,7 +3899,7 @@ CREATE TABLE capability_quota_consumptions (
 -- admission.  These are typed current results written in the same transaction
 -- as their accepting RealmCommit; the in-process product projection is never
 -- consulted by the admission cut.
-CREATE TABLE realm_policy_bundle_current_results (
+CREATE TABLE realm_policy_bundle_current_states (
  realm_id TEXT PRIMARY KEY,
  current_commit_id TEXT NOT NULL,
  current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
@@ -3911,7 +3911,7 @@ CREATE TABLE realm_policy_bundle_current_results (
 -- The registered `policy` typed-current family.  Recovery policy publication
 -- also keeps its immutable/audit record in `recovery_policies`, but every
 -- current read and snapshot is sourced from this RealmCommit-bound row.
-CREATE TABLE policy_current_results (
+CREATE TABLE policy_current_states (
  realm_id TEXT NOT NULL,
  policy_id TEXT NOT NULL PRIMARY KEY,
  current_commit_id TEXT NOT NULL,
@@ -3921,11 +3921,11 @@ CREATE TABLE policy_current_results (
  updated_at TIMESTAMPTZ NOT NULL,
  CHECK(jsonb_typeof(value)='object')
 );
-CREATE INDEX policy_current_result_realm
- ON policy_current_results(realm_id,policy_id);
+CREATE INDEX policy_current_state_realm
+ ON policy_current_states(realm_id,policy_id);
 
 -- Governing Station private evidence and global approval nonce namespace.
--- This table is excluded from shared current-result snapshots and fanout.
+-- This table is excluded from shared current-state snapshots and fanout.
 CREATE TABLE event_approval_private_audit (
  approval_context TEXT NOT NULL,
  approver_did TEXT NOT NULL,
@@ -3952,7 +3952,7 @@ CREATE TABLE event_approval_private_audit (
 CREATE INDEX event_approval_private_audit_event ON event_approval_private_audit(event_id);
 
 -- Two tagged Policy action namespaces; Realm-local IDs never collide with Policy refs.
-CREATE TABLE policy_action_current_results (
+CREATE TABLE policy_action_current_states (
  realm_id TEXT NOT NULL,
  subject_kind TEXT NOT NULL CHECK(subject_kind IN ('policy_ref','realm_action')),
  subject_id TEXT NOT NULL,
@@ -3970,7 +3970,7 @@ CREATE TABLE policy_action_current_results (
 -- URI-keyed MIMI binding current result. The accepting RealmCommit and the
 -- typed value become visible in the same transaction; URI is unique across
 -- Realms so a room cannot resolve to two current Arkret targets.
-CREATE TABLE mimi_room_binding_current_results (
+CREATE TABLE mimi_room_binding_current_states (
  mimi_room_uri TEXT PRIMARY KEY,
  realm_id TEXT NOT NULL,
  current_commit_id TEXT NOT NULL,
@@ -3982,10 +3982,10 @@ CREATE TABLE mimi_room_binding_current_results (
  CHECK(value->>'mimi_room_uri'=mimi_room_uri),
  CHECK(value->'binding_scope'->>'realm_id'=realm_id)
 );
-CREATE INDEX mimi_room_binding_current_result_realm
- ON mimi_room_binding_current_results(realm_id,mimi_room_uri);
+CREATE INDEX mimi_room_binding_current_state_realm
+ ON mimi_room_binding_current_states(realm_id,mimi_room_uri);
 
-CREATE TABLE realm_link_current_results (
+CREATE TABLE realm_link_current_states (
  realm_id TEXT NOT NULL,
  target_realm_id TEXT NOT NULL,
  link_kind TEXT NOT NULL,
@@ -4000,10 +4000,10 @@ CREATE TABLE realm_link_current_results (
  CHECK(value->>'link_kind'=link_kind),
  CHECK(value->>'status'=status)
 );
-CREATE INDEX realm_link_current_result_gate
- ON realm_link_current_results(realm_id,link_kind,status,target_realm_id);
+CREATE INDEX realm_link_current_state_gate
+ ON realm_link_current_states(realm_id,link_kind,status,target_realm_id);
 
-CREATE TABLE realm_organization_current_results (
+CREATE TABLE realm_organization_current_states (
  realm_id TEXT NOT NULL,
  organization_id TEXT NOT NULL,
  relationship TEXT NOT NULL CHECK(relationship IN ('owner','governance','sponsor','directory_certifier')),
@@ -4019,7 +4019,7 @@ CREATE TABLE realm_organization_current_results (
  CHECK(value->>'relationship'=relationship)
 );
 
-CREATE TABLE member_state_current_results (
+CREATE TABLE member_state_current_states (
  realm_id TEXT NOT NULL,
  member_id TEXT NOT NULL,
  membership TEXT NOT NULL CHECK(membership IN ('join','knock','leave','ban')),
@@ -4031,13 +4031,13 @@ CREATE TABLE member_state_current_results (
  CHECK(jsonb_typeof(value)='object'),
  CHECK(value->>'membership'=membership)
 );
-CREATE INDEX member_state_current_result_membership
- ON member_state_current_results(realm_id,membership,member_id);
+CREATE INDEX member_state_current_state_membership
+ ON member_state_current_states(realm_id,membership,member_id);
 
 -- Circle create is a Realm-stream Event; membership writes are on that
 -- Circle's own Commit stream. These rows are derived only in the accepting
 -- transaction and carry the exact accepted revision.
-CREATE TABLE call_state_current_results (
+CREATE TABLE call_state_current_states (
  realm_id TEXT NOT NULL,
  call_id TEXT NOT NULL,
  create_event_id TEXT NOT NULL UNIQUE,
@@ -4052,7 +4052,7 @@ CREATE TABLE call_state_current_results (
  CHECK(source_stream_ref->>'realm_id'=realm_id)
 );
 
-CREATE TABLE call_component_current_results (
+CREATE TABLE call_component_current_states (
  realm_id TEXT NOT NULL,
  call_id TEXT NOT NULL,
  selector JSONB NOT NULL,
@@ -4074,7 +4074,7 @@ CREATE TABLE call_participant_issuer_sources (
  call_id TEXT NOT NULL,
  source_commit_id TEXT NOT NULL,
  issuer_kid TEXT NOT NULL,
- public_key_b64u TEXT NOT NULL,
+ public_key_base64url TEXT NOT NULL,
  issuer_history JSONB,
  PRIMARY KEY(realm_id,call_id,source_commit_id)
 );
@@ -4088,7 +4088,7 @@ CREATE TABLE call_voluntary_join_nonces (
  CHECK(jsonb_typeof(subject_actor_id)='object')
 );
 
-CREATE TABLE realm_media_service_current_results (
+CREATE TABLE realm_media_service_current_states (
  realm_id TEXT PRIMARY KEY,
  source_stream_ref JSONB NOT NULL,
  current_commit_id TEXT NOT NULL,
@@ -4100,7 +4100,7 @@ CREATE TABLE realm_media_service_current_results (
  CHECK(source_stream_ref->>'realm_id'=realm_id)
 );
 
-CREATE TABLE circle_current_results (
+CREATE TABLE circle_current_states (
  realm_id TEXT NOT NULL,
  circle_id TEXT NOT NULL PRIMARY KEY,
  create_event_id TEXT NOT NULL UNIQUE,
@@ -4116,7 +4116,7 @@ CREATE TABLE circle_current_results (
  CHECK(value->>'id'=circle_id),
  CHECK(value->>'realm_id'=realm_id)
 );
-CREATE TABLE circle_member_state_current_results (
+CREATE TABLE circle_member_state_current_states (
  realm_id TEXT NOT NULL,
  circle_id TEXT NOT NULL,
  member_id TEXT NOT NULL,
@@ -4132,10 +4132,10 @@ CREATE TABLE circle_member_state_current_results (
  CHECK(value->>'membership'=membership),
  CHECK((membership='join')=(value ? 'parent_membership_revision'))
 );
-CREATE INDEX circle_member_state_current_result_membership
- ON circle_member_state_current_results(circle_id,membership,member_id);
-CREATE INDEX circle_member_state_current_results_realm
- ON circle_member_state_current_results(realm_id,member_id,circle_id);
+CREATE INDEX circle_member_state_current_state_membership
+ ON circle_member_state_current_states(circle_id,membership,member_id);
+CREATE INDEX circle_member_state_current_states_realm
+ ON circle_member_state_current_states(realm_id,member_id,circle_id);
 -- Effective Circle membership (circle.md section 9.1): a canonical Circle join
 -- counts only while the parent Realm member_state current of the same actor
 -- is join at exactly the producer-signed parent_membership_revision. The
@@ -4144,7 +4144,7 @@ CREATE INDEX circle_member_state_current_results_realm
 CREATE FUNCTION circle_member_parent_join_current(
     circle_realm_id TEXT, circle_member_id TEXT, circle_value JSONB
 ) RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
-    SELECT EXISTS (SELECT 1 FROM member_state_current_results parent
+    SELECT EXISTS (SELECT 1 FROM member_state_current_states parent
         WHERE parent.realm_id=circle_realm_id AND parent.member_id=circle_member_id
           AND parent.membership='join' AND circle_value->>'membership'='join'
           AND parent.current_commit_id=circle_value->'parent_membership_revision'->>'commit_id'
@@ -4154,7 +4154,7 @@ $$;
 -- Native Sidecar genesis is a Realm-stream Event. This accepted current is
 -- separate from the service-local agent_sidecars projection and permanently
 -- reserves one (Realm, complete controller AccountId) singleton.
-CREATE TABLE sidecar_current_results (
+CREATE TABLE sidecar_current_states (
  realm_id TEXT NOT NULL,
  sidecar_id TEXT NOT NULL PRIMARY KEY,
  controller_account_id JSONB NOT NULL,
@@ -4173,11 +4173,11 @@ CREATE TABLE sidecar_current_results (
 );
 -- Realm snapshots use a narrow Realm-leading index instead of scanning the
 -- wider controller-account uniqueness index or unrelated Realm currents.
-CREATE INDEX sidecar_current_results_realm
- ON sidecar_current_results(realm_id,sidecar_id);
-CREATE TABLE sidecar_context_current_results (
+CREATE INDEX sidecar_current_states_realm
+ ON sidecar_current_states(realm_id,sidecar_id);
+CREATE TABLE sidecar_context_current_states (
  realm_id TEXT NOT NULL,
- sidecar_id TEXT NOT NULL REFERENCES sidecar_current_results(sidecar_id),
+ sidecar_id TEXT NOT NULL REFERENCES sidecar_current_states(sidecar_id),
  context_ref_digest TEXT NOT NULL,
  context_ref JSONB NOT NULL,
  version BIGINT NOT NULL CHECK(version BETWEEN 1 AND 9007199254740991),
@@ -4198,12 +4198,12 @@ CREATE TABLE sidecar_context_current_results (
 );
 -- Snapshot material reads all disclosed context currents for one exact Realm.
 -- The Sidecar-leading primary key serves exact context lookups separately.
-CREATE INDEX sidecar_context_current_results_realm
- ON sidecar_context_current_results(realm_id,sidecar_id,context_ref_digest);
+CREATE INDEX sidecar_context_current_states_realm
+ ON sidecar_context_current_states(realm_id,sidecar_id,context_ref_digest);
 
 -- Encrypted controller controls are one native Sidecar-context keyed set.
 -- No exchange id or decrypted control member is stored outside the carrier.
-CREATE TABLE sidecar_exchange_controls_current_results (
+CREATE TABLE sidecar_exchange_controls_current_states (
  realm_id TEXT NOT NULL,
  sidecar_id TEXT NOT NULL,
  context_ref_digest TEXT NOT NULL,
@@ -4221,11 +4221,11 @@ CREATE TABLE sidecar_exchange_controls_current_results (
  CHECK(jsonb_typeof(value)='object'),
  CHECK(jsonb_typeof(value->'assertions')='array')
 );
-CREATE INDEX sidecar_exchange_controls_current_results_realm
- ON sidecar_exchange_controls_current_results(realm_id,sidecar_id,context_ref_digest);
+CREATE INDEX sidecar_exchange_controls_current_states_realm
+ ON sidecar_exchange_controls_current_states(realm_id,sidecar_id,context_ref_digest);
 
 -- Event-derived Strand identity and its complete registered current value.
-CREATE TABLE strand_current_results (
+CREATE TABLE strand_current_states (
  realm_id TEXT NOT NULL,
  strand_id TEXT NOT NULL PRIMARY KEY,
  current_commit_id TEXT NOT NULL,
@@ -4237,13 +4237,13 @@ CREATE TABLE strand_current_results (
  CHECK(value->>'id'=strand_id),
  CHECK(value->>'realm_id'=realm_id)
 );
-CREATE INDEX strand_current_results_realm ON strand_current_results(realm_id,strand_id);
-CREATE INDEX strand_current_results_topic ON strand_current_results(realm_id, (value #>> '{topic,space_id}'));
+CREATE INDEX strand_current_states_realm ON strand_current_states(realm_id,strand_id);
+CREATE INDEX strand_current_states_topic ON strand_current_states(realm_id, (value #>> '{topic,space_id}'));
 
 -- Registered typed-pair position current, including an explicit JSON null.
 -- The Board and Strand are separate typed identity components, never a hash
 -- subject or a canonical Relation. RealmCommit order is the only revision.
-CREATE TABLE strand_position_current_results (
+CREATE TABLE strand_position_current_states (
  realm_id TEXT NOT NULL,
  board_space_id TEXT NOT NULL,
  strand_id TEXT NOT NULL,
@@ -4258,16 +4258,16 @@ CREATE TABLE strand_position_current_results (
    AND value - 'list_space_id' - 'rank'='{}'::jsonb
  ))
 );
-CREATE INDEX strand_position_current_results_realm
- ON strand_position_current_results(realm_id,board_space_id,strand_id);
-CREATE INDEX strand_position_current_results_list
- ON strand_position_current_results(realm_id,board_space_id,(value->>'list_space_id'));
+CREATE INDEX strand_position_current_states_realm
+ ON strand_position_current_states(realm_id,board_space_id,strand_id);
+CREATE INDEX strand_position_current_states_list
+ ON strand_position_current_states(realm_id,board_space_id,(value->>'list_space_id'));
 
 -- Event-derived Space metadata and its two sibling registered current
 -- families. The parent and policy must exist from genesis, including explicit
 -- JSON null values for an undeclared parent/policy. They advance with the
 -- covering RealmCommit in one authority transaction.
-CREATE TABLE space_current_results (
+CREATE TABLE space_current_states (
  realm_id TEXT NOT NULL,
  space_id TEXT NOT NULL PRIMARY KEY,
  current_commit_id TEXT NOT NULL,
@@ -4280,11 +4280,11 @@ CREATE TABLE space_current_results (
  CHECK(NOT value ? 'parent_space_id'),
  CHECK(NOT value ? 'child_scope_policy')
 );
-CREATE INDEX space_current_results_realm ON space_current_results(realm_id,space_id);
+CREATE INDEX space_current_states_realm ON space_current_states(realm_id,space_id);
 
-CREATE TABLE space_parent_current_results (
+CREATE TABLE space_parent_current_states (
  realm_id TEXT NOT NULL,
- space_id TEXT NOT NULL PRIMARY KEY REFERENCES space_current_results(space_id) DEFERRABLE INITIALLY DEFERRED,
+ space_id TEXT NOT NULL PRIMARY KEY REFERENCES space_current_states(space_id) DEFERRABLE INITIALLY DEFERRED,
  current_commit_id TEXT NOT NULL,
  current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
  value JSONB NOT NULL,
@@ -4294,23 +4294,23 @@ CREATE TABLE space_parent_current_results (
  CHECK(value=jsonb_build_object('parent_space_id',value->'parent_space_id')),
  CHECK(jsonb_typeof(value->'parent_space_id') IN ('null','string'))
 );
-CREATE INDEX space_parent_current_results_realm ON space_parent_current_results(realm_id,space_id);
+CREATE INDEX space_parent_current_states_realm ON space_parent_current_states(realm_id,space_id);
 
-CREATE TABLE space_child_scope_policy_current_results (
+CREATE TABLE space_child_scope_policy_current_states (
  realm_id TEXT NOT NULL,
- space_id TEXT NOT NULL PRIMARY KEY REFERENCES space_current_results(space_id) DEFERRABLE INITIALLY DEFERRED,
+ space_id TEXT NOT NULL PRIMARY KEY REFERENCES space_current_states(space_id) DEFERRABLE INITIALLY DEFERRED,
  current_commit_id TEXT NOT NULL,
  current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
  value JSONB NOT NULL,
  updated_at TIMESTAMPTZ NOT NULL,
  CHECK(jsonb_typeof(value) IN ('null','object'))
 );
-CREATE INDEX space_child_scope_policy_current_results_realm ON space_child_scope_policy_current_results(realm_id,space_id);
+CREATE INDEX space_child_scope_policy_current_states_realm ON space_child_scope_policy_current_states(realm_id,space_id);
 
 -- The whole accepted RSVP entry per exact Calendar Strand, occurrence and
 -- accountable Actor. JSONB scalars preserve an explicit null series key and
 -- JSONB ActorId preserves the complete signed identity in the subject.
-CREATE TABLE rsvp_current_results (
+CREATE TABLE rsvp_current_states (
  realm_id TEXT NOT NULL,
  event_ref TEXT NOT NULL,
  occurrence JSONB NOT NULL,
@@ -4326,10 +4326,10 @@ CREATE TABLE rsvp_current_results (
  CHECK(jsonb_typeof(value)='object'),
  CHECK(source_stream_ref->>'kind' IN ('realm','circle'))
 );
-CREATE INDEX rsvp_current_results_realm ON rsvp_current_results(realm_id,event_ref);
+CREATE INDEX rsvp_current_states_realm ON rsvp_current_states(realm_id,event_ref);
 
 -- Realm singleton pointer to a confirmed non-tombstoned Strand.
-CREATE TABLE realm_set_default_strand_current_results (
+CREATE TABLE realm_set_default_strand_current_states (
  realm_id TEXT NOT NULL PRIMARY KEY,
  current_commit_id TEXT NOT NULL,
  current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
@@ -4380,7 +4380,7 @@ CREATE TABLE watch_audit_read_results (
     private_audit_digest TEXT NOT NULL
 );
 
-CREATE TABLE strand_watch_current_results (
+CREATE TABLE strand_watch_current_states (
  realm_id TEXT NOT NULL,
  strand_id TEXT NOT NULL,
  watcher_actor_id TEXT NOT NULL,
@@ -4390,7 +4390,7 @@ CREATE TABLE strand_watch_current_results (
  updated_at TIMESTAMPTZ NOT NULL,
  PRIMARY KEY(strand_id,watcher_actor_id)
 );
-CREATE INDEX strand_watch_current_results_realm_idx ON strand_watch_current_results (realm_id,strand_id,watcher_actor_id);
+CREATE INDEX strand_watch_current_states_realm_idx ON strand_watch_current_states (realm_id,strand_id,watcher_actor_id);
 CREATE INDEX canonical_events_watch_key_idx ON public.canonical_events (realm_id,((envelope->'payload'->>'strand_id')),((envelope->'payload'->'watcher_actor_id'))) WHERE kind='ak.strand.watch.set' AND state='committed';
 
 -- Poll response history references its canonical truth in the same acceptance
@@ -4418,7 +4418,7 @@ JOIN public.realm_commits c ON c.commit_id=p.commit_id AND c.event_pk=e.pk
 WHERE e.state='committed' AND original.state='committed'
 ORDER BY e.realm_id,c.stream_ref,p.poll_event_pk,e.envelope->'actor_id',c.stream_position DESC;
 
-CREATE TABLE message_revision_current_results (
+CREATE TABLE message_revision_current_states (
  realm_id TEXT NOT NULL,
  message_id TEXT NOT NULL PRIMARY KEY,
  current_commit_id TEXT NOT NULL,
@@ -4430,7 +4430,7 @@ CREATE TABLE message_revision_current_results (
     OR (value->>'message_id'=message_id AND NOT value ? 'strand_id'
         AND (NOT value ? 'track_name' OR value->>'track_name'='discussion')))
 );
-CREATE INDEX message_revision_current_results_realm ON message_revision_current_results(realm_id,message_id);
+CREATE INDEX message_revision_current_states_realm ON message_revision_current_states(realm_id,message_id);
 
 -- `mls_group` typed current (encryption-and-audit.md §2.5): one row per MLS
 -- effective scope, keyed by the canonical JSON of that scope. The scope's
@@ -4440,7 +4440,7 @@ CREATE INDEX message_revision_current_results_realm ON message_revision_current_
 -- `public_state` is the Station-private public RFC 9420 tracker the current
 -- transition was verified into; it holds no member secret and never leaves
 -- the Station.
-CREATE TABLE mls_group_current_results (
+CREATE TABLE mls_group_current_states (
  realm_id TEXT NOT NULL,
  scope_key TEXT COLLATE "C" NOT NULL PRIMARY KEY,
  mls_group_id TEXT NOT NULL UNIQUE,
@@ -4453,7 +4453,7 @@ CREATE TABLE mls_group_current_results (
  CHECK(value->'effective_scope'->>'realm_id'=realm_id),
  CHECK((value->>'covered_key_access_revision')::numeric <= (value->>'current_key_access_revision')::numeric)
 );
-CREATE INDEX mls_group_current_results_realm ON mls_group_current_results(realm_id,scope_key);
+CREATE INDEX mls_group_current_states_realm ON mls_group_current_states(realm_id,scope_key);
 
 -- Historical, Station-private facts from the exact signed PublicMessage of
 -- each accepted MLS Commit. The row identity includes the creating Commit and
@@ -4580,7 +4580,7 @@ CREATE TABLE mls_replica_genesis_provenance (
 -- `target_ref`). Each element is tagged by its accepting Event's `<event_id>:0`
 -- dot with the complete redact payload, and no element is ever removed. The
 -- redacted object's own state is never mirrored here.
-CREATE TABLE object_redaction_current_results (
+CREATE TABLE object_redaction_current_states (
  realm_id TEXT NOT NULL,
  target_ref TEXT NOT NULL,
  current_commit_id TEXT NOT NULL,
@@ -4599,7 +4599,7 @@ CREATE TABLE object_redaction_current_results (
 -- signed payload at the covering RealmCommit. The report queue item is a
 -- read-side View over this family; it has no second writable state here.
 -- Existing franking typed current, published from the exact durable receipt job.
-CREATE TABLE moderation_franking_proof_current_results (
+CREATE TABLE moderation_franking_proof_current_states (
  realm_id TEXT NOT NULL,
  target_event_id TEXT NOT NULL,
  source_stream_ref JSONB NOT NULL,
@@ -4637,7 +4637,7 @@ CREATE TABLE moderation_franking_proof_nonces (
 );
 CREATE INDEX moderation_franking_proof_nonces_expiry ON moderation_franking_proof_nonces(realm_id,received_by,expires_at);
 
-CREATE TABLE moderation_report_current_results (
+CREATE TABLE moderation_report_current_states (
  realm_id TEXT NOT NULL,
  report_event_id TEXT NOT NULL PRIMARY KEY,
  current_commit_id TEXT NOT NULL UNIQUE,
@@ -4649,14 +4649,14 @@ CREATE TABLE moderation_report_current_results (
  CHECK(jsonb_typeof(value->'target_ref')='string'),
  CHECK(jsonb_typeof(value->'reporter_id')='string')
 );
-CREATE INDEX moderation_report_current_results_realm ON moderation_report_current_results(realm_id,report_event_id);
+CREATE INDEX moderation_report_current_states_realm ON moderation_report_current_states(realm_id,report_event_id);
 
 -- `moderation_state` typed current: the canonically sorted set of committed
 -- `ak.moderation.decision` / `.lift` assertions on one moderated target, each
 -- tagged by its accepting Event's `<event_id>:0` dot with the complete payload.
 -- No element is ever removed; the active fold and the queue item status are
 -- read-side derivations.
-CREATE TABLE moderation_state_current_results (
+CREATE TABLE moderation_state_current_states (
  realm_id TEXT NOT NULL,
  target_ref TEXT NOT NULL,
  current_commit_id TEXT NOT NULL,
@@ -4675,7 +4675,7 @@ CREATE TABLE moderation_state_current_results (
 -- Message, each tagged by its accepting Event's `<event_id>:0` dot with the
 -- complete payload. A remove is an asserted element; no element is ever
 -- removed. Membership, deduplication and counts are read-side folds.
-CREATE TABLE message_reactions_current_results (
+CREATE TABLE message_reactions_current_states (
  realm_id TEXT NOT NULL,
  target_ref TEXT NOT NULL,
  current_commit_id TEXT NOT NULL,
@@ -4692,7 +4692,7 @@ CREATE TABLE message_reactions_current_results (
 -- `invite_lifecycle` typed current: the process-state register of one Invite,
 -- keyed by its InviteId (the create Event id retyped). The value is only the
 -- state name; every other Invite fact is its own registered family.
-CREATE TABLE invite_lifecycle_current_results (
+CREATE TABLE invite_lifecycle_current_states (
  realm_id TEXT NOT NULL,
  invite_id TEXT NOT NULL,
  current_commit_id TEXT NOT NULL,
@@ -4720,7 +4720,7 @@ CREATE TABLE invite_third_party_create_index (
 -- invitee account inside the Realm, keyed by canonical_json(invitee_account_id).
 -- The value is `{create_event_id}` while occupied and JSON null once a
 -- registered release write empties it; the released head is kept.
-CREATE TABLE invite_live_target_current_results (
+CREATE TABLE invite_live_target_current_states (
  realm_id TEXT NOT NULL,
  invitee_account_id TEXT COLLATE "C" NOT NULL,
  current_commit_id TEXT NOT NULL,
@@ -4732,14 +4732,14 @@ CREATE TABLE invite_live_target_current_results (
   AND (value - 'create_event_id')='{}'::jsonb
   AND jsonb_typeof(value->'create_event_id')='string'))
 );
-CREATE UNIQUE INDEX invite_live_target_current_results_occupant
- ON invite_live_target_current_results((value->>'create_event_id'))
+CREATE UNIQUE INDEX invite_live_target_current_states_occupant
+ ON invite_live_target_current_states((value->>'create_event_id'))
  WHERE jsonb_typeof(value)='object';
 
 -- `invite_directed_invitee` typed current: the create-locked invitee of one
 -- directed Invite, the reverse index of its live-target slot. A third-party
 -- Invite has no row.
-CREATE TABLE invite_directed_invitee_current_results (
+CREATE TABLE invite_directed_invitee_current_states (
  realm_id TEXT NOT NULL,
  invite_id TEXT NOT NULL,
  current_commit_id TEXT NOT NULL,
@@ -4753,20 +4753,20 @@ CREATE TABLE invite_directed_invitee_current_results (
 );
 
 -- Ordinary Realm bootstrap singleton families share one physical table. Each
--- row is keyed by its registered typed-current-result selector kind and by
+-- row is keyed by its registered current-state selector kind and by
 -- the exact RealmCommit that first established it.
-CREATE TABLE realm_bootstrap_current_results (
+CREATE TABLE realm_bootstrap_current_states (
  realm_id TEXT NOT NULL,
- result_family TEXT COLLATE "C" NOT NULL,
+ state_family TEXT COLLATE "C" NOT NULL,
  current_commit_id TEXT NOT NULL,
  current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
  value JSONB NOT NULL,
  updated_at TIMESTAMPTZ NOT NULL,
- PRIMARY KEY(realm_id,result_family)
+ PRIMARY KEY(realm_id,state_family)
 );
 
 -- One whole-value receipt policy per exact, independently configured scope.
-CREATE TABLE scope_read_receipt_policy_current_results (
+CREATE TABLE scope_read_receipt_policy_current_states (
  realm_id TEXT NOT NULL,
  scope_ref JSONB NOT NULL,
  source_stream_ref JSONB NOT NULL,
@@ -4785,7 +4785,7 @@ CREATE TABLE scope_read_receipt_policy_current_results (
  CHECK(NOT value ? 'visibility' OR (jsonb_typeof(value->'visibility')='string' AND value->>'visibility' IN ('public','members','private')))
 );
 
-CREATE TABLE agent_interaction_current_results (
+CREATE TABLE agent_interaction_current_states (
  realm_id TEXT NOT NULL,
  current_key TEXT NOT NULL,
  agent_account_id JSONB NOT NULL,
@@ -4800,7 +4800,7 @@ CREATE TABLE agent_interaction_current_results (
  CHECK(value->>'interaction_mode' IN ('private','public'))
 );
 
-CREATE TABLE agent_status_current_results (
+CREATE TABLE agent_status_current_states (
  realm_id TEXT NOT NULL,
  current_key TEXT NOT NULL,
  agent_id TEXT NOT NULL,
@@ -4841,8 +4841,8 @@ CREATE TABLE pcr_genesis_units (
  CHECK(jsonb_typeof(result_json)='object'),
  UNIQUE(principal_id,station_id)
 );
-CREATE INDEX agent_status_current_result_agent
- ON agent_status_current_results(realm_id,agent_id);
+CREATE INDEX agent_status_current_state_agent
+ ON agent_status_current_states(realm_id,agent_id);
 
 -- One immutable result captured under the original producer admission locks.
 -- Missing historical results are unavailable, never reconstructed from current keys.
@@ -4857,7 +4857,7 @@ CREATE TABLE agent_producer_signer_keys (
  CHECK((self_admission_account IS NULL) = (self_admission_provenance IS NULL))
 );
 
-CREATE TABLE agent_key_current_results (
+CREATE TABLE agent_key_current_states (
  realm_id TEXT NOT NULL,
  current_key TEXT NOT NULL,
  agent_id TEXT NOT NULL,
@@ -4875,7 +4875,7 @@ CREATE TABLE agent_key_current_results (
 -- The signed active-series payload is projected only with its accepting
 -- RealmCommit. A missing row is meaningful only after the PCR Realm head has
 -- been read from the same database snapshot.
-CREATE TABLE key_backup_active_series_current_results (
+CREATE TABLE key_backup_active_series_current_states (
  realm_id TEXT NOT NULL,
  current_key TEXT NOT NULL,
  actor_id JSONB NOT NULL,
@@ -4898,7 +4898,7 @@ CREATE TABLE key_backup_active_series_current_results (
 -- PCR-local device authority is projected with the accepting RealmCommit.
 -- The generation value is a singleton; authorization is keyed only by
 -- device_id because the PCR already fixes the AccountId.
-CREATE TABLE pcr_device_generation_current_results (
+CREATE TABLE pcr_device_generation_current_states (
  realm_id TEXT PRIMARY KEY,
  current_commit_id TEXT NOT NULL REFERENCES realm_commits(commit_id),
  current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
@@ -4908,7 +4908,7 @@ CREATE TABLE pcr_device_generation_current_results (
  CHECK(value - 'current_device_generation_ref' = '{}'::jsonb),
  CHECK((value->>'current_device_generation_ref')::bigint >= 1)
 );
-CREATE TABLE pcr_device_authorization_current_results (
+CREATE TABLE pcr_device_authorization_current_states (
  realm_id TEXT NOT NULL,
  device_id TEXT NOT NULL,
  current_commit_id TEXT NOT NULL REFERENCES realm_commits(commit_id),
@@ -4941,7 +4941,7 @@ CREATE INDEX pcr_device_revocation_proposals_commit
 
 -- Actor Profile current: one lineage per full Account and exact signed scope.
 -- PCR identity and ordinary Applet interaction profiles never share a lineage.
-CREATE TABLE actor_profile_current_results (
+CREATE TABLE actor_profile_current_states (
  realm_id TEXT NOT NULL,
  actor_profile_id TEXT PRIMARY KEY,
  actor_id JSONB NOT NULL,
@@ -4960,8 +4960,8 @@ CREATE TABLE actor_profile_current_results (
  CHECK(value->>'schema'='ak.schema.actor_profile.v1')
 );
 
-CREATE INDEX actor_profile_current_results_realm
- ON actor_profile_current_results(realm_id);
+CREATE INDEX actor_profile_current_states_realm
+ ON actor_profile_current_states(realm_id);
 
 -- The stored outcome of every accepted profile Event, so an exact replay
 -- returns the value that Event produced after later updates have moved the
@@ -4979,7 +4979,7 @@ CREATE TABLE actor_profile_result_versions (
 -- component is its ak.accountability_scope_set.v1 digest. Both registered
 -- writers -- ak.identity.accountability_grant and the atomic projection of
 -- ak.agent.provision -- write the same row with the accepting RealmCommit.
-CREATE TABLE identity_accountability_current_results (
+CREATE TABLE identity_accountability_current_states (
  realm_id TEXT NOT NULL,
  issuer_id TEXT NOT NULL,
  subject_id TEXT NOT NULL,
@@ -4997,15 +4997,15 @@ CREATE TABLE identity_accountability_current_results (
  CHECK(value->'accountability_scope'=accountability_scope),
  CHECK(value->>'grant_status' IN ('active','revoked'))
 );
-CREATE INDEX identity_accountability_current_result_pair
- ON identity_accountability_current_results(subject_id,issuer_id);
+CREATE INDEX identity_accountability_current_state_pair
+ ON identity_accountability_current_states(subject_id,issuer_id);
 
 -- The three provision-owned typed currents of ak.agent.provision
 -- (key-management.md section 3.6.3). One accepted provision writes them,
 -- with identity_accountability, in the transaction that commits it in the
 -- controller PCR. agent_provisioning is keyed by the Agent DID within that
 -- PCR; a second declaration of the same agent_id is refused.
-CREATE TABLE agent_provisioning_current_results (
+CREATE TABLE agent_provisioning_current_states (
  realm_id TEXT NOT NULL,
  agent_id TEXT NOT NULL,
  current_commit_id TEXT NOT NULL REFERENCES realm_commits(commit_id),
@@ -5023,7 +5023,7 @@ CREATE TABLE agent_provisioning_current_results (
 -- entry 1 admission read by realm id. The subject is unique within the
 -- controller PCR and, by this Station's local uniqueness index, across every
 -- controller PCR it governs.
-CREATE TABLE agent_pcr_genesis_declaration_current_results (
+CREATE TABLE agent_pcr_genesis_declaration_current_states (
  realm_id TEXT NOT NULL,
  principal_control_realm_id TEXT NOT NULL UNIQUE,
  current_commit_id TEXT NOT NULL REFERENCES realm_commits(commit_id),
@@ -5039,7 +5039,7 @@ CREATE TABLE agent_pcr_genesis_declaration_current_results (
 -- The controller-scoped selector binding (actor.md section 3.3): the subject
 -- is (controller principal, agent_slug) without a Station, and a later
 -- provision of the same slug replaces the binding.
-CREATE TABLE agent_selector_claim_current_results (
+CREATE TABLE agent_selector_claim_current_states (
  realm_id TEXT NOT NULL,
  controller_principal_id TEXT NOT NULL,
  agent_slug TEXT NOT NULL,
@@ -5197,7 +5197,7 @@ CREATE TABLE forwarded_producer_agent_evidence (
 
 -- Immutable security confirmations. Nonces are global to the complete controller
 -- Actor, distinct from the detached approval_signature private namespace.
-CREATE TABLE agent_action_approval_current_results (
+CREATE TABLE agent_action_approval_current_states (
  realm_id TEXT NOT NULL,
  approval_id TEXT NOT NULL,
  controller_actor_key TEXT NOT NULL,
@@ -5214,10 +5214,10 @@ CREATE TABLE agent_action_approval_current_results (
  CHECK(value->>'approved_event_id'=approved_event_id),
  CHECK(value->>'approval_nonce'=approval_nonce)
 );
-CREATE INDEX agent_action_approval_target_idx ON agent_action_approval_current_results(realm_id,approved_event_id,controller_actor_key);
+CREATE INDEX agent_action_approval_target_idx ON agent_action_approval_current_states(realm_id,approved_event_id,controller_actor_key);
 
 -- Every Pin home keeps its exact accepting stream and immutable assertion set.
-CREATE TABLE pin_current_results (
+CREATE TABLE pin_current_states (
     realm_id TEXT NOT NULL,
     pin_scope_key TEXT NOT NULL,
     pin_scope JSONB NOT NULL,
@@ -5230,7 +5230,7 @@ CREATE TABLE pin_current_results (
 );
 
 -- The first accepted JSON Schema document permanently occupies its subject.
-CREATE TABLE schema_definition_current_results (
+CREATE TABLE schema_definition_current_states (
  realm_id TEXT NOT NULL,
  schema_id TEXT NOT NULL,
  current_commit_id TEXT NOT NULL,
@@ -5328,7 +5328,7 @@ CREATE TABLE public.realm_actor_creations (
     CHECK (actor_id->>'kind' = 'realm' AND actor_id#>>'{realm_actor_id,realm_id}' = realm_id)
 );
 CREATE UNIQUE INDEX realm_actor_external_mapping ON public.realm_actor_creations(realm_id,applet_id,external_ref) WHERE external_ref IS NOT NULL;
-CREATE TABLE public.realm_actor_current_results (
+CREATE TABLE public.realm_actor_current_states (
     realm_id text NOT NULL,
     actor_id jsonb NOT NULL,
     selector jsonb NOT NULL,

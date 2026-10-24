@@ -11,11 +11,13 @@
 
 use arkret_identifiers::RealmId;
 use arkret_models_collaboration::governance::authorization::{
-    AuthzInviteList, EffectiveCapabilityGrantRow, GrantList,
+    AuthorizationInvitePage, EffectiveCapabilityGrantRow, EffectiveGrantSnapshot,
 };
 use arkret_models_collaboration::governance::invite_addressing::InviteDelivery;
 use arkret_models_collaboration::governance::operation_wire::Invite;
-use arkret_wire::{AccountDataKey, AccountId, ActorId, AuthzDecision, DidCoreId, InviteState};
+use arkret_wire::{
+    AccountDataKey, AccountId, ActorId, AuthorizationDecision, DidCoreId, InviteState,
+};
 use chrono::{DateTime, Utc};
 use coland_http::error::AppError;
 use coland_http::result::{JsonResult, json_ok};
@@ -28,7 +30,7 @@ use super::{now, query_param};
 use crate::authz::CapabilityVerdict;
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
-use crate::wire::{AuthzCheckOutcome, AuthzCheckRequestBody};
+use crate::wire::{AuthorizationCheckRequestBody, AuthorizationCheckResponseBody};
 
 pub(super) fn protocol_router() -> Router {
     Router::new()
@@ -45,10 +47,10 @@ pub(super) fn protocol_router() -> Router {
 #[tracing::instrument(skip_all, fields(op = "ak.self.authz.read.check.v1"))]
 async fn authz_check(
     aa: AuthArgs,
-    body: JsonBody<AuthzCheckRequestBody>,
+    body: JsonBody<AuthorizationCheckRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AuthzCheckOutcome> {
+) -> JsonResult<AuthorizationCheckResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
@@ -117,10 +119,10 @@ async fn authz_check(
     // is its own decision (constraint-schema.md section 15.4); every other
     // refusal maps to the conservative terminal `hard_deny`.
     let decision = match &verdict {
-        _ if reason_code.is_none() => AuthzDecision::Allow,
-        Some(CapabilityVerdict::Quarantined) => AuthzDecision::Quarantine,
-        Some(CapabilityVerdict::RequiresReview) => AuthzDecision::RequireReview,
-        _ => AuthzDecision::HardDeny,
+        _ if reason_code.is_none() => AuthorizationDecision::Allow,
+        Some(CapabilityVerdict::Quarantined) => AuthorizationDecision::Quarantine,
+        Some(CapabilityVerdict::RequiresReview) => AuthorizationDecision::RequireReview,
+        _ => AuthorizationDecision::HardDeny,
     };
     let policy_results = vec![json!({
         "actor_id": body.actor_id,
@@ -138,7 +140,7 @@ async fn authz_check(
             "evaluated_at": arkret_canonical::format_timestamp_canonical(now),
         }
     })];
-    json_ok(AuthzCheckOutcome {
+    json_ok(AuthorizationCheckResponseBody {
         decision,
         matched_grants,
         applied_constraints: Vec::new(),
@@ -269,7 +271,7 @@ async fn effective_grants(
     aa: AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> coland_http::result::JsonResult<GrantList> {
+) -> coland_http::result::JsonResult<EffectiveGrantSnapshot> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let service_read = req.headers().contains_key("source-service-id");
     let session_actor = if service_read {
@@ -322,7 +324,7 @@ async fn effective_grants(
         .collect::<Vec<_>>();
     let state_digest = coland_storage::effective_capability_grant_state_digest(&grants)
         .map_err(|error| AppError::internal(format!("effective grant digest failed: {error}")))?;
-    coland_http::result::json_ok(GrantList {
+    coland_http::result::json_ok(EffectiveGrantSnapshot {
         grants,
         state_digest,
         evaluated_at,
@@ -395,7 +397,7 @@ async fn invites(
     aa: crate::routing::system::extract::AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> coland_http::result::JsonResult<AuthzInviteList> {
+) -> coland_http::result::JsonResult<AuthorizationInvitePage> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let session_actor =
@@ -463,7 +465,7 @@ async fn invites(
         })
         .map(directed_invite_to_sdk)
         .collect::<Result<Vec<_>, _>>()?;
-    coland_http::result::json_ok(AuthzInviteList {
+    coland_http::result::json_ok(AuthorizationInvitePage {
         invites: invite_list,
         next_cursor: None,
         has_more: false,

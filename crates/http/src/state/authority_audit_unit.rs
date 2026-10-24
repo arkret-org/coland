@@ -2,12 +2,12 @@
 
 use arkret_models_collaboration::authority_commit::{
     AtomicSlotProducerEvidence, AuditPairedEventAcceptanceOutcome, AuditPairedEventUnitSubmission,
-    AuthorityForwardBranch, PeerAuthorityForwardAtomicRequest, PeerAuthorityForwardOutcomeValue,
-    PeerAuthoritySubmitOutcome, PeerAuthoritySubmitRequest,
+    AuthorityForwardBranch, ForwardedAuthorityResponseBody, PeerAuthorityForwardAtomicRequestBody,
+    PeerAuthoritySubmitRequestBody, PeerAuthoritySubmitResponseBody,
 };
 use arkret_models_collaboration::strand_watch_operations::{
-    PEER_STRAND_WATCH_AUDIT_PATH, PeerWatchAuditReadRequest, STRAND_WATCH_AUDIT_MAX_BYTES,
-    WatchAuditReadOutcome, WatchAuditReadRequest,
+    PEER_STRAND_WATCH_AUDIT_PATH, PeerWatchAuditReadRequestBody, STRAND_WATCH_AUDIT_MAX_BYTES,
+    WatchAuditReadRequestBody, WatchAuditReadResponseBody,
 };
 use arkret_wire::{EventAdmissionSubmission, ServiceOperationId};
 use coland_services::identity::SessionIdentityState;
@@ -133,7 +133,7 @@ async fn commit(
     state: &AppState,
     submissions: &[EventAdmissionSubmission],
     producers: Vec<AdmittedProducer>,
-    read: Option<&WatchAuditReadRequest>,
+    read: Option<&WatchAuditReadRequestBody>,
     pair: Option<&AuditPairedEventUnitSubmission>,
 ) -> ServiceResult<RegisteredAuditOutcome> {
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
@@ -332,7 +332,7 @@ pub(super) async fn submit_self_pair(
 pub(super) async fn submit_peer_pair(
     state: &AppState,
     peer: &coland_services::authority_commit::AuthenticatedPeerContext,
-    request: PeerAuthorityForwardAtomicRequest,
+    request: PeerAuthorityForwardAtomicRequestBody,
 ) -> ServiceResult<AuditPairedEventAcceptanceOutcome> {
     let event = &request.atomic_submission.events[0].event;
     if event
@@ -391,7 +391,7 @@ async fn forward_pair(
         .authority_commits()
         .retain_registered_pair_forward(&unit, None)
         .await?;
-    let mut request = PeerAuthorityForwardAtomicRequest {
+    let mut request = PeerAuthorityForwardAtomicRequestBody {
         branch: AuthorityForwardBranch::AuthorityForward,
         atomic_submission: unit,
         atomic_producer_evidence: [
@@ -495,7 +495,7 @@ async fn forward_pair(
         ));
     };
     request.validate().map_err(refusal)?;
-    let body = PeerAuthoritySubmitRequest::AuthorityForwardAtomic(request);
+    let body = PeerAuthoritySubmitRequestBody::AuthorityForwardAtomic(request);
     let bytes = arkret_canonical::canonical_json_bytes(&body)
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
     let response = crate::routing::federation::outbox::signed_peer_request(
@@ -517,18 +517,18 @@ async fn forward_pair(
             &response.body,
         ));
     }
-    let outcome: PeerAuthoritySubmitOutcome = serde_json::from_slice(&response.body)
+    let outcome: PeerAuthoritySubmitResponseBody = serde_json::from_slice(&response.body)
         .map_err(|e| ServiceError::internal(e.to_string()))?;
     outcome.validate_for_request(&body).map_err(refusal)?;
-    let PeerAuthoritySubmitOutcome::AuthorityForward(outcome) = outcome else {
+    let PeerAuthoritySubmitResponseBody::AuthorityForward(outcome) = outcome else {
         return Err(ServiceError::internal(
             "audit forward response branch mismatch",
         ));
     };
-    let PeerAuthorityForwardOutcomeValue::AuditPairedEvent(outcome) = outcome.outcome else {
+    let ForwardedAuthorityResponseBody::AuditPairedEvent(outcome) = outcome.response_body else {
         return Err(ServiceError::internal("audit forward returned one Event"));
     };
-    let PeerAuthoritySubmitRequest::AuthorityForwardAtomic(request) = body else {
+    let PeerAuthoritySubmitRequestBody::AuthorityForwardAtomic(request) = body else {
         unreachable!()
     };
     for (slot, commit) in request
@@ -559,8 +559,11 @@ async fn forward_pair(
 pub(crate) async fn submit_self_read(
     state: &AppState,
     session: &SessionIdentityState,
-    request: &WatchAuditReadRequest,
-) -> ServiceResult<(WatchAuditReadOutcome, coland_storage::CurrentRealmAuthority)> {
+    request: &WatchAuditReadRequestBody,
+) -> ServiceResult<(
+    WatchAuditReadResponseBody,
+    coland_storage::CurrentRealmAuthority,
+)> {
     request.validate().map_err(refusal)?;
     validate_caller(
         state,
@@ -571,7 +574,7 @@ pub(crate) async fn submit_self_read(
     .await?;
     let authority = verified_governor(state, &request.audit_submission.event.realm_id).await?;
     if authority.service_id != state.service_core_id() {
-        let mut peer = PeerWatchAuditReadRequest {
+        let mut peer = PeerWatchAuditReadRequestBody {
             audit_submission: request.audit_submission.clone(),
             producer_device_evidence: None,
             producer_agent_evidence: None,
@@ -612,7 +615,7 @@ pub(crate) async fn submit_self_read(
                 &response.body,
             ));
         }
-        let outcome: WatchAuditReadOutcome = serde_json::from_slice(&response.body)
+        let outcome: WatchAuditReadResponseBody = serde_json::from_slice(&response.body)
             .map_err(|e| ServiceError::internal(e.to_string()))?;
         outcome
             .validate_for_request(request, authority.generation)
@@ -651,8 +654,8 @@ pub(crate) async fn submit_self_read(
 
 async fn original_read(
     state: &AppState,
-    request: &WatchAuditReadRequest,
-) -> ServiceResult<Option<WatchAuditReadOutcome>> {
+    request: &WatchAuditReadRequestBody,
+) -> ServiceResult<Option<WatchAuditReadResponseBody>> {
     if let Some(original) = state
         .authority_commits()
         .registered_audit_result(&request.audit_submission.event.event_id)
@@ -683,8 +686,8 @@ async fn original_read(
 pub(crate) async fn submit_peer_read(
     state: &AppState,
     peer: &coland_services::authority_commit::AuthenticatedPeerContext,
-    request: &PeerWatchAuditReadRequest,
-) -> ServiceResult<WatchAuditReadOutcome> {
+    request: &PeerWatchAuditReadRequestBody,
+) -> ServiceResult<WatchAuditReadResponseBody> {
     let event = &request.audit_submission.event;
     if event
         .actor_id

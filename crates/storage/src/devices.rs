@@ -56,7 +56,7 @@ pub struct AppletDeviceQueueRead<'a> {
 
 /// Pending private allocations and the current cut survive until publication.
 pub struct AppletDeviceQueuePage {
-    pub outcome: arkret_models_collaboration::device_messages::DeviceMessagesGetOutcome,
+    pub outcome: arkret_models_collaboration::device_messages::DeviceMessagesGetResponseBody,
     pub guard: Box<dyn crate::AccountContentDeliveryGuard>,
 }
 
@@ -64,7 +64,8 @@ pub struct AppletDeviceQueuePage {
 pub struct AppletDeviceQueueAck<'a> {
     pub authority: &'a crate::AppletManagedDeviceAuthority,
     pub effective_scope: &'a arkret_wire::ScopeRef,
-    pub body: &'a arkret_models_collaboration::device_messages::DeviceMessagesAckRequestBody,
+    pub body:
+        &'a arkret_models_collaboration::device_messages::DeviceMessagesAcknowledgementRequestBody,
     pub transport_expires_at: chrono::DateTime<Utc>,
 }
 
@@ -121,7 +122,7 @@ pub trait DeviceMessageStore: Send + Sync {
         &self,
         recipient: &str,
         device_id: &str,
-        ack_token: &str,
+        acknowledgement_token: &str,
     ) -> PersistenceResult<Option<usize>>;
     /// List queued messages for a device strictly after `queue_position`.
     async fn list_after(
@@ -145,7 +146,7 @@ pub trait DeviceMessageStore: Send + Sync {
     async fn ack_recipient_with_token(
         &self,
         selector: &RecipientQueueSelector,
-        ack_token: &str,
+        acknowledgement_token: &str,
     ) -> PersistenceResult<Option<usize>>;
     /// Historical verified loss watermark, if any. Current v1 writers retain
     /// unacknowledged deliveries until explicit ACK.

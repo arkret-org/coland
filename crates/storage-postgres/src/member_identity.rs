@@ -33,7 +33,7 @@ struct HandleClaimRow {
     #[diesel(sql_type = Nullable<Text>)]
     revocation_digest: Option<String>,
     #[diesel(sql_type = Timestamptz)]
-    fresh_until: chrono::DateTime<chrono::Utc>,
+    cache_expires_at: chrono::DateTime<chrono::Utc>,
     #[diesel(sql_type = Nullable<Text>)]
     visibility: Option<String>,
     #[diesel(sql_type = Nullable<Timestamptz>)]
@@ -51,7 +51,7 @@ impl From<HandleClaimRow> for HandleClaimEvidenceRecord {
             audience: row.audience,
             status: row.status,
             revocation_digest: row.revocation_digest,
-            fresh_until: row.fresh_until,
+            cache_expires_at: row.cache_expires_at,
             visibility: row.visibility,
             expires_at: row.expires_at,
             envelope: row.envelope,
@@ -60,7 +60,7 @@ impl From<HandleClaimRow> for HandleClaimEvidenceRecord {
 }
 
 const HANDLE_CLAIM_COLUMNS: &str = "digest, subject_id, issuer_id, audience, \
-     status, revocation_digest, fresh_until, visibility, expires_at, envelope";
+     status, revocation_digest, cache_expires_at, visibility, expires_at, envelope";
 
 #[async_trait]
 impl MemberIdentityStore for PgMemberIdentityStore {
@@ -118,14 +118,14 @@ impl MemberIdentityStore for PgMemberIdentityStore {
         sql_query(
             "INSERT INTO member_identity_handle_claims \
              (digest, subject_id, issuer_id, audience, status, revocation_digest, \
-              fresh_until, visibility, expires_at, envelope) \
+              cache_expires_at, visibility, expires_at, envelope) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
              ON CONFLICT (subject_id, digest) DO UPDATE SET \
                 issuer_id = EXCLUDED.issuer_id, \
                 audience = EXCLUDED.audience, \
                 status = EXCLUDED.status, \
                 revocation_digest = EXCLUDED.revocation_digest, \
-                fresh_until = EXCLUDED.fresh_until, \
+                cache_expires_at = EXCLUDED.cache_expires_at, \
                 visibility = EXCLUDED.visibility, \
                 expires_at = EXCLUDED.expires_at, \
                 envelope = EXCLUDED.envelope",
@@ -136,7 +136,7 @@ impl MemberIdentityStore for PgMemberIdentityStore {
         .bind::<Nullable<Text>, _>(&record.audience)
         .bind::<Text, _>(&record.status)
         .bind::<Nullable<Text>, _>(&record.revocation_digest)
-        .bind::<Timestamptz, _>(record.fresh_until)
+        .bind::<Timestamptz, _>(record.cache_expires_at)
         .bind::<Nullable<Text>, _>(&record.visibility)
         .bind::<Nullable<Timestamptz>, _>(record.expires_at)
         .bind::<Jsonb, _>(&record.envelope)

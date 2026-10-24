@@ -5,8 +5,7 @@
 
 use arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload;
 use arkret_models_identity::{
-    HistoricalSignerKeyQuerySender, ResolvedSignerKey, SignerKeyQueryOutcome,
-    SignerKeyQuerySelector,
+    HistoricalSignerKeyQuerySender, ResolvedSignerKey, SignerKeyQuerySelector, SignerKeyResolution,
 };
 
 use super::*;
@@ -91,7 +90,7 @@ pub(crate) async fn retain_in_connection(
             "Agent historical authorization coordinate differs".into(),
         ));
     }
-    let revision = sql_query("SELECT e.envelope,c.commit_json FROM agent_key_current_results k JOIN realm_commits c ON c.commit_id=k.current_commit_id AND c.stream_position=k.current_stream_position AND c.realm_id=k.realm_id JOIN canonical_events e ON e.pk=c.event_pk WHERE k.realm_id=$1 AND k.agent_id=$2 AND k.agent_key_id=$3")
+    let revision = sql_query("SELECT e.envelope,c.commit_json FROM agent_key_current_states k JOIN realm_commits c ON c.commit_id=k.current_commit_id AND c.stream_position=k.current_stream_position AND c.realm_id=k.realm_id JOIN canonical_events e ON e.pk=c.event_pk WHERE k.realm_id=$1 AND k.agent_id=$2 AND k.agent_key_id=$3")
         .bind::<Text,_>(pcr_realm_id.as_str()).bind::<Text,_>(agent_id.as_str()).bind::<Text,_>(payload.key_id.as_str())
         .get_result::<SourceRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let revision_commit: arkret_wire::RealmCommit =
@@ -120,12 +119,12 @@ pub(crate) async fn retain_in_connection(
             },
         },
     };
-    let outcome = SignerKeyQueryOutcome::HistoricalResolved {
+    let outcome = SignerKeyResolution::HistoricalResolved {
         selector,
         key: ResolvedSignerKey {
-            public_key_b64u: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
-                key.raw_public_key,
-            ))
+            public_key_base64url: arkret_wire::Base64UrlString::new(
+                arkret_canonical::base64url_encode(key.raw_public_key),
+            )
             .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?,
             authorization_ref: authorization_ref.clone(),
             revision: arkret_wire::CurrentRevision {
@@ -143,13 +142,13 @@ async fn retain_outcome_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
-    outcome: SignerKeyQueryOutcome,
+    outcome: SignerKeyResolution,
 ) -> PersistenceResult<()> {
     retain_outcome_with_self_admission(conn, event, commit, outcome, None).await
 }
 
 pub(crate) struct PreparedSelfHistoricalFact {
-    outcome: SignerKeyQueryOutcome,
+    outcome: SignerKeyResolution,
     kind: &'static str,
     provenance: Value,
 }
@@ -190,7 +189,7 @@ async fn retain_outcome_with_self_admission(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
-    outcome: SignerKeyQueryOutcome,
+    outcome: SignerKeyResolution,
     provenance: Option<(&arkret_wire::AccountId, &'static str, &Value)>,
 ) -> PersistenceResult<()> {
     outcome
@@ -248,7 +247,7 @@ async fn confirmed_human_outcome_in_connection(
     status: &crate::pcr_device_status_reader::ConfirmedPcrDeviceStatusCut,
     account: &arkret_wire::AccountId,
     device: &arkret_wire::DeviceId,
-) -> PersistenceResult<SignerKeyQueryOutcome> {
+) -> PersistenceResult<SignerKeyResolution> {
     let authorization = status.authority.authorization.as_ref().ok_or_else(|| {
         PersistenceError::Conflict("self historical authorization is absent".into())
     })?;
@@ -291,7 +290,7 @@ async fn human_outcome_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     guard: &coland_storage::DeviceRevocationGateSelector,
-) -> PersistenceResult<SignerKeyQueryOutcome> {
+) -> PersistenceResult<SignerKeyResolution> {
     if commit.event_ref != event.event_id || commit.realm_id != event.realm_id {
         return Err(PersistenceError::Conflict(
             "Human historical target differs".into(),
@@ -305,8 +304,8 @@ async fn human_outcome_in_connection(
 fn human_fact_outcome(
     fact: &arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
     commit: &arkret_wire::RealmCommit,
-) -> SignerKeyQueryOutcome {
-    SignerKeyQueryOutcome::HistoricalResolved {
+) -> SignerKeyResolution {
+    SignerKeyResolution::HistoricalResolved {
         selector: SignerKeyQuerySelector::HistoricalEvent {
             sender: HistoricalSignerKeyQuerySender::AccountDevice {
                 actor: fact.actor.clone(),
@@ -630,7 +629,7 @@ pub(crate) async fn prepare_account_device_source_in_connection(
             device_id: device.clone(),
             verification_method: proof.verification_method.clone(),
             key: ResolvedSignerKey {
-                public_key_b64u: arkret_wire::Base64UrlString::new(
+                public_key_base64url: arkret_wire::Base64UrlString::new(
                     arkret_canonical::base64url_encode(raw),
                 )
                 .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?,
@@ -767,8 +766,8 @@ pub(crate) async fn retain_prepared_account_device_in_connection(
 fn service_fact_outcome(
     fact: &arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact,
     commit: &arkret_wire::RealmCommit,
-) -> SignerKeyQueryOutcome {
-    SignerKeyQueryOutcome::HistoricalServiceResolved {
+) -> SignerKeyResolution {
+    SignerKeyResolution::HistoricalServiceResolved {
         selector: SignerKeyQuerySelector::HistoricalEvent {
             sender: HistoricalSignerKeyQuerySender::Service {
                 actor: fact.actor.clone(),
@@ -789,12 +788,12 @@ fn service_fact_outcome(
 fn producer_fact_outcome(
     fact: &arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact,
     commit: &arkret_wire::RealmCommit,
-) -> PersistenceResult<SignerKeyQueryOutcome> {
+) -> PersistenceResult<SignerKeyResolution> {
     use arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact as Fact;
     match fact {
         Fact::AccountDevice(fact) => Ok(human_fact_outcome(fact, commit)),
         Fact::Service(fact) => Ok(service_fact_outcome(fact, commit)),
-        Fact::RealmDevice(fact) => Ok(SignerKeyQueryOutcome::HistoricalRealmDeviceResolved {
+        Fact::RealmDevice(fact) => Ok(SignerKeyResolution::HistoricalRealmDeviceResolved {
             selector: SignerKeyQuerySelector::HistoricalRealmDevice {
                 sender_kind: arkret_models_identity::RealmDeviceSignerKind::RealmDevice,
                 actor_id: fact.actor_id.clone(),
@@ -808,7 +807,7 @@ fn producer_fact_outcome(
                 },
             },
             key: arkret_models_identity::CurrentDeviceSigningKey {
-                public_key_b64u: fact.public_key_b64u.clone(),
+                public_key_base64url: fact.public_key_base64url.clone(),
             },
             accepted_at: fact.accepted_at,
         }),
@@ -969,7 +968,7 @@ pub(crate) async fn read(
     pool: &PgPool,
     realm_id: &arkret_wire::RealmId,
     selector: &SignerKeyQuerySelector,
-) -> PersistenceResult<Option<SignerKeyQueryOutcome>> {
+) -> PersistenceResult<Option<SignerKeyResolution>> {
     let Some(target) = selector.committed_event_ref() else {
         historical_fact_diagnostic("ordinary_read", "target_missing");
         return Ok(None);
@@ -1006,7 +1005,7 @@ pub(crate) async fn read(
         historical_fact_diagnostic("ordinary_read", "immutable_fact_not_found");
         return Ok(None);
     };
-    let outcome: SignerKeyQueryOutcome = serde_json::from_value(row.payload).map_err(|error| {
+    let outcome: SignerKeyResolution = serde_json::from_value(row.payload).map_err(|error| {
         historical_fact_diagnostic("ordinary_read", "fact_decode_failed");
         PersistenceError::database(error)
     })?;
@@ -1040,7 +1039,7 @@ pub(crate) async fn read(
     }
     if matches!(
         &outcome,
-        SignerKeyQueryOutcome::HistoricalServiceResolved { .. }
+        SignerKeyResolution::HistoricalServiceResolved { .. }
     ) {
         let fact = producer_source_for_commit_in_connection(&mut conn, &event, &commit).await?;
         let Some(
@@ -1058,9 +1057,9 @@ pub(crate) async fn read(
     let matches = outcome.selector() == selector
         && matches!(
             outcome,
-            SignerKeyQueryOutcome::HistoricalResolved { .. }
-                | SignerKeyQueryOutcome::HistoricalServiceResolved { .. }
-                | SignerKeyQueryOutcome::HistoricalRealmDeviceResolved { .. }
+            SignerKeyResolution::HistoricalResolved { .. }
+                | SignerKeyResolution::HistoricalServiceResolved { .. }
+                | SignerKeyResolution::HistoricalRealmDeviceResolved { .. }
         );
     historical_fact_diagnostic(
         "ordinary_read",
@@ -1079,7 +1078,7 @@ pub(crate) async fn read_self_pcr(
     realm_id: &arkret_wire::RealmId,
     selector: &SignerKeyQuerySelector,
     recipient: &arkret_wire::AccountId,
-) -> PersistenceResult<Option<SignerKeyQueryOutcome>> {
+) -> PersistenceResult<Option<SignerKeyResolution>> {
     let SignerKeyQuerySelector::HistoricalEvent {
         sender: HistoricalSignerKeyQuerySender::AccountDevice { actor, .. },
     } = selector
@@ -1198,7 +1197,7 @@ pub(crate) async fn read_self_pcr(
             );
             PersistenceError::database(error)
         })?;
-    let outcome: SignerKeyQueryOutcome = serde_json::from_value(row.outcome).map_err(|error| {
+    let outcome: SignerKeyResolution = serde_json::from_value(row.outcome).map_err(|error| {
         historical_fact_diagnostic("restricted_self_pcr_read", "fact_or_selector_decode_failed");
         PersistenceError::database(error)
     })?;
@@ -1210,7 +1209,7 @@ pub(crate) async fn read_self_pcr(
         PersistenceError::SchemaViolation(error.to_string())
     })?;
     if outcome.selector() != selector
-        || !matches!(outcome, SignerKeyQueryOutcome::HistoricalResolved { .. })
+        || !matches!(outcome, SignerKeyResolution::HistoricalResolved { .. })
         || outcome
             .key()
             .map(|key| key.authorization_ref.stream_ref.realm_id())

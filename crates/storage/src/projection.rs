@@ -108,7 +108,7 @@ pub trait MorphProjectionStore: Send + Sync {
 /// reads this port so queries and subsequent validation observe the same
 /// current value the transaction boundary serialized.
 #[derive(Clone, Debug)]
-pub struct RelationCurrentResultRecord {
+pub struct RelationCurrentStateRecord {
     pub realm_id: arkret_wire::RealmId,
     pub domain_key: String,
     pub primary_conflict_domain:
@@ -118,8 +118,8 @@ pub struct RelationCurrentResultRecord {
 }
 
 #[async_trait]
-pub trait RelationCurrentResultStore: Send + Sync {
-    async fn snapshot_all(&self) -> PersistenceResult<Vec<RelationCurrentResultRecord>>;
+pub trait RelationCurrentStateStore: Send + Sync {
+    async fn snapshot_all(&self) -> PersistenceResult<Vec<RelationCurrentStateRecord>>;
 }
 
 /// Authoritative current Capability Grant value accepted by the governing
@@ -129,7 +129,7 @@ pub trait RelationCurrentResultStore: Send + Sync {
 /// snapshot.  Consumers must never replace this revision with the in-memory
 /// facet counter, the effective-list digest, or an Event id.
 #[derive(Clone, Debug)]
-pub struct CapabilityGrantCurrentResultRecord {
+pub struct CapabilityGrantCurrentStateRecord {
     pub realm_id: arkret_wire::RealmId,
     pub grant_id: arkret_wire::GrantId,
     pub status: CapabilityGrantCurrentStatus,
@@ -138,7 +138,7 @@ pub struct CapabilityGrantCurrentResultRecord {
     pub source: arkret_wire::CommittedEventRef,
 }
 
-impl CapabilityGrantCurrentResultRecord {
+impl CapabilityGrantCurrentStateRecord {
     /// Build one backend-neutral current row and fail closed if its canonical
     /// value disagrees with the storage key or lifecycle columns.
     pub fn try_new(
@@ -180,7 +180,7 @@ impl CapabilityGrantCurrentResultRecord {
     }
 }
 
-/// Closed lifecycle of the `capability_grant` typed current result.
+/// Closed lifecycle of the `capability_grant` current state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CapabilityGrantCurrentStatus {
     Active,
@@ -228,7 +228,7 @@ impl std::str::FromStr for CapabilityGrantCurrentStatus {
 }
 
 /// One Capability Grant effective for one exact actor, paired with the exact
-/// revision of the same `capability_grant` current-result row.
+/// revision of the same `capability_grant` current-state row.
 #[derive(Clone, Debug)]
 pub struct EffectiveActorGrant {
     pub grant: arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
@@ -415,7 +415,7 @@ pub fn effective_capability_grant_state_digest(
 }
 
 #[async_trait]
-pub trait CapabilityGrantCurrentResultStore: Send + Sync {
+pub trait CapabilityGrantCurrentStateStore: Send + Sync {
     /// Deployment-private issuer source supply from one durable current cut.
     async fn agent_session_authority(
         &self,
@@ -431,17 +431,17 @@ pub trait CapabilityGrantCurrentResultStore: Send + Sync {
         &self,
         realm_id: &arkret_wire::RealmId,
         grant_id: &arkret_wire::GrantId,
-    ) -> PersistenceResult<Option<CapabilityGrantCurrentResultRecord>>;
+    ) -> PersistenceResult<Option<CapabilityGrantCurrentStateRecord>>;
 
     /// Return one statement-level snapshot of every current grant in a Realm.
     /// Effective/subject filtering belongs above this persistence boundary.
     async fn snapshot_for_realm(
         &self,
         realm_id: &arkret_wire::RealmId,
-    ) -> PersistenceResult<Vec<CapabilityGrantCurrentResultRecord>>;
+    ) -> PersistenceResult<Vec<CapabilityGrantCurrentStateRecord>>;
 
     /// Every current grant of every Realm, ordered by Realm and grant id.
-    async fn snapshot_all(&self) -> PersistenceResult<Vec<CapabilityGrantCurrentResultRecord>>;
+    async fn snapshot_all(&self) -> PersistenceResult<Vec<CapabilityGrantCurrentStateRecord>>;
 
     /// Every `active` current grant whose subject is exactly `subject`, in
     /// any Realm. Lifecycle only: temporal windows and issuer chains are not
@@ -449,7 +449,7 @@ pub trait CapabilityGrantCurrentResultStore: Send + Sync {
     async fn active_for_subject(
         &self,
         subject: &arkret_wire::ActorId,
-    ) -> PersistenceResult<Vec<CapabilityGrantCurrentResultRecord>>;
+    ) -> PersistenceResult<Vec<CapabilityGrantCurrentStateRecord>>;
 
     /// Read the authorization inputs of `actor` in `realm_id` from one
     /// snapshot and evaluate its effective grants at `at`.
@@ -505,7 +505,7 @@ pub struct TestCapabilityGrant {
 }
 
 #[cfg(test)]
-mod capability_grant_current_result_tests {
+mod capability_grant_current_state_tests {
     use super::*;
 
     const REALM_ID: &str = "ak:realm:AUGIFvQctz4TjQTmvvO4Wdy-xdc5XP2ZnJ5Qpbh4s8Ru";
@@ -543,7 +543,7 @@ mod capability_grant_current_result_tests {
                     arkret_canonical::DigestSuite::Sha256,
                     [0x55; 32],
                 ),
-                "authority_generation":0
+                "authority_generation":"0"
             }],
             "issued_at": "2026-09-21T00:00:00.000Z",
             "status": status.as_str()
@@ -554,8 +554,8 @@ mod capability_grant_current_result_tests {
     fn record_with(
         status: CapabilityGrantCurrentStatus,
         value: arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
-    ) -> PersistenceResult<CapabilityGrantCurrentResultRecord> {
-        CapabilityGrantCurrentResultRecord::try_new(
+    ) -> PersistenceResult<CapabilityGrantCurrentStateRecord> {
+        CapabilityGrantCurrentStateRecord::try_new(
             REALM_ID.parse().unwrap(),
             GRANT_ID.parse().unwrap(),
             status,
@@ -578,7 +578,7 @@ mod capability_grant_current_result_tests {
         )
     }
 
-    fn complete_record(status: CapabilityGrantCurrentStatus) -> CapabilityGrantCurrentResultRecord {
+    fn complete_record(status: CapabilityGrantCurrentStatus) -> CapabilityGrantCurrentStateRecord {
         record_with(status, grant(status)).unwrap()
     }
 
@@ -783,7 +783,7 @@ mod capability_grant_current_result_tests {
         let mut quota =
             GrantConstraint::new(GrantConstraintKind::Quota, GrantConstraintEffect::Allow);
         quota.constraint_subkind = Some(GrantConstraintSubkind::Rate);
-        quota.max_operations = Some(1);
+        quota.max_operation_count = Some(1);
         quota.period = Some("PT1M".into());
         quota.constraint_scope = Some(arkret_models_collaboration::governance::grant_constraint::GrantConstraintScope::PerActor);
         controller.grants[0].grant.constraints.push(quota);

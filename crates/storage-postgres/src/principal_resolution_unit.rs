@@ -2,7 +2,7 @@
 
 use arkret_models_identity::{PrincipalResolutionProjection, PrincipalResolutionUpdatePayload};
 use arkret_wire::{
-    AccountId, AuthorityCommitStatus, AuthoritySubmitOutcome, Event, EventKind, RealmCommit,
+    AccountId, AuthorityCommitStatus, AuthoritySubmitResponseBody, Event, EventKind, RealmCommit,
 };
 use coland_storage::{
     AuthorityCommitWriteOutcome, ConflictCode, PrincipalResolutionRecord,
@@ -42,7 +42,7 @@ pub(crate) async fn current_in_connection(
 ) -> Result<Option<(PrincipalResolutionRecord, RealmCommit)>, PgTransactionError> {
     let row = sql_query(
         "SELECT r.principal_id,r.station_id,g.envelope AS genesis_event,e.envelope AS current_event,c.commit_json,r.value \
-         FROM principal_resolution_current_results r \
+         FROM principal_resolution_current_states r \
          JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.pcr_realm_id AND c.stream_position=r.current_stream_position \
          JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
          JOIN canonical_events g ON g.envelope->>'event_id'=r.genesis_event_id AND g.realm_id=r.pcr_realm_id AND g.state='committed' \
@@ -124,7 +124,7 @@ pub(crate) async fn initialize_in_connection(
             "resolution initialization is not the exact Account genesis",
         ));
     }
-    sql_query("INSERT INTO principal_resolution_current_results(principal_id,station_id,pcr_realm_id,genesis_event_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+    sql_query("INSERT INTO principal_resolution_current_states(principal_id,station_id,pcr_realm_id,genesis_event_id,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
         .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.event_id.as_str())
         .bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(i64::try_from(commit.stream_position).map_err(corrupt)?)
@@ -136,7 +136,7 @@ pub(crate) async fn initialize_in_connection(
 pub(crate) async fn admit_in_connection(
     conn: &mut AsyncPgConnection,
     write: &PrincipalResolutionUpdateWrite,
-) -> Result<AuthoritySubmitOutcome, PgTransactionError> {
+) -> Result<AuthoritySubmitResponseBody, PgTransactionError> {
     let tx = &write.transaction;
     let event = &tx.event;
     if event.kind != EventKind::IdentityResolutionUpdate {
@@ -151,7 +151,7 @@ pub(crate) async fn admit_in_connection(
             .await?
         {
             PcrSelfEventCut::Known(commit) => {
-                return Ok(AuthoritySubmitOutcome::Accepted {
+                return Ok(AuthoritySubmitResponseBody::Accepted {
                     status: AuthorityCommitStatus::Duplicate,
                     commit: *commit,
                 });
@@ -220,7 +220,7 @@ pub(crate) async fn admit_in_connection(
     })?;
     let log = verified.log;
     if log.entries.last().is_none_or(|entry| {
-        entry.version_time > tx.commit.committed_at
+        entry.version_created_at > tx.commit.committed_at
             || entry
                 .parameters
                 .get("deactivated")
@@ -261,7 +261,7 @@ pub(crate) async fn admit_in_connection(
         #[diesel(sql_type=Text)]
         id: String,
     }
-    let head = sql_query("SELECT id FROM webvh_log_events WHERE split_part(did,':',3)=split_part($1,':',3) ORDER BY seq DESC LIMIT 1")
+    let head = sql_query("SELECT id FROM webvh_log_events WHERE split_part(did,':',3)=split_part($1,':',3) ORDER BY sequence DESC LIMIT 1")
         .bind::<Text,_>(payload.next.did.as_str()).get_result::<Head>(&mut *conn).await.optional()?;
     if head.as_ref().is_none_or(|head| head.id != digest) {
         return Err(rejected(
@@ -294,7 +294,7 @@ pub(crate) async fn admit_in_connection(
         resolution_event_ref: event.event_id.to_string(),
         updated_at: event.created_at,
     };
-    let changed = sql_query("UPDATE principal_resolution_current_results SET current_commit_id=$4,current_stream_position=$5,value=$6,updated_at=$7 WHERE principal_id=$1 AND station_id=$2 AND current_commit_id=$3")
+    let changed = sql_query("UPDATE principal_resolution_current_states SET current_commit_id=$4,current_stream_position=$5,value=$6,updated_at=$7 WHERE principal_id=$1 AND station_id=$2 AND current_commit_id=$3")
         .bind::<Text,_>(current.account_id.principal_id.as_str()).bind::<Text,_>(current.account_id.station_id.as_str())
         .bind::<Text,_>(source.commit_id.as_str()).bind::<Text,_>(tx.commit.commit_id.as_str())
         .bind::<BigInt,_>(i64::try_from(tx.commit.stream_position).map_err(corrupt)?)
@@ -306,7 +306,7 @@ pub(crate) async fn admit_in_connection(
             "resolution current changed",
         ));
     }
-    Ok(AuthoritySubmitOutcome::Accepted {
+    Ok(AuthoritySubmitResponseBody::Accepted {
         status: AuthorityCommitStatus::Committed,
         commit: tx.commit.clone(),
     })

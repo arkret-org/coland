@@ -57,7 +57,7 @@ const ARKRET_PREFIX: &str = "/_arkret/";
 pub struct RateLimiterConfig {
     /// Maximum requests per window per key. Used as the fallback for any
     /// endpoint class that does not have a class-specific override.
-    pub max_requests: u32,
+    pub max_request_count: u32,
     /// Window duration.
     pub window: Duration,
     /// Strict ceiling for the credential/bearer-issuing endpoints (see the
@@ -76,7 +76,7 @@ impl Default for RateLimiterConfig {
     fn default() -> Self {
         Self {
             // `other` (non-`/_arkret/*`) ceiling.
-            max_requests: 600,
+            max_request_count: 600,
             window: Duration::from_secs(60),
             // Strict for the credential endpoints: 60/min ≈ 1/sec. Enough
             // headroom for an OAuth refresh cycle, but tight enough to stall a
@@ -127,7 +127,7 @@ impl RateLimiterConfig {
         // a runaway loop in a dev build is eventually caught.
         const DEV_CEILING: u32 = 100_000;
         Self {
-            max_requests: DEV_CEILING,
+            max_request_count: DEV_CEILING,
             window: Duration::from_secs(60),
             auth_max_requests: DEV_CEILING,
             api_max_requests: DEV_CEILING,
@@ -140,7 +140,7 @@ impl RateLimiterConfig {
             self.window = Duration::from_secs(u64::from(seconds.max(1)));
         }
         if let Some(value) = overrides.default_per_minute {
-            self.max_requests = value;
+            self.max_request_count = value;
         }
         if let Some(value) = overrides.auth_per_minute {
             self.auth_max_requests = value;
@@ -160,7 +160,7 @@ impl RateLimiterConfig {
             EndpointClass::Probe => self.probe_max_requests,
             EndpointClass::Auth => self.auth_max_requests,
             EndpointClass::Api => self.api_max_requests,
-            EndpointClass::Other => self.max_requests,
+            EndpointClass::Other => self.max_request_count,
         }
     }
 
@@ -174,7 +174,7 @@ impl RateLimiterConfig {
         let window_seconds = u32::try_from(self.window.as_secs())
             .unwrap_or(u32::MAX)
             .max(1);
-        let entry = |endpoint: String, max_requests: u32| {
+        let entry = |endpoint: String, max_request_count: u32| {
             arkret_models_discovery::service_description::RateLimitEntry {
                 endpoint: Some(endpoint),
                 // NOTE: `arkret_models_discovery::service_description::RateLimitScope` (crate root)
@@ -184,7 +184,7 @@ impl RateLimiterConfig {
                     "ip".to_owned(),
                 )),
                 window_seconds: Some(window_seconds),
-                max_requests: Some(max_requests.max(1)),
+                max_request_count: Some(max_request_count.max(1)),
                 ..arkret_models_discovery::service_description::RateLimitEntry::default()
             }
         };
@@ -197,7 +197,7 @@ impl RateLimiterConfig {
                 entry(AUTH_AGENT_KEY_PAIR_PATH.to_owned(), self.auth_max_requests),
                 entry(format!("{COLAND_AUTH_PREFIX}*"), self.auth_max_requests),
                 entry(format!("{ARKRET_PREFIX}*"), self.api_max_requests),
-                entry("*".to_owned(), self.max_requests),
+                entry("*".to_owned(), self.max_request_count),
             ],
             ..arkret_models_discovery::service_description::RateLimitPolicy::default()
         }
@@ -266,7 +266,7 @@ impl RateLimiter {
     pub fn new(config: RateLimiterConfig) -> Self {
         Self {
             state: Arc::new(MemoryFixedWindowRateLimiter::new(FixedWindowConfig::new(
-                u64::from(config.max_requests),
+                u64::from(config.max_request_count),
                 config.window,
                 RATE_LIMIT_MAX_ENTRIES,
             ))),
@@ -277,7 +277,7 @@ impl RateLimiter {
     /// Check if a request is allowed for the given key.
     /// Returns true if allowed, false if rate limited.
     pub fn check(&self, key: &str) -> bool {
-        self.check_with_ceiling(key, self.config.max_requests)
+        self.check_with_ceiling(key, self.config.max_request_count)
             .is_ok()
     }
 
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn retry_after_reports_active_window_remaining() {
         let limiter = RateLimiter::new(RateLimiterConfig {
-            max_requests: 1,
+            max_request_count: 1,
             window: Duration::from_secs(60),
             auth_max_requests: 1,
             api_max_requests: 1,
@@ -483,7 +483,9 @@ mod tests {
 
         for entry in &policy.entries {
             let endpoint = entry.endpoint.as_deref().expect("entry has endpoint");
-            let advertised = entry.max_requests.expect("entry has max_requests");
+            let advertised = entry
+                .max_request_count
+                .expect("entry has max_request_count");
             // Resolve a representative concrete path for the glob/catch-all
             // entries so we can run them through the real classifier.
             let concrete = match endpoint {
@@ -507,7 +509,7 @@ mod tests {
         assert!(dev.probe_max_requests > prod.probe_max_requests);
         assert!(dev.api_max_requests > prod.api_max_requests);
         assert!(dev.auth_max_requests > prod.auth_max_requests);
-        assert!(dev.max_requests >= prod.max_requests);
+        assert!(dev.max_request_count >= prod.max_request_count);
     }
 
     #[test]

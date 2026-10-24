@@ -20,12 +20,12 @@ use arkret_models_crypto::{
     AuthoritySetAuthorizationIssuer, AuthoritySetAuthorizationRule, AuthoritySetIssuerRole,
     AuthoritySetPolicy, DidRootRecoveryTranscript, GenericRecoveryTranscript,
     PublicationAuthorityContext, RecoveryIdentityModel, RecoveryPolicy,
-    RecoveryPolicyActiveOutcome, RecoveryPolicyPublishOutcome, RecoveryPolicyPublishRequest,
-    RecoveryPolicyRef, RecoveryPolicySummary, RecoveryProofKind,
+    RecoveryPolicyPublishRequestBody, RecoveryPolicyPublishResponseBody, RecoveryPolicyRef,
+    RecoveryPolicyStatusView, RecoveryPolicySummary, RecoveryProofKind,
     RecoverySession as RecoverySessionState, RecoverySessionCreateRequestBody,
-    RecoverySessionProofSubmitOutcome, RecoverySessionProofSubmitRequestBody,
+    RecoverySessionProofSubmitRequestBody, RecoverySessionProofSubmitResponseBody,
     RecoverySessionProofSummary as ProofSummary, RecoveryTranscriptProofBody, SecurityTransaction,
-    SecurityTransactionContinueRequest, SecurityTransactionCreateRequest,
+    SecurityTransactionContinueRequestBody, SecurityTransactionCreateRequestBody,
     TrustedRecoveryServiceProofBody, TrustedRecoveryServiceProofBodyWithSignature,
 };
 use arkret_wire::{

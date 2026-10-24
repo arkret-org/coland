@@ -1,6 +1,6 @@
 use arkret_models_collaboration::governance::erasure::{
     ErasureReceiptAcceptance, ErasureReceiptAcceptanceStatus, ErasureReceiptPackage,
-    ErasureReceiptResource, ErasureReceiptSubmitOutcome, ErasureReceiptSubmitRequestBody,
+    ErasureReceiptResource, ErasureReceiptSubmitRequestBody, ErasureReceiptSubmitResponseBody,
 };
 use arkret_wire::ProtocolSignature;
 use chrono::{Duration, Utc};
@@ -27,7 +27,7 @@ async fn submit(
     body: JsonBody<ErasureReceiptSubmitRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<ErasureReceiptSubmitOutcome> {
+) -> JsonResult<ErasureReceiptSubmitResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     verify_inbound_peer_http_signature(state, req, true).await?;
     let source = required_header(req, "source-service-id")?;
@@ -205,7 +205,7 @@ async fn submit(
         )
         .await?
     };
-    let outcome = ErasureReceiptSubmitOutcome::Accepted(acceptance);
+    let outcome = ErasureReceiptSubmitResponseBody::Accepted(acceptance);
     let now = Utc::now();
     let response_record = IdempotencyState {
         authenticated_actor: arkret_wire::ActorId::service(source_id),
@@ -219,7 +219,7 @@ async fn submit(
         created_at: now,
         expires_at: now + Duration::days(3650),
     };
-    let ErasureReceiptSubmitOutcome::Accepted(acceptance) = &outcome else {
+    let ErasureReceiptSubmitResponseBody::Accepted(acceptance) = &outcome else {
         unreachable!()
     };
     let lookup = IdempotencyState {
@@ -302,10 +302,10 @@ struct StoredReceipt {
 async fn persist_lookup(
     state: &AppState,
     package: &ErasureReceiptPackage,
-    outcome: &ErasureReceiptSubmitOutcome,
+    outcome: &ErasureReceiptSubmitResponseBody,
     authorized_requester_id: Option<&arkret_wire::DidCoreId>,
 ) -> Result<(), AppError> {
-    let ErasureReceiptSubmitOutcome::Accepted(acceptance) = outcome else {
+    let ErasureReceiptSubmitResponseBody::Accepted(acceptance) = outcome else {
         return Ok(());
     };
     let lookup_key = format!("erasure-receipt:lookup:{}", package.receipt.receipt_id);
@@ -357,7 +357,7 @@ pub(crate) async fn persist_issued_package(
     persist_lookup(
         state,
         package,
-        &ErasureReceiptSubmitOutcome::Accepted(acceptance),
+        &ErasureReceiptSubmitResponseBody::Accepted(acceptance),
         Some(authorized_requester_id),
     )
     .await
@@ -405,9 +405,9 @@ pub(crate) async fn verify_acceptance(
     destination: &arkret_wire::DidCoreId,
     response: &str,
 ) -> Result<ErasureReceiptAcceptance, String> {
-    let outcome: ErasureReceiptSubmitOutcome = serde_json::from_str(response)
+    let outcome: ErasureReceiptSubmitResponseBody = serde_json::from_str(response)
         .map_err(|error| format!("erasure acknowledgement shape: {error}"))?;
-    let ErasureReceiptSubmitOutcome::Accepted(acceptance) = outcome else {
+    let ErasureReceiptSubmitResponseBody::Accepted(acceptance) = outcome else {
         return Err("erasure receipt was rejected".into());
     };
     if acceptance.receipt_id != package.receipt.receipt_id

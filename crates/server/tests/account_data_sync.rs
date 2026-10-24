@@ -274,7 +274,7 @@ async fn account_grant_session_at(
             station_id: state.service_core_id(),
             localpart: format!("account-data-{}", uuid::Uuid::now_v7().simple()),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: chrono::Utc::now(),
         })
@@ -775,7 +775,7 @@ async fn signed_read_cursor_round_trip_replays_without_entering_the_realm_log() 
             arkret_wire::EventAdmissionSubmission::new(transaction.event.clone());
     }
     unit.exact_request_body = arkret_canonical::canonical_json_bytes(
-        &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(
+        &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(
             unit.submission.clone(),
         ),
     )

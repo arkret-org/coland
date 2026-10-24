@@ -44,7 +44,7 @@ async fn account_detail_unavailable_realm_does_not_block_an_independent_window()
     realms.sort_by_key(|realm| realm.head.event.realm_id.clone());
     let broken = &realms[0].head;
     let healthy = &realms[1].head;
-    let body: SyncRequestBody = serde_json::from_value(json!({
+    let body: AccountSubscribeParameters = serde_json::from_value(json!({
         "filter": {"realm_ids": [broken.event.realm_id, healthy.event.realm_id]},
         "catchup": true,
     }))
@@ -121,7 +121,7 @@ async fn account_detail_unavailable_realm_does_not_block_an_independent_window()
 async fn build_sync_snapshot(
     state: &AppState,
     session: Option<&SessionIdentityState>,
-    body: &SyncRequestBody,
+    body: &AccountSubscribeParameters,
     after: &SyncCursor,
 ) -> arkret_models_collaboration::sync_frames::account_subscribe::AccountSubscribeFrame {
     super::build_sync_snapshot(state, session, body, after)
@@ -167,7 +167,7 @@ async fn inconsistent_continuation_head_returns_503_without_issuing_or_resetting
         state.service_verification_method("notary-key").unwrap(),
     )
     .await;
-    let mut body: SyncRequestBody = serde_json::from_value(json!({
+    let mut body: AccountSubscribeParameters = serde_json::from_value(json!({
         "filter": {"realm_ids": [realm.head.event.realm_id]}, "catchup": true,
     }))
     .unwrap();
@@ -292,7 +292,7 @@ async fn accepted_leave_preserves_the_ordinary_unavailable_continuation() {
     realm
         .member_state(store.as_ref(), account, account, "join")
         .await;
-    let mut body: SyncRequestBody = serde_json::from_value(json!({
+    let mut body: AccountSubscribeParameters = serde_json::from_value(json!({
         "filter": {"realm_ids": [realm.head.event.realm_id]}, "catchup": true,
     }))
     .unwrap();
@@ -381,7 +381,8 @@ async fn global_storage_failure_returns_503_without_reset_or_new_delivery_materi
     session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
         device_id: device.device_id,
     };
-    let body: SyncRequestBody = serde_json::from_value(json!({"catchup": true})).unwrap();
+    let body: AccountSubscribeParameters =
+        serde_json::from_value(json!({"catchup": true})).unwrap();
     let initial = build_sync_snapshot(&state, Some(&session), &body, &SyncCursor::default()).await;
     let list_token = initial.realm_list.unwrap().snapshot_cursor;
     let token = initial.cursor.unwrap();
@@ -446,17 +447,22 @@ async fn global_storage_failure_returns_503_without_reset_or_new_delivery_materi
         .unwrap()
         .value;
     assert_eq!(before, unchanged);
-    super::build_sync_snapshot(&state, Some(&session), &SyncRequestBody::default(), &after)
-        .await
-        .unwrap()
-        .validate()
-        .unwrap();
+    super::build_sync_snapshot(
+        &state,
+        Some(&session),
+        &AccountSubscribeParameters::default(),
+        &after,
+    )
+    .await
+    .unwrap()
+    .validate()
+    .unwrap();
     // Exercise the internal expiry classifier, not an externally forgeable cursor.
     let mut expired = retained;
     let progress = expired.global_baseline.as_mut().unwrap();
     progress["snapshot_expires_at_ms"] = json!(0);
     progress["completed"] = json!([]);
-    let body: SyncRequestBody =
+    let body: AccountSubscribeParameters =
         serde_json::from_value(json!({"after": token.clone(), "catchup": true})).unwrap();
     let frame = super::build_sync_snapshot(&state, Some(&session), &body, &expired)
         .await
@@ -480,7 +486,7 @@ async fn global_storage_failure_returns_503_without_reset_or_new_delivery_materi
         .unwrap()
             > 0
     );
-    let body: SyncRequestBody = serde_json::from_value(json!({
+    let body: AccountSubscribeParameters = serde_json::from_value(json!({
         "after": token, "catchup": true, "realm_list": {"after": list_token},
     }))
     .unwrap();
@@ -804,8 +810,8 @@ const ROSTER_ACTOR_DID: &str = "did:web:alice.example";
 pub(crate) const ROSTER_ACTOR: &str = "ak:did_core:web:alice.example";
 pub(crate) const ROSTER_CALLER: &str = "ak:did_core:web:bob.example";
 
-fn roster_body(_audience: &str) -> SyncRequestBody {
-    SyncRequestBody::default()
+fn roster_body(_audience: &str) -> AccountSubscribeParameters {
+    AccountSubscribeParameters::default()
 }
 
 pub(crate) fn roster_session(state: &AppState, actor: &str) -> SessionIdentityState {
@@ -980,7 +986,7 @@ async fn sync_snapshot_excludes_public_realms_without_exact_account_membership()
     .await;
     assert!(detail(unselected).is_none());
 
-    let selected: SyncRequestBody =
+    let selected: AccountSubscribeParameters =
         serde_json::from_value(json!({"filter": {"realm_ids": [ROSTER_REALM]}})).unwrap();
     let not_found = json!({"unavailable": {"error_code": "not_found"}});
     let outsider =
@@ -1066,7 +1072,8 @@ impl CommittedRealm {
                     signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "3".repeat(64)))
                         .unwrap(),
                     created_at: at,
-                    sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
+                    signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned())
+                        .unwrap(),
                 },
             },
             event,
@@ -1084,7 +1091,7 @@ impl CommittedRealm {
     ) -> Self {
         use arkret_models_collaboration::authority_commit::{
             OrdinaryRealmBootstrapUnitKind, OrdinaryRealmBootstrapUnitSubmission,
-            SelfAuthoritySubmitRequest,
+            SelfAuthoritySubmitRequestBody,
         };
         use base64::Engine as _;
 
@@ -1172,7 +1179,7 @@ impl CommittedRealm {
         let unit = coland_storage::OrdinaryRealmBootstrapCommitUnit {
             event_approvals: Vec::new(),
             exact_request_body: serde_json::to_vec(
-                &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(submission.clone()),
+                &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(submission.clone()),
             )
             .unwrap(),
             submission,
@@ -1271,8 +1278,8 @@ async fn admit_sync_revoke_terminal(
         AcceptedSecurityTransactionStep, BackupObjectRef, BackupRotationBinding,
         BackupRotationKind, BackupRotationPlan, PreparedEventUnit,
         SecurityRotationRevokeCommandDecision, SecurityRotationRevokeCommandOutcome,
-        SecurityRotationRevokeProposal, SecurityRotationTransactionCreateRequest,
-        SecurityTransactionAcceptor, SecurityTransactionCreateRequest,
+        SecurityRotationRevokeProposal, SecurityRotationTransactionCreateRequestBody,
+        SecurityTransactionAcceptor, SecurityTransactionCreateRequestBody,
         SecurityTransactionPreparedPlan, SecurityTransactionStep,
     };
     use arkret_wire::{
@@ -1308,16 +1315,16 @@ async fn admit_sync_revoke_terminal(
     let mut backup: arkret_models_crypto::KeyBackup = serde_json::from_value(json!({
         "backup_id": backup_id, "actor_id": arkret_wire::ActorId::account(account.clone()),
         "backup_kind": "secret_storage", "backup_version": "kb_1",
-        "created_at": "2026-09-09T00:00:00.000Z", "series_id": new_series, "series_seq": 0,
+        "created_at": "2026-09-09T00:00:00.000Z", "series_id": new_series, "series_sequence": 0,
         "encryption": {"recipient_method":"secret_storage_key","recipient_key_ref":"backup-key","aead":{"name":"xchacha20_poly1305","nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
         "domain_separation":{"subdomain":"secret_storage"},
         "contents":[{"item_kind":"recovery_key_share","secret_id":"share"}],
         "ciphertext":"AAAA", "ciphertext_digest":"sha256:709e80c88487a2411e1ee4dfb9f22a861492d20c4765150c0c794abd70f8147c",
-        "auth_data": {"device_id": authorizer, "verification_method": fixture.history.device_verification_method,
+        "signature_proof": {"device_id": authorizer, "verification_method": fixture.history.device_verification_method,
             "signature_algorithm":"Ed25519", "signature":"AAAA", "device_authorize_event_id":fixture.history.events[1].event_id}
     })).unwrap();
     let signer = SigningKey::from_bytes(&fixture.history.founding_device_signing_seed);
-    backup.auth_data.signature =
+    backup.signature_proof.signature =
         Base64UrlString::new(arkret_canonical::base64url::base64url_encode(
             signer
                 .sign(&backup.signing_payload_bytes().unwrap())
@@ -1354,7 +1361,7 @@ async fn admit_sync_revoke_terminal(
         EventKind::KeyBackupActiveSeries,
         serde_json::to_value(pointer).unwrap(),
     );
-    let request = SecurityRotationTransactionCreateRequest::from_prepared_rotations(
+    let request = SecurityRotationTransactionCreateRequestBody::from_prepared_rotations(
         TransactionId::new(format!("ak:transaction:{}", uuid::Uuid::now_v7())).unwrap(),
         account.clone(),
         authorizer.clone(),
@@ -1401,9 +1408,10 @@ async fn admit_sync_revoke_terminal(
     )
     .unwrap();
     let plan = SecurityTransactionPreparedPlan::SecurityRotation(request.prepared_plan.clone());
-    let (initial, canonical_request) = SecurityTransactionCreateRequest::SecurityRotation(request)
-        .into_initial_resource(plan, at)
-        .unwrap();
+    let (initial, canonical_request) =
+        SecurityTransactionCreateRequestBody::SecurityRotation(request)
+            .into_initial_resource(plan, at)
+            .unwrap();
     let transaction_id = initial.transaction_id.clone();
     let transactions = store.security_transactions();
     transactions
@@ -1455,7 +1463,7 @@ async fn admit_sync_revoke_terminal(
     accepted.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
         proposal_event_id: revoke.event_id,
         covering_commit_id: covering.commit_id,
-        result: SecurityRotationRevokeCommandDecision::Accepted,
+        outcome: SecurityRotationRevokeCommandDecision::Accepted,
         decided_at,
     });
     transactions
@@ -2409,7 +2417,7 @@ async fn cursor_revoke_http_rejects_unowned_unknown_and_tampered_targets_without
             account_id: account.clone(),
             localpart: "cursor-revoker".into(),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: Utc::now(),
         })
@@ -2623,7 +2631,7 @@ async fn selected_unreadable_realm_is_an_explicit_unavailable_detail() {
     let state = test_state();
     let session = roster_session(&state, "ak:did_core:web:alice.example");
     let realm = "ak:realm:AQVZRUJrSSC16EodjmqL6mBFC9TGwv6oxx-sQlJzlvxS";
-    let body: SyncRequestBody =
+    let body: AccountSubscribeParameters =
         serde_json::from_value(json!({"filter": {"realm_ids": [realm], "window_limit": 2}}))
             .unwrap();
     let frame = build_sync_snapshot(&state, Some(&session), &body, &SyncCursor::default()).await;
@@ -2662,7 +2670,7 @@ async fn first_detail_continuation_starts_an_account_baseline_after_retention_ad
     .await
     .unwrap();
     let session = roster_session(&state, "ak:did_core:web:alice.example");
-    let body: SyncRequestBody = serde_json::from_value(json!({
+    let body: AccountSubscribeParameters = serde_json::from_value(json!({
         "filter": {"realm_ids": [ROSTER_REALM]}
     }))
     .unwrap();

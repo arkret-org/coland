@@ -24,7 +24,7 @@ use super::{
     AsyncPgConnection, PgTransactionError, StepAttemptSource, accept_step_in_transaction, load_one,
     load_step_outcome,
 };
-use crate::key_backup_current_results::{
+use crate::key_backup_current_states::{
     commit_key_backup_pointer_unit_in_connection, verification_method_device,
 };
 use crate::pcr_device_status_fold::PcrDeviceLifecycle;
@@ -233,12 +233,12 @@ async fn verify_replacement_envelope(
             "rotation PCR has no current generation",
         )
     })?;
-    if &backup.auth_data.device_id != authorizer
+    if &backup.signature_proof.device_id != authorizer
         || backup
             .device_id
             .as_ref()
             .is_some_and(|device| device != authorizer)
-        || verification_method_device(&backup.auth_data.verification_method, account).as_ref()
+        || verification_method_device(&backup.signature_proof.verification_method, account).as_ref()
             != Some(authorizer)
     {
         return Err(rejected(
@@ -246,7 +246,7 @@ async fn verify_replacement_envelope(
             "replacement backup is not signed by the rotation's authorizing device",
         ));
     }
-    if backup.auth_data.device_authorize_event_id != authorization.event_id {
+    if backup.signature_proof.device_authorize_event_id != authorization.event_id {
         return Err(rejected(
             ConflictCode::SignatureInvalid,
             "replacement backup names a device authorization that is not current",
@@ -263,7 +263,7 @@ async fn verify_replacement_envelope(
             "SELECT \
                (SELECT c.stream_position FROM realm_commits c WHERE c.commit_id=$2 AND c.realm_id=$1 \
                   AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',$1::text)) AS source_position, \
-               (SELECT g.current_stream_position FROM pcr_device_generation_current_results g \
+               (SELECT g.current_stream_position FROM pcr_device_generation_current_states g \
                   WHERE g.realm_id=$1) AS generation_position, \
                (SELECT c.stream_position FROM realm_commits c WHERE c.commit_id=$3 AND c.realm_id=$1) \
                   AS authorization_position",
@@ -314,7 +314,7 @@ async fn verify_replacement_envelope(
             bytes: public_key.to_vec(),
         },
         &signed,
-        backup.auth_data.signature.as_str(),
+        backup.signature_proof.signature.as_str(),
     ) {
         return Err(rejected(
             ConflictCode::SignatureInvalid,
@@ -378,12 +378,12 @@ fn planned_replacement_chain(
         }
         chain.push((backup.clone(), value));
     }
-    chain.sort_by_key(|(backup, _)| backup.series_seq);
+    chain.sort_by_key(|(backup, _)| backup.series_sequence);
     let mut predecessor: Option<&KeyBackup> = None;
     for (index, (backup, _)) in chain.iter().enumerate() {
         let linked = match predecessor {
             None => {
-                backup.series_seq == 0
+                backup.series_sequence == 0
                     && backup.supersedes_id.is_none()
                     && backup.supersedes_digest.is_none()
             }
@@ -393,7 +393,7 @@ fn planned_replacement_chain(
                         .signing_payload_bytes()
                         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?,
                 );
-                u64::try_from(index).ok() == Some(backup.series_seq)
+                u64::try_from(index).ok() == Some(backup.series_sequence)
                     && backup.supersedes_id.as_ref() == Some(&previous.backup_id)
                     && backup
                         .supersedes_digest
@@ -586,7 +586,7 @@ pub(super) async fn commit_rotation_pointer_switch_in_connection(
     )
     .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     let current = sql_query(
-        "SELECT value FROM key_backup_active_series_current_results \
+        "SELECT value FROM key_backup_active_series_current_states \
          WHERE realm_id=$1 AND current_key=$2",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -741,7 +741,7 @@ pub(super) async fn commit_rotation_local_commit_in_connection(
     let cut =
         active_authorizer_cut(conn, account, &artifact.device_id, &realm_id, accepted_at).await?;
     let account_did = sql_query(
-        "SELECT value->>'did' AS did FROM principal_resolution_current_results \
+        "SELECT value->>'did' AS did FROM principal_resolution_current_states \
          WHERE principal_id=$1 AND station_id=$2 AND pcr_realm_id=$3",
     )
     .bind::<Text, _>(account.principal_id.as_str())
@@ -757,9 +757,17 @@ pub(super) async fn commit_rotation_local_commit_in_connection(
         )
     })?;
     let expected_method = format!("{}#{}", account_did.did, artifact.device_id.as_str());
-    if write.attestation.auth_data.verification_method.as_str() != expected_method
-        || verification_method_device(&write.attestation.auth_data.verification_method, account)
-            .as_ref()
+    if write
+        .attestation
+        .signature_proof
+        .verification_method
+        .as_str()
+        != expected_method
+        || verification_method_device(
+            &write.attestation.signature_proof.verification_method,
+            account,
+        )
+        .as_ref()
             != Some(&artifact.device_id)
     {
         return Err(rejected(
@@ -777,7 +785,7 @@ pub(super) async fn commit_rotation_local_commit_in_connection(
             bytes: public_key.to_vec(),
         },
         &signed,
-        write.attestation.auth_data.signature.as_str(),
+        write.attestation.signature_proof.signature.as_str(),
     ) {
         return Err(rejected(
             ConflictCode::SignatureInvalid,

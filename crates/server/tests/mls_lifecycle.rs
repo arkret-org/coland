@@ -30,15 +30,15 @@ use std::sync::Arc;
 use arkret_mls::{ArkretMlsGroup, ArkretMlsIdentity, ArkretMlsSigner, MlsPublicGroupTracker};
 use arkret_models_collaboration::authority_commit::{
     OrdinaryRealmBootstrapUnitKind, OrdinaryRealmBootstrapUnitSubmission,
-    SelfAuthoritySubmitRequest,
+    SelfAuthoritySubmitRequestBody,
 };
 use arkret_models_collaboration::device_messages::{
-    DeviceMessagesAckRequestBody, DeviceMessagesGetOutcome, RecipientDelivery,
+    DeviceMessagesAcknowledgementRequestBody, DeviceMessagesGetResponseBody, RecipientDelivery,
 };
 use arkret_models_collaboration::governance::membership_invite::MembershipPayload;
 use arkret_models_crypto::{
-    KeyPackagesClaimOutcome, KeyPackagesClaimQueryRequestBody, KeyPackagesClaimRequestBody,
-    KeyPackagesUploadOutcome, MlsCommitPayload, MlsGovernanceBindingPayload,
+    KeyPackagesClaimQueryRequestBody, KeyPackagesClaimRequestBody, KeyPackagesClaimResponseBody,
+    KeyPackagesUploadResponseBody, MlsCommitPayload, MlsGovernanceBindingPayload,
 };
 use arkret_wire::{AccountId, ActorId, EventKind, MlsWelcomeDelivery, RealmId, ScopeRef};
 use base64::Engine as _;
@@ -258,7 +258,7 @@ impl Member {
         .await
     }
 
-    async fn recipient_queue(&self, state: &AppState) -> DeviceMessagesGetOutcome {
+    async fn recipient_queue(&self, state: &AppState) -> DeviceMessagesGetResponseBody {
         let mut response = TestClient::get("http://server/_arkret/self/device_messages")
             .add_header("authorization", format!("Bearer {}", self.token), true)
             .add_header(
@@ -442,7 +442,7 @@ fn bootstrap(
             .collect(),
     };
     let exact_request_body = serde_json::to_vec(
-        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(submission.clone()),
+        &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(submission.clone()),
     )
     .unwrap();
     OrdinaryRealmBootstrapCommitUnit {
@@ -530,7 +530,7 @@ fn claim_request(
             "requester_device_id": requester.device,
             "device_authorize_event_id": requester.authorize_event_id,
             "signed_at": arkret_canonical::format_timestamp_canonical(signed_at),
-            "signature": {"kid": requester.method, "signature_algorithm": "Ed25519", "sig": "AA"},
+            "signature": {"kid": requester.method, "signature_algorithm": "Ed25519", "signature": "AA"},
         },
     }))
     .expect("typed claim request");
@@ -545,7 +545,7 @@ fn claim_request(
     else {
         unreachable!("the fixture builds the device branch");
     };
-    signature.sig = arkret_wire::Base64UrlString::new(
+    signature.signature = arkret_wire::Base64UrlString::new(
         base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(requester.key.sign(&bytes).to_bytes()),
     )
@@ -623,7 +623,7 @@ async fn assert_closed_upload_boundary(
         .remove("signature_algorithm");
     negatives.push(("missing_signature_algorithm".to_owned(), candidate));
     let mut candidate = original.clone();
-    candidate["endpoint_signature"]["sig"] = json!("AA");
+    candidate["endpoint_signature"]["signature"] = json!("AA");
     negatives.push(("invalid_signature_bytes".to_owned(), candidate));
     let mut signed_optional = upload.unsigned();
     signed_optional.expires_at = Some(arkret_canonical::normalize_timestamp_canonical(
@@ -796,7 +796,7 @@ async fn mls_lifecycle_body() {
         "{}",
         String::from_utf8_lossy(&uploaded.bytes)
     );
-    let uploaded: KeyPackagesUploadOutcome = serde_json::from_slice(&uploaded.bytes).unwrap();
+    let uploaded: KeyPackagesUploadResponseBody = serde_json::from_slice(&uploaded.bytes).unwrap();
     assert_eq!(uploaded.accepted, 2, "{uploaded:?}");
     assert_eq!(uploaded.rejections.len(), 1, "{uploaded:?}");
     assert_eq!(
@@ -844,7 +844,7 @@ async fn mls_lifecycle_body() {
         "{}",
         String::from_utf8_lossy(&claimed.bytes)
     );
-    let outcome: KeyPackagesClaimOutcome = serde_json::from_slice(&claimed.bytes).unwrap();
+    let outcome: KeyPackagesClaimResponseBody = serde_json::from_slice(&claimed.bytes).unwrap();
     outcome.validate_shape().unwrap();
     assert_eq!(outcome.claims.len(), 1);
     let claim = outcome.claims[0].clone();
@@ -948,7 +948,7 @@ async fn mls_lifecycle_body() {
             "group_info_ref": blob_ref(&group_info),
             "ratchet_tree_ref": blob_ref(&tree),
             "creator_leaf_authority": arkret_models_collaboration::events_payloads::MlsGenesisCreatorLeafAuthority {
-                leaf_signature_key_b64u: arkret_wire::Base64UrlString::new(
+                leaf_signature_key_base64url: arkret_wire::Base64UrlString::new(
                     arkret_canonical::base64url_encode(alice.key.verifying_key().as_bytes()),
                 ).unwrap(),
                 endpoint: arkret_wire::MlsWelcomeRecipientEndpoint::Device {
@@ -1027,7 +1027,7 @@ async fn mls_lifecycle_body() {
             device_id: bob.device.clone(),
         },
         keypackage_claim_ref: add.welcome.keypackage_claim_ref.clone(),
-        ciphertext_b64: add.welcome.ciphertext_b64.clone(),
+        ciphertext_base64url: add.welcome.ciphertext_base64url.clone(),
         producer_proof: arkret_wire::DetachedObjectSignature {
             context: arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
             signature_algorithm: arkret_wire::DetachedSignatureAlgorithm::Ed25519,
@@ -1039,7 +1039,7 @@ async fn mls_lifecycle_body() {
                 .clone(),
             signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "5".repeat(64))).unwrap(),
             created_at: commit_request.authority_commit.commit.committed_at,
-            sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
+            signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
         },
     };
     welcome.producer_proof = arkret_signatures::detached_object::sign_detached_object(
@@ -1112,7 +1112,7 @@ async fn mls_lifecycle_body() {
         ArkretMlsGroup::join_from_verified_welcome_delivery(bob_identity, &welcome, &accepted)
             .expect("Bob joins from the queued Welcome");
     assert_eq!(bob_group.epoch(), 1);
-    let base = arkret_wire::MlsGroupCurrent {
+    let base = arkret_wire::MlsGroupValue {
         effective_scope: scope.clone(),
         genesis_event_ref: genesis_ref.clone(),
         cipher_suite: arkret_wire::NonEmptyString::new(
@@ -1153,8 +1153,8 @@ async fn mls_lifecycle_body() {
 
     // ACK first: consume reads the claim's Welcome binding, never the queue
     // row, so it has no order against the ACK (decision 0121).
-    let ack_token = page
-        .ack_token
+    let acknowledgement_token = page
+        .acknowledgement_token
         .clone()
         .expect("a non-empty page carries its ack token");
     let acked = bob
@@ -1162,7 +1162,9 @@ async fn mls_lifecycle_body() {
             &state,
             "/_arkret/self/device_messages/ack",
             arkret_wire::ServiceOperationId::SELF_DEVICE_MESSAGES_COMMAND_ACK_V1,
-            &DeviceMessagesAckRequestBody { ack_token },
+            &DeviceMessagesAcknowledgementRequestBody {
+                acknowledgement_token,
+            },
         )
         .await;
     assert_eq!(acked.status, StatusCode::OK);
@@ -1195,7 +1197,7 @@ async fn mls_lifecycle_body() {
             signature: arkret_models_crypto::KeyOperationSignature {
                 kid: arkret_wire::NonEmptyString::new(bob.method.to_string()).unwrap(),
                 signature_algorithm: None,
-                sig: arkret_wire::Base64UrlString::new("AA".to_owned()).unwrap(),
+                signature: arkret_wire::Base64UrlString::new("AA".to_owned()).unwrap(),
             },
         };
         signer
@@ -1272,7 +1274,7 @@ async fn mls_lifecycle_body() {
         "{}",
         String::from_utf8_lossy(&consumed.bytes)
     );
-    let outcome: arkret_models_crypto::KeyPackagesConsumeOutcome =
+    let outcome: arkret_models_crypto::KeyPackagesConsumeResponseBody =
         serde_json::from_slice(&consumed.bytes).unwrap();
     assert_eq!(
         outcome.consume_receipt.claim_id.as_str(),

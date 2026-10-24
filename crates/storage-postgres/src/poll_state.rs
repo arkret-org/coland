@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use arkret_models_collaboration::events_payloads::message::PollResponseHead;
 use arkret_models_collaboration::events_payloads::poll::PollContentBlock;
-use arkret_models_collaboration::poll::{PollPartition, VerifiedPollResponse};
+use arkret_models_collaboration::poll::{PollPartition, VerifiedPollVote};
 use arkret_wire::{CommittedEventRef, Event, EventId, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Binary, Jsonb, Text};
@@ -157,7 +157,7 @@ pub(crate) async fn admit_poll_in_connection(
         .iter()
         .map(|answer| answer.id.clone())
         .collect::<BTreeSet<_>>();
-    VerifiedPollResponse::new(
+    VerifiedPollVote::new(
         partition,
         CommittedEventRef {
             event_id: event.event_id.clone(),
@@ -167,7 +167,7 @@ pub(crate) async fn admit_poll_in_connection(
         },
         &response.poll_response.selections,
         &answers,
-        usize::try_from(definition.poll.max_selections).map_err(PersistenceError::database)?,
+        usize::try_from(definition.poll.max_selection_count).map_err(PersistenceError::database)?,
         heads.to_vec(),
         |id| predecessors.get(id).cloned(),
     )

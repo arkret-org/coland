@@ -269,15 +269,15 @@ async fn reset(connection: &mut AsyncPgConnection) {
     execute(
         connection,
         "DO $native_faults$ BEGIN
-        DROP TRIGGER IF EXISTS fail_native_membership ON public.member_state_current_results;
+        DROP TRIGGER IF EXISTS fail_native_membership ON public.member_state_current_states;
         DROP FUNCTION IF EXISTS public.fail_native_membership();
-        DROP TRIGGER IF EXISTS fail_native_profile ON public.actor_profile_current_results;
+        DROP TRIGGER IF EXISTS fail_native_profile ON public.actor_profile_current_states;
         DROP FUNCTION IF EXISTS public.fail_native_profile();
         DROP TRIGGER IF EXISTS fail_native_profile_source ON public.agent_producer_signer_keys;
         DROP FUNCTION IF EXISTS public.fail_native_profile_source();
-        DROP TRIGGER IF EXISTS fail_native_message ON public.message_revision_current_results;
+        DROP TRIGGER IF EXISTS fail_native_message ON public.message_revision_current_states;
         DROP FUNCTION IF EXISTS public.fail_native_message();
-        DROP TRIGGER IF EXISTS fail_native_circle ON public.circle_member_state_current_results;
+        DROP TRIGGER IF EXISTS fail_native_circle ON public.circle_member_state_current_states;
         DROP FUNCTION IF EXISTS public.fail_native_circle();
         DROP TRIGGER IF EXISTS fail_native_keypackage_insert ON public.mls_key_packages;
         DROP FUNCTION IF EXISTS public.fail_native_keypackage_insert();
@@ -285,11 +285,11 @@ async fn reset(connection: &mut AsyncPgConnection) {
         DROP FUNCTION IF EXISTS public.fail_native_keypackage_claim();
         DROP TRIGGER IF EXISTS fail_native_keypackage_revoke ON public.mls_key_packages;
         DROP FUNCTION IF EXISTS public.fail_native_keypackage_revoke();
-        DROP TRIGGER IF EXISTS reject_departing_current ON public.member_state_current_results;
+        DROP TRIGGER IF EXISTS reject_departing_current ON public.member_state_current_states;
         DROP FUNCTION IF EXISTS public.reject_departing_current();
         DROP TRIGGER IF EXISTS reject_terminal_intent ON public.federation_outbox;
         DROP FUNCTION IF EXISTS public.reject_terminal_intent();
-        DROP TRIGGER IF EXISTS reject_terminal_fence ON public.realm_bootstrap_current_results;
+        DROP TRIGGER IF EXISTS reject_terminal_fence ON public.realm_bootstrap_current_states;
         DROP FUNCTION IF EXISTS public.reject_terminal_fence();
         DROP TRIGGER IF EXISTS fail_receipt_response ON public.idempotency_keys;
         DROP FUNCTION IF EXISTS public.fail_receipt_response();
@@ -982,11 +982,11 @@ mod tests {
             &mut connection,
             "DO $owned_faults$ BEGIN
             CREATE FUNCTION public.reject_departing_current() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
-            CREATE TRIGGER reject_departing_current BEFORE UPDATE ON public.member_state_current_results FOR EACH ROW EXECUTE FUNCTION public.reject_departing_current();
+            CREATE TRIGGER reject_departing_current BEFORE UPDATE ON public.member_state_current_states FOR EACH ROW EXECUTE FUNCTION public.reject_departing_current();
             CREATE FUNCTION public.reject_terminal_intent() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
             CREATE TRIGGER reject_terminal_intent BEFORE INSERT ON public.federation_outbox FOR EACH ROW EXECUTE FUNCTION public.reject_terminal_intent();
             CREATE FUNCTION public.reject_terminal_fence() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
-            CREATE TRIGGER reject_terminal_fence BEFORE INSERT OR UPDATE ON public.realm_bootstrap_current_results FOR EACH ROW EXECUTE FUNCTION public.reject_terminal_fence();
+            CREATE TRIGGER reject_terminal_fence BEFORE INSERT OR UPDATE ON public.realm_bootstrap_current_states FOR EACH ROW EXECUTE FUNCTION public.reject_terminal_fence();
             CREATE FUNCTION public.fail_receipt_response() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
             CREATE TRIGGER fail_receipt_response BEFORE INSERT ON public.idempotency_keys FOR EACH ROW EXECUTE FUNCTION public.fail_receipt_response();
             END $owned_faults$",

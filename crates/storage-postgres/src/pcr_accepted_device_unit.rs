@@ -136,7 +136,7 @@ pub(crate) async fn admit_accepted_device_unit_in_connection(
     })?;
     // §5.3: the signer is the approving device named by `authorized_by`,
     // under a DID URL of the actor principal's own verified DID.
-    if crate::key_backup_current_results::verification_method_device(
+    if crate::key_backup_current_states::verification_method_device(
         &proof.verification_method,
         account,
     )
@@ -347,7 +347,7 @@ pub(crate) async fn admit_accepted_device_unit_in_connection(
             ));
         }
     }
-    crate::pcr_device_current_results::project_pcr_device_current_in_connection(
+    crate::pcr_device_current_states::project_pcr_device_current_in_connection(
         conn, event, commit, None,
     )
     .await?;

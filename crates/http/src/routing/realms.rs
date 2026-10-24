@@ -79,7 +79,7 @@ async fn list_realm_links_impl(
     let direction_enum = RealmLinkDirection::parse(&direction_str)
         .ok_or_else(|| AppError::param_invalid("direction MUST be one of outbound|inbound|both"))?;
     // `link_kind_allow` is a comma-separated list — keeps the query
-    // surface dense and avoids repeated query params.
+    // surface dense and avoids repeated query parameters.
     let allow_raw = link_kind_allow.into_inner();
     let allow: Option<Vec<String>> = allow_raw
         .as_ref()

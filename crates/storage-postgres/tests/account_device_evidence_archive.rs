@@ -158,7 +158,7 @@ async fn exact_signed_root_is_immutable_and_scoped_after_real_pcr_genesis() {
             provider_endpoint: &"https://identity.example/".parse().unwrap(),
             registration_key: &registration,
             also_known_as: &[],
-            version_time: inception_at,
+            version_created_at: inception_at,
             did_key_fragment: None,
         },
     )

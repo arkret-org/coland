@@ -675,7 +675,8 @@ async fn racing_realm_commit_accepts_only_one_event_and_rolls_back_the_loser() {
                         .unwrap(),
                         signed_digest: event_digest,
                         created_at: now,
-                        sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
+                        signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned())
+                            .unwrap(),
                     },
                 },
                 event,

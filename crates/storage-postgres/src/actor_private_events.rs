@@ -11,7 +11,7 @@
 use arkret_models_identity::device_push_route::{
     DevicePushRoutePayload, ServerRevisionCasDecision, decide_server_revision_cas,
 };
-use arkret_wire::ActorPrivateEventSubmitOutcome;
+use arkret_wire::ActorPrivateEventSubmitResponseBody;
 use coland_storage::{
     ActorPrivateEventEffect, ActorPrivateEventRefusal, ActorPrivateEventStore,
     ActorPrivateEventSubmission, ActorPrivateEventSubmitResult,
@@ -147,7 +147,7 @@ async fn submit_in_connection(
                 ),
             ));
         }
-        let outcome = serde_json::from_value::<ActorPrivateEventSubmitOutcome>(
+        let outcome = serde_json::from_value::<ActorPrivateEventSubmitResponseBody>(
             row.outcome
                 .ok_or_else(|| internal("accepted actor-private Event has no outcome"))?,
         )
@@ -211,7 +211,7 @@ async fn submit_in_connection(
                 .bind::<Timestamptz, _>(payload.expires_at)
                 .execute(&mut *conn)
                 .await?;
-                Ok(ActorPrivateEventSubmitOutcome::AgentActionRequest {
+                Ok(ActorPrivateEventSubmitResponseBody::AgentActionRequest {
                     accepted_event_id: event.event_id.clone(),
                 })
             }
@@ -248,7 +248,7 @@ async fn submit_in_connection(
                 ))
             } else {
                 commit_agent_draft_pending_intent_in_connection(conn, commit).await?;
-                Ok(ActorPrivateEventSubmitOutcome::AgentDraftPropose {
+                Ok(ActorPrivateEventSubmitResponseBody::AgentDraftPropose {
                     accepted_event_id: event.event_id.clone(),
                 })
             }
@@ -283,7 +283,8 @@ async fn push_route(
     submission: &ActorPrivateEventSubmission,
     owner_key: &str,
     payload: &DevicePushRoutePayload,
-) -> Result<Result<ActorPrivateEventSubmitOutcome, ActorPrivateEventRefusal>, PgTransactionError> {
+) -> Result<Result<ActorPrivateEventSubmitResponseBody, ActorPrivateEventRefusal>, PgTransactionError>
+{
     let scope = payload.scope();
     lock(
         conn,
@@ -334,7 +335,7 @@ async fn push_route(
     .bind::<Text, _>(submission.event.event_id.as_str())
     .execute(&mut *conn)
     .await?;
-    Ok(Ok(ActorPrivateEventSubmitOutcome::DevicePushRoute {
+    Ok(Ok(ActorPrivateEventSubmitResponseBody::DevicePushRoute {
         accepted_event_id: submission.event.event_id.clone(),
         revision: revision.unsigned_abs(),
     }))
@@ -348,7 +349,8 @@ async fn reject(
     owner_key: &str,
     payload: &arkret_models_collaboration::events_payloads::agent::AgentActionRejectPayload,
     request_id: &str,
-) -> Result<Result<ActorPrivateEventSubmitOutcome, ActorPrivateEventRefusal>, PgTransactionError> {
+) -> Result<Result<ActorPrivateEventSubmitResponseBody, ActorPrivateEventRefusal>, PgTransactionError>
+{
     let agent_id = payload.agent_id.as_str();
     lock(
         conn,
@@ -431,7 +433,7 @@ async fn reject(
     if transitioned != 1 {
         return Err(internal("the locked rejection target changed state").into());
     }
-    Ok(Ok(ActorPrivateEventSubmitOutcome::AgentActionReject {
+    Ok(Ok(ActorPrivateEventSubmitResponseBody::AgentActionReject {
         accepted_event_id: submission.event.event_id.clone(),
     }))
 }

@@ -72,7 +72,7 @@ async fn policy_accepted_by(
     let basis = serde_json::to_value(commit_id).map_err(PersistenceError::database)?;
     sql_query(format!(
         "SELECT {POLICY_COLUMNS} FROM recovery_policies p \
-         JOIN policy_current_results c \
+         JOIN policy_current_states c \
            ON c.policy_id=('ak:policy:' || p.id::text) \
           AND c.current_commit_id=(p.acceptance_basis #>> '{{}}') \
           AND c.value=p.raw_payload \
@@ -103,7 +103,7 @@ async fn current_policy(
         .await?;
     sql_query(format!(
         "SELECT {POLICY_COLUMNS} FROM recovery_policies p \
-         JOIN policy_current_results c \
+         JOIN policy_current_states c \
            ON c.policy_id=('ak:policy:' || p.id::text) \
           AND c.current_commit_id=(p.acceptance_basis #>> '{{}}') \
           AND c.value=p.raw_payload \
@@ -180,7 +180,7 @@ pub(crate) async fn commit_recovery_policy_unit_in_connection(
             "recovery policy account differs from the Event actor",
         ));
     }
-    if policy.auth_data.signature_algorithm != RecoverySignatureAlgorithm::Ed25519 {
+    if policy.signature_proof.signature_algorithm != RecoverySignatureAlgorithm::Ed25519 {
         return Err(rejected(
             ConflictCode::UnsupportedFeature,
             "recovery policy device signature algorithm is not Ed25519",
@@ -192,14 +192,14 @@ pub(crate) async fn commit_recovery_policy_unit_in_connection(
             "recovery policy producer proof is absent",
         )
     })?;
-    if proof.verification_method != policy.auth_data.verification_method {
+    if proof.verification_method != policy.signature_proof.verification_method {
         return Err(rejected(
             ConflictCode::SignatureInvalid,
             "recovery policy and its Event are signed by different methods",
         ));
     }
-    let signer = crate::key_backup_current_results::verification_method_device(
-        &policy.auth_data.verification_method,
+    let signer = crate::key_backup_current_states::verification_method_device(
+        &policy.signature_proof.verification_method,
         account,
     )
     .ok_or_else(|| {
@@ -342,7 +342,7 @@ pub(crate) async fn commit_recovery_policy_unit_in_connection(
     if !arkret_signatures::verify_detached_ed25519_signature(
         &device_key,
         &transcript,
-        policy.auth_data.signature.as_str(),
+        policy.signature_proof.signature.as_str(),
     ) {
         return Err(rejected(
             ConflictCode::SignatureInvalid,
@@ -411,7 +411,11 @@ pub(crate) async fn commit_recovery_policy_unit_in_connection(
         issued_at: policy.issued_at,
         raw_payload: serde_json::to_value(policy).map_err(PersistenceError::database)?,
         accepted_at: commit.committed_at,
-        verification_method: policy.auth_data.verification_method.as_str().to_owned(),
+        verification_method: policy
+            .signature_proof
+            .verification_method
+            .as_str()
+            .to_owned(),
     };
     upsert_policy_current_in_connection(conn, &record, event, commit).await?;
     insert_accepted_policy_in_connection(conn, &record, policy.revokes_recovery()).await?;
@@ -434,17 +438,17 @@ async fn upsert_policy_current_in_connection(
         )
     })?;
     let written = sql_query(
-        "INSERT INTO policy_current_results \
+        "INSERT INTO policy_current_states \
          (realm_id,policy_id,current_commit_id,current_stream_position,current_event_id,value,updated_at) \
          VALUES($1,$2,$3,$4,$5,$6,$7) \
          ON CONFLICT(policy_id) DO UPDATE SET \
            realm_id=EXCLUDED.realm_id,current_commit_id=EXCLUDED.current_commit_id, \
            current_stream_position=EXCLUDED.current_stream_position, \
            current_event_id=EXCLUDED.current_event_id,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at \
-         WHERE policy_current_results.realm_id=EXCLUDED.realm_id \
-           AND policy_current_results.current_stream_position<EXCLUDED.current_stream_position \
-           AND (policy_current_results.value->>'schema' IS DISTINCT FROM 'ak.schema.policy.v1' \
-                OR policy_current_results.value->>'policy_kind' IS DISTINCT FROM 'agent')",
+         WHERE policy_current_states.realm_id=EXCLUDED.realm_id \
+           AND policy_current_states.current_stream_position<EXCLUDED.current_stream_position \
+           AND (policy_current_states.value->>'schema' IS DISTINCT FROM 'ak.schema.policy.v1' \
+                OR policy_current_states.value->>'policy_kind' IS DISTINCT FROM 'agent')",
     )
     .bind::<Text, _>(event.realm_id.as_str())
     .bind::<Text, _>(&record.policy_id)

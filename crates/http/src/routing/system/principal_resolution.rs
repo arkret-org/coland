@@ -163,8 +163,8 @@ pub(crate) async fn principal_method_history_evidence(
                     )
                 })?;
             events.sort_by(|left, right| {
-                (left.seq, left.event_digest.as_str())
-                    .cmp(&(right.seq, right.event_digest.as_str()))
+                (left.sequence, left.event_digest.as_str())
+                    .cmp(&(right.sequence, right.event_digest.as_str()))
             });
             let terminal = events
                 .iter()

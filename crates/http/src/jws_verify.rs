@@ -946,7 +946,7 @@ fn principal_binding_acceptance(
             .map_err(|error| error.to_string())?,
         policy_digest: key.policy_digest.clone(),
         verified_at,
-        refresh_after: None,
+        refresh_at: None,
         expires_at: Some(expires_at),
         status: arkret_identity::DidBindingStatus::Active,
     };
@@ -1265,10 +1265,10 @@ async fn refresh_embedded_webvh_document_for_high_risk(
     let Some(last_event) = events.last() else {
         return Err("embedded did:webvh log is empty".to_owned());
     };
-    if record.seq != last_event.seq {
+    if record.sequence != last_event.sequence {
         return Err(format!(
-            "embedded did:webvh document seq {} does not match log tail seq {}",
-            record.seq, last_event.seq
+            "embedded did:webvh document sequence {} does not match log tail sequence {}",
+            record.sequence, last_event.sequence
         ));
     }
     if record.key_log_head.as_deref() != Some(last_event.event_digest.as_str()) {

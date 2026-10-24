@@ -38,7 +38,7 @@ async fn insert_policy(pool: &crate::PgPool, policy: &Value) {
         .bind::<Jsonb,_>(serde_json::to_value(&acceptance_basis).unwrap())
         .bind::<Nullable<Timestamptz>,_>(typed.expires_at).bind::<Timestamptz,_>(typed.issued_at)
         .bind::<Jsonb,_>(policy.clone()).execute(&mut conn).await.unwrap();
-    sql_query("INSERT INTO policy_current_results(realm_id,policy_id,current_commit_id,current_stream_position,current_event_id,value,updated_at) VALUES($1,$2,$3,1,$4,$5,$6)")
+    sql_query("INSERT INTO policy_current_states(realm_id,policy_id,current_commit_id,current_stream_position,current_event_id,value,updated_at) VALUES($1,$2,$3,1,$4,$5,$6)")
         .bind::<Text,_>(wire::RealmId::from_event_id(&wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, arkret_canonical::sha256_bytes(b"recovery-policy-realm"))).as_str())
         .bind::<Text,_>(typed.policy_id.as_str())
         .bind::<Text,_>(acceptance_basis.as_str())
@@ -63,7 +63,7 @@ impl Fixture {
             "trust_domain":"ak:trust_domain:station.example","methods":[{"kind":"did_root"}],
             "issued_at":(now-chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis,true),
             "expires_at":policy_expiry.to_rfc3339_opts(chrono::SecondsFormat::Millis,true),
-            "auth_data":{"verification_method":"did:web:unlock-test.example#root","signature_algorithm":"Ed25519","signature":signature}
+            "signature_proof":{"verification_method":"did:web:unlock-test.example#root","signature_algorithm":"Ed25519","signature":signature}
         });
         let typed_policy: arkret_models_crypto::RecoveryPolicy =
             serde_json::from_value(policy.clone()).unwrap();
@@ -125,7 +125,7 @@ impl Fixture {
                 .unwrap(),
             ciphertext_digest: wire::Hash::new(arkret_canonical::sha256_digest([0u8; 24])).unwrap(),
             plaintext_commitment: None,
-            auth_data: crypto::KeyBackupAuthData {
+            signature_proof: crypto::KeyBackupSignatureProof {
                 device_id: device.clone(),
                 verification_method: wire::DidUrl::new("did:web:unlock-test.example#root").unwrap(),
                 signature_algorithm: crypto::KeyBackupSignatureAlgorithm::Ed25519,
@@ -140,7 +140,7 @@ impl Fixture {
                 "ak:backup_series:01904100-0000-7000-8000-000000000024",
             )
             .unwrap(),
-            series_seq: 0,
+            series_sequence: 0,
             supersedes_id: None,
             supersedes_digest: None,
             recovery_policy_ref: None,
@@ -189,7 +189,7 @@ impl Fixture {
                     .unwrap(),
                 signed_digest: wire::Hash::new(REQUEST).unwrap(),
                 created_at: now,
-                sig: wire::Base64UrlString::new(signature.clone()).unwrap(),
+                signature: wire::Base64UrlString::new(signature.clone()).unwrap(),
             },
         };
         basis_commit.validate_shape().unwrap();

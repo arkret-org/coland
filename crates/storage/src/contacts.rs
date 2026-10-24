@@ -102,7 +102,7 @@ pub struct ContactDeliveryTarget {
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContactCompletionResult {
     Accepted {
-        outcome: Box<arkret_models_collaboration::contact_operations::ContactAcceptedOutcome>,
+        outcome: Box<arkret_models_collaboration::contact_operations::ContactAcceptedResponseBody>,
     },
     Rejected {
         problem: arkret_wire::problem_details::Problem,

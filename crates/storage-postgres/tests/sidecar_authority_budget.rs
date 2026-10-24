@@ -47,10 +47,10 @@ async fn counts(pool: &coland_storage_postgres::PgPool) -> Counts {
     diesel::sql_query(
         "SELECT (SELECT COUNT(*) FROM canonical_events) AS events, \
         (SELECT COUNT(*) FROM realm_commits) AS commits, \
-        (SELECT COUNT(*) FROM agent_provisioning_current_results) AS provisions, \
-        (SELECT COUNT(*) FROM agent_pcr_genesis_declaration_current_results) AS declarations, \
-        (SELECT COUNT(*) FROM identity_accountability_current_results) AS accountability, \
-        (SELECT COUNT(*) FROM agent_selector_claim_current_results) AS selectors, \
+        (SELECT COUNT(*) FROM agent_provisioning_current_states) AS provisions, \
+        (SELECT COUNT(*) FROM agent_pcr_genesis_declaration_current_states) AS declarations, \
+        (SELECT COUNT(*) FROM identity_accountability_current_states) AS accountability, \
+        (SELECT COUNT(*) FROM agent_selector_claim_current_states) AS selectors, \
         (SELECT COUNT(*) FROM federation_outbox) AS deliveries",
     )
     .get_result(&mut conn)

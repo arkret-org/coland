@@ -33,14 +33,15 @@ use arkret_models_collaboration::agent_operations::AgentLifecycleState;
 use arkret_models_crypto::{
     Failure as KeypackageFailure, KeyOperationSignature, KeyPackageClaimRecord,
     KeyPackageClaimTerminalReceipt, KeyPackageClaimTerminalState, KeyPackageConsumeReceipt,
-    KeyPackageUploadEntry, KeyPackagesClaimOutcome, KeyPackagesClaimQueryRequestBody,
-    KeyPackagesClaimRequestBody, KeyPackagesConsumeOutcome, KeyPackagesConsumeRequestBody,
-    KeyPackagesRevokeOutcome, KeyPackagesRevokeRequestBody, KeyPackagesUploadOutcome,
-    KeyPackagesUploadRequestBody, PeerKeyPackageClaimErrorCode, PeerKeyPackageClaimPurpose,
-    PeerKeyPackageClaimReceipt, PeerKeyPackageRequesterAuthorization, PeerKeyPackagesClaimOutcome,
-    PeerKeyPackagesClaimQueryOutcome, PeerKeyPackagesClaimQueryRequestBody,
+    KeyPackageUploadEntry, KeyPackagesClaimQueryRequestBody, KeyPackagesClaimRequestBody,
+    KeyPackagesClaimResponseBody, KeyPackagesConsumeRequestBody, KeyPackagesConsumeResponseBody,
+    KeyPackagesRevokeRequestBody, KeyPackagesRevokeResponseBody, KeyPackagesUploadRequestBody,
+    KeyPackagesUploadResponseBody, PeerKeyPackageClaimErrorCode, PeerKeyPackageClaimPurpose,
+    PeerKeyPackageClaimReceipt, PeerKeyPackageRequesterAuthorization,
+    PeerKeyPackagesClaimQueryRequestBody, PeerKeyPackagesClaimQueryResponseBody,
     PeerKeyPackagesClaimQueryState, PeerKeyPackagesClaimRequestBody,
-    keypackage_claim_authorization_signing_bytes, peer_keypackage_claim_receipt_signing_bytes,
+    PeerKeyPackagesClaimResponseBody, keypackage_claim_authorization_signing_bytes,
+    peer_keypackage_claim_receipt_signing_bytes,
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -275,7 +276,7 @@ struct MlsAttestAddHttpRequest {
     #[salvo(schema(value_type = serde_json::Value))]
     attestation: arkret_models_collaboration::mls_roster_authority::MlsAddAuthorityAttestation,
     #[salvo(schema(value_type = serde_json::Value))]
-    claim_outcome: arkret_models_crypto::PeerKeyPackagesClaimOutcome,
+    claim_outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody,
 }
 
 #[derive(serde::Serialize, salvo::oapi::ToSchema)]
@@ -396,7 +397,7 @@ async fn resolve_self_mls_group_state_material(
     depot: &mut Depot,
     req: &mut Request,
 ) -> GuardedJsonResult<
-    arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialOutcome,
+    arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialResponseBody,
 > {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let request = body.into_inner();
@@ -441,7 +442,7 @@ pub(crate) async fn read_member_group_state_material(
     state: &AppState,
     request: &arkret_models_collaboration::mls_group_state_material::MlsMemberGroupStateMaterialReadRequestBody,
 ) -> Result<
-    arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialOutcome,
+    arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialResponseBody,
     AppError,
 > {
     use coland_storage::MlsMemberGroupStateMaterialRead as Read;
@@ -498,7 +499,7 @@ pub(crate) async fn read_member_group_state_material(
         200 => {}
         _ => return Err(mls_group_state_material_revision_unavailable()),
     }
-    let outcome: arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialOutcome =
+    let outcome: arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialResponseBody =
         serde_json::from_slice(&response.body)
             .map_err(|_| mls_group_state_material_revision_unavailable())?;
     outcome
@@ -519,8 +520,9 @@ pub(crate) async fn read_member_group_state_material(
 async fn resolve_peer_mls_group_state_material(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialOutcome>
-{
+) -> JsonResult<
+    arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialResponseBody,
+> {
     use arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody;
 
     let state = depot.get_typed::<AppState>().expect("state injected");
@@ -586,11 +588,11 @@ pub(crate) async fn serve_group_state_material(
     request: &arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody,
     event: &arkret_wire::Event,
 ) -> Result<
-    arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialOutcome,
+    arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialResponseBody,
     AppError,
 > {
     use arkret_models_collaboration::mls_group_state_material::{
-        MLS_GROUP_STATE_MATERIAL_MAX_RESPONSE_BYTES, MlsGroupStateMaterialOutcome,
+        MLS_GROUP_STATE_MATERIAL_MAX_RESPONSE_BYTES, MlsGroupStateMaterialResponseBody,
         material_digest_from_ref,
     };
     let unavailable_material = || {
@@ -652,19 +654,19 @@ pub(crate) async fn serve_group_state_material(
     )
     .await
     .map_err(|_| unavailable_material())?;
-    let outcome = MlsGroupStateMaterialOutcome {
+    let outcome = MlsGroupStateMaterialResponseBody {
         realm_id: request.realm_id.clone(),
         effective_scope: request.effective_scope.clone(),
         mls_group_id: request.mls_group_id.clone(),
         epoch: request.epoch,
         group_state_event_id: request.group_state_event_id.clone(),
         group_info_ref: request.group_info_ref.clone(),
-        group_info_bytes_b64: arkret_wire::Base64UrlString::new(
+        group_info_base64url: arkret_wire::Base64UrlString::new(
             arkret_canonical::base64url_encode(&group_info_bytes),
         )
         .map_err(|error| AppError::internal(error.to_string()))?,
         ratchet_tree_ref: request.ratchet_tree_ref.clone(),
-        ratchet_tree_bytes_b64: arkret_wire::Base64UrlString::new(
+        ratchet_tree_base64url: arkret_wire::Base64UrlString::new(
             arkret_canonical::base64url_encode(&ratchet_tree_bytes),
         )
         .map_err(|error| AppError::internal(error.to_string()))?,
@@ -744,7 +746,7 @@ async fn upload_keypackage(
     body: JsonBody<KeyPackagesUploadRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeyPackagesUploadOutcome> {
+) -> JsonResult<KeyPackagesUploadResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     let verified = depot
@@ -933,7 +935,7 @@ async fn upload_keypackage(
         key_package_refs.push(keypackage_ref);
     }
 
-    json_ok(KeyPackagesUploadOutcome {
+    json_ok(KeyPackagesUploadResponseBody {
         accepted,
         rejections: rejected,
         key_package_refs,
@@ -950,7 +952,7 @@ async fn upload_keypackage(
 async fn peer_claim_keypackage(
     depot: &mut Depot,
     req: &mut Request,
-) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryOutcome> {
+) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryResponseBody> {
     let Json(outcome) = peer_claim_keypackage_inner(depot, req).await?;
     guard_native_claim_command_outcome(depot, req, outcome).await
 }
@@ -958,8 +960,8 @@ async fn peer_claim_keypackage(
 async fn guard_native_claim_command_outcome(
     depot: &mut Depot,
     req: &mut Request,
-    outcome: PeerKeyPackagesClaimQueryOutcome,
-) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryOutcome> {
+    outcome: PeerKeyPackagesClaimQueryResponseBody,
+) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryResponseBody> {
     let command = req
         .parse_json::<PeerKeyPackagesClaimRequestBody>()
         .await
@@ -985,7 +987,7 @@ async fn guard_native_claim_command_outcome(
 async fn peer_claim_keypackage_inner(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<PeerKeyPackagesClaimQueryOutcome> {
+) -> JsonResult<PeerKeyPackagesClaimQueryResponseBody> {
     peer_claim_keypackage_with_room(depot, req, None).await
 }
 
@@ -993,7 +995,7 @@ pub(crate) async fn mimi_claim_keypackage(
     depot: &mut Depot,
     req: &mut Request,
     room: &arkret_wire::MimiRoomUri,
-) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryOutcome> {
+) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryResponseBody> {
     let Json(outcome) = peer_claim_keypackage_with_room(depot, req, Some(room)).await?;
     guard_native_claim_command_outcome(depot, req, outcome).await
 }
@@ -1002,7 +1004,7 @@ async fn peer_claim_keypackage_with_room(
     depot: &mut Depot,
     req: &mut Request,
     mimi_room: Option<&arkret_wire::MimiRoomUri>,
-) -> JsonResult<PeerKeyPackagesClaimQueryOutcome> {
+) -> JsonResult<PeerKeyPackagesClaimQueryResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let (body, authorization) =
         verify_peer_claim_source_attestation(state, req, mimi_room.is_some()).await?;
@@ -1062,7 +1064,7 @@ async fn claim_keypackage_at_destination(
     body: &PeerKeyPackagesClaimRequestBody,
     authorization: VerifiedClaimAuthorization,
     native_requester: Option<&(coland_storage::AppletManagedDeviceScopeGuard, DateTime<Utc>)>,
-) -> JsonResult<PeerKeyPackagesClaimOutcome> {
+) -> JsonResult<PeerKeyPackagesClaimResponseBody> {
     claim_keypackage_at_destination_with_room(state, body, authorization, native_requester, None)
         .await
 }
@@ -1073,7 +1075,7 @@ async fn claim_keypackage_at_destination_with_room(
     authorization: VerifiedClaimAuthorization,
     native_requester: Option<&(coland_storage::AppletManagedDeviceScopeGuard, DateTime<Utc>)>,
     mimi_room: Option<&arkret_wire::MimiRoomUri>,
-) -> JsonResult<PeerKeyPackagesClaimOutcome> {
+) -> JsonResult<PeerKeyPackagesClaimResponseBody> {
     let target_principal_id = body
         .unsigned_request()
         .target_principal_id()
@@ -1380,7 +1382,7 @@ async fn claim_keypackage_at_destination_with_room(
 async fn peer_query_keypackage_claim(
     depot: &mut Depot,
     req: &mut Request,
-) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryOutcome> {
+) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryResponseBody> {
     let Json(outcome) = peer_query_keypackage_claim_inner(depot, req).await?;
     let state = depot.get_typed::<AppState>().expect("state injected");
     let guard = if let Some(claim) = &outcome.claim_outcome {
@@ -1403,7 +1405,7 @@ async fn peer_query_keypackage_claim(
 async fn peer_query_keypackage_claim_inner(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<PeerKeyPackagesClaimQueryOutcome> {
+) -> JsonResult<PeerKeyPackagesClaimQueryResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = req
         .parse_json::<PeerKeyPackagesClaimQueryRequestBody>()
@@ -1421,7 +1423,7 @@ async fn query_claim_ledger(
     state: &AppState,
     body: PeerKeyPackagesClaimQueryRequestBody,
     source_id: String,
-) -> JsonResult<PeerKeyPackagesClaimQueryOutcome> {
+) -> JsonResult<PeerKeyPackagesClaimQueryResponseBody> {
     revoke_expired_peer_claims(state).await?;
     let mut source_id = source_id;
     let mut record = state
@@ -1469,7 +1471,7 @@ async fn query_claim_ledger(
             .map_err(|error| AppError::internal(format!("peer claim recovered ledger: {error}")))?;
     }
     let Some(record) = record else {
-        return json_ok(PeerKeyPackagesClaimQueryOutcome {
+        return json_ok(PeerKeyPackagesClaimQueryResponseBody {
             claim_request_id: body.claim_request_id,
             state: PeerKeyPackagesClaimQueryState::Unknown,
             claim_outcome: None,
@@ -1485,7 +1487,7 @@ async fn query_claim_ledger(
     let claim_outcome = record
         .outcome
         .clone()
-        .map(serde_json::from_value::<PeerKeyPackagesClaimOutcome>)
+        .map(serde_json::from_value::<PeerKeyPackagesClaimResponseBody>)
         .transpose()
         .map_err(|error| {
             AppError::internal(format!("stored peer claim outcome invalid: {error}"))
@@ -1580,7 +1582,7 @@ async fn query_claim_ledger(
             "failed peer claim has no durable terminal_receipt; refusing to fabricate one",
         ));
     }
-    let outcome = PeerKeyPackagesClaimQueryOutcome {
+    let outcome = PeerKeyPackagesClaimQueryResponseBody {
         claim_request_id: body.claim_request_id,
         state: state_value,
         claim_outcome,
@@ -1912,7 +1914,7 @@ async fn verify_local_claim_participant_authorization(
     let signature_valid = crate::routing::identity::device_signing::ed25519_verify(
         &key,
         &signing_bytes,
-        signature.sig.as_str(),
+        signature.signature.as_str(),
     );
     if !signature_valid {
         return reject("directory_governance_proof_signature_invalid");
@@ -2087,7 +2089,7 @@ async fn build_peer_claim_outcome(
     source_id: &str,
     request_digest: &str,
     claimed: &MlsKeyPackageRow,
-) -> Result<PeerKeyPackagesClaimOutcome, AppError> {
+) -> Result<PeerKeyPackagesClaimResponseBody, AppError> {
     let claims = vec![keypackage_claim_record(state, claimed, body).await?];
     let claims_value = serde_json::to_value(&claims)
         .map_err(|error| AppError::internal(format!("peer claim records serialize: {error}")))?;
@@ -2131,17 +2133,17 @@ async fn build_peer_claim_outcome(
             signature_algorithm: Some(
                 arkret_wire::NonEmptyString::new("Ed25519").expect("Ed25519 is non-empty"),
             ),
-            sig: arkret_wire::Base64UrlString::new("AA")
+            signature: arkret_wire::Base64UrlString::new("AA")
                 .expect("placeholder receipt signature is base64url"),
         },
     };
     let signing_bytes = peer_keypackage_claim_receipt_signing_bytes(&receipt)
         .map_err(|error| AppError::internal(format!("peer claim receipt transcript: {error}")))?;
     let signature = state.notary_signing_key().sign(&signing_bytes);
-    receipt.signature.sig =
+    receipt.signature.signature =
         arkret_wire::Base64UrlString::new(URL_SAFE_NO_PAD.encode(signature.to_bytes()))
             .map_err(|error| AppError::internal(format!("receipt signature invalid: {error}")))?;
-    let outcome = PeerKeyPackagesClaimOutcome {
+    let outcome = PeerKeyPackagesClaimResponseBody {
         claim_request_id: body.claim_request_id.clone(),
         claims,
         claim_receipt: receipt,
@@ -2232,7 +2234,7 @@ fn build_peer_claim_terminal_receipt(
             signature_algorithm: Some(
                 arkret_wire::NonEmptyString::new("Ed25519").expect("Ed25519 is non-empty"),
             ),
-            sig: arkret_wire::Base64UrlString::new("AA")
+            signature: arkret_wire::Base64UrlString::new("AA")
                 .expect("placeholder signature is base64url"),
         },
     };
@@ -2241,7 +2243,7 @@ fn build_peer_claim_terminal_receipt(
             "terminal receipt signing transcript invalid: {error}"
         ))
     })?;
-    receipt.signature.sig = arkret_wire::Base64UrlString::new(
+    receipt.signature.signature = arkret_wire::Base64UrlString::new(
         URL_SAFE_NO_PAD.encode(state.notary_signing_key().sign(&signing_input).to_bytes()),
     )
     .map_err(|error| AppError::internal(format!("terminal receipt signature invalid: {error}")))?;
@@ -2251,7 +2253,7 @@ fn build_peer_claim_terminal_receipt(
 fn replay_peer_claim(
     record: PeerKeyPackageClaimLedgerRecord,
     request_digest: &str,
-) -> JsonResult<PeerKeyPackagesClaimOutcome> {
+) -> JsonResult<PeerKeyPackagesClaimResponseBody> {
     if record.request_digest != request_digest {
         return Err(peer_claim_duplicate_conflict());
     }
@@ -2264,7 +2266,7 @@ fn replay_peer_claim(
     let Some(outcome) = record.outcome else {
         return Err(peer_claim_failed());
     };
-    let outcome: PeerKeyPackagesClaimOutcome =
+    let outcome: PeerKeyPackagesClaimResponseBody =
         serde_json::from_value(outcome).map_err(|error| {
             AppError::internal(format!("stored peer claim outcome invalid: {error}"))
         })?;
@@ -2326,7 +2328,7 @@ async fn claim_keypackage(
     body: JsonBody<KeyPackagesClaimRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> coland_http::result::GuardedJsonResult<KeyPackagesClaimOutcome> {
+) -> coland_http::result::GuardedJsonResult<KeyPackagesClaimResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     let original_command = PeerKeyPackagesClaimRequestBody::from(&body);
@@ -2377,7 +2379,7 @@ async fn claim_keypackage(
     } else {
         (credential_deadline, Vec::new())
     };
-    let peer_outcome = PeerKeyPackagesClaimOutcome {
+    let peer_outcome = PeerKeyPackagesClaimResponseBody {
         claim_request_id: outcome.claim_request_id.clone(),
         claims: outcome.claims.clone(),
         claim_receipt: outcome.claim_receipt.clone(),
@@ -2399,7 +2401,7 @@ async fn claim_keypackage_session(
     state: &AppState,
     session: SessionRecord,
     body: KeyPackagesClaimRequestBody,
-) -> JsonResult<KeyPackagesClaimOutcome> {
+) -> JsonResult<KeyPackagesClaimResponseBody> {
     if session.agent_session().is_some()
         != matches!(
             &body.requester_authorization,
@@ -2665,7 +2667,7 @@ async fn query_own_keypackage_claim(
     body: JsonBody<KeyPackagesClaimQueryRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> coland_http::result::GuardedJsonResult<KeyPackagesClaimOutcome> {
+) -> coland_http::result::GuardedJsonResult<KeyPackagesClaimResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     let native = depot
@@ -2693,7 +2695,7 @@ async fn query_own_keypackage_claim(
         DateTime::from_timestamp(row.expires_at, 0).ok_or_else(keypackage_claim_unknown)?;
     let outcome = row
         .outcome
-        .map(serde_json::from_value::<PeerKeyPackagesClaimOutcome>)
+        .map(serde_json::from_value::<PeerKeyPackagesClaimResponseBody>)
         .transpose()
         .map_err(|error| AppError::internal(format!("stored claim outcome invalid: {error}")))?
         .ok_or_else(keypackage_claim_unknown)?;
@@ -2816,10 +2818,10 @@ pub(crate) async fn capture_relayed_keypackage_claim_outcome(
 ) -> Result<(), String> {
     let request: KeyPackagesClaimRequestBody =
         serde_json::from_str(request_body).map_err(|error| error.to_string())?;
-    let outcome: KeyPackagesClaimOutcome =
+    let outcome: KeyPackagesClaimResponseBody =
         serde_json::from_str(response_body).map_err(|error| error.to_string())?;
     if request.requester_actor_id.is_some() {
-        let query = PeerKeyPackagesClaimQueryOutcome {
+        let query = PeerKeyPackagesClaimQueryResponseBody {
             claim_request_id: request.claim_request_id.clone(),
             state: PeerKeyPackagesClaimQueryState::Claimed,
             claim_outcome: Some(
@@ -2905,7 +2907,7 @@ pub(crate) async fn capture_relayed_keypackage_claim_outcome(
     if !crate::routing::identity::device_signing::ed25519_verify(
         &verification_key,
         &signing_bytes,
-        receipt.signature.sig.as_str(),
+        receipt.signature.signature.as_str(),
     ) {
         return Err("relayed KeyPackage claim receipt signature invalid".to_owned());
     }
@@ -2961,7 +2963,7 @@ pub(crate) async fn capture_relayed_keypackage_claim_query(
     state: &AppState,
     destination_id: &str,
     request_body: &str,
-    query: &PeerKeyPackagesClaimQueryOutcome,
+    query: &PeerKeyPackagesClaimQueryResponseBody,
 ) -> Result<(), String> {
     let original: PeerKeyPackagesClaimRequestBody =
         serde_json::from_str(request_body).map_err(|e| e.to_string())?;
@@ -3111,7 +3113,7 @@ pub(crate) async fn capture_relayed_keypackage_claim_query(
         if !crate::routing::identity::device_signing::ed25519_verify(
             &key,
             &signing_bytes,
-            consume.signature.sig.as_str(),
+            consume.signature.signature.as_str(),
         ) {
             return Err("consumed claim query receipt signature invalid".to_owned());
         }
@@ -3194,7 +3196,7 @@ pub(crate) async fn capture_relayed_keypackage_claim_query(
     if !crate::routing::identity::device_signing::ed25519_verify(
         &verification_key,
         &signing_bytes,
-        terminal.signature.sig.as_str(),
+        terminal.signature.signature.as_str(),
     ) {
         return Err("terminal claim query receipt signature invalid".to_owned());
     }
@@ -3357,7 +3359,7 @@ async fn consume_keypackages(
     body: JsonBody<KeyPackagesConsumeRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeyPackagesConsumeOutcome> {
+) -> JsonResult<KeyPackagesConsumeResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     if let Ok(native) = depot
@@ -3453,7 +3455,7 @@ async fn consume_keypackages(
                 AppError::internal("consumed KeyPackage ledger has no durable receipt")
             })?;
         validate_consume_receipt_replay(state, &body, &stored_receipt)?;
-        return json_ok(KeyPackagesConsumeOutcome {
+        return json_ok(KeyPackagesConsumeResponseBody {
             consume_receipt: stored_receipt,
         });
     }
@@ -3499,14 +3501,14 @@ async fn consume_keypackages(
             })?
             .ok_or_else(|| AppError::conflict("KeyPackage claim changed before consume"))?;
         validate_consume_receipt_replay(state, &body, &winner)?;
-        return json_ok(KeyPackagesConsumeOutcome {
+        return json_ok(KeyPackagesConsumeResponseBody {
             consume_receipt: winner,
         });
     };
     state
         .projections()
         .mark_key_package_consumed(&consumed.id, consumed_at_unix_ms.div_euclid(1000));
-    json_ok(KeyPackagesConsumeOutcome {
+    json_ok(KeyPackagesConsumeResponseBody {
         consume_receipt: prepared_consume_receipt,
     })
 }
@@ -3603,7 +3605,7 @@ async fn receipt_matches_welcome_binding(
         .ok_or_else(|| AppError::internal("the bound claim has no ledger row"))?;
     let outcome = ledger
         .outcome
-        .map(serde_json::from_value::<PeerKeyPackagesClaimOutcome>)
+        .map(serde_json::from_value::<PeerKeyPackagesClaimResponseBody>)
         .transpose()
         .map_err(|error| AppError::internal(format!("stored claim outcome invalid: {error}")))?
         .ok_or_else(|| AppError::internal("the bound claim has no success outcome"))?;
@@ -3786,7 +3788,7 @@ fn build_keypackage_consume_receipt(
             signature_algorithm: Some(
                 arkret_wire::NonEmptyString::new("Ed25519").expect("Ed25519 is non-empty"),
             ),
-            sig: arkret_wire::Base64UrlString::new("AA")
+            signature: arkret_wire::Base64UrlString::new("AA")
                 .expect("placeholder signature is base64url"),
         },
     };
@@ -3795,7 +3797,7 @@ fn build_keypackage_consume_receipt(
             "consume receipt signing transcript invalid: {error}"
         ))
     })?;
-    receipt.signature.sig = arkret_wire::Base64UrlString::new(
+    receipt.signature.signature = arkret_wire::Base64UrlString::new(
         URL_SAFE_NO_PAD.encode(state.notary_signing_key().sign(&signing_input).to_bytes()),
     )
     .map_err(|error| AppError::internal(format!("consume receipt signature invalid: {error}")))?;
@@ -3852,7 +3854,7 @@ fn validate_consume_receipt_replay(
     if !crate::routing::identity::device_signing::ed25519_verify(
         &state.notary_verifying_key(),
         &signing_input,
-        receipt.signature.sig.as_str(),
+        receipt.signature.signature.as_str(),
     ) {
         return Err(AppError::internal(
             "stored consume receipt service signature is invalid",
@@ -3871,7 +3873,7 @@ async fn revoke_keypackages(
     body: JsonBody<KeyPackagesRevokeRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeyPackagesRevokeOutcome> {
+) -> JsonResult<KeyPackagesRevokeResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     if let Ok(native) = depot
@@ -4014,7 +4016,7 @@ async fn revoke_keypackages(
             }
         }
     }
-    json_ok(KeyPackagesRevokeOutcome { revoked, failures })
+    json_ok(KeyPackagesRevokeResponseBody { revoked, failures })
 }
 
 /// The governance binding of the Event that made `current` the scope's
@@ -4022,7 +4024,7 @@ async fn revoke_keypackages(
 /// exact committed Event, never restated in the typed current.
 pub(crate) async fn current_mls_group_binding(
     state: &AppState,
-    current: &arkret_wire::MlsGroupCurrent,
+    current: &arkret_wire::MlsGroupValue,
 ) -> Result<arkret_models_crypto::MlsGovernanceBindingPayload, AppError> {
     let event = state
         .event_queries()
@@ -5025,7 +5027,7 @@ mod trust_binding_tests {
                 "signature": {
                     "kid": requester.verification_method,
                     "signature_algorithm": "Ed25519",
-                    "sig": "AA"
+                    "signature": "AA"
                 }
             }
         }))
@@ -5041,7 +5043,7 @@ mod trust_binding_tests {
         else {
             unreachable!();
         };
-        signature.sig =
+        signature.signature =
             arkret_wire::Base64UrlString::new(URL_SAFE_NO_PAD.encode(key.sign(&bytes).to_bytes()))
                 .unwrap();
         body.validate_shape().unwrap();

@@ -1,6 +1,6 @@
 //! Private exact material at one locked Realm cut, with no member-history fallback.
 use arkret_models_integration::*;
-use arkret_wire::{ActorId, CommitStreamRef, CurrentSelector, RealmCommit, TypedCurrentRow};
+use arkret_wire::{ActorId, CommitStreamRef, CurrentSelector, CurrentState, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult, RealmActorMaterialCaller};
 use diesel::sql_types::{Jsonb, Text, Timestamptz};
 use diesel::{QueryableByName, sql_query};
@@ -28,10 +28,10 @@ pub(crate) async fn retain_outcome(
     event: &arkret_wire::Event,
     subject: &ActorId,
     digest: &arkret_wire::Hash,
-    outcome: &arkret_wire::AuthoritySubmitOutcome,
+    outcome: &arkret_wire::AuthoritySubmitResponseBody,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
-    let value = json!(RealmActorOperationOutcome::Submitted(outcome.clone()));
+    let value = json!(RealmActorRequestStatus::Submitted(outcome.clone()));
     let written = sql_query("INSERT INTO realm_actor_operation_outcomes(realm_id,actor_id,request_digest,requester_actor_id,event_id,outcome,recorded_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(json!(subject)).bind::<Text,_>(digest.as_str())
         .bind::<Jsonb,_>(json!(event.actor_id)).bind::<Text,_>(event.event_id.as_str()).bind::<Jsonb,_>(&value)
@@ -53,11 +53,11 @@ pub(crate) async fn retain_outcome(
 
 pub(crate) async fn read(
     conn: &mut AsyncPgConnection,
-    request: &RealmActorMaterialRequest,
+    request: &RealmActorMaterialRequestBody,
     caller: &RealmActorMaterialCaller,
     governor: &arkret_wire::DidCoreId,
     sign: coland_storage::RealmActorMaterialSigner<'_>,
-) -> PersistenceResult<RealmActorMaterialOutcome> {
+) -> PersistenceResult<RealmActorMaterialResponseBody> {
     request.validate().map_err(|_| hidden())?;
     if arkret_canonical::canonical_json_bytes(request)
         .map_err(unavailable)?
@@ -83,7 +83,7 @@ pub(crate) async fn read(
         return Err(unavailable("Realm is governed elsewhere"));
     }
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-    let outcome_row = if let RealmActorMaterialRequest::Outcome {
+    let outcome_row = if let RealmActorMaterialRequestBody::RequestStatus {
         target_request_digest,
         ..
     } = request
@@ -101,7 +101,7 @@ pub(crate) async fn read(
             creation_ref,
             service_id,
         } => {
-            let RealmActorMaterialRequest::Event { target, .. } = request else {
+            let RealmActorMaterialRequestBody::Event { target, .. } = request else {
                 return Err(hidden());
             };
             if target != creation_ref {
@@ -219,7 +219,7 @@ pub(crate) async fn read(
             (requester, *expires_at)
         }
         RealmActorMaterialCaller::Device { guard, expires_at } => {
-            let RealmActorMaterialRequest::Event { target, .. } = request else {
+            let RealmActorMaterialRequestBody::Event { target, .. } = request else {
                 return Err(hidden());
             };
             if &guard.authority.actor_id != actor || target != &guard.authority.authorization_ref {
@@ -270,7 +270,7 @@ pub(crate) async fn read(
             commit_id: commit.commit_id,
         });
     let (purpose, result) = match request {
-        RealmActorMaterialRequest::Current { selectors, .. } => {
+        RealmActorMaterialRequestBody::Current { selectors, .. } => {
             if head.is_none() {
                 return Err(unavailable("private control head unavailable"));
             }
@@ -292,7 +292,7 @@ pub(crate) async fn read(
                     })?;
 
                     entries.push(RealmActorMaterialCurrentEntry::Present {
-                        row: TypedCurrentRow::Value {
+                        row: CurrentState::Value {
                             selector: selector.clone(),
                             source_stream_ref: source.stream_ref.clone(),
                             revision: arkret_wire::CurrentRevision {
@@ -336,7 +336,7 @@ pub(crate) async fn read(
                 RealmActorMaterial::Current { entries },
             )
         }
-        RealmActorMaterialRequest::Event { target, .. } => {
+        RealmActorMaterialRequestBody::Event { target, .. } => {
             let (event, commit) = crate::realm_actor_control_source::original(conn, target).await?;
             let target_actor = if event.kind == arkret_wire::EventKind::RealmActorCreate {
                 event.payload.get("actor_id")
@@ -361,18 +361,18 @@ pub(crate) async fn read(
                 },
             )
         }
-        RealmActorMaterialRequest::Outcome {
+        RealmActorMaterialRequestBody::RequestStatus {
             target_request_digest,
             ..
         } => {
             let mut outcome = match outcome_row.flatten() {
                 Some(row) => decode(row.value["outcome"].clone())?,
-                None => RealmActorOperationOutcome::Status {
+                None => RealmActorRequestStatus::Status {
                     status: RealmActorOperationStatus::Unknown,
                 },
             };
-            if let RealmActorOperationOutcome::Submitted(
-                arkret_wire::AuthoritySubmitOutcome::Accepted { commit, .. },
+            if let RealmActorRequestStatus::Submitted(
+                arkret_wire::AuthoritySubmitResponseBody::Accepted { commit, .. },
             ) = &outcome
             {
                 let proposal = arkret_wire::CommittedEventRef {
@@ -389,15 +389,15 @@ pub(crate) async fn read(
                 }
             }
             (
-                RealmActorMaterialPurpose::Outcome,
-                RealmActorMaterial::Outcome {
+                RealmActorMaterialPurpose::RequestStatus,
+                RealmActorMaterial::RequestStatus {
                     target_request_digest: target_request_digest.clone(),
-                    outcome,
+                    request_status: outcome,
                 },
             )
         }
     };
-    let unsigned = RealmActorMaterialUnsigned {
+    let unsigned = RealmActorMaterialSignatureInput {
         realm_id: subject.realm_id.clone(),
         actor_id: actor.clone(),
         purpose,
@@ -412,7 +412,7 @@ pub(crate) async fn read(
         control_stream_head: head,
         issued_at: at,
         expires_at,
-        result,
+        material: result,
     };
     let signed = sign(&unsigned)?;
     signed

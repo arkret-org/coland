@@ -117,7 +117,7 @@ fn capability_grant_payload() -> Value {
             "kind": "realm_root",
             "realm_id": TEST_REALM,
             "authority_event_ref": "ak:event:AWBLVNs9HeoGO5lSMOgHAujzyX_u-d_6wfDWF_3lEM2J",
-            "authority_generation": 0
+            "authority_generation": "0"
         }]
     });
     json!({"grant": grant})

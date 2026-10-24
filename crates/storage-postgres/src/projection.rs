@@ -710,7 +710,7 @@ pub(crate) async fn append_projection_batch_in_connection(
 ///
 /// The Event commit unit of work reuses this so business projection and the
 /// authority-signed `RealmCommit` share one transaction: a reader can never see
-/// a committed Event whose current-result projection is missing.
+/// a committed Event whose current-state projection is missing.
 pub(crate) async fn append_projection_event_in_transaction(
     conn: &mut diesel_async::AsyncPgConnection,
     mut record: ProjectionEventRecord,

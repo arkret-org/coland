@@ -241,7 +241,7 @@ All settings can be supplied via environment variables (preferred) or a
 | `COLAND_EXTERNAL_WEBVH_PROVIDER_URL` | unset | Optional external `did:webvh` provider; any standalone registrar implementing the `did:webvh` provider surface |
 | `COLAND_EXTERNAL_WEBVH_REGISTRATION_BEARER` / `_FILE` | unset | When set with the external Provider URL, stores Coland's own service identity there (class A); no first-provisioning flag or configured DID is used |
 | `COLAND_DEFAULT_WEBVH_PROVIDER_ID` | unset | Optional coauth default provider id: `coland.embedded` or `external.webvh` |
-| `COLAND_ACCOUNT_AUTHORITY_URL` | unset | Canonical public Account Authority base URL advertised at `/_arkret/describe.auth_metadata.account_authority`; internal bearer targets must use this exact origin |
+| `COLAND_ACCOUNT_AUTHORITY_URL` | unset | Canonical public Account Authority base URL advertised at `/_arkret/describe.authentication_metadata.account_authority`; internal bearer targets must use this exact origin |
 | `COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN` | unset | Explicit source trust domain of the configured Account Authority; required to register the unsigned §2.2.3 internal channel and never derived from its URL |
 | `COLAND_SESSION_GRANT_INTROSPECTION_URL` | unset | Exact `/_coauth/internal/session-grants/introspect` endpoint used for `ak.session.grant + DPoP`; when the internal channel is registered it must match the Account Authority scheme, host and effective port and contain no credentials/query/fragment |
 | `COLAND_AUTH_SESSION_LOGOUT_URL` | unset | Exact Account Authority process S2S `/_coauth/internal/auth-sessions/logout` endpoint; never derived from the introspection URL and subject to the same origin/URL restrictions |

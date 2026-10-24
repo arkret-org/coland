@@ -194,10 +194,10 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
     async fn retain_realm_claim_source_result(
         &self,
         request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
-        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome,
+        result: &arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody,
         histories: &[arkret_models_identity::AuthenticatedServiceResolution],
         governor: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome> {
+    ) -> PersistenceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async |conn| {
             Ok(

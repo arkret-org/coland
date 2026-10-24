@@ -41,7 +41,7 @@ fn create_poll(state: &mut ProjectionState, hlc: &ServerHlc) {
     create_poll_with_limit(state, hlc, 1);
 }
 
-fn create_poll_with_limit(state: &mut ProjectionState, hlc: &ServerHlc, max_selections: u32) {
+fn create_poll_with_limit(state: &mut ProjectionState, hlc: &ServerHlc, max_selection_count: u32) {
     if !state.strands.contains_key(STRAND_A) {
         seed_strand(state, STRAND_A, None);
     }
@@ -57,7 +57,7 @@ fn create_poll_with_limit(state: &mut ProjectionState, hlc: &ServerHlc, max_sele
                 "body": "Choose",
                 "poll": {
                     "kind": "disclosed",
-                    "max_selections": max_selections,
+                    "max_selection_count": max_selection_count,
                     "answers": [
                         {"id": "yes", "text": {"kind": "ak.content.text", "body": "Yes"}},
                         {"id": "no", "text": {"kind": "ak.content.text", "body": "No"}}

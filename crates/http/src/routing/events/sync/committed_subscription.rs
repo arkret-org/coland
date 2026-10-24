@@ -5,7 +5,7 @@ use arkret_models_collaboration::sync_frames::committed_event_subscribe::{
     CommittedEventSubscribeFramePayload as Payload,
 };
 use arkret_wire::{
-    CommitStreamHead, CommitStreamRef, RealmStreamRow, StreamScanDirection, StreamScanRequest,
+    CommitStreamHead, CommitStreamRef, RealmStreamRow, StreamScanDirection, StreamScanRequestBody,
 };
 use coland_http::error::AppError;
 
@@ -388,7 +388,7 @@ async fn response(
             let mut more = false;
             for index in 0..progress.len() {
                 if progress[index].head.stream_position + 1 >= current_rows[index].next_position { continue; }
-                let request = StreamScanRequest { realm_id:progress[index].stream_ref.realm_id().clone(),
+                let request = StreamScanRequestBody { realm_id:progress[index].stream_ref.realm_id().clone(),
                     stream_ref:progress[index].stream_ref.clone(),direction:StreamScanDirection::After(Some(progress[index].head.stream_position)),limit:PAGE_ITEMS };
                 let page = match state.authority().scan_stream_for_account(account,request.clone()).await {
                     Ok(coland_storage::AccountStreamScan::Page(page)) if page.validate_for_request(&request).is_ok()
@@ -537,7 +537,7 @@ mod tests {
                 account_id: account.clone(),
                 localpart: "stream-reader".to_owned(),
                 display_name: None,
-                bio: None,
+                biography: None,
                 avatar_blob_ref: None,
                 created_at: Utc::now(),
             })

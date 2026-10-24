@@ -91,7 +91,7 @@ struct AcceptedGroup {
 pub(crate) async fn tree_authorized_in_connection(
     conn: &mut crate::AsyncPgConnection,
     cut: &crate::sidecar_authority_cut::SidecarParticipantAuthorityCut,
-    current: &arkret_wire::MlsGroupCurrent,
+    current: &arkret_wire::MlsGroupValue,
     public_state: &[u8],
     candidate: Option<&coland_storage::AuthorityCommitTransaction>,
 ) -> coland_storage::PersistenceResult<bool> {
@@ -179,8 +179,8 @@ pub(crate) async fn tree_authorized_in_connection(
                     #[diesel(sql_type = Text)]
                     agent_key_id: String,
                 }
-                let keys = diesel::sql_query("SELECT k.value,k.agent_key_id FROM agent_key_current_results k \
-                    JOIN agent_status_current_results s ON s.realm_id=k.realm_id AND s.agent_id=k.agent_id \
+                let keys = diesel::sql_query("SELECT k.value,k.agent_key_id FROM agent_key_current_states k \
+                    JOIN agent_status_current_states s ON s.realm_id=k.realm_id AND s.agent_id=k.agent_id \
                     JOIN realm_commits c ON c.realm_id=k.realm_id AND c.commit_id=k.current_commit_id AND c.stream_position=k.current_stream_position \
                     JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
                     WHERE k.agent_id=$1 AND s.actor_id=$2::jsonb")
@@ -231,7 +231,7 @@ pub(crate) async fn tree_authorized_in_connection(
                             payload: serde_json::Value,
                         }
                         let source = diesel::sql_query("SELECT e.envelope->'payload' AS payload FROM canonical_events e \
-                            JOIN realm_commits c ON c.event_pk=e.pk JOIN agent_status_current_results s ON s.realm_id=c.realm_id \
+                            JOIN realm_commits c ON c.event_pk=e.pk JOIN agent_status_current_states s ON s.realm_id=c.realm_id \
                             WHERE e.envelope->>'event_id'=$1 AND e.state='committed' AND e.kind=$3 \
                             AND e.envelope->'actor_id'=$2::jsonb AND s.actor_id=$2::jsonb")
                             .bind::<Text,_>(authorization.as_str()).bind::<Jsonb,_>(serde_json::to_value(&leaf.actor_id).map_err(PersistenceError::database)?)
@@ -252,7 +252,7 @@ pub(crate) async fn tree_authorized_in_connection(
 
 async fn leaf_origin_in_connection(
     conn: &mut crate::AsyncPgConnection,
-    current: &arkret_wire::MlsGroupCurrent,
+    current: &arkret_wire::MlsGroupValue,
     leaf: &arkret_mls::MlsPublicEndpointLeaf,
     candidate: Option<&coland_storage::AuthorityCommitTransaction>,
 ) -> coland_storage::PersistenceResult<Option<(MlsWelcomeRecipientEndpoint, EventId)>> {
@@ -269,7 +269,7 @@ async fn leaf_origin_in_connection(
                 .map_err(PersistenceError::database)?;
             if leaf.leaf_index == 0
                 && leaf.actor_id == candidate.event.actor_id
-                && leaf.signature_key == payload.creator_leaf_authority.leaf_signature_key_b64u
+                && leaf.signature_key == payload.creator_leaf_authority.leaf_signature_key_base64url
             {
                 return Ok(Some((
                     payload.creator_leaf_authority.endpoint,
@@ -317,7 +317,7 @@ async fn leaf_origin_in_connection(
                     && welcome.delivery.recipient_actor_id == leaf.actor_id
                     && welcome.delivery.recipient_endpoint == a.endpoint
                     && a.actor_id == leaf.actor_id
-                    && a.leaf_signature_key_b64u == leaf.signature_key
+                    && a.leaf_signature_key_base64url == leaf.signature_key
                 {
                     return Ok(Some((a.endpoint, a.authorization_event_ref)));
                 }
@@ -330,7 +330,7 @@ async fn leaf_origin_in_connection(
         #[diesel(sql_type = Jsonb)]
         request_json: serde_json::Value,
     }
-    let scope_key = crate::mls_group_current_results::scope_key(&current.effective_scope)?;
+    let scope_key = crate::mls_group_current_states::scope_key(&current.effective_scope)?;
     let origin = diesel::sql_query("SELECT a.request_json FROM mls_consumed_proposal_provenance p \
         JOIN mls_add_authority_attestations a ON a.scope_key=p.scope_key AND a.commit_event_ref=p.commit_event_ref AND a.consumed_proposal_ordinal=p.consumed_proposal_ordinal \
         JOIN canonical_events e ON e.envelope->>'event_id'=p.commit_event_ref AND e.state='committed' \
@@ -349,7 +349,7 @@ async fn leaf_origin_in_connection(
         return Ok((a.effective_scope == current.effective_scope
             && a.genesis_event_ref == current.genesis_event_ref
             && a.actor_id == leaf.actor_id
-            && a.leaf_signature_key_b64u == leaf.signature_key)
+            && a.leaf_signature_key_base64url == leaf.signature_key)
             .then_some((a.endpoint, a.authorization_event_ref)));
     }
     let genesis = diesel::sql_query("SELECT e.envelope AS payload FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk \
@@ -368,7 +368,7 @@ async fn leaf_origin_in_connection(
         .map_err(PersistenceError::database)?;
     Ok((leaf.leaf_index == 0
         && event.actor_id == leaf.actor_id
-        && payload.creator_leaf_authority.leaf_signature_key_b64u == leaf.signature_key)
+        && payload.creator_leaf_authority.leaf_signature_key_base64url == leaf.signature_key)
         .then_some((
             payload.creator_leaf_authority.endpoint,
             payload.creator_leaf_authority.authorization_event_ref,
@@ -378,7 +378,7 @@ async fn leaf_origin_in_connection(
 pub(crate) async fn controller_device_ready_in_connection(
     conn: &mut crate::AsyncPgConnection,
     cut: &crate::sidecar_authority_cut::SidecarParticipantAuthorityCut,
-    current: &arkret_wire::MlsGroupCurrent,
+    current: &arkret_wire::MlsGroupValue,
     device: &arkret_wire::DeviceId,
 ) -> coland_storage::PersistenceResult<bool> {
     use coland_storage::PersistenceError;
@@ -420,8 +420,8 @@ pub(crate) async fn controller_device_ready_in_connection(
     if current.effective_scope != scope {
         return Ok(false);
     }
-    let scope_key = crate::mls_group_current_results::scope_key(&scope)?;
-    let group = diesel::sql_query("SELECT g.public_state,e.envelope,genesis.envelope AS genesis FROM mls_group_current_results g \
+    let scope_key = crate::mls_group_current_states::scope_key(&scope)?;
+    let group = diesel::sql_query("SELECT g.public_state,e.envelope,genesis.envelope AS genesis FROM mls_group_current_states g \
         JOIN realm_commits c ON c.commit_id=g.current_commit_id AND c.realm_id=g.realm_id AND c.stream_position=g.current_stream_position \
         JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
         JOIN canonical_events genesis ON genesis.envelope->>'event_id'=g.value->>'genesis_event_ref' AND genesis.state='committed' \
@@ -521,11 +521,11 @@ pub(crate) async fn consumed_endpoint_in_connection(
     use arkret_models_crypto::http_bodies::{KeyPackageConsumeReceipt, RecipientMlsDurableSigner};
     use coland_storage::PersistenceError;
     let invalid = |message: &str| PersistenceError::SchemaViolation(message.to_owned());
-    let scope_key = crate::mls_group_current_results::scope_key(scope)?;
+    let scope_key = crate::mls_group_current_states::scope_key(scope)?;
     let group = scope
         .canonical_mls_group_id()
         .map_err(PersistenceError::database)?;
-    let public = diesel::sql_query("SELECT public_state FROM mls_group_current_results WHERE scope_key=$1 AND (value->>'epoch')::bigint=$2")
+    let public = diesel::sql_query("SELECT public_state FROM mls_group_current_states WHERE scope_key=$1 AND (value->>'epoch')::bigint=$2")
         .bind::<Text,_>(&scope_key).bind::<diesel::sql_types::BigInt,_>(i64::try_from(current_epoch).map_err(PersistenceError::database)?)
         .get_result::<PublicState>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     let Some(public) = public else {
@@ -575,7 +575,7 @@ pub(crate) async fn consumed_endpoint_in_connection(
             AND attestor.scope_key=w.scope_key AND attestor.commit_event_ref=w.commit_event_ref AND attestor.attestor_station_id=w.recipient_station_id \
         JOIN canonical_events e ON e.envelope->>'event_id'=w.commit_event_ref AND e.state='committed' \
         JOIN realm_commits c ON c.event_pk=e.pk \
-        JOIN mls_group_current_results g ON g.scope_key=w.scope_key \
+        JOIN mls_group_current_states g ON g.scope_key=w.scope_key \
         WHERE k.actor_id=$1 AND a.principal_id=$9 AND a.station_id=$3 AND w.scope_key=$2 AND w.recipient_station_id=$3 \
         AND p.state='consumed' AND p.consume_receipt IS NOT NULL \
         AND b.welcome_digest=w.delivery_digest AND c.stream_ref=jsonb_build_object('kind','sidecar','realm_id',w.realm_id,'sidecar_id',$4) \

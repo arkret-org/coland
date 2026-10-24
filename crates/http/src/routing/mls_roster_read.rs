@@ -1,8 +1,8 @@
 //! Member-authorized signed MLS roster reads through Account and governance Stations.
 
 use arkret_models_collaboration::mls_roster_authority::{
-    MlsMemberRosterAuthorityReadRequestBody, MlsRosterAuthorityReadOutcome,
-    MlsRosterAuthorityReadRequestBody,
+    MlsMemberRosterAuthorityReadRequestBody, MlsRosterAuthorityReadRequestBody,
+    MlsRosterAuthorityReadResponseBody,
 };
 use arkret_wire::DidCoreId;
 use coland_services::authority_commit::{
@@ -42,7 +42,7 @@ fn internal_read_error(_: coland_services::ServiceError) -> AppError {
     AppError::internal("MLS roster authority read unavailable")
 }
 
-fn read_page(outcome: Read) -> Result<MlsRosterAuthorityReadOutcome, AppError> {
+fn read_page(outcome: Read) -> Result<MlsRosterAuthorityReadResponseBody, AppError> {
     match outcome {
         Read::NotFound => Err(not_found()),
         Read::CursorInvalid => Err(cursor_invalid()),
@@ -55,7 +55,7 @@ async fn governance_page(
     state: &AppState,
     request: &MlsRosterAuthorityReadRequestBody,
     source_peer: Option<&DidCoreId>,
-) -> Result<MlsRosterAuthorityReadOutcome, AppError> {
+) -> Result<MlsRosterAuthorityReadResponseBody, AppError> {
     let issuer = state.service_core_id();
     let head = match state
         .authority_commits()
@@ -89,14 +89,14 @@ async fn governance_page(
     read_page(outcome)
 }
 
-fn json_page(page: MlsRosterAuthorityReadOutcome) -> JsonResult<serde_json::Value> {
+fn json_page(page: MlsRosterAuthorityReadResponseBody) -> JsonResult<serde_json::Value> {
     let value = serde_json::to_value(page)
         .map_err(|_| AppError::internal("MLS roster page serialization unavailable"))?;
     json_ok(value)
 }
 
 fn self_json_page(
-    page: MlsRosterAuthorityReadOutcome,
+    page: MlsRosterAuthorityReadResponseBody,
     request: &MlsRosterAuthorityReadRequestBody,
     authority: &DidCoreId,
     resolution: &arkret_models_identity::AuthenticatedServiceResolution,
@@ -104,18 +104,18 @@ fn self_json_page(
 ) -> GuardedJsonResult<serde_json::Value> {
     for record in &page.records {
         if let arkret_models_collaboration::mls_roster_authority::MlsRosterRecord::Add {
-            proposal_wire_b64u,
+            proposal_wire_base64url,
             attestation,
             ..
         } = record
         {
             let proposal = arkret_mls::verify_add_proposal_leaf(
-                &arkret_canonical::base64url_decode(proposal_wire_b64u.as_str())
+                &arkret_canonical::base64url_decode(proposal_wire_base64url.as_str())
                     .map_err(|_| unavailable())?,
             )
             .map_err(|_| unavailable())?;
             if proposal.actor_id != attestation.actor_id
-                || proposal.leaf_signature_key != attestation.leaf_signature_key_b64u
+                || proposal.leaf_signature_key != attestation.leaf_signature_key_base64url
             {
                 return Err(unavailable());
             }
@@ -285,7 +285,7 @@ pub(super) async fn resolve_self_mls_roster_authority(
         200 => {}
         _ => return Err(unavailable()),
     }
-    let page: MlsRosterAuthorityReadOutcome =
+    let page: MlsRosterAuthorityReadResponseBody =
         serde_json::from_slice(&response.body).map_err(|_| unavailable())?;
     let resolution = crate::routing::identity::agents::evidence::fetch_service_resolution(
         state,

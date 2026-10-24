@@ -62,12 +62,12 @@ async fn fixture() -> Fixture {
         "account_id": account, "version": 1, "supersedes_id": null,
         "trust_domain": "ak:trust_domain:fixture.example",
         "issued_at": arkret_canonical::format_timestamp_canonical(now),
-        "auth_data": {"verification_method": pcr.history.device_verification_method,
+        "signature_proof": {"verification_method": pcr.history.device_verification_method,
                       "signature_algorithm": "Ed25519", "signature": "AA"},
         "methods": [{"kind": "did_root"}]
     }))
     .unwrap();
-    policy.auth_data.signature = signature(
+    policy.signature_proof.signature = signature(
         pcr.history.founding_device_signing_seed,
         &recovery_policy_signature_transcript_bytes(&policy).unwrap(),
     );
@@ -297,11 +297,11 @@ async fn fixture() -> Fixture {
         recovery_session_snapshot_digest: hash(&transcript),
         proof_digest: hash(&proof),
         previous_model_generation_ref: 1,
-        result_model_generation_ref: 2,
+        new_model_generation_ref: 2,
         reanchor_unit: unit.clone(),
         reanchor_commit_intent: intent.clone(),
     };
-    let request = RecoveryTransactionCreateRequest::new(
+    let request = RecoveryTransactionCreateRequestBody::new(
         TransactionId::new(format!("ak:transaction:{}", uuid::Uuid::now_v7())).unwrap(),
         account.clone(),
         expires,
@@ -309,14 +309,14 @@ async fn fixture() -> Fixture {
             recovery_session_id: session_id.clone(),
             replacement_device_id: device_id.clone(),
             previous_model_generation_ref: 1,
-            result_model_generation_ref: 2,
+            new_model_generation_ref: 2,
             terminal_receipt_id: receipt_id.clone(),
             reanchor_unit: unit,
             reanchor_commit_intent: intent,
         },
     )
     .unwrap();
-    let (resource, canonical_request) = SecurityTransactionCreateRequest::Recovery(request)
+    let (resource, canonical_request) = SecurityTransactionCreateRequestBody::Recovery(request)
         .into_initial_resource(SecurityTransactionPreparedPlan::Recovery(plan), now)
         .unwrap();
     let initial = SecurityTransactionRecord {
@@ -370,7 +370,7 @@ async fn fixture() -> Fixture {
         identity_model: RecoveryIdentityModel::PcrPolicy,
         recovery_authority_kind: RecoveryAuthorityKind::PcrPolicy,
         previous_model_generation_ref: 1,
-        result_model_generation_ref: 2,
+        new_model_generation_ref: 2,
         authorization_event_id: commits[1].event.event_id.clone(),
         reanchor_event_id: commits[0].event.event_id.clone(),
         proof_summary: RecoveryProofSummary {
@@ -385,14 +385,14 @@ async fn fixture() -> Fixture {
         outcome_reason_code: None,
         started_at: now,
         completed_at: now,
-        auth_data: RecoveryReceiptAuthData {
+        signature_proof: RecoveryReceiptSignatureProof {
             verification_method: replacement_method.clone(),
             signature_algorithm: "Ed25519".to_owned(),
             signature: Base64UrlString::new("AA").unwrap(),
         },
         extra: Default::default(),
     };
-    receipt.auth_data.signature = signature(
+    receipt.signature_proof.signature = signature(
         replacement_seed,
         &receipt.signature_transcript_bytes().unwrap(),
     );
@@ -406,17 +406,17 @@ async fn fixture() -> Fixture {
         transaction_request_digest: initial.resource.request_digest.clone(),
         prepared_plan_digest: initial.resource.prepared_plan_digest.clone(),
         artifact: ClientStepAttestationArtifact::Recovery(terminal.clone()),
-        auth_data: ClientStepAttestationAuthData {
+        signature_proof: ClientStepAttestationSignatureProof {
             verification_method: replacement_method,
             signature_algorithm: "Ed25519".to_owned(),
             signature: Base64UrlString::new("AA").unwrap(),
         },
     };
-    client_attestation.auth_data.signature = signature(
+    client_attestation.signature_proof.signature = signature(
         replacement_seed,
         &client_attestation.signing_bytes().unwrap(),
     );
-    let terminal_request = SecurityTransactionContinueRequest {
+    let terminal_request = SecurityTransactionContinueRequestBody {
         request_digest: initial.resource.request_digest.clone(),
         prepared_plan_digest: initial.resource.prepared_plan_digest.clone(),
         expected_accepted_step_count: 0,
@@ -435,7 +435,7 @@ async fn fixture() -> Fixture {
             terminal_receipt_id: receipt_id.clone(),
             terminal_receipt_digest: hash(&receipt),
             replacement_device_id: device_id,
-            result_model_generation_ref: 2,
+            new_model_generation_ref: 2,
             completed_at: now,
             reanchor_event_ref: committed_ref(0),
             device_authorization_event_ref: committed_ref(1),
@@ -501,10 +501,10 @@ async fn footprint(fixture: &Fixture) -> Value {
         "realm_commit_event_kinds",
         "realm_authorities",
         "recovery_policies",
-        "policy_current_results",
+        "policy_current_states",
         "devices",
-        "pcr_device_generation_current_results",
-        "pcr_device_authorization_current_results",
+        "pcr_device_generation_current_states",
+        "pcr_device_authorization_current_states",
         "account_global_versions",
         "account_global_clock",
         "account_global_channel_clocks",
@@ -629,9 +629,9 @@ async fn recovery_terminal_unit_fences_old_device_and_replays_after_response_los
     let mut changed = fixture.write.clone();
     // Different canonical input cannot reuse the first outcome, even when
     // its outer request remains structurally well formed.
-    let mut request: SecurityTransactionContinueRequest =
+    let mut request: SecurityTransactionContinueRequestBody =
         serde_json::from_slice(&fixture.write.step_outcome.canonical_request).unwrap();
-    request.client_attestation.auth_data.signature = Base64UrlString::new("AQ").unwrap();
+    request.client_attestation.signature_proof.signature = Base64UrlString::new("AQ").unwrap();
     changed.step_outcome.canonical_request =
         arkret_canonical::canonical_json_bytes(&request).unwrap();
     assert!(matches!(
@@ -716,7 +716,7 @@ async fn recovery_terminal_metadata_must_bind_the_exact_receipt_and_response() {
             0 => write.step_outcome.response = json!({"unrelated":"response"}),
             1 => write.step_outcome.participant_outcome = None,
             2 => {
-                write.step_outcome.participant_outcome.as_mut().unwrap()["recovery_receipt"]["auth_data"]
+                write.step_outcome.participant_outcome.as_mut().unwrap()["recovery_receipt"]["signature_proof"]
                     ["signature"] = json!("AQ")
             }
             3 => {
@@ -732,17 +732,19 @@ async fn recovery_terminal_metadata_must_bind_the_exact_receipt_and_response() {
                     serde_json::to_value(&write.transaction.resource).unwrap();
             }
             4 => {
-                let mut request: SecurityTransactionContinueRequest =
+                let mut request: SecurityTransactionContinueRequestBody =
                     serde_json::from_slice(&write.step_outcome.canonical_request).unwrap();
                 request.expected_accepted_step_count = 1;
                 write.step_outcome.canonical_request =
                     arkret_canonical::canonical_json_bytes(&request).unwrap();
             }
             5 => {
-                let mut request: SecurityTransactionContinueRequest =
+                let mut request: SecurityTransactionContinueRequestBody =
                     serde_json::from_slice(&write.step_outcome.canonical_request).unwrap();
-                request.client_attestation.auth_data.verification_method =
-                    DidUrl::new("did:web:another.example#device").unwrap();
+                request
+                    .client_attestation
+                    .signature_proof
+                    .verification_method = DidUrl::new("did:web:another.example#device").unwrap();
                 write.step_outcome.canonical_request =
                     arkret_canonical::canonical_json_bytes(&request).unwrap();
             }
@@ -789,7 +791,7 @@ async fn policy_revocation_write(fixture: &mut Fixture) -> RecoveryPolicyPublica
     revoke.policy_id = PolicyId::new(format!("ak:policy:{}", uuid::Uuid::now_v7())).unwrap();
     revoke.version = 2;
     revoke.methods.clear();
-    revoke.auth_data.signature = signature(
+    revoke.signature_proof.signature = signature(
         fixture.pcr.history.founding_device_signing_seed,
         &recovery_policy_signature_transcript_bytes(&revoke).unwrap(),
     );
@@ -858,7 +860,7 @@ async fn policy_revocation_boundaries_roll_back_and_response_loss_replays_withou
         ("canonical_events", "NEW.kind='ak.policy.set'"),
         ("realm_commits", "TRUE"),
         ("realm_commit_event_kinds", "TRUE"),
-        ("policy_current_results", "TRUE"),
+        ("policy_current_states", "TRUE"),
         ("recovery_policies", "TRUE"),
         ("recovery_sessions", "NEW.state='rejected'"),
     ] {
@@ -953,7 +955,7 @@ async fn every_recovery_durable_boundary_rolls_back_both_commits_and_terminal_le
             "realm_commit_event_kinds",
             "NEW.kind='ak.device.reanchor'".to_owned(),
         ),
-        ("pcr_device_generation_current_results", "TRUE".to_owned()),
+        ("pcr_device_generation_current_states", "TRUE".to_owned()),
         (
             "canonical_events",
             "NEW.kind='ak.device.authorize'".to_owned(),
@@ -963,10 +965,7 @@ async fn every_recovery_durable_boundary_rolls_back_both_commits_and_terminal_le
             "realm_commit_event_kinds",
             "NEW.kind='ak.device.authorize'".to_owned(),
         ),
-        (
-            "pcr_device_authorization_current_results",
-            "TRUE".to_owned(),
-        ),
+        ("pcr_device_authorization_current_states", "TRUE".to_owned()),
         ("account_global_versions", "TRUE".to_owned()),
         ("account_global_clock", "TRUE".to_owned()),
         ("account_global_channel_clocks", "TRUE".to_owned()),

@@ -143,7 +143,7 @@ impl Fixture {
             )
             .await;
         assert_eq!(status, StatusCode::CREATED, "install commit: {outcome}");
-        let outcome: AppletInstallOutcome = serde_json::from_value(outcome).unwrap();
+        let outcome: AppletInstallResponseBody = serde_json::from_value(outcome).unwrap();
         WidgetInstalled {
             _native: native,
             package,
@@ -424,7 +424,7 @@ pub(super) async fn run_widget_inventory() {
 struct WidgetInstalled {
     _native: realm_native_fixture::NativeService,
     package: AppletPackage,
-    outcome: AppletInstallOutcome,
+    outcome: AppletInstallResponseBody,
     body: Value,
     key: String,
 }
@@ -434,7 +434,8 @@ impl Fixture {
         &'a self,
         install: &'a WidgetInstalled,
         revoke_mode: arkret_wire::AppletRevokeMode,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppletRevokeOutcome> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppletRevokeResponseBody> + Send + 'a>>
+    {
         Box::pin(async move {
             let reason = arkret_wire::ReasonCode::from_wire("applet_revoked");
             let preview_body = serde_json::to_value(AppletRevokePreviewRequestBody {
@@ -461,7 +462,7 @@ impl Fixture {
                 .await;
             assert_eq!(status, StatusCode::OK, "revoke preview: {preview}");
 
-            let preview: AppletRevokePreviewOutcome = serde_json::from_value(preview).unwrap();
+            let preview: AppletRevokePreviewResponseBody = serde_json::from_value(preview).unwrap();
             let revoke_plan_digest =
                 Hash::new(arkret_canonical::canonical_sha256(&preview.revoke_plan).unwrap())
                     .unwrap();
@@ -511,7 +512,7 @@ impl Fixture {
                 )
                 .await;
             assert_eq!(status, StatusCode::OK, "accepted Applet revoke: {outcome}");
-            let outcome: AppletRevokeOutcome = serde_json::from_value(outcome).unwrap();
+            let outcome: AppletRevokeResponseBody = serde_json::from_value(outcome).unwrap();
             assert_eq!(
                 outcome.status,
                 AppletRevokeSagaStatus::Complete,
@@ -535,8 +536,8 @@ async fn widget_authority_snapshot(pool: &PgPool) -> Value {
     for (key, table) in [
         ("events", "canonical_events"),
         ("commits", "realm_commits"),
-        ("profiles", "actor_profile_current_results"),
-        ("grants", "capability_grant_current_results"),
+        ("profiles", "actor_profile_current_states"),
+        ("grants", "capability_grant_current_states"),
         ("managed", "applet_managed_identities"),
         ("claims", "realm_actor_creations"),
         ("namespace_claims", "applet_namespace_claims"),

@@ -103,7 +103,7 @@ async fn storage_encryption_is_required_and_ciphertext_cannot_be_presigned_body(
     let mut signed_fields = receipt.clone();
     signed_fields.as_object_mut().unwrap().remove("signature");
     let signature_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(receipt["signature"]["sig"].as_str().unwrap())
+        .decode(receipt["signature"]["signature"].as_str().unwrap())
         .unwrap();
     let signature = ed25519_dalek::Signature::from_slice(&signature_bytes).unwrap();
     state

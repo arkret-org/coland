@@ -431,8 +431,8 @@ pub fn handle_claim_evidence_valid(
         return false;
     }
     if handle_claim.status != HandleClaimStatus::Verified
-        || now < handle_claim.as_of
-        || now >= handle_claim.fresh_until
+        || now < handle_claim.evaluated_at
+        || now >= handle_claim.cache_expires_at
         || resolved_by.is_some_and(|resolver| resolver != &handle_claim.verifier_id)
     {
         return false;

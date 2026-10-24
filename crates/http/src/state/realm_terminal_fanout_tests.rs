@@ -2,9 +2,9 @@
 //! Only the already-authorized opening anchor is installed as a precondition.
 //! The checked-in outbox CA is explicitly trusted; TLS verification stays enabled.
 use arkret_models_collaboration::authority_commit::{
-    CommittedEventSubmission, CommittedReplicationBranch, PeerAuthoritySubmitOutcome,
-    PeerAuthoritySubmitRequest, PeerCommittedReplicationOutcomeRecord,
-    PeerCommittedReplicationRequest,
+    CommittedEventReplicationOutcome, CommittedEventSubmission, CommittedReplicationBranch,
+    PeerAuthoritySubmitRequestBody, PeerAuthoritySubmitResponseBody,
+    PeerCommittedReplicationRequestBody,
 };
 use diesel_async::RunQueryDsl as _;
 use salvo::conn::{Acceptor as _, Listener as _};
@@ -174,7 +174,7 @@ async fn admitted_owner(
         owner.unit.submission.events[index] = EventAdmissionSubmission::new(tx.event.clone());
     }
     owner.unit.exact_request_body = serde_json::to_vec(
-        &SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(owner.unit.submission.clone()),
+        &SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(owner.unit.submission.clone()),
     )
     .unwrap();
     Box::pin(owner.admit(&source.pool)).await;
@@ -281,16 +281,17 @@ fn owner_candidate(
 
 fn replication_body(request: &coland_storage::EventCommitRequest) -> Vec<u8> {
     let tx = &request.authority_commit;
-    let body = PeerAuthoritySubmitRequest::CommittedReplication(PeerCommittedReplicationRequest {
-        branch: CommittedReplicationBranch::CommittedReplication,
-        replications: vec![CommittedEventSubmission::from_source_submission(
-            &EventAdmissionSubmission::new(tx.event.clone()),
-            tx.commit.clone(),
-            tx.producer_signer_fact.clone(),
-            None,
-            None,
-        )],
-    });
+    let body =
+        PeerAuthoritySubmitRequestBody::CommittedReplication(PeerCommittedReplicationRequestBody {
+            branch: CommittedReplicationBranch::CommittedReplication,
+            replications: vec![CommittedEventSubmission::from_source_submission(
+                &EventAdmissionSubmission::new(tx.event.clone()),
+                tx.commit.clone(),
+                tx.producer_signer_fact.clone(),
+                None,
+                None,
+            )],
+        });
     body.validate().unwrap();
     arkret_canonical::canonical_json_bytes(&body).unwrap()
 }
@@ -365,12 +366,12 @@ async fn send_replication(
 fn assert_replication_outcome(
     value: serde_json::Value,
     body: &[u8],
-    expected: PeerCommittedReplicationOutcomeRecord,
+    expected: CommittedEventReplicationOutcome,
 ) {
-    let request: PeerAuthoritySubmitRequest = serde_json::from_slice(body).unwrap();
-    let outcome: PeerAuthoritySubmitOutcome = serde_json::from_value(value).unwrap();
+    let request: PeerAuthoritySubmitRequestBody = serde_json::from_slice(body).unwrap();
+    let outcome: PeerAuthoritySubmitResponseBody = serde_json::from_value(value).unwrap();
     outcome.validate_for_request(&request).unwrap();
-    let PeerAuthoritySubmitOutcome::CommittedReplication(outcome) = outcome else {
+    let PeerAuthoritySubmitResponseBody::CommittedReplication(outcome) = outcome else {
         panic!("wrong response branch")
     };
     assert_eq!(outcome.replication_outcomes, vec![expected]);
@@ -590,8 +591,8 @@ async fn joined_holder_terminal_real_fanout_signed_http_and_atomic_fence() {
     .await;
 
     // An installation failure cannot persist the canonical terminal without its fence.
-    execute(&receiver.pool, "CREATE OR REPLACE FUNCTION reject_terminal_fence() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.result_family='realm_tombstone' THEN RAISE EXCEPTION 'terminal fence rollback'; END IF; RETURN NEW; END $$").await;
-    execute(&receiver.pool, "CREATE TRIGGER reject_terminal_fence BEFORE INSERT OR UPDATE ON realm_bootstrap_current_results FOR EACH ROW EXECUTE FUNCTION reject_terminal_fence()").await;
+    execute(&receiver.pool, "CREATE OR REPLACE FUNCTION reject_terminal_fence() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state_family='realm_tombstone' THEN RAISE EXCEPTION 'terminal fence rollback'; END IF; RETURN NEW; END $$").await;
+    execute(&receiver.pool, "CREATE TRIGGER reject_terminal_fence BEFORE INSERT OR UPDATE ON realm_bootstrap_current_states FOR EACH ROW EXECUTE FUNCTION reject_terminal_fence()").await;
     let before = terminal_persistent_rows(&receiver.pool).await;
     Box::pin(dispatcher.run_one_pass()).await.unwrap();
     assert_eq!(terminal_persistent_rows(&receiver.pool).await, before);
@@ -602,7 +603,7 @@ async fn joined_holder_terminal_real_fanout_signed_http_and_atomic_fence() {
     assert_eq!(retry["payload_json"], intent["payload_json"]);
     execute(
         &receiver.pool,
-        "DROP TRIGGER reject_terminal_fence ON realm_bootstrap_current_results",
+        "DROP TRIGGER reject_terminal_fence ON realm_bootstrap_current_states",
     )
     .await;
     execute(&receiver.pool, "DROP FUNCTION reject_terminal_fence()").await;
@@ -635,11 +636,11 @@ async fn joined_holder_terminal_real_fanout_signed_http_and_atomic_fence() {
     );
     let before = terminal_persistent_rows(&receiver.pool).await;
     assert!(
-        before["realm_bootstrap_current_results"]
+        before["realm_bootstrap_current_states"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|row| row["result_family"] == "realm_tombstone"
+            .any(|row| row["state_family"] == "realm_tombstone"
                 && row["current_commit_id"] == terminal.authority_commit.commit.commit_id.as_str())
     );
     assert!(
@@ -661,7 +662,7 @@ async fn joined_holder_terminal_real_fanout_signed_http_and_atomic_fence() {
     assert_replication_outcome(
         replay,
         &body,
-        PeerCommittedReplicationOutcomeRecord::Duplicate {},
+        CommittedEventReplicationOutcome::Duplicate {},
     );
     assert_eq!(terminal_persistent_rows(&receiver.pool).await, before);
     let (status, problem) = Box::pin(send_replication(
@@ -708,7 +709,7 @@ async fn joined_holder_terminal_real_fanout_signed_http_and_atomic_fence() {
     assert_replication_outcome(
         rejected,
         &replication_body(&fresh),
-        PeerCommittedReplicationOutcomeRecord::Rejected {
+        CommittedEventReplicationOutcome::Rejected {
             reason_code: "failed_precondition".into(),
         },
     );

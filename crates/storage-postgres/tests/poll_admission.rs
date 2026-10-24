@@ -18,13 +18,13 @@ struct Footprint {
 
 async fn footprint(pool: &PgPool) -> Value {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT count(*) FROM canonical_events), 'commits',(SELECT count(*) FROM realm_commits), 'messages',(SELECT count(*) FROM message_revision_current_results), 'votes',(SELECT count(*) FROM poll_response_inputs), 'outbox',(SELECT count(*) FROM federation_outbox)) AS value")
+    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT count(*) FROM canonical_events), 'commits',(SELECT count(*) FROM realm_commits), 'messages',(SELECT count(*) FROM message_revision_current_states), 'votes',(SELECT count(*) FROM poll_response_inputs), 'outbox',(SELECT count(*) FROM federation_outbox)) AS value")
         .get_result::<Footprint>(&mut *conn).await.unwrap().value
 }
 
 fn definition(discussion: &ordinary_realm::Discussion) -> Value {
     json!({"strand_id":discussion.strand_id,"track_name":"discussion","content":{
-        "kind":"ak.content.poll","body":"Choose","poll":{"kind":"disclosed","max_selections":1,
+        "kind":"ak.content.poll","body":"Choose","poll":{"kind":"disclosed","max_selection_count":1,
         "answers":[{"id":"a","text":{"kind":"ak.content.text","body":"A"}},
         {"id":"b","text":{"kind":"ak.content.text","body":"B"}}]}}})
 }

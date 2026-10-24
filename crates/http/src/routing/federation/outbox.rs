@@ -292,7 +292,7 @@ fn rfc9421_sign_with_window(
 pub(crate) async fn relay_signal_once(
     state: &AppState,
     peer_id: &str,
-    request: &arkret_wire::SignalRelayRequest,
+    request: &arkret_wire::SignalRelayRequestBody,
 ) -> Result<(), String> {
     request.validate().map_err(|error| error.to_string())?;
     let body =
@@ -349,7 +349,7 @@ pub(crate) async fn relay_signal_once(
         ));
     }
     let outcome = response
-        .json::<arkret_wire::SignalRelayOutcome>()
+        .json::<arkret_wire::SignalRelayResponseBody>()
         .await
         .map_err(|error| error.to_string())?;
     outcome.validate().map_err(|error| error.to_string())
@@ -641,13 +641,16 @@ fn peer_event_application_failure(
 ) -> Option<&'static str> {
     if endpoint == "/_arkret/peer/account-status" {
         use arkret_models_collaboration::account_lifecycle::{
-            AccountStatusPublicationOutcome, AccountStatusPublicationRequestBody,
+            AccountStatusPublicationRequestBody, AccountStatusPublicationResponseBody,
             AccountStatusPublicationStatus,
         };
         let Some((request, outcome)) =
             serde_json::from_str::<AccountStatusPublicationRequestBody>(request_body)
                 .ok()
-                .zip(serde_json::from_str::<AccountStatusPublicationOutcome>(response_body).ok())
+                .zip(
+                    serde_json::from_str::<AccountStatusPublicationResponseBody>(response_body)
+                        .ok(),
+                )
         else {
             return Some("invalid_account_status_outcome");
         };
@@ -681,9 +684,9 @@ fn peer_event_application_failure(
         // `deferred` are all authoritative receive outcomes; `deferred` covers
         // quarantine and every indistinguishable denial, so none of them is a
         // resubmittable failure. Only a body that is not a typed
-        // `invite_delivery_outcome` at all is an application failure.
+        // `invite_delivery_response_body` at all is an application failure.
         return match serde_json::from_str::<
-            arkret_models_collaboration::governance::invite_addressing::InviteDeliveryOutcome,
+            arkret_models_collaboration::governance::invite_addressing::InviteDeliveryResponseBody,
         >(response_body)
         {
             Ok(_) => None,
@@ -694,11 +697,11 @@ fn peer_event_application_failure(
         return None;
     }
     use arkret_models_collaboration::authority_commit::{
-        PeerAuthoritySubmitOutcome, PeerAuthoritySubmitRequest,
-        PeerCommittedReplicationOutcomeRecord, PeerRegisteredAtomicUnitOutcomeValue,
+        CommittedEventReplicationOutcome, PeerAuthoritySubmitRequestBody,
+        PeerAuthoritySubmitResponseBody, RegisteredAtomicUnitAdmissionOutcome,
     };
 
-    let Ok(request) = serde_json::from_str::<PeerAuthoritySubmitRequest>(request_body) else {
+    let Ok(request) = serde_json::from_str::<PeerAuthoritySubmitRequestBody>(request_body) else {
         return Some("invalid_peer_event_request");
     };
     // `authority_forward` is synchronous and every new attempt carries freshly
@@ -707,25 +710,25 @@ fn peer_event_application_failure(
     if is_authority_forward(&request) {
         return Some(AUTHORITY_FORWARD_NOT_QUEUED);
     }
-    let Ok(outcome) = serde_json::from_str::<PeerAuthoritySubmitOutcome>(response_body) else {
+    let Ok(outcome) = serde_json::from_str::<PeerAuthoritySubmitResponseBody>(response_body) else {
         return Some("invalid_peer_event_outcome");
     };
     if outcome.validate_for_request(&request).is_err() {
         return Some("invalid_peer_event_outcome");
     }
     match outcome {
-        PeerAuthoritySubmitOutcome::AuthorityForward(_) => Some("invalid_peer_event_outcome"),
-        PeerAuthoritySubmitOutcome::CommittedReplication(value) => {
+        PeerAuthoritySubmitResponseBody::AuthorityForward(_) => Some("invalid_peer_event_outcome"),
+        PeerAuthoritySubmitResponseBody::CommittedReplication(value) => {
             if value.replication_outcomes.iter().all(|record| {
                 matches!(
                     record,
-                    PeerCommittedReplicationOutcomeRecord::Stored {}
-                        | PeerCommittedReplicationOutcomeRecord::Duplicate {}
+                    CommittedEventReplicationOutcome::Stored {}
+                        | CommittedEventReplicationOutcome::Duplicate {}
                 )
             }) {
                 None
             } else if value.replication_outcomes.iter().all(|record| {
-                !matches!(record, PeerCommittedReplicationOutcomeRecord::Rejected { reason_code }
+                !matches!(record, CommittedEventReplicationOutcome::Rejected { reason_code }
                     if reason_code != error_code::DEPENDENCY_MISSING)
             }) {
                 Some(error_code::DEPENDENCY_MISSING)
@@ -733,13 +736,13 @@ fn peer_event_application_failure(
                 Some("peer_replication_rejected")
             }
         }
-        PeerAuthoritySubmitOutcome::RegisteredAtomicUnit(value) => match value.outcome {
-            PeerRegisteredAtomicUnitOutcomeValue::Rejected(rejection)
+        PeerAuthoritySubmitResponseBody::RegisteredAtomicUnit(value) => match value.outcome {
+            RegisteredAtomicUnitAdmissionOutcome::Rejected(rejection)
                 if rejection.reason_code == error_code::DEPENDENCY_MISSING =>
             {
                 Some(error_code::DEPENDENCY_MISSING)
             }
-            PeerRegisteredAtomicUnitOutcomeValue::Rejected(_) => Some("peer_atomic_unit_rejected"),
+            RegisteredAtomicUnitAdmissionOutcome::Rejected(_) => Some("peer_atomic_unit_rejected"),
             _ => None,
         },
     }
@@ -748,14 +751,14 @@ fn peer_event_application_failure(
 const AUTHORITY_FORWARD_NOT_QUEUED: &str = "authority_forward_not_queued";
 
 fn is_authority_forward(
-    request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+    request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
 ) -> bool {
-    use arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest;
+    use arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody;
     matches!(
         request,
-        PeerAuthoritySubmitRequest::AuthorityForwardEvent(_)
-            | PeerAuthoritySubmitRequest::AuthorityForwardMls(_)
-            | PeerAuthoritySubmitRequest::AuthorityForwardAtomic(_)
+        PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(_)
+            | PeerAuthoritySubmitRequestBody::AuthorityForwardMls(_)
+            | PeerAuthoritySubmitRequestBody::AuthorityForwardAtomic(_)
     )
 }
 
@@ -764,7 +767,7 @@ fn is_authority_forward(
 fn is_queued_authority_forward(endpoint: &str, payload_json: &str) -> bool {
     endpoint == "/_arkret/peer/events"
         && serde_json::from_str::<
-            arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+            arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
         >(payload_json)
         .is_ok_and(|request| is_authority_forward(&request))
 }
@@ -828,15 +831,15 @@ fn peer_event_partial_retry(
         return None;
     }
     use arkret_models_collaboration::authority_commit::{
-        PeerAuthoritySubmitOutcome, PeerAuthoritySubmitRequest,
-        PeerCommittedReplicationOutcomeRecord,
+        CommittedEventReplicationOutcome, PeerAuthoritySubmitRequestBody,
+        PeerAuthoritySubmitResponseBody,
     };
-    let mut request: PeerAuthoritySubmitRequest = serde_json::from_str(request_body).ok()?;
-    let outcome: PeerAuthoritySubmitOutcome = serde_json::from_str(response_body).ok()?;
+    let mut request: PeerAuthoritySubmitRequestBody = serde_json::from_str(request_body).ok()?;
+    let outcome: PeerAuthoritySubmitResponseBody = serde_json::from_str(response_body).ok()?;
     outcome.validate_for_request(&request).ok()?;
     let (
-        PeerAuthoritySubmitRequest::CommittedReplication(request),
-        PeerAuthoritySubmitOutcome::CommittedReplication(outcome),
+        PeerAuthoritySubmitRequestBody::CommittedReplication(request),
+        PeerAuthoritySubmitResponseBody::CommittedReplication(outcome),
     ) = (&mut request, outcome)
     else {
         return None;
@@ -847,13 +850,13 @@ fn peer_event_partial_retry(
         .replication_outcomes
         .iter()
         .map(|record| {
-            matches!(record, PeerCommittedReplicationOutcomeRecord::Rejected { reason_code }
+            matches!(record, CommittedEventReplicationOutcome::Rejected { reason_code }
                 if reason_code == error_code::DEPENDENCY_MISSING)
         })
         .collect::<Vec<_>>();
     if !retry.contains(&true)
         || outcome.replication_outcomes.iter().any(|record| {
-            matches!(record, PeerCommittedReplicationOutcomeRecord::Rejected { reason_code }
+            matches!(record, CommittedEventReplicationOutcome::Rejected { reason_code }
             if reason_code != error_code::DEPENDENCY_MISSING)
         })
     {
@@ -1599,7 +1602,7 @@ impl FederationDispatcher {
         let request: arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody =
             serde_json::from_str(&row.delivery.payload_json)
                 .map_err(|error| format!("outbound Contact carrier decode failed: {error}"))?;
-        let outcome: arkret_models_collaboration::contact_operations::PeerContactSubmitOutcome =
+        let outcome: arkret_models_collaboration::contact_operations::PeerContactSubmitResponseBody =
             serde_json::from_str(response_body)
                 .map_err(|error| format!("Contact carrier outcome decode failed: {error}"))?;
         outcome
@@ -1618,7 +1621,7 @@ impl FederationDispatcher {
                     | arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::Response { .. }
                     | arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::ScopeUpdate { .. }
                     | arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::Tombstone { .. },
-                arkret_models_collaboration::contact_operations::PeerContactSubmitOutcome::Event(
+                arkret_models_collaboration::contact_operations::PeerContactSubmitResponseBody::Event(
                     event_outcome,
                 ),
             ) => crate::routing::identity::contact_federation::accept_outbound_contact_event_outcome(
@@ -1632,7 +1635,7 @@ impl FederationDispatcher {
             (
                 arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::GlareFinalize { .. }
                     | arkret_models_collaboration::contact_operations::PeerContactSubmitRequestBody::CurrentRefresh { .. },
-                arkret_models_collaboration::contact_operations::PeerContactSubmitOutcome::ControlDeferred(deferred),
+                arkret_models_collaboration::contact_operations::PeerContactSubmitResponseBody::ControlDeferred(deferred),
             ) => crate::routing::identity::contact_federation::reenqueue_deferred_contact_control(
                 &self.state,
                 &request,
@@ -1664,7 +1667,7 @@ impl FederationDispatcher {
         acknowledged_at: i64,
     ) -> Result<(), String> {
         use arkret_models_collaboration::account_lifecycle::{
-            AccountStatusPublicationOutcome, AccountStatusPublicationRequestBody,
+            AccountStatusPublicationRequestBody, AccountStatusPublicationResponseBody,
             AccountStatusPublicationStatus,
         };
 
@@ -1674,7 +1677,7 @@ impl FederationDispatcher {
         let request: AccountStatusPublicationRequestBody =
             serde_json::from_str(&row.delivery.payload_json)
                 .map_err(|error| format!("account-status request decode failed: {error}"))?;
-        let outcome: AccountStatusPublicationOutcome = serde_json::from_str(response_body)
+        let outcome: AccountStatusPublicationResponseBody = serde_json::from_str(response_body)
             .map_err(|error| format!("account-status outcome decode failed: {error}"))?;
         outcome
             .validate_for_request(&request)
@@ -1719,7 +1722,7 @@ impl FederationDispatcher {
         if row.delivery.endpoint != "/_arkret/peer/keys/keypackages/claim" {
             return Ok(());
         }
-        let outcome: arkret_models_crypto::PeerKeyPackagesClaimQueryOutcome =
+        let outcome: arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody =
             serde_json::from_str(response_body).map_err(|error| error.to_string())?;
         outcome
             .validate_command_shape()
@@ -1750,7 +1753,7 @@ impl FederationDispatcher {
         if row.delivery.endpoint != "/_arkret/peer/account-status" {
             return Ok(None);
         }
-        let outcome: arkret_models_collaboration::account_lifecycle::AccountStatusPublicationOutcome =
+        let outcome: arkret_models_collaboration::account_lifecycle::AccountStatusPublicationResponseBody =
             serde_json::from_str(response_body)
                 .map_err(|error| format!("account-status outcome decode failed: {error}"))?;
         let request: AccountStatusPublicationRequestBody =
@@ -1789,8 +1792,8 @@ impl FederationDispatcher {
                     serde_json::from_str(&ancestor.delivery.payload_json).map_err(|error| {
                         format!("account-status ancestor request decode failed: {error}")
                     })?;
-                let ancestor_seq = ancestor_request.publication.record().status_seq;
-                if ancestor_seq > submitted.status_seq
+                let ancestor_seq = ancestor_request.publication.record().status_sequence;
+                if ancestor_seq > submitted.status_sequence
                     && desired
                         .as_ref()
                         .is_none_or(|(desired_seq, _)| ancestor_seq > *desired_seq)
@@ -1802,7 +1805,7 @@ impl FederationDispatcher {
             let Some((desired_seq, desired_payload_json)) = desired else {
                 return Ok(None);
             };
-            let next_seq = submitted.status_seq.saturating_add(1);
+            let next_seq = submitted.status_sequence.saturating_add(1);
             let payload_json = if next_seq == desired_seq {
                 desired_payload_json
             } else {
@@ -1860,12 +1863,13 @@ impl FederationDispatcher {
         if outcome.status != AccountStatusPublicationStatus::DependencyMissing {
             return Ok(None);
         }
-        let required = outcome
-            .required_status_seq
-            .ok_or_else(|| "dependency_missing outcome omits required_status_seq".to_owned())?;
-        if required >= submitted.status_seq {
+        let required = outcome.required_status_sequence.ok_or_else(|| {
+            "dependency_missing outcome omits required_status_sequence".to_owned()
+        })?;
+        if required >= submitted.status_sequence {
             return Err(
-                "account-status required_status_seq does not precede submitted record".to_owned(),
+                "account-status required_status_sequence does not precede submitted record"
+                    .to_owned(),
             );
         }
         let predecessor = self
@@ -2293,17 +2297,17 @@ async fn realm_fanout_still_owed(
         return Ok(true);
     };
     let request = serde_json::from_str::<
-        arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
     >(&row.delivery.payload_json)
     .map_err(|error| format!("Realm fanout body is not a peer submission: {error}"))?;
     use arkret_models_collaboration::authority_commit::{
-        PeerAuthoritySubmitRequest, PeerRegisteredAtomicUnit,
+        PeerAuthoritySubmitRequestBody, PeerRegisteredAtomicUnit,
     };
     let items = match &request {
-        PeerAuthoritySubmitRequest::CommittedReplication(request) => {
+        PeerAuthoritySubmitRequestBody::CommittedReplication(request) => {
             request.replications.as_slice()
         }
-        PeerAuthoritySubmitRequest::RegisteredAtomicUnit(request) => match &request.unit {
+        PeerAuthoritySubmitRequestBody::RegisteredAtomicUnit(request) => match &request.unit {
             PeerRegisteredAtomicUnit::AuditPairedEvent(pair) => pair.committed_events.as_slice(),
             _ => return Err("Realm fanout has an unregistered atomic body".to_owned()),
         },
@@ -2519,8 +2523,8 @@ mod tests {
             arkret_wire::DidUrl::new("did:web:queued-producer.example#key-1").unwrap(),
         );
         let body = serde_json::to_string(
-            &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest::AuthorityForwardEvent(
-                arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequest::new(
+            &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(
+                arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequestBody::new(
                     arkret_wire::EventAdmissionSubmission::new(event),
                     None,
                     None,
@@ -2570,7 +2574,7 @@ mod tests {
             "stream_position": 0,
             "previous_commit_ref": null,
             "event_ref": event["event_id"],
-            "governance_generation": 0,
+            "governance_generation": "0",
             "authority_ref": event["event_id"],
             "committed_at": "2026-09-20T00:00:00.000Z",
             "signature": {
@@ -2579,7 +2583,7 @@ mod tests {
                 "verification_method": "did:web:station.example#authority",
                 "signed_digest": format!("sha256:{}", "4".repeat(64)),
                 "created_at": "2026-09-20T00:00:00.000Z",
-                "sig": "A".repeat(86)
+                "signature": "A".repeat(86)
             }
         });
         serde_json::json!({"event_submission": submission, "source_commit": source_commit})
@@ -2596,7 +2600,7 @@ mod tests {
         item["event_submission"]["approval_signatures"] =
             fixture["event_id_invariance"]["submission_with_evidence"]["approval_signatures"]
                 .clone();
-        let request: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest =
+        let request: arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody =
             serde_json::from_value(serde_json::json!({
                 "branch": "committed_replication", "replications": [item]
             }))

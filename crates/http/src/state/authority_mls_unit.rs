@@ -36,10 +36,11 @@ use arkret_models_collaboration::mls_roster_authority::{
     MlsAddAuthorityAttestation, MlsAttestAddRequestBody,
 };
 use arkret_models_crypto::{
-    KeyOperationSignature, KeyPackageClaimRecord, MlsCommitPayload, PeerKeyPackagesClaimOutcome,
+    KeyOperationSignature, KeyPackageClaimRecord, MlsCommitPayload,
+    PeerKeyPackagesClaimResponseBody,
 };
 use arkret_wire::{
-    AuthoritySubmitOutcome, Base64UrlString, DetachedSignatureContext, Event,
+    AuthoritySubmitResponseBody, Base64UrlString, DetachedSignatureContext, Event,
     EventAdmissionSubmission, EventKind, MlsWelcomeDelivery, MlsWelcomeRecipientEndpoint, ScopeRef,
 };
 use coland_services::{ServiceError, ServiceResult};
@@ -95,7 +96,7 @@ pub(super) fn admit_mls_event<'a>(
     producer: AdmittedProducer,
     producer_key: &'a arkret_signatures::PublicKeyMaterial,
 ) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = ServiceResult<AuthoritySubmitOutcome>> + Send + 'a>,
+    Box<dyn std::future::Future<Output = ServiceResult<AuthoritySubmitResponseBody>> + Send + 'a>,
 > {
     // Keep the public-transition future out of ordinary submit-port frames.
     Box::pin(admit_mls_event_inner(
@@ -118,7 +119,7 @@ pub(super) fn admit_native_mls_event<'a>(
     producer: AdmittedProducer,
     producer_key: &'a arkret_signatures::PublicKeyMaterial,
     native_request: Option<super::authority_managed_device::mls::NativeMlsRequest>,
-) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitOutcome>> + Send + 'a {
+) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitResponseBody>> + Send + 'a {
     crate::boxed_future(move || {
         admit_mls_event_inner(
             state,
@@ -140,7 +141,7 @@ async fn admit_mls_event_inner(
     producer: AdmittedProducer,
     producer_key: &arkret_signatures::PublicKeyMaterial,
     native_request: Option<super::authority_managed_device::mls::NativeMlsRequest>,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     if let Some(outcome) = super::authority_self_event_unit::exact_replay(state, event).await? {
         return Ok(outcome);
     }
@@ -251,7 +252,7 @@ async fn admit_mls_event_inner(
         }
         Err(error) => return Err(error),
     };
-    if let AuthoritySubmitOutcome::Rejected {
+    if let AuthoritySubmitResponseBody::Rejected {
         status: arkret_wire::AuthorityRejectionStatus::Rejected,
         reason_code,
     } = &outcome
@@ -332,7 +333,7 @@ pub(super) async fn attach_replicated_roster_witnesses(
         .ok_or_else(|| failed_precondition("replicated Welcome lacks accepted Genesis selector"))?;
     let group = event.scope_ref.canonical_mls_group_id().map_err(schema)?;
     let added = arkret_mls::verify_adds_from_accepted_public_commit(
-        &arkret_canonical::base64url_decode(payload.commit_bytes_b64()).map_err(schema)?,
+        &arkret_canonical::base64url_decode(payload.commit_base64url()).map_err(schema)?,
         group.as_str(),
         payload.governance_binding().previous_epoch(),
     )
@@ -413,7 +414,7 @@ async fn sign_local_roster_witnesses(
                 "local Add claim differs from the verified claim",
             ));
         }
-        let outcome: PeerKeyPackagesClaimOutcome = serde_json::from_value(
+        let outcome: PeerKeyPackagesClaimResponseBody = serde_json::from_value(
             row.outcome
                 .ok_or_else(|| failed_precondition("local Add claim has no signed outcome"))?,
         )
@@ -459,7 +460,7 @@ async fn sign_local_roster_witnesses(
             actor_id: welcome.delivery.recipient_actor_id.clone(),
             endpoint: welcome.delivery.recipient_endpoint.clone(),
             authorization_event_ref,
-            leaf_signature_key_b64u: parsed.leaf_signature_key.clone(),
+            leaf_signature_key_base64url: parsed.leaf_signature_key.clone(),
             claim_record_digest: arkret_wire::Hash::new(
                 arkret_canonical::canonical_sha256(selected).map_err(schema)?,
             )
@@ -472,7 +473,7 @@ async fn sign_local_roster_witnesses(
                 signature_algorithm: Some(
                     arkret_wire::NonEmptyString::new("Ed25519").map_err(schema)?,
                 ),
-                sig: Base64UrlString::new("AA").map_err(schema)?,
+                signature: Base64UrlString::new("AA").map_err(schema)?,
             },
         };
         attestation.signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
@@ -600,7 +601,7 @@ async fn verify_genesis(
         .map_err(|error| schema(error.to_string()))?;
     if leaves.len() != 1
         || leaves[0].actor_id != event.actor_id
-        || leaves[0].signature_key != authority.leaf_signature_key_b64u
+        || leaves[0].signature_key != authority.leaf_signature_key_base64url
     {
         return Err(failed_precondition(
             "the MLS Genesis public tree does not match the creator leaf authority",
@@ -718,7 +719,7 @@ async fn prepare_commit(state: &AppState, event: &Event) -> ServiceResult<Prepar
                 ServiceError::Internal(format!("stored public MLS state is unusable: {error}"))
             })?;
     let commit_bytes =
-        arkret_canonical::base64url_decode(payload.commit_bytes_b64()).map_err(schema)?;
+        arkret_canonical::base64url_decode(payload.commit_base64url()).map_err(schema)?;
     let transition = tracker
         .process_public_handshake(&commit_bytes)
         .map_err(|error| {
@@ -1017,7 +1018,7 @@ pub(super) async fn resolve_claim(
             "the Welcome's KeyPackage claim is no longer live",
         ));
     }
-    let outcome: PeerKeyPackagesClaimOutcome = row
+    let outcome: PeerKeyPackagesClaimResponseBody = row
         .outcome
         .clone()
         .ok_or_else(|| failed_precondition("the claim ledger row holds no success outcome"))
@@ -1205,7 +1206,7 @@ async fn public_blob(state: &AppState, blob_ref: &str) -> ServiceResult<Vec<u8>>
 mod tests {
     use arkret_mls::{ArkretMlsGroup, ArkretMlsIdentity};
     use arkret_models_crypto::{MlsGovernanceBindingPayload, MlsKeyPackageState};
-    use arkret_wire::{AccountId, ActorId, DeviceId, DidCoreId, EventId, MlsGroupCurrent, RealmId};
+    use arkret_wire::{AccountId, ActorId, DeviceId, DidCoreId, EventId, MlsGroupValue, RealmId};
     use coland_storage::MlsGroupCurrentRecord;
 
     use super::*;
@@ -1275,7 +1276,7 @@ mod tests {
             .mls_groups()
             .seed_test_current(&MlsGroupCurrentRecord {
                 realm_id: RealmId::new(REALM).unwrap(),
-                value: MlsGroupCurrent {
+                value: MlsGroupValue {
                     effective_scope: scope,
                     genesis_event_ref: genesis.clone(),
                     cipher_suite: arkret_wire::NonEmptyString::new(
@@ -1462,10 +1463,10 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.conflict_code(), Some(ConflictCode::CapabilityDenied));
         let mut corrupted = event;
-        let mut bytes = arkret_canonical::base64url_decode(payload.commit_bytes_b64()).unwrap();
+        let mut bytes = arkret_canonical::base64url_decode(payload.commit_base64url()).unwrap();
         bytes[20] ^= 1;
         corrupted.payload.insert(
-            "commit_bytes_b64".to_owned(),
+            "commit_base64url".to_owned(),
             serde_json::json!(arkret_canonical::base64url_encode(&bytes)),
         );
         assert!(verify_commit(&state, &corrupted).await.is_err());
@@ -1539,7 +1540,8 @@ mod tests {
                 "ak:keypackage_claim:01904100-0000-7000-8000-000000000083".to_owned(),
             )
             .unwrap(),
-            ciphertext_b64: arkret_wire::Base64UrlString::new("V2VsY29tZQ".to_owned()).unwrap(),
+            ciphertext_base64url: arkret_wire::Base64UrlString::new("V2VsY29tZQ".to_owned())
+                .unwrap(),
             producer_proof: arkret_wire::DetachedObjectSignature {
                 context: DetachedSignatureContext::MlsWelcomeDelivery,
                 signature_algorithm: arkret_wire::DetachedSignatureAlgorithm::Ed25519,
@@ -1547,7 +1549,7 @@ mod tests {
                 signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "0".repeat(64)))
                     .unwrap(),
                 created_at: chrono::Utc::now(),
-                sig: arkret_wire::Base64UrlString::new("AA".to_owned()).unwrap(),
+                signature: arkret_wire::Base64UrlString::new("AA".to_owned()).unwrap(),
             },
         };
         let mut unsigned = serde_json::to_value(&delivery).unwrap();
@@ -1570,7 +1572,8 @@ mod tests {
             Some(ConflictCode::SignatureInvalid)
         );
         let mut tampered = delivery.clone();
-        tampered.ciphertext_b64 = arkret_wire::Base64UrlString::new("VGFtcGVy".to_owned()).unwrap();
+        tampered.ciphertext_base64url =
+            arkret_wire::Base64UrlString::new("VGFtcGVy".to_owned()).unwrap();
         assert_eq!(
             verify_welcome_proof(&tampered, &method, &key)
                 .unwrap_err()

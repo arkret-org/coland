@@ -16,7 +16,7 @@ fn unavailable(detail: impl std::fmt::Display) -> PersistenceError {
 #[derive(diesel::QueryableByName)]
 struct LifecycleRow {
     #[diesel(sql_type = Text)]
-    result_family: String,
+    state_family: String,
     #[diesel(sql_type = Text)]
     current_commit_id: String,
     #[diesel(sql_type = BigInt)]
@@ -51,13 +51,13 @@ pub(crate) async fn lifecycle_in_connection(
         terminal_state: None,
         successor_realm_id: None,
     };
-    let rows = sql_query("SELECT r.result_family,r.current_commit_id,r.current_stream_position,r.value,c.commit_json FROM realm_bootstrap_current_results r LEFT JOIN realm_commits c ON c.realm_id=r.realm_id AND c.commit_id=r.current_commit_id AND c.stream_position=r.current_stream_position AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',r.realm_id) WHERE r.realm_id=$1 AND r.result_family IN ('realm_archive','realm_freeze','realm_tombstone','realm_destroy')")
+    let rows = sql_query("SELECT r.state_family,r.current_commit_id,r.current_stream_position,r.value,c.commit_json FROM realm_bootstrap_current_states r LEFT JOIN realm_commits c ON c.realm_id=r.realm_id AND c.commit_id=r.current_commit_id AND c.stream_position=r.current_stream_position AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',r.realm_id) WHERE r.realm_id=$1 AND r.state_family IN ('realm_archive','realm_freeze','realm_tombstone','realm_destroy')")
         .bind::<Text,_>(realm.as_str()).load::<LifecycleRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     for row in rows {
         let Some(commit_json) = row.commit_json else {
             // A member snapshot may prove a current value below the retained
             // history floor. Require its exact durable anchor, never a cache.
-            let selector = match row.result_family.as_str() {
+            let selector = match row.state_family.as_str() {
                 "realm_archive" => arkret_wire::CurrentSelector::RealmArchive,
                 "realm_freeze" => arkret_wire::CurrentSelector::RealmFreeze,
                 "realm_tombstone" => arkret_wire::CurrentSelector::RealmTombstone,
@@ -74,7 +74,7 @@ pub(crate) async fn lifecycle_in_connection(
             .await?
             .ok_or_else(|| unavailable("Realm lifecycle anchor is unavailable"))?;
             let proved = entries.iter().any(|entry| {
-                let arkret_wire::TypedCurrentRow::Value {
+                let arkret_wire::CurrentState::Value {
                     selector,
                     revision,
                     value,
@@ -86,7 +86,7 @@ pub(crate) async fn lifecycle_in_connection(
                     arkret_wire::CurrentSelector::RealmTombstone => "realm_tombstone",
                     _ => "",
                 };
-                family == row.result_family
+                family == row.state_family
                     && revision.commit_id.as_str() == row.current_commit_id
                     && i64::try_from(revision.stream_position).ok()
                         == Some(row.current_stream_position)
@@ -95,9 +95,9 @@ pub(crate) async fn lifecycle_in_connection(
             if !proved {
                 return Err(unavailable("Realm lifecycle has no exact accepted anchor"));
             }
-            match row.result_family.as_str() {
+            match row.state_family.as_str() {
                 "realm_archive" | "realm_freeze" => {
-                    let key = if row.result_family == "realm_archive" {
+                    let key = if row.state_family == "realm_archive" {
                         "archived"
                     } else {
                         "frozen"
@@ -149,7 +149,7 @@ pub(crate) async fn lifecycle_in_connection(
             .verify_commit_id_matches_content()
             .map_err(unavailable)?;
         use arkret_wire::EventKind;
-        let expected = match (row.result_family.as_str(), full.event.kind) {
+        let expected = match (row.state_family.as_str(), full.event.kind) {
             ("realm_archive", EventKind::RealmArchive) => {
                 view.archived = true;
                 serde_json::json!({"archived":true})

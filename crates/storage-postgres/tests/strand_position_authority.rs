@@ -95,7 +95,7 @@ async fn position(
     strand: &arkret_wire::StrandId,
 ) -> Position {
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT value,current_stream_position FROM strand_position_current_results WHERE board_space_id=$1 AND strand_id=$2")
+    diesel::sql_query("SELECT value,current_stream_position FROM strand_position_current_states WHERE board_space_id=$1 AND strand_id=$2")
         .bind::<Text, _>(board.as_str()).bind::<Text, _>(strand.as_str())
         .get_result(&mut conn).await.unwrap()
 }
@@ -954,12 +954,12 @@ async fn exercise_wip_override_resource_grants(
         "constraints":[{
             "constraint_kind":"scope_limitation","effect":"allow",
             "allowed_to_container_refs":[list_a_id],
-            "wip_limit_override":true
+            "wip_limit_override_allowed":true
         }],
         "issuer_authority_refs":[{
             "kind":"realm_root","realm_id":realm,
             "authority_event_ref":opened.unit.transactions[0].event.event_id,
-            "authority_generation":0
+            "authority_generation":"0"
         }],
         "issued_at":arkret_canonical::format_timestamp_canonical(at)
     }});
@@ -969,7 +969,7 @@ async fn exercise_wip_override_resource_grants(
         .unwrap()
         .push(
             json!({"constraint_kind":"scope_limitation","effect":"allow",
-            "wip_limit_override":false}),
+            "wip_limit_override_allowed":false}),
         );
     let conflicting_grant = Box::pin(ordinary_realm::source_request(
         &pool,
@@ -1108,12 +1108,12 @@ async fn exercise_wip_override_global_deny(
         "constraints":[{
             "constraint_kind":"scope_limitation","effect":"allow",
             "allowed_to_container_refs":[list_a_id],
-            "wip_limit_override":true
+            "wip_limit_override_allowed":true
         }],
         "issuer_authority_refs":[{
             "kind":"realm_root","realm_id":realm,
             "authority_event_ref":opened.unit.transactions[0].event.event_id,
-            "authority_generation":0
+            "authority_generation":"0"
         }],
         "issued_at":arkret_canonical::format_timestamp_canonical(at)
     }});
@@ -1462,7 +1462,7 @@ async fn terminal_target_keeps_canonical_position_without_breaking_the_joined_re
         // latest-cut tombstone with observed dependents is admissible.
         let mut conn = pool.get().await.unwrap();
         let metadata: Position = diesel::sql_query(
-            "SELECT value,current_stream_position FROM space_current_results WHERE space_id=$1",
+            "SELECT value,current_stream_position FROM space_current_states WHERE space_id=$1",
         )
         .bind::<Text, _>(target.as_str())
         .get_result(&mut conn)
@@ -1471,7 +1471,7 @@ async fn terminal_target_keeps_canonical_position_without_breaking_the_joined_re
         let mut terminal = metadata.value.clone();
         terminal["state"] = json!("tombstoned");
         terminal["state_changed_at"] = json!(arkret_canonical::format_timestamp_canonical(at));
-        diesel::sql_query("UPDATE space_current_results SET value=$2 WHERE space_id=$1")
+        diesel::sql_query("UPDATE space_current_states SET value=$2 WHERE space_id=$1")
             .bind::<Text, _>(target.as_str())
             .bind::<Jsonb, _>(&terminal)
             .execute(&mut conn)
@@ -1505,7 +1505,7 @@ async fn terminal_target_keeps_canonical_position_without_breaking_the_joined_re
         );
         assert_eq!(count(&pool, &realm, "realm_commits").await, commits_before);
         let mut conn = pool.get().await.unwrap();
-        diesel::sql_query("UPDATE space_current_results SET value=$2 WHERE space_id=$1")
+        diesel::sql_query("UPDATE space_current_states SET value=$2 WHERE space_id=$1")
             .bind::<Text, _>(target.as_str())
             .bind::<Jsonb, _>(&metadata.value)
             .execute(&mut conn)

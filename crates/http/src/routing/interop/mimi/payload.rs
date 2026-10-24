@@ -76,7 +76,7 @@ pub(super) async fn persist_mimi_canonical_message_event(
         reporter_authority: None,
         mapping_receipt: Some(receipt),
         reporter_device_guard: None,
-        submit_request: Some(
+        submit_request_body: Some(
             serde_json::to_value(request).map_err(|e| AppError::internal(e.to_string()))?,
         ),
     };

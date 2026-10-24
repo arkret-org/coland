@@ -1,7 +1,7 @@
 use arkret_event_draft::EventPayloadExt as _;
 use arkret_models_crypto::{
     AcceptedSecurityTransactionStep as AcceptedStep, PcrPolicyRecoveryBinding,
-    PcrPolicyRecoveryPlan, RecoveryIdentityModel, RecoveryTransactionCreateRequest,
+    PcrPolicyRecoveryPlan, RecoveryIdentityModel, RecoveryTransactionCreateRequestBody,
     SecurityTransactionAcceptor, SecurityTransactionPreparedPlan, SecurityTransactionStep,
     SecurityTransactionTerminalOutcome,
 };
@@ -14,21 +14,21 @@ use ed25519_dalek::Signer as _;
 
 use super::*;
 
-fn transaction_account(request: &SecurityTransactionCreateRequest) -> &arkret_wire::AccountId {
+fn transaction_account(request: &SecurityTransactionCreateRequestBody) -> &arkret_wire::AccountId {
     match request {
-        SecurityTransactionCreateRequest::Recovery(request) => &request.account_id,
-        SecurityTransactionCreateRequest::SecurityRotation(request) => &request.account_id,
+        SecurityTransactionCreateRequestBody::Recovery(request) => &request.account_id,
+        SecurityTransactionCreateRequestBody::SecurityRotation(request) => &request.account_id,
     }
 }
 
 fn recovery_transaction_session_id(
-    request: &SecurityTransactionCreateRequest,
+    request: &SecurityTransactionCreateRequestBody,
 ) -> Option<&arkret_identifiers::RecoverySessionId> {
     match request {
-        SecurityTransactionCreateRequest::Recovery(request) => {
+        SecurityTransactionCreateRequestBody::Recovery(request) => {
             Some(&request.recovery_intent.recovery_session_id)
         }
-        SecurityTransactionCreateRequest::SecurityRotation(_) => None,
+        SecurityTransactionCreateRequestBody::SecurityRotation(_) => None,
     }
 }
 
@@ -140,7 +140,7 @@ fn transaction_account_actor(
 )]
 pub(super) async fn security_transaction_create(
     aa: AuthArgs,
-    body: JsonBody<SecurityTransactionCreateRequest>,
+    body: JsonBody<SecurityTransactionCreateRequestBody>,
     depot: &mut Depot,
     res: &mut Response,
     req: &mut Request,
@@ -163,7 +163,7 @@ pub(super) async fn security_transaction_create(
         recovery_transaction_session_id(&request),
     )
     .await?;
-    if let SecurityTransactionCreateRequest::SecurityRotation(rotation) = &request
+    if let SecurityTransactionCreateRequestBody::SecurityRotation(rotation) = &request
         && (rotation.authorizing_device_id.as_str() != session.require_human_device_id()
             || state.account_lifecycle_state(session.actor.as_str()) != "active"
             || !authorizing_device_active(
@@ -185,12 +185,12 @@ pub(super) async fn security_transaction_create(
     // no accepted Event, no committed Seal, no generation advance, no activated
     // device, no consumed session, no terminal result.
     let prepared_plan = match &request {
-        SecurityTransactionCreateRequest::Recovery(recovery) => {
+        SecurityTransactionCreateRequestBody::Recovery(recovery) => {
             SecurityTransactionPreparedPlan::Recovery(
                 prepare_recovery_plan(state, &session, recovery).await?,
             )
         }
-        SecurityTransactionCreateRequest::SecurityRotation(rotation) => {
+        SecurityTransactionCreateRequestBody::SecurityRotation(rotation) => {
             SecurityTransactionPreparedPlan::SecurityRotation(rotation.prepared_plan.clone())
         }
     };
@@ -264,7 +264,7 @@ pub(super) async fn security_transaction_get(
 pub(super) async fn security_transaction_continue(
     aa: AuthArgs,
     transaction_id: PathParam<String>,
-    body: JsonBody<SecurityTransactionContinueRequest>,
+    body: JsonBody<SecurityTransactionContinueRequestBody>,
     depot: &mut Depot,
     res: &mut Response,
     req: &mut Request,
@@ -637,7 +637,7 @@ async fn try_advance_rotation_revoke(
     let outcome = SecurityRotationRevokeCommandOutcome {
         proposal_event_id: proposal.proposal_event_id,
         covering_commit_id: proposal.covering_commit_id.clone(),
-        result: SecurityRotationRevokeCommandDecision::Accepted,
+        outcome: SecurityRotationRevokeCommandDecision::Accepted,
         decided_at,
     };
     let mut decided = proposed;
@@ -730,7 +730,7 @@ async fn expire_rotation_revoke(
     transaction.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
         proposal_event_id: proposal.proposal_event_id,
         covering_commit_id: proposal.covering_commit_id,
-        result: SecurityRotationRevokeCommandDecision::Rejected,
+        outcome: SecurityRotationRevokeCommandDecision::Rejected,
         decided_at: expires_at,
     });
     state
@@ -1534,7 +1534,7 @@ async fn continue_rotation_local_commit(
     state: &AppState,
     session: &SessionRecord,
     mut transaction: SecurityTransactionRecord,
-    request: SecurityTransactionContinueRequest,
+    request: SecurityTransactionContinueRequestBody,
     canonical_request: Vec<u8>,
     res: &mut Response,
 ) -> JsonResult<SecurityTransaction> {
@@ -1627,7 +1627,7 @@ async fn continue_commit_recovery_unit(
     state: &AppState,
     session: &SessionRecord,
     mut transaction: SecurityTransactionRecord,
-    request: SecurityTransactionContinueRequest,
+    request: SecurityTransactionContinueRequestBody,
     canonical_request: Vec<u8>,
     res: &mut Response,
 ) -> JsonResult<SecurityTransaction> {
@@ -1668,7 +1668,7 @@ async fn continue_commit_recovery_unit(
         || receipt.identity_model != RecoveryIdentityModel::PcrPolicy
         || receipt.recovery_authority_kind != arkret_models_crypto::RecoveryAuthorityKind::PcrPolicy
         || receipt.previous_model_generation_ref != plan.previous_model_generation_ref
-        || receipt.result_model_generation_ref != plan.result_model_generation_ref
+        || receipt.new_model_generation_ref != plan.new_model_generation_ref
         || receipt.authorization_event_id != binding.authorize_event_id
         || receipt.reanchor_event_id != binding.reanchor_event_id
         || receipt.proof_summary.proof_digest != plan.proof_digest
@@ -1740,8 +1740,8 @@ async fn continue_commit_recovery_unit(
         .as_ref()
         .ok_or_else(|| AppError::internal("authorize Event has no producer proof"))?
         .verification_method;
-    if &attestation.auth_data.verification_method != expected_method
-        || &receipt.auth_data.verification_method != expected_method
+    if &attestation.signature_proof.verification_method != expected_method
+        || &receipt.signature_proof.verification_method != expected_method
     {
         return Err(crate::app_error!(
             FailedPrecondition,
@@ -1755,14 +1755,14 @@ async fn continue_commit_recovery_unit(
     .map_err(|error| AppError::internal(format!("replacement device key: {error}")))?;
     verify_recovery_device_signature(
         &key,
-        &attestation.auth_data.signature,
+        &attestation.signature_proof.signature,
         &attestation
             .signing_bytes()
             .map_err(|error| AppError::param_invalid(error.to_string()))?,
     )?;
     verify_recovery_device_signature(
         &key,
-        &receipt.auth_data.signature,
+        &receipt.signature_proof.signature,
         &receipt
             .signature_transcript_bytes()
             .map_err(|error| AppError::param_invalid(error.to_string()))?,
@@ -1832,7 +1832,7 @@ async fn continue_commit_recovery_unit(
             terminal_receipt_id: receipt.receipt_id.clone(),
             terminal_receipt_digest: receipt_digest.clone(),
             replacement_device_id: binding.replacement_device_id.clone(),
-            result_model_generation_ref: plan.result_model_generation_ref,
+            new_model_generation_ref: plan.new_model_generation_ref,
             completed_at: committed_at,
             reanchor_event_ref: committed_ref(&commits[0]),
             device_authorization_event_ref: committed_ref(&commits[1]),
@@ -1904,7 +1904,7 @@ async fn continue_commit_recovery_unit(
 async fn prepare_recovery_plan(
     state: &AppState,
     session: &SessionRecord,
-    request: &RecoveryTransactionCreateRequest,
+    request: &RecoveryTransactionCreateRequestBody,
 ) -> Result<PcrPolicyRecoveryPlan, AppError> {
     let intent = &request.recovery_intent;
     intent
@@ -2074,7 +2074,7 @@ async fn prepare_recovery_plan(
         recovery_session_snapshot_digest,
         proof_digest: proof_summary.proof_digest.clone(),
         previous_model_generation_ref: intent.previous_model_generation_ref,
-        result_model_generation_ref: intent.result_model_generation_ref,
+        new_model_generation_ref: intent.new_model_generation_ref,
         reanchor_unit: intent.reanchor_unit.clone(),
         reanchor_commit_intent: commit_intent.clone(),
     })

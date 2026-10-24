@@ -199,7 +199,7 @@ impl ProjectionState {
         let selected = match validate_poll_selections(
             &response.selections,
             &valid,
-            usize::try_from(poll.definition.poll.max_selections).unwrap_or(usize::MAX),
+            usize::try_from(poll.definition.poll.max_selection_count).unwrap_or(usize::MAX),
         ) {
             Ok(selected) => selected,
             Err(reason) => {
@@ -234,12 +234,12 @@ impl ProjectionState {
             poll_event_ref: poll.message_event_id.clone(),
             actor_id: operation.context.sender.clone(),
         };
-        let verified = match arkret_models_collaboration::poll::VerifiedPollResponse::new(
+        let verified = match arkret_models_collaboration::poll::VerifiedPollVote::new(
             partition,
             accepted_ref,
             &response.selections,
             &valid,
-            usize::try_from(poll.definition.poll.max_selections).unwrap_or(usize::MAX),
+            usize::try_from(poll.definition.poll.max_selection_count).unwrap_or(usize::MAX),
             heads,
             |id| {
                 poll.responses
@@ -905,17 +905,17 @@ struct PinEffectiveScope {
 /// Reduce one poll response against its poll definition.
 ///
 /// JSON Schema cannot compare a response to the poll it references, so
-/// `max_selections` and answer-id membership are checked here
+/// `max_selection_count` and answer-id membership are checked here
 /// (`content-block-poll.schema.json#/$defs/poll_body`).
 fn validate_poll_selections(
     selections: &[String],
     valid: &BTreeSet<String>,
-    max_selections: usize,
+    max_selection_count: usize,
 ) -> std::result::Result<Vec<String>, &'static str> {
     if selections.is_empty() {
         return Err("poll_selection_empty");
     }
-    if selections.len() > max_selections {
+    if selections.len() > max_selection_count {
         return Err("poll_selection_over_max");
     }
     let mut selected = Vec::with_capacity(selections.len());

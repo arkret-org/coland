@@ -5,8 +5,8 @@ mod tests;
 use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
 use arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload;
 use arkret_models_crypto::{
-    PeerKeyPackageRequesterAuthorization, PeerKeyPackagesClaimOutcome,
-    PeerKeyPackagesClaimRequestBody,
+    PeerKeyPackageRequesterAuthorization, PeerKeyPackagesClaimRequestBody,
+    PeerKeyPackagesClaimResponseBody,
 };
 use arkret_wire::{
     AccountId, ActorId, CommittedEventRef, DeviceId, DidCoreId, DidUrl, EventId, EventKind, RealmId,
@@ -364,12 +364,11 @@ async fn group_scope(
         #[diesel(sql_type = Jsonb)]
         value: serde_json::Value,
     }
-    let row = sql_query("SELECT value FROM mls_group_current_results WHERE realm_id=$1 AND mls_group_id=$2 FOR SHARE")
+    let row = sql_query("SELECT value FROM mls_group_current_states WHERE realm_id=$1 AND mls_group_id=$2 FOR SHARE")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(group.as_str())
         .get_result::<Row>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(|| denied("accepted MLS group scope unavailable"))?;
-    let current: arkret_wire::MlsGroupCurrent =
-        serde_json::from_value(row.value).map_err(denied)?;
+    let current: arkret_wire::MlsGroupValue = serde_json::from_value(row.value).map_err(denied)?;
     let scope = current.effective_scope;
     if scope.realm_id() != realm
         || !matches!(
@@ -419,7 +418,7 @@ async fn agent(
 /// Every local source and target is instead re-read under the real local PCR.
 pub(crate) async fn prepare(
     conn: &mut AsyncPgConnection,
-    outcome: &PeerKeyPackagesClaimOutcome,
+    outcome: &PeerKeyPackagesClaimResponseBody,
     command: Option<&PeerKeyPackagesClaimRequestBody>,
     station: &DidCoreId,
     remote_devices: &[coland_storage::MlsClaimRemoteDeviceEvidence],

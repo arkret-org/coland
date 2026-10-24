@@ -35,7 +35,7 @@ impl OriginFixture {
             .append_log_event(coland_storage::WebvhLogRecord {
                 event_digest: arkret_canonical::canonical_sha256(&self.inception_log).unwrap(),
                 did: self.station_did.to_string(),
-                seq: 1,
+                sequence: 1,
                 operation: self.inception_log.clone(),
                 created_at: self.genesis.commit.committed_at,
             })

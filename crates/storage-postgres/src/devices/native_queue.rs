@@ -1,6 +1,8 @@
 //! Scope-bound native recipient pages and exact, post-delivery acknowledgements.
-use arkret_models_collaboration::device_messages::{DeviceMessagesGetOutcome, RecipientDelivery};
-use arkret_models_crypto::{MlsCommitPayload, PeerKeyPackagesClaimOutcome};
+use arkret_models_collaboration::device_messages::{
+    DeviceMessagesGetResponseBody, RecipientDelivery,
+};
+use arkret_models_crypto::{MlsCommitPayload, PeerKeyPackagesClaimResponseBody};
 use arkret_wire::ScopeRef;
 use coland_storage::{
     AccountContentDeliveryGuard, AppletDeviceQueueAck, AppletDeviceQueuePage,
@@ -291,7 +293,7 @@ async fn material_deadline(
     let row=sql_query("SELECT l.source_id,l.claim_request_id,l.request_digest,l.key_package_use,l.keypackage_id,l.outcome,l.state,l.expires_at,l.claim_expires_at_unix_ms,b.welcome_id,b.welcome_digest,b.commit_event_ref FROM keypackage_claim_welcome_bindings b JOIN peer_keypackage_claims l ON l.source_id=b.source_id AND l.claim_request_id=b.claim_request_id WHERE b.claim_id=$1 FOR SHARE OF l,b NOWAIT")
         .bind::<Text,_>(welcome.keypackage_claim_ref.as_str()).get_result::<MaterialRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(||denied("queued Welcome has no original claim binding"))?;
-    let outcome: PeerKeyPackagesClaimOutcome =
+    let outcome: PeerKeyPackagesClaimResponseBody =
         serde_json::from_value(row.outcome).map_err(PersistenceError::database)?;
     outcome
         .validate_shape()
@@ -502,7 +504,7 @@ pub(super) async fn read(
             mls_welcome: welcome,
         });
     }
-    let (ack_token, next_cursor) = if positions.is_empty() {
+    let (acknowledgement_token, next_cursor) = if positions.is_empty() {
         (None, None)
     } else {
         let token = fresh_device_message_ack_token();
@@ -554,7 +556,7 @@ pub(super) async fn read(
             Vec::new()
         };
         cumulative.extend_from_slice(&positions);
-        sql_query("INSERT INTO device_message_ack_tokens(ack_token,recipient,device_id,recipient_device_authorization,effective_scope,delivered_positions,queue_position,issued_at,expires_at,consumed_at) VALUES($1,$2,$3,$4,$5,$6,$7,NOW(),$8,NULL)")
+        sql_query("INSERT INTO device_message_ack_tokens(acknowledgement_token,recipient,device_id,recipient_device_authorization,effective_scope,delivered_positions,queue_position,issued_at,expires_at,consumed_at) VALUES($1,$2,$3,$4,$5,$6,$7,NOW(),$8,NULL)")
             .bind::<Text,_>(&token).bind::<Text,_>(subject(authority)?).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(&binding)
             .bind::<Jsonb,_>(&scope).bind::<Array<BigInt>,_>(&cumulative).bind::<BigInt,_>(position).bind::<Timestamptz,_>(Utc::now()+chrono::Duration::hours(24))
             .execute(held.connection()).await.map_err(PersistenceError::database)?;
@@ -590,9 +592,9 @@ pub(super) async fn read(
         return Err(denied("native queue authority ended before publication"));
     }
     Ok(AppletDeviceQueuePage {
-        outcome: DeviceMessagesGetOutcome {
+        outcome: DeviceMessagesGetResponseBody {
             deliveries,
-            ack_token,
+            acknowledgement_token,
             next_cursor,
             has_more,
             limited: Some(has_more),
@@ -612,7 +614,7 @@ pub(super) async fn ack(
 ) -> PersistenceResult<Option<usize>> {
     let authority = input.authority;
     let scope = input.effective_scope;
-    let token = input.body.ack_token.as_str();
+    let token = input.body.acknowledgement_token.as_str();
     if token.is_empty() || token.len() > 1024 {
         return Ok(None);
     }
@@ -621,7 +623,7 @@ pub(super) async fn ack(
         crate::realm_authorization_cut::lock_realm_authorization_cut(conn,&authority.realm_id).await?;
         require_device(conn,authority,scope,input.transport_expires_at).await?;
         let binding=super::queue_authority::realm_device_binding(authority)?;
-        let stored=sql_query("SELECT recipient,device_id,recipient_device_authorization,effective_scope,delivered_positions,expires_at,consumed_at FROM device_message_ack_tokens WHERE ack_token=$1 AND effective_scope IS NOT NULL FOR UPDATE")
+        let stored=sql_query("SELECT recipient,device_id,recipient_device_authorization,effective_scope,delivered_positions,expires_at,consumed_at FROM device_message_ack_tokens WHERE acknowledgement_token=$1 AND effective_scope IS NOT NULL FOR UPDATE")
             .bind::<Text,_>(token).get_result::<AckRow>(&mut *conn).await.optional()?;
         let Some(stored)=stored else{return Ok(None)};
         let scope=serde_json::to_value(scope).map_err(PersistenceError::database)?;
@@ -633,7 +635,7 @@ pub(super) async fn ack(
         let count=sql_query("UPDATE mls_welcome_deliveries SET state='delivered',delivered_at=NOW() WHERE recipient=$1 AND recipient_endpoint_kind='device' AND recipient_device_id=$2 AND recipient_device_authorization=$3 AND position=ANY($4) AND delivery_json->'effective_scope'=$5 AND state='queued'")
             .bind::<Text,_>(subject(authority)?).bind::<Text,_>(authority.device_id.as_str()).bind::<Jsonb,_>(binding).bind::<Array<BigInt>,_>(&stored.delivered_positions).bind::<Jsonb,_>(scope)
             .execute(&mut *conn).await?;
-        sql_query("UPDATE device_message_ack_tokens SET consumed_at=NOW() WHERE ack_token=$1 AND consumed_at IS NULL").bind::<Text,_>(token).execute(&mut *conn).await?;
+        sql_query("UPDATE device_message_ack_tokens SET consumed_at=NOW() WHERE acknowledgement_token=$1 AND consumed_at IS NULL").bind::<Text,_>(token).execute(&mut *conn).await?;
         require_device(conn,authority,input.effective_scope,input.transport_expires_at).await?;
         if Utc::now()>=stored.expires_at {return Err(denied("native ACK token expired before completion").into());}
         Ok(Some(count))

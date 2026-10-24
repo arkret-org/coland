@@ -2,30 +2,32 @@
 
 mod mls_roster;
 use arkret_models_collaboration::authority_commit::{
-    AccountDeviceHistoricalSignerFact, AuthorityForwardBranch, AuthorityHandoffRequest,
-    DirectConversationFoundingAcceptanceOutcome, DirectConversationFoundingFederationSubmission,
-    DirectConversationFoundingUnitSubmission, HistoricalProducerSignerFact,
-    MembershipCompensationAcceptanceOutcome, MembershipCompensationFederationSubmission,
-    MembershipCompensationUnitSubmission, OrdinaryRealmBootstrapAcceptanceOutcome,
-    OrdinaryRealmBootstrapUnitSubmission, PeerAuthorityForwardEventRequest,
-    PeerAuthorityForwardMlsRequest, PeerAuthorityForwardOutcome, PeerAuthoritySubmitOutcome,
-    PeerAuthoritySubmitRequest, PeerCommittedReplicationOutcome, PeerCommittedReplicationRequest,
-    PeerRegisteredAtomicUnit, PeerRegisteredAtomicUnitOutcome,
-    PeerRegisteredAtomicUnitOutcomeValue, SelfAuthoritySubmitOutcome, SelfAuthoritySubmitRequest,
+    AccountDeviceHistoricalSignerFact, AuthorityForwardBranch,
+    AuthorityRealmAuthorityHandoffRequestBody, DirectConversationFoundingAcceptanceOutcome,
+    DirectConversationFoundingFederationSubmission, DirectConversationFoundingUnitSubmission,
+    HistoricalProducerSignerFact, MembershipCompensationAcceptanceOutcome,
+    MembershipCompensationFederationSubmission, MembershipCompensationUnitSubmission,
+    OrdinaryRealmBootstrapAcceptanceOutcome, OrdinaryRealmBootstrapUnitSubmission,
+    PeerAuthorityForwardEventRequestBody, PeerAuthorityForwardMlsRequestBody,
+    PeerAuthorityForwardResponseBody, PeerAuthoritySubmitRequestBody,
+    PeerAuthoritySubmitResponseBody, PeerCommittedReplicationRequestBody,
+    PeerCommittedReplicationResponseBody, PeerRegisteredAtomicUnit,
+    PeerRegisteredAtomicUnitResponseBody, RegisteredAtomicUnitAdmissionOutcome,
+    SelfAuthoritySubmitRequestBody, SelfAuthoritySubmitResponseBody,
 };
-use arkret_models_collaboration::exact_current_results::{
-    ExactCurrentResultsReadOutcome, ExactCurrentResultsReadRequestBody,
+use arkret_models_collaboration::exact_current_state::{
+    ExactCurrentStateReadRequestBody, ExactCurrentStateReadResponseBody,
 };
 use arkret_models_collaboration::principal_operations::PcrGenesisAdmissionInput;
 use arkret_models_collaboration::strand_watch_operations::{
-    StrandWatchCurrentOutcome, StrandWatchCurrentRequestBody,
+    StrandWatchCurrentRequestBody, StrandWatchCurrentResponseBody,
 };
 use arkret_wire::{
-    AuthorityBundleRequest, AuthoritySubmitOutcome, CommitStreamHead, CommitStreamRef,
-    DetachedSignatureContext, DidCoreId, DidUrl, Event, EventAdmissionSubmission,
-    MlsCommitSubmission, RealmAuthorityBundle, RealmAuthorityCurrentAssertion,
-    RealmAuthorityHandoff, RealmAuthorityTransition, RealmCommit, RealmCommitId,
-    RealmStateSnapshot, StreamScanDirection, StreamScanOutcome, StreamScanRequest,
+    AuthoritySubmitResponseBody, CommitStreamHead, CommitStreamRef, DetachedSignatureContext,
+    DidCoreId, DidUrl, Event, EventAdmissionSubmission, MlsCommitSubmission, RealmAuthorityBundle,
+    RealmAuthorityBundleRequestBody, RealmAuthorityCurrentAssertion, RealmAuthorityHandoff,
+    RealmAuthorityTransition, RealmCommit, RealmCommitId, RealmStateSnapshot, StreamScanDirection,
+    StreamScanRequestBody, StreamScanResponseBody,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -88,7 +90,7 @@ struct RealmSnapshotIdentityBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     history_basis: Option<&'a arkret_wire::RealmSnapshotHistoryBasis>,
     visible_stream_heads: &'a [CommitStreamHead],
-    current_state_entries: &'a [arkret_wire::TypedCurrentRow],
+    current_state_entries: &'a [arkret_wire::CurrentState],
     retention_and_history_floor: &'a arkret_wire::RetentionAndHistoryFloor,
     #[serde(serialize_with = "arkret_wire::serde_helpers::serialize_canonical_timestamp")]
     created_at: DateTime<Utc>,
@@ -103,7 +105,7 @@ struct RealmSnapshotUnsignedBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     history_basis: Option<&'a arkret_wire::RealmSnapshotHistoryBasis>,
     visible_stream_heads: &'a [CommitStreamHead],
-    current_state_entries: &'a [arkret_wire::TypedCurrentRow],
+    current_state_entries: &'a [arkret_wire::CurrentState],
     retention_and_history_floor: &'a arkret_wire::RetentionAndHistoryFloor,
     #[serde(serialize_with = "arkret_wire::serde_helpers::serialize_canonical_timestamp")]
     created_at: DateTime<Utc>,
@@ -449,9 +451,8 @@ impl AuthorityCommitApplication {
         actor: &arkret_wire::ActorId,
         station: &arkret_wire::DidCoreId,
         include_terminal: bool,
-    ) -> ServiceResult<
-        Option<arkret_models_collaboration::objects::query_projection::ProjectionMorphList>,
-    > {
+    ) -> ServiceResult<Option<arkret_models_collaboration::objects::query_projection::MorphPage>>
+    {
         Ok(self
             .store()
             .morph_list_for_actor(realm, actor, station, include_terminal)
@@ -465,9 +466,7 @@ impl AuthorityCommitApplication {
         actor: &arkret_wire::ActorId,
         station: &arkret_wire::DidCoreId,
     ) -> ServiceResult<
-        Option<
-            arkret_models_collaboration::objects::query_projection::DocumentMorphProjectionOutcome,
-        >,
+        Option<arkret_models_collaboration::objects::query_projection::DocumentMorphView>,
     > {
         Ok(self
             .store()
@@ -479,9 +478,11 @@ impl AuthorityCommitApplication {
         &self,
         caller: &arkret_wire::ActorId,
         station: &arkret_wire::DidCoreId,
-        request: &arkret_models_collaboration::governance::authorization::AuthzCheckRequestBody,
+        request: &arkret_models_collaboration::governance::authorization::AuthorizationCheckRequestBody,
     ) -> ServiceResult<
-        Option<arkret_models_collaboration::governance::authorization::AuthzCheckOutcome>,
+        Option<
+            arkret_models_collaboration::governance::authorization::AuthorizationCheckResponseBody,
+        >,
     > {
         Ok(self
             .store()
@@ -633,8 +634,8 @@ impl AuthorityCommitApplication {
 
     pub async fn watch_audit_read_disclosure(
         &self,
-        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
-        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequestBody,
+        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadResponseBody,
         issuer: &DidCoreId,
     ) -> ServiceResult<()> {
         Ok(self
@@ -645,8 +646,8 @@ impl AuthorityCommitApplication {
 
     pub async fn watch_audit_read_delivery_guard(
         &self,
-        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequest,
-        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadOutcome,
+        request: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadRequestBody,
+        outcome: &arkret_models_collaboration::strand_watch_operations::WatchAuditReadResponseBody,
         issuer: &DidCoreId,
         expires_at: DateTime<Utc>,
     ) -> ServiceResult<Box<dyn coland_storage::AccountContentDeliveryGuard>> {
@@ -776,7 +777,7 @@ impl AuthorityCommitApplication {
     pub async fn retain_forwarded_submission(
         &self,
         event: &Event,
-        submission: &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest,
+        submission: &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody,
         at: DateTime<Utc>,
     ) -> ServiceResult<()> {
         self.store()
@@ -800,10 +801,11 @@ impl AuthorityCommitApplication {
     pub async fn freeze_forwarded_peer_request(
         &self,
         event: &Event,
-        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest,
+        request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
         at: DateTime<Utc>,
-    ) -> ServiceResult<Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest>>
-    {
+    ) -> ServiceResult<
+        Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody>,
+    > {
         Ok(self
             .store()
             .freeze_forwarded_peer_request(event, request, at)
@@ -832,7 +834,7 @@ impl AuthorityCommitApplication {
             coland_storage::ManagedMlsRefusalSource<'_>,
             &coland_storage::IdempotencyRecord,
         )>,
-    ) -> ServiceResult<AuthoritySubmitOutcome> {
+    ) -> ServiceResult<AuthoritySubmitResponseBody> {
         Ok(self
             .store()
             .finalize_mls_rejection(event, authority, reason_code, native)
@@ -1035,7 +1037,7 @@ impl AuthorityCommitApplication {
         submission: &PcrGenesisAdmissionInput,
         exact_request_body: &[u8],
     ) -> ServiceResult<
-        Option<arkret_models_collaboration::principal_operations::PcrGenesisAdmissionOutcome>,
+        Option<arkret_models_collaboration::principal_operations::PcrGenesisAdmissionResponseBody>,
     > {
         submission
             .validate()
@@ -1625,13 +1627,13 @@ impl AuthorityCommitApplication {
 
     pub async fn read_realm_actor_material(
         &self,
-        request: &arkret_models_integration::RealmActorMaterialRequest,
+        request: &arkret_models_integration::RealmActorMaterialRequestBody,
         caller: &coland_storage::RealmActorMaterialCaller,
         governor: &DidCoreId,
         verification_method: &DidUrl,
         signing_key: &SigningKey,
-    ) -> ServiceResult<arkret_models_integration::RealmActorMaterialOutcome> {
-        let sign = |body: &arkret_models_integration::RealmActorMaterialUnsigned| {
+    ) -> ServiceResult<arkret_models_integration::RealmActorMaterialResponseBody> {
+        let sign = |body: &arkret_models_integration::RealmActorMaterialSignatureInput| {
             let signature = arkret_signatures::detached_object::sign_detached_object(
                 body,
                 DetachedSignatureContext::RealmActorMaterial,
@@ -1655,7 +1657,7 @@ impl AuthorityCommitApplication {
         verification_method: &DidUrl,
         signing_key: &SigningKey,
     ) -> ServiceResult<coland_storage::AppletAuthoringCompletion> {
-        let sign = |body: &arkret_models_integration::RealmActorMaterialUnsigned| {
+        let sign = |body: &arkret_models_integration::RealmActorMaterialSignatureInput| {
             let signature = arkret_signatures::detached_object::sign_detached_object(
                 body,
                 DetachedSignatureContext::RealmActorMaterial,
@@ -1755,7 +1757,7 @@ impl AuthorityCommitApplication {
         at: DateTime<Utc>,
         prepared: Option<&coland_storage::EventApprovalCommit>,
         digest: &arkret_wire::Hash,
-    ) -> ServiceResult<arkret_wire::AuthoritySubmitOutcome> {
+    ) -> ServiceResult<arkret_wire::AuthoritySubmitResponseBody> {
         event
             .validate_for_submit_structural()
             .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
@@ -1764,7 +1766,7 @@ impl AuthorityCommitApplication {
             .realm_actor_creation_replay(event, digest, local_service_id)
             .await?
         {
-            return Ok(arkret_wire::AuthoritySubmitOutcome::Accepted {
+            return Ok(arkret_wire::AuthoritySubmitResponseBody::Accepted {
                 status: arkret_wire::AuthorityCommitStatus::Duplicate,
                 commit,
             });
@@ -1814,7 +1816,7 @@ impl AuthorityCommitApplication {
         signing_key: &SigningKey,
         at: DateTime<Utc>,
         digest: &arkret_wire::Hash,
-    ) -> ServiceResult<AuthoritySubmitOutcome> {
+    ) -> ServiceResult<AuthoritySubmitResponseBody> {
         event
             .validate_for_submit_structural()
             .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
@@ -1823,7 +1825,7 @@ impl AuthorityCommitApplication {
             .realm_actor_recovery_replay(event, digest, local_service_id)
             .await?
         {
-            return Ok(AuthoritySubmitOutcome::Accepted {
+            return Ok(AuthoritySubmitResponseBody::Accepted {
                 status: arkret_wire::AuthorityCommitStatus::Duplicate,
                 commit,
             });
@@ -1874,7 +1876,7 @@ impl AuthorityCommitApplication {
         signing_key: &SigningKey,
         at: DateTime<Utc>,
         digest: &arkret_wire::Hash,
-    ) -> ServiceResult<AuthoritySubmitOutcome> {
+    ) -> ServiceResult<AuthoritySubmitResponseBody> {
         event
             .validate_for_submit_structural()
             .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
@@ -1883,7 +1885,7 @@ impl AuthorityCommitApplication {
             .realm_actor_control_replay(event, carrier, digest)
             .await?
         {
-            return Ok(AuthoritySubmitOutcome::Accepted {
+            return Ok(AuthoritySubmitResponseBody::Accepted {
                 status: arkret_wire::AuthorityCommitStatus::Duplicate,
                 commit,
             });
@@ -1929,7 +1931,7 @@ impl AuthorityCommitApplication {
         at: DateTime<Utc>,
         prepared: Option<&coland_storage::EventApprovalCommit>,
         request_digest: &arkret_wire::Hash,
-    ) -> ServiceResult<AuthoritySubmitOutcome> {
+    ) -> ServiceResult<AuthoritySubmitResponseBody> {
         let fact = self
             .store()
             .prepare_realm_actor_control_signer_fact(event, at)
@@ -2092,7 +2094,7 @@ impl AuthorityCommitApplication {
         Option<(
             arkret_models_collaboration::agent_sidecar::SidecarParticipantAuthorityCut,
             Vec<arkret_wire::DidCoreId>,
-            Option<arkret_wire::MlsGroupCurrent>,
+            Option<arkret_wire::MlsGroupValue>,
             bool,
         )>,
     > {
@@ -2373,7 +2375,7 @@ impl AuthorityCommitApplication {
         realm_id: &arkret_wire::RealmId,
         selector: &arkret_models_identity::SignerKeyQuerySelector,
         recipient: &arkret_wire::AccountId,
-    ) -> ServiceResult<Option<arkret_models_identity::SignerKeyQueryOutcome>> {
+    ) -> ServiceResult<Option<arkret_models_identity::SignerKeyResolution>> {
         Ok(self
             .store()
             .historical_self_pcr_producer_signer_key(realm_id, selector, recipient)
@@ -2384,7 +2386,7 @@ impl AuthorityCommitApplication {
         &self,
         realm_id: &arkret_wire::RealmId,
         selector: &arkret_models_identity::SignerKeyQuerySelector,
-    ) -> crate::ServiceResult<Option<arkret_models_identity::SignerKeyQueryOutcome>> {
+    ) -> crate::ServiceResult<Option<arkret_models_identity::SignerKeyResolution>> {
         Ok(self
             .store()
             .historical_producer_signer_key(realm_id, selector)
@@ -2435,7 +2437,7 @@ impl AuthorityCommitApplication {
         &self,
         realm_id: &arkret_wire::RealmId,
         selector: &arkret_wire::CurrentSelector,
-    ) -> ServiceResult<Option<arkret_wire::TypedCurrentRow>> {
+    ) -> ServiceResult<Option<arkret_wire::CurrentState>> {
         Ok(self
             .store()
             .current_agent_result(realm_id, selector)
@@ -2492,8 +2494,8 @@ impl AuthorityCommitApplication {
         include_terminal: bool,
     ) -> ServiceResult<
         Option<(
-            arkret_models_collaboration::objects::query_projection::ProjectionSpaceList,
-            arkret_models_collaboration::objects::query_projection::ProjectionStrandList,
+            arkret_models_collaboration::objects::query_projection::SpacePage,
+            arkret_models_collaboration::objects::query_projection::StrandPage,
         )>,
     > {
         Ok(self
@@ -2509,9 +2511,9 @@ impl AuthorityCommitApplication {
         include_terminal: bool,
     ) -> ServiceResult<
         Option<(
-            arkret_models_collaboration::objects::query_projection::ProjectionSpaceList,
-            arkret_models_collaboration::objects::query_projection::ProjectionStrandList,
-            arkret_models_collaboration::sync_frames::current_results::AccountCurrentView,
+            arkret_models_collaboration::objects::query_projection::SpacePage,
+            arkret_models_collaboration::objects::query_projection::StrandPage,
+            arkret_models_collaboration::sync_frames::current_states::AccountStateView,
         )>,
     > {
         Ok(self
@@ -2755,8 +2757,8 @@ impl AuthorityCommitApplication {
     /// `truncated` indicates whether another page exists in that direction.
     pub async fn scan_stream(
         &self,
-        request: &StreamScanRequest,
-    ) -> ServiceResult<StreamScanOutcome> {
+        request: &StreamScanRequestBody,
+    ) -> ServiceResult<StreamScanResponseBody> {
         request.validate().map_err(|error| {
             crate::ServiceError::SchemaViolation(format!("invalid stream scan request: {error}"))
         })?;
@@ -2772,7 +2774,7 @@ impl AuthorityCommitApplication {
     /// [`coland_storage::AuthorityCommitStore::scan_stream_for_account`].
     pub async fn scan_stream_for_actor(
         &self,
-        request: &StreamScanRequest,
+        request: &StreamScanRequestBody,
         actor: &arkret_wire::ActorId,
         issuer: &DidCoreId,
     ) -> ServiceResult<coland_storage::AccountStreamScan> {
@@ -2793,7 +2795,7 @@ impl AuthorityCommitApplication {
 
     pub async fn scan_stream_for_account(
         &self,
-        request: &StreamScanRequest,
+        request: &StreamScanRequestBody,
         account: &arkret_wire::AccountId,
         issuer: &DidCoreId,
     ) -> ServiceResult<coland_storage::AccountStreamScan> {
@@ -2850,7 +2852,8 @@ impl AuthorityCommitApplication {
         &self,
         verified: &coland_storage::VerifiedMlsAddAuthorityAttestation,
         issuer: &DidCoreId,
-    ) -> ServiceResult<arkret_models_collaboration::mls_roster_authority::MlsAttestAddOutcome> {
+    ) -> ServiceResult<arkret_models_collaboration::mls_roster_authority::MlsAttestAddResponseBody>
+    {
         Ok(self
             .store()
             .install_mls_add_authority_attestation(verified, issuer)
@@ -2911,7 +2914,7 @@ impl AuthorityCommitApplication {
 
     pub async fn scan_stream_for_peer(
         &self,
-        request: &StreamScanRequest,
+        request: &StreamScanRequestBody,
         peer: &DidCoreId,
         issuer: &DidCoreId,
     ) -> ServiceResult<coland_storage::PeerStreamScan> {
@@ -2944,7 +2947,7 @@ impl AuthorityCommitApplication {
             .list_realm_streams_for_account(realm_id, account, issuer)
             .await?;
         if let coland_storage::AccountRealmStreamList::Listed(streams) = &listing {
-            arkret_wire::RealmStreamList::validate_rows(realm_id, streams).map_err(|error| {
+            arkret_wire::RealmStreamPage::validate_rows(realm_id, streams).map_err(|error| {
                 crate::ServiceError::Internal(format!("invalid realm stream list: {error}"))
             })?;
         }
@@ -2962,7 +2965,7 @@ impl AuthorityCommitApplication {
             .realm_stream_subscription_cut(realm_id, account, issuer)
             .await?;
         if let coland_storage::AccountRealmStreamList::Listed(streams) = &cut.listing {
-            arkret_wire::RealmStreamList::validate_rows(realm_id, streams)
+            arkret_wire::RealmStreamPage::validate_rows(realm_id, streams)
                 .map_err(|e| crate::ServiceError::Internal(e.to_string()))?;
             if cut
                 .history_digest
@@ -2977,31 +2980,32 @@ impl AuthorityCommitApplication {
         Ok(cut)
     }
 
-    /// `ak.self.current_results.read.exact.v1` at one governing read cut. The
+    /// `ak.self.current_state.read.exact.v1` at one governing read cut. The
     /// answer is checked against the exact request and the cut's generation
     /// before it can leave the Station.
-    pub async fn exact_current_result_for_actor(
+    pub async fn exact_current_state_for_actor(
         &self,
-        request: &ExactCurrentResultsReadRequestBody,
+        request: &ExactCurrentStateReadRequestBody,
         actor: &arkret_wire::ActorId,
         issuer: &DidCoreId,
-    ) -> ServiceResult<coland_storage::SelfExactCurrentRead<ExactCurrentResultsReadOutcome>> {
+    ) -> ServiceResult<coland_storage::SelfExactCurrentRead<ExactCurrentStateReadResponseBody>>
+    {
         request.validate().map_err(|error| {
             crate::ServiceError::SchemaViolation(format!(
-                "invalid exact current-result request: {error}"
+                "invalid exact current-state request: {error}"
             ))
         })?;
         let read = self
             .store()
-            .exact_current_result_for_actor(request, actor, issuer)
+            .exact_current_state_for_actor(request, actor, issuer)
             .await?;
         if let coland_storage::SelfExactCurrentRead::Answer(outcome) = &read {
             let generation = match outcome {
-                ExactCurrentResultsReadOutcome::Present {
+                ExactCurrentStateReadResponseBody::Present {
                     governance_generation,
                     ..
                 }
-                | ExactCurrentResultsReadOutcome::NeverWritten {
+                | ExactCurrentStateReadResponseBody::NeverWritten {
                     governance_generation,
                     ..
                 } => *governance_generation,
@@ -3010,35 +3014,36 @@ impl AuthorityCommitApplication {
                 .validate_for_request(request, generation)
                 .map_err(|error| {
                     crate::ServiceError::Internal(format!(
-                        "invalid exact current-result outcome: {error}"
+                        "invalid exact current-state outcome: {error}"
                     ))
                 })?;
         }
         Ok(read)
     }
 
-    pub async fn exact_current_result_for_account(
+    pub async fn exact_current_state_for_account(
         &self,
-        request: &ExactCurrentResultsReadRequestBody,
+        request: &ExactCurrentStateReadRequestBody,
         account: &arkret_wire::AccountId,
         issuer: &DidCoreId,
-    ) -> ServiceResult<coland_storage::SelfExactCurrentRead<ExactCurrentResultsReadOutcome>> {
+    ) -> ServiceResult<coland_storage::SelfExactCurrentRead<ExactCurrentStateReadResponseBody>>
+    {
         request.validate().map_err(|error| {
             crate::ServiceError::SchemaViolation(format!(
-                "invalid exact current-result request: {error}"
+                "invalid exact current-state request: {error}"
             ))
         })?;
         let read = self
             .store()
-            .exact_current_result_for_account(request, account, issuer)
+            .exact_current_state_for_account(request, account, issuer)
             .await?;
         if let coland_storage::SelfExactCurrentRead::Answer(outcome) = &read {
             let generation = match outcome {
-                ExactCurrentResultsReadOutcome::Present {
+                ExactCurrentStateReadResponseBody::Present {
                     governance_generation,
                     ..
                 }
-                | ExactCurrentResultsReadOutcome::NeverWritten {
+                | ExactCurrentStateReadResponseBody::NeverWritten {
                     governance_generation,
                     ..
                 } => *governance_generation,
@@ -3047,7 +3052,7 @@ impl AuthorityCommitApplication {
                 .validate_for_request(request, generation)
                 .map_err(|error| {
                     crate::ServiceError::Internal(format!(
-                        "invalid exact current-result outcome: {error}"
+                        "invalid exact current-state outcome: {error}"
                     ))
                 })?;
         }
@@ -3060,7 +3065,7 @@ impl AuthorityCommitApplication {
         request: &StrandWatchCurrentRequestBody,
         account: &arkret_wire::AccountId,
         issuer: &DidCoreId,
-    ) -> ServiceResult<coland_storage::SelfExactCurrentRead<StrandWatchCurrentOutcome>> {
+    ) -> ServiceResult<coland_storage::SelfExactCurrentRead<StrandWatchCurrentResponseBody>> {
         let read = self
             .store()
             .strand_watch_current_for_account(request, account, issuer)
@@ -3152,7 +3157,10 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
-    pub async fn install_handoff(&self, request: &AuthorityHandoffRequest) -> ServiceResult<()> {
+    pub async fn install_handoff(
+        &self,
+        request: &AuthorityRealmAuthorityHandoffRequestBody,
+    ) -> ServiceResult<()> {
         request.validate_new_handoff().map_err(|error| {
             crate::ServiceError::SchemaViolation(format!("invalid authority handoff: {error}"))
         })?;
@@ -3226,7 +3234,7 @@ impl AuthorityCommitApplication {
     /// never a conflict the caller could not resolve.
     pub async fn authority_bundle(
         &self,
-        request: &AuthorityBundleRequest,
+        request: &RealmAuthorityBundleRequestBody,
         local_service_id: &DidCoreId,
         current_route_record: serde_json::Value,
         verification_method: DidUrl,
@@ -3260,7 +3268,7 @@ impl AuthorityCommitApplication {
     /// One bundle attempt; `None` when the authority cut moved underneath it.
     async fn authority_bundle_at_current_cut(
         &self,
-        request: &AuthorityBundleRequest,
+        request: &RealmAuthorityBundleRequestBody,
         local_service_id: &DidCoreId,
         current_route_record: serde_json::Value,
         verification_method: DidUrl,
@@ -3281,7 +3289,7 @@ impl AuthorityCommitApplication {
             realm_id: request.realm_id.clone(),
         };
         let scan = self
-            .scan_stream(&StreamScanRequest {
+            .scan_stream(&StreamScanRequestBody {
                 realm_id: request.realm_id.clone(),
                 stream_ref: stream_ref.clone(),
                 direction: StreamScanDirection::After(None),
@@ -3383,11 +3391,11 @@ const AUTHORITY_BUNDLE_CUT_ATTEMPTS: usize = 4;
 
 /// Wrap one `authority_forward` admission result in its closed branch.
 fn authority_forward_outcome(
-    outcome: AuthoritySubmitOutcome,
-) -> ServiceResult<PeerAuthoritySubmitOutcome> {
-    let outcome = PeerAuthoritySubmitOutcome::AuthorityForward(PeerAuthorityForwardOutcome {
+    outcome: AuthoritySubmitResponseBody,
+) -> ServiceResult<PeerAuthoritySubmitResponseBody> {
+    let outcome = PeerAuthoritySubmitResponseBody::AuthorityForward(PeerAuthorityForwardResponseBody {
         branch: AuthorityForwardBranch::AuthorityForward,
-        outcome: arkret_models_collaboration::authority_commit::PeerAuthorityForwardOutcomeValue::Ordinary(outcome),
+        response_body: arkret_models_collaboration::authority_commit::ForwardedAuthorityResponseBody::Ordinary(outcome),
     });
     outcome.validate().map_err(|error| {
         ServiceError::Internal(format!(
@@ -3420,8 +3428,8 @@ pub trait AuthorityProtocolPort: Send + Sync {
         &self,
         _metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
         _authority: &coland_storage::AppletManagedDeviceAuthority,
-        _request: SelfAuthoritySubmitRequest,
-    ) -> ServiceResult<SelfAuthoritySubmitOutcome> {
+        _request: SelfAuthoritySubmitRequestBody,
+    ) -> ServiceResult<SelfAuthoritySubmitResponseBody> {
         Err(ServiceError::UnsupportedEventKind(
             "managed Device submission has no accepting domain unit".into(),
         ))
@@ -3431,7 +3439,7 @@ pub trait AuthorityProtocolPort: Send + Sync {
         &self,
         session: &crate::identity::SessionIdentityState,
         request: EventAdmissionSubmission,
-    ) -> ServiceResult<AuthoritySubmitOutcome>;
+    ) -> ServiceResult<AuthoritySubmitResponseBody>;
 
     /// An accepted MLS result is forbidden until the MLS state, every Welcome,
     /// and its authority Commit are visible through one transaction.
@@ -3439,7 +3447,7 @@ pub trait AuthorityProtocolPort: Send + Sync {
         &self,
         session: &crate::identity::SessionIdentityState,
         request: MlsCommitSubmission,
-    ) -> ServiceResult<AuthoritySubmitOutcome>;
+    ) -> ServiceResult<AuthoritySubmitResponseBody>;
 
     async fn submit_self_direct_conversation_founding(
         &self,
@@ -3477,7 +3485,7 @@ pub trait AuthorityProtocolPort: Send + Sync {
     async fn submit_peer_audit_pair(
         &self,
         _peer: &AuthenticatedPeerContext,
-        _request: arkret_models_collaboration::authority_commit::PeerAuthorityForwardAtomicRequest,
+        _request: arkret_models_collaboration::authority_commit::PeerAuthorityForwardAtomicRequestBody,
     ) -> ServiceResult<
         arkret_models_collaboration::authority_commit::AuditPairedEventAcceptanceOutcome,
     > {
@@ -3514,40 +3522,44 @@ pub trait AuthorityProtocolPort: Send + Sync {
     async fn submit_self(
         &self,
         session: &crate::identity::SessionIdentityState,
-        request: SelfAuthoritySubmitRequest,
+        request: SelfAuthoritySubmitRequestBody,
         exact_request_body: &[u8],
-    ) -> ServiceResult<SelfAuthoritySubmitOutcome> {
+    ) -> ServiceResult<SelfAuthoritySubmitResponseBody> {
         request.validate().map_err(|error| {
             crate::ServiceError::SchemaViolation(format!(
                 "invalid self authority submission: {error}"
             ))
         })?;
         let outcome = match request.clone() {
-            SelfAuthoritySubmitRequest::Event(value) => {
-                SelfAuthoritySubmitOutcome::Ordinary(self.submit_self_event(session, value).await?)
+            SelfAuthoritySubmitRequestBody::Event(value) => {
+                SelfAuthoritySubmitResponseBody::Ordinary(
+                    self.submit_self_event(session, value).await?,
+                )
             }
-            SelfAuthoritySubmitRequest::MlsCommit(value) => {
-                SelfAuthoritySubmitOutcome::Ordinary(self.submit_self_mls(session, value).await?)
+            SelfAuthoritySubmitRequestBody::MlsCommit(value) => {
+                SelfAuthoritySubmitResponseBody::Ordinary(
+                    self.submit_self_mls(session, value).await?,
+                )
             }
-            SelfAuthoritySubmitRequest::OrdinaryRealmBootstrap(value) => {
-                SelfAuthoritySubmitOutcome::OrdinaryRealmBootstrap(
+            SelfAuthoritySubmitRequestBody::OrdinaryRealmBootstrap(value) => {
+                SelfAuthoritySubmitResponseBody::OrdinaryRealmBootstrap(
                     self.submit_self_ordinary_realm_bootstrap(session, value, exact_request_body)
                         .await?,
                 )
             }
-            SelfAuthoritySubmitRequest::DirectConversationFounding(value) => {
-                SelfAuthoritySubmitOutcome::DirectConversationFounding(
+            SelfAuthoritySubmitRequestBody::DirectConversationFounding(value) => {
+                SelfAuthoritySubmitResponseBody::DirectConversationFounding(
                     self.submit_self_direct_conversation_founding(session, value)
                         .await?,
                 )
             }
-            SelfAuthoritySubmitRequest::AuditPairedEvent(value) => {
-                SelfAuthoritySubmitOutcome::AuditPairedEvent(
+            SelfAuthoritySubmitRequestBody::AuditPairedEvent(value) => {
+                SelfAuthoritySubmitResponseBody::AuditPairedEvent(
                     self.submit_self_audit_pair(session, value).await?,
                 )
             }
-            SelfAuthoritySubmitRequest::MembershipCompensation(value) => {
-                SelfAuthoritySubmitOutcome::MembershipCompensation(
+            SelfAuthoritySubmitRequestBody::MembershipCompensation(value) => {
+                SelfAuthoritySubmitResponseBody::MembershipCompensation(
                     self.submit_self_membership_compensation(session, value)
                         .await?,
                 )
@@ -3570,8 +3582,8 @@ pub trait AuthorityProtocolPort: Send + Sync {
     async fn submit_peer_authority_forward_event(
         &self,
         _peer: &AuthenticatedPeerContext,
-        _request: PeerAuthorityForwardEventRequest,
-    ) -> ServiceResult<AuthoritySubmitOutcome> {
+        _request: PeerAuthorityForwardEventRequestBody,
+    ) -> ServiceResult<AuthoritySubmitResponseBody> {
         Err(crate::ServiceError::internal(
             "authority_forward admission is not connected to this Station",
         ))
@@ -3582,8 +3594,8 @@ pub trait AuthorityProtocolPort: Send + Sync {
     async fn submit_peer_authority_forward_mls(
         &self,
         _peer: &AuthenticatedPeerContext,
-        _request: PeerAuthorityForwardMlsRequest,
-    ) -> ServiceResult<AuthoritySubmitOutcome> {
+        _request: PeerAuthorityForwardMlsRequestBody,
+    ) -> ServiceResult<AuthoritySubmitResponseBody> {
         Err(crate::ServiceError::internal(
             "authority_forward MLS admission is not connected to this Station",
         ))
@@ -3592,8 +3604,8 @@ pub trait AuthorityProtocolPort: Send + Sync {
     async fn submit_peer_committed_replication(
         &self,
         _peer: &AuthenticatedPeerContext,
-        _request: PeerCommittedReplicationRequest,
-    ) -> ServiceResult<PeerCommittedReplicationOutcome> {
+        _request: PeerCommittedReplicationRequestBody,
+    ) -> ServiceResult<PeerCommittedReplicationResponseBody> {
         Err(crate::ServiceError::internal(
             "committed replication is not connected to durable replica persistence",
         ))
@@ -3629,23 +3641,23 @@ pub trait AuthorityProtocolPort: Send + Sync {
     async fn submit_peer(
         &self,
         peer: &AuthenticatedPeerContext,
-        request: PeerAuthoritySubmitRequest,
-    ) -> ServiceResult<PeerAuthoritySubmitOutcome> {
+        request: PeerAuthoritySubmitRequestBody,
+    ) -> ServiceResult<PeerAuthoritySubmitResponseBody> {
         match request {
-            PeerAuthoritySubmitRequest::AuthorityForwardEvent(value) => {
+            PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(value) => {
                 let outcome = self
                     .submit_peer_authority_forward_event(peer, value)
                     .await?;
                 return authority_forward_outcome(outcome);
             }
-            PeerAuthoritySubmitRequest::AuthorityForwardAtomic(value) => {
+            PeerAuthoritySubmitRequestBody::AuthorityForwardAtomic(value) => {
                 let outcome = self.submit_peer_audit_pair(peer, value).await?;
                 outcome
                     .validate()
                     .map_err(|error| ServiceError::Internal(error.to_string()))?;
-                return Ok(PeerAuthoritySubmitOutcome::AuthorityForward(PeerAuthorityForwardOutcome { branch: AuthorityForwardBranch::AuthorityForward, outcome: arkret_models_collaboration::authority_commit::PeerAuthorityForwardOutcomeValue::AuditPairedEvent(outcome) }));
+                return Ok(PeerAuthoritySubmitResponseBody::AuthorityForward(PeerAuthorityForwardResponseBody { branch: AuthorityForwardBranch::AuthorityForward, response_body: arkret_models_collaboration::authority_commit::ForwardedAuthorityResponseBody::AuditPairedEvent(outcome) }));
             }
-            PeerAuthoritySubmitRequest::AuthorityForwardMls(value) => {
+            PeerAuthoritySubmitRequestBody::AuthorityForwardMls(value) => {
                 let outcome = self.submit_peer_authority_forward_mls(peer, value).await?;
                 return authority_forward_outcome(outcome);
             }
@@ -3657,42 +3669,44 @@ pub trait AuthorityProtocolPort: Send + Sync {
             ))
         })?;
         let outcome = match request.clone() {
-            PeerAuthoritySubmitRequest::AuthorityForwardEvent(_)
-            | PeerAuthoritySubmitRequest::AuthorityForwardMls(_)
-            | PeerAuthoritySubmitRequest::AuthorityForwardAtomic(_) => {
+            PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(_)
+            | PeerAuthoritySubmitRequestBody::AuthorityForwardMls(_)
+            | PeerAuthoritySubmitRequestBody::AuthorityForwardAtomic(_) => {
                 return Err(crate::ServiceError::internal(
                     "authority_forward is dispatched before whole-request validation",
                 ));
             }
-            PeerAuthoritySubmitRequest::CommittedReplication(value) => {
-                PeerAuthoritySubmitOutcome::CommittedReplication(
+            PeerAuthoritySubmitRequestBody::CommittedReplication(value) => {
+                PeerAuthoritySubmitResponseBody::CommittedReplication(
                     self.submit_peer_committed_replication(peer, value).await?,
                 )
             }
-            PeerAuthoritySubmitRequest::RegisteredAtomicUnit(value) => {
+            PeerAuthoritySubmitRequestBody::RegisteredAtomicUnit(value) => {
                 let branch = value.branch;
                 let unit = match value.unit {
                     PeerRegisteredAtomicUnit::DirectConversationFounding(unit) => {
-                        PeerRegisteredAtomicUnitOutcomeValue::DirectConversationFounding(
+                        RegisteredAtomicUnitAdmissionOutcome::DirectConversationFounding(
                             self.submit_peer_direct_conversation_founding(peer, unit)
                                 .await?,
                         )
                     }
                     PeerRegisteredAtomicUnit::AuditPairedEvent(unit) => {
-                        PeerRegisteredAtomicUnitOutcomeValue::AuditPairedEvent(
+                        RegisteredAtomicUnitAdmissionOutcome::AuditPairedEvent(
                             self.replicate_peer_audit_pair(peer, unit).await?,
                         )
                     }
                     PeerRegisteredAtomicUnit::MembershipCompensation(unit) => {
-                        PeerRegisteredAtomicUnitOutcomeValue::MembershipCompensation(
+                        RegisteredAtomicUnitAdmissionOutcome::MembershipCompensation(
                             self.submit_peer_membership_compensation(peer, unit).await?,
                         )
                     }
                 };
-                PeerAuthoritySubmitOutcome::RegisteredAtomicUnit(PeerRegisteredAtomicUnitOutcome {
-                    branch,
-                    outcome: unit,
-                })
+                PeerAuthoritySubmitResponseBody::RegisteredAtomicUnit(
+                    PeerRegisteredAtomicUnitResponseBody {
+                        branch,
+                        outcome: unit,
+                    },
+                )
             }
         };
         outcome.validate_for_request(&request).map_err(|error| {
@@ -3707,7 +3721,7 @@ pub trait AuthorityProtocolPort: Send + Sync {
     async fn scan_stream_for_account(
         &self,
         account: &arkret_wire::AccountId,
-        request: StreamScanRequest,
+        request: StreamScanRequestBody,
     ) -> ServiceResult<coland_storage::AccountStreamScan>;
 
     /// `ak.peer.committed_event.read.scan.v1` for the authenticated peer
@@ -3715,18 +3729,18 @@ pub trait AuthorityProtocolPort: Send + Sync {
     async fn scan_stream_for_peer(
         &self,
         peer: &AuthenticatedPeerContext,
-        request: StreamScanRequest,
+        request: StreamScanRequestBody,
     ) -> ServiceResult<coland_storage::PeerStreamScan>;
 
     async fn authority_bundle(
         &self,
-        request: AuthorityBundleRequest,
+        request: RealmAuthorityBundleRequestBody,
     ) -> ServiceResult<RealmAuthorityBundle>;
 
     async fn install_authority_handoff(
         &self,
         peer: &AuthenticatedPeerContext,
-        request: AuthorityHandoffRequest,
+        request: AuthorityRealmAuthorityHandoffRequestBody,
     ) -> ServiceResult<RealmAuthorityHandoff>;
 }
 
@@ -3838,7 +3852,7 @@ mod tests {
                 stream_position: 7,
                 commit_id: arkret_wire::RealmCommitId::from_digest([0x22; 32]),
             }],
-            current_state_entries: vec![arkret_wire::TypedCurrentRow::Value {
+            current_state_entries: vec![arkret_wire::CurrentState::Value {
                 selector: arkret_wire::CurrentSelector::RealmPolicyBundle,
                 source_stream_ref: stream_ref.clone(),
                 revision: arkret_wire::CurrentRevision {

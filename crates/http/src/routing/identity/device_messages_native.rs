@@ -38,7 +38,7 @@ pub(super) async fn list(
     native: &VerifiedAppletManagedDevice,
     after: Option<&str>,
     limit: Option<u32>,
-) -> coland_http::result::GuardedJsonResult<DeviceMessagesGetOutcome> {
+) -> coland_http::result::GuardedJsonResult<DeviceMessagesGetResponseBody> {
     if native.operation != arkret_wire::ServiceOperationId::SelfDeviceMessagesReadListV1 {
         return Err(AppError::capability_denied(
             "native queue operation is invalid",
@@ -66,8 +66,8 @@ pub(super) async fn list(
 pub(super) async fn ack(
     state: &AppState,
     native: &VerifiedAppletManagedDevice,
-    body: &DeviceMessagesAckRequestBody,
-) -> JsonResult<DeviceMessagesAckOutcome> {
+    body: &DeviceMessagesAcknowledgementRequestBody,
+) -> JsonResult<DeviceMessagesAcknowledgementResponseBody> {
     if native.operation != arkret_wire::ServiceOperationId::SelfDeviceMessagesCommandAckV1 {
         return Err(AppError::capability_denied(
             "native ACK operation is invalid",
@@ -87,7 +87,7 @@ pub(super) async fn ack(
             AppError::param_invalid("invalid ack token")
                 .with_reason_code(arkret_wire::ReasonCode::INVALID_ACK_TOKEN)
         })?;
-    json_ok(DeviceMessagesAckOutcome {
+    json_ok(DeviceMessagesAcknowledgementResponseBody {
         pruned_count: count as u64,
     })
 }

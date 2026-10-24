@@ -29,8 +29,8 @@
 use std::collections::BTreeMap;
 
 use arkret_models_collaboration::authority_commit::{
-    CommittedEventSubmission, CommittedReplicationBranch, PeerAuthoritySubmitRequest,
-    PeerCommittedReplicationRequest,
+    CommittedEventSubmission, CommittedReplicationBranch, PeerAuthoritySubmitRequestBody,
+    PeerCommittedReplicationRequestBody,
 };
 use coland_storage::{
     FederationOutboxRecord, PersistenceError, PersistenceResult, RealmFanoutAuthorityWitness,
@@ -202,7 +202,7 @@ async fn accepted_mls_genesis_for_fanout(
             .map_err(PersistenceError::database)?,
     )
     .map_err(internal)?;
-    let row = sql_query("SELECT value FROM mls_group_current_results WHERE scope_key=$1 FOR SHARE")
+    let row = sql_query("SELECT value FROM mls_group_current_states WHERE scope_key=$1 FOR SHARE")
         .bind::<Text, _>(&key)
         .get_result::<CurrentValueRow>(&mut *conn)
         .await
@@ -211,7 +211,7 @@ async fn accepted_mls_genesis_for_fanout(
         .ok_or_else(|| {
             PersistenceError::SchemaViolation("MLS fanout has no accepted group current".into())
         })?;
-    let group: arkret_wire::MlsGroupCurrent =
+    let group: arkret_wire::MlsGroupValue =
         serde_json::from_value(row.value).map_err(PersistenceError::database)?;
     if group.effective_scope != event.scope_ref
         || group.current_mls_commit_event_ref != event.event_id
@@ -322,9 +322,9 @@ async fn plaintext_message_services(
     realm_id: &arkret_wire::RealmId,
 ) -> PersistenceResult<Vec<String>> {
     let Some(row) = sql_query(
-        "SELECT b.value FROM realm_bootstrap_current_results b \
+        "SELECT b.value FROM realm_bootstrap_current_states b \
          JOIN realm_commits c ON c.commit_id=b.current_commit_id \
-         WHERE b.realm_id=$1 AND b.result_family='realm_plaintext_visible_services' \
+         WHERE b.realm_id=$1 AND b.state_family='realm_plaintext_visible_services' \
            AND c.realm_id=b.realm_id AND c.stream_position=b.current_stream_position \
            AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=b.realm_id",
     )
@@ -376,7 +376,7 @@ async fn departing_member_target(
     let member_key = member.to_string();
     let current = sql_query(
         "SELECT e.envelope->>'event_id' AS event_id \
-         FROM member_state_current_results m \
+         FROM member_state_current_states m \
          JOIN realm_commits c ON c.commit_id=m.current_commit_id \
          JOIN canonical_events e ON e.pk=c.event_pk \
          WHERE m.realm_id=$1 AND m.member_id=$2 \
@@ -570,7 +570,7 @@ async fn membership_targets(
             }
             let actor = arkret_wire::ActorId::account(recipient.clone());
             let Some(join) = sql_query("SELECT m.member_id,e.envelope->>'event_id' AS membership_event_id \
-                FROM member_state_current_results m JOIN realm_commits c ON c.realm_id=m.realm_id AND c.commit_id=m.current_commit_id \
+                FROM member_state_current_states m JOIN realm_commits c ON c.realm_id=m.realm_id AND c.commit_id=m.current_commit_id \
                 AND c.stream_position=m.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
                 WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join'")
                 .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(actor.to_string())
@@ -604,7 +604,7 @@ async fn membership_targets(
         let proof: arkret_models_collaboration::events_payloads::moderation::FrankingProof =
             serde_json::from_value(serde_json::to_value(&event.payload).map_err(internal)?)
                 .map_err(internal)?;
-        crate::moderation_franking_proof_current_results::franking_target_scope_in_connection(
+        crate::moderation_franking_proof_current_states::franking_target_scope_in_connection(
             conn,
             &event.realm_id,
             &proof.event_id,
@@ -615,7 +615,7 @@ async fn membership_targets(
     };
     let rows = sql_query(
         "SELECT m.member_id, e.envelope->>'event_id' AS membership_event_id \
-         FROM member_state_current_results m \
+         FROM member_state_current_states m \
          JOIN realm_commits c ON c.commit_id=m.current_commit_id \
          JOIN canonical_events e ON e.pk=c.event_pk \
          WHERE m.realm_id=$1 AND m.membership='join' \
@@ -655,7 +655,7 @@ async fn membership_targets(
                 circle_id,
             } = &effective_scope
             {
-                let Some(basis) = sql_query("SELECT e.envelope->>'event_id' AS event_id FROM circle_member_state_current_results m JOIN circle_current_results circle ON circle.circle_id=m.circle_id AND circle.realm_id=m.realm_id JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position AND c.stream_ref=m.source_stream_ref JOIN canonical_events e ON e.pk=c.event_pk WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND circle.value->>'state'='active' AND e.state='committed'")
+                let Some(basis) = sql_query("SELECT e.envelope->>'event_id' AS event_id FROM circle_member_state_current_states m JOIN circle_current_states circle ON circle.circle_id=m.circle_id AND circle.realm_id=m.realm_id JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position AND c.stream_ref=m.source_stream_ref JOIN canonical_events e ON e.pk=c.event_pk WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND circle.value->>'state'='active' AND e.state='committed'")
                 .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(circle_id.as_str()).bind::<Text, _>(member.to_string())
                 .get_result::<MembershipEventRow>(&mut *conn).await.optional().map_err(PersistenceError::database)? else { continue; };
                 Some(arkret_wire::EventId::new(basis.event_id).map_err(internal)?)
@@ -666,7 +666,7 @@ async fn membership_targets(
             None
         };
         if moderation_private
-            && !crate::moderation_report_current_results::scope_moderator(
+            && !crate::moderation_report_current_states::scope_moderator(
                 conn,
                 &event.realm_id,
                 &effective_scope,
@@ -739,14 +739,14 @@ async fn departing_circle_member_target(
     if &station == authority_station {
         return Ok(None);
     }
-    let Some(parent) = sql_query("SELECT e.envelope->>'event_id' AS event_id FROM member_state_current_results m JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join' AND e.state='committed' AND c.stream_ref->>'kind'='realm'")
+    let Some(parent) = sql_query("SELECT e.envelope->>'event_id' AS event_id FROM member_state_current_states m JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join' AND e.state='committed' AND c.stream_ref->>'kind'='realm'")
         .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(member.to_string()).get_result::<MembershipEventRow>(&mut *conn).await.optional().map_err(PersistenceError::database)? else { return Ok(None); };
-    let current = sql_query("SELECT e.envelope->>'event_id' AS event_id FROM circle_member_state_current_results m JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position AND c.stream_ref=m.source_stream_ref JOIN canonical_events e ON e.pk=c.event_pk WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership IN ('leave','ban') AND e.state='committed'")
+    let current = sql_query("SELECT e.envelope->>'event_id' AS event_id FROM circle_member_state_current_states m JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position AND c.stream_ref=m.source_stream_ref JOIN canonical_events e ON e.pk=c.event_pk WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership IN ('leave','ban') AND e.state='committed'")
         .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(circle_id.as_str()).bind::<Text, _>(member.to_string()).get_result::<MembershipEventRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     if current.as_ref().map(|row| row.event_id.as_str()) != Some(event.event_id.as_str()) {
         return Ok(None);
     }
-    let previous = sql_query("SELECT e.kind, e.envelope->'payload'->>'membership' AS membership FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND c.stream_ref=$2 AND e.kind='ak.circle.member.state' AND e.envelope->'payload'->'member_id'=$3 AND c.stream_position < (SELECT current_stream_position FROM circle_member_state_current_results WHERE realm_id=$1 AND circle_id=$4 AND member_id=$5) ORDER BY c.stream_position DESC LIMIT 1")
+    let previous = sql_query("SELECT e.kind, e.envelope->'payload'->>'membership' AS membership FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND c.stream_ref=$2 AND e.kind='ak.circle.member.state' AND e.envelope->'payload'->'member_id'=$3 AND c.stream_position < (SELECT current_stream_position FROM circle_member_state_current_states WHERE realm_id=$1 AND circle_id=$4 AND member_id=$5) ORDER BY c.stream_position DESC LIMIT 1")
         .bind::<Text, _>(realm_id.as_str()).bind::<Jsonb, _>(serde_json::to_value(arkret_wire::CommitStreamRef::Circle { realm_id:realm_id.clone(),circle_id:circle_id.clone() }).map_err(internal)?).bind::<Jsonb, _>(serde_json::to_value(&member).map_err(internal)?).bind::<Text, _>(circle_id.as_str()).bind::<Text, _>(member.to_string()).get_result::<PriorMembershipRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     if previous.and_then(|row| row.membership).as_deref() != Some("join") {
         return Ok(None);
@@ -907,8 +907,8 @@ pub(crate) async fn plan_realm_fanout_in_connection(
         .await?;
     let mut inserted = 0;
     for (station, authority_witnesses) in targets {
-        let request =
-            PeerAuthoritySubmitRequest::CommittedReplication(PeerCommittedReplicationRequest {
+        let request = PeerAuthoritySubmitRequestBody::CommittedReplication(
+            PeerCommittedReplicationRequestBody {
                 branch: CommittedReplicationBranch::CommittedReplication,
                 replications: vec![CommittedEventSubmission::from_source_submission(
                     source,
@@ -917,7 +917,8 @@ pub(crate) async fn plan_realm_fanout_in_connection(
                     genesis_event_ref.clone(),
                     replicated_welcomes.remove(&station),
                 )],
-            });
+            },
+        );
         request
             .validate()
             .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
@@ -971,7 +972,7 @@ pub(crate) async fn plan_audit_pair_in_connection(
 ) -> Result<usize, PgTransactionError> {
     use arkret_models_collaboration::authority_commit::{
         AuditPairedEventFederationSubmission, PeerRegisteredAtomicUnit,
-        PeerRegisteredAtomicUnitRequest, RegisteredAtomicUnitBranch,
+        PeerRegisteredAtomicUnitRequestBody, RegisteredAtomicUnitBranch,
     };
     let mut business_targets = remote_targets(
         conn,
@@ -1007,7 +1008,7 @@ pub(crate) async fn plan_audit_pair_in_connection(
         .try_into()
         .map_err(|_| internal("audit pair requires two source slots"))?;
     let request =
-        PeerAuthoritySubmitRequest::RegisteredAtomicUnit(PeerRegisteredAtomicUnitRequest {
+        PeerAuthoritySubmitRequestBody::RegisteredAtomicUnit(PeerRegisteredAtomicUnitRequestBody {
             branch: RegisteredAtomicUnitBranch::RegisteredAtomicUnit,
             unit: PeerRegisteredAtomicUnit::AuditPairedEvent(
                 AuditPairedEventFederationSubmission {

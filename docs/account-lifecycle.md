@@ -29,7 +29,7 @@ request, using durable application/storage ports:
 
 1. Append a `org.arkret.coland.audit.erasure_initiated` audit row.
 2. Pseudonymize the account record — replace `display_name` with
-   `"[user erased]"`, null `bio` and `avatar_url`, and rotate `handle`
+   `"[user erased]"`, null `biography` and `avatar_url`, and rotate `handle`
    to `@erased-<short-tag>`. The previous handle enters the release
    ledger so foreign references resolve gracefully.
 3. Revoke every device record owned by the actor (`revoked_at` stamped

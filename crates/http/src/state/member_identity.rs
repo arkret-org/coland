@@ -203,7 +203,7 @@ pub(crate) fn handle_claim_record_from_envelope(
             .as_ref()
             .and_then(|revocation| revocation.digest().ok())
             .map(|digest| digest.to_string()),
-        fresh_until: claim.fresh_until,
+        cache_expires_at: claim.cache_expires_at,
         visibility: Some(visibility),
         expires_at: claim.claim.expires_at,
         envelope: envelope.clone(),
@@ -298,11 +298,11 @@ pub(crate) fn test_handle_claim(
         schema: HandleClaim::SCHEMA.to_owned(),
         claim: core,
         status,
-        as_of: issued_at,
+        evaluated_at: issued_at,
         verifier_id: issuer_id,
         verified_at: (status == HandleClaimStatus::Verified).then_some(issued_at),
         revocation,
-        fresh_until: expires_at.min(issued_at + chrono::Duration::seconds(300)),
+        cache_expires_at: expires_at.min(issued_at + chrono::Duration::seconds(300)),
         status_proof: proof(
             PayloadProofPurpose::StatusAttestation,
             HANDLE_CLAIM_STATUS_DOMAIN,

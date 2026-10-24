@@ -43,14 +43,14 @@ pub(crate) async fn check_origin_cut(
     if state.authority_id != account.station_id {
         return Err(missing("Origin Account Station differs"));
     }
-    crate::agent_current_results::lock_agent_producer_current(
+    crate::agent_current_states::lock_agent_producer_current(
         conn,
         &state.pcr_genesis_event.realm_id,
         &account.principal_id,
     )
     .await?;
     let realm = state.pcr_genesis_event.realm_id.as_str();
-    let owning = sql_query("SELECT p.value AS value FROM agent_provisioning_current_results p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id WHERE p.agent_id=$1 AND g.station_id=$2 AND p.value->>'controller_principal_id'=g.principal_id AND p.value->>'principal_control_realm_id'=$3 FOR SHARE OF p,g")
+    let owning = sql_query("SELECT p.value AS value FROM agent_provisioning_current_states p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id WHERE p.agent_id=$1 AND g.station_id=$2 AND p.value->>'controller_principal_id'=g.principal_id AND p.value->>'principal_control_realm_id'=$3 FOR SHARE OF p,g")
         .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str()).bind::<Text,_>(realm)
         .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(|| missing("Origin controller provision changed"))?;
@@ -69,23 +69,23 @@ pub(crate) async fn check_origin_cut(
     if actual_head.value != state.source_commit_id.as_str() {
         return Err(missing("Origin source cut changed"));
     }
-    let status = sql_query("SELECT jsonb_build_object('selector',jsonb_build_object('kind','agent_status','agent_id',s.agent_id),'source_stream_ref',c.stream_ref,'revision',jsonb_build_object('commit_id',s.current_commit_id,'stream_position',s.current_stream_position),'value',s.value) AS value FROM agent_status_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.agent_id=$2 FOR SHARE OF s,c")
+    let status = sql_query("SELECT jsonb_build_object('selector',jsonb_build_object('kind','agent_status','agent_id',s.agent_id),'source_stream_ref',c.stream_ref,'revision',jsonb_build_object('commit_id',s.current_commit_id,'stream_position',s.current_stream_position),'value',s.value) AS value FROM agent_status_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.agent_id=$2 FOR SHARE OF s,c")
         .bind::<Text,_>(realm).bind::<Text,_>(account.principal_id.as_str())
         .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(|| missing("Origin lifecycle current missing"))?;
-    let actual_status: arkret_wire::TypedCurrentRow =
+    let actual_status: arkret_wire::CurrentState =
         serde_json::from_value(status.value).map_err(invalid)?;
-    if actual_status != state.agent_lifecycle_witness.result {
+    if actual_status != state.agent_lifecycle_witness.current_state {
         return Err(missing("Origin lifecycle witness changed"));
     }
-    let key = sql_query("SELECT jsonb_build_object('selector',jsonb_build_object('kind','agent_key','agent_id',s.agent_id,'agent_key_id',s.agent_key_id),'source_stream_ref',c.stream_ref,'revision',jsonb_build_object('commit_id',s.current_commit_id,'stream_position',s.current_stream_position),'value',s.value) AS value FROM agent_key_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.agent_id=$2 AND s.agent_key_id=$3 FOR SHARE OF s,c")
+    let key = sql_query("SELECT jsonb_build_object('selector',jsonb_build_object('kind','agent_key','agent_id',s.agent_id,'agent_key_id',s.agent_key_id),'source_stream_ref',c.stream_ref,'revision',jsonb_build_object('commit_id',s.current_commit_id,'stream_position',s.current_stream_position),'value',s.value) AS value FROM agent_key_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.agent_id=$2 AND s.agent_key_id=$3 FOR SHARE OF s,c")
         .bind::<Text,_>(realm).bind::<Text,_>(account.principal_id.as_str())
         .bind::<Text,_>(state.authorization.agent_key_id.as_str())
         .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(|| missing("Origin key current missing"))?;
-    let actual_key: arkret_wire::TypedCurrentRow =
+    let actual_key: arkret_wire::CurrentState =
         serde_json::from_value(key.value).map_err(invalid)?;
-    if actual_key != state.key_state_witness.result {
+    if actual_key != state.key_state_witness.current_state {
         return Err(missing("Origin authorization witness changed"));
     }
     // Every immutable Event/Commit in the asserted state must be the original
@@ -527,7 +527,7 @@ pub(crate) async fn assemble_state_in_connection(
         .producer_proof
         .as_ref()
         .ok_or_else(|| missing("Agent proof missing"))?;
-    let provision = sql_query("SELECT p.value AS value FROM agent_provisioning_current_results p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id WHERE p.agent_id=$1 AND g.station_id=$2 AND p.value->>'controller_principal_id'=g.principal_id FOR SHARE OF p,g")
+    let provision = sql_query("SELECT p.value AS value FROM agent_provisioning_current_states p JOIN pcr_genesis_units g ON g.realm_id=p.realm_id WHERE p.agent_id=$1 AND g.station_id=$2 AND p.value->>'controller_principal_id'=g.principal_id FOR SHARE OF p,g")
         .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
         .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(|| missing("Agent owning provision unavailable"))?;
@@ -539,7 +539,7 @@ pub(crate) async fn assemble_state_in_connection(
             .ok_or_else(|| missing("Agent provision PCR missing"))?,
     )
     .map_err(invalid)?;
-    crate::agent_current_results::lock_agent_producer_current(conn, &realm, &account.principal_id)
+    crate::agent_current_states::lock_agent_producer_current(conn, &realm, &account.principal_id)
         .await?;
     // Read only the indispensable Commit prefix. Intermediate Event bodies
     // are not part of this carrier and must not make the source read unbounded.
@@ -578,13 +578,13 @@ pub(crate) async fn assemble_state_in_connection(
         .ok_or_else(|| missing("Agent source Commit missing"))?
         .clone();
     let genesis = (original_event(conn, &genesis_commit).await?, genesis_commit);
-    let key = sql_query("SELECT jsonb_build_object('selector',jsonb_build_object('kind','agent_key','agent_id',s.agent_id,'agent_key_id',s.agent_key_id),'source_stream_ref',c.stream_ref,'revision',jsonb_build_object('commit_id',s.current_commit_id,'stream_position',s.current_stream_position),'value',s.value) AS value FROM agent_key_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.agent_id=$2 AND EXISTS(SELECT 1 FROM jsonb_array_elements(s.value->'authorizations') a WHERE a->'value'->>'verification_method'=$3) FOR SHARE OF s,c")
+    let key = sql_query("SELECT jsonb_build_object('selector',jsonb_build_object('kind','agent_key','agent_id',s.agent_id,'agent_key_id',s.agent_key_id),'source_stream_ref',c.stream_ref,'revision',jsonb_build_object('commit_id',s.current_commit_id,'stream_position',s.current_stream_position),'value',s.value) AS value FROM agent_key_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.agent_id=$2 AND EXISTS(SELECT 1 FROM jsonb_array_elements(s.value->'authorizations') a WHERE a->'value'->>'verification_method'=$3) FOR SHARE OF s,c")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(account.principal_id.as_str())
         .bind::<Text,_>(proof.verification_method.as_str()).get_result::<JsonRow>(&mut *conn).await.optional()
         .map_err(PersistenceError::database)?.ok_or_else(|| missing("Agent runtime method is not active"))?;
-    let key_result: arkret_wire::TypedCurrentRow =
+    let key_result: arkret_wire::CurrentState =
         serde_json::from_value(key.value).map_err(invalid)?;
-    let arkret_wire::TypedCurrentRow::Value {
+    let arkret_wire::CurrentState::Value {
         revision: key_revision,
         ..
     } = &key_result;
@@ -592,7 +592,7 @@ pub(crate) async fn assemble_state_in_connection(
         .iter()
         .find(|c| c.commit_id == key_revision.commit_id)
         .ok_or_else(|| missing("Agent key current covering Commit missing"))?;
-    let arkret_wire::TypedCurrentRow::Value {
+    let arkret_wire::CurrentState::Value {
         value: key_value, ..
     } = &key_result;
     let entries = key_value
@@ -641,13 +641,13 @@ pub(crate) async fn assemble_state_in_connection(
     {
         return Err(missing("Agent runtime and exact key witness differ"));
     }
-    let status = sql_query("SELECT jsonb_build_object('selector',jsonb_build_object('kind','agent_status','agent_id',s.agent_id),'source_stream_ref',c.stream_ref,'revision',jsonb_build_object('commit_id',s.current_commit_id,'stream_position',s.current_stream_position),'value',s.value) AS value FROM agent_status_current_results s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.agent_id=$2 AND s.value='\"active\"'::jsonb FOR SHARE OF s,c")
+    let status = sql_query("SELECT jsonb_build_object('selector',jsonb_build_object('kind','agent_status','agent_id',s.agent_id),'source_stream_ref',c.stream_ref,'revision',jsonb_build_object('commit_id',s.current_commit_id,'stream_position',s.current_stream_position),'value',s.value) AS value FROM agent_status_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.agent_id=$2 AND s.value='\"active\"'::jsonb FOR SHARE OF s,c")
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(account.principal_id.as_str())
         .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(|| missing("Agent current lifecycle is not active"))?;
-    let status_result: arkret_wire::TypedCurrentRow =
+    let status_result: arkret_wire::CurrentState =
         serde_json::from_value(status.value).map_err(invalid)?;
-    let arkret_wire::TypedCurrentRow::Value {
+    let arkret_wire::CurrentState::Value {
         revision: status_revision,
         ..
     } = &status_result;
@@ -807,12 +807,12 @@ pub(crate) async fn assemble_state_in_connection(
         key_state_witness: AgentKeyStateWitness {
             commit_id: key_witness.commit_id.clone(),
             commit: key_witness.clone(),
-            result: key_result,
+            current_state: key_result,
         },
         agent_lifecycle_witness: AgentLifecycleWitness {
             commit_id: lifecycle.1.commit_id.clone(),
             commit: lifecycle.1.clone(),
-            result: status_result,
+            current_state: status_result,
             accepted_status_event: lifecycle.0.clone(),
             provenance,
         },

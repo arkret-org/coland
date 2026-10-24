@@ -28,8 +28,8 @@ struct Cut {
 }
 pub(crate) async fn observe(
     store: &PgConsentCurrentStore,
-    request: &ConsentPrivateProxyRequest,
-    outcome: &ConsentPrivateProxyOutcome,
+    request: &ConsentPrivateProxyRequestBody,
+    outcome: &ConsentPrivateProxyResponseBody,
 ) -> PersistenceResult<()> {
     outcome
         .validate_for_request(request, chrono::Utc::now())
@@ -45,7 +45,7 @@ pub(crate) async fn observe(
         )
     };
     let mut revisions = serde_json::Map::new();
-    if let ConsentPrivateCommandOutcome::Effects(effects) = &outcome.outcome {
+    if let ConsentPrivateCommandResponseBody::Effects(effects) = &outcome.response_body {
         effects
             .body
             .validate_holder(&request.holder_account_id)
@@ -96,7 +96,7 @@ pub(crate) async fn observe(
                 .unwrap_or(Value::Null),
         );
     }
-    if let ConsentPrivateCommandOutcome::InvitePolicy(policy) = &outcome.outcome {
+    if let ConsentPrivateCommandResponseBody::InvitePolicy(policy) = &outcome.response_body {
         revisions.insert(
             "invite_receive_policy".into(),
             summarize(

@@ -31,11 +31,11 @@ pub(crate) fn strand_scope_key(realm_id: &str, strand_id: &str) -> String {
 pub(crate) fn participation_from_value(row: &Value) -> ParticipationBits {
     let mut bits = serde_json::Map::new();
     for field in [
-        "reply_message",
-        "reaction_add",
-        "reaction_remove",
-        "accept_third_party_mention",
-        "act_on_behalf",
+        "message_creation_allowed",
+        "reaction_addition_allowed",
+        "reaction_removal_allowed",
+        "third_party_mention_delivery_allowed",
+        "acting_on_behalf_allowed",
     ] {
         let Some(value) = row.get(field).filter(|value| value.is_boolean()) else {
             return ParticipationBits::NONE;

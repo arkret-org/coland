@@ -211,12 +211,12 @@ fn validate_typed_payload_shapes(
                     .and_then(Value::as_str)
                     .is_none_or(str::is_empty)
                     || binding
-                        .get("sig")
+                        .get("signature")
                         .and_then(Value::as_str)
                         .is_none_or(str::is_empty))
             {
                 return Err(
-                    "participant_binding_invalid: participant_binding issuer_kid and sig are \
+                    "participant_binding_invalid: participant_binding issuer_kid and signature are \
                          required",
                 );
             }

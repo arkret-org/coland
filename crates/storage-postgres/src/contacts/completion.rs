@@ -1,7 +1,7 @@
 //! Contact command completion keyed by the authority's committed Event ref.
 
 use arkret_models_collaboration::contact_operations::{
-    ContactAcceptedOutcome, ContactCurrentProof,
+    ContactAcceptedResponseBody, ContactCurrentProof,
 };
 use arkret_wire::{ActorId, Hash};
 use coland_storage::{
@@ -290,7 +290,7 @@ pub(super) async fn finalize(
 async fn install_evidence(
     conn: &mut AsyncPgConnection,
     intent: &ContactCompletionIntent,
-    outcome: &ContactAcceptedOutcome,
+    outcome: &ContactAcceptedResponseBody,
     counterpart_proof: Option<&ContactCurrentProof>,
 ) -> PersistenceResult<()> {
     use arkret_models_collaboration::contact_operations::*;
@@ -312,7 +312,7 @@ async fn install_evidence(
     .ok_or_else(|| invalid("committed Contact row absent"))?;
     let expected = record.updated_at;
     let (operation, proof) = match outcome {
-        ContactAcceptedOutcome::Request {
+        ContactAcceptedResponseBody::Request {
             request_acceptance_receipt,
             ..
         } => (
@@ -322,7 +322,7 @@ async fn install_evidence(
             },
             None,
         ),
-        ContactAcceptedOutcome::Response {
+        ContactAcceptedResponseBody::Response {
             normal_response_acceptance_receipt,
             current_proof,
             ..
@@ -333,7 +333,7 @@ async fn install_evidence(
             },
             Some(current_proof),
         ),
-        ContactAcceptedOutcome::Reject {
+        ContactAcceptedResponseBody::Reject {
             reject_acceptance_receipt,
             ..
         } => (
@@ -343,7 +343,7 @@ async fn install_evidence(
             },
             None,
         ),
-        ContactAcceptedOutcome::ScopeUpdate {
+        ContactAcceptedResponseBody::ScopeUpdate {
             lineage,
             current_proof,
             ..
@@ -354,7 +354,7 @@ async fn install_evidence(
             },
             Some(current_proof),
         ),
-        ContactAcceptedOutcome::Tombstone {
+        ContactAcceptedResponseBody::Tombstone {
             lineage,
             current_proof,
             ..
@@ -613,7 +613,7 @@ async fn persist_result(
         ContactCompletionResult::Accepted { outcome } => (
             200,
             serde_json::to_value(
-                arkret_models_collaboration::contact_operations::ContactOperationOutcome::Accepted {
+                arkret_models_collaboration::contact_operations::ContactOperationResponseBody::Accepted {
                     outcome: outcome.as_ref().clone(),
                 },
             )
@@ -670,7 +670,7 @@ async fn persist_result(
 /// The delivery must be the exact canonical peer carrier of this result.
 fn validate_delivery_payload(
     intent: &ContactCompletionIntent,
-    outcome: &arkret_models_collaboration::contact_operations::ContactAcceptedOutcome,
+    outcome: &arkret_models_collaboration::contact_operations::ContactAcceptedResponseBody,
     delivery: &FederationOutboxRecord,
     additional_proof: Option<&ContactCurrentProof>,
 ) -> PersistenceResult<()> {

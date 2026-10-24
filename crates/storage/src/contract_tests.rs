@@ -7,7 +7,7 @@ use arkret_models_collaboration::account_status::{
 use arkret_models_collaboration::objects::account_status::AccountStatus;
 use arkret_models_identity::{
     OrganizationControlProofKind, OrganizationRegistrationChallenge,
-    OrganizationRegistrationOutcome, OrganizationRegistrationReceipt,
+    OrganizationRegistrationReceipt, OrganizationRegistrationResponseBody,
     OrganizationRegistrationScope, OrganizationRegistrationStatus,
 };
 use arkret_wire::{
@@ -61,7 +61,7 @@ pub async fn assert_account_localpart_remove_contract(
             station_id: station_id.clone(),
             localpart: String::new(),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: database_timestamp_now(),
         })
@@ -77,7 +77,7 @@ pub async fn assert_account_localpart_remove_contract(
             station_id,
             localpart: String::new(),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: database_timestamp_now(),
         })
@@ -904,7 +904,7 @@ fn registration_outcome(
     version_id: &str,
     issued_at: chrono::DateTime<Utc>,
     created: bool,
-) -> OrganizationRegistrationOutcome {
+) -> OrganizationRegistrationResponseBody {
     let issuer = DidCoreId::new("ak:did_core:webvh:zService").expect("valid service core id");
     let issuer_did = Did::new("did:webvh:zService:service.example").expect("valid service DID");
     let mut receipt = OrganizationRegistrationReceipt {
@@ -946,7 +946,7 @@ fn registration_outcome(
     receipt.proof.payload_digest = receipt
         .expected_payload_digest()
         .expect("derive registration receipt digest");
-    let outcome = OrganizationRegistrationOutcome {
+    let outcome = OrganizationRegistrationResponseBody {
         registration_receipt: receipt,
         created,
     };
@@ -1183,7 +1183,7 @@ fn contract_authority_signature(
         signed_digest: Hash::new(format!("sha256:{}", "3".repeat(64)))
             .expect("contract authority signed digest"),
         created_at,
-        sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned())
+        signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned())
             .expect("contract authority signature bytes"),
     }
 }
@@ -2867,7 +2867,7 @@ pub async fn assert_federation_outbox_store_contract(
             "https://peer.example".to_owned(),
             "/_arkret/peer/account-status".to_owned(),
             format!("ak:outbox:account-status:{namespace}:{suffix}"),
-            format!(r#"{{"status_seq":{position}}}"#),
+            format!(r#"{{"status_sequence":{position}}}"#),
             created_at,
         )
         .with_coalescing_lane(lane_key.clone(), position)
@@ -2947,7 +2947,7 @@ async fn mls_keypackage_contract_account(
             station_id: device.station_id.clone(),
             localpart: String::new(),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: database_timestamp_now(),
         })
@@ -3560,7 +3560,7 @@ fn account_status_fixture_proof(
 
 fn account_status_record(
     account_id: &str,
-    status_seq: u64,
+    status_sequence: u64,
     previous: Option<AccountStatusRecordId>,
     binding_version: u64,
     status: AccountStatus,
@@ -3583,7 +3583,7 @@ fn account_status_record(
         )
         .expect("principal control realm id"),
         binding_version,
-        status_seq,
+        status_sequence,
         previous_account_status_record_id: previous,
         status,
         reason_code: None,
@@ -3610,7 +3610,7 @@ fn account_status_receipt(record: &AccountStatusRecord, suffix: u32) -> AccountS
         record_digest: record.payload_digest().expect("record payload digest"),
         account_authority_id: record.account_authority_id.clone(),
         account_id: record.account_id.clone(),
-        status_seq: record.status_seq,
+        status_sequence: record.status_sequence,
         receiver_id: DidCoreId::new("ak:did_core:web:receiver.example").expect("receiver core id"),
         accepted_at,
         verification_method: DidUrl::new("did:web:receiver.example#notary-key")
@@ -3657,7 +3657,7 @@ pub async fn assert_account_status_replica_decision_table_contract(
     );
 
     // genesis_gap: with no durable head a non-genesis submission stays
-    // retryable behind required_status_seq = 1 and writes nothing.
+    // retryable behind required_status_sequence = 1 and writes nothing.
     assert_eq!(
         store
             .append(&second, &account_status_receipt(&second, 1))
@@ -3665,7 +3665,7 @@ pub async fn assert_account_status_replica_decision_table_contract(
             .expect("classify a submission against an absent head"),
         AccountStatusReplicaAppend::DependencyMissing {
             current_record: None,
-            required_status_seq: 1,
+            required_status_sequence: 1,
         }
     );
     assert_eq!(
@@ -3775,7 +3775,7 @@ pub async fn assert_account_status_replica_decision_table_contract(
             .expect("classify a submission beyond the next sequence"),
         AccountStatusReplicaAppend::DependencyMissing {
             current_record: Some(genesis.clone()),
-            required_status_seq: 2,
+            required_status_sequence: 2,
         }
     );
     assert_eq!(
@@ -3876,7 +3876,7 @@ pub async fn assert_account_status_replica_decision_table_contract(
     );
 
     // stale is unconditional. The receiver still stores the byte-identical
-    // history row for status_seq 2, and local retention must never turn a
+    // history row for status_sequence 2, and local retention must never turn a
     // below-head submission into a duplicate terminal ack.
     assert_eq!(
         store
@@ -4229,7 +4229,7 @@ pub async fn assert_member_identity_store_contract(
         audience: Some("ak:service:directory".to_owned()),
         status: "verified".to_owned(),
         revocation_digest: None,
-        fresh_until: database_timestamp_now() + Duration::minutes(5),
+        cache_expires_at: database_timestamp_now() + Duration::minutes(5),
         visibility: Some("public".to_owned()),
         expires_at: Some(database_timestamp_now() + Duration::hours(1)),
         envelope: serde_json::json!({"subject_id": format!("ak:did_core:web:{namespace}.example")}),
@@ -4286,9 +4286,9 @@ pub async fn assert_invite_new_source_ledger_contract(
     let now = database_timestamp_now();
     let quota = arkret_wire::receive_policy::EffectiveNewSourceQuota {
         window_seconds: 3_600,
-        new_sources_per_window: 2,
+        source_count_per_window: 2,
         retention_seconds: 7_200,
-        new_sources_per_retention: 3,
+        source_count_per_retention: 3,
     };
 
     // Two first contacts fit under both ceilings.

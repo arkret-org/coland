@@ -149,7 +149,7 @@ async fn assert_problem(
     problem
 }
 
-/// Every selector answers once, in the exact closed `unavailable_outcome`
+/// Every selector answers once, in the exact closed `unavailable_signer_key_resolution`
 /// shape: the complete request selector plus `status`, nothing else.
 async fn assert_all_unavailable(app: &salvo::Service, token: &str, body: &Value, case: &str) {
     let (status, outcome) = send(app, Some(token), body).await;

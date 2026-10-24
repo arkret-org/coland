@@ -42,7 +42,7 @@ const TABLES: &[(&str, &str)] = &[
     ),
     ("realm_actor_creations", "t.realm_id=$1"),
     ("applet_configurations", "t.realm_id=$1"),
-    ("realm_actor_current_results", "t.realm_id=$1"),
+    ("realm_actor_current_states", "t.realm_id=$1"),
     ("realm_actor_private_signer_facts", "t.realm_id=$1"),
     ("management_private_handoff_imports", "t.realm_id=$1"),
     ("realm_actor_recovery_intents", "t.realm_id=$1"),
@@ -63,7 +63,7 @@ const TABLES: &[(&str, &str)] = &[
         "t.actor_id#>>'{realm_actor_id,realm_id}'=$1",
     ),
     ("applet_registration_instances", "t.realm_id=$1"),
-    ("applet_registration_current_results", "t.realm_id=$1"),
+    ("applet_registration_current_states", "t.realm_id=$1"),
     ("applet_grant_registration_sources", "t.realm_id=$1"),
     (
         "applet_managed_identities",
@@ -94,15 +94,15 @@ const TABLES: &[(&str, &str)] = &[
     ("event_approval_private_audit", "t.realm_id=$1"),
     (
         "capability_quota_counters",
-        "EXISTS(SELECT 1 FROM capability_grant_current_results g WHERE g.realm_id=$1 AND g.grant_id=t.grant_id)",
+        "EXISTS(SELECT 1 FROM capability_grant_current_states g WHERE g.realm_id=$1 AND g.grant_id=t.grant_id)",
     ),
     (
         "capability_quota_buckets",
-        "EXISTS(SELECT 1 FROM capability_grant_current_results g WHERE g.realm_id=$1 AND g.grant_id=t.grant_id)",
+        "EXISTS(SELECT 1 FROM capability_grant_current_states g WHERE g.realm_id=$1 AND g.grant_id=t.grant_id)",
     ),
     (
         "capability_quota_consumptions",
-        "EXISTS(SELECT 1 FROM capability_grant_current_results g WHERE g.realm_id=$1 AND g.grant_id=t.grant_id)",
+        "EXISTS(SELECT 1 FROM capability_grant_current_states g WHERE g.realm_id=$1 AND g.grant_id=t.grant_id)",
     ),
     (
         "mls_key_packages",

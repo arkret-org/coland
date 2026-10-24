@@ -17,8 +17,8 @@
 use arkret_canonical as canonical;
 use arkret_identifiers::{BlobRef, DidCoreId, RealmId};
 use arkret_models_collaboration::objects::blob::{
-    BlobPresignAccessScope, BlobPresignDetachedJwsProof, BlobPresignEnvelope, BlobPresignOutcome,
-    BlobPresignPayload, BlobPresignRequestBody, BlobStorageEncryption, BlobUploadOutcome,
+    BlobPresignAccessScope, BlobPresignDetachedJwsProof, BlobPresignEnvelope, BlobPresignPayload,
+    BlobPresignRequestBody, BlobPresignResponseBody, BlobStorageEncryption, BlobUploadResponseBody,
     BlobVisibility, SignatureValue, UploadReceipt,
 };
 use base64::Engine as _;
@@ -89,13 +89,13 @@ pub(super) async fn blob_session_has_realm_membership(
         .map_err(|error| AppError::internal(format!("Realm membership lookup failed: {error}")))
 }
 
-pub(super) fn blob_upload_outcome(
+pub(super) fn blob_upload_response_body(
     state: &AppState,
     blob_ref: String,
     size_bytes: u64,
     media_type: String,
     received_at: chrono::DateTime<chrono::Utc>,
-) -> Result<BlobUploadOutcome, AppError> {
+) -> Result<BlobUploadResponseBody, AppError> {
     let blob_ref = BlobRef::new(blob_ref)
         .map_err(|error| AppError::internal(format!("blob_ref construction failed: {error}")))?;
     let issuer_id = arkret_identifiers::DidCoreId::new(state.service_id().clone())
@@ -120,10 +120,10 @@ pub(super) fn blob_upload_outcome(
         signature: SignatureValue {
             kid: signature_kid,
             signature_algorithm: "Ed25519".to_owned(),
-            sig: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+            signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
         },
     };
-    Ok(BlobUploadOutcome {
+    Ok(BlobUploadResponseBody {
         blob_ref,
         size_bytes,
         media_type: Some(media_type),
@@ -353,7 +353,7 @@ async fn blob_upload(depot: &mut Depot, req: &mut Request, res: &mut Response) {
                 return;
             }
         };
-        match blob_upload_outcome(
+        match blob_upload_response_body(
             state,
             blob_ref,
             retained.size_bytes as u64,
@@ -384,18 +384,19 @@ async fn blob_upload(depot: &mut Depot, req: &mut Request, res: &mut Response) {
         );
         return;
     }
-    let outcome = match blob_upload_outcome(state, blob_ref, size as u64, media_type, received_at) {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            render_error(
-                res,
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                &error.to_string(),
-            );
-            return;
-        }
-    };
+    let outcome =
+        match blob_upload_response_body(state, blob_ref, size as u64, media_type, received_at) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                render_error(
+                    res,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    &error.to_string(),
+                );
+                return;
+            }
+        };
     res.render(Json(outcome));
 }
 
@@ -921,7 +922,7 @@ async fn blob_presign(
     body: JsonBody<BlobPresignRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<BlobPresignOutcome> {
+) -> JsonResult<BlobPresignResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let native = depot
         .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>()
@@ -1061,7 +1062,7 @@ async fn blob_presign(
             .await
             .map_err(|_| AppError::not_found("blob not found"))?;
     }
-    json_ok(BlobPresignOutcome {
+    json_ok(BlobPresignResponseBody {
         url,
         expires_at,
         purpose: Some(purpose.to_owned()),

@@ -120,7 +120,8 @@ pub(crate) async fn admit(
     };
     let registration = crate::managed_message_actor::registration(conn, event).await?;
     if registration.service_id != payload.new_service_id
-        || registration.webhook_auth.key_ref != payload.new_service_signature.verification_method
+        || registration.webhook_signature_policy.key_ref
+            != payload.new_service_signature.verification_method
     {
         return Err(invalid("receiving Service registration differs"));
     }
@@ -134,7 +135,7 @@ pub(crate) async fn admit(
         #[diesel(sql_type=Jsonb)]
         value: Value,
     }
-    let registered = sql_query("SELECT to_jsonb(a) AS value FROM applet_registration_current_results r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref WHERE r.realm_id=$1 AND r.applet_id=$2 AND a.registration_event_ref=$3")
+    let registered = sql_query("SELECT to_jsonb(a) AS value FROM applet_registration_current_states r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref WHERE r.realm_id=$1 AND r.applet_id=$2 AND a.registration_event_ref=$3")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(registration.applet_id.as_str())
         .bind::<Text,_>(payload.new_registration_ref.as_str()).get_result::<Row>(&mut *conn).await?;
     if registered.value.is_null() {

@@ -9,7 +9,7 @@
 //! creates the Agent PCR, or writes nothing.
 
 use arkret_event_draft::EventPayloadExt;
-use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitOutcome, EventAdmissionSubmission};
+use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitResponseBody, EventAdmissionSubmission};
 use chrono::Utc;
 use coland_services::identity::SessionIdentityState;
 use coland_services::{ServiceError, ServiceResult};
@@ -39,7 +39,7 @@ pub(super) async fn submit_self_agent_pcr_genesis(
     state: &AppState,
     session: &SessionIdentityState,
     request: &EventAdmissionSubmission,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     let event = &request.event;
     arkret_event_draft::validate_event_for_submit(event)
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
@@ -117,13 +117,17 @@ pub(super) async fn submit_self_agent_pcr_genesis(
         })
         .await?;
     Ok(match outcome {
-        AgentPcrGenesisAdmissionOutcome::Committed(commit) => AuthoritySubmitOutcome::Accepted {
-            status: AuthorityCommitStatus::Committed,
-            commit,
-        },
-        AgentPcrGenesisAdmissionOutcome::Duplicate(commit) => AuthoritySubmitOutcome::Accepted {
-            status: AuthorityCommitStatus::Duplicate,
-            commit,
-        },
+        AgentPcrGenesisAdmissionOutcome::Committed(commit) => {
+            AuthoritySubmitResponseBody::Accepted {
+                status: AuthorityCommitStatus::Committed,
+                commit,
+            }
+        }
+        AgentPcrGenesisAdmissionOutcome::Duplicate(commit) => {
+            AuthoritySubmitResponseBody::Accepted {
+                status: AuthorityCommitStatus::Duplicate,
+                commit,
+            }
+        }
     })
 }

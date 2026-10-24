@@ -9,7 +9,7 @@ fn session_actor(state: &AppState, session: &SessionIdentityState) -> Option<ark
 pub(crate) async fn build_sync_snapshot(
     state: &AppState,
     session: Option<&SessionIdentityState>,
-    body: &SyncRequestBody,
+    body: &AccountSubscribeParameters,
     after_cursor: &SyncCursor,
 ) -> Result<
     arkret_models_collaboration::sync_frames::account_subscribe::AccountSubscribeFrame,
@@ -24,7 +24,7 @@ pub(crate) async fn build_sync_snapshot(
 async fn build_global_sync_snapshot(
     state: &AppState,
     session: Option<&SessionIdentityState>,
-    body: &SyncRequestBody,
+    body: &AccountSubscribeParameters,
     after_cursor: &SyncCursor,
 ) -> Result<
     arkret_models_collaboration::sync_frames::account_subscribe::AccountSubscribeFrame,
@@ -261,7 +261,7 @@ async fn build_global_sync_snapshot(
         }),
         to_device: Some(arkret_models_collaboration::sync_frames::account_subscribe::RecipientDeliveryContainer {
             deliveries: to_device,
-            ack_token: to_device_ack_token,
+            acknowledgement_token: to_device_ack_token,
             lost: to_device_lost,
             limited: to_device_limited.then_some(true),
             next_cursor: to_device_next_cursor,

@@ -215,15 +215,15 @@ async fn check_snapshot_current_without_create_history(
         #[diesel(sql_type=BigInt)]
         event_pk: i64,
     }
-    let covering = diesel::sql_query("SELECT c.event_pk FROM realm_commits c JOIN circle_current_results r ON r.current_commit_id=c.commit_id WHERE r.circle_id=$1")
+    let covering = diesel::sql_query("SELECT c.event_pk FROM realm_commits c JOIN circle_current_states r ON r.current_commit_id=c.commit_id WHERE r.circle_id=$1")
         .bind::<Text,_>(id.as_str()).get_result::<CoveringEvent>(&mut *conn).await.unwrap();
     // A retained continuity Commit carries no readable producer Event.
-    diesel::sql_query("UPDATE realm_commits SET event_pk=NULL WHERE commit_id=(SELECT current_commit_id FROM circle_current_results WHERE circle_id=$1)")
+    diesel::sql_query("UPDATE realm_commits SET event_pk=NULL WHERE commit_id=(SELECT current_commit_id FROM circle_current_states WHERE circle_id=$1)")
         .bind::<Text,_>(id.as_str()).execute(&mut *conn).await.unwrap();
     assert!(store.circle_view_for_actor(id, actor).await.is_err());
-    diesel::sql_query("INSERT INTO replica_authorization_rows(realm_id,selector,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) SELECT realm_id,jsonb_build_object('kind','circle','circle_id',circle_id),source_stream_ref,current_commit_id,current_stream_position,value,updated_at FROM circle_current_results WHERE circle_id=$1")
+    diesel::sql_query("INSERT INTO replica_authorization_rows(realm_id,selector,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) SELECT realm_id,jsonb_build_object('kind','circle','circle_id',circle_id),source_stream_ref,current_commit_id,current_stream_position,value,updated_at FROM circle_current_states WHERE circle_id=$1")
         .bind::<Text,_>(id.as_str()).execute(&mut *conn).await.unwrap();
-    diesel::sql_query("INSERT INTO replica_authorization_cuts(realm_id,source_stream_ref,head_commit_id,head_stream_position,verified_at) SELECT realm_id,source_stream_ref,current_commit_id,current_stream_position,updated_at FROM circle_current_results WHERE circle_id=$1")
+    diesel::sql_query("INSERT INTO replica_authorization_cuts(realm_id,source_stream_ref,head_commit_id,head_stream_position,verified_at) SELECT realm_id,source_stream_ref,current_commit_id,current_stream_position,updated_at FROM circle_current_states WHERE circle_id=$1")
         .bind::<Text,_>(id.as_str()).execute(&mut *conn).await.unwrap();
     assert!(
         store
@@ -236,16 +236,16 @@ async fn check_snapshot_current_without_create_history(
     diesel::sql_query("UPDATE replica_authorization_rows SET value=jsonb_set(value,'{title}','\"different current\"') WHERE selector=jsonb_build_object('kind','circle','circle_id',$1::text)")
         .bind::<Text,_>(id.as_str()).execute(&mut *conn).await.unwrap();
     assert!(store.circle_view_for_actor(id, actor).await.is_err());
-    diesel::sql_query("UPDATE replica_authorization_rows v SET value=r.value FROM circle_current_results r WHERE r.circle_id=$1 AND v.selector=jsonb_build_object('kind','circle','circle_id',r.circle_id)")
+    diesel::sql_query("UPDATE replica_authorization_rows v SET value=r.value FROM circle_current_states r WHERE r.circle_id=$1 AND v.selector=jsonb_build_object('kind','circle','circle_id',r.circle_id)")
         .bind::<Text,_>(id.as_str()).execute(&mut *conn).await.unwrap();
     // Equal positions from a different Commit are not the same verified cut.
-    diesel::sql_query("UPDATE replica_authorization_cuts h SET head_commit_id='different-commit' FROM circle_current_results r WHERE r.circle_id=$1 AND h.realm_id=r.realm_id AND h.source_stream_ref=r.source_stream_ref")
+    diesel::sql_query("UPDATE replica_authorization_cuts h SET head_commit_id='different-commit' FROM circle_current_states r WHERE r.circle_id=$1 AND h.realm_id=r.realm_id AND h.source_stream_ref=r.source_stream_ref")
         .bind::<Text,_>(id.as_str()).execute(&mut *conn).await.unwrap();
     assert!(store.circle_view_for_actor(id, actor).await.is_err());
-    diesel::sql_query("UPDATE realm_commits c SET event_pk=$2 FROM circle_current_results r WHERE r.circle_id=$1 AND c.commit_id=r.current_commit_id")
+    diesel::sql_query("UPDATE realm_commits c SET event_pk=$2 FROM circle_current_states r WHERE r.circle_id=$1 AND c.commit_id=r.current_commit_id")
         .bind::<Text,_>(id.as_str()).bind::<BigInt,_>(covering.event_pk).execute(&mut *conn).await.unwrap();
     diesel::sql_query("DELETE FROM replica_authorization_rows WHERE selector=jsonb_build_object('kind','circle','circle_id',$1::text)")
         .bind::<Text,_>(id.as_str()).execute(&mut *conn).await.unwrap();
-    diesel::sql_query("DELETE FROM replica_authorization_cuts h USING circle_current_results r WHERE r.circle_id=$1 AND h.realm_id=r.realm_id AND h.source_stream_ref=r.source_stream_ref")
+    diesel::sql_query("DELETE FROM replica_authorization_cuts h USING circle_current_states r WHERE r.circle_id=$1 AND h.realm_id=r.realm_id AND h.source_stream_ref=r.source_stream_ref")
         .bind::<Text,_>(id.as_str()).execute(&mut *conn).await.unwrap();
 }

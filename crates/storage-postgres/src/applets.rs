@@ -194,7 +194,7 @@ impl AppletStore for PgAppletStore {
         command: arkret_models_integration::AppletConfigurationCommand,
         current: &coland_storage::ManagementReviewCurrent,
         ingress: &coland_storage::AppletConfigurationIngress,
-    ) -> PersistenceResult<arkret_models_integration::AppletConfigurationOutcome> {
+    ) -> PersistenceResult<arkret_models_integration::AppletConfigurationResponseBody> {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
@@ -211,10 +211,10 @@ impl AppletStore for PgAppletStore {
         &self,
         governor: &arkret_wire::DidCoreId,
         intent: &arkret_models_integration::AppletConfigurationExecutionIntent,
-        source: &arkret_models_integration::AppletConfigurationExecutionOutcome,
+        source: &arkret_models_integration::AppletConfigurationExecutionResponseBody,
         producer: &coland_storage::AppletEventProducerGuard,
         current: &coland_storage::ManagementReviewCurrent,
-    ) -> PersistenceResult<arkret_models_integration::AppletConfigurationOutcome> {
+    ) -> PersistenceResult<arkret_models_integration::AppletConfigurationResponseBody> {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
@@ -234,8 +234,8 @@ impl AppletStore for PgAppletStore {
         station: &arkret_wire::DidCoreId,
         request: &arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialRequestBody,
     ) -> PersistenceResult<
-        arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialOutcome,
-    > {
+        arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialResponseBody,
+    >{
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;

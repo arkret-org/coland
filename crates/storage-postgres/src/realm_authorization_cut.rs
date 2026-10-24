@@ -60,8 +60,8 @@ use super::{
     AsyncPgConnection, Jsonb, OptionalExtension, PersistenceError, PersistenceResult,
     QueryableByName, RunQueryDsl, Text, sql_query,
 };
-use crate::capability_grant_current_results::{
-    CapabilityGrantCurrentResultReadRow, RealmAuthorityRootCurrent, RealmAuthorityRootReadRow,
+use crate::capability_grant_current_states::{
+    CapabilityGrantCurrentStateReadRow, RealmAuthorityRootCurrent, RealmAuthorityRootReadRow,
     decode_authority_root, decode_row, grant_is_active_at, validate_ancestor_graph,
 };
 use crate::direct_conversation_admission::ProfileAuthority;
@@ -114,7 +114,7 @@ pub(crate) async fn is_owned_agent_in_connection(
     }
     let actor = ActorId::account(account.clone());
     Ok(sql_query(
-        "SELECT EXISTS(SELECT 1 FROM agent_provisioning_current_results p \
+        "SELECT EXISTS(SELECT 1 FROM agent_provisioning_current_states p \
          JOIN pcr_genesis_units g ON g.realm_id=p.realm_id \
          WHERE p.agent_id=$1 AND g.station_id=$2) \
          OR EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk \
@@ -123,7 +123,7 @@ pub(crate) async fn is_owned_agent_in_connection(
            AND e.envelope->'actor_id'->'account_id'->>'station_id'=$2 \
            AND c.realm_id=e.realm_id \
            AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',e.realm_id)) \
-         OR EXISTS(SELECT 1 FROM member_state_current_results m \
+         OR EXISTS(SELECT 1 FROM member_state_current_states m \
          JOIN realm_commits c ON c.commit_id=m.current_commit_id \
            AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position \
          JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
@@ -181,12 +181,10 @@ async fn read_owned_controller_in_connection(
         return Ok(None);
     }
     let controller = if lock {
-        crate::agent_interaction_current_results::controller_in_connection(
-            conn, realm_id, agent, at,
-        )
-        .await?
+        crate::agent_interaction_current_states::controller_in_connection(conn, realm_id, agent, at)
+            .await?
     } else {
-        crate::agent_interaction_current_results::controller_snapshot_in_connection(
+        crate::agent_interaction_current_states::controller_snapshot_in_connection(
             conn, realm_id, agent, at,
         )
         .await?
@@ -262,7 +260,7 @@ pub(crate) async fn owned_source_in_connection(
     }
     let members = vec![controller.to_string(), agent.to_string()];
     let rows = sql_query(format!(
-        "SELECT m.member_id,e.envelope FROM member_state_current_results m \
+        "SELECT m.member_id,e.envelope FROM member_state_current_states m \
          JOIN realm_commits c ON c.commit_id=m.current_commit_id \
            AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position \
          JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
@@ -373,7 +371,7 @@ async fn confirmed_resource_scope(
             let Some(id) = target.space_id.as_ref() else {
                 return Ok(None);
             };
-            let row = sql_query("SELECT s.value FROM space_current_results s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE s.realm_id=$1 AND s.space_id=$2")
+            let row = sql_query("SELECT s.value FROM space_current_states s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE s.realm_id=$1 AND s.space_id=$2")
                 .bind::<Text,_>(realm.as_str()).bind::<Text,_>(id.as_str()).get_result::<PolicyBundleRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
             let Some(row) = row else { return Ok(None) };
             let space: arkret_models_collaboration::objects::space::Space =
@@ -395,7 +393,7 @@ async fn confirmed_resource_scope(
             let Some(id) = target.strand_id.as_ref() else {
                 return Ok(None);
             };
-            let row = sql_query("SELECT s.value FROM strand_current_results s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE s.realm_id=$1 AND s.strand_id=$2")
+            let row = sql_query("SELECT s.value FROM strand_current_states s JOIN realm_commits c ON c.realm_id=s.realm_id AND c.commit_id=s.current_commit_id AND c.stream_position=s.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE s.realm_id=$1 AND s.strand_id=$2")
                 .bind::<Text,_>(realm.as_str()).bind::<Text,_>(id.as_str()).get_result::<PolicyBundleRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
             let Some(row) = row else { return Ok(None) };
             let strand: arkret_models_collaboration::objects::strand::Strand =
@@ -461,12 +459,12 @@ async fn scope_member_readable(
 pub(crate) async fn owned_agent_authorization_check_in_connection(
     conn: &mut AsyncPgConnection,
     caller: &ActorId,
-    request: &arkret_models_collaboration::governance::authorization::AuthzCheckRequestBody,
+    request: &arkret_models_collaboration::governance::authorization::AuthorizationCheckRequestBody,
 ) -> PersistenceResult<
-    Option<arkret_models_collaboration::governance::authorization::AuthzCheckOutcome>,
+    Option<arkret_models_collaboration::governance::authorization::AuthorizationCheckResponseBody>,
 > {
     use arkret_models_collaboration::governance::operation_wire::AgentPolicyOperation;
-    use arkret_wire::{AuthzDecision, PolicyEffect};
+    use arkret_wire::{AuthorizationDecision, PolicyEffect};
     let Some(target) = request.resource.as_ref() else {
         return Ok(None);
     };
@@ -496,7 +494,7 @@ pub(crate) async fn owned_agent_authorization_check_in_connection(
     let owner_cut = RealmAuthorizationCut::read(conn, realm, &controller).await?;
     let scope = confirmed_resource_scope(conn, realm, target).await?;
     let action = CapabilityActionId::from_wire(&request.action);
-    let mut decision = AuthzDecision::HardDeny;
+    let mut decision = AuthorizationDecision::HardDeny;
     let mut matched_grants = Vec::new();
     if let (Some(scope), Some(action), Some(descriptor)) = (
         &scope,
@@ -540,7 +538,7 @@ pub(crate) async fn owned_agent_authorization_check_in_connection(
         let resources =
             crate::agent_management_admission::selector_content_resources(realm, target)?;
         let policies =
-            crate::policy_current_results::read_scoped_agent_management_policies_in_connection(
+            crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
                 conn, realm, circle,
             )
             .await?;
@@ -590,26 +588,28 @@ pub(crate) async fn owned_agent_authorization_check_in_connection(
             )
             .is_refusal();
         decision = match (effect, &evaluation) {
-            (PolicyEffect::Deny, _) | (_, GrantEvaluation::Denied) => AuthzDecision::HardDeny,
+            (PolicyEffect::Deny, _) | (_, GrantEvaluation::Denied) => {
+                AuthorizationDecision::HardDeny
+            }
             (PolicyEffect::Quarantine, _) | (_, GrantEvaluation::Quarantined) => {
-                AuthzDecision::Quarantine
+                AuthorizationDecision::Quarantine
             }
             (PolicyEffect::RequireReview, _) | (_, GrantEvaluation::RequiresReview) => {
-                AuthzDecision::RequireReview
+                AuthorizationDecision::RequireReview
             }
             _ if descriptor.required_evaluator_checks.is_empty()
                 && (membership_read || !evaluation.unreserved().is_empty()) =>
             {
-                AuthzDecision::Allow
+                AuthorizationDecision::Allow
             }
-            _ => AuthzDecision::HardDeny,
+            _ => AuthorizationDecision::HardDeny,
         };
-        if decision == AuthzDecision::Allow {
+        if decision == AuthorizationDecision::Allow {
             matched_grants = evaluation.unreserved().iter().map(|grant| serde_json::json!({"grant_id":grant.id,"subject":grant.subject,"actions":grant.actions,"resources":grant.resources})).collect();
         }
     }
     Ok(Some(
-        arkret_models_collaboration::governance::authorization::AuthzCheckOutcome {
+        arkret_models_collaboration::governance::authorization::AuthorizationCheckResponseBody {
             decision: decision.clone(),
             matched_grants,
             applied_constraints: Vec::new(),
@@ -622,7 +622,7 @@ pub(crate) async fn owned_agent_authorization_check_in_connection(
             last_known_checkpoint_age_ms: None,
             authority_status: Some(arkret_wire::AuthorityStatus::Fresh),
             cache_expires_at: None,
-            reason_code: (decision != AuthzDecision::Allow)
+            reason_code: (decision != AuthorizationDecision::Allow)
                 .then(|| arkret_wire::ReasonCode::from_wire("capability_denied")),
             retry_after_ms: None,
             obligations: Vec::new(),
@@ -673,7 +673,7 @@ impl RealmAuthorizationCut {
         cut.grants.clear();
         cut.revisions.clear();
         for row in rows {
-            let arkret_wire::TypedCurrentRow::Value {
+            let arkret_wire::CurrentState::Value {
                 selector,
                 revision,
                 value,
@@ -745,7 +745,7 @@ impl RealmAuthorizationCut {
     ) -> PersistenceResult<Self> {
         let root = sql_query(
             "SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,\
-             authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1",
+             authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1",
         )
         .bind::<Text, _>(realm_id.as_str())
         .get_result::<RealmAuthorityRootReadRow>(&mut *conn)
@@ -756,11 +756,11 @@ impl RealmAuthorizationCut {
         .transpose()?;
         let stored = sql_query(
             "SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,\
-             current_stream_position,value FROM capability_grant_current_results \
+             current_stream_position,value FROM capability_grant_current_states \
              WHERE realm_id=$1 ORDER BY grant_id ASC",
         )
         .bind::<Text, _>(realm_id.as_str())
-        .load::<CapabilityGrantCurrentResultReadRow>(&mut *conn)
+        .load::<CapabilityGrantCurrentStateReadRow>(&mut *conn)
         .await
         .map_err(PersistenceError::database)?;
         let mut grants = BTreeMap::new();
@@ -771,7 +771,7 @@ impl RealmAuthorizationCut {
             grants.insert(record.grant_id, record.value);
         }
         let policy_bundle =
-            sql_query("SELECT value FROM realm_policy_bundle_current_results WHERE realm_id=$1")
+            sql_query("SELECT value FROM realm_policy_bundle_current_states WHERE realm_id=$1")
                 .bind::<Text, _>(realm_id.as_str())
                 .get_result::<PolicyBundleRow>(&mut *conn)
                 .await
@@ -787,7 +787,7 @@ impl RealmAuthorizationCut {
                 .transpose()?;
         let member_id = actor.to_string();
         let actor_membership = sql_query(
-            "SELECT membership FROM member_state_current_results \
+            "SELECT membership FROM member_state_current_states \
              WHERE realm_id=$1 AND member_id=$2",
         )
         .bind::<Text, _>(realm_id.as_str())
@@ -988,7 +988,7 @@ impl RealmAuthorizationCut {
         // Member Stations keep signed authorization rows, not the governor's
         // private admission tables. These observations may refuse a receipt;
         // they never manufacture positive remote authorization.
-        let observed = sql_query("SELECT selector,value,updated_at FROM (SELECT jsonb_build_object('kind','capability_grant','grant_id',grant_id) AS selector,value,updated_at FROM capability_grant_current_results WHERE realm_id=$1 UNION ALL SELECT selector,value,updated_at FROM replica_authorization_rows WHERE realm_id=$1 AND selector->>'kind'='capability_grant') observations ORDER BY updated_at")
+        let observed = sql_query("SELECT selector,value,updated_at FROM (SELECT jsonb_build_object('kind','capability_grant','grant_id',grant_id) AS selector,value,updated_at FROM capability_grant_current_states WHERE realm_id=$1 UNION ALL SELECT selector,value,updated_at FROM replica_authorization_rows WHERE realm_id=$1 AND selector->>'kind'='capability_grant') observations ORDER BY updated_at")
             .bind::<Text,_>(self.realm_id.as_str()).load::<ReplicaGrant>(&mut *conn).await.map_err(PersistenceError::database)?;
         let mut recent = std::collections::BTreeSet::new();
         for row in observed {
@@ -1029,7 +1029,7 @@ impl RealmAuthorizationCut {
             EventKind::RealmPolicyBundle.as_str(),
             EventKind::PolicySet.as_str(),
         ];
-        let revoked = sql_query("SELECT (EXISTS(SELECT 1 FROM capability_grant_current_results WHERE realm_id=$1 AND grant_id=ANY($2) AND status<>'active' AND updated_at >= $3) OR EXISTS(SELECT 1 FROM realm_authority_root_current_results WHERE realm_id=$1 AND updated_at >= $3) OR EXISTS(SELECT 1 FROM replica_authorization_rows WHERE realm_id=$1 AND updated_at >= $3 AND ((selector->>'kind'='capability_grant' AND selector->>'grant_id'=ANY($2) AND value->>'status'<>'active') OR selector->>'kind' IN ('realm_authority_root','realm_policy_bundle','policy') OR (selector->>'kind'='policy_action' AND value->>'action'='ak.realm.actor.audit'))) OR EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE c.realm_id=$1 AND e.state='committed' AND GREATEST(e.received_at,c.committed_at) >= $3 AND (e.kind=ANY($4) OR (e.kind='ak.policy.action' AND e.envelope#>>'{payload,action}'='ak.realm.actor.audit') OR (e.kind IN ('ak.capability.revoke','ak.capability.relinquish') AND (e.envelope#>>'{payload,grant_id}'=ANY($2) OR NOT(e.envelope#>>'{payload,grant_id}'=ANY($5))))))) AS present")
+        let revoked = sql_query("SELECT (EXISTS(SELECT 1 FROM capability_grant_current_states WHERE realm_id=$1 AND grant_id=ANY($2) AND status<>'active' AND updated_at >= $3) OR EXISTS(SELECT 1 FROM realm_authority_root_current_states WHERE realm_id=$1 AND updated_at >= $3) OR EXISTS(SELECT 1 FROM replica_authorization_rows WHERE realm_id=$1 AND updated_at >= $3 AND ((selector->>'kind'='capability_grant' AND selector->>'grant_id'=ANY($2) AND value->>'status'<>'active') OR selector->>'kind' IN ('realm_authority_root','realm_policy_bundle','policy') OR (selector->>'kind'='policy_action' AND value->>'action'='ak.realm.actor.audit'))) OR EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE c.realm_id=$1 AND e.state='committed' AND GREATEST(e.received_at,c.committed_at) >= $3 AND (e.kind=ANY($4) OR (e.kind='ak.policy.action' AND e.envelope#>>'{payload,action}'='ak.realm.actor.audit') OR (e.kind IN ('ak.capability.revoke','ak.capability.relinquish') AND (e.envelope#>>'{payload,grant_id}'=ANY($2) OR NOT(e.envelope#>>'{payload,grant_id}'=ANY($5))))))) AS present")
             .bind::<Text,_>(self.realm_id.as_str())
             .bind::<diesel::sql_types::Array<Text>,_>(&ids)
             .bind::<diesel::sql_types::Timestamptz,_>(signed_at)
@@ -2057,7 +2057,7 @@ impl RealmAuthorizationCut {
             }
             // Same active-source join as the original Circle content writer.
             let active = sql_query(
-                "SELECT EXISTS (SELECT 1 FROM circle_current_results circle \
+                "SELECT EXISTS (SELECT 1 FROM circle_current_states circle \
                  JOIN realm_commits cc ON cc.commit_id=circle.current_commit_id \
                  WHERE circle.realm_id=$1 AND circle.circle_id=$2 AND circle.value->>'state'='active' \
                    AND cc.realm_id=circle.realm_id AND cc.stream_position=circle.current_stream_position \
@@ -2079,7 +2079,7 @@ impl RealmAuthorizationCut {
                 ));
             }
         }
-        crate::message_revision_current_results::require_active_discussion_strand(
+        crate::message_revision_current_states::require_active_discussion_strand(
             conn,
             &self.realm_id,
             strand,
@@ -2189,14 +2189,14 @@ impl RealmAuthorizationCut {
             owned_source_in_connection(conn, &self.realm_id, &self.actor, at, lock).await?;
         authorization = self.actor_authorization_with_owned_source(at, owned_source)?;
         let policies = if lock {
-            crate::policy_current_results::read_scoped_agent_management_policies_in_connection(
+            crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
                 conn,
                 &self.realm_id,
                 None,
             )
             .await?
         } else {
-            crate::policy_current_results::read_scoped_agent_management_policy_snapshot_in_connection(conn, &self.realm_id, None).await?
+            crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(conn, &self.realm_id, None).await?
         };
         authorization.agent_ceiling = Some(coland_storage::AgentControllerCeiling {
             controller: Box::new(controller_cut.actor_authorization(at)?),
@@ -2577,12 +2577,12 @@ impl RealmAuthorizationCut {
                     .constraints
                     .iter()
                     .filter(wip_allow)
-                    .any(|constraint| constraint.wip_limit_override == Some(true))
+                    .any(|constraint| constraint.wip_limit_override_allowed == Some(true))
                     && !grant
                         .constraints
                         .iter()
                         .filter(wip_allow)
-                        .any(|constraint| constraint.wip_limit_override == Some(false))
+                        .any(|constraint| constraint.wip_limit_override_allowed == Some(false))
             });
         Ok((override_allowed, approved))
     }
@@ -3538,7 +3538,7 @@ impl RealmAuthorizationCut {
             let message = arkret_wire::MessageId::new(payload.target_ref.as_str())
                 .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
             let target = crate::boxed_future(|| {
-                crate::message_revision_current_results::locked_message_target(
+                crate::message_revision_current_states::locked_message_target(
                     conn,
                     &event.realm_id,
                     &message,
@@ -3568,7 +3568,7 @@ impl RealmAuthorizationCut {
                     serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
                 )
                 .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-            let row = diesel::sql_query("SELECT value FROM space_current_results WHERE realm_id=$1 AND space_id=$2 FOR SHARE")
+            let row = diesel::sql_query("SELECT value FROM space_current_states WHERE realm_id=$1 AND space_id=$2 FOR SHARE")
                 .bind::<Text, _>(event.realm_id.as_str())
                 .bind::<Text, _>(payload.space_id.as_str())
                 .get_result::<PolicyBundleRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
@@ -4218,7 +4218,7 @@ mod operation_fact_tests {
         let root_event = event(0x70);
         let parent_id = GrantId::from_event_id(&event(0x71));
         let child_id = GrantId::from_event_id(&event(0x72));
-        let root_ref = json!({"kind":"realm_root","realm_id":realm,"authority_event_ref":root_event,"authority_generation":0});
+        let root_ref = json!({"kind":"realm_root","realm_id":realm,"authority_event_ref":root_event,"authority_generation":"0"});
         let parent:CapabilityGrant=serde_json::from_value(json!({"id":parent_id,"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":owner,"subject":service,"actions":["ak.message.create","ak.event.read"],"resources":[{"kind":"realm","realm_id":realm}],"constraints":[{"constraint_kind":"authority_control","effect":"allow","authority_regrant_allowed":false,"max_authority_depth":0}],"issuer_authority_refs":[root_ref],"authority_depth":1,"authority_root_refs":[root_ref],"issued_at":"2026-09-21T00:00:00.000Z","status":"active"})).unwrap();
         let mut child:CapabilityGrant=serde_json::from_value(json!({"id":child_id,"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":service,"subject":actor,"actions":["ak.message.create","ak.event.read"],"resources":[{"kind":"realm","realm_id":realm}],"constraints":[{"constraint_kind":"temporal","effect":"allow","applies_to_actions":["ak.event.read"],"expires_at":"2026-09-22T00:00:00.000Z"}],"issuer_authority_refs":[{"kind":"grant","grant_id":parent_id}],"authority_depth":2,"authority_root_refs":[root_ref],"issued_at":"2026-09-21T00:00:00.000Z","status":"active"})).unwrap();
         let target = WireResourceSelector::realm(realm.clone());
@@ -4314,7 +4314,7 @@ mod operation_fact_tests {
         let controller = account("ak:did_core:web:controller.example");
         let root_event =
             arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0x51; 32]);
-        let root_ref = json!({"kind":"realm_root","realm_id":realm,"authority_event_ref":root_event,"authority_generation":0});
+        let root_ref = json!({"kind":"realm_root","realm_id":realm,"authority_event_ref":root_event,"authority_generation":"0"});
         let grant_id = GrantId::from_event_id(&arkret_wire::EventId::from_digest(
             arkret_canonical::DigestSuite::Sha256,
             [0x52; 32],
@@ -4397,7 +4397,7 @@ mod operation_fact_tests {
         let parent = id(21);
         let child = id(22);
         let root = json!({"kind":"realm_root","realm_id":realm,
-            "authority_event_ref":arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[23;32]),"authority_generation":0});
+            "authority_event_ref":arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[23;32]),"authority_generation":"0"});
         let grant: CapabilityGrant = serde_json::from_value(json!({
             "id":child,"schema":"ak.schema.capability.v1","realm_id":realm,
             "issuer_id":actor,"subject":actor,"actions":["ak.realm.actor.audit"],"resources":[target],

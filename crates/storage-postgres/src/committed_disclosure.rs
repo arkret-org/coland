@@ -225,7 +225,7 @@ async fn member_event_visible_in_connection(
                     serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
                 )
                 .map_err(PersistenceError::database)?;
-            crate::moderation_franking_proof_current_results::franking_target_scope_in_connection(
+            crate::moderation_franking_proof_current_states::franking_target_scope_in_connection(
                 conn,
                 &event.realm_id,
                 &proof.event_id,
@@ -238,7 +238,7 @@ async fn member_event_visible_in_connection(
             arkret_wire::CapabilityActionId::POLICY_MANAGE,
             arkret_wire::CapabilityActionId::MODERATION_DECISION,
         ];
-        if crate::moderation_report_current_results::scope_moderator(
+        if crate::moderation_report_current_states::scope_moderator(
             conn,
             &event.realm_id,
             &scope,
@@ -324,7 +324,7 @@ pub(crate) const WITHHELD_COMMITS_SQL: &str = "\
     WHERE commit_row.commit_id = ANY($1) \
       AND (EXISTS (SELECT 1 FROM retention_tombstones tombstone \
                    WHERE tombstone.event_id = event_row.id) \
-        OR EXISTS (SELECT 1 FROM object_redaction_current_results redaction \
+        OR EXISTS (SELECT 1 FROM object_redaction_current_states redaction \
                    WHERE redaction.realm_id = event_row.realm_id \
                      AND redaction.target_ref IN (target.message_id, \
                                                   event_row.envelope->>'event_id')))";

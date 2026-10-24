@@ -11,7 +11,7 @@
 //! prove stays provisional: it is refused and the durable winner is kept.
 
 use arkret_models_collaboration::objects::read_receipts::{
-    ReadCursor, ReadCursorCausalRelation, ReadMarkerOutcome, merge_read_cursors,
+    ReadCursor, ReadCursorCausalRelation, ReadMarkerResponseBody, merge_read_cursors,
 };
 use arkret_wire::{AccountId, ActorId, CommitStreamRef, RealmId};
 use coland_storage::{
@@ -88,8 +88,11 @@ fn scope_key(cursor: &ReadCursor) -> PersistenceResult<String> {
     .map_err(|error| PersistenceError::Internal(error.to_string()))
 }
 
-fn marker(cursor: &ReadCursor, updated_at: chrono::DateTime<chrono::Utc>) -> ReadMarkerOutcome {
-    ReadMarkerOutcome {
+fn marker(
+    cursor: &ReadCursor,
+    updated_at: chrono::DateTime<chrono::Utc>,
+) -> ReadMarkerResponseBody {
+    ReadMarkerResponseBody {
         realm_id: cursor.realm_id.clone(),
         actor_id: cursor.actor_id.clone(),
         device_id: cursor.device_id.clone(),
@@ -132,7 +135,7 @@ async fn prove_position(
     }
     let owner = ActorId::account(advance.owner.clone()).to_string();
     let Some(_membership) = sql_query(
-        "SELECT current_stream_position FROM member_state_current_results \
+        "SELECT current_stream_position FROM member_state_current_states \
          WHERE realm_id=$1 AND member_id=$2 AND membership='join' FOR SHARE",
     )
     .bind::<Text, _>(realm_id)
@@ -173,7 +176,7 @@ async fn prove_position(
     let caller = ActorId::account(advance.owner.clone());
     let floor = match &stream {
         CommitStreamRef::Realm { realm_id } => {
-            sql_query("SELECT 1 FROM realm_bootstrap_current_results WHERE realm_id=$1 AND result_family='realm_history_access' FOR SHARE")
+            sql_query("SELECT 1 FROM realm_bootstrap_current_states WHERE realm_id=$1 AND state_family='realm_history_access' FOR SHARE")
                 .bind::<Text, _>(realm_id.as_str()).execute(&mut *conn).await?;
             crate::account_stream_scan::caller_realm_floor_in_connection(conn, realm_id, &caller)
                 .await?
@@ -185,13 +188,13 @@ async fn prove_position(
             // Pin the exact accepted Circle current and join while evaluating
             // the same parent-bound interval used by ordinary stream reads.
             sql_query(
-                "SELECT 1 FROM circle_current_results WHERE realm_id=$1 AND circle_id=$2 FOR SHARE",
+                "SELECT 1 FROM circle_current_states WHERE realm_id=$1 AND circle_id=$2 FOR SHARE",
             )
             .bind::<Text, _>(realm_id.as_str())
             .bind::<Text, _>(circle_id.as_str())
             .execute(&mut *conn)
             .await?;
-            sql_query("SELECT 1 FROM circle_member_state_current_results WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3 FOR SHARE")
+            sql_query("SELECT 1 FROM circle_member_state_current_states WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3 FOR SHARE")
                 .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(circle_id.as_str())
                 .bind::<Text, _>(&owner).execute(&mut *conn).await?;
             crate::account_stream_scan::caller_circle_floor_in_connection(
@@ -392,7 +395,7 @@ impl ReadCursorStore for PgReadCursorStore {
         &self,
         owner: &AccountId,
         realm_id: Option<&RealmId>,
-    ) -> PersistenceResult<Vec<ReadMarkerOutcome>> {
+    ) -> PersistenceResult<Vec<ReadMarkerResponseBody>> {
         let mut conn = pg_conn(&self.pool).await?;
         let rows = sql_query(
             "SELECT cursor, derived_updated_at, position_stream_key, position_stream_position \

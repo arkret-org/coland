@@ -77,8 +77,8 @@ impl ReviewRow {
     fn request(&self) -> std::sync::Arc<ManagementReviewRequestBody> {
         self.request.clone()
     }
-    fn outcome(&self) -> PersistenceResult<ManagementReviewOutcome> {
-        Ok(ManagementReviewOutcome {
+    fn outcome(&self) -> PersistenceResult<ManagementReviewResponseBody> {
+        Ok(ManagementReviewResponseBody {
             request_id: self.request.request_id.clone(),
             target_digest: self.target_digest.parse().map_err(invalid)?,
             status: serde_json::from_value(json!(self.status)).map_err(invalid)?,
@@ -383,7 +383,7 @@ async fn pins(
     cut.require_open_lifecycle(event)?;
     cut.require_governed_member(&event.kind)?;
     let producer = producer_pin(conn, event, at).await?;
-    let joined = sql_query("SELECT jsonb_build_object('membership',m.membership,'current_commit_id',m.current_commit_id,'current_stream_position',m.current_stream_position,'event',e.envelope,'commit',c.commit_json) AS value FROM member_state_current_results m JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE m.realm_id=$1 AND m.member_id=$2 FOR SHARE OF m")
+    let joined = sql_query("SELECT jsonb_build_object('membership',m.membership,'current_commit_id',m.current_commit_id,'current_stream_position',m.current_stream_position,'event',e.envelope,'commit',c.commit_json) AS value FROM member_state_current_states m JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE m.realm_id=$1 AND m.member_id=$2 FOR SHARE OF m")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(ActorId::account(controller.clone()).to_string()).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(hidden)?;
     if joined.value["membership"] != "join" {
         return Err(hidden());
@@ -402,7 +402,7 @@ async fn pins(
                 "controller joined generation changed",
             ));
         }
-    } else if crate::agent_interaction_current_results::controller_in_connection(
+    } else if crate::agent_interaction_current_states::controller_in_connection(
         conn,
         &event.realm_id,
         &agent,
@@ -414,7 +414,7 @@ async fn pins(
     {
         return Err(hidden());
     }
-    let ownership = crate::agent_interaction_current_results::owned_provenance_in_connection(
+    let ownership = crate::agent_interaction_current_states::owned_provenance_in_connection(
         conn,
         &agent,
         &controller,
@@ -424,7 +424,7 @@ async fn pins(
     .await?
     .ok_or_else(hidden)?;
     let policies =
-        crate::policy_current_results::read_scoped_agent_management_policies_in_connection(
+        crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
             conn,
             &event.realm_id,
             None,
@@ -438,11 +438,11 @@ async fn pins(
         request.management_operation,
         at,
     )?;
-    let policy_pins = sql_query("SELECT to_jsonb(p) AS value FROM policy_current_results p WHERE realm_id=$1 AND value->>'policy_kind'='agent' ORDER BY policy_id FOR SHARE")
+    let policy_pins = sql_query("SELECT to_jsonb(p) AS value FROM policy_current_states p WHERE realm_id=$1 AND value->>'policy_kind'='agent' ORDER BY policy_id FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).load::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    let membership = sql_query("SELECT to_jsonb(m) AS value FROM member_state_current_results m WHERE realm_id=$1 AND member_id=$2 FOR SHARE")
+    let membership = sql_query("SELECT to_jsonb(m) AS value FROM member_state_current_states m WHERE realm_id=$1 AND member_id=$2 FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(ActorId::account(agent.clone()).to_string()).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-    let mode = sql_query("SELECT to_jsonb(m) AS value FROM agent_interaction_current_results m WHERE realm_id=$1 AND agent_account_id=$2 FOR SHARE")
+    let mode = sql_query("SELECT to_jsonb(m) AS value FROM agent_interaction_current_states m WHERE realm_id=$1 AND agent_account_id=$2 FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(json!(agent)).get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     if request.management_operation == ManagementOperation::Publish {
         let payload: arkret_models_collaboration::agent_interaction::AgentInteractionSetPayload =
@@ -824,7 +824,7 @@ pub(crate) async fn request_in_connection(
     request: &ManagementReviewRequestBody,
     producer: Option<&coland_storage::SelfProducerCommitGuard>,
     current: &coland_storage::ManagementReviewCurrent,
-) -> PersistenceResult<ManagementReviewOutcome> {
+) -> PersistenceResult<ManagementReviewResponseBody> {
     let realm = realm(request)?;
     if caller != &request.requester_actor_id {
         return Err(hidden());
@@ -917,7 +917,7 @@ pub(crate) async fn status_in_connection(
     caller: &ActorId,
     id: &str,
     current: &coland_storage::ManagementReviewCurrent,
-) -> PersistenceResult<ManagementReviewOutcome> {
+) -> PersistenceResult<ManagementReviewResponseBody> {
     let row = read(conn, id, false).await?.ok_or_else(hidden)?;
     let request = row.request();
     let realm = realm(&request)?;
@@ -1095,7 +1095,7 @@ pub(crate) async fn decide_in_connection(
     decision: &ManagementReviewDecisionRequestBody,
     methods: &[ApprovalHistoricalMethod],
     current: &coland_storage::ManagementReviewCurrent,
-) -> PersistenceResult<ManagementReviewOutcome> {
+) -> PersistenceResult<ManagementReviewResponseBody> {
     decision.validate().map_err(invalid)?;
     let initial = read(conn, &decision.request_id, false)
         .await?

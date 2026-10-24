@@ -562,7 +562,7 @@ pub(in crate::routing) async fn submit_peer_pcr_genesis(
     request: &arkret_models_collaboration::principal_operations::PcrGenesisAdmissionInput,
     exact_request_body: Vec<u8>,
 ) -> Result<
-    arkret_models_collaboration::principal_operations::PcrGenesisAdmissionOutcome,
+    arkret_models_collaboration::principal_operations::PcrGenesisAdmissionResponseBody,
     SubmitOneError,
 > {
     request.validate().map_err(|error| {

@@ -4,7 +4,7 @@
 #[allow(dead_code)]
 mod ordinary_realm;
 
-use arkret_wire::{ActorId, CommitStreamRef, EventKind, RealmId, RealmStreamList};
+use arkret_wire::{ActorId, CommitStreamRef, EventKind, RealmId, RealmStreamPage};
 use coland_http::config::AppConfig;
 use coland_http::service;
 use coland_storage::AuthorityCommitTransaction;
@@ -28,7 +28,7 @@ async fn session(
             station_id: account.station_id.clone(),
             localpart: label.to_owned(),
             display_name: None,
-            bio: None,
+            biography: None,
             avatar_blob_ref: None,
             created_at: now,
         })
@@ -156,7 +156,7 @@ fn verify_snapshot(
     );
     assert_eq!(snapshot.governance_generation, 0);
     for row in &snapshot.current_state_entries {
-        let arkret_wire::TypedCurrentRow::Value {
+        let arkret_wire::CurrentState::Value {
             source_stream_ref,
             revision,
             ..
@@ -362,7 +362,7 @@ async fn frozen_enumeration_scenario() {
     );
     let (status, value) = listing(&state, &token, &realm, 500, None).await;
     assert_eq!(status, StatusCode::OK, "{value}");
-    let first: RealmStreamList = serde_json::from_value(value).unwrap();
+    let first: RealmStreamPage = serde_json::from_value(value).unwrap();
     first.validate().unwrap();
     assert_eq!(first.streams.len(), 500);
     assert!(first.has_more);
@@ -409,7 +409,7 @@ async fn frozen_enumeration_scenario() {
     assert_eq!(refusal["reason_code"], "invalid_cursor");
     let (status, value) = listing(&state, &token, &realm, 500, Some(cursor)).await;
     assert_eq!(status, StatusCode::OK, "{value}");
-    let last: RealmStreamList = serde_json::from_value(value).unwrap();
+    let last: RealmStreamPage = serde_json::from_value(value).unwrap();
     last.validate().unwrap();
     assert_eq!(last.streams.len(), 2);
     assert!(!last.has_more);
@@ -496,7 +496,7 @@ async fn frozen_enumeration_scenario() {
     let (_, new_join) = create_circle(&state, &pool, &head, &actor, &parent, 502).await;
     let (status, value) = listing(&state, &token, &realm, 500, Some(cursor)).await;
     assert_eq!(status, StatusCode::OK, "{value}");
-    let narrowed: RealmStreamList = serde_json::from_value(value).unwrap();
+    let narrowed: RealmStreamPage = serde_json::from_value(value).unwrap();
     assert_eq!(
         narrowed.streams,
         last.streams
@@ -536,7 +536,7 @@ async fn frozen_enumeration_scenario() {
             .all(|floor| floor.stream_ref != revoke.stream_ref)
     );
     assert!(fresh.current_state_entries.iter().all(|row| {
-        let arkret_wire::TypedCurrentRow::Value {
+        let arkret_wire::CurrentState::Value {
             source_stream_ref, ..
         } = row;
         source_stream_ref != &revoke.stream_ref
@@ -557,7 +557,7 @@ async fn frozen_enumeration_scenario() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{value}");
-        let page: RealmStreamList = serde_json::from_value(value).unwrap();
+        let page: RealmStreamPage = serde_json::from_value(value).unwrap();
         page.validate().unwrap();
         assert!(page.streams.len() <= 37);
         enumerated.extend(page.streams);
@@ -674,11 +674,11 @@ async fn issuing_session_scenario() {
     let refreshed = session(&state, &human, "issuing-session-founder").await;
     let (status, first) = listing(&state, &original, &realm, 1, None).await;
     assert_eq!(status, StatusCode::OK, "{first}");
-    let first: RealmStreamList = serde_json::from_value(first).unwrap();
+    let first: RealmStreamPage = serde_json::from_value(first).unwrap();
     let root = first.next_cursor.unwrap();
     let (status, second) = listing(&state, &refreshed, &realm, 1, Some(&root)).await;
     assert_eq!(status, StatusCode::OK, "{second}");
-    let second: RealmStreamList = serde_json::from_value(second).unwrap();
+    let second: RealmStreamPage = serde_json::from_value(second).unwrap();
     let child = second.next_cursor.unwrap();
     let body = arkret_models_identity::account::AccountCursorRevokeRequestBody {
         cursor: child.clone(),
@@ -825,7 +825,7 @@ async fn snapshot_retention_http_scenario() {
     );
     assert!(!current.current_state_entries.iter().any(|row| matches!(
         row,
-        arkret_wire::TypedCurrentRow::Value {
+        arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::MessageRevision { .. },
             ..
         }
@@ -863,7 +863,7 @@ async fn snapshot_retention_http_scenario() {
         .await
         .unwrap()
         .value;
-    diesel::sql_query("UPDATE realm_bootstrap_current_results SET value=jsonb_set(value,'{title}',to_jsonb($2::text)) WHERE realm_id=$1 AND result_family='realm_profile'")
+    diesel::sql_query("UPDATE realm_bootstrap_current_states SET value=jsonb_set(value,'{title}',to_jsonb($2::text)) WHERE realm_id=$1 AND state_family='realm_profile'")
         .bind::<diesel::sql_types::Text, _>(realm.as_str())
         .bind::<diesel::sql_types::Text, _>("x".repeat(8 * 1024 * 1024))
         .execute(&mut conn).await.unwrap();
@@ -892,7 +892,7 @@ fn sidecar_http_snapshot_discovery_and_bidirectional_scan_keep_private_coordinat
 }
 
 async fn sidecar_http_scenario() {
-    use arkret_wire::{StreamScanDirection, StreamScanOutcome, StreamScanRequest};
+    use arkret_wire::{StreamScanDirection, StreamScanRequestBody, StreamScanResponseBody};
     let (state, pool) = coland_test_support::app_state_with_pool(AppConfig {
         development_mode: true,
         ..coland_test_support::app_config()
@@ -986,7 +986,7 @@ async fn sidecar_http_scenario() {
     for (credential, expected) in [(&token, true), (&outsider, false)] {
         let (status, value) = listing(&state, credential, &realm, 500, None).await;
         assert_eq!(status, StatusCode::OK, "{value}");
-        let page: RealmStreamList = serde_json::from_value(value).unwrap();
+        let page: RealmStreamPage = serde_json::from_value(value).unwrap();
         page.validate().unwrap();
         assert_eq!(
             page.streams.iter().any(|row| row.stream_ref == stream),
@@ -1011,7 +1011,7 @@ async fn sidecar_http_scenario() {
                 .any(|floor| floor.stream_ref == stream),
             expected
         );
-        assert_eq!(signed.current_state_entries.iter().any(|row| matches!(row, arkret_wire::TypedCurrentRow::Value {source_stream_ref, ..} if source_stream_ref == &stream)), expected);
+        assert_eq!(signed.current_state_entries.iter().any(|row| matches!(row, arkret_wire::CurrentState::Value {source_stream_ref, ..} if source_stream_ref == &stream)), expected);
         let (status, value) = snapshot(&state, credential, &realm, Some(&signed.snapshot_id)).await;
         assert_eq!(status, StatusCode::OK, "{value}");
         assert_eq!(
@@ -1026,7 +1026,7 @@ async fn sidecar_http_scenario() {
             StreamScanDirection::After(None),
             StreamScanDirection::Before(None),
         ] {
-            let request = StreamScanRequest {
+            let request = StreamScanRequestBody {
                 realm_id: realm.clone(),
                 stream_ref: stream.clone(),
                 direction,
@@ -1049,7 +1049,7 @@ async fn sidecar_http_scenario() {
             let value: Value = response.take_json().await.unwrap();
             if expected {
                 assert_eq!(status, StatusCode::OK, "{value}");
-                let scan: StreamScanOutcome = serde_json::from_value(value).unwrap();
+                let scan: StreamScanResponseBody = serde_json::from_value(value).unwrap();
                 scan.validate_for_request(&request).unwrap();
                 assert_eq!(scan.committed_events.len(), 1);
                 assert_eq!(

@@ -17,8 +17,8 @@
 use std::collections::BTreeMap;
 
 use arkret_models_collaboration::authority_commit::{
-    CommittedEventSubmission, CommittedReplicationBranch, PeerCommittedReplicationOutcome,
-    PeerCommittedReplicationOutcomeRecord, PeerCommittedReplicationRequest,
+    CommittedEventReplicationOutcome, CommittedEventSubmission, CommittedReplicationBranch,
+    PeerCommittedReplicationRequestBody, PeerCommittedReplicationResponseBody,
 };
 use arkret_models_collaboration::governance::membership_invite::{
     MembershipPayload, MembershipPayloadState,
@@ -514,8 +514,8 @@ pub(super) async fn receive_audit_pair(
 pub(super) async fn receive(
     state: &AppState,
     peer: &AuthenticatedPeerContext,
-    request: PeerCommittedReplicationRequest,
-) -> ServiceResult<PeerCommittedReplicationOutcome> {
+    request: PeerCommittedReplicationRequestBody,
+) -> ServiceResult<PeerCommittedReplicationResponseBody> {
     let mut authorities = BTreeMap::new();
     let mut replication_outcomes = Vec::with_capacity(request.replications.len());
     let mut converge = std::collections::BTreeSet::new();
@@ -545,10 +545,10 @@ pub(super) async fn receive(
                     if fresh {
                         converge.insert(item.source_commit.stream_ref.clone());
                     }
-                    PeerCommittedReplicationOutcomeRecord::Stored {}
+                    CommittedEventReplicationOutcome::Stored {}
                 }
                 Ok((CommittedReplicaOutcome::Duplicate, _)) => {
-                    PeerCommittedReplicationOutcomeRecord::Duplicate {}
+                    CommittedEventReplicationOutcome::Duplicate {}
                 }
                 Err(error) => {
                     let reason_code = rejection_reason(error)?;
@@ -557,7 +557,7 @@ pub(super) async fn receive(
                     if reason_code == ConflictCode::DependencyMissing.as_str() {
                         converge.insert(item.source_commit.stream_ref.clone());
                     }
-                    PeerCommittedReplicationOutcomeRecord::Rejected { reason_code }
+                    CommittedEventReplicationOutcome::Rejected { reason_code }
                 }
             };
         replication_outcomes.push(record);
@@ -565,7 +565,7 @@ pub(super) async fn receive(
     for stream in converge {
         super::replica_anchor::spawn_converge_stream(state, stream);
     }
-    Ok(PeerCommittedReplicationOutcome {
+    Ok(PeerCommittedReplicationResponseBody {
         branch: CommittedReplicationBranch::CommittedReplication,
         replication_outcomes,
     })

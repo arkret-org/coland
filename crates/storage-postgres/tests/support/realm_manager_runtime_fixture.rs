@@ -59,7 +59,7 @@ async fn freeze_manager_revoke_request(
         StatusCode::OK,
         "pre-transfer revoke preview: {body}"
     );
-    let preview: AppletRevokePreviewOutcome = serde_json::from_value(body).unwrap();
+    let preview: AppletRevokePreviewResponseBody = serde_json::from_value(body).unwrap();
     let request = AppletRevokeRequestBody {
         service_id: package.service_id.clone(),
         revoke_plan_digest: arkret_wire::Hash::new(arkret_canonical::canonical_sha256(&preview.revoke_plan).unwrap()).unwrap(),
@@ -105,7 +105,7 @@ async fn freeze_manager_revoke_request(
         "request":request,"revoke_plan":preview.revoke_plan,
         "outcome":{"operation_id":format!("ak:operation:{}",uuid::Uuid::now_v7()),"revoke_plan_digest":request.revoke_plan_digest,"status":"in_progress","steps":steps,"revoked_refs":[],"rejections":[]},
     });
-    let _: arkret_models_integration::AppletRevokeOutcome =
+    let _: arkret_models_integration::AppletRevokeResponseBody =
         serde_json::from_value(replacement["revoke_execution"]["outcome"].clone()).unwrap();
     assert!(
         store
@@ -137,7 +137,7 @@ async fn run_manager_runtime_transfer(
 ) {
     use arkret_bridge_runtime::managed_device::{ManagedDeviceRuntime, ManagementTransferPlan};
     use arkret_bridge_runtime::{ArkretEdge, AuthoringJournal, AuthoringStore, FileAuthoringStore};
-    use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequest;
+    use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
     struct LostManagerReceipt {
         inner: FileAuthoringStore,
         armed: Arc<std::sync::atomic::AtomicBool>,
@@ -182,7 +182,7 @@ async fn run_manager_runtime_transfer(
     let arkret_bridge_runtime::PreparedGhost::Create(other_command) = prepared else { panic!("new companion Ghost required"); };
     let other_candidate: RealmActorCreatePayload = serde_json::from_value(serde_json::to_value(&other_command.create_event.payload).unwrap()).unwrap();
     let result = boxed_step(|| previous_edge.submit_managed_creation(&other_command)).await.unwrap();
-    assert!(matches!(result, arkret::AuthoritySubmitOutcome::Accepted { .. }));
+    assert!(matches!(result, arkret::AuthoritySubmitResponseBody::Accepted { .. }));
     boxed_step(|| realm_actor_mls_fixture::business_parent(fixture, &previous.package, &other_candidate.actor_id, &candidate.creation_scope)).await;
     let other_device = boxed_step(|| previous_runtime.device_for_actor(&other_candidate.actor_id)).await.unwrap();
     boxed_step(|| previous_runtime.ensure_realm_membership(&other_device)).await.unwrap();
@@ -262,13 +262,13 @@ async fn run_manager_runtime_transfer(
             "issuer_id":ActorId::account(fixture.pcr.history.account.clone()),
             "subject":ActorId::service(receiving.package.service_id.clone()),"actions":["ak.realm.actor.manager.change"],
             "resources":[{"kind":"realm_actor","actor_id":actor}],"constraints":[],
-            "issuer_authority_refs":[{"kind":"realm_root","realm_id":fixture.realm,"authority_event_ref":fixture.authority_event_ref,"authority_generation":0}],
+            "issuer_authority_refs":[{"kind":"realm_root","realm_id":fixture.realm,"authority_event_ref":fixture.authority_event_ref,"authority_generation":"0"}],
             "issued_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}}));
     let (status, body) = fixture
         .admin_post_network(
             "/_arkret/self/events",
             arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-            &json!(SelfAuthoritySubmitRequest::Event(
+            &json!(SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(grant.clone())
             )),
             "receiving-manager-permission",
@@ -302,7 +302,7 @@ async fn run_manager_runtime_transfer(
                 Ed25519PayloadSigner::new(
                     SigningKey::from_bytes(&[42; 32]),
                     applet_service_did(&receiving.package),
-                    receiving.package.webhook_auth.key_ref.clone(),
+                    receiving.package.webhook_signature_policy.key_ref.clone(),
                 ),
                 AuthoringJournal::new(Arc::new(LostManagerReceipt {
                     inner: FileAuthoringStore::new(path.clone()).unwrap(),
@@ -331,7 +331,7 @@ async fn run_manager_runtime_transfer(
     let prepared = boxed_step(|| receiving_author.prepare_ghost_in_scope(&candidate.applet_id, &candidate.creation_scope, &receiving_external, None)).await.unwrap();
     let arkret_bridge_runtime::PreparedGhost::Create(receiving_command) = prepared else { panic!("new receiving companion required"); };
     let receiving_candidate: RealmActorCreatePayload = serde_json::from_value(serde_json::to_value(&receiving_command.create_event.payload).unwrap()).unwrap();
-    assert!(matches!(boxed_step(|| edge.submit_managed_creation(&receiving_command)).await.unwrap(), arkret::AuthoritySubmitOutcome::Accepted { .. }));
+    assert!(matches!(boxed_step(|| edge.submit_managed_creation(&receiving_command)).await.unwrap(), arkret::AuthoritySubmitResponseBody::Accepted { .. }));
     boxed_step(|| realm_actor_mls_fixture::business_parent(fixture, &receiving.package, &receiving_candidate.actor_id, &candidate.creation_scope)).await;
     let receiving_device = boxed_step(|| runtime.device_for_actor(&receiving_candidate.actor_id)).await.unwrap();
     boxed_step(|| runtime.ensure_realm_membership(&receiving_device)).await.unwrap();
@@ -424,7 +424,7 @@ async fn run_manager_runtime_transfer(
     assert_eq!(accepted["realm_actor_statusowner"], "paused");
     let (status, body) = fixture.admin_post_network(
         "/_arkret/self/events", arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-        &json!(SelfAuthoritySubmitRequest::Event(frozen_revoke.clone())), "manager-race-old-revoke-effect",
+        &json!(SelfAuthoritySubmitRequestBody::Event(frozen_revoke.clone())), "manager-race-old-revoke-effect",
     ).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "old Service revoke cannot remove the transferred subject: {body}");
     assert!(fixture.state.test_persistence().authority_commits().committed_event(&frozen_revoke.event.event_id).await.unwrap().is_none());
@@ -510,7 +510,7 @@ async fn run_manager_runtime_transfer(
     moved_config.arkret.managed_actor_authoring.principal_endpoint = receiving.package.base_url.clone();
     let moved_edge = Arc::new(ArkretEdge::new_outbound(Arc::new(moved_config), client.clone(),
         Ed25519PayloadSigner::new(SigningKey::from_bytes(&[42; 32]),
-            applet_service_did(&receiving.package), receiving.package.webhook_auth.key_ref.clone()),
+            applet_service_did(&receiving.package), receiving.package.webhook_signature_policy.key_ref.clone()),
         AuthoringJournal::new(Arc::new(FileAuthoringStore::new(path.clone()).unwrap()))).unwrap());
     *receiving.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
         arkret_bridge_runtime::web::managed_applet_host_router(moved_edge.clone()).unwrap())));
@@ -717,7 +717,7 @@ async fn run_manager_runtime_transfer(
         &json!(frozen_revoke_request), "manager-race-frozen-revoke",
     ).await;
     assert_eq!(status, StatusCode::OK, "resume the exact saved uninstall request: {body}");
-    let outcome: arkret_models_integration::AppletRevokeOutcome = serde_json::from_value(body).unwrap();
+    let outcome: arkret_models_integration::AppletRevokeResponseBody = serde_json::from_value(body).unwrap();
     assert_eq!(outcome.status, arkret_models_integration::AppletRevokeSagaStatus::PartiallyCompleted);
     assert!(outcome.steps.iter().any(|step| matches!(step,
         arkret_models_integration::AppletRevokeStep::SubmittedEvent(step)
@@ -728,7 +728,7 @@ async fn run_manager_runtime_transfer(
         json!({"member_id":actor,"membership":"leave","reason":"independent admin decision after transfer"}));
     let (status, body) = fixture.admin_post_network(
         "/_arkret/self/events", arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-        &json!(SelfAuthoritySubmitRequest::Event(arkret_wire::EventAdmissionSubmission::new(independent_leave))),
+        &json!(SelfAuthoritySubmitRequestBody::Event(arkret_wire::EventAdmissionSubmission::new(independent_leave))),
         "manager-race-independent-admin-leave",
     ).await;
     assert_eq!(status, StatusCode::OK, "independent admin member authority remains valid: {body}");

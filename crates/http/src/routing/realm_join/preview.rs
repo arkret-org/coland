@@ -12,13 +12,13 @@ use std::time::Duration;
 use arkret_models_collaboration::events_payloads::preview::PreviewPolicyPayloadValue;
 use arkret_models_collaboration::events_payloads::realm::RealmProfile;
 use arkret_models_collaboration::governance::realm_join_intake::{
-    PUBLIC_PREVIEW_DISPLAY_NAME_MAX_CHARS, PeerRealmJoinPreviewOutcome,
-    PeerRealmJoinPreviewRequestBody, RealmPublicPreview, SelfRealmJoinPreviewOutcome,
-    SelfRealmJoinPreviewRequestBody,
+    PUBLIC_PREVIEW_DISPLAY_NAME_MAX_CHARS, PeerRealmJoinPreviewRequestBody,
+    PeerRealmJoinPreviewResponseBody, RealmPublicPreview, SelfRealmJoinPreviewRequestBody,
+    SelfRealmJoinPreviewResponseBody,
 };
 use arkret_wire::{
-    AccountId, ActorId, Base64UrlString, CurrentSelector, DidCoreId, HistoryAccess, InviteId,
-    JoinRule, RealmId, TypedCurrentRow,
+    AccountId, ActorId, Base64UrlString, CurrentSelector, CurrentState, DidCoreId, HistoryAccess,
+    InviteId, JoinRule, RealmId,
 };
 use base64::Engine as _;
 use coland_http::error::AppError;
@@ -66,7 +66,7 @@ pub(super) fn fresh_nonce() -> Result<Base64UrlString, AppError> {
 pub(super) async fn self_preview(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<SelfRealmJoinPreviewOutcome> {
+) -> JsonResult<SelfRealmJoinPreviewResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = AuthArgs.authenticated_session(state, req).await?;
     let account_id = crate::routing::identity::auth_grant_dpop::authenticated_session_account_id(
@@ -93,7 +93,7 @@ async fn resolve_self_preview(
     state: &AppState,
     account_id: AccountId,
     body: SelfRealmJoinPreviewRequestBody,
-) -> JsonResult<SelfRealmJoinPreviewOutcome> {
+) -> JsonResult<SelfRealmJoinPreviewResponseBody> {
     // Undisclosed or invalid evidence remains non-enumerating. Transport
     // failure and divergent verified chains require a retry without changing source.
     let located = super::resolve_verified_authority(
@@ -124,7 +124,7 @@ async fn resolve_self_preview(
             .await?
             .preview
     };
-    let outcome = SelfRealmJoinPreviewOutcome {
+    let outcome = SelfRealmJoinPreviewResponseBody {
         request_id: body.request_id.clone(),
         authority_bundle: located.bundle,
         preview,
@@ -142,7 +142,7 @@ async fn resolve_self_preview(
 pub(super) async fn peer_preview(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<PeerRealmJoinPreviewOutcome> {
+) -> JsonResult<PeerRealmJoinPreviewResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     crate::routing::events::peer::validate_peer_request(state, req, true).await?;
     let source_id = crate::routing::events::peer::source_id_from_request(req)?;
@@ -161,7 +161,7 @@ async fn answer_peer_preview(
     state: &AppState,
     source_id: &str,
     body: PeerRealmJoinPreviewRequestBody,
-) -> Result<PeerRealmJoinPreviewOutcome, AppError> {
+) -> Result<PeerRealmJoinPreviewResponseBody, AppError> {
     let started = tokio::time::Instant::now();
     let answer = if body.requester_account_id.station_id.as_str() == source_id {
         governance_preview(state, &body).await
@@ -169,7 +169,7 @@ async fn answer_peer_preview(
         Err(preview_not_found())
     };
     tokio::time::sleep_until(started + PEER_PREVIEW_TIMING_FLOOR).await;
-    Ok(PeerRealmJoinPreviewOutcome {
+    Ok(PeerRealmJoinPreviewResponseBody {
         request_id: body.request_id,
         preview: answer?,
     })
@@ -289,11 +289,11 @@ impl PreviewAudience {
 }
 
 fn singleton_value<'a>(
-    entries: &'a [TypedCurrentRow],
+    entries: &'a [CurrentState],
     wanted: &CurrentSelector,
 ) -> Option<&'a serde_json::Value> {
     entries.iter().find_map(|entry| match entry {
-        TypedCurrentRow::Value {
+        CurrentState::Value {
             selector, value, ..
         } if selector == wanted => Some(value),
         _ => None,
@@ -310,7 +310,7 @@ fn disclose(
     audience: PreviewAudience,
     realm_id: &RealmId,
     governance_generation: u64,
-    entries: &[TypedCurrentRow],
+    entries: &[CurrentState],
 ) -> Option<RealmPublicPreview> {
     if policy.mode == "none" || !audience.admitted_by(&policy.audiences) {
         return None;
@@ -349,7 +349,7 @@ async fn request_peer_preview(
     state: &AppState,
     governance: &DidCoreId,
     request: &PeerRealmJoinPreviewRequestBody,
-) -> Result<PeerRealmJoinPreviewOutcome, AppError> {
+) -> Result<PeerRealmJoinPreviewResponseBody, AppError> {
     use crate::routing::federation::outbox::{
         content_digest_header_value, insert_header_if_valid, rfc9421_sign,
     };
@@ -420,7 +420,7 @@ async fn request_peer_preview(
         }
         bytes.extend_from_slice(&chunk);
     }
-    let outcome = serde_json::from_slice::<PeerRealmJoinPreviewOutcome>(&bytes)
+    let outcome = serde_json::from_slice::<PeerRealmJoinPreviewResponseBody>(&bytes)
         .map_err(governance_unavailable)?;
     outcome
         .validate_for_request(request)

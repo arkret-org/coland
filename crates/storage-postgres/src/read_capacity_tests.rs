@@ -334,24 +334,24 @@ async fn per_stream_reads_stay_bounded_across_one_hundred_and_one_thousand_realm
 // and message families expose a scan hidden by tiny bootstrap-only Realms.
 async fn seed_current(conn: &mut AsyncPgConnection, first: i64, last: i64, width: i64) {
     conn.batch_execute(&format!(
-        "INSERT INTO member_state_current_results
+        "INSERT INTO member_state_current_states
            (realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at)
          SELECT 'ak:realm:capacity-' || r, jsonb_build_object('member',m)::text, 'join',
                 'capacity-' || r || '-0', 0, '{{\"membership\":\"join\"}}'::jsonb, now()
          FROM generate_series({first},{last}) r, generate_series(1,{width}) m;
-         INSERT INTO message_revision_current_results
+         INSERT INTO message_revision_current_states
            (realm_id,message_id,current_commit_id,current_stream_position,value,updated_at)
          SELECT 'ak:realm:capacity-' || r, 'message-' || r || '-' || m,
                 'capacity-' || r || '-0', 0,
                 '{{\"strand_id\":\"strand\",\"track_name\":\"discussion\"}}'::jsonb, now()
          FROM generate_series({first},{last}) r, generate_series(1,{width}) m;
-         INSERT INTO relation_current_results
+         INSERT INTO relation_current_states
            (realm_id,domain_key,domain,relation_id,state,current_commit_id,current_stream_position,value,updated_at)
          SELECT 'ak:realm:capacity-' || r, 'domain-' || m, '{{}}'::jsonb, 'relation-' || r || '-' || m,
                 'active', 'capacity-' || r || '-0', 0,
                 jsonb_build_object('id','relation-' || r || '-' || m,'state','active'), now()
          FROM generate_series({first},{last}) r, generate_series(1,{width}) m;
-         INSERT INTO moderation_state_current_results
+         INSERT INTO moderation_state_current_states
            (realm_id,target_ref,current_commit_id,current_stream_position,value,updated_at)
          SELECT 'ak:realm:capacity-' || r, 'target-' || m, 'capacity-' || r || '-0', 0,
                 '{{}}'::jsonb, now()
@@ -376,46 +376,46 @@ async fn seed_snapshot_families(conn: &mut AsyncPgConnection, first: i64, last: 
             .await.unwrap();
     }
     for (table, columns, expressions, value) in [
-        ("actor_profile_current_results", "actor_profile_id,actor_id,scope_ref", format!("'profile-' || {key},jsonb_build_object('kind','account','account_id',jsonb_build_object('principal_id','actor-' || {key},'station_id','station')),jsonb_build_object('kind','realm','realm_id',{realm})"), format!("jsonb_build_object('id','profile-' || {key},'realm_id',{realm},'schema','ak.schema.actor_profile.v1')")),
-        ("call_component_current_results", "call_id,selector,source_stream_ref", format!("'call-' || {key},jsonb_build_object('kind','call_focus','call_id','call-' || {key}),jsonb_build_object('kind','realm','realm_id',{realm})"), "'{}'::jsonb".to_owned()),
-        ("applet_registration_current_results", "applet_id,service_id,instance_event_ref", format!("'applet-' || {key},'ak:did_core:web:capacity-service-' || {key} || '.example','registration-event-' || {key}"), format!("jsonb_build_object('applet_id','applet-' || {key},'service_id','ak:did_core:web:capacity-service-' || {key} || '.example')")),
-        ("member_identity_updates_current_results", "member_id,segment", "jsonb_build_object('member',m)::text,'member_identity'".to_owned(), "jsonb_build_object('assertions','[]'::jsonb)".to_owned()),
-        ("circle_current_results", "circle_id,create_event_id,source_stream_ref,short_name_folded", format!("'circle-' || {key},'circle-event-' || {key},jsonb_build_object('kind','realm','realm_id',{realm}),'circle-' || m"), format!("jsonb_build_object('id','circle-' || {key},'realm_id',{realm})")),
-        ("circle_member_state_current_results", "circle_id,member_id,membership,source_stream_ref", format!("'circle-' || {key},jsonb_build_object('member',m)::text,'join',jsonb_build_object('kind','circle','realm_id',{realm},'circle_id','circle-' || {key})"), format!("jsonb_build_object('membership','join','parent_membership_revision',jsonb_build_object('commit_id',{commit},'stream_position',0))")),
-        ("call_state_current_results", "call_id,create_event_id,source_stream_ref", format!("'call-' || {key},'call-event-' || {key},jsonb_build_object('kind','realm','realm_id',{realm})"), "jsonb_build_object('from',NULL,'to','ringing')".to_owned()),
-        ("moderation_franking_proof_current_results", "target_event_id,source_stream_ref", format!("'franking-target-' || {key},jsonb_build_object('kind','realm','realm_id',{realm})"), "'{}'::jsonb".to_owned()),
-        ("realm_organization_current_results", "organization_id,relationship,organization_public_key", format!("'organization-' || {key},'owner',decode(repeat('00',32),'hex')"), format!("jsonb_build_object('realm_id',{realm},'organization_id','organization-' || {key},'relationship','owner')")),
-        ("schema_definition_current_results", "schema_id", format!("'schema-' || {key}"), format!("jsonb_build_object('$id','schema-' || {key},'type','object')")),
-        ("pin_current_results", "pin_scope_key,pin_scope,source_stream_ref", format!("'pin-' || {key},jsonb_build_object('kind','strand','id','strand-' || {key}),jsonb_build_object('kind','realm','realm_id',{realm})"), "jsonb_build_object('assertions',jsonb_build_array(jsonb_build_object('tag_id','pin-dot')))".to_owned()),
-        ("policy_current_results", "policy_id,current_event_id", format!("'policy-' || {key}, 'event-' || {key}"), "'{}'::jsonb".to_owned()),
-        ("sidecar_current_results", "sidecar_id,controller_account_id,create_event_id,source_stream_ref", format!("'sidecar-' || {key},jsonb_build_object('principal_id','controller-' || {key},'station_id','station'),'sidecar-event-' || {key},jsonb_build_object('kind','realm','realm_id',{realm})"), format!("jsonb_build_object('id','sidecar-' || {key},'realm_id',{realm},'controller_account_id',jsonb_build_object('principal_id','controller-' || {key},'station_id','station'))")),
-        ("sidecar_context_current_results", "sidecar_id,context_ref_digest,context_ref,version,predecessor_event_ref,attach_event_id,source_stream_ref", format!("'sidecar-' || {key},'context-' || {key},jsonb_build_object('kind','strand','strand_id','strand-' || {key}),1,NULL,'attach-event-' || {key},jsonb_build_object('kind','sidecar','realm_id',{realm},'sidecar_id','sidecar-' || {key})"), format!("jsonb_build_object('sidecar_id','sidecar-' || {key},'source_context_ref',jsonb_build_object('kind','strand','strand_id','strand-' || {key}),'version',1)")),
-        ("policy_action_current_results", "subject_kind,subject_id,action_key,current_event_id", format!("'realm_action','action-' || {key},'','action-event-' || {key}"), "'{}'::jsonb".to_owned()),
-        ("strand_current_results", "strand_id,calendar_schedule_source_value", format!("'strand-' || {key},jsonb_build_object('effective_scope',jsonb_build_object('kind','realm','realm_id',{realm}),'source',NULL,'strand_revision',jsonb_build_object('commit_id',{commit},'stream_position',0),'metadata_context',NULL)"), format!("jsonb_build_object('id','strand-' || {key},'realm_id',{realm})")),
-        ("rsvp_current_results", "event_ref,occurrence,responder_actor_id,source_stream_ref", format!("'strand-' || {key},'null'::jsonb,jsonb_build_object('actor',m),jsonb_build_object('kind','realm','realm_id',{realm})"), "jsonb_build_object('response','accepted')".to_owned()),
-        ("strand_watch_current_results", "strand_id,watcher_actor_id", format!("'strand-' || {key},jsonb_build_object('watcher','actor-' || {key})::text"), "jsonb_build_object('level','all')".to_owned()),
-        ("strand_position_current_results", "board_space_id,strand_id", format!("'board-' || {key},'strand-' || {key}"), "jsonb_build_object('list_space_id','list','rank','a')".to_owned()),
-        ("space_current_results", "space_id", format!("'space-' || {key}"), format!("jsonb_build_object('id','space-' || {key},'realm_id',{realm})")),
-        ("space_parent_current_results", "space_id", format!("'space-' || {key}"), "jsonb_build_object('parent_space_id',NULL)".to_owned()),
-        ("space_child_scope_policy_current_results", "space_id", format!("'space-' || {key}"), "'null'::jsonb".to_owned()),
-        ("mls_group_current_results", "scope_key,mls_group_id,public_state", format!("'scope-' || {key},'group-' || {key},'\\x00'::bytea"), format!("jsonb_build_object('effective_scope',jsonb_build_object('kind','realm','realm_id',{realm}),'covered_key_access_revision',0,'current_key_access_revision',0)")),
+        ("actor_profile_current_states", "actor_profile_id,actor_id,scope_ref", format!("'profile-' || {key},jsonb_build_object('kind','account','account_id',jsonb_build_object('principal_id','actor-' || {key},'station_id','station')),jsonb_build_object('kind','realm','realm_id',{realm})"), format!("jsonb_build_object('id','profile-' || {key},'realm_id',{realm},'schema','ak.schema.actor_profile.v1')")),
+        ("call_component_current_states", "call_id,selector,source_stream_ref", format!("'call-' || {key},jsonb_build_object('kind','call_focus','call_id','call-' || {key}),jsonb_build_object('kind','realm','realm_id',{realm})"), "'{}'::jsonb".to_owned()),
+        ("applet_registration_current_states", "applet_id,service_id,instance_event_ref", format!("'applet-' || {key},'ak:did_core:web:capacity-service-' || {key} || '.example','registration-event-' || {key}"), format!("jsonb_build_object('applet_id','applet-' || {key},'service_id','ak:did_core:web:capacity-service-' || {key} || '.example')")),
+        ("member_identity_updates_current_states", "member_id,segment", "jsonb_build_object('member',m)::text,'member_identity'".to_owned(), "jsonb_build_object('assertions','[]'::jsonb)".to_owned()),
+        ("circle_current_states", "circle_id,create_event_id,source_stream_ref,short_name_folded", format!("'circle-' || {key},'circle-event-' || {key},jsonb_build_object('kind','realm','realm_id',{realm}),'circle-' || m"), format!("jsonb_build_object('id','circle-' || {key},'realm_id',{realm})")),
+        ("circle_member_state_current_states", "circle_id,member_id,membership,source_stream_ref", format!("'circle-' || {key},jsonb_build_object('member',m)::text,'join',jsonb_build_object('kind','circle','realm_id',{realm},'circle_id','circle-' || {key})"), format!("jsonb_build_object('membership','join','parent_membership_revision',jsonb_build_object('commit_id',{commit},'stream_position',0))")),
+        ("call_state_current_states", "call_id,create_event_id,source_stream_ref", format!("'call-' || {key},'call-event-' || {key},jsonb_build_object('kind','realm','realm_id',{realm})"), "jsonb_build_object('from',NULL,'to','ringing')".to_owned()),
+        ("moderation_franking_proof_current_states", "target_event_id,source_stream_ref", format!("'franking-target-' || {key},jsonb_build_object('kind','realm','realm_id',{realm})"), "'{}'::jsonb".to_owned()),
+        ("realm_organization_current_states", "organization_id,relationship,organization_public_key", format!("'organization-' || {key},'owner',decode(repeat('00',32),'hex')"), format!("jsonb_build_object('realm_id',{realm},'organization_id','organization-' || {key},'relationship','owner')")),
+        ("schema_definition_current_states", "schema_id", format!("'schema-' || {key}"), format!("jsonb_build_object('$id','schema-' || {key},'type','object')")),
+        ("pin_current_states", "pin_scope_key,pin_scope,source_stream_ref", format!("'pin-' || {key},jsonb_build_object('kind','strand','id','strand-' || {key}),jsonb_build_object('kind','realm','realm_id',{realm})"), "jsonb_build_object('assertions',jsonb_build_array(jsonb_build_object('tag_id','pin-dot')))".to_owned()),
+        ("policy_current_states", "policy_id,current_event_id", format!("'policy-' || {key}, 'event-' || {key}"), "'{}'::jsonb".to_owned()),
+        ("sidecar_current_states", "sidecar_id,controller_account_id,create_event_id,source_stream_ref", format!("'sidecar-' || {key},jsonb_build_object('principal_id','controller-' || {key},'station_id','station'),'sidecar-event-' || {key},jsonb_build_object('kind','realm','realm_id',{realm})"), format!("jsonb_build_object('id','sidecar-' || {key},'realm_id',{realm},'controller_account_id',jsonb_build_object('principal_id','controller-' || {key},'station_id','station'))")),
+        ("sidecar_context_current_states", "sidecar_id,context_ref_digest,context_ref,version,predecessor_event_ref,attach_event_id,source_stream_ref", format!("'sidecar-' || {key},'context-' || {key},jsonb_build_object('kind','strand','strand_id','strand-' || {key}),1,NULL,'attach-event-' || {key},jsonb_build_object('kind','sidecar','realm_id',{realm},'sidecar_id','sidecar-' || {key})"), format!("jsonb_build_object('sidecar_id','sidecar-' || {key},'source_context_ref',jsonb_build_object('kind','strand','strand_id','strand-' || {key}),'version',1)")),
+        ("policy_action_current_states", "subject_kind,subject_id,action_key,current_event_id", format!("'realm_action','action-' || {key},'','action-event-' || {key}"), "'{}'::jsonb".to_owned()),
+        ("strand_current_states", "strand_id,calendar_schedule_source_value", format!("'strand-' || {key},jsonb_build_object('effective_scope',jsonb_build_object('kind','realm','realm_id',{realm}),'source',NULL,'strand_revision',jsonb_build_object('commit_id',{commit},'stream_position',0),'metadata_context',NULL)"), format!("jsonb_build_object('id','strand-' || {key},'realm_id',{realm})")),
+        ("rsvp_current_states", "event_ref,occurrence,responder_actor_id,source_stream_ref", format!("'strand-' || {key},'null'::jsonb,jsonb_build_object('actor',m),jsonb_build_object('kind','realm','realm_id',{realm})"), "jsonb_build_object('response','accepted')".to_owned()),
+        ("strand_watch_current_states", "strand_id,watcher_actor_id", format!("'strand-' || {key},jsonb_build_object('watcher','actor-' || {key})::text"), "jsonb_build_object('level','all')".to_owned()),
+        ("strand_position_current_states", "board_space_id,strand_id", format!("'board-' || {key},'strand-' || {key}"), "jsonb_build_object('list_space_id','list','rank','a')".to_owned()),
+        ("space_current_states", "space_id", format!("'space-' || {key}"), format!("jsonb_build_object('id','space-' || {key},'realm_id',{realm})")),
+        ("space_parent_current_states", "space_id", format!("'space-' || {key}"), "jsonb_build_object('parent_space_id',NULL)".to_owned()),
+        ("space_child_scope_policy_current_states", "space_id", format!("'space-' || {key}"), "'null'::jsonb".to_owned()),
+        ("mls_group_current_states", "scope_key,mls_group_id,public_state", format!("'scope-' || {key},'group-' || {key},'\\x00'::bytea"), format!("jsonb_build_object('effective_scope',jsonb_build_object('kind','realm','realm_id',{realm}),'covered_key_access_revision',0,'current_key_access_revision',0)")),
         // Reports have distinct covering Commits. They cannot all share position 0.
-        ("moderation_report_current_results", "report_event_id", format!("'report-' || {key}"), format!("jsonb_build_object('realm_id',{realm},'target_ref','target-' || m,'reporter_id','reporter')")),
-        ("object_redaction_current_results", "target_ref", "'target-' || m".to_owned(), "jsonb_build_object('assertions',jsonb_build_array(jsonb_build_object('tag_id','dot')))".to_owned()),
-        ("message_reactions_current_results", "target_ref", "'target-' || m".to_owned(), "jsonb_build_object('assertions',jsonb_build_array(jsonb_build_object('tag_id','dot')))".to_owned()),
-        ("sidecar_exchange_controls_current_results", "sidecar_id,context_ref_digest,context_ref,source_stream_ref", format!("'sidecar-' || {key},'context-' || {key},jsonb_build_object('kind','strand','strand_id','strand-' || {key}),jsonb_build_object('kind','sidecar','realm_id',{realm},'sidecar_id','sidecar-' || {key})"), "jsonb_build_object('assertions',jsonb_build_array(jsonb_build_object('tag_id','control-dot')))".to_owned()),
-        ("invite_lifecycle_current_results", "invite_id", format!("'invite-' || {key}"), "'\"pending\"'::jsonb".to_owned()),
-        ("invite_live_target_current_results", "invitee_account_id", "jsonb_build_object('account',m)::text".to_owned(), format!("jsonb_build_object('create_event_id','create-' || {key})")),
-        ("invite_directed_invitee_current_results", "invite_id", format!("'invite-' || {key}"), "jsonb_build_object('invitee_account_id',jsonb_build_object('account',m))".to_owned()),
-        ("capability_grant_current_results", "grant_id,status,current_event_id,current_stream_ref", format!("'grant-' || {key},'active','event-' || {key},'{{}}'::jsonb"), format!("jsonb_build_object('id','grant-' || {key},'schema','ak.schema.capability.v1','status','active')")),
-        ("mimi_room_binding_current_results", "mimi_room_uri,current_event_id", format!("'mimi-' || {key},'event-' || {key}"), format!("jsonb_build_object('mimi_room_uri','mimi-' || {key},'binding_scope',jsonb_build_object('realm_id',{realm}))")),
-        ("agent_interaction_current_results", "current_key,agent_account_id", format!("'interaction-' || {key},jsonb_build_object('principal_id','agent-' || {key},'station_id','station')"), "jsonb_build_object('interaction_mode','private')".to_owned()),
-        ("agent_status_current_results", "current_key,agent_id,actor_id", format!("'agent-' || {key},'agent-' || {key},'{{}}'::jsonb"), "'\"active\"'::jsonb".to_owned()),
-        ("agent_key_current_results", "current_key,agent_id,agent_key_id", format!("'key-' || {key},'agent-' || {key},'key-' || {key}"), "jsonb_build_object('authorizations','[]'::jsonb)".to_owned()),
+        ("moderation_report_current_states", "report_event_id", format!("'report-' || {key}"), format!("jsonb_build_object('realm_id',{realm},'target_ref','target-' || m,'reporter_id','reporter')")),
+        ("object_redaction_current_states", "target_ref", "'target-' || m".to_owned(), "jsonb_build_object('assertions',jsonb_build_array(jsonb_build_object('tag_id','dot')))".to_owned()),
+        ("message_reactions_current_states", "target_ref", "'target-' || m".to_owned(), "jsonb_build_object('assertions',jsonb_build_array(jsonb_build_object('tag_id','dot')))".to_owned()),
+        ("sidecar_exchange_controls_current_states", "sidecar_id,context_ref_digest,context_ref,source_stream_ref", format!("'sidecar-' || {key},'context-' || {key},jsonb_build_object('kind','strand','strand_id','strand-' || {key}),jsonb_build_object('kind','sidecar','realm_id',{realm},'sidecar_id','sidecar-' || {key})"), "jsonb_build_object('assertions',jsonb_build_array(jsonb_build_object('tag_id','control-dot')))".to_owned()),
+        ("invite_lifecycle_current_states", "invite_id", format!("'invite-' || {key}"), "'\"pending\"'::jsonb".to_owned()),
+        ("invite_live_target_current_states", "invitee_account_id", "jsonb_build_object('account',m)::text".to_owned(), format!("jsonb_build_object('create_event_id','create-' || {key})")),
+        ("invite_directed_invitee_current_states", "invite_id", format!("'invite-' || {key}"), "jsonb_build_object('invitee_account_id',jsonb_build_object('account',m))".to_owned()),
+        ("capability_grant_current_states", "grant_id,status,current_event_id,current_stream_ref", format!("'grant-' || {key},'active','event-' || {key},'{{}}'::jsonb"), format!("jsonb_build_object('id','grant-' || {key},'schema','ak.schema.capability.v1','status','active')")),
+        ("mimi_room_binding_current_states", "mimi_room_uri,current_event_id", format!("'mimi-' || {key},'event-' || {key}"), format!("jsonb_build_object('mimi_room_uri','mimi-' || {key},'binding_scope',jsonb_build_object('realm_id',{realm}))")),
+        ("agent_interaction_current_states", "current_key,agent_account_id", format!("'interaction-' || {key},jsonb_build_object('principal_id','agent-' || {key},'station_id','station')"), "jsonb_build_object('interaction_mode','private')".to_owned()),
+        ("agent_status_current_states", "current_key,agent_id,actor_id", format!("'agent-' || {key},'agent-' || {key},'{{}}'::jsonb"), "'\"active\"'::jsonb".to_owned()),
+        ("agent_key_current_states", "current_key,agent_id,agent_key_id", format!("'key-' || {key},'agent-' || {key},'key-' || {key}"), "jsonb_build_object('authorizations','[]'::jsonb)".to_owned()),
     ] {
-        let (covering, position) = if table == "moderation_report_current_results" {
+        let (covering, position) = if table == "moderation_report_current_states" {
             ("'capacity-' || r || '-' || (m-1)", "m-1")
-        } else if matches!(table, "schema_definition_current_results" | "pin_current_results" | "actor_profile_current_results" | "call_component_current_results") {
+        } else if matches!(table, "schema_definition_current_states" | "pin_current_states" | "actor_profile_current_states" | "call_component_current_states") {
             ("'capacity-' || r || '-1'", "1")
         } else {
             (commit, "0")
@@ -424,21 +424,21 @@ async fn seed_snapshot_families(conn: &mut AsyncPgConnection, first: i64, last: 
             .await.unwrap_or_else(|error| panic!("capacity seed {table}: {error}"));
     }
     conn.batch_execute(&format!(
-        "INSERT INTO realm_bootstrap_current_results(realm_id,result_family,current_commit_id,current_stream_position,value,updated_at)
+        "INSERT INTO realm_bootstrap_current_states(realm_id,state_family,current_commit_id,current_stream_position,value,updated_at)
          SELECT {realm},f,{commit},0,CASE WHEN f='realm_genesis' THEN jsonb_build_object('purpose','collaboration') ELSE '{{}}'::jsonb END,now() FROM generate_series({first},{last}) r,
          unnest(ARRAY['realm_genesis','realm_profile','realm_join_rule','realm_history_access','realm_discovery','realm_alias','realm_plaintext_visible_services']) f;
-         INSERT INTO realm_media_service_current_results(realm_id,source_stream_ref,current_commit_id,current_stream_position,value,updated_at)
+         INSERT INTO realm_media_service_current_states(realm_id,source_stream_ref,current_commit_id,current_stream_position,value,updated_at)
          SELECT {realm},jsonb_build_object('kind','realm','realm_id',{realm}),'capacity-' || r || '-1',1,'{{}}'::jsonb,now() FROM generate_series({first},{last}) r;
-         INSERT INTO scope_read_receipt_policy_current_results(realm_id,scope_ref,source_stream_ref,current_commit_id,current_stream_position,value,updated_at)
+         INSERT INTO scope_read_receipt_policy_current_states(realm_id,scope_ref,source_stream_ref,current_commit_id,current_stream_position,value,updated_at)
          SELECT {realm},jsonb_build_object('kind','realm','realm_id',{realm}),jsonb_build_object('kind','realm','realm_id',{realm}),
                 'capacity-' || r || '-1',1,jsonb_build_object('disclosure','optional'),now() FROM generate_series({first},{last}) r;
-         INSERT INTO realm_authority_root_current_results(realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref,current_commit_id,current_stream_position,updated_at)
+         INSERT INTO realm_authority_root_current_states(realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref,current_commit_id,current_stream_position,updated_at)
          SELECT {realm},'{{}}'::jsonb,0,0,'event',{commit},0,now() FROM generate_series({first},{last}) r;
-         INSERT INTO realm_policy_bundle_current_results(realm_id,current_commit_id,current_stream_position,value,updated_at)
+         INSERT INTO realm_policy_bundle_current_states(realm_id,current_commit_id,current_stream_position,value,updated_at)
          SELECT {realm},{commit},0,'{{}}'::jsonb,now() FROM generate_series({first},{last}) r;
-         INSERT INTO realm_set_default_strand_current_results(realm_id,current_commit_id,current_stream_position,value,updated_at)
+         INSERT INTO realm_set_default_strand_current_states(realm_id,current_commit_id,current_stream_position,value,updated_at)
          SELECT {realm},{commit},0,jsonb_build_object('default_strand_id','strand'),now() FROM generate_series({first},{last}) r;
-         INSERT INTO direct_conversation_binding_current_results(realm_id,pair_key,current_commit_id,current_stream_position,value,updated_at)
+         INSERT INTO direct_conversation_binding_current_states(realm_id,pair_key,current_commit_id,current_stream_position,value,updated_at)
          SELECT {realm},'pair-' || r,'capacity-' || r || '-1',1,jsonb_build_object('binding_event_ref','event','binding','{{}}'::jsonb),now() FROM generate_series({first},{last}) r;"
     )).await.unwrap();
 }
@@ -459,7 +459,7 @@ fn measured_current(plan: Value, label: &str, bound: f64) {
             // row budget below: PostgreSQL can prefer one when the requested
             // Realm is a large fraction of the table. History scans must
             // never grow with its length. Do not disable seqscan.
-            let current_table = relation.ends_with("_current_results");
+            let current_table = relation.ends_with("_current_states");
             assert!(
                 node["Node Type"] != "Seq Scan" || visited <= 32.0 || current_table,
                 "{label}: unbounded sequential scan of {relation}: {visited}: {node}"
@@ -489,20 +489,20 @@ fn assert_each_snapshot_family_bounded(
 ) {
     if let Some(table) = node["Relation Name"]
         .as_str()
-        .filter(|table| table.ends_with("_current_results"))
+        .filter(|table| table.ends_with("_current_states"))
     {
         observed.insert(table.to_owned());
         let genesis_lookup =
-            table == "realm_bootstrap_current_results" && node["Alias"].as_str() == Some("g");
+            table == "realm_bootstrap_current_states" && node["Alias"].as_str() == Some("g");
         let output = match table {
-            "realm_bootstrap_current_results" if genesis_lookup => 1.0,
-            "realm_bootstrap_current_results" => 7.0,
-            "scope_read_receipt_policy_current_results"
-            | "realm_media_service_current_results"
-            | "realm_authority_root_current_results"
-            | "realm_policy_bundle_current_results"
-            | "realm_set_default_strand_current_results"
-            | "direct_conversation_binding_current_results" => 1.0,
+            "realm_bootstrap_current_states" if genesis_lookup => 1.0,
+            "realm_bootstrap_current_states" => 7.0,
+            "scope_read_receipt_policy_current_states"
+            | "realm_media_service_current_states"
+            | "realm_authority_root_current_states"
+            | "realm_policy_bundle_current_states"
+            | "realm_set_default_strand_current_states"
+            | "direct_conversation_binding_current_states" => 1.0,
             _ => width,
         };
         let visited = [
@@ -578,7 +578,7 @@ async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_th
                 .split("FROM ")
                 .skip(1)
                 .filter_map(|part| part.split_whitespace().next())
-                .filter(|table| table.ends_with("_current_results"))
+                .filter(|table| table.ends_with("_current_states"))
                 .map(str::to_owned)
                 .collect::<std::collections::BTreeSet<_>>();
             assert_eq!(observed, expected);
@@ -684,7 +684,7 @@ async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_th
                 .plan;
                 assert_eq!(plan[0]["Plan"]["Actual Rows"].as_f64(), Some(expected_rows));
                 measured_current(plan, &label, 4.0);
-                let result = sql_query(crate::strand_watch_current_results::WATCH_HISTORY_SQL)
+                let result = sql_query(crate::strand_watch_current_states::WATCH_HISTORY_SQL)
                     .bind::<Text, _>(&realm)
                     .bind::<Text, _>(&strand)
                     .bind::<Text, _>(&actor)
@@ -695,7 +695,7 @@ async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_th
                 assert_eq!(result.present, expected_rows == 1.0);
                 let plan = sql_query(format!(
                     "EXPLAIN (ANALYZE, FORMAT JSON) {}",
-                    crate::strand_watch_current_results::WATCH_HISTORY_SQL
+                    crate::strand_watch_current_states::WATCH_HISTORY_SQL
                 ))
                 .bind::<Text, _>(&realm)
                 .bind::<Text, _>(&strand)

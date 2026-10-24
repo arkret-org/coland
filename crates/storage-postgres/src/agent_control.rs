@@ -130,7 +130,7 @@ async fn accepted_lifecycle(
     let key = arkret_wire::derive_agent_status_current_key(agent)
         .map_err(|error| corrupt(error.to_string()))?;
     let row = sql_query(
-        "SELECT value FROM agent_status_current_results \
+        "SELECT value FROM agent_status_current_states \
          WHERE realm_id=$1 AND current_key=$2 FOR SHARE",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -178,7 +178,7 @@ async fn validate_same_key_renewal(
         arkret_wire::AgentKeyId::new(payload.key_id.as_str().to_owned()).map_err(corrupt)?;
     let key =
         arkret_wire::derive_agent_key_current_key(&payload.agent_id, &key_id).map_err(corrupt)?;
-    let row = sql_query("SELECT k.value,c.commit_json FROM agent_key_current_results k JOIN realm_commits c ON c.realm_id=k.realm_id AND c.commit_id=k.current_commit_id AND c.stream_position=k.current_stream_position WHERE k.realm_id=$1 AND k.current_key=$2 FOR UPDATE OF k")
+    let row = sql_query("SELECT k.value,c.commit_json FROM agent_key_current_states k JOIN realm_commits c ON c.realm_id=k.realm_id AND c.commit_id=k.current_commit_id AND c.stream_position=k.current_stream_position WHERE k.realm_id=$1 AND k.current_key=$2 FOR UPDATE OF k")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(&key)
         .get_result::<KeyRow>(&mut *conn).await.optional()?
         .ok_or_else(|| precondition("same-key renewal requires a current accepted key"))?;
@@ -382,7 +382,7 @@ async fn admit_agent_control_in_connection(
             "Agent control Event is unsigned",
         )
     })?;
-    let signer = crate::key_backup_current_results::verification_method_device(
+    let signer = crate::key_backup_current_states::verification_method_device(
         &proof.verification_method,
         &controller,
     )
@@ -439,7 +439,7 @@ async fn admit_agent_control_in_connection(
         .await?
         .ok_or_else(|| precondition("the controller account has no Principal Control Realm"))?;
     let provisioning = sql_query(
-        "SELECT value FROM agent_provisioning_current_results \
+        "SELECT value FROM agent_provisioning_current_states \
          WHERE realm_id=$1 AND agent_id=$2 FOR SHARE",
     )
     .bind::<Text, _>(controller_realm.as_str())
@@ -569,7 +569,7 @@ async fn admit_agent_control_in_connection(
         }
         if let Some(slug) = &profile.agent_slug {
             let selected = sql_query(
-                "SELECT value FROM agent_selector_claim_current_results \
+                "SELECT value FROM agent_selector_claim_current_states \
                  WHERE realm_id=$1 AND controller_principal_id=$2 AND agent_slug=$3 FOR SHARE",
             )
             .bind::<Text, _>(controller_realm.as_str())
@@ -650,10 +650,10 @@ async fn admit_agent_control_in_connection(
             .map_err(PgTransactionError::into_persistence)
         }
         EventKind::AgentKeyAuthorize | EventKind::AgentKeyRevoke => {
-            crate::agent_current_results::project_agent_key_in_connection(conn, event, commit).await
+            crate::agent_current_states::project_agent_key_in_connection(conn, event, commit).await
         }
         _ => {
-            crate::agent_current_results::project_agent_status_in_connection(conn, event, commit)
+            crate::agent_current_states::project_agent_status_in_connection(conn, event, commit)
                 .await
         }
     };

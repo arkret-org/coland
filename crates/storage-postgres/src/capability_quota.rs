@@ -97,7 +97,7 @@ async fn reserve_one(
         // The same operation identity already holds this reservation.
         return Ok(true);
     }
-    if reservation.max_operations == 0 {
+    if reservation.max_operation_count == 0 {
         return Ok(false);
     }
     let counted = sql_query(
@@ -111,12 +111,12 @@ async fn reserve_one(
     .bind::<Text, _>(&reservation.constraint_key)
     .bind::<Text, _>(&reservation.counter_key)
     .bind::<BigInt, _>(reservation.window_id)
-    .bind::<BigInt, _>(saturating_i64(reservation.max_operations))
+    .bind::<BigInt, _>(saturating_i64(reservation.max_operation_count))
     .get_result::<ConsumedRow>(&mut *conn)
     .await
     .optional()
     .map_err(PersistenceError::database)?;
-    if counted.is_none_or(|row| row.consumed > saturating_i64(reservation.max_operations)) {
+    if counted.is_none_or(|row| row.consumed > saturating_i64(reservation.max_operation_count)) {
         return Ok(false);
     }
     match reservation.burst {
@@ -125,8 +125,8 @@ async fn reserve_one(
     }
 }
 
-/// §8.1 item 4: a token bucket of capacity `min(burst, max_operations)`
-/// refilling at `max_operations / period` on the same authority. Levels are
+/// §8.1 item 4: a token bucket of capacity `min(burst, max_operation_count)`
+/// refilling at `max_operation_count / period` on the same authority. Levels are
 /// kept in units of `1 / period_ms` token.
 async fn take_bucket_token(
     conn: &mut AsyncPgConnection,
@@ -134,8 +134,8 @@ async fn take_bucket_token(
     burst: u64,
 ) -> PersistenceResult<bool> {
     let period = i128::from(reservation.period_ms);
-    let rate = i128::from(reservation.max_operations);
-    let capacity = i128::from(burst.min(reservation.max_operations)) * period;
+    let rate = i128::from(reservation.max_operation_count);
+    let capacity = i128::from(burst.min(reservation.max_operation_count)) * period;
     let now = reservation.verification_ms;
     let capacity_level = i64::try_from(capacity).unwrap_or(i64::MAX);
     // The first reservation opens a full bucket; racing openers converge on
@@ -189,7 +189,7 @@ mod tests {
     use super::*;
     use crate::test_database::TestDatabase;
 
-    fn reservation(seed: u8, counter: &str, max_operations: u64) -> QuotaReservation {
+    fn reservation(seed: u8, counter: &str, max_operation_count: u64) -> QuotaReservation {
         QuotaReservation {
             grant_id: arkret_wire::GrantId::from_event_id(&arkret_wire::EventId::from_digest(
                 arkret_canonical::DigestSuite::Sha256,
@@ -198,7 +198,7 @@ mod tests {
             constraint_key: "id:rate".into(),
             counter_key: counter.into(),
             window_id: 1,
-            max_operations,
+            max_operation_count,
             period_ms: 60_000,
             burst: None,
             verification_ms: 60_001,

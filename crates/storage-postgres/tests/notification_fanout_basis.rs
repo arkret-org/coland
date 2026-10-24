@@ -30,7 +30,7 @@ async fn seed_member(
     let commit = &discussion.head.authority_commit.commit;
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "INSERT INTO member_state_current_results \
+        "INSERT INTO member_state_current_states \
          (realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at) \
          VALUES($1,$2,$3,$4,$5,$6,NOW())",
     )

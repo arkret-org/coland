@@ -227,7 +227,7 @@ async fn boundary_worker_publication_and_budget(
                 StatusCode::OK,
                 "real native worker attempt {index}: {value}"
             );
-            let outcome: KeyPackagesClaimOutcome = serde_json::from_value(value).unwrap();
+            let outcome: KeyPackagesClaimResponseBody = serde_json::from_value(value).unwrap();
             assert_eq!(outcome.claims.len(), 1);
             assert_eq!(outcome.claims[0].keypackage_ref, reference.as_str());
             assert_eq!(
@@ -382,7 +382,7 @@ async fn boundary_business_source_still_live(
     let rows = fixture
         .state
         .test_persistence()
-        .capability_grant_current_results()
+        .capability_grant_current_states()
         .snapshot_for_realm(&fixture.realm)
         .await
         .unwrap();
@@ -404,8 +404,8 @@ async fn boundary_exact_current(
     fixture: &Fixture,
     authority: &coland_storage::AppletManagedDeviceAuthority,
     source: &(arkret_wire::StrandId, EventId),
-) -> arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadRequestBody {
-    use arkret_models_collaboration::exact_current_results::*;
+) -> arkret_models_collaboration::exact_current_state::ExactCurrentStateReadRequestBody {
+    use arkret_models_collaboration::exact_current_state::*;
     let path = format!("/_arkret/self/committed-events/{}", source.1);
     let mut historical = boxed_step(|| {
         boundary_native_response(
@@ -427,9 +427,9 @@ async fn boundary_exact_current(
     } else {
         assert_eq!(historical.status_code, Some(StatusCode::NOT_FOUND));
     }
-    let request = ExactCurrentResultsReadRequestBody {
+    let request = ExactCurrentStateReadRequestBody {
         realm_id: fixture.realm.clone(),
-        selector: ExactCurrentResultSelector::CalendarScheduleSource(
+        selector: ExactCurrentStateSelector::CalendarScheduleSource(
             CalendarScheduleSourceExactSelector {
                 kind: CalendarScheduleSourceExactSelectorKind::CalendarScheduleSource,
                 strand_id: source.0.clone(),
@@ -442,17 +442,17 @@ async fn boundary_exact_current(
             fixture,
             &fixture.state,
             authority,
-            "/_arkret/self/current-results/exact",
-            ServiceOperationId::SelfCurrentResultsReadExactV1,
+            "/_arkret/self/current-state/exact",
+            ServiceOperationId::SelfCurrentStateReadExactV1,
             Some(json!(request)),
         )
     })
     .await;
     assert_eq!(response.status_code, Some(StatusCode::OK));
-    let outcome: ExactCurrentResultsReadOutcome = response.take_json().await.unwrap();
-    let ExactCurrentResultsReadOutcome::Present {
+    let outcome: ExactCurrentStateReadResponseBody = response.take_json().await.unwrap();
+    let ExactCurrentStateReadResponseBody::Present {
         governance_generation,
-        entry: ExactCurrentResultEntry::CalendarScheduleSource(row),
+        entry: ExactCurrentStateEntry::CalendarScheduleSource(row),
         ..
     } = &outcome
     else {
@@ -475,14 +475,14 @@ async fn boundary_exact_current(
             fixture,
             &reopened,
             authority,
-            "/_arkret/self/current-results/exact",
-            ServiceOperationId::SelfCurrentResultsReadExactV1,
+            "/_arkret/self/current-state/exact",
+            ServiceOperationId::SelfCurrentStateReadExactV1,
             Some(json!(request)),
         )
     })
     .await;
     assert_eq!(cold.status_code, Some(StatusCode::OK));
-    let cold: ExactCurrentResultsReadOutcome = cold.take_json().await.unwrap();
+    let cold: ExactCurrentStateReadResponseBody = cold.take_json().await.unwrap();
     assert_eq!(json!(outcome), json!(cold));
     request
 }
@@ -612,7 +612,7 @@ async fn boundary_claim_expiry(
 async fn boundary_claim_native_recipient(
     fixture: &Fixture,
     authority: &coland_storage::AppletManagedDeviceAuthority,
-) -> (KeyPackagesClaimRequestBody, KeyPackagesClaimOutcome) {
+) -> (KeyPackagesClaimRequestBody, KeyPackagesClaimResponseBody) {
     let identity = arkret_mls::ArkretMlsIdentity::new_realm_device(
         authority.actor_id.clone(),
         authority.device_id.clone(),
@@ -717,7 +717,7 @@ async fn boundary_claim_native_recipient(
         StatusCode::OK,
         "genuine Human claim of native recipient: {value}"
     );
-    let outcome: KeyPackagesClaimOutcome = serde_json::from_value(value).unwrap();
+    let outcome: KeyPackagesClaimResponseBody = serde_json::from_value(value).unwrap();
     assert_eq!(outcome.claims.len(), 1);
     assert_eq!(outcome.claims[0].actor_id, authority.actor_id);
     assert_eq!(
@@ -796,7 +796,7 @@ async fn boundary_encrypted_message(
             authority,
             "/_arkret/self/events",
             ServiceOperationId::SelfEventsCommandSubmitV1,
-            json!(SelfAuthoritySubmitRequest::Event(
+            json!(SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(event.clone())
             )),
         )
@@ -932,7 +932,7 @@ async fn boundary_finite_read_parent(
     let rows = fixture
         .state
         .test_persistence()
-        .capability_grant_current_results()
+        .capability_grant_current_states()
         .snapshot_for_realm(&fixture.realm)
         .await
         .unwrap();
@@ -1004,21 +1004,21 @@ async fn boundary_exact_floor_expiry(
             fixture,
             &fixture.state,
             authority,
-            "/_arkret/self/current-results/exact",
-            ServiceOperationId::SelfCurrentResultsReadExactV1,
+            "/_arkret/self/current-state/exact",
+            ServiceOperationId::SelfCurrentStateReadExactV1,
             Some(json!(request)),
         )
     })
     .await;
     assert_eq!(positive.status_code, Some(StatusCode::OK));
-    let positive:arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome=positive.take_json().await.unwrap();
+    let positive:arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody=positive.take_json().await.unwrap();
     let mut prepared = boxed_step(|| {
         boundary_native_response(
             fixture,
             &fixture.state,
             authority,
-            "/_arkret/self/current-results/exact",
-            ServiceOperationId::SelfCurrentResultsReadExactV1,
+            "/_arkret/self/current-state/exact",
+            ServiceOperationId::SelfCurrentStateReadExactV1,
             Some(json!(request)),
         )
     })
@@ -1036,8 +1036,8 @@ async fn boundary_exact_floor_expiry(
             fixture,
             &fixture.state,
             authority,
-            "/_arkret/self/current-results/exact",
-            ServiceOperationId::SelfCurrentResultsReadExactV1,
+            "/_arkret/self/current-state/exact",
+            ServiceOperationId::SelfCurrentStateReadExactV1,
             Some(json!(request)),
         )
     })
@@ -1049,7 +1049,7 @@ async fn boundary_exact_floor_expiry(
         boxed_step(|| obligation_mls_footprint(fixture)).await,
         before
     );
-    assert!(matches!(positive,arkret_models_collaboration::exact_current_results::ExactCurrentResultsReadOutcome::Present{..}));
+    assert!(matches!(positive,arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody::Present{..}));
 }
 
 #[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
@@ -1325,7 +1325,7 @@ async fn boundary_human_pcr_handoff(
     // recording a "remote" authority at its own Station would be invalid.
     let join=human.admin_event(EventKind::MemberState,ScopeRef::Realm{realm_id:fixture.realm.clone()},
         json!({"member_id":ActorId::account(human.pcr.history.account.clone()),"membership":"join"}));
-    let join_body = json!(SelfAuthoritySubmitRequest::Event(
+    let join_body = json!(SelfAuthoritySubmitRequestBody::Event(
         arkret_wire::EventAdmissionSubmission::new(join)
     ));
     let (status, value) = boxed_step(|| {
@@ -1394,7 +1394,7 @@ async fn boundary_human_pcr_handoff(
         }
     };
     drop(monitor);
-    let received = response.take_json::<KeyPackagesClaimOutcome>().await;
+    let received = response.take_json::<KeyPackagesClaimResponseBody>().await;
     drop(response);
     // Always release the held response before finishing this real writer.
     if !revoke_finished {
@@ -1489,15 +1489,15 @@ async fn boundary_terminal_human_revoke(
     let backup = |series: &arkret_wire::BackupSeriesId| {
         let mut backup: KeyBackup = serde_json::from_value(json!({
             "backup_id":format!("ak:backup:{}",uuid::Uuid::now_v7()),"actor_id":ActorId::account(account.clone()),
-            "backup_kind":"secret_storage","backup_version":"kb_1","created_at":arkret_canonical::format_timestamp_canonical(at),"series_id":series,"series_seq":0,
+            "backup_kind":"secret_storage","backup_version":"kb_1","created_at":arkret_canonical::format_timestamp_canonical(at),"series_id":series,"series_sequence":0,
             "encryption":{"recipient_method":"secret_storage_key","recipient_key_ref":"source-history-fixture-key","aead":{"name":"xchacha20_poly1305","nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
             "domain_separation":{"subdomain":"secret_storage"},"contents":[{"item_kind":"recovery_key_share","secret_id":"device-source-history"}],
             "ciphertext":"AAAA","ciphertext_digest":arkret_canonical::sha256_digest([0,0,0]),
-            "auth_data":{"device_id":other.authorization.device_id,"verification_method":other.verification_method,"signature_algorithm":"Ed25519","signature":"AA","device_authorize_event_id":other.authorization.authorization_ref.event_id}
+            "signature_proof":{"device_id":other.authorization.device_id,"verification_method":other.verification_method,"signature_algorithm":"Ed25519","signature":"AA","device_authorize_event_id":other.authorization.authorization_ref.event_id}
         })).unwrap();
         let signature = SigningKey::from_bytes(&other.signing_seed)
             .sign(&backup.signing_payload_bytes().unwrap());
-        backup.auth_data.signature = arkret_wire::Base64UrlString::new(
+        backup.signature_proof.signature = arkret_wire::Base64UrlString::new(
             arkret_canonical::base64url_encode(signature.to_bytes()),
         )
         .unwrap();
@@ -1607,7 +1607,7 @@ async fn boundary_terminal_human_revoke(
         vec![old_series.clone()],
         covering.commit_id.clone(),
     );
-    let plan = SecurityRotationTransactionCreateRequest::from_prepared_rotations(
+    let plan = SecurityRotationTransactionCreateRequestBody::from_prepared_rotations(
         arkret_wire::TransactionId::new(format!("ak:transaction:{}", uuid::Uuid::now_v7()))
             .unwrap(),
         account.clone(),
@@ -1657,7 +1657,7 @@ async fn boundary_terminal_human_revoke(
     )
     .unwrap();
     let prepared = SecurityTransactionPreparedPlan::SecurityRotation(plan.prepared_plan.clone());
-    let (mut initial, canonical_request) = SecurityTransactionCreateRequest::SecurityRotation(plan)
+    let (mut initial, canonical_request) = SecurityTransactionCreateRequestBody::SecurityRotation(plan)
         .into_initial_resource(prepared, at)
         .unwrap();
     let id = initial.transaction_id.clone();
@@ -1704,7 +1704,7 @@ async fn boundary_terminal_human_revoke(
     terminal.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
         proposal_event_id: revoke.event_id,
         covering_commit_id: covering.commit_id,
-        result: SecurityRotationRevokeCommandDecision::Accepted,
+        outcome: SecurityRotationRevokeCommandDecision::Accepted,
         decided_at,
     });
     persistence

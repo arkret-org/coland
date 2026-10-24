@@ -151,8 +151,8 @@ pub(crate) async fn admit_in_connection(
     let count=sql_query("SELECT count(*) FILTER(WHERE l.first_admitted_at>$3) AS rate,count(*) FILTER(WHERE l.first_admitted_at>$4) AS total FROM invite_new_source_ledgers l JOIN accounts a ON a.pk=l.account_pk WHERE a.principal_id=$1 AND a.station_id=$2")
         .bind::<Text,_>(holder.principal_id.as_str()).bind::<Text,_>(holder.station_id.as_str()).bind::<Timestamptz,_>(window).bind::<Timestamptz,_>(retained)
         .get_result::<CountsRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    if count.rate >= quota.new_sources_per_window as i64
-        || count.total >= quota.new_sources_per_retention as i64
+    if count.rate >= quota.source_count_per_window as i64
+        || count.total >= quota.source_count_per_retention as i64
     {
         return Ok(NewSourceAdmission::Denied);
     }

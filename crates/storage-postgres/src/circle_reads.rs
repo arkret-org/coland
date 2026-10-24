@@ -115,7 +115,7 @@ async fn views(
     actor: &ActorId,
 ) -> PersistenceResult<Vec<CircleReadView>> {
     let circles = diesel::sql_query(format!(
-        "SELECT r.value,e.envelope,c.commit_json,r.circle_id,{} FROM circle_current_results r \
+        "SELECT r.value,e.envelope,c.commit_json,r.circle_id,{} FROM circle_current_states r \
          LEFT JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id \
              AND c.stream_position=r.current_stream_position AND c.stream_ref=r.source_stream_ref \
          LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
@@ -135,8 +135,8 @@ async fn views(
         // Keep Circle canonical lifecycle, membership and scope unchanged;
         // authorized retained history uses the separate committed read ports.
         let terminal = diesel::sql_query(
-            "SELECT EXISTS(SELECT 1 FROM realm_bootstrap_current_results \
-             WHERE realm_id=$1 AND result_family IN ('realm_tombstone','realm_destroy')) AS present",
+            "SELECT EXISTS(SELECT 1 FROM realm_bootstrap_current_states \
+             WHERE realm_id=$1 AND state_family IN ('realm_tombstone','realm_destroy')) AS present",
         )
         .bind::<Text, _>(circle.realm_id.as_str())
         .get_result::<crate::ExistsRow>(&mut *conn)
@@ -191,7 +191,7 @@ async fn views(
         let mut member_ids = Vec::new();
         let mut viewer_membership = None;
         let members = diesel::sql_query(format!(
-            "SELECT m.member_id,m.value,e.envelope,c.commit_json,{} FROM circle_member_state_current_results m \
+            "SELECT m.member_id,m.value,e.envelope,c.commit_json,{} FROM circle_member_state_current_states m \
              LEFT JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id \
                 AND c.stream_position=m.current_stream_position AND c.stream_ref=m.source_stream_ref \
              LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
@@ -204,7 +204,7 @@ async fn views(
                 .iter()
                 .find(|member| member.member_id == actor.to_string())
                 .map(|member| {
-                    serde_json::from_value::<arkret_wire::CircleMemberStateCurrent>(
+                    serde_json::from_value::<arkret_wire::CircleMemberStateValue>(
                         member.value.clone(),
                     )
                     .map_err(corrupt)
@@ -217,7 +217,7 @@ async fn views(
         }
         for member in members {
             let who: ActorId = serde_json::from_str(&member.member_id).map_err(corrupt)?;
-            let current: arkret_wire::CircleMemberStateCurrent =
+            let current: arkret_wire::CircleMemberStateValue =
                 serde_json::from_value(member.value).map_err(corrupt)?;
             if let Some(event) =
                 covering_event(member.envelope, member.commit_json, member.verified_current)?
@@ -289,7 +289,7 @@ async fn views(
             String::from_utf8(arkret_canonical::canonical_json_bytes(&scope).map_err(corrupt)?)
                 .map_err(corrupt)?;
         let groups = diesel::sql_query(
-            "SELECT g.value,e.envelope,c.commit_json,false AS verified_current FROM mls_group_current_results g \
+            "SELECT g.value,e.envelope,c.commit_json,false AS verified_current FROM mls_group_current_states g \
              LEFT JOIN realm_commits c ON c.commit_id=g.current_commit_id AND c.realm_id=g.realm_id \
                AND c.stream_position=g.current_stream_position AND c.stream_ref=$3 \
              LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
@@ -299,13 +299,13 @@ async fn views(
              WHERE v.selector=$2 AND v.source_stream_ref=$3 \
                AND v.current_stream_position<=h.head_stream_position \
                AND (v.current_stream_position<h.head_stream_position OR v.current_commit_id=h.head_commit_id) \
-               AND NOT EXISTS(SELECT 1 FROM mls_group_current_results g WHERE g.scope_key=$1)",
+               AND NOT EXISTS(SELECT 1 FROM mls_group_current_states g WHERE g.scope_key=$1)",
         ).bind::<Text,_>(&key)
             .bind::<Jsonb,_>(serde_json::to_value(arkret_wire::CurrentSelector::MlsGroup { scope_ref: scope.clone() }).map_err(corrupt)?)
             .bind::<Jsonb,_>(serde_json::to_value(arkret_wire::CommitStreamRef::from_scope(&scope, None).map_err(corrupt)?).map_err(corrupt)?)
             .load::<AcceptedGroupRow>(&mut *conn).await.map_err(PersistenceError::database)?;
         let mls_group_id = if let Some(group) = groups.into_iter().next() {
-            let current: arkret_wire::MlsGroupCurrent =
+            let current: arkret_wire::MlsGroupValue =
                 serde_json::from_value(group.value).map_err(corrupt)?;
             if current.effective_scope != scope {
                 return Err(corrupt("MLS current differs from its scope"));

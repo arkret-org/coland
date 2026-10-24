@@ -20,11 +20,11 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use arkret_models_collaboration::governance::realm_join_bootstrap::RealmJoinBootstrapAssembly;
 use arkret_models_collaboration::governance::realm_join_intake::{
-    PeerRealmJoinBootstrapOutcome, PeerRealmJoinBootstrapRequestBody,
+    PeerRealmJoinBootstrapRequestBody, PeerRealmJoinBootstrapResponseBody,
 };
 use arkret_wire::{
     CommitStreamHead, CommitStreamRef, CommittedEventView, DidCoreId, RealmCommit, RealmId,
-    RequestId, StreamScanDirection, StreamScanRequest,
+    RequestId, StreamScanDirection, StreamScanRequestBody,
 };
 use coland_services::committed_receipt::{
     CommitContinuity, verify_committed_event_receipt_with_source,
@@ -343,7 +343,7 @@ async fn prepare_history_original(
         .current_state_entries
         .iter()
         .find_map(|row| {
-            let arkret_wire::TypedCurrentRow::Value {
+            let arkret_wire::CurrentState::Value {
                 selector, revision, ..
             } = row;
             match selector {
@@ -372,7 +372,7 @@ async fn prepare_history_original(
         BOOTSTRAP_MAX_BYTES,
     )
     .await?;
-    let outcome: PeerRealmJoinBootstrapOutcome =
+    let outcome: PeerRealmJoinBootstrapResponseBody =
         serde_json::from_slice(&body).map_err(temporary)?;
     let history = outcome.snapshot;
     history.validate_purpose().map_err(temporary)?;
@@ -462,7 +462,7 @@ async fn verified_account_snapshot(
     ),
     String,
 > {
-    use arkret_wire::{CurrentSelector, TypedCurrentRow};
+    use arkret_wire::{CurrentSelector, CurrentState};
 
     if account.station_id != state.service_core_id() {
         return Err("the Account is not hosted by this member Station".to_owned());
@@ -478,13 +478,13 @@ async fn verified_account_snapshot(
         realm_id: realm_id.clone(),
     };
     let own_join = material.current_state_entries.iter().find(|row| matches!(row,
-        TypedCurrentRow::Value {
+        CurrentState::Value {
             selector: CurrentSelector::MemberState { actor_id }, source_stream_ref, value, ..
         } if actor_id == &actor && source_stream_ref == &realm_stream
-            && serde_json::from_value::<arkret_wire::MemberStateCurrent>(value.clone())
+            && serde_json::from_value::<arkret_wire::MemberStateValue>(value.clone())
                 .is_ok_and(|member| member.membership == arkret_wire::MembershipState::Join)
     )).ok_or("the hosted Account has no accepted current opening join")?;
-    let TypedCurrentRow::Value { revision, .. } = own_join;
+    let CurrentState::Value { revision, .. } = own_join;
     let governance = commits
         .current_authority(realm_id)
         .await
@@ -514,7 +514,7 @@ async fn verified_account_snapshot(
         BOOTSTRAP_MAX_BYTES,
     )
     .await?;
-    let outcome: PeerRealmJoinBootstrapOutcome =
+    let outcome: PeerRealmJoinBootstrapResponseBody =
         serde_json::from_slice(&body).map_err(temporary)?;
     if outcome.request_id != request.request_id || outcome.snapshot.realm_id != *realm_id {
         return Err("bootstrap answer does not bind the Account Snapshot request".to_owned());
@@ -640,7 +640,7 @@ pub(crate) async fn account_continuation_recoverable(
                 return Err("continuation recovery page budget exhausted".into());
             }
             pages_left -= 1;
-            let request = StreamScanRequest {
+            let request = StreamScanRequestBody {
                 realm_id: realm_id.clone(),
                 stream_ref: required.stream_ref.clone(),
                 direction: StreamScanDirection::After(Some(held.stream_position)),
@@ -653,7 +653,7 @@ pub(crate) async fn account_continuation_recoverable(
             if total_bytes > MAX_TOTAL_BYTES {
                 return Err("continuation recovery byte budget exhausted".into());
             }
-            let page: arkret_models_collaboration::authority_commit::PeerStreamScanOutcome =
+            let page: arkret_models_collaboration::authority_commit::PeerStreamScanResponseBody =
                 serde_json::from_slice(&body).map_err(temporary)?;
             page.validate_for_request(&request).map_err(temporary)?;
             if page.committed_events.is_empty() {
@@ -856,7 +856,7 @@ async fn verify_snapshot(
             .map_err(temporary)?;
     }
     for row in &snapshot.current_state_entries {
-        let arkret_wire::TypedCurrentRow::Value {
+        let arkret_wire::CurrentState::Value {
             selector: arkret_wire::CurrentSelector::CallRoster { call_id },
             value,
             ..
@@ -987,7 +987,7 @@ async fn anchor_stream_with_forward_source(
     if let Some((session, event)) = forward_source {
         require_forward_source(state, session, event, located).await?;
     }
-    let outcome: PeerRealmJoinBootstrapOutcome =
+    let outcome: PeerRealmJoinBootstrapResponseBody =
         serde_json::from_slice(&body).map_err(temporary)?;
     if outcome.request_id != request.request_id || outcome.snapshot.realm_id != *realm_id {
         return Err("bootstrap answer does not bind the request".to_owned());
@@ -1091,14 +1091,14 @@ async fn fill_to_head(
                 return Ok(());
             }
         }
-        let request = StreamScanRequest {
+        let request = StreamScanRequestBody {
             realm_id: realm_id.clone(),
             stream_ref: realm_stream.clone(),
             direction: StreamScanDirection::After(Some(held.stream_position)),
             limit: SCAN_PAGE_LIMIT,
         };
         let body = post_peer(state, governance, SCAN_PATH, &request, SCAN_MAX_BYTES).await?;
-        let page: arkret_models_collaboration::authority_commit::PeerStreamScanOutcome =
+        let page: arkret_models_collaboration::authority_commit::PeerStreamScanResponseBody =
             serde_json::from_slice(&body).map_err(temporary)?;
         page.validate_for_request(&request).map_err(temporary)?;
         if page.committed_events.is_empty() {
@@ -1117,7 +1117,7 @@ async fn fill_to_head(
                 let pair_page = if index + 1 == page.committed_events.len() {
                     // Never persist the first half at a page boundary. The
                     // next authorized scan starts at the same held prefix.
-                    let request = StreamScanRequest {
+                    let request = StreamScanRequestBody {
                         realm_id: realm_id.clone(),
                         stream_ref: realm_stream.clone(),
                         direction: StreamScanDirection::After(Some(held.stream_position)),
@@ -1126,7 +1126,7 @@ async fn fill_to_head(
                     let body =
                         post_peer(state, governance, SCAN_PATH, &request, SCAN_MAX_BYTES).await?;
                     boundary = serde_json::from_slice::<
-                        arkret_models_collaboration::authority_commit::PeerStreamScanOutcome,
+                        arkret_models_collaboration::authority_commit::PeerStreamScanResponseBody,
                     >(&body)
                     .map_err(temporary)?;
                     boundary.validate_for_request(&request).map_err(temporary)?;
@@ -1184,7 +1184,7 @@ async fn fill_to_head(
 }
 
 fn require_scanned_snapshot_target(
-    page: &arkret_models_collaboration::authority_commit::PeerStreamScanOutcome,
+    page: &arkret_models_collaboration::authority_commit::PeerStreamScanResponseBody,
     target: Option<&CommitStreamHead>,
 ) -> Result<(), String> {
     let Some(target) = target else {
@@ -1358,7 +1358,7 @@ pub(crate) async fn ensure_forwarded_target(
         if attempt == pages_left {
             return Err("forward recovery page budget exhausted".into());
         }
-        let request = StreamScanRequest {
+        let request = StreamScanRequestBody {
             realm_id: event.realm_id.clone(),
             stream_ref: stream.clone(),
             direction: StreamScanDirection::After(Some(held.stream_position)),
@@ -1372,7 +1372,7 @@ pub(crate) async fn ensure_forwarded_target(
         if total_bytes > MAX_TOTAL_BYTES {
             return Err("forward recovery byte budget exhausted".into());
         }
-        let page: arkret_models_collaboration::authority_commit::PeerStreamScanOutcome =
+        let page: arkret_models_collaboration::authority_commit::PeerStreamScanResponseBody =
             serde_json::from_slice(&body).map_err(temporary)?;
         page.validate_for_request(&request).map_err(temporary)?;
         verify_scanned_page(state, &event.realm_id, located, &held, &page).await?;
@@ -1555,7 +1555,7 @@ async fn open_forwarded_join(
         *pages_left -= 1;
         let mut original = None;
         {
-            let request = StreamScanRequest {
+            let request = StreamScanRequestBody {
                 realm_id: event.realm_id.clone(),
                 stream_ref: commit.stream_ref.clone(),
                 direction: StreamScanDirection::Before(Some(
@@ -1574,7 +1574,7 @@ async fn open_forwarded_join(
             if *total_bytes > max_total_bytes {
                 return Err("forward recovery byte budget exhausted".into());
             }
-            let page: arkret_models_collaboration::authority_commit::PeerStreamScanOutcome =
+            let page: arkret_models_collaboration::authority_commit::PeerStreamScanResponseBody =
                 serde_json::from_slice(&body).map_err(temporary)?;
             page.validate_for_request(&request).map_err(temporary)?;
             for item in &page.committed_events {
@@ -1782,7 +1782,7 @@ async fn require_forward_visibility(
     if account.station_id != state.service_core_id() {
         return Err("forward recovery producer is not hosted here".into());
     }
-    let request = StreamScanRequest {
+    let request = StreamScanRequestBody {
         realm_id: event.realm_id.clone(),
         stream_ref: commit.stream_ref.clone(),
         direction: StreamScanDirection::Before(Some(
@@ -1814,7 +1814,7 @@ async fn require_forward_visibility(
 }
 
 fn scan_fact<'a>(
-    page: &'a arkret_models_collaboration::authority_commit::PeerStreamScanOutcome,
+    page: &'a arkret_models_collaboration::authority_commit::PeerStreamScanResponseBody,
     commit: &RealmCommit,
 ) -> Option<&'a arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact> {
     page.producer_signer_facts
@@ -1841,7 +1841,7 @@ async fn store_scanned_pair(
     anchored: &CommitStreamHead,
     located: &mut LocatedRealmAuthority,
     held: &RealmCommit,
-    page: &arkret_models_collaboration::authority_commit::PeerStreamScanOutcome,
+    page: &arkret_models_collaboration::authority_commit::PeerStreamScanResponseBody,
     index: usize,
 ) -> Result<RealmCommit, String> {
     use arkret_models_collaboration::authority_commit::{
@@ -1963,7 +1963,7 @@ fn verify_scanned_page<'a>(
     realm_id: &'a RealmId,
     located: &'a mut LocatedRealmAuthority,
     held: &'a RealmCommit,
-    page: &'a arkret_models_collaboration::authority_commit::PeerStreamScanOutcome,
+    page: &'a arkret_models_collaboration::authority_commit::PeerStreamScanResponseBody,
 ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), String>> + Send + 'a>> {
     Box::pin(async move {
         let mut previous = held;

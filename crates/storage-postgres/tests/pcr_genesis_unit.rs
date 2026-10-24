@@ -25,9 +25,9 @@ use arkret_models_crypto::{
     AcceptedSecurityTransactionStep, BackupActiveSeriesPointer, BackupObjectRef,
     BackupRotationBinding, BackupRotationKind, BackupRotationPlan, PreparedEventUnit,
     SecurityRotationRevokeCommandDecision, SecurityRotationRevokeCommandOutcome,
-    SecurityRotationRevokeProposal, SecurityRotationTransactionCreateRequest,
-    SecurityTransactionAcceptor, SecurityTransactionCreateRequest, SecurityTransactionPreparedPlan,
-    SecurityTransactionStep, SecurityTransactionTerminalOutcome,
+    SecurityRotationRevokeProposal, SecurityRotationTransactionCreateRequestBody,
+    SecurityTransactionAcceptor, SecurityTransactionCreateRequestBody,
+    SecurityTransactionPreparedPlan, SecurityTransactionStep, SecurityTransactionTerminalOutcome,
 };
 use arkret_models_identity::{
     IdentityBindingPurpose, IdentityCreationControlProofKind, PCR_GENESIS_UNIT_KINDS,
@@ -151,14 +151,14 @@ async fn footprint(
            (SELECT COUNT(*) FROM realm_authorities WHERE realm_id=$1) AS realm_authorities, \
            (SELECT COUNT(*) FROM canonical_events WHERE realm_id=$1) AS canonical_events, \
            (SELECT COUNT(*) FROM realm_commits WHERE realm_id=$1) AS realm_commits, \
-           (SELECT COUNT(*) FROM realm_authority_root_current_results WHERE realm_id=$1) \
+           (SELECT COUNT(*) FROM realm_authority_root_current_states WHERE realm_id=$1) \
              AS authority_roots, \
            (SELECT COUNT(*) FROM principal_resolutions WHERE principal_id=$2) \
              AS principal_resolutions, \
            (SELECT COUNT(*) FROM devices WHERE actor_id=$2) AS devices, \
-           (SELECT COUNT(*) FROM pcr_device_generation_current_results WHERE realm_id=$1) \
+           (SELECT COUNT(*) FROM pcr_device_generation_current_states WHERE realm_id=$1) \
              AS device_generations, \
-           (SELECT COUNT(*) FROM pcr_device_authorization_current_results WHERE realm_id=$1) \
+           (SELECT COUNT(*) FROM pcr_device_authorization_current_states WHERE realm_id=$1) \
              AS device_authorizations",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -212,17 +212,17 @@ fn page_fixture(
     id: &str,
     actor: &arkret_wire::ActorId,
     series: &str,
-    seq: u64,
+    sequence: u64,
     previous: Option<&str>,
 ) -> serde_json::Value {
     let mut page = serde_json::json!({
         "backup_id":id, "actor_id":actor, "backup_kind":"secret_storage", "backup_version":"kb_1",
-        "created_at":"2026-09-09T00:00:00.000Z", "series_id":series, "series_seq":seq,
+        "created_at":"2026-09-09T00:00:00.000Z", "series_id":series, "series_sequence":sequence,
         "encryption":{"recipient_method":"secret_storage_key", "recipient_key_ref":"backup-key", "aead":{"name":"xchacha20_poly1305", "nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
         "domain_separation":{"subdomain":"secret_storage"},
         "contents":[{"item_kind":"recovery_key_share", "secret_id":"share"}],
         "ciphertext":"AAAA", "ciphertext_digest":"sha256:709e80c88487a2411e1ee4dfb9f22a861492d20c4765150c0c794abd70f8147c",
-        "auth_data":{
+        "signature_proof":{
             "device_id":"ak:device:01904100-0000-7000-8000-000000000001",
             "verification_method":"did:web:backup.example#device-signer",
             "signature_algorithm":"Ed25519", "signature":"AAAA",
@@ -526,7 +526,7 @@ async fn founding_device_conflict_rolls_back_both_commits_and_exact_replay_is_st
     .unwrap();
     assert_eq!(resolution.count, 0);
     let realm_root = diesel::sql_query(
-        "SELECT COUNT(*) AS count FROM realm_authority_root_current_results WHERE realm_id=$1",
+        "SELECT COUNT(*) AS count FROM realm_authority_root_current_states WHERE realm_id=$1",
     )
     .bind::<Text, _>(unit.submission.pcr_realm_id.as_str())
     .get_result::<CountRow>(&mut *conn)
@@ -547,14 +547,14 @@ async fn founding_device_conflict_rolls_back_both_commits_and_exact_replay_is_st
     };
     let mut conn = pool.get().await.unwrap();
     let generation = diesel::sql_query(
-        "SELECT current_commit_id,value FROM pcr_device_generation_current_results WHERE realm_id=$1",
+        "SELECT current_commit_id,value FROM pcr_device_generation_current_states WHERE realm_id=$1",
     )
     .bind::<Text, _>(unit.submission.pcr_realm_id.as_str())
     .get_result::<DeviceCurrentRow>(&mut *conn)
     .await
     .unwrap();
     let authorization = diesel::sql_query(
-        "SELECT current_commit_id,value FROM pcr_device_authorization_current_results \
+        "SELECT current_commit_id,value FROM pcr_device_authorization_current_states \
          WHERE realm_id=$1 AND device_id=$2",
     )
     .bind::<Text, _>(unit.submission.pcr_realm_id.as_str())
@@ -965,7 +965,7 @@ async fn current_principal_survives_index_eviction_and_refuses_missing_typed_cur
 
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "DELETE FROM principal_resolution_current_results WHERE principal_id=$1 AND station_id=$2",
+        "DELETE FROM principal_resolution_current_states WHERE principal_id=$1 AND station_id=$2",
     )
     .bind::<Text, _>(account.principal_id.as_str())
     .bind::<Text, _>(account.station_id.as_str())
@@ -1143,7 +1143,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
     first_query.after = Some(KeyBackupListPosition {
         backup_kind: "secret_storage".to_owned(),
         series_id: series,
-        series_seq: 0,
+        series_sequence: 0,
         backup_id: first_id,
     });
     let second_page = backups
@@ -1281,7 +1281,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         new_backup_envelopes: vec![envelope],
         active_series_unit: active_unit,
     };
-    let request = SecurityRotationTransactionCreateRequest::from_prepared_rotations(
+    let request = SecurityRotationTransactionCreateRequestBody::from_prepared_rotations(
         TransactionId::new(format!("ak:transaction:{}", uuid::Uuid::now_v7())).unwrap(),
         account.clone(),
         authorizer.clone(),
@@ -1292,9 +1292,10 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
     )
     .unwrap();
     let plan = SecurityTransactionPreparedPlan::SecurityRotation(request.prepared_plan.clone());
-    let (initial, canonical_request) = SecurityTransactionCreateRequest::SecurityRotation(request)
-        .into_initial_resource(plan, at)
-        .unwrap();
+    let (initial, canonical_request) =
+        SecurityTransactionCreateRequestBody::SecurityRotation(request)
+            .into_initial_resource(plan, at)
+            .unwrap();
     let initial_record = SecurityTransactionRecord {
         resource: initial.clone(),
         canonical_request: canonical_request.clone(),
@@ -1351,7 +1352,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         "an Event other than the prepared unit is refused before any read: {bad_proof}"
     );
     diesel::sql_query(
-        "UPDATE pcr_device_generation_current_results SET value=jsonb_build_object('current_device_generation_ref',2) WHERE realm_id=$1",
+        "UPDATE pcr_device_generation_current_states SET value=jsonb_build_object('current_device_generation_ref',2) WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm_id.as_str())
     .execute(&mut *conn)
@@ -1364,7 +1365,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
             .is_err()
     );
     diesel::sql_query(
-        "UPDATE pcr_device_generation_current_results SET value=jsonb_build_object('current_device_generation_ref',1) WHERE realm_id=$1",
+        "UPDATE pcr_device_generation_current_states SET value=jsonb_build_object('current_device_generation_ref',1) WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm_id.as_str())
     .execute(&mut *conn)
@@ -1453,7 +1454,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
     accepted.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
         proposal_event_id: revoke.event_id.clone(),
         covering_commit_id: covering.commit_id.clone(),
-        result: SecurityRotationRevokeCommandDecision::Accepted,
+        outcome: SecurityRotationRevokeCommandDecision::Accepted,
         decided_at: at + chrono::TimeDelta::seconds(2),
     });
     let terminal = RevokeCommandTerminalWrite {
@@ -1492,7 +1493,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
             .revoke_command_outcome
             .as_ref()
             .unwrap()
-            .result,
+            .outcome,
         SecurityRotationRevokeCommandDecision::Accepted
     );
     assert_eq!(
@@ -1588,7 +1589,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         &station_key,
     )
     .unwrap();
-    let reject_request = SecurityRotationTransactionCreateRequest::from_prepared_rotations(
+    let reject_request = SecurityRotationTransactionCreateRequestBody::from_prepared_rotations(
         TransactionId::new(format!("ak:transaction:{}", uuid::Uuid::now_v7())).unwrap(),
         account.clone(),
         authorizer.clone(),
@@ -1615,7 +1616,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
     let reject_plan =
         SecurityTransactionPreparedPlan::SecurityRotation(reject_request.prepared_plan.clone());
     let (reject_initial, reject_request_bytes) =
-        SecurityTransactionCreateRequest::SecurityRotation(reject_request)
+        SecurityTransactionCreateRequestBody::SecurityRotation(reject_request)
             .into_initial_resource(reject_plan, at)
             .unwrap();
     let reject_id = reject_initial.transaction_id.clone();
@@ -1654,7 +1655,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
     rejected.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
         proposal_event_id: reject_event.event_id,
         covering_commit_id: reject_commit.commit_id.clone(),
-        result: SecurityRotationRevokeCommandDecision::Rejected,
+        outcome: SecurityRotationRevokeCommandDecision::Rejected,
         decided_at: at + chrono::TimeDelta::seconds(3),
     });
     rejected.resource.terminal_outcome = Some(SecurityTransactionTerminalOutcome::Aborted {
@@ -1692,7 +1693,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
             .revoke_command_outcome
             .as_ref()
             .unwrap()
-            .result,
+            .outcome,
         SecurityRotationRevokeCommandDecision::Rejected
     );
     assert_eq!(
@@ -1878,7 +1879,7 @@ async fn pointer_footprint(pool: &PgPool, realm_id: &RealmId) -> (i64, i64, i64)
     let row = diesel::sql_query(
         "SELECT (SELECT COUNT(*) FROM canonical_events WHERE realm_id=$1) AS events, \
                 (SELECT COUNT(*) FROM realm_commits WHERE realm_id=$1) AS commits, \
-                (SELECT COUNT(*) FROM key_backup_active_series_current_results WHERE realm_id=$1) \
+                (SELECT COUNT(*) FROM key_backup_active_series_current_states WHERE realm_id=$1) \
                   AS pointers",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -2302,7 +2303,7 @@ async fn key_backup_active_series_pointer_unit_commits_only_at_the_active_device
     // while one exists, is unavailable -- never the older pointer or Absent.
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "UPDATE key_backup_active_series_current_results \
+        "UPDATE key_backup_active_series_current_states \
          SET current_commit_id=$2,current_event_id=$3,current_stream_position=$4 \
          WHERE realm_id=$1",
     )
@@ -2320,7 +2321,7 @@ async fn key_backup_active_series_pointer_unit_commits_only_at_the_active_device
             .is_err(),
         "a lagging typed pointer must not be served"
     );
-    diesel::sql_query("DELETE FROM key_backup_active_series_current_results WHERE realm_id=$1")
+    diesel::sql_query("DELETE FROM key_backup_active_series_current_states WHERE realm_id=$1")
         .bind::<Text, _>(author.realm_id.as_str())
         .execute(&mut *conn)
         .await
@@ -2364,7 +2365,7 @@ async fn accepted_device_footprint(
     diesel::sql_query(
         "SELECT (SELECT COUNT(*) FROM canonical_events WHERE realm_id=$1) AS events, \
                 (SELECT COUNT(*) FROM realm_commits WHERE realm_id=$1) AS commits, \
-                (SELECT COUNT(*) FROM pcr_device_authorization_current_results WHERE realm_id=$1) \
+                (SELECT COUNT(*) FROM pcr_device_authorization_current_states WHERE realm_id=$1) \
                   AS authorizations, \
                 (SELECT COUNT(*) FROM devices WHERE actor_id=$2 AND verification_state='verified') \
                   AS devices",
@@ -2808,7 +2809,7 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
         ),
         2,
     );
-    let request = SecurityRotationTransactionCreateRequest::from_prepared_rotations(
+    let request = SecurityRotationTransactionCreateRequestBody::from_prepared_rotations(
         TransactionId::new(format!("ak:transaction:{}", uuid::Uuid::now_v7())).unwrap(),
         account.clone(),
         device_a.clone(),
@@ -2855,9 +2856,10 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
     )
     .unwrap();
     let plan = SecurityTransactionPreparedPlan::SecurityRotation(request.prepared_plan.clone());
-    let (initial, canonical_request) = SecurityTransactionCreateRequest::SecurityRotation(request)
-        .into_initial_resource(plan, now)
-        .unwrap();
+    let (initial, canonical_request) =
+        SecurityTransactionCreateRequestBody::SecurityRotation(request)
+            .into_initial_resource(plan, now)
+            .unwrap();
     let transaction_id = initial.transaction_id.clone();
     transactions
         .create(SecurityTransactionRecord {
@@ -2979,7 +2981,7 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
     accepted.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
         proposal_event_id: revoke.event_id.clone(),
         covering_commit_id: covering.commit_id.clone(),
-        result: SecurityRotationRevokeCommandDecision::Accepted,
+        outcome: SecurityRotationRevokeCommandDecision::Accepted,
         decided_at,
     });
     let terminal = RevokeCommandTerminalWrite {
@@ -3164,7 +3166,7 @@ fn signed_backup(
     device_id: &DeviceId,
     authorize_event_id: &arkret_wire::EventId,
     series: &BackupSeriesId,
-    seq: u64,
+    sequence: u64,
     predecessor: Option<&arkret_models_crypto::KeyBackup>,
     signing_seed: [u8; 32],
 ) -> arkret_models_crypto::KeyBackup {
@@ -3173,12 +3175,12 @@ fn signed_backup(
         &backup_id,
         &arkret_wire::ActorId::account(author.account.clone()),
         series.as_str(),
-        seq,
+        sequence,
         None,
     );
-    value["auth_data"]["device_id"] = serde_json::json!(device_id);
-    value["auth_data"]["verification_method"] = serde_json::json!(author.method);
-    value["auth_data"]["device_authorize_event_id"] = serde_json::json!(authorize_event_id);
+    value["signature_proof"]["device_id"] = serde_json::json!(device_id);
+    value["signature_proof"]["verification_method"] = serde_json::json!(author.method);
+    value["signature_proof"]["device_authorize_event_id"] = serde_json::json!(authorize_event_id);
     if let Some(previous) = predecessor {
         value["supersedes_id"] = serde_json::json!(previous.backup_id);
         value["supersedes_digest"] = serde_json::json!(arkret_canonical::sha256_digest(
@@ -3189,7 +3191,7 @@ fn signed_backup(
     let signature = SigningKey::from_bytes(&signing_seed)
         .sign(&backup.signing_payload_bytes().unwrap())
         .to_bytes();
-    backup.auth_data.signature =
+    backup.signature_proof.signature =
         arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(signature)).unwrap();
     backup
 }
@@ -3464,7 +3466,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
                 ciphertext_digest: backup.ciphertext_digest.clone(),
             })
             .collect();
-        let request = SecurityRotationTransactionCreateRequest::from_prepared_rotations(
+        let request = SecurityRotationTransactionCreateRequestBody::from_prepared_rotations(
             TransactionId::new(format!("ak:transaction:{}", uuid::Uuid::now_v7())).unwrap(),
             account.clone(),
             device_a.clone(),
@@ -3508,7 +3510,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         .unwrap();
         let plan = SecurityTransactionPreparedPlan::SecurityRotation(request.prepared_plan.clone());
         let (initial, canonical_request) =
-            SecurityTransactionCreateRequest::SecurityRotation(request)
+            SecurityTransactionCreateRequestBody::SecurityRotation(request)
                 .into_initial_resource(plan, now)
                 .unwrap();
         let record = transactions
@@ -3546,7 +3548,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         accepted.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
             proposal_event_id: revoke.event_id.clone(),
             covering_commit_id: covering.commit_id.clone(),
-            result: SecurityRotationRevokeCommandDecision::Accepted,
+            outcome: SecurityRotationRevokeCommandDecision::Accepted,
             decided_at,
         });
         let decided = transactions
@@ -3967,7 +3969,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             artifact: arkret_models_crypto::ClientStepAttestationArtifact::SecurityRotation(
                 artifact.clone(),
             ),
-            auth_data: arkret_models_crypto::ClientStepAttestationAuthData {
+            signature_proof: arkret_models_crypto::ClientStepAttestationSignatureProof {
                 verification_method: method,
                 signature_algorithm: "Ed25519".to_owned(),
                 signature: arkret_wire::Base64UrlString::new("AA").unwrap(),
@@ -3976,7 +3978,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         let signature = SigningKey::from_bytes(&seed)
             .sign(&attestation.signing_bytes().unwrap())
             .to_bytes();
-        attestation.auth_data.signature =
+        attestation.signature_proof.signature =
             arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(signature))
                 .unwrap();
         let mut next = erased.clone();
@@ -3993,18 +3995,21 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             receipt_id: None,
             completion_attestation: None,
         });
-        let continue_request = arkret_models_crypto::SecurityTransactionContinueRequest {
-            request_digest: erased.resource.request_digest.clone(),
-            prepared_plan_digest: erased.resource.prepared_plan_digest.clone(),
-            expected_accepted_step_count: 4,
-            client_attestation: attestation.clone(),
-        };
+        let security_transaction_continue_request_body =
+            arkret_models_crypto::SecurityTransactionContinueRequestBody {
+                request_digest: erased.resource.request_digest.clone(),
+                prepared_plan_digest: erased.resource.prepared_plan_digest.clone(),
+                expected_accepted_step_count: 4,
+                client_attestation: attestation.clone(),
+            };
         coland_storage::RotationLocalCommitWrite {
             step_outcome: SecurityTransactionStepOutcomeRecord {
                 transaction_id: transaction_id.to_string(),
                 step: SecurityTransactionStep::LocalCommit,
-                canonical_request: arkret_canonical::canonical_json_bytes(&continue_request)
-                    .unwrap(),
+                canonical_request: arkret_canonical::canonical_json_bytes(
+                    &security_transaction_continue_request_body,
+                )
+                .unwrap(),
                 response: serde_json::to_value(&next.resource).unwrap(),
                 participant_outcome: Some(serde_json::to_value(&artifact).unwrap()),
             },
@@ -4178,7 +4183,7 @@ async fn policy_footprint(
                 (SELECT COUNT(*) FROM realm_commits WHERE realm_id=$1) AS commits, \
                 (SELECT COUNT(*) FROM recovery_policies WHERE principal_id=$2 AND station_id=$3) \
                   AS policies, \
-                (SELECT COUNT(*) FROM policy_current_results WHERE realm_id=$1) \
+                (SELECT COUNT(*) FROM policy_current_states WHERE realm_id=$1) \
                   AS policy_currents",
     )
     .bind::<Text, _>(realm_id.as_str())
@@ -4211,7 +4216,7 @@ fn recovery_policy_event(
             "supersedes_id": supersedes,
             "trust_domain": "ak:trust_domain:station.example",
             "issued_at": "2026-09-25T00:00:00.000Z",
-            "auth_data": {
+            "signature_proof": {
                 "verification_method": method,
                 "signature_algorithm": "Ed25519",
                 "signature": "AA"
@@ -4221,7 +4226,7 @@ fn recovery_policy_event(
         .unwrap();
     let transcript =
         arkret_models_crypto::recovery_policy_signature_transcript_bytes(&policy).unwrap();
-    policy.auth_data.signature =
+    policy.signature_proof.signature =
         arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
             SigningKey::from_bytes(&seed).sign(&transcript).to_bytes(),
         ))
@@ -4397,7 +4402,7 @@ async fn recovery_policy_publication_unit_ratchets_under_the_pcr_cut() {
         use diesel::sql_types::Text;
         use diesel_async::RunQueryDsl;
         let mut conn = pool.get().await.unwrap();
-        diesel::sql_query("INSERT INTO policy_current_results(realm_id,policy_id,current_commit_id,current_stream_position,current_event_id,value,updated_at) VALUES($1,$2,$3,0,'imported-agent-policy','{\"schema\":\"ak.schema.policy.v1\",\"policy_kind\":\"agent\"}',now())")
+        diesel::sql_query("INSERT INTO policy_current_states(realm_id,policy_id,current_commit_id,current_stream_position,current_event_id,value,updated_at) VALUES($1,$2,$3,0,'imported-agent-policy','{\"schema\":\"ak.schema.policy.v1\",\"policy_kind\":\"agent\"}',now())")
             .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(&genesis_id)
             .bind::<Text,_>(head.commit_id.as_str()).execute(&mut conn).await.unwrap();
         let collision = policy_footprint(&pool, &realm_id, &account).await;
@@ -4410,7 +4415,7 @@ async fn recovery_policy_publication_unit_ratchets_under_the_pcr_cut() {
             policy_footprint(&pool, &realm_id, &account).await,
             collision
         );
-        diesel::sql_query("DELETE FROM policy_current_results WHERE policy_id=$1")
+        diesel::sql_query("DELETE FROM policy_current_states WHERE policy_id=$1")
             .bind::<Text, _>(&genesis_id)
             .execute(&mut conn)
             .await
@@ -4508,14 +4513,14 @@ async fn recovery_policy_publication_unit_ratchets_under_the_pcr_cut() {
         .find(|entry| {
             matches!(
                 entry,
-                arkret_wire::TypedCurrentRow::Value {
+                arkret_wire::CurrentState::Value {
                     selector: arkret_wire::CurrentSelector::Policy { policy_id },
                     ..
                 } if policy_id.as_str() == v2_id
             )
         })
         .expect("recovery policy is materialized as registered policy current");
-    let arkret_wire::TypedCurrentRow::Value {
+    let arkret_wire::CurrentState::Value {
         revision,
         source_stream_ref,
         value,
@@ -4561,12 +4566,12 @@ async fn profile_footprint(pool: &PgPool, realms: &[&RealmId]) -> ProfileFootpri
     diesel::sql_query(
         "SELECT (SELECT COUNT(*) FROM canonical_events WHERE realm_id=ANY($1)) AS events, \
                 (SELECT COUNT(*) FROM realm_commits WHERE realm_id=ANY($1)) AS commits, \
-                (SELECT COUNT(*) FROM actor_profile_current_results WHERE realm_id=ANY($1)) \
+                (SELECT COUNT(*) FROM actor_profile_current_states WHERE realm_id=ANY($1)) \
                   AS profiles, \
                 (SELECT COUNT(*) FROM actor_profile_result_versions v \
                    JOIN realm_commits c ON c.commit_id=v.commit_id \
                   WHERE c.realm_id=ANY($1)) AS versions, \
-                (SELECT COUNT(*) FROM identity_accountability_current_results \
+                (SELECT COUNT(*) FROM identity_accountability_current_states \
                   WHERE realm_id=ANY($1)) AS endorsements",
     )
     .bind::<diesel::sql_types::Array<Text>, _>(realms)
@@ -4707,7 +4712,7 @@ async fn profile_update_commits_actor_profile_current_and_rejects_forbidden_patc
             "principal_id": account.principal_id,
             "actor_kind": "user",
             "display_name": "Alice",
-            "profile_fields": {"bio": "first"}
+            "profile_fields": {"biography": "first"}
         }}),
     );
     // The generic Event path cannot commit profile state.
@@ -4843,7 +4848,7 @@ async fn profile_update_commits_actor_profile_current_and_rejects_forbidden_patc
         .unwrap();
     let delta = update(serde_json::json!({
         "target_ref": profile_id,
-        "patch": {"display_name": "Alice C.", "profile_fields.bio": {"$op": "unset"}},
+        "patch": {"display_name": "Alice C.", "profile_fields.biography": {"$op": "unset"}},
         "expected_state_digest": digest
     }));
     let delta_commit = station_successor(&create_commit, &delta, &station_did, 1);
@@ -5151,13 +5156,13 @@ async fn provision_footprint(pool: &PgPool, realms: &[&RealmId]) -> ProvisionFoo
     diesel::sql_query(
         "SELECT (SELECT COUNT(*) FROM canonical_events WHERE realm_id=ANY($1)) AS events, \
                 (SELECT COUNT(*) FROM realm_commits WHERE realm_id=ANY($1)) AS commits, \
-                (SELECT COUNT(*) FROM agent_provisioning_current_results \
+                (SELECT COUNT(*) FROM agent_provisioning_current_states \
                   WHERE realm_id=ANY($1)) AS provisionings, \
-                (SELECT COUNT(*) FROM identity_accountability_current_results \
+                (SELECT COUNT(*) FROM identity_accountability_current_states \
                   WHERE realm_id=ANY($1)) AS endorsements, \
-                (SELECT COUNT(*) FROM agent_selector_claim_current_results \
+                (SELECT COUNT(*) FROM agent_selector_claim_current_states \
                   WHERE realm_id=ANY($1)) AS selectors, \
-                (SELECT COUNT(*) FROM agent_pcr_genesis_declaration_current_results \
+                (SELECT COUNT(*) FROM agent_pcr_genesis_declaration_current_states \
                   WHERE realm_id=ANY($1)) AS declarations",
     )
     .bind::<diesel::sql_types::Array<Text>, _>(realms)
@@ -5718,11 +5723,11 @@ async fn agent_pcr_footprint(pool: &PgPool, realm: &RealmId) -> AgentPcrFootprin
         "SELECT (SELECT COUNT(*) FROM realm_authorities WHERE realm_id=$1) AS authorities, \
                 (SELECT COUNT(*) FROM canonical_events WHERE realm_id=$1) AS events, \
                 (SELECT COUNT(*) FROM realm_commits WHERE realm_id=$1) AS commits, \
-                (SELECT COUNT(*) FROM realm_bootstrap_current_results WHERE realm_id=$1) \
+                (SELECT COUNT(*) FROM realm_bootstrap_current_states WHERE realm_id=$1) \
                   AS singletons, \
-                (SELECT COUNT(*) FROM realm_authority_root_current_results WHERE realm_id=$1) \
+                (SELECT COUNT(*) FROM realm_authority_root_current_states WHERE realm_id=$1) \
                   AS roots, \
-                (SELECT COUNT(*) FROM agent_status_current_results \
+                (SELECT COUNT(*) FROM agent_status_current_states \
                   WHERE realm_id=$1 AND value #>> '{}' = 'active') AS statuses, \
                 (SELECT COUNT(*) FROM principal_resolutions WHERE pcr_realm_id=$1) AS resolutions",
     )
@@ -6046,10 +6051,10 @@ async fn agent_control_footprint(pool: &PgPool, realm: &RealmId) -> AgentControl
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
         "SELECT (SELECT COUNT(*) FROM canonical_events WHERE realm_id=$1) AS events, \
-                (SELECT COUNT(*) FROM agent_key_current_results k, \
+                (SELECT COUNT(*) FROM agent_key_current_states k, \
                    jsonb_array_elements(k.value->'authorizations') a \
                   WHERE k.realm_id=$1 AND a->'value' ? 'verification_method') AS active_keys, \
-                (SELECT value #>> '{}' FROM agent_status_current_results WHERE realm_id=$1) \
+                (SELECT value #>> '{}' FROM agent_status_current_states WHERE realm_id=$1) \
                   AS status",
     )
     .bind::<Text, _>(realm.as_str())

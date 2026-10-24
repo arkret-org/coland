@@ -25,7 +25,7 @@ fn third_party_invite(expires_at: &str) -> Value {
             "token_entropy_bits": 128,
             "verification_id": SERVICE,
             "verification_public_key": VERIFICATION_METHOD,
-            "max_claims": 1
+            "max_claim_count": 1
         }
     })
 }

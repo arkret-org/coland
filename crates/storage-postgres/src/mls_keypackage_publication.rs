@@ -119,10 +119,10 @@ async fn require_current(
     };
     if let Some(circle) = circle {
         let basis =
-            crate::circle_current_results::locked_circle_basis(conn, scope.realm_id(), circle)
+            crate::circle_current_states::locked_circle_basis(conn, scope.realm_id(), circle)
                 .await?;
         if basis["value"]["state"] != "active"
-            || !crate::circle_current_results::effective_member_in_connection(
+            || !crate::circle_current_states::effective_member_in_connection(
                 conn,
                 scope.realm_id(),
                 circle,
@@ -136,7 +136,7 @@ async fn require_current(
         }
     }
     let policies =
-        crate::policy_current_results::read_scoped_applet_management_policies_in_connection(
+        crate::policy_current_states::read_scoped_applet_management_policies_in_connection(
             conn,
             scope.realm_id(),
             circle,
@@ -285,7 +285,7 @@ pub(crate) async fn require_native_publication(
         ));
     }
     if let Some(strand) = &body.strand_id {
-        let actual = crate::strand_current_results::locked_active_strand_scope(
+        let actual = crate::strand_current_states::locked_active_strand_scope(
             conn,
             guard.effective_scope.realm_id(),
             strand,
@@ -316,9 +316,9 @@ pub(crate) async fn require_existing_group(
     conn: &mut AsyncPgConnection,
     scope: &ScopeRef,
 ) -> PersistenceResult<()> {
-    let group = crate::mls_group_current_results::locked_group(
+    let group = crate::mls_group_current_states::locked_group(
         conn,
-        &crate::mls_group_current_results::scope_key(scope)?,
+        &crate::mls_group_current_states::scope_key(scope)?,
     )
     .await?
     .ok_or_else(|| denied("KeyPackage target has no accepted MLS group"))?;

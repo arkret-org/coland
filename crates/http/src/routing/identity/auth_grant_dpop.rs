@@ -60,7 +60,7 @@ use sha2::{Digest, Sha256};
 use crate::state::AppState;
 use crate::wire::{
     SessionGrantAdminIntrospectionStatus, SessionGrantValidationInput,
-    SessionGrantValidationMetadata, SessionGrantValidationOutcome,
+    SessionGrantValidationMetadata, SessionGrantValidationResponseBody,
 };
 
 /// Device-scope prefix carried in a `ak.session.grant`'s scope set
@@ -469,7 +469,7 @@ async fn introspect_session_grant_remote(
     ))?;
     require_successful_introspection(response.status().as_u16())?;
     let outcome = response
-        .json::<SessionGrantValidationOutcome>()
+        .json::<SessionGrantValidationResponseBody>()
         .await
         .map_err(|_| {
             (
@@ -1001,7 +1001,7 @@ mod tests {
     }
 
     async fn spawn_counting_introspection_mock(
-        outcome: SessionGrantValidationOutcome,
+        outcome: SessionGrantValidationResponseBody,
     ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1138,7 +1138,7 @@ mod tests {
     #[tokio::test]
     async fn request_memo_cache_and_force_fresh_count_real_http_round_trips() {
         let grant = test_introspection_grant();
-        let outcome = SessionGrantValidationOutcome {
+        let outcome = SessionGrantValidationResponseBody {
             active: true,
             status: SessionGrantAdminIntrospectionStatus::Active,
             proof_required: false,

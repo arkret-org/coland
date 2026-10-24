@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use super::now;
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
-use crate::wire::{ModerationReportOutcome, ModerationReportRequestBody};
+use crate::wire::{ModerationReportRequestBody, ModerationReportResponseBody};
 
 pub(super) fn protocol_router() -> Router {
     Router::new().push(Router::with_path("moderation/report").post(moderation_report))
@@ -615,7 +615,7 @@ async fn moderation_report(
     body: JsonBody<ModerationReportRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<ModerationReportOutcome> {
+) -> JsonResult<ModerationReportResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let body = body.into_inner();
@@ -694,7 +694,7 @@ async fn moderation_report(
             &error.message(),
         )
     })?;
-    json_ok(ModerationReportOutcome {
+    json_ok(ModerationReportResponseBody {
         report_id,
         status:
             arkret_models_collaboration::governance::moderation::ModerationReportStatus::Submitted,
@@ -1036,7 +1036,7 @@ mod report_safety_tests {
                     "version": "1.0",
                     "content_type": "application/vnd.arkret.message+json",
                     "encryption_context": {
-                        "epoch": 0,
+                        "epoch": "0",
                         "group_state_ref": EventId::from_digest(
                             arkret_canonical::DigestSuite::Sha256, [0x32; 32],
                         ),
@@ -1092,7 +1092,7 @@ mod report_safety_tests {
                     signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "00".repeat(32)))
                         .unwrap(),
                     created_at: event.created_at,
-                    sig: arkret_wire::Base64UrlString::new("c3RydWN0dXJhbA").unwrap(),
+                    signature: arkret_wire::Base64UrlString::new("c3RydWN0dXJhbA").unwrap(),
                 },
             },
             event,

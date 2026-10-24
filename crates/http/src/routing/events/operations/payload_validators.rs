@@ -467,7 +467,7 @@ mod tests {
             "version": "1.0",
             "content_type": "application/json",
             "encryption_context": {
-                "epoch": 7u64,
+                "epoch": (7u64).to_string(),
                 "group_state_ref": "ak:event:AdkQ-RmB1a8zyc52yl9GWAsodQ_EUle1WAVZqbO7pc19",
             },
             "ciphertext": "Y2lwaGVydGV4dA",

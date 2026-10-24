@@ -33,7 +33,7 @@ mod realm_terminal_replica_cases;
 #[path = "support/space_parent_replica_cases.rs"]
 mod space_parent_replica_cases;
 
-use arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequest;
+use arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody;
 use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, CommittedChainNode, CommittedReplica,
     CommittedReplicaOutcome, CommittedReplicaRole, ConflictCode, CurrentRealmAuthority,
@@ -58,7 +58,7 @@ fn bootstrap_snapshot(
     realm: &arkret_wire::RealmId,
     generation: u64,
     heads: &[arkret_wire::CommitStreamHead],
-    entries: &[arkret_wire::TypedCurrentRow],
+    entries: &[arkret_wire::CurrentState],
 ) -> arkret_wire::RealmStateSnapshot {
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let mut snapshot = arkret_wire::RealmStateSnapshot {
@@ -87,7 +87,7 @@ fn bootstrap_snapshot(
                 .unwrap(),
             signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "0".repeat(64))).unwrap(),
             created_at: at,
-            sig: arkret_wire::Base64UrlString::new("c2ln").unwrap(),
+            signature: arkret_wire::Base64UrlString::new("c2ln").unwrap(),
         },
     };
     let mut identity = serde_json::to_value(&snapshot).unwrap();
@@ -247,7 +247,7 @@ async fn member_state(
 ) -> Option<String> {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "SELECT membership FROM member_state_current_results WHERE realm_id=$1 AND member_id=$2",
+        "SELECT membership FROM member_state_current_states WHERE realm_id=$1 AND member_id=$2",
     )
     .bind::<Text, _>(realm_id.as_str())
     .bind::<Text, _>(member.to_string())
@@ -271,9 +271,9 @@ fn assert_owed(
     assert_eq!(row.state, "pending_route");
     assert_eq!(row.endpoint, "/_arkret/peer/events");
     assert_eq!(row.linked, 1);
-    let body: PeerAuthoritySubmitRequest = serde_json::from_str(&row.payload_json).unwrap();
+    let body: PeerAuthoritySubmitRequestBody = serde_json::from_str(&row.payload_json).unwrap();
     body.validate().unwrap();
-    let PeerAuthoritySubmitRequest::CommittedReplication(body) = body else {
+    let PeerAuthoritySubmitRequestBody::CommittedReplication(body) = body else {
         panic!("Realm fanout must use the committed_replication branch");
     };
     assert_eq!(body.replications.len(), 1);
@@ -692,7 +692,7 @@ async fn realm_root_event_ref(pool: &PgPool, realm_id: &arkret_wire::RealmId) ->
     }
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
-        "SELECT authority_event_ref FROM realm_authority_root_current_results WHERE realm_id=$1",
+        "SELECT authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1",
     )
     .bind::<Text, _>(realm_id.as_str())
     .get_result::<RootRow>(&mut *conn)
@@ -727,7 +727,7 @@ fn grant_request(
                     "kind": "realm_root",
                     "realm_id": realm_id,
                     "authority_event_ref": root_event_ref,
-                    "authority_generation": 0
+                    "authority_generation": "0"
                 }],
                 "issued_at": arkret_canonical::format_timestamp_canonical(at),
             }
@@ -766,11 +766,11 @@ async fn accept_state(pool: &PgPool, realm_id: &arkret_wire::RealmId) -> AcceptS
     let mut families = Vec::new();
     for sql in [
         "SELECT invite_id AS subject, value, current_commit_id \
-         FROM invite_lifecycle_current_results WHERE realm_id=$1 ORDER BY invite_id",
+         FROM invite_lifecycle_current_states WHERE realm_id=$1 ORDER BY invite_id",
         "SELECT invitee_account_id AS subject, value, current_commit_id \
-         FROM invite_live_target_current_results WHERE realm_id=$1 ORDER BY invitee_account_id",
+         FROM invite_live_target_current_states WHERE realm_id=$1 ORDER BY invitee_account_id",
         "SELECT member_id AS subject, value, current_commit_id \
-         FROM member_state_current_results WHERE realm_id=$1 ORDER BY member_id",
+         FROM member_state_current_states WHERE realm_id=$1 ORDER BY member_id",
     ] {
         families.push(
             diesel::sql_query(sql)
@@ -1096,7 +1096,7 @@ fn replica(
 async fn anchor_at_join(
     store: &PgAuthorityCommitStore,
     join: &EventCommitRequest,
-    entries: Vec<arkret_wire::TypedCurrentRow>,
+    entries: Vec<arkret_wire::CurrentState>,
 ) {
     let commit = &join.authority_commit.commit;
     store
@@ -1135,9 +1135,9 @@ async fn anchor_at_join(
 fn joined_row(
     join: &EventCommitRequest,
     member: &arkret_wire::ActorId,
-) -> arkret_wire::TypedCurrentRow {
+) -> arkret_wire::CurrentState {
     let commit = &join.authority_commit.commit;
-    arkret_wire::TypedCurrentRow::Value {
+    arkret_wire::CurrentState::Value {
         selector: arkret_wire::CurrentSelector::MemberState {
             actor_id: member.clone(),
         },
@@ -1179,7 +1179,7 @@ async fn held_genesis_replica_freezes_only_its_exact_scope_provenance() {
         "group_info_ref":format!("ak:blob:sha256:{}", "3".repeat(64)),
         "ratchet_tree_ref":format!("ak:blob:sha256:{}", "4".repeat(64)),
         "creator_leaf_authority":{
-            "leaf_signature_key_b64u":arkret_canonical::base64url_encode([7_u8;32]),
+            "leaf_signature_key_base64url":arkret_canonical::base64url_encode([7_u8;32]),
             "endpoint":{"kind":"device","device_id":format!("ak:device:{}",uuid::Uuid::now_v7())},
             "authorization_event_ref":last.event.event_id,
         },
@@ -2007,8 +2007,8 @@ fn scan_request(
     realm_id: &arkret_wire::RealmId,
     direction: arkret_wire::StreamScanDirection,
     limit: u16,
-) -> arkret_wire::StreamScanRequest {
-    arkret_wire::StreamScanRequest {
+) -> arkret_wire::StreamScanRequestBody {
+    arkret_wire::StreamScanRequestBody {
         realm_id: realm_id.clone(),
         stream_ref: arkret_wire::CommitStreamRef::Realm {
             realm_id: realm_id.clone(),
@@ -2020,7 +2020,7 @@ fn scan_request(
 
 async fn scanned(
     store: &PgAuthorityCommitStore,
-    request: arkret_wire::StreamScanRequest,
+    request: arkret_wire::StreamScanRequestBody,
     account: &arkret_wire::ActorId,
 ) -> coland_storage::AccountStreamScan {
     store
@@ -2033,7 +2033,7 @@ async fn scanned(
         .unwrap()
 }
 
-fn page(scan: coland_storage::AccountStreamScan) -> arkret_wire::StreamScanOutcome {
+fn page(scan: coland_storage::AccountStreamScan) -> arkret_wire::StreamScanResponseBody {
     match scan {
         coland_storage::AccountStreamScan::Page(page) => page,
         other => panic!("expected a proved page, got {other:?}"),
@@ -2041,7 +2041,7 @@ fn page(scan: coland_storage::AccountStreamScan) -> arkret_wire::StreamScanOutco
 }
 
 /// Each row's position and whether its Event is disclosed in full.
-fn rows(page: &arkret_wire::StreamScanOutcome) -> Vec<(u64, bool)> {
+fn rows(page: &arkret_wire::StreamScanResponseBody) -> Vec<(u64, bool)> {
     page.committed_events
         .iter()
         .map(|item| {
@@ -2765,7 +2765,7 @@ async fn grant_status(pool: &PgPool, grant: &EventCommitRequest) -> String {
         status: String,
     }
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("SELECT status FROM capability_grant_current_results WHERE grant_id=$1")
+    diesel::sql_query("SELECT status FROM capability_grant_current_states WHERE grant_id=$1")
         .bind::<Text, _>(
             arkret_wire::GrantId::from_event_id(&grant.authority_commit.event.event_id).to_string(),
         )
@@ -2839,7 +2839,7 @@ async fn capability_revoke_and_relinquish_follow_their_target_guards_case() {
                     "kind": "realm_root",
                     "realm_id": realm_id,
                     "authority_event_ref": root_event_ref,
-                    "authority_generation": 0
+                    "authority_generation": "0"
                 }],
                 "issued_at": arkret_canonical::format_timestamp_canonical(
                     bob_join.authority_commit.commit.committed_at
@@ -3281,7 +3281,7 @@ async fn collaboration_governance_change_replica_case() {
         &join.authority_commit,
         arkret_wire::EventKind::RealmGovernanceStationChange,
         founder_actor(),
-        serde_json::json!({"expected_governance_generation":0,
+        serde_json::json!({"expected_governance_generation":"0",
             "expected_realm_stream_commit_id":join.authority_commit.commit.commit_id,
             "new_governance_station_id":"ak:did_core:web:collaboration-successor.example"}),
         join.authority_commit.commit.committed_at,
@@ -3841,11 +3841,11 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
     ));
 }
 
-fn row_selectors(entries: &[arkret_wire::TypedCurrentRow]) -> Vec<arkret_wire::CurrentSelector> {
+fn row_selectors(entries: &[arkret_wire::CurrentState]) -> Vec<arkret_wire::CurrentSelector> {
     entries
         .iter()
         .map(|entry| match entry {
-            arkret_wire::TypedCurrentRow::Value { selector, .. } => selector.clone(),
+            arkret_wire::CurrentState::Value { selector, .. } => selector.clone(),
         })
         .collect()
 }
@@ -3946,7 +3946,7 @@ async fn account_snapshot_serves_joined_member_floor() {
     assert!(founder_rows.contains(&founder_message));
     let mut expected = full.current_state_entries.clone();
     expected.retain(|entry| {
-        !matches!(entry, arkret_wire::TypedCurrentRow::Value { selector, .. } if selector == &founder_message)
+        !matches!(entry, arkret_wire::CurrentState::Value { selector, .. } if selector == &founder_message)
     });
     assert_eq!(
         bob_cut.current_state_entries, expected,
@@ -4168,7 +4168,7 @@ fn local_member(label: &str) -> arkret_wire::ActorId {
 
 async fn peer_page(
     store: &PgAuthorityCommitStore,
-    request: arkret_wire::StreamScanRequest,
+    request: arkret_wire::StreamScanRequestBody,
     peer: &arkret_wire::DidCoreId,
 ) -> coland_storage::AccountStreamScan {
     peer_interval_decision(
@@ -5100,7 +5100,8 @@ fn replicated_welcome(
                 device_id: arkret_wire::DeviceId::new(device.to_owned()).unwrap(),
             },
             keypackage_claim_ref: arkret_wire::KeypackageClaimId::new(claim_id.to_owned()).unwrap(),
-            ciphertext_b64: arkret_wire::Base64UrlString::new("V2VsY29tZQ".to_owned()).unwrap(),
+            ciphertext_base64url: arkret_wire::Base64UrlString::new("V2VsY29tZQ".to_owned())
+                .unwrap(),
             producer_proof: arkret_wire::DetachedObjectSignature {
                 context: arkret_wire::DetachedSignatureContext::MlsWelcomeDelivery,
                 signature_algorithm: arkret_wire::DetachedSignatureAlgorithm::Ed25519,
@@ -5113,7 +5114,7 @@ fn replicated_welcome(
                 signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "5".repeat(64)))
                     .unwrap(),
                 created_at: commit.authority_commit.commit.committed_at,
-                sig: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
+                signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned()).unwrap(),
             },
         },
         claim: Some(claim),
@@ -5140,7 +5141,7 @@ fn recipient_roster_witness(
     };
     use arkret_models_crypto::{
         KeyOperationSignature, KeyPackageClaimRecord, PeerKeyPackageClaimReceipt,
-        PeerKeyPackagesClaimOutcome, PeerKeyPackagesClaimUnsignedRequest,
+        PeerKeyPackagesClaimFields, PeerKeyPackagesClaimResponseBody,
         peer_keypackage_claim_receipt_signing_bytes,
     };
     let delivery = &welcome.delivery;
@@ -5152,7 +5153,7 @@ fn recipient_roster_witness(
     let placeholder = || KeyOperationSignature {
         kid: arkret_wire::NonEmptyString::new(verification_method.clone()).unwrap(),
         signature_algorithm: Some(arkret_wire::NonEmptyString::new("Ed25519").unwrap()),
-        sig: arkret_wire::Base64UrlString::new("AA").unwrap(),
+        signature: arkret_wire::Base64UrlString::new("AA").unwrap(),
     };
     let record = KeyPackageClaimRecord {
         claim_id: delivery.keypackage_claim_ref.to_string(),
@@ -5179,7 +5180,7 @@ fn recipient_roster_witness(
         last_resort: None,
     };
     record.validate_shape().unwrap();
-    let request: PeerKeyPackagesClaimUnsignedRequest = serde_json::from_value(serde_json::json!({
+    let request: PeerKeyPackagesClaimFields = serde_json::from_value(serde_json::json!({
         "claim_request_id": claim_key.claim_request_id,
         "intended_realm_id": delivery.realm_id,
         "mls_group_id": delivery.effective_scope.canonical_mls_group_id().unwrap(),
@@ -5212,7 +5213,7 @@ fn recipient_roster_witness(
         &peer_keypackage_claim_receipt_signing_bytes(&receipt).unwrap(),
     )
     .unwrap();
-    let outcome = PeerKeyPackagesClaimOutcome {
+    let outcome = PeerKeyPackagesClaimResponseBody {
         claim_request_id: receipt.claim_request_id.clone(),
         claims: vec![record],
         claim_receipt: receipt.clone(),
@@ -5231,7 +5232,7 @@ fn recipient_roster_witness(
         actor_id: delivery.recipient_actor_id.clone(),
         endpoint: delivery.recipient_endpoint.clone(),
         authorization_event_ref: authorization_event_ref.clone(),
-        leaf_signature_key_b64u: arkret_wire::Base64UrlString::new(
+        leaf_signature_key_base64url: arkret_wire::Base64UrlString::new(
             arkret_canonical::base64url_encode([7; 32]),
         )
         .unwrap(),
@@ -5869,7 +5870,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                     "issuer_id":creator,"subject":remote,"actions":["ak.circle.member.add"],
                     "resources":[{"kind":"circle","realm_id":realm,"circle_id":circle}],
                     "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,
-                        "authority_event_ref":root_event_ref,"authority_generation":0}],
+                        "authority_event_ref":root_event_ref,"authority_generation":"0"}],
                     "issued_at":arkret_canonical::format_timestamp_canonical(at)
                 }}),
                 at,
@@ -5931,13 +5932,12 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         CommittedReplicaOutcome::Stored
     );
     let mut connection = member.pool.get().await.unwrap();
-    let metadata = diesel::sql_query(
-        "SELECT COUNT(*) AS count FROM circle_current_results WHERE circle_id=$1",
-    )
-    .bind::<Text, _>(circle.as_str())
-    .get_result::<CountRow>(&mut *connection)
-    .await
-    .unwrap();
+    let metadata =
+        diesel::sql_query("SELECT COUNT(*) AS count FROM circle_current_states WHERE circle_id=$1")
+            .bind::<Text, _>(circle.as_str())
+            .get_result::<CountRow>(&mut *connection)
+            .await
+            .unwrap();
     assert_eq!(
         metadata.count, 0,
         "the private Circle Create must not be fabricated before bootstrap"
@@ -5987,7 +5987,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
     let mut connection = member.pool.get().await.unwrap();
     let advance_parent = |delta: i64| {
         diesel::sql_query(
-        "UPDATE member_state_current_results SET current_stream_position=current_stream_position+$3 \
+        "UPDATE member_state_current_states SET current_stream_position=current_stream_position+$3 \
          WHERE realm_id=$1 AND member_id=$2",
     ).bind::<Text,_>(realm.as_str()).bind::<Text,_>(remote.to_string()).bind::<BigInt,_>(delta)
     };
@@ -6015,7 +6015,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             .unwrap(),
         join_floor
     );
-    let pending_scan = arkret_wire::StreamScanRequest {
+    let pending_scan = arkret_wire::StreamScanRequestBody {
         realm_id: realm.clone(),
         stream_ref: stream.clone(),
         direction: arkret_wire::StreamScanDirection::After(None),
@@ -6091,7 +6091,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             .unwrap()
             .is_some()
     );
-    let scan = arkret_wire::StreamScanRequest {
+    let scan = arkret_wire::StreamScanRequestBody {
         realm_id: realm.clone(),
         stream_ref: stream.clone(),
         direction: arkret_wire::StreamScanDirection::After(None),
@@ -6145,7 +6145,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             "schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":creator,
             "subject":remote,"actions":["ak.event.read"],
             "resources":[{"kind":"circle","realm_id":realm,"circle_id":circle,"match_scope":"exact"}],
-            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":root_event_ref,"authority_generation":0}],
+            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":root_event_ref,"authority_generation":"0"}],
             "issued_at":arkret_canonical::format_timestamp_canonical(at)
         }}),
     );
@@ -6232,7 +6232,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             .is_none(),
         "the successor cannot skip a withheld Circle Commit"
     );
-    let scan_gap = arkret_wire::StreamScanRequest {
+    let scan_gap = arkret_wire::StreamScanRequestBody {
         realm_id: realm.clone(),
         stream_ref: stream.clone(),
         direction: arkret_wire::StreamScanDirection::After(Some(
@@ -6420,7 +6420,7 @@ fn peer_interval_decision(
 ) -> coland_storage::AccountStreamScan {
     match scan {
         coland_storage::PeerStreamScan::Page(page) => {
-            coland_storage::AccountStreamScan::Page(arkret_wire::StreamScanOutcome {
+            coland_storage::AccountStreamScan::Page(arkret_wire::StreamScanResponseBody {
                 committed_events: page.committed_events,
                 readable_floor: page.readable_floor,
                 truncated: page.truncated,

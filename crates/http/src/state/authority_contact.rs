@@ -11,7 +11,9 @@
 //! in-process projection is consulted or advanced.
 
 use arkret_models_collaboration::contact_operations::ContactProducerSigner;
-use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitOutcome, Event, EventAdmissionSubmission};
+use arkret_wire::{
+    AuthorityCommitStatus, AuthoritySubmitResponseBody, Event, EventAdmissionSubmission,
+};
 use coland_services::identity::SessionIdentityState;
 use coland_services::{ServiceError, ServiceResult};
 use coland_storage::SelfProducerCommitGuard;
@@ -82,7 +84,7 @@ pub(crate) async fn commit_contact_event_unit(
     guard: SelfProducerCommitGuard,
     projection: coland_services::events::CommitContactProjection,
     accepted_at: chrono::DateTime<chrono::Utc>,
-) -> ServiceResult<AuthoritySubmitOutcome> {
+) -> ServiceResult<AuthoritySubmitResponseBody> {
     submission
         .validate()
         .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
@@ -174,7 +176,7 @@ pub(crate) async fn commit_contact_event_unit(
         }
         return Err(error);
     }
-    Ok(AuthoritySubmitOutcome::Accepted {
+    Ok(AuthoritySubmitResponseBody::Accepted {
         status: AuthorityCommitStatus::Committed,
         commit: transaction.commit,
     })

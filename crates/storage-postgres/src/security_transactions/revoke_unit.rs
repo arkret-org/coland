@@ -129,7 +129,7 @@ pub(super) async fn commit_revoke_command_terminal_in_connection(
         )
         .await?;
         match (
-            outcome.result,
+            outcome.outcome,
             write.step_outcome.as_ref(),
             durable.as_ref(),
         ) {
@@ -157,7 +157,7 @@ pub(super) async fn commit_revoke_command_terminal_in_connection(
             "rotation terminal changed its accepted proposal or first result",
         ));
     }
-    match outcome.result {
+    match outcome.outcome {
         SecurityRotationRevokeCommandDecision::Accepted => {
             accept_step_in_transaction(
                 conn,
@@ -166,7 +166,7 @@ pub(super) async fn commit_revoke_command_terminal_in_connection(
                 StepAttemptSource::CoCommittedWithOutcome,
             )
             .await?;
-            crate::pcr_device_current_results::publish_device_list_change_in_connection(
+            crate::pcr_device_current_states::publish_device_list_change_in_connection(
                 conn,
                 &resource.account_id,
             )

@@ -19,8 +19,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use arkret_event_draft::EventPayloadExt as _;
 use arkret_models_collaboration::SignalStreamFrame;
-use arkret_models_collaboration::signal_operations::SignalSubmitOutcome;
-use arkret_wire::{SignalEnvelope, SignalRelayRequest};
+use arkret_models_collaboration::signal_operations::SignalSubmitResponseBody;
+use arkret_wire::{SignalEnvelope, SignalRelayRequestBody};
 use coland_http::error::AppError;
 use coland_services::identity::SessionIdentityState;
 use futures_util::stream::StreamExt;
@@ -56,7 +56,7 @@ pub(super) async fn submit_signal(
     aa: crate::routing::system::extract::AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> coland_http::result::JsonResult<SignalSubmitOutcome> {
+) -> coland_http::result::JsonResult<SignalSubmitResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     super::super::require_agent_session_scope(
@@ -124,7 +124,7 @@ pub(super) async fn submit_signal(
         relay_signal_to_remote_services(state, &envelope, &scope_authority.recipient_actors).await;
     }
 
-    coland_http::result::json_ok(SignalSubmitOutcome {
+    coland_http::result::json_ok(SignalSubmitResponseBody {
         accepted: true,
         realm_id,
         envelope_digest: arkret_wire::Hash::new(envelope_digest)
@@ -150,7 +150,7 @@ async fn relay_signal_to_remote_services(
     };
     for destination_id in destinations {
         let state = state.clone();
-        let request = SignalRelayRequest {
+        let request = SignalRelayRequestBody {
             realm_id: envelope.realm_id.clone(),
             signals: vec![envelope.clone()],
         };
@@ -416,9 +416,9 @@ async fn resolve_local_signal_device_key(
     Ok(arkret_wire::StationSigningKey {
         actor: actor.clone(),
         verification_method: envelope.proof.verification_method.clone(),
-        public_key_b64u: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
-            raw_key,
-        ))
+        public_key_base64url: arkret_wire::Base64UrlString::new(
+            arkret_canonical::base64url_encode(raw_key),
+        )
         .map_err(|_| signal_proof_invalid("Signal device key encoding is invalid"))?,
         authorization_ref: facet
             .device_authorize_event_id
@@ -473,8 +473,10 @@ pub(crate) async fn resolve_signal_delivery_device_key(
     Ok(arkret_wire::StationSigningKey {
         actor: actor.clone(),
         verification_method: envelope.proof.verification_method.clone(),
-        public_key_b64u: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(raw))
-            .map_err(|_| signal_proof_invalid("remote device key encoding is invalid"))?,
+        public_key_base64url: arkret_wire::Base64UrlString::new(
+            arkret_canonical::base64url_encode(raw),
+        )
+        .map_err(|_| signal_proof_invalid("remote device key encoding is invalid"))?,
         authorization_ref: projection.device_authorize_event_id,
     })
 }
@@ -591,7 +593,7 @@ async fn verify_signal_agent_current_authority(
             )
             .await
             .map_err(|_| signal_rail_unavailable("resolve Signal authority"))?;
-        if !matches!(mode, Some(arkret_wire::TypedCurrentRow::Value { value, .. }) if serde_json::from_value::<arkret_models_collaboration::agent_interaction::AgentInteractionCurrentValue>(value.clone()).is_ok_and(|v| v.controller_account_id == controller_account && v.interaction_mode == arkret_models_collaboration::agent_interaction::AgentInteractionMode::Public))
+        if !matches!(mode, Some(arkret_wire::CurrentState::Value { value, .. }) if serde_json::from_value::<arkret_models_collaboration::agent_interaction::AgentInteractionCurrentValue>(value.clone()).is_ok_and(|v| v.controller_account_id == controller_account && v.interaction_mode == arkret_models_collaboration::agent_interaction::AgentInteractionMode::Public))
         {
             return Err(signal_proof_invalid("Signal authority is unavailable"));
         }
@@ -998,7 +1000,7 @@ pub(crate) async fn admitted_signal_frame(
     envelope: SignalEnvelope,
 ) -> Result<SignalStreamFrame, AppError> {
     use arkret_models_identity::{
-        CurrentSignerKeyQuerySender, SignerKeyQueryOutcome, SignerKeyQuerySelector,
+        CurrentSignerKeyQuerySender, SignerKeyQuerySelector, SignerKeyResolution,
         SignerKeysQueryRequestBody,
     };
     let actor =
@@ -1042,15 +1044,15 @@ pub(crate) async fn admitted_signal_frame(
         outcome
             .validate_for_request(&request)
             .map_err(structural_error)?;
-        let Some(SignerKeyQueryOutcome::CurrentResolved { selector, key }) =
-            outcome.results.into_iter().next()
+        let Some(SignerKeyResolution::CurrentResolved { selector, key }) =
+            outcome.resolutions.into_iter().next()
         else {
             return Err(signal_rail_unavailable("verify current sender authority"));
         };
         Some(arkret_wire::StationSigningKey {
             actor: selector.actor().clone(),
             verification_method: selector.verification_method().clone(),
-            public_key_b64u: key.public_key_b64u,
+            public_key_base64url: key.public_key_base64url,
             authorization_ref: key.authorization_ref.event_id,
         })
     } else {

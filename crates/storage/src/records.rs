@@ -85,7 +85,7 @@ pub struct AccountRecord {
     /// Free-form short description for directory rendering. Updated via
     /// `POST /_arkret/self/account/profile` (operationId
     /// `ak.self.account.command.update_profile.v1`).
-    pub bio: Option<String>,
+    pub biography: Option<String>,
     /// Canonical content-addressed avatar Blob reference.
     pub avatar_blob_ref: Option<BlobRef>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -286,7 +286,7 @@ pub struct WebvhDocumentRecord {
     pub did: String,
     pub did_document: Value,
     pub key_log_head: Option<String>,
-    pub seq: u64,
+    pub sequence: u64,
     pub method_evidence: Value,
     /// Time this record was ingested by this node. High-risk verification
     /// paths compare `age = now - fetched_at` with the caller-provided
@@ -307,7 +307,7 @@ pub struct WebvhDocumentRecord {
 pub struct WebvhLogRecord {
     pub event_digest: String,
     pub did: String,
-    pub seq: u64,
+    pub sequence: u64,
     pub operation: Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -766,7 +766,7 @@ pub struct FederationOutboxRecord {
     /// unfinished row may exist for `(peer_id, coalescing_key)`; a higher
     /// `coalescing_position` atomically supersedes the older unfinished row.
     pub coalescing_key: Option<String>,
-    /// Monotonic position within `coalescing_key` (account-status `status_seq`).
+    /// Monotonic position within `coalescing_key` (account-status `status_sequence`).
     pub coalescing_position: Option<i64>,
     /// Explicit lifecycle state — the single source of truth for whether this
     /// intent is still owed to the peer.
@@ -1178,9 +1178,9 @@ pub struct ForeignDirectMlsInput {
     pub service_id: arkret_wire::DidCoreId,
     pub generation: u64,
     pub head: arkret_wire::CommitStreamHead,
-    pub current: arkret_wire::TypedCurrentRow,
+    pub current: arkret_wire::CurrentState,
     /// Bounded signed Binding/MLS/member evidence, rechecked under the install lock.
-    pub current_state_entries: Vec<arkret_wire::TypedCurrentRow>,
+    pub current_state_entries: Vec<arkret_wire::CurrentState>,
     pub participants: std::collections::BTreeSet<arkret_wire::ActorId>,
     pub history: Vec<(arkret_wire::RealmCommit, arkret_wire::Event)>,
     pub base: Option<ForeignDirectMlsBase>,

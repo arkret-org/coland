@@ -1,6 +1,6 @@
 //! Realm-owned Applet control state, committed with the original Event.
 use arkret_models_integration::RealmActorCreatePayload;
-use arkret_wire::{ActorId, Event, EventKind, RealmCommit, ScopeRef, TypedCurrentRow};
+use arkret_wire::{ActorId, CurrentState, Event, EventKind, RealmCommit, ScopeRef};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Binary, Jsonb, Nullable, Text};
 use diesel::{QueryableByName, sql_query};
@@ -125,7 +125,7 @@ pub(crate) async fn optional_current_source(
             "private current selector names another complete actor",
         ));
     }
-    let Some(row) = sql_query("SELECT jsonb_build_object('value',r.value,'event',e.envelope,'commit',c.commit_json) AS value FROM realm_actor_current_results r LEFT JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.stream_position=r.current_stream_position AND c.stream_ref=r.source_stream_ref AND c.realm_id=r.realm_id LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE r.realm_id=$1 AND r.actor_id=$2 AND r.selector=$3")
+    let Some(row) = sql_query("SELECT jsonb_build_object('value',r.value,'event',e.envelope,'commit',c.commit_json) AS value FROM realm_actor_current_states r LEFT JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.stream_position=r.current_stream_position AND c.stream_ref=r.source_stream_ref AND c.realm_id=r.realm_id LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE r.realm_id=$1 AND r.actor_id=$2 AND r.selector=$3")
         .bind::<Text,_>(subject.realm_id.as_str()).bind::<Jsonb,_>(json!(actor)).bind::<Jsonb,_>(json!(selector))
         .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)? else { return Ok(None); };
     let event: Event = serde_json::from_value(row.value["event"].clone()).map_err(denied)?;
@@ -228,7 +228,7 @@ pub(crate) async fn recovery_service_fact(
             "recovery Applet does not own the target Realm identity",
         ));
     }
-    let registered=sql_query("SELECT c.commit_json AS value FROM applet_registration_current_results r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref JOIN realm_commits c ON c.commit_id=a.accepted_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3 AND e.state='committed'")
+    let registered=sql_query("SELECT c.commit_json AS value FROM applet_registration_current_states r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref JOIN realm_commits c ON c.commit_id=a.accepted_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3 AND e.state='committed'")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(registration.applet_id.as_str()).bind::<Text,_>(registration.service_id.as_str()).get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let registration_commit: RealmCommit =
         serde_json::from_value(registered.value).map_err(denied)?;
@@ -236,7 +236,7 @@ pub(crate) async fn recovery_service_fact(
         .producer_proof
         .as_ref()
         .ok_or_else(|| denied("recovery Service producer proof is absent"))?;
-    if proof.verification_method != registration.webhook_auth.key_ref {
+    if proof.verification_method != registration.webhook_signature_policy.key_ref {
         return Err(denied("recovery method differs from current registration"));
     }
     arkret_identity::validate_verification_method_relationship(
@@ -258,9 +258,9 @@ pub(crate) async fn recovery_service_fact(
             actor_id: event.actor_id.clone(),
             target_actor_id: target,
             verification_method: proof.verification_method.clone(),
-            public_key_b64u: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
-                key.ed25519_bytes().map_err(denied)?,
-            ))
+            public_key_base64url: arkret_wire::Base64UrlString::new(
+                arkret_canonical::base64url_encode(key.ed25519_bytes().map_err(denied)?),
+            )
             .map_err(denied)?,
             accepted_at: arkret_canonical::normalize_timestamp_canonical(at),
             applet_id: registration.applet_id,
@@ -309,7 +309,7 @@ pub(crate) async fn admit_creation(
     {
         return Err(denied("creation manager differs from active registration"));
     }
-    let registered = sql_query("SELECT to_jsonb(a) AS value FROM applet_registration_current_results r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref WHERE r.realm_id=$1 AND r.applet_id=$2 AND a.registration_event_ref=$3")
+    let registered = sql_query("SELECT to_jsonb(a) AS value FROM applet_registration_current_states r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref WHERE r.realm_id=$1 AND r.applet_id=$2 AND a.registration_event_ref=$3")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(candidate.applet_id.as_str()).bind::<Text,_>(candidate.registration_ref.as_str())
         .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     if registered.is_none() {
@@ -349,14 +349,14 @@ pub(crate) async fn commit_creation(
         .bind::<Nullable<Jsonb>,_>(candidate.external_ref.as_ref().map(|value| json!(value)))
         .bind::<Text,_>(event.event_id.as_str()).bind::<Text,_>(commit.commit_id.as_str())
         .execute(&mut *conn).await.map_err(PersistenceError::database)?;
-    for TypedCurrentRow::Value {
+    for CurrentState::Value {
         selector,
         source_stream_ref,
         revision,
         value,
     } in rows
     {
-        sql_query("INSERT INTO realm_actor_current_results(realm_id,actor_id,selector,source_stream_ref,current_commit_id,current_stream_position,value) VALUES($1,$2,$3,$4,$5,$6,$7)")
+        sql_query("INSERT INTO realm_actor_current_states(realm_id,actor_id,selector,source_stream_ref,current_commit_id,current_stream_position,value) VALUES($1,$2,$3,$4,$5,$6,$7)")
             .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(json!(candidate.actor_id))
             .bind::<Jsonb,_>(json!(selector)).bind::<Jsonb,_>(json!(source_stream_ref))
             .bind::<Text,_>(revision.commit_id.as_str()).bind::<BigInt,_>(i64::try_from(revision.stream_position).map_err(denied)?)
@@ -388,7 +388,7 @@ pub(crate) async fn write_current(
     {
         return Err(denied("private current writer identity or stream differs"));
     }
-    let written=sql_query("INSERT INTO realm_actor_current_results(realm_id,actor_id,selector,source_stream_ref,current_commit_id,current_stream_position,value) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(realm_id,selector) DO UPDATE SET source_stream_ref=EXCLUDED.source_stream_ref,current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value WHERE realm_actor_current_results.actor_id=EXCLUDED.actor_id AND realm_actor_current_results.source_stream_ref=EXCLUDED.source_stream_ref AND realm_actor_current_results.current_stream_position<EXCLUDED.current_stream_position")
+    let written=sql_query("INSERT INTO realm_actor_current_states(realm_id,actor_id,selector,source_stream_ref,current_commit_id,current_stream_position,value) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(realm_id,selector) DO UPDATE SET source_stream_ref=EXCLUDED.source_stream_ref,current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value WHERE realm_actor_current_states.actor_id=EXCLUDED.actor_id AND realm_actor_current_states.source_stream_ref=EXCLUDED.source_stream_ref AND realm_actor_current_states.current_stream_position<EXCLUDED.current_stream_position")
         .bind::<Text,_>(subject.realm_id.as_str()).bind::<Jsonb,_>(json!(actor)).bind::<Jsonb,_>(json!(selector))
         .bind::<Jsonb,_>(json!(commit.stream_ref)).bind::<Text,_>(commit.commit_id.as_str())
         .bind::<BigInt,_>(i64::try_from(commit.stream_position).map_err(denied)?).bind::<Jsonb,_>(value)

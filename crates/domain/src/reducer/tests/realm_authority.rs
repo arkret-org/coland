@@ -44,7 +44,7 @@ fn authority_generation(state: &ProjectionState) -> u64 {
         .realm_authority_root(REALM)
         .unwrap()
         .get("authority_generation")
-        .and_then(Value::as_u64)
+        .and_then(arkret_canonical::serde_helpers::parse_uint64_decimal_value)
         .unwrap()
 }
 
@@ -56,7 +56,7 @@ fn state_with_successor() -> ProjectionState {
         serde_json::json!({
             "controller_actor_id": account_actor(OWNER),
             "controller_epoch": 0,
-            "authority_generation": 0,
+            "authority_generation": "0",
             "authority_event_ref": REALM.replacen("ak:realm:", "ak:event:", 1),
         }),
     );
@@ -216,7 +216,7 @@ fn governance_station_change_is_explicit_without_mutating_projection_state() {
         &operation(
             arkret_wire::EventKind::RealmGovernanceStationChange,
             serde_json::json!({
-                "expected_governance_generation": 0,
+                "expected_governance_generation": "0",
                 "expected_realm_stream_commit_id": arkret_wire::RealmCommitId::from_digest([0x11; 32]).to_string(),
                 "new_governance_station_id": "ak:did_core:web:successor-station.example",
                 "sender": OWNER

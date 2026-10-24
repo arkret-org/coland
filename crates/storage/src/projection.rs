@@ -394,7 +394,7 @@ impl ActorRealmAuthorization {
 }
 
 impl From<EffectiveActorGrant>
-    for arkret_models_collaboration::governance::authorization::EffectiveCapabilityGrantRow
+    for arkret_models_collaboration::governance::authorization::EffectiveCapabilityGrantView
 {
     fn from(effective: EffectiveActorGrant) -> Self {
         Self {
@@ -407,7 +407,7 @@ impl From<EffectiveActorGrant>
 /// Canonical digest of the complete effective-list rows. This binds the list
 /// snapshot only; it is deliberately not a per-grant revision.
 pub fn effective_capability_grant_state_digest(
-    rows: &[arkret_models_collaboration::governance::authorization::EffectiveCapabilityGrantRow],
+    rows: &[arkret_models_collaboration::governance::authorization::EffectiveCapabilityGrantView],
 ) -> PersistenceResult<arkret_wire::Hash> {
     let bytes = arkret_canonical::canonical_json_bytes(rows).map_err(PersistenceError::database)?;
     arkret_wire::Hash::new(arkret_canonical::sha256_digest(&bytes))
@@ -605,7 +605,7 @@ mod capability_grant_current_state_tests {
     fn effective_row_digest_binds_the_listed_rows() {
         let active = complete_record(CapabilityGrantCurrentStatus::Active);
         let rows = vec![
-            arkret_models_collaboration::governance::authorization::EffectiveCapabilityGrantRow::from(
+            arkret_models_collaboration::governance::authorization::EffectiveCapabilityGrantView::from(
                 EffectiveActorGrant {
                     grant: active.value.clone(),
                     revision: active.revision.clone(),

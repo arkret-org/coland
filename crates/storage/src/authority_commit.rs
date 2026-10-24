@@ -51,7 +51,7 @@ pub enum PeerStreamScan {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AccountRealmStreamList {
     /// Every row the caller may know exists, in JCS(stream_ref) order.
-    Listed(Vec<arkret_wire::RealmStreamRow>),
+    Listed(Vec<arkret_wire::RealmStreamView>),
     /// Unknown Realm or a caller that is not a currently joined member: the
     /// universal non-enumerating `not_found`.
     NotVisible,
@@ -184,7 +184,7 @@ pub struct CommittedEventRecord {
 /// Durable MIMI room binding winner at one accepted RealmCommit revision.
 #[derive(Clone, Debug)]
 pub struct MimiRoomBindingCurrentRecord {
-    pub current: arkret_models_collaboration::events_payloads::mimi::MimiRoomBindingCurrentRow,
+    pub current: arkret_models_collaboration::events_payloads::mimi::CurrentMimiRoomBinding,
     pub source_event_id: arkret_wire::EventId,
     pub realm_id: arkret_wire::RealmId,
 }

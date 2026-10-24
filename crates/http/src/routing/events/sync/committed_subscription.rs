@@ -5,7 +5,7 @@ use arkret_models_collaboration::sync_frames::committed_event_subscribe::{
     CommittedEventSubscribeFramePayload as Payload,
 };
 use arkret_wire::{
-    CommitStreamHead, CommitStreamRef, RealmStreamRow, StreamScanDirection, StreamScanRequestBody,
+    CommitStreamHead, CommitStreamRef, RealmStreamView, StreamScanDirection, StreamScanRequestBody,
 };
 use coland_http::error::AppError;
 
@@ -26,11 +26,11 @@ struct StreamProgress {
 
 #[derive(Clone)]
 struct AuthorizedStream {
-    row: RealmStreamRow,
+    row: RealmStreamView,
     history_digest: String,
 }
 impl std::ops::Deref for AuthorizedStream {
-    type Target = RealmStreamRow;
+    type Target = RealmStreamView;
     fn deref(&self) -> &Self::Target {
         &self.row
     }
@@ -727,7 +727,7 @@ mod tests {
         let realm =
             arkret_wire::RealmId::new("ak:realm:ATdMSXE70ijF1u9M9PvT4WFuWRgKpqVf-tiHDAD-_stf")
                 .unwrap();
-        let row = RealmStreamRow {
+        let row = RealmStreamView {
             stream_ref: CommitStreamRef::Realm { realm_id: realm },
             head_commit_ref: arkret_wire::RealmCommitId::from_digest([1; 32]),
             next_position: 5,

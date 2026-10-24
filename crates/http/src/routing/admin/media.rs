@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use arkret_identifiers::RealmId;
 use arkret_models_collaboration::events_payloads::RealmMediaServicePayload;
 use coland_contracts::admin::{
-    AdminMediaBucket, AdminMediaByActorList, AdminMediaByActorRow, AdminMediaStatistics,
+    AdminMediaBucket, AdminMediaByActorList, AdminMediaStatistics, AdminMediaUsageView,
     AdminRealmMediaService,
 };
 use coland_http::error::AppError;
@@ -200,7 +200,7 @@ async fn media_snapshot(state: &AppState) -> Vec<BlobRecord> {
     state.deliveries().blobs().await.unwrap_or_default()
 }
 
-async fn media_by_actor_rows(state: &AppState, blobs: &[BlobRecord]) -> Vec<AdminMediaByActorRow> {
+async fn media_by_actor_rows(state: &AppState, blobs: &[BlobRecord]) -> Vec<AdminMediaUsageView> {
     let accounts: BTreeMap<String, _> = state
         .identities()
         .accounts()
@@ -221,7 +221,7 @@ async fn media_by_actor_rows(state: &AppState, blobs: &[BlobRecord]) -> Vec<Admi
             let display_name = accounts
                 .get(&actor_id)
                 .and_then(|account| account.display_name.clone());
-            AdminMediaByActorRow {
+            AdminMediaUsageView {
                 actor_id,
                 display_name,
                 blob_count,

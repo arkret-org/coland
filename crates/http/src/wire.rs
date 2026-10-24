@@ -1,5 +1,5 @@
 pub use arkret_models_collaboration::contact_operations::{
-    ContactListRow, ContactState, DirectConversationSummary, DirectConversationSummaryState,
+    ContactState, ContactView, DirectConversationSummary, DirectConversationSummaryState,
 };
 pub use arkret_models_collaboration::device_messages::{
     DeviceMessageEnvelope, DeviceMessageSender, DeviceMessageTarget,

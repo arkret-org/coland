@@ -50,7 +50,7 @@ pub trait RealmOrganizationStatementStore: Send + Sync {
         &self,
         realm_id: &arkret_wire::RealmId,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::realm_governance::RealmOrganizationRelationshipRow>>;
+    ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::realm_governance::RealmOrganizationRelationshipView>>;
     /// Refuse a sensitive dependency on the unavailable cross-Realm policy
     /// authority from accepted relationships at one locked Realm cut.
     async fn require_moderation_authority(

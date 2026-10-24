@@ -10,7 +10,7 @@ use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
 #[derive(diesel::QueryableByName)]
-struct StrandRow {
+struct StrandCurrentValueRow {
     #[diesel(sql_type = Text)]
     realm_id: String,
     #[diesel(sql_type = Jsonb)]
@@ -90,7 +90,7 @@ pub(crate) async fn commit_rsvp_current_state_in_connection(
         "SELECT realm_id,value FROM strand_current_states WHERE strand_id=$1 FOR SHARE",
     )
     .bind::<Text, _>(payload.event_ref.as_str())
-    .get_result::<StrandRow>(&mut *conn)
+    .get_result::<StrandCurrentValueRow>(&mut *conn)
     .await
     .optional()
     .map_err(PersistenceError::database)?

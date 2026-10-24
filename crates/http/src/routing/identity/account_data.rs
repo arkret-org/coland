@@ -11,8 +11,8 @@
 //! and (where applicable) encryption.
 
 use arkret_models_identity::account::{
-    AccountDataDeleteRequestBody, AccountDataDeleteResponseBody, AccountDataList,
-    AccountDataReplaceRequestBody, AccountDataRow,
+    AccountDataDeleteRequestBody, AccountDataDeleteResponseBody, AccountDataEntry, AccountDataList,
+    AccountDataReplaceRequestBody,
 };
 use coland_http::error::AppError;
 use coland_services::identity::{AccountDataState, FindAgentControllerQuery, IdentityService};
@@ -219,8 +219,8 @@ fn validate_account_data_key(account_data_key: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn entry_from(record: AccountDataState) -> AccountDataRow {
-    AccountDataRow {
+fn entry_from(record: AccountDataState) -> AccountDataEntry {
+    AccountDataEntry {
         account_data_key: record.account_data_key,
         revision: record.revision,
         content: record.payload,
@@ -421,7 +421,7 @@ async fn put_account_data(
     res: &mut Response,
     account_data_key: PathParam<String>,
     body: JsonBody<AccountDataReplaceRequestBody>,
-) -> JsonResult<AccountDataRow> {
+) -> JsonResult<AccountDataEntry> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let account_data_key = account_data_key.into_inner();
@@ -540,7 +540,7 @@ async fn get_account_data(
     depot: &mut Depot,
     req: &mut Request,
     account_data_key: PathParam<String>,
-) -> JsonResult<AccountDataRow> {
+) -> JsonResult<AccountDataEntry> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let account_key =

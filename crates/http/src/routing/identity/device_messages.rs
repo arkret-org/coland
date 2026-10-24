@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 mod native;
 
 use arkret_models_collaboration::device_messages::{
-    DeviceMessageDeliveredRow, DeviceMessageDeliveredStatus, DeviceMessageTarget,
-    DeviceMessageUnknownRow, DeviceMessageUnknownStatus,
+    DeviceMessageDeliveredEntry, DeviceMessageDeliveredStatus, DeviceMessageTarget,
+    DeviceMessageUnknownEntry, DeviceMessageUnknownStatus,
 };
 use coland_http::error::AppError;
 use coland_http::result::{JsonResult, json_ok};
@@ -624,7 +624,7 @@ fn device_message_send_outcome(
                 .or_insert_with(BTreeMap::new)
                 .insert(
                     device_id,
-                    DeviceMessageDeliveredRow {
+                    DeviceMessageDeliveredEntry {
                         device_message_id: target.target.device_message_id.clone(),
                         status: DeviceMessageDeliveredStatus::Delivered,
                     },
@@ -635,7 +635,7 @@ fn device_message_send_outcome(
                 .or_insert_with(BTreeMap::new)
                 .insert(
                     device_id,
-                    DeviceMessageUnknownRow {
+                    DeviceMessageUnknownEntry {
                         device_message_id: target.target.device_message_id.clone(),
                         status: DeviceMessageUnknownStatus::Unknown,
                     },

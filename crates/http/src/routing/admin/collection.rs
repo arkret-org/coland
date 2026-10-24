@@ -20,7 +20,8 @@ use std::collections::BTreeMap;
 use arkret_identifiers::{DidCoreId, RealmId};
 use arkret_wire::JoinRule;
 use coland_contracts::admin::{
-    AdminFederationOperation, AdminMediaRow, AdminRealmItem, AdminSpaceRow, RealmClass, SpaceHealth,
+    AdminFederationOperation, AdminMediaView, AdminRealmItem, AdminSpaceView, RealmClass,
+    SpaceHealth,
 };
 use coland_domain::reducer::SpaceContainerLifecycleState;
 use coland_http::error::AppError;
@@ -366,7 +367,7 @@ fn admin_space_container_items(state: &AppState) -> Vec<Value> {
         .space_containers
         .values()
         .map(|container| {
-            json!(AdminSpaceRow {
+            json!(AdminSpaceView {
                 id: container.container_space_id.clone(),
                 name: container.title.clone(),
                 realm_id: container.realm_id.clone(),
@@ -518,7 +519,7 @@ pub(super) async fn admin_media_items(state: &AppState) -> Vec<Value> {
         .unwrap_or_default()
         .iter()
         .map(|blob| {
-            json!(AdminMediaRow {
+            json!(AdminMediaView {
                 kind: "media".to_owned(),
                 sha256: blob.sha256.clone(),
                 media_type: blob.media_type.clone(),

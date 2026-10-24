@@ -178,11 +178,11 @@ pub(crate) async fn accepted_relationships_in_connection(
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<
     Vec<
-        arkret_models_collaboration::governance::realm_governance::RealmOrganizationRelationshipRow,
+        arkret_models_collaboration::governance::realm_governance::RealmOrganizationRelationshipView,
     >,
-> {
+>{
     use arkret_models_collaboration::governance::realm_governance::{
-        RealmOrganizationLifecyclePhase, RealmOrganizationRelationshipRow,
+        RealmOrganizationLifecyclePhase, RealmOrganizationRelationshipView,
     };
     let mut result = Vec::new();
     for row in relationships(conn, realm.as_str()).await? {
@@ -194,7 +194,7 @@ pub(crate) async fn accepted_relationships_in_connection(
         };
         let commit: arkret_wire::RealmCommit =
             serde_json::from_value(row.commit_json).map_err(corrupt)?;
-        result.push(RealmOrganizationRelationshipRow {
+        result.push(RealmOrganizationRelationshipView {
             statement_id: value.statement_id,
             organization_id: value.organization_id,
             relationship: value.relationship,

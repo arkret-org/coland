@@ -140,7 +140,7 @@ struct SnapshotCurrentRow {
 }
 
 #[derive(QueryableByName)]
-struct MimiRoomBindingCurrentRow {
+struct MimiRoomBindingStorageRow {
     #[diesel(sql_type = Text)]
     mimi_room_uri: String,
     #[diesel(sql_type = Text)]
@@ -151,19 +151,30 @@ struct MimiRoomBindingCurrentRow {
     current_stream_position: i64,
     #[diesel(sql_type = Text)]
     current_event_id: String,
+    #[diesel(sql_type = Nullable<Jsonb>)]
+    source_stream_ref: Option<Value>,
     #[diesel(sql_type = Jsonb)]
     value: Value,
 }
 
 fn decode_mimi_room_binding_current(
-    row: MimiRoomBindingCurrentRow,
+    row: MimiRoomBindingStorageRow,
 ) -> PersistenceResult<coland_storage::MimiRoomBindingCurrentRecord> {
-    let selector = arkret_wire::CurrentSelector::MimiRoomBinding {
+    let selector = arkret_models_collaboration::events_payloads::mimi::MimiRoomBindingSelector {
+        kind: arkret_models_collaboration::events_payloads::mimi::MimiRoomBindingSelectorKind::MimiRoomBinding,
         mimi_room_uri: arkret_wire::MimiRoomUri::new(row.mimi_room_uri)
             .map_err(|error| PersistenceError::Internal(error.to_string()))?,
     };
-    let current = arkret_models_collaboration::events_payloads::mimi::MimiRoomBindingCurrentRow {
+    let current = arkret_models_collaboration::events_payloads::mimi::CurrentMimiRoomBinding {
         selector,
+        source_stream_ref: decode_json(
+            row.source_stream_ref.ok_or_else(|| {
+                PersistenceError::SchemaViolation(
+                    "MIMI current binding has no exact covering RealmCommit".to_owned(),
+                )
+            })?,
+            "MIMI current source stream",
+        )?,
         revision: arkret_wire::CurrentRevision {
             commit_id: decode_text(row.current_commit_id, "MIMI current RealmCommit id")?,
             stream_position: to_u64(row.current_stream_position, "MIMI current stream position")?,
@@ -201,7 +212,7 @@ async fn verify_mimi_migration_in_connection(
     conn: &mut AsyncPgConnection,
     payload: &arkret_models_collaboration::events_payloads::mimi::MimiRoomBindingPayload,
     value: &Value,
-    previous: &MimiRoomBindingCurrentRow,
+    previous: &MimiRoomBindingStorageRow,
 ) -> PersistenceResult<()> {
     use arkret_models_collaboration::events_payloads::mimi::MimiRoomBindingMigrationOutcome;
 
@@ -362,11 +373,14 @@ pub(crate) async fn commit_mimi_room_binding_current_state_in_connection(
     }
     let room_uri = payload.mimi_room_uri.as_str();
     let previous = sql_query(
-        "SELECT mimi_room_uri,realm_id,current_commit_id,current_stream_position,current_event_id,value \
-         FROM mimi_room_binding_current_states WHERE mimi_room_uri=$1 FOR UPDATE",
+        "SELECT b.mimi_room_uri,b.realm_id,b.current_commit_id,b.current_stream_position,b.current_event_id,b.value,c.stream_ref AS source_stream_ref \
+         FROM mimi_room_binding_current_states b LEFT JOIN realm_commits c \
+         ON c.commit_id=b.current_commit_id AND c.realm_id=b.realm_id \
+         AND c.stream_position=b.current_stream_position AND c.commit_json->>'event_ref'=b.current_event_id \
+         WHERE b.mimi_room_uri=$1 FOR UPDATE OF b",
     )
     .bind::<Text, _>(room_uri)
-    .get_result::<MimiRoomBindingCurrentRow>(&mut *conn)
+    .get_result::<MimiRoomBindingStorageRow>(&mut *conn)
     .await
     .optional()
     .map_err(PersistenceError::database)?;
@@ -5622,11 +5636,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     ) -> PersistenceResult<Option<coland_storage::MimiRoomBindingCurrentRecord>> {
         let mut conn = crate::pg_db(&self.pool);
         sql_query(
-            "SELECT mimi_room_uri,realm_id,current_commit_id,current_stream_position,current_event_id,value \
-             FROM mimi_room_binding_current_states WHERE mimi_room_uri=$1",
+            "SELECT b.mimi_room_uri,b.realm_id,b.current_commit_id,b.current_stream_position,b.current_event_id,b.value,c.stream_ref AS source_stream_ref \
+             FROM mimi_room_binding_current_states b LEFT JOIN realm_commits c \
+             ON c.commit_id=b.current_commit_id AND c.realm_id=b.realm_id \
+             AND c.stream_position=b.current_stream_position AND c.commit_json->>'event_ref'=b.current_event_id \
+             WHERE b.mimi_room_uri=$1",
         )
         .bind::<Text, _>(room_uri.as_str())
-        .get_result::<MimiRoomBindingCurrentRow>(&mut conn)
+        .get_result::<MimiRoomBindingStorageRow>(&mut conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?

@@ -3,7 +3,7 @@
 #[allow(dead_code)]
 mod ordinary_realm;
 use arkret_wire::EventKind;
-use coland_storage::{EventCommitRequest, EventCommitUnitOfWork};
+use coland_storage::{AuthorityCommitStore, EventCommitRequest, EventCommitUnitOfWork};
 use coland_storage_postgres::PgEventCommitUnitOfWork;
 use coland_storage_postgres::test_database::TestDatabase;
 use diesel::sql_types::{BigInt, Text};
@@ -128,5 +128,31 @@ async fn completed_and_rolled_back_use_exact_lineage_and_topology_at_cut() {
         .unwrap();
         assert_eq!(row.value["status"], "accepted");
         assert_eq!(row.value["migration_outcome"], outcome);
+        drop(conn);
+        let store = coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() };
+        let uri = arkret_wire::MimiRoomUri::new(format!(
+            "mimi://ordinary-station.example/rooms/{outcome}"
+        ))
+        .unwrap();
+        let record = store
+            .current_mimi_room_binding(&uri)
+            .await
+            .unwrap()
+            .unwrap();
+        record.current.validate().unwrap();
+        assert_eq!(
+            record.current.source_stream_ref,
+            accepted.authority_commit.commit.stream_ref
+        );
+        assert_eq!(record.current.source_stream_ref.realm_id(), &realm);
+        assert_eq!(record.current.selector.mimi_room_uri, uri);
+        let mut conn = pool.get().await.unwrap();
+        diesel::sql_query("UPDATE mimi_room_binding_current_states SET current_stream_position=current_stream_position+1 WHERE mimi_room_uri=$1")
+            .bind::<Text, _>(uri.as_str()).execute(&mut conn).await.unwrap();
+        drop(conn);
+        assert!(
+            store.current_mimi_room_binding(&uri).await.is_err(),
+            "a missing exact covering Commit must fail instead of manufacturing a stream ref"
+        );
     }
 }

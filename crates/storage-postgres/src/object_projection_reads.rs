@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use arkret_models_collaboration::objects::query_projection::{
-    ProjectionAssignedToRelation, SpacePage, SpaceRow, StrandPage, StrandRow,
+    ProjectionAssignedToRelation, SpacePage, SpaceView, StrandPage, StrandView,
 };
 use arkret_models_collaboration::objects::relation::Relation;
 use arkret_models_collaboration::objects::space::Space;
@@ -339,7 +339,7 @@ pub(crate) async fn lists_for_actor_in_connection(
         if !include_terminal && state == SpaceState::Tombstoned {
             continue;
         }
-        spaces.push(SpaceRow {
+        spaces.push(SpaceView {
             space_id: space.id.ok_or_else(|| corrupt("Space id absent"))?,
             realm_id: space.realm_id,
             kind: space.kind,
@@ -523,7 +523,7 @@ pub(crate) async fn lists_for_actor_in_connection(
             .collect::<Vec<_>>();
         actors.sort_by_key(ToString::to_string);
         actors.dedup();
-        strands.push(StrandRow {
+        strands.push(StrandView {
             is_default: default.as_ref() == Some(&id),
             strand_id: id,
             realm_id: strand.realm_id,
@@ -985,7 +985,7 @@ mod tests {
             total: 1,
             next_cursor: None,
             has_more: false,
-            spaces: vec![SpaceRow {
+            spaces: vec![SpaceView {
                 space_id: space_id.clone(),
                 realm_id: realm.clone(),
                 kind: space.kind.clone(),

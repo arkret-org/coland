@@ -20,10 +20,11 @@ use arkret_models_collaboration::agent_operations::AgentLifecycleState;
 // resolves at the crate root, but the invite-addressing strong type lives under `model`;
 // import it via the `model` path to avoid binding the wrong same-named re-export.
 use arkret_models_collaboration::contact_operations::{
-    ContactAcceptRequestBody, ContactAgentProjection, ContactListRow, ContactNextPrepareInput,
+    ContactAcceptRequestBody, ContactAgentProjection, ContactNextPrepareInput,
     ContactOperationRequestBody, ContactOperationResponseBody, ContactPage, ContactPeer,
     ContactRejectRequestBody, ContactScopeUpdateRequestBody, ContactState,
-    ContactTombstoneRequestBody, DirectConversationSummary, DirectConversationSummaryState,
+    ContactTombstoneRequestBody, ContactView, DirectConversationSummary,
+    DirectConversationSummaryState,
 };
 use arkret_models_collaboration::direct_conversation::{
     DirectConversationCoordinates, DirectConversationFoundingInput,

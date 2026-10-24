@@ -406,7 +406,7 @@ impl AccountDataStore for PgAccountDataStore {
         )
         .bind::<Text, _>(actor)
         .bind::<Text, _>(account_data_key)
-        .get_result::<AccountDataRow>(&mut conn)
+        .get_result::<AccountDataStorageRow>(&mut conn)
         .await
         .optional()
         .map(|row| row.map(AccountDataRecord::from))
@@ -444,7 +444,7 @@ impl AccountDataStore for PgAccountDataStore {
              ORDER BY account_data_key",
         )
         .bind::<Text, _>(actor)
-        .load::<AccountDataRow>(&mut conn)
+        .load::<AccountDataStorageRow>(&mut conn)
         .await
         .map(|rows| rows.into_iter().map(AccountDataRecord::from).collect())
         .map_err(PersistenceError::database)
@@ -779,7 +779,7 @@ impl TryFrom<AccountRow> for AccountRecord {
     }
 }
 #[derive(QueryableByName)]
-struct AccountDataRow {
+struct AccountDataStorageRow {
     #[diesel(sql_type = Text)]
     actor: String,
     #[diesel(sql_type = Text)]
@@ -793,8 +793,8 @@ struct AccountDataRow {
     #[diesel(sql_type = Timestamptz)]
     updated_at: chrono::DateTime<chrono::Utc>,
 }
-impl From<AccountDataRow> for AccountDataRecord {
-    fn from(row: AccountDataRow) -> Self {
+impl From<AccountDataStorageRow> for AccountDataRecord {
+    fn from(row: AccountDataStorageRow) -> Self {
         Self {
             actor: row.actor,
             account_data_key: row.account_data_key,
@@ -893,7 +893,7 @@ pub(crate) async fn compare_account_data_in_transaction(
         .bind::<Timestamptz, _>(record.updated_at)
         .bind::<BigInt, _>(expected_revision)
         .bind::<Nullable<diesel::sql_types::Binary>, _>(source_event_id.map(|id| id.token_bytes().to_vec()))
-        .get_result::<AccountDataRow>(&mut *conn)
+        .get_result::<AccountDataStorageRow>(&mut *conn)
         .await
         .optional()
         .map_err(PersistenceError::database)?;
@@ -902,6 +902,6 @@ pub(crate) async fn compare_account_data_in_transaction(
     }
     let current = sql_query("SELECT actor_id AS actor, account_data_key, revision, payload, tombstone, updated_at FROM account_datas WHERE actor_id=$1 AND account_data_key=$2 AND account_data_source_current(actor_id,account_data_key)")
             .bind::<Text,_>(&record.actor).bind::<Text,_>(&record.account_data_key)
-            .get_result::<AccountDataRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.map(AccountDataRecord::from);
+            .get_result::<AccountDataStorageRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.map(AccountDataRecord::from);
     Ok(AccountDataCasResult::Conflict(current))
 }

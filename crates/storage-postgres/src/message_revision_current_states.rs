@@ -25,7 +25,7 @@ struct RootRow {
 }
 
 #[derive(diesel::QueryableByName)]
-struct StrandRow {
+struct StrandRevisionSourceRow {
     #[diesel(sql_type = Jsonb)]
     value: Value,
     #[diesel(sql_type = BigInt)]
@@ -550,7 +550,7 @@ async fn require_active_strand_track(
     .bind::<Text, _>(strand_id.as_str())
     .bind::<diesel::sql_types::Binary, _>(creating_event.token_bytes().to_vec())
     .bind::<Jsonb, _>(serde_json::to_value(&stream).map_err(PersistenceError::database)?)
-    .get_result::<StrandRow>(&mut *conn)
+    .get_result::<StrandRevisionSourceRow>(&mut *conn)
     .await
     .optional()
     .map_err(PersistenceError::database)?

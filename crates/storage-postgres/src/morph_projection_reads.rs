@@ -592,9 +592,9 @@ async fn visible(
 
 fn morph_row(
     morph: &coland_storage::MorphProjection,
-) -> PersistenceResult<arkret_models_collaboration::objects::query_projection::MorphRow> {
+) -> PersistenceResult<arkret_models_collaboration::objects::query_projection::MorphView> {
     use coland_storage::ObjectLifecycleState;
-    let row = arkret_models_collaboration::objects::query_projection::MorphRow {
+    let row = arkret_models_collaboration::objects::query_projection::MorphView {
         morph_id: morph.morph_id.parse().map_err(unavailable)?,
         realm_id: morph.realm_id.parse().map_err(unavailable)?,
         morph_kind: morph.morph_kind.clone(),

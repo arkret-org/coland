@@ -48,7 +48,7 @@ impl RealmClass {
 }
 
 /// One Realm row. A Realm is the security boundary; Space containers are
-/// separate navigation containers and are projected by [`AdminSpaceRow`].
+/// separate navigation containers and are projected by [`AdminSpaceView`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
 #[serde(deny_unknown_fields)]
@@ -122,7 +122,7 @@ impl SpaceHealth {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
 #[serde(deny_unknown_fields)]
-pub struct AdminSpaceRow {
+pub struct AdminSpaceView {
     pub id: String,
     pub name: String,
     /// Home Realm of the container — the security boundary the Space
@@ -172,7 +172,7 @@ pub struct AdminFederationOperation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
 #[serde(deny_unknown_fields)]
-pub struct AdminMediaRow {
+pub struct AdminMediaView {
     /// Discriminator carried by every collection row (`"media"`).
     pub kind: String,
     /// Content digest of the blob — the durable row identity.
@@ -213,21 +213,21 @@ mod tests {
             "created_at": "2026-08-14T00:00:00.000Z",
             "parent_space_id": null,
         });
-        let row: AdminSpaceRow = serde_json::from_value(base.clone()).expect("row parses");
+        let row: AdminSpaceView = serde_json::from_value(base.clone()).expect("row parses");
         assert_eq!(row.health, SpaceHealth::Archived);
 
         let mut unknown_health = base.clone();
         unknown_health["health"] = serde_json::json!("garbage");
-        assert!(serde_json::from_value::<AdminSpaceRow>(unknown_health).is_err());
+        assert!(serde_json::from_value::<AdminSpaceView>(unknown_health).is_err());
 
         let mut extra = base;
         extra["surprise"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<AdminSpaceRow>(extra).is_err());
+        assert!(serde_json::from_value::<AdminSpaceView>(extra).is_err());
     }
 
     #[test]
     fn media_row_carries_its_content_digest_identity() {
-        let row: AdminMediaRow = serde_json::from_value(serde_json::json!({
+        let row: AdminMediaView = serde_json::from_value(serde_json::json!({
             "kind": "media",
             "sha256": "9f2c",
             "media_type": "image/png",

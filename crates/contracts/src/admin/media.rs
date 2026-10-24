@@ -22,7 +22,7 @@ pub struct AdminMediaBucket {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
 #[serde(deny_unknown_fields)]
-pub struct AdminMediaByActorRow {
+pub struct AdminMediaUsageView {
     pub actor_id: String,
     pub display_name: Option<String>,
     pub blob_count: u64,
@@ -42,7 +42,7 @@ pub struct AdminMediaStatistics {
     pub quarantined_count: u64,
     pub by_media_type: BTreeMap<String, AdminMediaBucket>,
     pub by_realm: BTreeMap<String, AdminMediaBucket>,
-    pub by_actor: Vec<AdminMediaByActorRow>,
+    pub by_actor: Vec<AdminMediaUsageView>,
 }
 
 /// `GET /_coland/admin/media/by-actor` response.
@@ -50,7 +50,7 @@ pub struct AdminMediaStatistics {
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AdminMediaByActorList {
-    pub data: Vec<AdminMediaByActorRow>,
+    pub data: Vec<AdminMediaUsageView>,
     pub total: usize,
     pub next_cursor: Option<String>,
 }

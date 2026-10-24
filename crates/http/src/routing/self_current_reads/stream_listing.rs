@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use arkret_server::{CursorAuthority, CursorAuthorityError, CursorBindingContext};
-use arkret_wire::{RealmId, RealmStreamPage, RealmStreamRow};
+use arkret_wire::{RealmId, RealmStreamPage, RealmStreamView};
 use coland_http::error::AppError;
 use coland_services::sync::CursorState;
 use coland_storage::AccountRealmStreamList;
@@ -20,7 +20,7 @@ const PAGE_BYTES: usize = 8 * 1024 * 1024;
 #[serde(deny_unknown_fields)]
 enum Position {
     Root {
-        streams: Vec<RealmStreamRow>,
+        streams: Vec<RealmStreamView>,
         after: usize,
     },
     Page {
@@ -293,7 +293,7 @@ mod tests {
 
     use super::*;
 
-    fn fixture() -> (RealmId, Vec<RealmStreamRow>) {
+    fn fixture() -> (RealmId, Vec<RealmStreamView>) {
         let realm: RealmId = "ak:realm:AUGIFvQctz4TjQTmvvO4Wdy-xdc5XP2ZnJ5Qpbh4s8Ru"
             .parse()
             .unwrap();
@@ -306,7 +306,7 @@ mod tests {
                 let mut bytes = [0u8; 33];
                 bytes[0] = 1;
                 bytes[1..9].copy_from_slice(&index.to_be_bytes());
-                RealmStreamRow {
+                RealmStreamView {
                     stream_ref: CommitStreamRef::Circle {
                         realm_id: realm.clone(),
                         circle_id: arkret_wire::CircleId::from_event_id(
@@ -376,8 +376,8 @@ mod tests {
 /// Frozen heads cannot advance, and a stricter current floor cannot be relaxed.
 fn select_page(
     realm: &RealmId,
-    frozen: &[RealmStreamRow],
-    live: &[RealmStreamRow],
+    frozen: &[RealmStreamView],
+    live: &[RealmStreamView],
     after: usize,
     limit: usize,
     byte_limit: usize,

@@ -1,6 +1,6 @@
 //! List native stream heads from an anchored replica's single read cut.
 
-use arkret_wire::{ActorId, CommitStreamRef, RealmId, RealmStreamRow};
+use arkret_wire::{ActorId, CommitStreamRef, RealmId, RealmStreamView};
 use coland_storage::AccountRealmStreamList;
 
 use super::{
@@ -84,7 +84,7 @@ pub(crate) async fn in_connection(
         let position = u64::try_from(head.stream_position).map_err(|_| {
             PersistenceError::SchemaViolation("replica stream position is negative".into())
         })?;
-        rows.push(RealmStreamRow {
+        rows.push(RealmStreamView {
             stream_ref: stream,
             head_commit_ref: head.commit_id.parse().map_err(PersistenceError::database)?,
             next_position: position.checked_add(1).ok_or_else(|| {

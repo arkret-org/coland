@@ -198,7 +198,7 @@ impl PersistenceHandle {
             .await
     }
 
-    pub async fn accepted_realm_organization_relationships(&self, realm_id: &arkret_wire::RealmId, at: chrono::DateTime<chrono::Utc>) -> PersistenceResult<Vec<arkret_models_collaboration::governance::realm_governance::RealmOrganizationRelationshipRow>>{
+    pub async fn accepted_realm_organization_relationships(&self, realm_id: &arkret_wire::RealmId, at: chrono::DateTime<chrono::Utc>) -> PersistenceResult<Vec<arkret_models_collaboration::governance::realm_governance::RealmOrganizationRelationshipView>>{
         self.persistence
             .realm_organization_statements()
             .accepted_relationships(realm_id, at)

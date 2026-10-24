@@ -11,7 +11,7 @@
 
 use arkret_identifiers::RealmId;
 use arkret_models_collaboration::governance::authorization::{
-    AuthorizationInvitePage, EffectiveCapabilityGrantRow, EffectiveGrantSnapshot,
+    AuthorizationInvitePage, EffectiveCapabilityGrantView, EffectiveGrantSnapshot,
 };
 use arkret_models_collaboration::governance::invite_addressing::InviteDelivery;
 use arkret_models_collaboration::governance::operation_wire::Invite;
@@ -320,7 +320,7 @@ async fn effective_grants(
     let grants = authorization
         .grants
         .into_iter()
-        .map(EffectiveCapabilityGrantRow::from)
+        .map(EffectiveCapabilityGrantView::from)
         .collect::<Vec<_>>();
     let state_digest = coland_storage::effective_capability_grant_state_digest(&grants)
         .map_err(|error| AppError::internal(format!("effective grant digest failed: {error}")))?;

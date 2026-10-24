@@ -304,8 +304,8 @@ async fn contact_list_rows(
     state: &AppState,
     actor: &arkret_wire::ActorId,
     records: Vec<ContactRecord>,
-) -> Result<Vec<ContactListRow>, AppError> {
-    let mut rows: BTreeMap<String, ContactListRow> = BTreeMap::new();
+) -> Result<Vec<ContactView>, AppError> {
+    let mut rows: BTreeMap<String, ContactView> = BTreeMap::new();
     let mut selected = BTreeMap::<String, (ContactState, chrono::DateTime<chrono::Utc>)>::new();
     let mut records = records;
     records.sort_by(|left, right| {
@@ -408,7 +408,7 @@ async fn contact_list_rows(
         } else {
             None
         };
-        let candidate = ContactListRow {
+        let candidate = ContactView {
             peer: peer_model,
             state: row_state,
             request_event_ref: optional_contact_event_ref(&record.request_event_ref),

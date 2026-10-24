@@ -456,7 +456,7 @@ impl RealmOrganizationStatementStore for PgRealmOrganizationStatementStore {
         &self,
         realm_id: &arkret_wire::RealmId,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::realm_governance::RealmOrganizationRelationshipRow>>{
+    ) -> PersistenceResult<Vec<arkret_models_collaboration::governance::realm_governance::RealmOrganizationRelationshipView>>{
         use diesel_async::AsyncConnection as _;
         let mut conn = pg_conn(&self.pool)
             .await

@@ -10,7 +10,7 @@ pub(crate) struct AccountSummaryDelta {
     pub initial_global_snapshot: Option<(i64, i64)>,
 }
 
-fn visible_item(row: &coland_storage::AccountSummaryVersion) -> Option<RealmListRow> {
+fn visible_item(row: &coland_storage::AccountSummaryVersion) -> Option<AccountRealmView> {
     if !row.current_available {
         return None;
     }
@@ -21,7 +21,7 @@ fn visible_item(row: &coland_storage::AccountSummaryVersion) -> Option<RealmList
         }
         _ => return None,
     };
-    Some(RealmListRow {
+    Some(AccountRealmView {
         realm_id: arkret_wire::RealmId::new(row.key.realm_id.clone()).ok()?,
         revision: u64::try_from(row.key.revision).ok()?,
         activity_position: u64::try_from(row.key.activity_position).ok()?,

@@ -346,7 +346,7 @@ pub(crate) async fn read(
                         });
                     } else {
                         cas.upserts
-                            .push(arkret_models_identity::account::AccountDataRow {
+                            .push(arkret_models_identity::account::AccountDataEntry {
                                 account_data_key: key.to_owned(),
                                 revision,
                                 content: payload["payload"].clone(),

@@ -25,7 +25,7 @@ use arkret_models_collaboration::strand_watch_operations::{
 };
 use arkret_wire::{
     AccountId, ActorId, CommitStreamHead, CommitStreamRef, CurrentRevision, DidCoreId, RealmId,
-    RealmStreamRow, ScopeRef,
+    RealmStreamView, ScopeRef,
 };
 use coland_storage::{AccountRealmStreamList, MediaServiceAnchorRead, SelfExactCurrentRead};
 use diesel_async::AsyncPgConnection;
@@ -327,7 +327,7 @@ async fn list_streams_in_connection(
             "a per-member join or history floor is not proved at this cut",
         ));
     };
-    let mut visible = vec![RealmStreamRow {
+    let mut visible = vec![RealmStreamView {
         stream_ref: head.stream_ref,
         head_commit_ref: head.commit_id,
         next_position: head.stream_position.checked_add(1).ok_or_else(|| {
@@ -361,7 +361,7 @@ async fn list_streams_in_connection(
         let Some(floor) = floor else {
             continue;
         };
-        visible.push(RealmStreamRow {
+        visible.push(RealmStreamView {
             stream_ref: stream,
             head_commit_ref: head.commit_id.parse().map_err(PersistenceError::database)?,
             next_position: to_u64(head.stream_position, "scoped stream position")?
@@ -582,7 +582,7 @@ pub(crate) async fn exact_current_state_for_actor_in_connection(
             return policy_exact_read(conn, request, selector, &caller, generation, head).await;
         }
         ExactCurrentStateSelector::CalendarScheduleSource(selector) => {
-            use arkret_models_collaboration::exact_current_state::CalendarScheduleSourceExactRow;
+            use arkret_models_collaboration::exact_current_state::CurrentCalendarScheduleSource;
             #[derive(QueryableByName)]
             struct CalendarRow {
                 #[diesel(sql_type = Text)]
@@ -649,7 +649,7 @@ pub(crate) async fn exact_current_state_for_actor_in_connection(
                         )?,
                     },
                     entry: ExactCurrentStateEntry::CalendarScheduleSource(
-                        CalendarScheduleSourceExactRow {
+                        CurrentCalendarScheduleSource {
                             selector: selector.clone(),
                             source_stream_ref: stream,
                             revision,

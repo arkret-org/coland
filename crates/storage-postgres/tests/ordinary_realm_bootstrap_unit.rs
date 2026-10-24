@@ -4950,7 +4950,7 @@ async fn self_current_reads_answer_only_the_provable_cut() {
     };
     assert_eq!(
         rows,
-        vec![arkret_wire::RealmStreamRow {
+        vec![arkret_wire::RealmStreamView {
             stream_ref: arkret_wire::CommitStreamRef::Realm {
                 realm_id: realm_id.clone(),
             },

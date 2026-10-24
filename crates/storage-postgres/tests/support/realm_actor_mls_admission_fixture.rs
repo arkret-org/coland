@@ -72,7 +72,12 @@ async fn admission_native_upload(
         StatusCode::OK,
         "actual native scoped publication: {value}"
     );
-    assert_eq!(value["accepted"], 1);
+    assert_eq!(
+        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(value.clone())
+            .unwrap()
+            .accepted_count,
+        1
+    );
     let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
     let (status, replay) = boxed_step(|| {
         obligation_recipient_post(

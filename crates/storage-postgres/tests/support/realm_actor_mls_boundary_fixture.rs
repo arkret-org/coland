@@ -175,7 +175,12 @@ async fn boundary_publish_human(fixture: &Fixture) -> arkret_wire::KeyPackageRef
     })
     .await;
     assert_eq!(status, StatusCode::OK, "real Human publication: {value}");
-    assert_eq!(value["accepted"], 1);
+    assert_eq!(
+        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(value.clone())
+            .unwrap()
+            .accepted_count,
+        1
+    );
     reference
 }
 
@@ -653,7 +658,12 @@ async fn boundary_claim_native_recipient(
         StatusCode::OK,
         "genuine native recipient publication: {value}"
     );
-    assert_eq!(value["accepted"], 1);
+    assert_eq!(
+        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(value.clone())
+            .unwrap()
+            .accepted_count,
+        1
+    );
     let history = &fixture.pcr.history;
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let mut command = claim_request_with_lifetime(

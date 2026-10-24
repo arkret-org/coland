@@ -1294,7 +1294,14 @@ async fn claim_remote_with_lifetime(
         StatusCode::OK,
         "real foreign Account package upload: {value}"
     );
-    assert_eq!(value["accepted"], 1);
+    assert_eq!(
+        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(
+            value.clone()
+        )
+        .unwrap()
+        .accepted_count,
+        1
+    );
     let command = claim_request_with_lifetime(
         authority,
         recipient,

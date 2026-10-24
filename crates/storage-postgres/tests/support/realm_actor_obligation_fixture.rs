@@ -1098,7 +1098,12 @@ async fn realm_device_owned_query_prepared_guard_crosses_deadline(
         StatusCode::OK,
         "actual native recipient publication: {value}"
     );
-    assert_eq!(value["accepted"], 1);
+    assert_eq!(
+        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(value.clone())
+            .unwrap()
+            .accepted_count,
+        1
+    );
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let mut request = KeyPackagesClaimRequestBody {
         claim_request_id: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
@@ -1510,7 +1515,12 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
         StatusCode::OK,
         "actual independent recipient publishes its own scoped KeyPackage: {value}"
     );
-    assert_eq!(value["accepted"], 1);
+    assert_eq!(
+        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(value.clone())
+            .unwrap()
+            .accepted_count,
+        1
+    );
     let mut request = claim_request_with_lifetime(
         authority,
         fixture,

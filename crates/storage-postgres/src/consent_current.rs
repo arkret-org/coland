@@ -299,7 +299,7 @@ async fn invalidate_quarantine(
         peer_actor_id: peer.clone(),
         consent_scope: HolderQuarantineInvalidationScope::Invite,
         revoked_at: at,
-        removed_entries: (before - cell.quarantine_entries.len()) as u64,
+        removed_entry_count: (before - cell.quarantine_entries.len()) as u64,
     });
     let revision = u64::try_from(row.revision).map_err(corrupt)?;
     let record = AccountDataRecord {

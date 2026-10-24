@@ -517,7 +517,7 @@ async fn consent_replacement_preserves_quarantine_until_invite_closes_for_exact_
     );
     let invalidation = cell.last_invalidation.unwrap();
     assert_eq!(invalidation.peer_actor_id, peer);
-    assert_eq!(invalidation.removed_entries, 1);
+    assert_eq!(invalidation.removed_entry_count, 1);
     assert_eq!(store.list(&f.history.account).await.unwrap().len(), 1);
 }
 

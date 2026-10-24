@@ -935,7 +935,7 @@ async fn upload_keypackage(
     }
 
     json_ok(KeyPackagesUploadResponseBody {
-        accepted,
+        accepted_count: accepted,
         rejections: rejected,
         keypackage_refs,
     })

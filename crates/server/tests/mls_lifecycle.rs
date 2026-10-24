@@ -797,7 +797,7 @@ async fn mls_lifecycle_body() {
         String::from_utf8_lossy(&uploaded.bytes)
     );
     let uploaded: KeyPackagesUploadResponseBody = serde_json::from_slice(&uploaded.bytes).unwrap();
-    assert_eq!(uploaded.accepted, 2, "{uploaded:?}");
+    assert_eq!(uploaded.accepted_count, 2, "{uploaded:?}");
     assert_eq!(uploaded.rejections.len(), 1, "{uploaded:?}");
     assert_eq!(
         uploaded.rejections[0].reason_code.as_str(),

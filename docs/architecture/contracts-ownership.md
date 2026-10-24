@@ -49,11 +49,11 @@
 | `admin::collection` | `RealmClass` | local contract | Coland、Codmin | `/_coland/admin` Realm 行内分类封闭枚举；未命中 spec wire 类型 |
 | `admin::collection` | `AdminRealmItem` | local contract | Coland、Codmin | `GET /_coland/admin/{resource}`（realms）与 `/_coland/admin/realms/{realm_id}` 详情投影；字段复用 SDK 类型，整体未命中 spec wire 类型 |
 | `admin::collection` | `SpaceHealth` | local contract | Coland、Codmin | Space 容器生命周期封闭枚举；未命中 spec wire 类型 |
-| `admin::collection` | `AdminSpaceRow` | local contract | Coland、Codmin | `/_coland/admin/spaces` 集合行投影；未命中 spec wire 类型 |
+| `admin::collection` | `AdminSpaceView` | local contract | Coland、Codmin | `/_coland/admin/spaces` 集合行投影；未命中 spec wire 类型 |
 | `admin::collection` | `AdminFederationOperation` | local contract | Coland、Codmin | `/_coland/admin/federation` 联邦操作行投影；字段复用 SDK 类型，整体未命中 spec wire 类型 |
-| `admin::collection` | `AdminMediaRow` | local contract | Coland、Codmin | `/_coland/admin/media` 集合行投影；未命中 spec wire 类型 |
+| `admin::collection` | `AdminMediaView` | local contract | Coland、Codmin | `/_coland/admin/media` 集合行投影；未命中 spec wire 类型 |
 | `admin::media` | `AdminMediaBucket` | local contract | Coland、Codmin | `/_coland/admin/media/statistics` 聚合分桶；Codmin 经 `AdminMediaStatistics` 内嵌字段消费；未命中 spec wire 类型 |
-| `admin::media` | `AdminMediaByActorRow` | local contract | Coland、Codmin | `/_coland/admin/media/{statistics,by-actor}` 按上传者聚合行；Codmin 经 `AdminMediaStatistics`/`AdminMediaByActorList` 内嵌消费；未命中 spec wire 类型 |
+| `admin::media` | `AdminMediaUsageView` | local contract | Coland、Codmin | `/_coland/admin/media/{statistics,by-actor}` 按上传者聚合行；Codmin 经 `AdminMediaStatistics`/`AdminMediaByActorList` 内嵌消费；未命中 spec wire 类型 |
 | `admin::media` | `AdminMediaStatistics` | local contract | Coland、Codmin | `GET /_coland/admin/media/statistics` 响应；未命中 spec wire 类型 |
 | `admin::media` | `AdminMediaByActorList` | local contract | Coland、Codmin | `GET /_coland/admin/media/by-actor` 列表 envelope；未命中 spec wire 类型 |
 | `admin::media` | `MediaServiceFocus` | SDK contract | Coland、Codmin | 直接使用 `arkret-models-collaboration` 中 spec `event-payload.schema.json` `$defs/media_service_focus` 的唯一实现 |

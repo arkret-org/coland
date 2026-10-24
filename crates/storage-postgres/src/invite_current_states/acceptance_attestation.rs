@@ -3,7 +3,7 @@ use arkret_models_collaboration::governance::third_party_invite::{
     ThirdPartyInviteAcceptanceAttestation, ThirdPartyInviteAcceptanceAttestationRequestBody,
     ThirdPartyInviteAcceptanceAttestationResponseBody, ThirdPartyInviteAttestedState,
 };
-use arkret_wire::{CommitStreamRef, CommittedEventRef, DidCoreId, DidUrl, PayloadProof};
+use arkret_wire::{CommitStreamRef, DidCoreId, DidUrl, PayloadProof};
 use diesel::sql_types::Bool;
 
 use super::*;
@@ -43,9 +43,6 @@ fn unavailable() -> PersistenceError {
 }
 
 pub(super) struct PendingInviteEvidence {
-    event: arkret_wire::Event,
-    commit: arkret_wire::RealmCommit,
-    source: CommitStreamRef,
     pub(super) material: InviteThirdPartyCreatePayload,
     pub(super) observed_at: chrono::DateTime<chrono::Utc>,
 }
@@ -216,9 +213,6 @@ pub(super) async fn pending_invite_evidence(
         .require_live_invite_creator(&event, at)
         .map_err(|_| hidden())?;
     Ok(PendingInviteEvidence {
-        event,
-        commit,
-        source,
         material,
         observed_at: at,
     })
@@ -234,9 +228,6 @@ pub(super) async fn issue(
     sign: &coland_storage::InviteAcceptanceAttestationSigner<'_>,
 ) -> PersistenceResult<ThirdPartyInviteAcceptanceAttestationResponseBody> {
     let PendingInviteEvidence {
-        event,
-        commit,
-        source,
         material,
         observed_at: at,
     } = pending_invite_evidence(
@@ -259,12 +250,6 @@ pub(super) async fn issue(
         third_party_invite: material.third_party_invite,
         invite_expires_at: material.expires_at,
         invite_state: ThirdPartyInviteAttestedState::Pending,
-        accepted_commit_ref: CommittedEventRef {
-            event_id: event.event_id,
-            commit_id: commit.commit_id,
-            stream_ref: source,
-            stream_position: commit.stream_position,
-        },
         observed_at: at,
         expires_at: material.expires_at.min(at + chrono::TimeDelta::seconds(60)),
         signature: PayloadProof {

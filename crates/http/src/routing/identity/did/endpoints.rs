@@ -256,8 +256,9 @@ pub(crate) async fn identity_document(
     .await?;
     json_ok(IdentityDocumentView {
         did_document: resolved.did_document,
-        sequence: resolved.sequence,
-        receipts: Vec::new(),
+        normalized_view: None,
+        method_evidence: None,
+        cached_at: None,
     })
 }
 

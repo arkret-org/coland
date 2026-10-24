@@ -1049,7 +1049,7 @@ pub(super) async fn get_agent(
         .await
         .map_err(|error| AppError::internal(format!("agent grant read failed: {error}")))?
         .into_iter()
-        .map(|record| GrantSnapshot {
+        .map(|record| AgentGrantView {
             expires_at: coland_storage::capability_grant_expires_at(&record.value),
             grant_id: record.grant_id,
             realm_id: record.realm_id,

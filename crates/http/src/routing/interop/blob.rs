@@ -1051,7 +1051,7 @@ async fn blob_presign(
         "{base}/_arkret/self/blob/get?blob_ref={}&purpose={}&presign={}",
         query_escape(blob_ref),
         query_escape(purpose),
-        query_escape(&presign.token),
+        query_escape(&presign),
     );
     if let Some(guard) = native_guard {
         if !guard.permits_handoff() {
@@ -1066,9 +1066,6 @@ async fn blob_presign(
         url,
         expires_at,
         purpose: Some(purpose.to_owned()),
-        realm_id: presign.payload.realm_id,
-        nonce: presign.payload.nonce,
-        access_scope: presign.payload.access_scope,
     })
 }
 
@@ -1078,11 +1075,6 @@ const BLOB_PRESIGN_KID_FRAGMENT: &str = "notary-key";
 const BLOB_PRESIGN_MAX_TTL_SECONDS: i64 = 300;
 const BLOB_PRESIGN_CLOCK_SKEW_SECONDS: i64 = 30;
 
-struct IssuedBlobPresign {
-    token: String,
-    payload: BlobPresignPayload,
-}
-
 fn issue_presign_envelope(
     state: &AppState,
     blob_ref: &str,
@@ -1091,7 +1083,7 @@ fn issue_presign_envelope(
     actor: &str,
     issued_at: chrono::DateTime<chrono::Utc>,
     expires_at: chrono::DateTime<chrono::Utc>,
-) -> Result<IssuedBlobPresign, AppError> {
+) -> Result<String, AppError> {
     let blob_ref = BlobRef::new(blob_ref.to_owned())
         .map_err(|error| AppError::internal(format!("blob_ref is invalid: {error}")))?;
     let issuer_id = arkret_identifiers::DidCoreId::new(state.service_id().clone())
@@ -1147,10 +1139,7 @@ fn issue_presign_envelope(
             "blob presign envelope canonicalization failed: {error}"
         ))
     })?;
-    Ok(IssuedBlobPresign {
-        token: URL_SAFE_NO_PAD.encode(envelope_bytes),
-        payload,
-    })
+    Ok(URL_SAFE_NO_PAD.encode(envelope_bytes))
 }
 
 fn validate_presign_query(

@@ -956,7 +956,7 @@ async fn current_principal_survives_index_eviction_and_refuses_missing_typed_cur
             .pcr_device_admission(&account, &device_id, device_at)
             .await
             .unwrap(),
-        arkret_wire::DeviceRevocationAdmissionDecision::Allow
+        arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
     assert_eq!(
         resolutions.registered_genesis(&account).await.unwrap(),
@@ -985,7 +985,7 @@ async fn current_principal_survives_index_eviction_and_refuses_missing_typed_cur
             .pcr_device_admission(&account, &device_id, device_at)
             .await
             .unwrap(),
-        arkret_wire::DeviceRevocationAdmissionDecision::Allow
+        arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
     assert_eq!(
         resolutions.registered_genesis(&account).await.unwrap(),
@@ -1050,7 +1050,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
             .pcr_device_admission(&account, &authorizer, at)
             .await
             .unwrap()
-            == arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            == arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
     let backups = PgKeyBackupStore { pool: pool.clone() };
     let initial_pointer = backups
@@ -1548,7 +1548,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
             .pcr_device_admission(&account, &authorizer, at)
             .await
             .unwrap()
-            == arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            == arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
 
     let reject_target = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
@@ -1760,7 +1760,7 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
             .pcr_device_admission(&account, &authorizer, at)
             .await
             .unwrap()
-            == arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            == arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
 }
 
@@ -2286,7 +2286,7 @@ async fn key_backup_active_series_pointer_unit_commits_only_at_the_active_device
             .pcr_device_admission(&author.account, &device, at)
             .await
             .unwrap()
-            == arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            == arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
 
     // The account-scoped read that freezes delete/unlock bases names the same
@@ -2613,7 +2613,7 @@ async fn accepted_device_unit_admits_only_a_current_active_approver() {
             .pcr_device_admission(&account, &device_d, commit_d.committed_at)
             .await
             .unwrap()
-            == arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            == arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
 }
 
@@ -2717,14 +2717,14 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
             .pcr_device_admission(&account, &device_a, now)
             .await
             .unwrap()
-            == arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            == arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
     assert!(
         status
             .pcr_device_admission(&account, &device_b, now)
             .await
             .unwrap()
-            == arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            == arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
     let author_b = PointerAuthor {
         account: account.clone(),
@@ -2898,14 +2898,14 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
             .pcr_device_admission(&account, &device_b, pending_at)
             .await
             .unwrap()
-            != arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            != arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
     assert!(
         status
             .pcr_device_admission(&account, &device_a, pending_at)
             .await
             .unwrap()
-            == arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            == arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
     assert!(
         backups
@@ -3017,14 +3017,14 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
             .pcr_device_admission(&account, &device_b, decided_at)
             .await
             .unwrap()
-            != arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            != arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
     assert!(
         status
             .pcr_device_admission(&account, &device_a, decided_at)
             .await
             .unwrap()
-            == arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            == arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
     assert!(
         backups
@@ -3077,7 +3077,7 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
             .pcr_device_admission(&account, &device_b, decided_at)
             .await
             .unwrap()
-            != arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            != arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
 
     // The rotation reserved its own pointer Event: the self path cannot
@@ -3147,14 +3147,14 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
             .pcr_device_admission(&account, &device_b, decided_at)
             .await
             .unwrap()
-            != arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            != arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
     assert!(
         restarted_status
             .pcr_device_admission(&account, &device_a, decided_at)
             .await
             .unwrap()
-            == arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            == arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
 }
 
@@ -3617,7 +3617,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             .pcr_device_admission(&account, &device_b, covering.committed_at)
             .await
             .unwrap()
-            != arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            != arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
 
     // The generic accepted-step writer cannot stand in for the worker unit.
@@ -4537,7 +4537,7 @@ async fn recovery_policy_publication_unit_ratchets_under_the_pcr_cut() {
             .pcr_device_admission(&account, &device_a, commit_v2.committed_at)
             .await
             .unwrap()
-            == arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            == arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
 }
 

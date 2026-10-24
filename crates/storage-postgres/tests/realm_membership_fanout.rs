@@ -5140,8 +5140,8 @@ fn recipient_roster_witness(
         MlsAddAuthorityAttestation, MlsAttestAddRequestBody,
     };
     use arkret_models_crypto::{
-        KeyOperationSignature, KeyPackageClaimRecord, PeerKeyPackageClaimReceipt,
-        PeerKeyPackagesClaimFields, PeerKeyPackagesClaimResponseBody,
+        KeyOperationSignature, KeyPackageClaimRecord, KeyPackagesClaimResponseBody,
+        PeerKeyPackageClaimReceipt, PeerKeyPackagesClaimFields,
         peer_keypackage_claim_receipt_signing_bytes,
     };
     let delivery = &welcome.delivery;
@@ -5213,7 +5213,7 @@ fn recipient_roster_witness(
         &peer_keypackage_claim_receipt_signing_bytes(&receipt).unwrap(),
     )
     .unwrap();
-    let outcome = PeerKeyPackagesClaimResponseBody {
+    let outcome = KeyPackagesClaimResponseBody {
         claim_request_id: receipt.claim_request_id.clone(),
         claims: vec![record],
         claim_receipt: receipt.clone(),

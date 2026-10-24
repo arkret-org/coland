@@ -186,7 +186,7 @@ async fn package(
             issuer_id: source.service_core_id(),
             subject,
             scope,
-            outcome: ErasureOutcome::PartiallyCompleted,
+            outcome: ErasureAttemptOutcome::PartiallyCompleted,
             erased_classes: Vec::new(),
             retained_stub_digest: arkret_wire::Hash::new(arkret_canonical::sha256_digest(
                 b"replaced before signing",
@@ -522,10 +522,7 @@ async fn run(departure: Option<&str>) {
     assert!(frozen.realm_fanout.is_none());
     assert_eq!(
         frozen.payload_json,
-        arkret_canonical::canonical_json_string(&ErasureReceiptSubmitRequestBody {
-            package: package.clone()
-        })
-        .unwrap()
+        arkret_canonical::canonical_json_string(&package.clone()).unwrap()
     );
     let before = terminal_persistent_rows(&receiver.pool).await;
     let before_receipt = snapshot(&receiver.pool).await;
@@ -638,18 +635,13 @@ async fn run(departure: Option<&str>) {
         );
         assert_eq!(snapshot(&receiver.pool).await, accepted);
     }
-    let request = ErasureReceiptSubmitRequestBody {
-        package: package.clone(),
-    };
+    let request = package.clone();
     let mut different = package.clone();
     different.receipt.scope.service_scope = Some("changed receipt boundary".into());
     different.retained_stub.scope.service_scope = different.receipt.scope.service_scope.clone();
     sign_package(&source.state, &mut different).await;
     for key in [&frozen.idempotency_key, "another-key-same-receipt"] {
-        let bytes = arkret_canonical::canonical_json_bytes(&ErasureReceiptSubmitRequestBody {
-            package: different.clone(),
-        })
-        .unwrap();
+        let bytes = arkret_canonical::canonical_json_bytes(&different.clone()).unwrap();
         let (status, answer) = signed_request(
             &source.state,
             &receiver.state,
@@ -664,14 +656,14 @@ async fn run(departure: Option<&str>) {
     }
     let mut invalids = Vec::new();
     let mut stub = serde_json::to_value(&request).unwrap();
-    stub["package"]["retained_stub"]["receipt_id"] =
+    stub["retained_stub"]["receipt_id"] =
         serde_json::json!(format!("ak:receipt:{}", uuid::Uuid::now_v7()));
     invalids.push((stub, 400));
     let mut proof = serde_json::to_value(&request).unwrap();
-    proof["package"]["receipt"]["proofs"][0]["signature"] = serde_json::json!("forged");
+    proof["receipt"]["proofs"][0]["signature"] = serde_json::json!("forged");
     invalids.push((proof, 400));
     let mut extra = serde_json::to_value(&request).unwrap();
-    extra["package"]["receipt"]["undocumented"] = serde_json::json!(true);
+    extra["receipt"]["undocumented"] = serde_json::json!(true);
     invalids.push((extra, 422));
     for (index, (invalid, expected_status)) in invalids.into_iter().enumerate() {
         let bytes = arkret_canonical::canonical_json_bytes(&invalid).unwrap();
@@ -719,9 +711,7 @@ async fn run(departure: Option<&str>) {
     .await;
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
     assert_eq!(
-        serde_json::from_slice::<ErasureReceiptResource>(&bytes)
-            .unwrap()
-            .package,
+        serde_json::from_slice::<ErasureReceiptPackage>(&bytes).unwrap(),
         package
     );
     for path in [
@@ -762,10 +752,7 @@ async fn run(departure: Option<&str>) {
     feedback.receipt.issued_at = Some(feedback.receipt.completed_at);
     feedback.retained_stub.completed_at = feedback.receipt.completed_at;
     sign_package(&receiver.state, &mut feedback).await;
-    let body = arkret_canonical::canonical_json_string(&ErasureReceiptSubmitRequestBody {
-        package: feedback.clone(),
-    })
-    .unwrap();
+    let body = arkret_canonical::canonical_json_string(&feedback.clone()).unwrap();
     let source_before_feedback = terminal_persistent_rows(&source.pool).await;
     outbox::enqueue_outbound(
         &receiver.state,
@@ -873,10 +860,7 @@ async fn run(departure: Option<&str>) {
     );
     assert_eq!(
         pending.payload_json,
-        arkret_canonical::canonical_json_string(&ErasureReceiptSubmitRequestBody {
-            package: outstanding.clone()
-        })
-        .unwrap()
+        arkret_canonical::canonical_json_string(&outstanding.clone()).unwrap()
     );
     execute(
         &source.pool,

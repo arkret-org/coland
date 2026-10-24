@@ -482,7 +482,7 @@ pub(crate) async fn prepare_account_device_source_in_connection(
     .map_err(PgTransactionError::into_persistence)?
     .ok_or_else(|| reject("Account Device historical locked PCR cut is unavailable"))?;
     if cut.authority.realm_id != first.authority.realm_id
-        || cut.admission() != arkret_wire::DeviceRevocationAdmissionDecision::Allow
+        || cut.admission() != arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     {
         return Err(reject(
             "Account Device historical device is not active at the locked PCR cut",

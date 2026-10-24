@@ -1,8 +1,8 @@
 //! Realm Device authority read from one accepted private control cut.
 use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
+use arkret_models_crypto::DeviceGenerationState;
 use arkret_models_integration::{
-    RealmActorDeviceAuthorizationValue, RealmActorDeviceGenerationValue, RealmActorManagerValue,
-    RealmActorRecoveryValue,
+    RealmActorDeviceAuthorizationValue, RealmActorManagerValue, RealmActorRecoveryValue,
 };
 use arkret_wire::{ActorId, CommittedEventRef, DeviceId, Event, RealmCommit};
 use coland_storage::{AppletManagedDeviceAuthority, PersistenceError, PersistenceResult};
@@ -170,7 +170,7 @@ pub(crate) async fn current_in_connection(
         json!({"kind":"realm_actor_device_generation","actor_id":actor}),
     )
     .await?;
-    let generation: RealmActorDeviceGenerationValue = decode(value)?;
+    let generation: DeviceGenerationState = decode(value)?;
     for gate in ["owner", "governance"] {
         let (value, _) = current_source(
             conn,

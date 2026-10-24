@@ -1,4 +1,5 @@
 //! Service recovery at one private Realm cut, independent of business grants.
+use arkret_models_crypto::DeviceGenerationState;
 use arkret_models_integration::*;
 use arkret_wire::{ActorId, CommittedEventRef, CurrentRevision, Event, EventKind, RealmCommit};
 use coland_storage::{AppletEventProducerGuard, AuthorityCommitTransaction, PersistenceError};
@@ -153,7 +154,7 @@ pub(crate) async fn admit(
     let generation_selector = json!({"kind":"realm_actor_device_generation","actor_id":actor});
     let (generation, generation_ref) =
         current_source(conn, &actor, generation_selector.clone()).await?;
-    let generation: RealmActorDeviceGenerationValue = decode(generation)?;
+    let generation: DeviceGenerationState = decode(generation)?;
     let owner_selector = json!({"kind":"realm_actor_status","actor_id":actor,"gate":"owner"});
     let (owner, owner_ref) = current_source(conn, &actor, owner_selector.clone()).await?;
     let (governance, governance_ref) = current_source(
@@ -246,7 +247,7 @@ pub(crate) async fn admit(
             writes.push((owner_selector, json!("paused")));
             writes.push((
                 generation_selector,
-                json!(RealmActorDeviceGenerationValue {
+                json!(DeviceGenerationState {
                     current_device_generation_ref: payload.new_generation
                 }),
             ));

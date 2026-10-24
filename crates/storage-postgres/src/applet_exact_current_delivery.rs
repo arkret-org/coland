@@ -1,6 +1,6 @@
 //! Exact current projection reads at the real native Account and resource cut.
 use arkret_models_collaboration::exact_current_state::{
-    ExactCurrentStateEntry as Entry, ExactCurrentStateReadRequestBody as Request,
+    ExactCurrentState as Entry, ExactCurrentStateReadRequestBody as Request,
     ExactCurrentStateReadResponseBody as Outcome, NeverWrittenExactCurrentSelector,
 };
 use arkret_wire::{CommitStreamRef, CurrentRevision};
@@ -87,7 +87,10 @@ pub(super) async fn prepare(
         return Err(refused("native exact current changed before handoff"));
     }
     let stream = match outcome {
-        Outcome::Present { entry, .. } => coordinates(entry)?.0,
+        Outcome::Present {
+            current_state: entry,
+            ..
+        } => coordinates(entry)?.0,
         Outcome::NeverWritten {
             effective_stream_head,
             ..
@@ -102,7 +105,10 @@ pub(super) async fn prepare(
         crate::boxed_future(|| super::mls_scope_read_proof(conn, endpoint, expiry, None)).await?;
     let mut resources = Vec::new();
     match outcome {
-        Outcome::Present { entry, .. } => {
+        Outcome::Present {
+            current_state: entry,
+            ..
+        } => {
             let (stream, revision) = coordinates(entry)?;
             let source = crate::boxed_future(|| {
                 crate::account_content_delivery::current_source_in_connection(

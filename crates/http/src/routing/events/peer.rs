@@ -300,24 +300,24 @@ async fn peer_account_status_submit(
             receipt,
         ),
         coland_storage::AccountStatusReplicaAppend::DependencyMissing {
-            current_record,
+            current_material,
             required_status_sequence,
         } => {
             let outcome = publication_outcome(
                 record,
                 AccountStatusPublicationStatus::DependencyMissing,
-                current_record.as_ref(),
+                current_material.as_ref(),
                 Some(required_status_sequence),
                 None,
             );
             return json_ok(outcome);
         }
-        coland_storage::AccountStatusReplicaAppend::Stale { current_record } => {
+        coland_storage::AccountStatusReplicaAppend::Stale { current_material } => {
             return Err(crate::app_error!(
                 FailedPrecondition,
                 format!(
                     "account-status record is stale; current status_sequence is {}",
-                    current_record.status_sequence
+                    current_material.status_sequence
                 ),
             )
             .with_reason_code(arkret_wire::ReasonCode::ACCOUNT_STATUS_RECORD_STALE));

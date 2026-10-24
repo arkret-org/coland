@@ -12,7 +12,7 @@ pub type JsonResult<T> = Result<Json<T>, AppError>;
 pub type AppResult<T> = Result<T, AppError>;
 
 /// Empty-payload handlers still emit a JSON object.
-pub type EmptyResult = JsonResult<EmptyOutcome>;
+pub type EmptyResult = JsonResult<EmptyResponseBody>;
 
 /// Wrap a value in `Json` for `?`-friendly handler returns.
 pub fn json_ok<T>(value: T) -> JsonResult<T> {
@@ -21,12 +21,12 @@ pub fn json_ok<T>(value: T) -> JsonResult<T> {
 
 /// Return the canonical empty JSON object.
 pub fn empty_ok() -> EmptyResult {
-    json_ok(EmptyOutcome {})
+    json_ok(EmptyResponseBody {})
 }
 
 /// Marker response type used by [`empty_ok`].
 #[derive(Clone, Debug, Default, Serialize, Deserialize, salvo::oapi::ToSchema)]
-pub struct EmptyOutcome {}
+pub struct EmptyResponseBody {}
 
 /// The SDK response retains its schema while its publication owns a live cut.
 pub struct GuardedJson<T> {

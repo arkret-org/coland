@@ -111,6 +111,9 @@ async fn authz_check(
                     "actions": effective.grant.actions,
                     "resources": effective.grant.resources,
                 })
+                .as_object()
+                .expect("diagnostic object literal")
+                .clone()
             })
             .collect(),
         _ => Vec::new(),
@@ -124,27 +127,32 @@ async fn authz_check(
         Some(CapabilityVerdict::RequiresReview) => AuthorizationDecision::RequireReview,
         _ => AuthorizationDecision::HardDeny,
     };
-    let policy_results = vec![json!({
-        "actor_id": body.actor_id,
-        "action": body.action,
-        "resource": body.resource,
-        "reason_detail": match &verdict {
-            Some(CapabilityVerdict::RealmOwner) => Some("realm_owner_aggregate"),
-            Some(CapabilityVerdict::Granted(_)) => Some("explicit_grant"),
-            _ => None,
-        },
-        "constraints": [],
-        "missing_proofs": [],
-        "cache": {
-            "mode": "durable_current",
-            "evaluated_at": arkret_canonical::format_timestamp_canonical(now),
-        }
-    })];
+    let policy_evaluations = vec![
+        json!({
+            "actor_id": body.actor_id,
+            "action": body.action,
+            "resource": body.resource,
+            "reason_detail": match &verdict {
+                Some(CapabilityVerdict::RealmOwner) => Some("realm_owner_aggregate"),
+                Some(CapabilityVerdict::Granted(_)) => Some("explicit_grant"),
+                _ => None,
+            },
+            "constraints": [],
+            "missing_proofs": [],
+            "cache": {
+                "mode": "durable_current",
+                "evaluated_at": arkret_canonical::format_timestamp_canonical(now),
+            }
+        })
+        .as_object()
+        .expect("diagnostic object literal")
+        .clone(),
+    ];
     json_ok(AuthorizationCheckResponseBody {
         decision,
         matched_grants,
         applied_constraints: Vec::new(),
-        policy_results,
+        policy_evaluations,
         missing_proofs: Vec::new(),
         checkpoint: None,
         freshness_state: None,

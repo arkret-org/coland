@@ -3664,7 +3664,7 @@ pub async fn assert_account_status_replica_decision_table_contract(
             .await
             .expect("classify a submission against an absent head"),
         AccountStatusReplicaAppend::DependencyMissing {
-            current_record: None,
+            current_material: None,
             required_status_sequence: 1,
         }
     );
@@ -3725,7 +3725,7 @@ pub async fn assert_account_status_replica_decision_table_contract(
             .await
             .expect("classify a rival genesis record"),
         AccountStatusReplicaAppend::Conflict {
-            current_record: Some(genesis.clone()),
+            current_material: Some(genesis.clone()),
             kind: AccountStatusReplicaConflictKind::Fork,
         }
     );
@@ -3755,7 +3755,7 @@ pub async fn assert_account_status_replica_decision_table_contract(
             .await
             .expect("classify a successor with a foreign predecessor"),
         AccountStatusReplicaAppend::Conflict {
-            current_record: Some(genesis.clone()),
+            current_material: Some(genesis.clone()),
             kind: AccountStatusReplicaConflictKind::Fork,
         }
     );
@@ -3774,7 +3774,7 @@ pub async fn assert_account_status_replica_decision_table_contract(
             .await
             .expect("classify a submission beyond the next sequence"),
         AccountStatusReplicaAppend::DependencyMissing {
-            current_record: Some(genesis.clone()),
+            current_material: Some(genesis.clone()),
             required_status_sequence: 2,
         }
     );
@@ -3805,7 +3805,7 @@ pub async fn assert_account_status_replica_decision_table_contract(
             .await
             .expect("classify a rolled back binding at the next sequence"),
         AccountStatusReplicaAppend::Conflict {
-            current_record: Some(genesis.clone()),
+            current_material: Some(genesis.clone()),
             kind: AccountStatusReplicaConflictKind::BindingRollback,
         }
     );
@@ -3892,7 +3892,7 @@ pub async fn assert_account_status_replica_decision_table_contract(
             .await
             .expect("classify a byte-identical resubmission below the head"),
         AccountStatusReplicaAppend::Stale {
-            current_record: third.clone(),
+            current_material: third.clone(),
         }
     );
     assert_eq!(
@@ -3927,7 +3927,7 @@ pub async fn assert_account_status_replica_decision_table_contract(
             .await
             .expect("classify a rival record below the head"),
         AccountStatusReplicaAppend::Stale {
-            current_record: third.clone(),
+            current_material: third.clone(),
         }
     );
 
@@ -3949,7 +3949,7 @@ pub async fn assert_account_status_replica_decision_table_contract(
             .await
             .expect("classify a rolled back binding below the head"),
         AccountStatusReplicaAppend::Conflict {
-            current_record: Some(third.clone()),
+            current_material: Some(third.clone()),
             kind: AccountStatusReplicaConflictKind::BindingRollback,
         }
     );

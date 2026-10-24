@@ -6,7 +6,7 @@ use arkret_models_collaboration::applet_installation_authority::{
 use arkret_models_collaboration::events_payloads::CapabilityGrantPayload;
 use arkret_models_collaboration::exact_current_state::{
     CapabilityGrantExactCurrentSelector, CapabilityGrantExactCurrentSelectorKind,
-    CurrentCapabilityGrant, ExactCurrentStateEntry, ExactCurrentStateReadResponseBody,
+    CurrentCapabilityGrant, ExactCurrentState, ExactCurrentStateReadResponseBody,
 };
 use arkret_models_collaboration::governance::grant_constraint::{
     CapabilitySubject, GrantConstraintKind, GrantConstraintSubkind,
@@ -94,10 +94,23 @@ async fn portable(
 ) -> PersistenceResult<AppletCommittedEvent> {
     let evidence =
         crate::account_device_committed_evidence::read(conn, &full.event, &full.commit).await?;
+    let original_fact =
+        crate::agent_producer_signer_keys::producer_source_for_commit_in_connection(
+            conn,
+            &full.event,
+            &full.commit,
+        )
+        .await?;
+    let producer_signer_fact = match original_fact {
+        Some(arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::RealmDevice(fact)) => Some(fact),
+        _ => None,
+    };
     let full = AppletCommittedEvent {
         event: full.event,
         commit: full.commit,
         producer_device_evidence: evidence,
+
+        producer_signer_fact,
     };
     full.validate_structural()
         .map_err(PersistenceError::database)?;
@@ -293,7 +306,7 @@ pub(crate) async fn read(
             realm_id: realm.clone(),
             governance_generation: generation,
             effective_stream_head: effective_head.clone(),
-            entry: ExactCurrentStateEntry::CapabilityGrant(CurrentCapabilityGrant {
+            current_state: ExactCurrentState::CapabilityGrant(CurrentCapabilityGrant {
                 selector: selector.clone(),
                 source_stream_ref: current.source.stream_ref,
                 revision: current.revision,
@@ -342,7 +355,7 @@ pub(crate) async fn read(
                 commit_id: head.commit_id,
                 stream_position: head.stream_position,
             },
-            entry: ExactCurrentStateEntry::AppletRegistration(CurrentAppletRegistration {
+            current_state: ExactCurrentState::AppletRegistration(CurrentAppletRegistration {
                 selector: AppletRegistrationExactCurrentSelector {
                     kind: AppletRegistrationExactCurrentSelectorKind::AppletRegistration,
                     applet_id: applet.clone(),

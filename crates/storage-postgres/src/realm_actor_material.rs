@@ -292,7 +292,7 @@ pub(crate) async fn read(
                     })?;
 
                     entries.push(RealmActorMaterialCurrentEntry::Present {
-                        row: CurrentState::Value {
+                        current_state: CurrentState::Value {
                             selector: selector.clone(),
                             source_stream_ref: source.stream_ref.clone(),
                             revision: arkret_wire::CurrentRevision {

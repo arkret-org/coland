@@ -1,4 +1,5 @@
 //! Management handover keeps the Realm identity and transfers native control.
+use arkret_models_crypto::DeviceGenerationState;
 use arkret_models_integration::*;
 use arkret_wire::{CommittedEventRef, CurrentRevision, EventKind};
 use coland_storage::{
@@ -62,7 +63,7 @@ pub(crate) async fn admit(
     let generation_selector = json!({"kind":"realm_actor_device_generation","actor_id":actor});
     let (generation, generation_ref) =
         current_source(conn, actor, generation_selector.clone()).await?;
-    let generation: RealmActorDeviceGenerationValue = decode(generation)?;
+    let generation: DeviceGenerationState = decode(generation)?;
     if owner != "paused"
         || governance == "retired"
         || recovery.pending.is_some()
@@ -195,7 +196,7 @@ pub(crate) async fn admit(
         ),
         (
             generation_selector,
-            json!(RealmActorDeviceGenerationValue {
+            json!(DeviceGenerationState {
                 current_device_generation_ref: payload.new_generation,
             }),
         ),

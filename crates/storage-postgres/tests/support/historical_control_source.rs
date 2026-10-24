@@ -193,7 +193,7 @@ impl HistoricalControlStation {
             )
             .await
             .unwrap(),
-            arkret_wire::DeviceRevocationAdmissionDecision::Allow,
+            arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow,
             "a new current Directory projection is issued only from the real confirmed device cut"
         );
         let store = PgAuthorityCommitStore { pool: pool.clone() };
@@ -414,7 +414,7 @@ pub async fn stage_registered_signed_candidate(
     )
     .await
     .unwrap()
-        != arkret_wire::DeviceRevocationAdmissionDecision::Allow
+        != arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     {
         return;
     }

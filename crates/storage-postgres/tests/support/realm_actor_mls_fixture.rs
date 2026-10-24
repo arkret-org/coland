@@ -1736,7 +1736,7 @@ async fn receive_and_consume(
         )
         .unwrap(),
         claim_request_id: claim.claim_request_id.clone(),
-        key_package_ref: arkret_wire::NonEmptyString::new(claim.claims[0].keypackage_ref.clone())
+        keypackage_ref: arkret_wire::NonEmptyString::new(claim.claims[0].keypackage_ref.clone())
             .unwrap(),
         recipient: RecipientMlsDurableSigner::Device {
             recipient_account_id: recipient.pcr.history.account.clone(),

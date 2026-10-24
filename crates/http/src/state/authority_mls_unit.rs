@@ -36,8 +36,7 @@ use arkret_models_collaboration::mls_roster_authority::{
     MlsAddAuthorityAttestation, MlsAttestAddRequestBody,
 };
 use arkret_models_crypto::{
-    KeyOperationSignature, KeyPackageClaimRecord, MlsCommitPayload,
-    PeerKeyPackagesClaimResponseBody,
+    KeyOperationSignature, KeyPackageClaimRecord, KeyPackagesClaimResponseBody, MlsCommitPayload,
 };
 use arkret_wire::{
     AuthoritySubmitResponseBody, Base64UrlString, DetachedSignatureContext, Event,
@@ -414,7 +413,7 @@ async fn sign_local_roster_witnesses(
                 "local Add claim differs from the verified claim",
             ));
         }
-        let outcome: PeerKeyPackagesClaimResponseBody = serde_json::from_value(
+        let outcome: KeyPackagesClaimResponseBody = serde_json::from_value(
             row.outcome
                 .ok_or_else(|| failed_precondition("local Add claim has no signed outcome"))?,
         )
@@ -1018,7 +1017,7 @@ pub(super) async fn resolve_claim(
             "the Welcome's KeyPackage claim is no longer live",
         ));
     }
-    let outcome: PeerKeyPackagesClaimResponseBody = row
+    let outcome: KeyPackagesClaimResponseBody = row
         .outcome
         .clone()
         .ok_or_else(|| failed_precondition("the claim ledger row holds no success outcome"))

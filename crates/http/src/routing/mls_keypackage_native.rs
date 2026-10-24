@@ -68,7 +68,7 @@ pub(super) async fn claim(
     body: &KeyPackagesClaimRequestBody,
     source: &NativeRequester,
 ) -> JsonResult<KeyPackagesClaimResponseBody> {
-    let peer = PeerKeyPackagesClaimRequestBody::from(body);
+    let peer = body.clone();
     let target_actor = match (
         &body.target_actor_id,
         &body.target_account_id,
@@ -218,7 +218,7 @@ fn replay_source_result(
 /// tenure under the same lock that freezes this requester's private archive.
 pub(super) async fn capture_source_result(
     state: &AppState,
-    request: &PeerKeyPackagesClaimRequestBody,
+    request: &KeyPackagesClaimRequestBody,
     result: &PeerKeyPackagesClaimQueryResponseBody,
 ) -> Result<PeerKeyPackagesClaimQueryResponseBody, AppError> {
     let retained = state
@@ -335,7 +335,7 @@ pub(super) async fn capture_source_result(
 
 pub(super) async fn verify_ordinary_target(
     state: &AppState,
-    request: &PeerKeyPackagesClaimRequestBody,
+    request: &KeyPackagesClaimRequestBody,
     outcome: &KeyPackagesClaimResponseBody,
     deadline: DateTime<Utc>,
 ) -> Result<
@@ -503,7 +503,7 @@ async fn target(
 
 pub(super) async fn targets(
     state: &AppState,
-    body: &PeerKeyPackagesClaimRequestBody,
+    body: &KeyPackagesClaimRequestBody,
 ) -> Result<BTreeMap<String, AppletManagedDeviceScopeGuard>, AppError> {
     let Some(actor) = &body.target_actor_id else {
         return Ok(BTreeMap::new());
@@ -547,10 +547,10 @@ pub(super) async fn targets(
 pub(super) async fn delivery_guard(
     state: &AppState,
     operation: arkret_wire::ServiceOperationId,
-    outcome: &PeerKeyPackagesClaimResponseBody,
+    outcome: &KeyPackagesClaimResponseBody,
     source: Option<&NativeRequester>,
     credential_deadline: DateTime<Utc>,
-    command: Option<&PeerKeyPackagesClaimRequestBody>,
+    command: Option<&KeyPackagesClaimRequestBody>,
     remote_devices: Vec<coland_storage::MlsClaimRemoteDeviceEvidence>,
 ) -> Result<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>, AppError> {
     let mut endpoints = source

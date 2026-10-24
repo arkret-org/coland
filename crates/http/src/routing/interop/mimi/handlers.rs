@@ -26,7 +26,7 @@ pub(super) async fn mimi_provider_directory(
 #[endpoint(
     operation_id = "ak.open.mimi.exchange.request_key_material",
     summary = "Request MIMI key material",
-    request_body = arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    request_body = arkret_models_crypto::KeyPackagesClaimRequestBody,
     tags("mimi")
 )]
 #[tracing::instrument(skip_all, fields(op = "ak.open.mimi.exchange.request_key_material.v1"))]
@@ -2182,7 +2182,7 @@ mod consent_proof_tests {
                 .pcr_device_admission(account, &fixture.history.founding_device_id, now())
                 .await
                 .unwrap(),
-            arkret_wire::DeviceRevocationAdmissionDecision::Allow
+            arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
         );
     }
 
@@ -3007,12 +3007,12 @@ mod consent_proof_tests {
         let (key, requester, method) = did_key_originator("retired-mimi-claim-carrier");
         let consent = signed_request_consent_request(&state, &requester, &method, &key);
         assert!(
-            serde_json::from_value::<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>(
+            serde_json::from_value::<arkret_models_crypto::KeyPackagesClaimRequestBody>(
                 serde_json::to_value(consent).unwrap()
             )
             .is_err()
         );
-        assert!(serde_json::from_value::<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>(json!({
+        assert!(serde_json::from_value::<arkret_models_crypto::KeyPackagesClaimRequestBody>(json!({
             "requester_id": requester, "strand_id": fixture_strand_id(), "device_id":"ak:device:01964137-0000-7000-8000-000000000901"
         })).is_err());
     }

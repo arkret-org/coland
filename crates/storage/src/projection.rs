@@ -421,7 +421,7 @@ pub trait CapabilityGrantCurrentStateStore: Send + Sync {
         &self,
         _request: &crate::AgentSessionAuthorityRequest,
         _at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<crate::AgentSessionAuthorityOutcome> {
+    ) -> PersistenceResult<crate::AgentSessionAuthorityView> {
         Err(crate::PersistenceError::Database(
             "Agent session authority source is unavailable".to_owned(),
         ))

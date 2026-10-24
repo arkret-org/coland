@@ -193,7 +193,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
     }
     async fn retain_realm_claim_source_result(
         &self,
-        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
         result: &arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody,
         histories: &[arkret_models_identity::AuthenticatedServiceResolution],
         governor: &arkret_wire::DidCoreId,
@@ -210,7 +210,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
     }
     async fn prepare_realm_claim_source(
         &self,
-        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
         source: &coland_storage::AppletManagedDeviceScopeGuard,
         transport_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<bool> {
@@ -231,7 +231,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
         &self,
         claim_request_id: &str,
         request_digest: &str,
-    ) -> PersistenceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>> {
+    ) -> PersistenceResult<Option<arkret_models_crypto::KeyPackagesClaimRequestBody>> {
         let mut conn = pg_conn(&self.pool).await?;
         crate::realm_claim_history::original(&mut conn, claim_request_id, request_digest).await
     }
@@ -252,7 +252,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
     }
     async fn peer_claim_candidates(
         &self,
-        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        body: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     ) -> PersistenceResult<Vec<MlsKeyPackageRow>> {
         body.validate_shape().map_err(|error| {
             PersistenceError::SchemaViolation(format!("claim candidate command: {error}"))
@@ -568,7 +568,7 @@ impl MlsKeyPackageStore for PgMlsKeyPackageStore {
 
     async fn record_peer_claim_attempt(
         &self,
-        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        body: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     ) -> PersistenceResult<coland_storage::PeerKeyPackageClaimRateDecision> {
         crate::mls_keypackage_claim_budget::record_attempt(&self.pool, body).await
     }

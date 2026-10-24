@@ -115,12 +115,12 @@ fn history_document(did: &str, entries: &[Value]) -> WebvhDocumentRecord {
                 to_method_history_head: head.clone(),
                 to_version_id: last["versionId"].as_str().unwrap().into(),
             },
-            evidence: ResolutionDidBindingEvidenceReceipt {
-                kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+            evidence: DidBindingEvidenceReceipt {
+                kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                 method: "webvh".into(),
                 document_digest: arkret_identity::document_canonical_digest(&normalized).unwrap(),
-                method_proofs: vec![ResolutionDidBindingMethodProof {
-                    kind: ResolutionDidBindingMethodProofKind::WebvhLog,
+                method_proofs: vec![DidBindingMethodProof {
+                    kind: DidBindingMethodProofKind::WebvhLog,
                     history_head: head,
                     witnesses: vec![],
                     witness_proofs_digest: arkret_canonical::canonical_sha256(&Vec::<Value>::new())

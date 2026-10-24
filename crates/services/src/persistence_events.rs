@@ -759,7 +759,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
     }
     async fn peer_claim_candidates(
         &self,
-        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        body: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     ) -> crate::ServiceResult<Vec<crate::events::MlsKeyPackageState>> {
         Ok(self
             .0
@@ -812,7 +812,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
     }
     async fn record_peer_claim_attempt(
         &self,
-        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        body: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     ) -> crate::ServiceResult<coland_storage::PeerKeyPackageClaimRateDecision> {
         Ok(self
             .0
@@ -851,7 +851,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
     }
     async fn retain_realm_claim_source_result(
         &self,
-        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
         result: &arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody,
         histories: &[arkret_models_identity::AuthenticatedServiceResolution],
         governor: &arkret_wire::DidCoreId,
@@ -864,7 +864,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
     }
     async fn prepare_realm_claim_source(
         &self,
-        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
         source: &coland_storage::AppletManagedDeviceScopeGuard,
         transport_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> crate::ServiceResult<bool> {
@@ -878,7 +878,7 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
         &self,
         claim_request_id: &str,
         request_digest: &str,
-    ) -> crate::ServiceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>> {
+    ) -> crate::ServiceResult<Option<arkret_models_crypto::KeyPackagesClaimRequestBody>> {
         Ok(self
             .0
             .mls_key_packages()

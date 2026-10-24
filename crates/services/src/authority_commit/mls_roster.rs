@@ -473,13 +473,12 @@ mod tests {
         MlsAddAuthorityAttestation, MlsAttestAddRequestBody, MlsRosterRecord,
     };
     use arkret_models_crypto::{
-        KeyPackageClaimRecord, PeerKeyPackageClaimReceipt, PeerKeyPackagesClaimFields,
-        PeerKeyPackagesClaimResponseBody, peer_keypackage_claim_receipt_signing_bytes,
+        KeyPackageClaimRecord, KeyPackagesClaimResponseBody, PeerKeyPackageClaimReceipt,
+        PeerKeyPackagesClaimFields, peer_keypackage_claim_receipt_signing_bytes,
     };
     use arkret_models_identity::{
-        AuthenticatedServiceResolution, ResolutionDidBindingEvidenceKind,
-        ResolutionDidBindingEvidenceReceipt, ResolutionMethodEvidenceBoundary,
-        ResolutionMethodHistoryEvidence,
+        AuthenticatedServiceResolution, DidBindingEvidenceKind, DidBindingEvidenceReceipt,
+        ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence,
     };
     use arkret_wire::{
         AccountId, BlobRef, Did, MlsWelcomeRecipientEndpoint, RealmId, ScopeRef,
@@ -524,8 +523,8 @@ mod tests {
                     from_version_id: version.clone(),
                     to_version_id: version,
                 },
-                evidence: ResolutionDidBindingEvidenceReceipt {
-                    kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+                evidence: DidBindingEvidenceReceipt {
+                    kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                     method: "key".to_owned(),
                     document_digest: arkret_models_identity::normalized_did_document_digest(
                         &document,
@@ -610,7 +609,7 @@ mod tests {
         )
         .unwrap();
         arkret_models_crypto::validate_target_claim_evidence(&record, &receipt).unwrap();
-        let outcome = PeerKeyPackagesClaimResponseBody {
+        let outcome = KeyPackagesClaimResponseBody {
             claim_request_id: receipt.claim_request_id.clone(),
             claims: vec![record],
             claim_receipt: receipt.clone(),

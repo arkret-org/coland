@@ -2524,7 +2524,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
                 )
                 .unwrap(),
                 claim_request_id: request_id,
-                key_package_ref: arkret_wire::NonEmptyString::new(package.keypackage_ref.to_string())
+                keypackage_ref: arkret_wire::NonEmptyString::new(package.keypackage_ref.to_string())
                     .unwrap(),
                 recipient: RecipientMlsDurableSigner::Agent {
                     recipient_agent_id: agent.principal_id.clone(),
@@ -13206,7 +13206,7 @@ fn content_session_request(
 async fn content_session_source(
     pool: &coland_storage_postgres::PgPool,
     request: &coland_storage::AgentSessionAuthorityRequest,
-) -> coland_storage::PersistenceResult<coland_storage::AgentSessionAuthorityOutcome> {
+) -> coland_storage::PersistenceResult<coland_storage::AgentSessionAuthorityView> {
     use coland_storage::CapabilityGrantCurrentStateStore;
     coland_storage_postgres::PgCapabilityGrantCurrentStateStore { pool: pool.clone() }
         .agent_session_authority(request, chrono::Utc::now())

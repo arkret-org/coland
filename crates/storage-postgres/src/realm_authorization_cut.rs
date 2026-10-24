@@ -605,7 +605,7 @@ pub(crate) async fn owned_agent_authorization_check_in_connection(
             _ => AuthorizationDecision::HardDeny,
         };
         if decision == AuthorizationDecision::Allow {
-            matched_grants = evaluation.unreserved().iter().map(|grant| serde_json::json!({"grant_id":grant.id,"subject":grant.subject,"actions":grant.actions,"resources":grant.resources})).collect();
+            matched_grants = evaluation.unreserved().iter().map(|grant| serde_json::json!({"grant_id":grant.id,"subject":grant.subject,"actions":grant.actions,"resources":grant.resources}).as_object().expect("diagnostic object literal").clone()).collect();
         }
     }
     Ok(Some(
@@ -613,8 +613,8 @@ pub(crate) async fn owned_agent_authorization_check_in_connection(
             decision: decision.clone(),
             matched_grants,
             applied_constraints: Vec::new(),
-            policy_results: vec![
-                serde_json::json!({"actor_id":request.actor_id,"action":request.action,"resource":request.resource,"reason_detail":"owned_agent_current_capability_and_management", "evaluated_at":arkret_canonical::format_timestamp_canonical(at)}),
+            policy_evaluations: vec![
+                serde_json::json!({"actor_id":request.actor_id,"action":request.action,"resource":request.resource,"reason_detail":"owned_agent_current_capability_and_management", "evaluated_at":arkret_canonical::format_timestamp_canonical(at)}).as_object().expect("diagnostic object literal").clone(),
             ],
             missing_proofs: Vec::new(),
             checkpoint: None,

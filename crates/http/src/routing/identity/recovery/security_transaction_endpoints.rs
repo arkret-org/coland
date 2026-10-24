@@ -108,7 +108,7 @@ async fn authorizing_device_active(
         .persistence()
         .pcr_device_admission(account_id, device_id, chrono::Utc::now())
         .await
-        .map(|admission| admission == arkret_wire::DeviceRevocationAdmissionDecision::Allow)
+        .map(|admission| admission == arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow)
         .map_err(|error| {
             tracing::warn!(%error, "PCR device status unavailable for security rotation");
             crate::app_error!(
@@ -1002,7 +1002,7 @@ async fn try_advance_rotation_erase(
                 .persistence()
                 .pcr_device_admission(&resource.account_id, &authorizer, now)
                 .await?
-                != arkret_wire::DeviceRevocationAdmissionDecision::Allow
+                != arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
             {
                 return stop_rotation(
                     state,

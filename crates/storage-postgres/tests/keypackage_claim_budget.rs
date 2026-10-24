@@ -1,7 +1,7 @@
 //! Backend attempt-budget contracts. These do not claim that a fixture Device
 //! or Agent has accepted authorization, or that any KeyPackage was claimed.
 
-use arkret_models_crypto::{PeerKeyPackageRequesterAuthorization, PeerKeyPackagesClaimRequestBody};
+use arkret_models_crypto::{KeyPackagesClaimRequestBody, PeerKeyPackageRequesterAuthorization};
 use coland_storage::{MlsKeyPackageStore, PeerKeyPackageClaimRateDecision as Decision};
 use coland_storage_postgres::{PgMlsKeyPackageStore, PgPool};
 use diesel_async::RunQueryDsl;
@@ -19,7 +19,7 @@ fn account(principal: &str, station: &str) -> arkret_wire::AccountId {
 fn request(
     requester: arkret_wire::AccountId,
     target: arkret_wire::AccountId,
-) -> PeerKeyPackagesClaimRequestBody {
+) -> KeyPackagesClaimRequestBody {
     let signed_at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let method = format!(
         "did:{}#ak:device:01964137-0000-7000-8000-000000000002",
@@ -37,7 +37,7 @@ fn request(
     let scope = arkret_wire::ScopeRef::Realm {
         realm_id: realm.clone(),
     };
-    let mut body = PeerKeyPackagesClaimRequestBody {
+    let mut body = KeyPackagesClaimRequestBody {
         claim_request_id: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
             [
                 uuid::Uuid::new_v4().into_bytes(),
@@ -88,7 +88,7 @@ fn request(
     body
 }
 
-fn resign(body: &mut PeerKeyPackagesClaimRequestBody, key: &SigningKey) {
+fn resign(body: &mut KeyPackagesClaimRequestBody, key: &SigningKey) {
     let bytes = arkret_models_crypto::keypackage_claim_authorization_signing_bytes(
         &body.unsigned_request(),
         &body.service_binding,
@@ -454,7 +454,7 @@ fn agent_request(
     index: u8,
     target_agent: &str,
     requester_agent: &str,
-) -> PeerKeyPackagesClaimRequestBody {
+) -> KeyPackagesClaimRequestBody {
     let mut body = request(
         account("placeholder", "source"),
         account("placeholder", "destination"),

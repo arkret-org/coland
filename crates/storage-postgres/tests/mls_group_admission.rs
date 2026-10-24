@@ -1938,8 +1938,8 @@ fn signed_remote_add_attestation(
         MlsAddAuthorityAttestation, MlsAttestAddRequestBody,
     };
     use arkret_models_crypto::{
-        KeyOperationSignature, KeyPackageClaimRecord, PeerKeyPackageClaimReceipt,
-        PeerKeyPackagesClaimFields, PeerKeyPackagesClaimResponseBody,
+        KeyOperationSignature, KeyPackageClaimRecord, KeyPackagesClaimResponseBody,
+        PeerKeyPackageClaimReceipt, PeerKeyPackagesClaimFields,
         peer_keypackage_claim_receipt_signing_bytes,
     };
 
@@ -2019,7 +2019,7 @@ fn signed_remote_add_attestation(
         &peer_keypackage_claim_receipt_signing_bytes(&receipt).unwrap(),
     )
     .unwrap();
-    let outcome = PeerKeyPackagesClaimResponseBody {
+    let outcome = KeyPackagesClaimResponseBody {
         claim_request_id: receipt.claim_request_id.clone(),
         claims: vec![record],
         claim_receipt: receipt.clone(),
@@ -2070,9 +2070,8 @@ fn historical_roster_attestor_resolution() -> arkret_models_identity::Authentica
 {
     use arkret_identity::{DidKeyResolver, DidResolver};
     use arkret_models_identity::{
-        AuthenticatedServiceResolution, DidDocument, ResolutionDidBindingEvidenceKind,
-        ResolutionDidBindingEvidenceReceipt, ResolutionMethodEvidenceBoundary,
-        ResolutionMethodHistoryEvidence,
+        AuthenticatedServiceResolution, DidBindingEvidenceKind, DidBindingEvidenceReceipt,
+        DidDocument, ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence,
     };
     let signer = ed25519_dalek::SigningKey::from_bytes(&[19; 32]);
     let multibase =
@@ -2097,8 +2096,8 @@ fn historical_roster_attestor_resolution() -> arkret_models_identity::Authentica
                 from_version_id: version.clone(),
                 to_version_id: version,
             },
-            evidence: ResolutionDidBindingEvidenceReceipt {
-                kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+            evidence: DidBindingEvidenceReceipt {
+                kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                 method: "key".to_owned(),
                 document_digest: digest,
                 method_proofs: vec![],

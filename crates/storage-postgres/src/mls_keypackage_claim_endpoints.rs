@@ -5,8 +5,7 @@ mod tests;
 use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
 use arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload;
 use arkret_models_crypto::{
-    PeerKeyPackageRequesterAuthorization, PeerKeyPackagesClaimRequestBody,
-    PeerKeyPackagesClaimResponseBody,
+    KeyPackagesClaimRequestBody, KeyPackagesClaimResponseBody, PeerKeyPackageRequesterAuthorization,
 };
 use arkret_wire::{
     AccountId, ActorId, CommittedEventRef, DeviceId, DidCoreId, DidUrl, EventId, EventKind, RealmId,
@@ -165,7 +164,7 @@ async fn original(
 /// than treating its own transport signature as a remote source attestation.
 pub(crate) async fn require_local_requester_signature(
     conn: &mut AsyncPgConnection,
-    request: &PeerKeyPackagesClaimRequestBody,
+    request: &KeyPackagesClaimRequestBody,
 ) -> PersistenceResult<()> {
     let (method, signature, key) = match &request.requester_authorization {
         PeerKeyPackageRequesterAuthorization::Device {
@@ -418,8 +417,8 @@ async fn agent(
 /// Every local source and target is instead re-read under the real local PCR.
 pub(crate) async fn prepare(
     conn: &mut AsyncPgConnection,
-    outcome: &PeerKeyPackagesClaimResponseBody,
-    command: Option<&PeerKeyPackagesClaimRequestBody>,
+    outcome: &KeyPackagesClaimResponseBody,
+    command: Option<&KeyPackagesClaimRequestBody>,
     station: &DidCoreId,
     remote_devices: &[coland_storage::MlsClaimRemoteDeviceEvidence],
 ) -> PersistenceResult<Vec<ClaimEndpoint>> {

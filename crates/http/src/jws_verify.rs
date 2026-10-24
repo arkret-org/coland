@@ -922,7 +922,7 @@ fn principal_binding_acceptance(
     // proofless resolution, not a placeholder standing in for evidence. It is
     // still strictly stronger than the `evidence_digest = document_digest` this
     // replaced, because the receipt also commits to the resolved method.
-    let receipt = arkret_identity::EvidenceReceipt::new(
+    let receipt = arkret_identity::DidBindingEvidenceReceipt::new(
         did.method(),
         document_digest.clone(),
         &arkret_identity::MethodEvidence::none(),
@@ -1806,3 +1806,5 @@ mod did_binding_tests {
         .expect_err("the proof transcript is bound to the Event it was signed over");
     }
 }
+
+use arkret_identity::DidBindingEvidenceReceiptExt;

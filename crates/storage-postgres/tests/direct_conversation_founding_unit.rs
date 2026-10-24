@@ -5926,8 +5926,8 @@ async fn claim_human_peer_package(
     mut package: arkret_models_crypto::MlsKeyPackageRecord,
 ) -> arkret_models_crypto::MlsKeyPackageRecord {
     use arkret_models_crypto::{
-        KeyPackageClaimRecord, PeerKeyPackageClaimReceipt, PeerKeyPackageRequesterAuthorization,
-        PeerKeyPackagesClaimRequestBody, PeerKeyPackagesClaimResponseBody,
+        KeyPackageClaimRecord, KeyPackagesClaimRequestBody, KeyPackagesClaimResponseBody,
+        PeerKeyPackageClaimReceipt, PeerKeyPackageRequesterAuthorization,
     };
     use coland_storage::MlsKeyPackageStore;
     let guard = pair
@@ -5994,7 +5994,7 @@ async fn claim_human_peer_package(
     let SelfProducerCommitGuard::HumanDevice(requester_guard) = &pair.founder_guard else {
         panic!("actual Human requester");
     };
-    let mut request: PeerKeyPackagesClaimRequestBody = serde_json::from_value(serde_json::json!({
+    let mut request: KeyPackagesClaimRequestBody = serde_json::from_value(serde_json::json!({
         "claim_request_id":request_id, "target_account_id":pair.peer, "requester_account_id":pair.founder,
         "intended_realm_id":scope.realm_id(), "mls_group_id":scope.canonical_mls_group_id().unwrap(),
         "claim_purpose":"direct_conversation", "required_capabilities":package.capabilities,
@@ -6064,7 +6064,7 @@ async fn claim_human_peer_package(
         &arkret_models_crypto::peer_keypackage_claim_receipt_signing_bytes(&receipt).unwrap(),
     )
     .unwrap();
-    let outcome = PeerKeyPackagesClaimResponseBody {
+    let outcome = KeyPackagesClaimResponseBody {
         claim_request_id: request_id.clone(),
         claims: vec![record],
         claim_receipt: receipt,
@@ -6109,7 +6109,7 @@ async fn claim_human_peer_package(
         .await
         .unwrap()
         .unwrap();
-    let retained_outcome: PeerKeyPackagesClaimResponseBody =
+    let retained_outcome: KeyPackagesClaimResponseBody =
         serde_json::from_value(retained.outcome.unwrap()).unwrap();
     assert_eq!(retained_outcome.claims[0].keypackage, package.keypackage);
     assert_eq!(

@@ -653,7 +653,7 @@ pub(crate) async fn list_in_connection(
     rows.sort_by(|left, right| left.morph_id.cmp(&right.morph_id));
     let output = MorphPage {
         realm_id: realm.clone(),
-        total: u64::try_from(rows.len()).map_err(unavailable)?,
+        total_count: u64::try_from(rows.len()).map_err(unavailable)?,
         morphs: rows,
         next_cursor: None,
         has_more: false,
@@ -2819,7 +2819,7 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(list.total, 1);
+        assert_eq!(list.total_count, 1);
         assert_eq!(facts.len(), 2);
         sql_query("UPDATE member_state_current_states SET membership='leave',value=jsonb_set(value,'{membership}','\"leave\"'::jsonb)")
             .execute(&mut *conn)

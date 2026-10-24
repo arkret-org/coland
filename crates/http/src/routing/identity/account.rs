@@ -52,8 +52,8 @@ use arkret_models_identity::{
 use arkret_wire::ActorId;
 use coland_contracts::AccountProjectionRequestBody;
 use coland_contracts::admin::{
-    AccountLocalpartAddRequestBody, AccountLocalpartListOutcome, AccountLocalpartMutationOutcome,
-    AccountLocalpartView,
+    AccountLocalpartAddRequestBody, AccountLocalpartUpdateResponseBody, AccountLocalpartView,
+    AccountLocalpartsView,
 };
 use coland_http::error::AppError;
 use coland_services::identity::{
@@ -75,7 +75,7 @@ use super::did::require_embedded_webvh_registration_bearer;
 use super::{AuthArgs, append_audit_log, bearer_token, now, sha256_hex, validate_did};
 use crate::routing::validate_device_id;
 use crate::state::AppState;
-use crate::wire::ColandAccountRegisterOutcome;
+use crate::wire::LocalAccountView;
 
 /// Deployment-local Station projection result. The Account
 /// Authority owns `AccountRegisterResponseBody` and its signed binding receipt;
@@ -707,7 +707,7 @@ fn agent_direct_authorization_basis_from_record(
 async fn local_account_register(
     depot: &mut Depot,
     body: JsonBody<LocalAccountRegisterRequestBody>,
-) -> JsonResult<ColandAccountRegisterOutcome> {
+) -> JsonResult<LocalAccountView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
     let did =
@@ -797,7 +797,7 @@ async fn local_account_me(
     aa: AuthArgs,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<ColandAccountRegisterOutcome> {
+) -> JsonResult<LocalAccountView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let account = state
@@ -823,7 +823,7 @@ async fn list_account_localparts(
     account_principal_id: PathParam<String>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<AccountLocalpartListOutcome> {
+) -> JsonResult<AccountLocalpartsView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     require_account_localparts_bearer(state, req)?;
     let account_principal_id = account_core_id_from_path(account_principal_id.into_inner())?;
@@ -837,7 +837,7 @@ async fn list_account_localparts(
         .iter()
         .find(|record| record.is_primary)
         .map(|record| record.localpart.clone());
-    json_ok(AccountLocalpartListOutcome {
+    json_ok(AccountLocalpartsView {
         account_principal_id,
         primary_localpart,
         localparts: records.into_iter().map(account_localpart_view).collect(),
@@ -854,7 +854,7 @@ async fn add_account_localpart(
     depot: &mut Depot,
     req: &mut Request,
     body: JsonBody<AccountLocalpartAddRequestBody>,
-) -> JsonResult<AccountLocalpartMutationOutcome> {
+) -> JsonResult<AccountLocalpartUpdateResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     require_account_localparts_bearer(state, req)?;
     let account_principal_id = account_core_id_from_path(account_principal_id.into_inner())?;
@@ -884,7 +884,7 @@ async fn add_account_localpart(
         "accepted",
     )
     .await;
-    json_ok(AccountLocalpartMutationOutcome {
+    json_ok(AccountLocalpartUpdateResponseBody {
         localpart: account_localpart_view(record),
     })
 }
@@ -1428,7 +1428,7 @@ async fn read_principal_resolution_audit(
         .cloned()
         .collect::<Vec<_>>();
     let requested_depth = usize::from(body.history_depth.unwrap_or(0));
-    let mut predecessor_resolution_events = available_predecessors
+    let predecessor_resolution_events = available_predecessors
         .iter()
         .take(requested_depth)
         .cloned()
@@ -1468,7 +1468,6 @@ async fn read_principal_resolution_audit(
     } else {
         None
     };
-    predecessor_resolution_events.reverse();
     let (mut method_history_evidence, _) =
         crate::routing::system::principal_resolution::principal_method_history_evidence(
             state,
@@ -1501,13 +1500,39 @@ async fn read_principal_resolution_audit(
         }
     }
 
-    let principal_genesis_commit = state
-        .persistence()
-        .committed_event(&record.genesis_event.event_id)
+    let genesis_page = state
+        .authority_commits()
+        .scan_stream(&arkret_wire::StreamScanRequestBody {
+            realm_id: record.pcr_realm_id.clone(),
+            stream_ref: arkret_wire::CommitStreamRef::Realm {
+                realm_id: record.pcr_realm_id.clone(),
+            },
+            direction: arkret_wire::StreamScanDirection::After(None),
+            limit: 2,
+        })
         .await
-        .map_err(|error| AppError::internal(format!("load PCR genesis commit: {error}")))?
-        .map(|committed| committed.commit)
-        .ok_or_else(|| AppError::not_found("principal resolution audit unavailable"))?;
+        .map_err(|error| AppError::internal(format!("load PCR genesis unit: {error}")))?;
+    let mut genesis = genesis_page.committed_events.into_iter();
+    let Some(arkret_wire::CommittedEventView::Full(create)) = genesis.next() else {
+        return Err(AppError::not_found(
+            "principal resolution audit unavailable",
+        ));
+    };
+    let Some(arkret_wire::CommittedEventView::Full(authorize)) = genesis.next() else {
+        return Err(AppError::not_found(
+            "principal resolution audit unavailable",
+        ));
+    };
+    if create.event != record.genesis_event
+        || create.commit.stream_position != 0
+        || authorize.commit.stream_position != 1
+    {
+        return Err(AppError::not_found(
+            "principal resolution audit unavailable",
+        ));
+    }
+    let founding_device_authorize_event = authorize.event;
+    let genesis_commits = [create.commit, authorize.commit];
     let current_resolution_commit = state
         .persistence()
         .committed_event(&record.current_event.event_id)
@@ -1535,13 +1560,14 @@ async fn read_principal_resolution_audit(
     let evidence = PrincipalResolutionAuditEvidence {
         account_id: record.account_id,
         principal_control_realm_id: record.pcr_realm_id,
-        principal_genesis_commit,
+        founding_device_authorize_event,
+        genesis_commits,
         principal_genesis_event: record.genesis_event,
         current_resolution_event: record.current_event,
         predecessor_resolution_events,
         predecessor_resolution_commits,
         history_complete,
-        current_resolution_commit,
+        accepted_commit: current_resolution_commit,
         next_audit_cursor,
         method_history_evidence: Some(method_history_evidence),
     };
@@ -2097,9 +2123,9 @@ fn direct_slot_coordinates(
     })
 }
 
-fn account_response(account: AccountRecord, state: &AppState) -> ColandAccountRegisterOutcome {
+fn account_response(account: AccountRecord, state: &AppState) -> LocalAccountView {
     let lifecycle_state = state.account_lifecycle_state(account.principal_id.as_str());
-    ColandAccountRegisterOutcome {
+    LocalAccountView {
         handle: account.handle(),
         principal_id: account.principal_id,
         display_name: account.display_name,

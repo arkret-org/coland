@@ -1,4 +1,5 @@
 //! Owner status and Device generation writes by the current control method.
+use arkret_models_crypto::DeviceGenerationState;
 use arkret_models_integration::*;
 use arkret_wire::{CommittedEventRef, CurrentRevision, EventKind, ScopeRef};
 use coland_storage::{AppletControlCarrier, AuthorityCommitTransaction, PersistenceError};
@@ -208,7 +209,7 @@ pub(crate) async fn admit(
             let payload: RealmActorDevicesResetPayload = decode(json!(event.payload))?;
             let selector = json!({"kind":"realm_actor_device_generation","actor_id":actor});
             let (generation, source) = current_source(conn, actor, selector.clone()).await?;
-            let generation: RealmActorDeviceGenerationValue = decode(generation)?;
+            let generation: DeviceGenerationState = decode(generation)?;
             if recovery.pending.is_some()
                 || owner == "retired"
                 || governance == "retired"
@@ -229,7 +230,7 @@ pub(crate) async fn admit(
             .await?;
             writes.push((
                 selector,
-                json!(RealmActorDeviceGenerationValue {
+                json!(DeviceGenerationState {
                     current_device_generation_ref: payload.new_generation
                 }),
             ));

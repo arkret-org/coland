@@ -9,9 +9,8 @@
 
 use arkret_models_collaboration::events_payloads::event_wire::ErasureTrigger;
 use arkret_models_collaboration::governance::erasure::{
-    ErasedClass, ErasureOutcome, ErasureReceipt, ErasureReceiptPackage, ErasureReceiptProof,
-    ErasureReceiptSubmitRequestBody, ErasureScope, ErasureStorageBoundary, ErasureSubject,
-    ErasureSubjectKind,
+    ErasedClass, ErasureAttemptOutcome, ErasureReceipt, ErasureReceiptPackage, ErasureReceiptProof,
+    ErasureScope, ErasureStorageBoundary, ErasureSubject, ErasureSubjectKind,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -641,9 +640,7 @@ async fn enqueue_erasure_receipt_to_targets(
     package
         .validate_bindings()
         .map_err(|error| AppError::internal(format!("outbound erasure package: {error}")))?;
-    let body = ErasureReceiptSubmitRequestBody {
-        package: package.clone(),
-    };
+    let body = package.clone();
     let payload = arkret_canonical::canonical_json_string(&body)
         .map_err(|error| AppError::internal(error.to_string()))?;
     for peer in peers
@@ -655,10 +652,7 @@ async fn enqueue_erasure_receipt_to_targets(
             None,
             peer.as_str(),
             "/_arkret/peer/erasure-receipts",
-            &format!(
-                "ak:outbox:erasure-receipt:{}",
-                body.package.receipt.receipt_id
-            ),
+            &format!("ak:outbox:erasure-receipt:{}", body.receipt.receipt_id),
             &payload,
             None,
         )
@@ -751,7 +745,7 @@ fn build_erasure_receipt_package(
         issuer_id: issuer,
         subject,
         scope,
-        outcome: ErasureOutcome::Completed,
+        outcome: ErasureAttemptOutcome::Completed,
         erased_classes,
         retained_stub_digest,
         retained_stub: None,

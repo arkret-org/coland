@@ -225,7 +225,7 @@ async fn damage_hydration_mirror(
 #[tokio::test]
 async fn owned_agent_exact_current_is_issuer_only_even_after_membership_ends() {
     use arkret_models_collaboration::exact_current_state::{
-        ExactCurrentStateEntry, ExactCurrentStateReadRequestBody, ExactCurrentStateReadResponseBody,
+        ExactCurrentState, ExactCurrentStateReadRequestBody, ExactCurrentStateReadResponseBody,
     };
     use coland_storage::SelfExactCurrentRead;
     use diesel::sql_types::Jsonb;
@@ -275,7 +275,7 @@ async fn owned_agent_exact_current_is_issuer_only_even_after_membership_ends() {
     drop(conn);
     let request: ExactCurrentStateReadRequestBody = serde_json::from_value(serde_json::json!({"realm_id":realm,"selector":{"kind":"capability_grant","grant_id":grant_id}})).unwrap();
     let SelfExactCurrentRead::Answer(ExactCurrentStateReadResponseBody::Present {
-        entry: ExactCurrentStateEntry::CapabilityGrant(row),
+        current_state: ExactCurrentState::CapabilityGrant(row),
         ..
     }) = store
         .exact_current_state_for_account(&request, &controller, &station)
@@ -312,7 +312,7 @@ async fn owned_agent_exact_current_is_issuer_only_even_after_membership_ends() {
     );
     uow.commit_event(revoke.clone()).await.unwrap();
     let SelfExactCurrentRead::Answer(ExactCurrentStateReadResponseBody::Present {
-        entry: ExactCurrentStateEntry::CapabilityGrant(terminal),
+        current_state: ExactCurrentState::CapabilityGrant(terminal),
         ..
     }) = store
         .exact_current_state_for_account(&request, &controller, &station)
@@ -4902,7 +4902,7 @@ async fn realm_root_authority_event_ref(
 #[tokio::test]
 async fn self_current_reads_answer_only_the_provable_cut() {
     use arkret_models_collaboration::exact_current_state::{
-        ExactCurrentStateEntry, ExactCurrentStateReadRequestBody, ExactCurrentStateReadResponseBody,
+        ExactCurrentState, ExactCurrentStateReadRequestBody, ExactCurrentStateReadResponseBody,
     };
     use arkret_models_collaboration::strand_watch_operations::StrandWatchCurrentRequestBody;
     use coland_storage::{AccountRealmStreamList, MediaServiceAnchorRead, SelfExactCurrentRead};
@@ -5050,7 +5050,7 @@ async fn self_current_reads_answer_only_the_provable_cut() {
         realm_id: answered_realm,
         governance_generation,
         effective_stream_head,
-        entry: ExactCurrentStateEntry::Relation(entry),
+        current_state: ExactCurrentState::Relation(entry),
     }) = exact(
         relation_request(&realm_id),
         creator.clone(),
@@ -5964,13 +5964,14 @@ async fn third_party_invite_create_reads_from_committed_event_and_lifecycle() {
         .unwrap();
     outcome.validate_for_request(&request).unwrap();
     let attestation = &outcome.acceptance_attestation;
-    assert_eq!(
-        attestation.accepted_commit_ref.commit_id,
-        create.authority_commit.commit.commit_id
-    );
-    assert_eq!(
-        attestation.accepted_commit_ref.event_id,
-        create.authority_commit.event.event_id
+    assert_eq!(attestation.realm_id, realm_id);
+    assert_eq!(attestation.invite_id, invite.invite_id);
+    assert_eq!(attestation.verification_id, request.verification_id);
+    assert!(
+        serde_json::to_value(attestation)
+            .unwrap()
+            .get("accepted_commit_ref")
+            .is_none()
     );
     assert_eq!(
         attestation.third_party_invite,

@@ -424,7 +424,7 @@ async fn exact_visible_committed_event(
         signer_query_diagnostic("exact_visibility", "coordinate_mismatch");
         return false;
     }
-    let event_record = match state
+    let event_material = match state
         .event_queries()
         .canonical_event(reference.event_id.as_str())
         .await
@@ -439,10 +439,10 @@ async fn exact_visible_committed_event(
             return false;
         }
     };
-    let visible = event_record.realm_id.as_deref() == Some(realm_id.as_str())
+    let visible = event_material.realm_id.as_deref() == Some(realm_id.as_str())
         && crate::routing::events::event_log::event_visible_to_session(
             state,
-            &event_record,
+            &event_material,
             session,
         )
         .await;

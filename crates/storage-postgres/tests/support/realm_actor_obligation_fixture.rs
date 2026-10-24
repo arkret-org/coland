@@ -729,7 +729,10 @@ async fn realm_device_claim_writer_wait_crosses_deadline(
     );
 }
 
-#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
+)]
 async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
     fixture: &Fixture,
     package: &AppletPackage,
@@ -1001,7 +1004,7 @@ async fn realm_device_prepared_claim_guard_crosses_actual_deadline(
         realms: vec![fixture.realm.clone()],
         keypackage_claims: vec![coland_storage::MlsKeyPackageClaimDelivery {
             operation: ServiceOperationId::SelfKeysKeypackagesCommandClaimV1,
-            outcome: PeerKeyPackagesClaimResponseBody {
+            outcome: KeyPackagesClaimResponseBody {
                 claim_request_id: outcome.claim_request_id.clone(),
                 claims: outcome.claims.clone(),
                 claim_receipt: outcome.claim_receipt.clone(),
@@ -1177,7 +1180,7 @@ async fn realm_device_owned_query_prepared_guard_crosses_deadline(
         StatusCode::OK,
         "actual Human claims the native recipient, no source/recipient substitution: {value}"
     );
-    let outcome: PeerKeyPackagesClaimResponseBody = serde_json::from_value(value.clone()).unwrap();
+    let outcome: KeyPackagesClaimResponseBody = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(outcome.claims.len(), 1);
     assert_eq!(outcome.claims[0].actor_id, authority.actor_id);
     assert_eq!(
@@ -1403,7 +1406,10 @@ async fn realm_device_consume_writer_wait_crosses_physical_device_expiry(
     }
 }
 
-#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
+)]
 async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
     fixture: &Fixture,
     package: &AppletPackage,
@@ -1746,7 +1752,7 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
         )
         .unwrap(),
         claim_request_id: claim.claim_request_id.clone(),
-        key_package_ref: arkret_wire::NonEmptyString::new(claim.claims[0].keypackage_ref.clone())
+        keypackage_ref: arkret_wire::NonEmptyString::new(claim.claims[0].keypackage_ref.clone())
             .unwrap(),
         recipient: RecipientMlsDurableSigner::RealmDevice {
             recipient_actor_id: recipient_authority.actor_id.clone(),
@@ -1831,7 +1837,7 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
             match boundary {
                 NativeConsumeExpiryBoundary::InitialCurrent => {
                     NativeWriterWaitTarget::ConsumePackage {
-                        keypackage_ref: command.recipient_durable_receipt.key_package_ref.as_str(),
+                        keypackage_ref: command.recipient_durable_receipt.keypackage_ref.as_str(),
                         actor_id: &recipient_authority.actor_id,
                         device_id: &recipient_authority.device_id,
                     }

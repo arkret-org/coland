@@ -87,14 +87,14 @@ pub enum AccountStatusReplicaAppend {
     Accepted(AccountStatusReceipt),
     Duplicate(AccountStatusReceipt),
     DependencyMissing {
-        current_record: Option<AccountStatusRecord>,
+        current_material: Option<AccountStatusRecord>,
         required_status_sequence: u64,
     },
     Stale {
-        current_record: AccountStatusRecord,
+        current_material: AccountStatusRecord,
     },
     Conflict {
-        current_record: Option<AccountStatusRecord>,
+        current_material: Option<AccountStatusRecord>,
         kind: AccountStatusReplicaConflictKind,
     },
 }
@@ -201,7 +201,7 @@ pub fn classify_account_status_replica_append(
         // genesis_gap: an absent head requires the genesis record first.
         if record.status_sequence > 1 {
             return Some(AccountStatusReplicaAppend::DependencyMissing {
-                current_record: None,
+                current_material: None,
                 required_status_sequence: 1,
             });
         }
@@ -244,12 +244,12 @@ pub fn classify_account_status_replica_append(
         // for the submitted sequence is a local retention decision and must not
         // turn a below-head submission into a duplicate.
         return Some(AccountStatusReplicaAppend::Stale {
-            current_record: head_record.clone(),
+            current_material: head_record.clone(),
         });
     }
     // sequence_gap.
     Some(AccountStatusReplicaAppend::DependencyMissing {
-        current_record: Some(head_record.clone()),
+        current_material: Some(head_record.clone()),
         required_status_sequence: head_record.status_sequence + 1,
     })
 }
@@ -259,7 +259,7 @@ fn conflict(
     kind: AccountStatusReplicaConflictKind,
 ) -> AccountStatusReplicaAppend {
     AccountStatusReplicaAppend::Conflict {
-        current_record: Some(head.clone()),
+        current_material: Some(head.clone()),
         kind,
     }
 }

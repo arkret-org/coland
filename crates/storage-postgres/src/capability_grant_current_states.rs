@@ -1639,7 +1639,7 @@ impl CapabilityGrantCurrentStateStore for PgCapabilityGrantCurrentStateStore {
         &self,
         request: &coland_storage::AgentSessionAuthorityRequest,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<coland_storage::AgentSessionAuthorityOutcome> {
+    ) -> PersistenceResult<coland_storage::AgentSessionAuthorityView> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async |conn| {
             sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")

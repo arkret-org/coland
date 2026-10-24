@@ -44,11 +44,11 @@ pub(crate) async fn revoke(
         return Err(denied("revoke differs from original Device scope"));
     }
     let refs = body
-        .key_package_refs
+        .keypackage_refs
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    if refs.is_empty() || refs.len() != body.key_package_refs.len() {
+    if refs.is_empty() || refs.len() != body.keypackage_refs.len() {
         return Err(PersistenceError::SchemaViolation(
             "KeyPackage revoke refs must be nonempty and unique".into(),
         ));
@@ -99,7 +99,7 @@ pub(crate) async fn revoke(
         }
         let mut outcome = KeyPackagesRevokeResponseBody { revoked: vec![], failures: vec![] };
         let mut records = vec![];
-        for reference in &body.key_package_refs {
+        for reference in &body.keypackage_refs {
             let Some(row) = rows.remove(reference).flatten() else {
                 outcome.failures.push(failure(reference, arkret_wire::ErrorCode::KEYPACKAGE_UNKNOWN));
                 continue;

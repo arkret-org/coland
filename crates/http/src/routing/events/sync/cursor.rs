@@ -1089,7 +1089,6 @@ pub(super) async fn account_cursor_revoke(
         arkret_models_identity::account::AccountCursorRevokeResponseBody {
             revoked: true,
             expires_at: effective_expiry,
-            revoke_scope_effective: Some(scope),
         },
     )
 }

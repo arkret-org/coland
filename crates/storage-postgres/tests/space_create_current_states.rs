@@ -945,7 +945,7 @@ async fn space_create_root_and_child_have_three_sibling_results_and_exact_replay
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(list.total, 2);
+    assert_eq!(list.total_count, 2);
     let root_row = list
         .spaces
         .iter()

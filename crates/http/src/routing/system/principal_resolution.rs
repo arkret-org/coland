@@ -1,9 +1,8 @@
 use arkret_models_identity::{
-    DidDocument, PrincipalResolutionProjection, PrincipalResolutionProjectionAttestationCore,
-    PublicPrincipalResolution, ResolutionDidBindingEvidenceKind,
-    ResolutionDidBindingEvidenceReceipt, ResolutionDidBindingMethodProof,
-    ResolutionDidBindingMethodProofKind, ResolutionMethodEvidenceBoundary,
-    ResolutionMethodHistoryEvidence,
+    DidBindingEvidenceKind, DidBindingEvidenceReceipt, DidBindingMethodProof,
+    DidBindingMethodProofKind, DidDocument, PrincipalResolutionProjection,
+    PrincipalResolutionProjectionAttestationCore, PublicPrincipalResolution,
+    ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence,
 };
 use arkret_wire::{AccountId, Did, DidCoreId, Hash};
 use coland_http::error::AppError;
@@ -213,12 +212,12 @@ pub(crate) async fn principal_method_history_evidence(
             Ok((
                 ResolutionMethodHistoryEvidence::WebvhLog {
                     boundary,
-                    evidence: ResolutionDidBindingEvidenceReceipt {
-                        kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+                    evidence: DidBindingEvidenceReceipt {
+                        kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                         method: "webvh".to_owned(),
                         document_digest,
-                        method_proofs: vec![ResolutionDidBindingMethodProof {
-                            kind: ResolutionDidBindingMethodProofKind::WebvhLog,
+                        method_proofs: vec![DidBindingMethodProof {
+                            kind: DidBindingMethodProofKind::WebvhLog,
                             history_head: projection.method_history_head.clone(),
                             witnesses: Vec::new(),
                             witness_proofs_digest,
@@ -247,8 +246,8 @@ pub(crate) async fn principal_method_history_evidence(
                     ))
                 })?;
             let document_digest = canonical_document_digest(&document)?;
-            let evidence = ResolutionDidBindingEvidenceReceipt {
-                kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+            let evidence = DidBindingEvidenceReceipt {
+                kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                 method: did.method().to_owned(),
                 document_digest,
                 method_proofs: Vec::new(),

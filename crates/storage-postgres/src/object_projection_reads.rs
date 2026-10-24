@@ -259,14 +259,14 @@ pub(crate) async fn lists_for_actor_in_connection(
         return Ok(Some((
             SpacePage {
                 realm_id: realm_id.clone(),
-                total: 0,
+                total_count: 0,
                 spaces: Vec::new(),
                 next_cursor: None,
                 has_more: false,
             },
             StrandPage {
                 realm_id: realm_id.clone(),
-                total: 0,
+                total_count: 0,
                 strands: Vec::new(),
                 next_cursor: None,
                 has_more: false,
@@ -556,14 +556,14 @@ pub(crate) async fn lists_for_actor_in_connection(
     Ok(Some((
         SpacePage {
             realm_id: realm_id.clone(),
-            total: spaces.len() as u64,
+            total_count: spaces.len() as u64,
             spaces,
             next_cursor: None,
             has_more: false,
         },
         StrandPage {
             realm_id: realm_id.clone(),
-            total: strands.len() as u64,
+            total_count: strands.len() as u64,
             strands,
             next_cursor: None,
             has_more: false,
@@ -982,7 +982,7 @@ mod tests {
         );
         let output = SpacePage {
             realm_id: realm.clone(),
-            total: 1,
+            total_count: 1,
             next_cursor: None,
             has_more: false,
             spaces: vec![SpaceView {
@@ -1003,7 +1003,7 @@ mod tests {
         let strands = StrandPage {
             realm_id: realm.clone(),
             strands: vec![],
-            total: 0,
+            total_count: 0,
             next_cursor: None,
             has_more: false,
         };
@@ -1162,7 +1162,7 @@ mod tests {
             .unwrap()
         );
         let mut forged = spaces.clone();
-        forged.total += 1;
+        forged.total_count += 1;
         assert!(
             !projection_lists_match_in_connection(
                 &mut conn, &realm, &actor, false, &forged, &strands, &owner
@@ -1405,7 +1405,7 @@ pub(crate) async fn realm_link_list_in_connection(
     )>,
 > {
     use arkret_models_collaboration::governance::realm_governance::{
-        RealmLinkDirection, RealmLinkEntry, RealmLinkList, RealmLinkPayload,
+        RealmLinkDirection, RealmLinkList, RealmLinkPayload, RealmLinkView,
     };
     if !crate::authority_commit::accepted_realm_reader_in_connection(conn, realm, actor).await? {
         return Ok(None);
@@ -1516,7 +1516,7 @@ pub(crate) async fn realm_link_list_in_connection(
             continue;
         }
         sources.push(full);
-        result.push(RealmLinkEntry {
+        result.push(RealmLinkView {
             realm_id: event.realm_id,
             target_realm_id: value.target_realm_id,
             link_kind: value.link_kind,

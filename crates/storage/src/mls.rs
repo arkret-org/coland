@@ -307,7 +307,7 @@ pub struct PeerKeyPackageClaimLedgerRecord {
 /// recipient's allocation/consume ledger stays at the recipient authority.
 #[derive(Clone, Debug)]
 pub struct RealmKeyPackageClaimSource {
-    pub request: arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    pub request: arkret_models_crypto::KeyPackagesClaimRequestBody,
     pub result: Option<arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody>,
     pub issuer_histories: Vec<arkret_models_identity::AuthenticatedServiceResolution>,
 }
@@ -334,7 +334,7 @@ pub struct MlsKeyPackageClaimAdmission {
     pub mimi_room_uri: Option<arkret_wire::MimiRoomUri>,
     /// Exact verified issuing Station history frozen with a Realm target claim.
     pub claim_issuer_resolution: Option<arkret_models_identity::AuthenticatedServiceResolution>,
-    pub request: arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    pub request: arkret_models_crypto::KeyPackagesClaimRequestBody,
     pub requester: Option<(
         crate::AppletManagedDeviceScopeGuard,
         chrono::DateTime<chrono::Utc>,
@@ -348,9 +348,9 @@ pub struct MlsKeyPackageClaimAdmission {
 pub struct MlsKeyPackageClaimDelivery {
     /// Mounted consumer, never a caller-selected wire disclosure mode.
     pub operation: arkret_wire::ServiceOperationId,
-    pub outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody,
+    pub outcome: arkret_models_crypto::KeyPackagesClaimResponseBody,
     pub endpoints: Vec<crate::AppletManagedDeviceScopeGuard>,
-    pub command: Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>,
+    pub command: Option<arkret_models_crypto::KeyPackagesClaimRequestBody>,
     pub remote_devices: Vec<MlsClaimRemoteDeviceEvidence>,
 }
 
@@ -361,7 +361,7 @@ pub struct MlsClaimRemoteDeviceEvidence {
     pub account_id: arkret_wire::AccountId,
     pub device_id: arkret_wire::DeviceId,
     pub generation: arkret_models_crypto::AccountDeviceGenerationEntry,
-    pub record: arkret_models_crypto::PeerQueryDeviceRecord,
+    pub record: arkret_models_crypto::PeerDeviceKeyView,
     pub issuer_resolution: arkret_models_identity::AuthenticatedServiceResolution,
 }
 
@@ -831,7 +831,7 @@ pub trait MlsKeyPackageStore: Send + Sync {
     /// and rechecks the original endpoint and all current authority gates.
     async fn peer_claim_candidates(
         &self,
-        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        body: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     ) -> PersistenceResult<Vec<MlsKeyPackageRow>>;
     /// Atomically claim the named KeyPackage for `mls_group_id`. Returns
     /// `Ok(Some(record))` on success (with `claimed_by_mls_group_id` /
@@ -856,7 +856,7 @@ pub trait MlsKeyPackageStore: Send + Sync {
     /// retries recover their first decision without another charge.
     async fn record_peer_claim_attempt(
         &self,
-        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        body: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     ) -> PersistenceResult<PeerKeyPackageClaimRateDecision>;
     /// Reclaim expired private attempt decisions using the database clock.
     async fn prune_peer_claim_attempts(&self) -> PersistenceResult<usize>;
@@ -872,12 +872,12 @@ pub trait MlsKeyPackageStore: Send + Sync {
         &self,
         claim_request_id: &str,
         request_digest: &str,
-    ) -> PersistenceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>>;
+    ) -> PersistenceResult<Option<arkret_models_crypto::KeyPackagesClaimRequestBody>>;
     /// Register an outbound Realm Device command under its current authority
     /// cut before network I/O. False means an exact durable original exists.
     async fn prepare_realm_claim_source(
         &self,
-        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
         source: &crate::AppletManagedDeviceScopeGuard,
         transport_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<bool>;
@@ -890,7 +890,7 @@ pub trait MlsKeyPackageStore: Send + Sync {
     /// requester Realm lock. Exact retry returns the first durable bytes.
     async fn retain_realm_claim_source_result(
         &self,
-        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
         result: &arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody,
         histories: &[arkret_models_identity::AuthenticatedServiceResolution],
         governor: &arkret_wire::DidCoreId,

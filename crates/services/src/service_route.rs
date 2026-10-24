@@ -297,9 +297,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use arkret_models_identity::{
-        AuthenticatedServiceResolution, DidDocument, ResolutionDidBindingEvidenceKind,
-        ResolutionDidBindingEvidenceReceipt, ResolutionMethodEvidenceBoundary,
-        ResolutionMethodHistoryEvidence, ServiceMethodState,
+        AuthenticatedServiceResolution, DidBindingEvidenceKind, DidBindingEvidenceReceipt,
+        DidDocument, ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence,
+        ServiceMethodState,
     };
     use async_trait::async_trait;
     use coland_storage::{PersistenceResult, ServiceRouteStoredKey};
@@ -425,8 +425,8 @@ mod tests {
                     from_version_id: version.clone(),
                     to_version_id: version.clone(),
                 },
-                evidence: ResolutionDidBindingEvidenceReceipt {
-                    kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+                evidence: DidBindingEvidenceReceipt {
+                    kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                     method: "web".to_owned(),
                     document_digest: digest,
                     method_proofs: Vec::new(),

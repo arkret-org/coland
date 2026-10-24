@@ -19,7 +19,7 @@ pub struct AccountLocalpartView {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
-pub struct AccountLocalpartListOutcome {
+pub struct AccountLocalpartsView {
     pub account_principal_id: DidCoreId,
     pub primary_localpart: Option<String>,
     pub localparts: Vec<AccountLocalpartView>,
@@ -36,6 +36,6 @@ pub struct AccountLocalpartAddRequestBody {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
-pub struct AccountLocalpartMutationOutcome {
+pub struct AccountLocalpartUpdateResponseBody {
     pub localpart: AccountLocalpartView,
 }

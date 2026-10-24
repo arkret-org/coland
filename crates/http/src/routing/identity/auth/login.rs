@@ -115,7 +115,7 @@ pub(crate) fn account_existing_session_error(
 pub(super) async fn dev_login(
     depot: &mut Depot,
     body: JsonBody<DevLoginRequestBody>,
-) -> JsonResult<SessionLoginOutcome> {
+) -> JsonResult<DevLoginResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     if !state.config().development_harness_enabled() {
         return Err(AppError::not_found("endpoint not available"));
@@ -242,7 +242,7 @@ pub(super) async fn dev_login(
     )
     .await;
 
-    json_ok(SessionLoginOutcome {
+    json_ok(DevLoginResponseBody {
         session_credential: token,
         token_type: "Bearer".to_owned(),
         actor: actor.to_string(),

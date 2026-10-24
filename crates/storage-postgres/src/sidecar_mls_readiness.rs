@@ -645,7 +645,7 @@ pub(crate) async fn consumed_endpoint_in_connection(
                     .map_err(PersistenceError::database)?
             && durable.claim_request_id.as_str() == evidence.claim_request_id
             && evidence.consume_request_digest.as_deref() == Some(receipt.request_digest.as_str())
-            && durable.key_package_ref.as_str() == evidence.keypackage_ref
+            && durable.keypackage_ref.as_str() == evidence.keypackage_ref
             && durable.recipient_id == account.station_id
             && durable.realm_id == *scope.realm_id()
             && durable.mls_group_id == group

@@ -2946,7 +2946,7 @@ async fn peer_contacts_submit_inner(
                 PeerContactAdmissionAttemptOutcome::Deferred,
             )?;
             let result = PeerContactSubmitResponseBody::Event(PeerContactEventSubmitResponseBody {
-                operation_kind: ContactResultKind::Request,
+                operation_kind: ContactOperationKind::Request,
                 status: PeerContactAdmissionAttemptOutcome::Deferred,
                 mirror_receipt: mirror,
                 current_proof: None,
@@ -2972,11 +2972,11 @@ async fn peer_contacts_submit_inner(
         Box::pin(persist_authenticated_observation(state, &operation)).await?;
     }
     let operation_kind = match &operation {
-        ContactOperationEvidence::Request { .. } => ContactResultKind::Request,
-        ContactOperationEvidence::Response { .. } => ContactResultKind::Response,
-        ContactOperationEvidence::Reject { .. } => ContactResultKind::Reject,
-        ContactOperationEvidence::ScopeUpdate { .. } => ContactResultKind::ScopeUpdate,
-        ContactOperationEvidence::Tombstone { .. } => ContactResultKind::Tombstone,
+        ContactOperationEvidence::Request { .. } => ContactOperationKind::Request,
+        ContactOperationEvidence::Response { .. } => ContactOperationKind::Response,
+        ContactOperationEvidence::Reject { .. } => ContactOperationKind::Reject,
+        ContactOperationEvidence::ScopeUpdate { .. } => ContactOperationKind::ScopeUpdate,
+        ContactOperationEvidence::Tombstone { .. } => ContactOperationKind::Tombstone,
     };
     let mut response = PeerContactSubmitResponseBody::Event(PeerContactEventSubmitResponseBody {
         operation_kind,

@@ -3,9 +3,8 @@
 pub(super) fn attestor_resolution() -> arkret_models_identity::AuthenticatedServiceResolution {
     use arkret_identity::{DidKeyResolver, DidResolver};
     use arkret_models_identity::{
-        AuthenticatedServiceResolution, DidDocument, ResolutionDidBindingEvidenceKind,
-        ResolutionDidBindingEvidenceReceipt, ResolutionMethodEvidenceBoundary,
-        ResolutionMethodHistoryEvidence,
+        AuthenticatedServiceResolution, DidBindingEvidenceKind, DidBindingEvidenceReceipt,
+        DidDocument, ResolutionMethodEvidenceBoundary, ResolutionMethodHistoryEvidence,
     };
     let signer = ed25519_dalek::SigningKey::from_bytes(&[83; 32]);
     let multibase =
@@ -30,8 +29,8 @@ pub(super) fn attestor_resolution() -> arkret_models_identity::AuthenticatedServ
                 from_version_id: version.clone(),
                 to_version_id: version,
             },
-            evidence: ResolutionDidBindingEvidenceReceipt {
-                kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+            evidence: DidBindingEvidenceReceipt {
+                kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                 method: "key".to_owned(),
                 document_digest: digest,
                 method_proofs: vec![],
@@ -52,10 +51,10 @@ pub(super) fn claim_outcome(
     authorization: &arkret_wire::EventId,
     scope: &arkret_wire::ScopeRef,
     at: chrono::DateTime<chrono::Utc>,
-) -> arkret_models_crypto::PeerKeyPackagesClaimResponseBody {
+) -> arkret_models_crypto::KeyPackagesClaimResponseBody {
     use arkret_models_crypto::{
-        KeyPackageClaimRecord, PeerKeyPackageClaimReceipt, PeerKeyPackagesClaimFields,
-        PeerKeyPackagesClaimResponseBody,
+        KeyPackageClaimRecord, KeyPackagesClaimResponseBody, PeerKeyPackageClaimReceipt,
+        PeerKeyPackagesClaimFields,
     };
     let expires_at = at + chrono::TimeDelta::milliseconds(3_000_000);
     let record = KeyPackageClaimRecord {
@@ -107,7 +106,7 @@ pub(super) fn claim_outcome(
         &arkret_models_crypto::peer_keypackage_claim_receipt_signing_bytes(&receipt).unwrap(),
     )
     .unwrap();
-    let outcome = PeerKeyPackagesClaimResponseBody {
+    let outcome = KeyPackagesClaimResponseBody {
         claim_request_id: request_id.clone(),
         claims: vec![record],
         claim_receipt: receipt,
@@ -117,7 +116,7 @@ pub(super) fn claim_outcome(
 }
 
 pub(super) fn add_witness(
-    outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody,
+    outcome: arkret_models_crypto::KeyPackagesClaimResponseBody,
     delivery: &arkret_wire::MlsWelcomeDelivery,
     base: &arkret_wire::MlsGroupValue,
     position: u64,

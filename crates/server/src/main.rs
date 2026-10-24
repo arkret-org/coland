@@ -853,24 +853,75 @@ fn spawn_federation_peer_discovery(state: AppState) {
                         if description.service_kind == arkret_wire::ServiceKind::Station
                             && description.service_id.as_str() != state.service_id() =>
                     {
-                        let document_view = match client
-                            .identity_document(description.service_resolution.did.as_str(), None)
+                        let resolver = match state.service_route_resolver() {
+                            Ok(resolver) => resolver,
+                            Err(error) => {
+                                tracing::warn!(%endpoint, %error, "federation peer route verifier is unavailable");
+                                continue;
+                            }
+                        };
+                        let carrier =
+                            arkret_models_identity::ServiceResolutionCarrier::ResolutionUrl {
+                                resolution_url: format!(
+                                    "{}{}",
+                                    endpoint.trim_end_matches('/'),
+                                    arkret_models_identity::canonical_service_resolution_path(
+                                        &description.service_id
+                                    )
+                                ),
+                            };
+                        let now = chrono::Utc::now();
+                        let route = match resolver
+                            .resolve_carrier(&carrier, &description.service_id, "station", now)
                             .await
                         {
-                            Ok(document) => document,
+                            Ok(route) => route,
                             Err(error) => {
                                 tracing::debug!(
                                     %endpoint,
                                     peer_id = %description.service_id,
                                     %error,
-                                    "federation peer DID document is not ready; retrying"
+                                    "federation peer method evidence is not ready; retrying"
                                 );
                                 continue;
                             }
                         };
-                        let document_value = serde_json::Value::Object(
-                            document_view.did_document.into_iter().collect(),
-                        );
+                        if let Err(error) = description.validate_route_projection(&route.projection)
+                        {
+                            tracing::warn!(%endpoint, %error, "peer describe differs from the verified service route");
+                            continue;
+                        }
+                        let resolved_route = match resolver
+                            .resolve_route(&description.service_id, "station", now, false)
+                            .await
+                        {
+                            Ok(route) => route,
+                            Err(error) => {
+                                tracing::warn!(%endpoint, %error, "verified peer service material is unavailable");
+                                continue;
+                            }
+                        };
+                        if description
+                            .validate_route_projection(&resolved_route.route.projection)
+                            .is_err()
+                            || description.trust_domain != resolved_route.trust_domain
+                        {
+                            tracing::warn!(%endpoint, "peer describe differs from the retained verified route");
+                            continue;
+                        }
+                        let Some(evidence) = resolved_route.authenticated_resolution else {
+                            tracing::warn!(%endpoint, "verified peer route omits its retained method evidence");
+                            continue;
+                        };
+                        let document_value = match serde_json::to_value(
+                            &evidence.normalized_did_document,
+                        ) {
+                            Ok(document) => document,
+                            Err(error) => {
+                                tracing::warn!(%endpoint, %error, "verified peer document cannot be encoded");
+                                continue;
+                            }
+                        };
                         let document = match serde_json::from_value::<
                             arkret_models_identity::service_identity::ServiceDidDocument,
                         >(document_value.clone())
@@ -993,34 +1044,6 @@ fn spawn_federation_peer_discovery(state: AppState) {
                                     continue;
                                 }
                             };
-                        let now = chrono::Utc::now();
-                        let resolved_document = coland_services::identity::DidDocumentState {
-                            did: document.id.to_string(),
-                            did_document: document_value,
-                            key_log_head: None,
-                            sequence: document_view.sequence.unwrap_or_default(),
-                            method_evidence: serde_json::json!({
-                                "source": "peer_identity_document",
-                                "receipts": document_view.receipts,
-                            }),
-                            fetched_at: now,
-                            expires_at: now
-                                + chrono::Duration::seconds(
-                                    coland_services::identity::DID_DOCUMENT_HIGH_RISK_TTL_SECS,
-                                ),
-                            updated_at: now,
-                        };
-                        if let Err(error) =
-                            state.cache_verified_federation_peer_document(resolved_document)
-                        {
-                            tracing::warn!(
-                                %endpoint,
-                                peer_id = %description.service_id,
-                                %error,
-                                "federation peer DID document could not enter the verified resolver snapshot"
-                            );
-                            continue;
-                        }
                         let discovered = format!(
                             "{}|{}|{}",
                             endpoint.trim_end_matches('/'),

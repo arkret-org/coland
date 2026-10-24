@@ -28,7 +28,7 @@ pub struct AgentSessionAuthorityRequest {
 /// a later content operation, bypass a profile gate or expand a predecessor.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentSessionAuthorityOutcome {
+pub struct AgentSessionAuthorityView {
     pub binding: AgentSessionAuthorityRequest,
     pub granted_scope: Vec<String>,
     pub approval_required: bool,
@@ -41,7 +41,7 @@ pub struct AgentSessionAuthorityOutcome {
     pub policy_refs: Vec<String>,
 }
 
-impl AgentSessionAuthorityOutcome {
+impl AgentSessionAuthorityView {
     /// Exact internal binding is additional to authenticated channel ownership.
     pub fn matches_request(&self, request: &AgentSessionAuthorityRequest) -> bool {
         match (

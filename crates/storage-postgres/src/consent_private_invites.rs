@@ -28,7 +28,7 @@ struct Disabled {
 }
 fn deferred(
     at: chrono::DateTime<chrono::Utc>,
-    disclosed_outcome: Option<DisclosedOutcome>,
+    disclosed_outcome: Option<DisclosedInviteDeliveryOutcome>,
 ) -> InviteDeliveryResponseBody {
     InviteDeliveryResponseBody {
         status: InviteDeliveryOutcomeStatus::Deferred,

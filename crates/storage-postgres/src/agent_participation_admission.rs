@@ -1,7 +1,7 @@
 //! Controller selection and target ceilings at the Event transaction cut.
 
 use arkret_models_collaboration::governance::agent_participation::{
-    AgentParticipationEntry, AgentParticipationPolicy, ParticipationBits,
+    AgentParticipationPolicy, AgentParticipationView, ParticipationBits,
 };
 use arkret_wire::{DidCoreId, Event, EventKind, RealmCommit};
 use coland_storage::{PersistenceError, PersistenceResult};
@@ -72,7 +72,7 @@ async fn selection_at_cut(
         .map_err(PersistenceError::database)?
         .into_iter()
         .map(|row| {
-            let entry: AgentParticipationEntry =
+            let entry: AgentParticipationView =
                 serde_json::from_value(row.value).map_err(|_| unresolved())?;
             entry.validate().map_err(|_| unresolved())?;
             Ok(entry)
@@ -81,7 +81,10 @@ async fn selection_at_cut(
     Ok(scopes
         .iter()
         .rev()
-        .find_map(|key| rows.iter().find(|entry| entry.scope.scope_key() == *key))
+        .find_map(|key| {
+            rows.iter()
+                .find(|entry| entry.target_scope.scope_key() == *key)
+        })
         .map(|entry| entry.selection))
 }
 

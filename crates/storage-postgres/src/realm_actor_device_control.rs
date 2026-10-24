@@ -1,8 +1,7 @@
 //! Subject-control-signed Realm Device authorization, committed at one private cut.
 use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
-use arkret_models_integration::{
-    RealmActorDeviceAuthorizationValue, RealmActorDeviceGenerationValue, RealmActorRecoveryValue,
-};
+use arkret_models_crypto::DeviceGenerationState;
+use arkret_models_integration::{RealmActorDeviceAuthorizationValue, RealmActorRecoveryValue};
 use arkret_wire::{ActorId, CurrentRevision, EventKind, ScopeRef};
 use coland_storage::{
     AcceptedDeviceAuthorizationOutcome, AuthorityCommitTransaction, AuthorityCommitWriteOutcome,
@@ -120,7 +119,7 @@ pub(crate) async fn admit(
         json!({"kind":"realm_actor_device_generation","actor_id":actor}),
     )
     .await?;
-    let generation: RealmActorDeviceGenerationValue = decode(generation)?;
+    let generation: DeviceGenerationState = decode(generation)?;
     if recovery.pending.is_some()
         || value.authorized_generation_ref != generation.current_device_generation_ref
         || payload.expected_control_revision.as_ref() != Some(&revision(&control.source))

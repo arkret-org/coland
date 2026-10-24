@@ -1579,11 +1579,11 @@ impl FederationDispatcher {
         if row.delivery.endpoint != ERASURE_RECEIPT_ENDPOINT {
             return Ok(());
         }
-        let body: arkret_models_collaboration::governance::erasure::ErasureReceiptSubmitRequestBody =
+        let body: arkret_models_collaboration::governance::erasure::ErasureReceiptPackage =
             serde_json::from_str(&row.delivery.payload_json).map_err(|error| error.to_string())?;
         super::erasure_receipts::verify_acceptance(
             &self.state,
-            &body.package,
+            &body,
             &row.delivery.peer_id,
             response,
         )

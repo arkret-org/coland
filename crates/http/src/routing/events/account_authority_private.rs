@@ -16,7 +16,7 @@ use crate::state::AppState;
 pub(super) async fn read_agent_session_authority(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<coland_storage::AgentSessionAuthorityOutcome> {
+) -> JsonResult<coland_storage::AgentSessionAuthorityView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     super::peer::authenticate_account_authority_private_request(state, req)?;
     let request = req

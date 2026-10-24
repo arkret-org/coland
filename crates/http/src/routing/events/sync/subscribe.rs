@@ -251,12 +251,13 @@ pub(super) async fn account_response(
                                     render_account_cursor_error(res, error, false);
                                     return;
                                 }
-                                let details = arkret_wire::AccountRevisionStaleProblem::new(
-                                    body.after
-                                        .clone()
-                                        .expect("validated continuation has after"),
-                                )
-                                .expect("validated cursor satisfies the continuation schema");
+                                let details =
+                                    arkret_wire::AccountRevisionStaleProblemExtensions::new(
+                                        body.after
+                                            .clone()
+                                            .expect("validated continuation has after"),
+                                    )
+                                    .expect("validated cursor satisfies the continuation schema");
                                 crate::error::render_problem_envelope(
                                     res,
                                     StatusCode::CONFLICT,

@@ -24,8 +24,8 @@
 //! [`admin_handle_items`].
 
 use coland_contracts::admin::handles::{
-    AdminHandleAuditEvent, AdminHandleAuditListOutcome, AdminHandleListOutcome,
-    AdminHandleReassignBody, AdminHandleRecord, AdminHandleRevokeBody,
+    AdminHandleAuditEvent, AdminHandleAuditPage, AdminHandlePage, AdminHandleReassignBody,
+    AdminHandleRevokeBody, AdminHandleView,
 };
 use coland_http::error::AppError;
 use salvo::oapi::extract::{JsonBody, PathParam, QueryParam};
@@ -85,7 +85,7 @@ pub(super) fn router() -> Router {
 /// Build the full handle row set off the durable accounts table, enriched
 /// with local handle-claim evidence. Shared with the generic admin
 /// collection snapshot (`/_coland/admin/handles`).
-pub(super) async fn admin_handle_items(state: &AppState) -> Vec<AdminHandleRecord> {
+pub(super) async fn admin_handle_items(state: &AppState) -> Vec<AdminHandleView> {
     // Index handle-claim evidence by subject DID so account rows can pick
     // up issuer / status metadata when a directory-issued claim is
     // cached locally.
@@ -108,7 +108,7 @@ pub(super) async fn admin_handle_items(state: &AppState) -> Vec<AdminHandleRecor
                 None => "active".to_owned(),
             };
             let handle = format!("@{}", localpart.localpart);
-            rows.push(AdminHandleRecord {
+            rows.push(AdminHandleView {
                 id: localpart.localpart.clone(),
                 canonical_uri: format!("ak:handle:{handle}"),
                 aliases: vec![handle],
@@ -139,7 +139,7 @@ pub(super) async fn admin_handle_items(state: &AppState) -> Vec<AdminHandleRecor
 async fn handle_record_by_id(
     state: &AppState,
     handle_id: &str,
-) -> Result<AdminHandleRecord, AppError> {
+) -> Result<AdminHandleView, AppError> {
     admin_handle_items(state)
         .await
         .into_iter()
@@ -158,7 +158,7 @@ async fn list_handles(
     per_page: QueryParam<u64, false>,
     search: QueryParam<String, false>,
     depot: &mut Depot,
-) -> JsonResult<AdminHandleListOutcome> {
+) -> JsonResult<AdminHandlePage> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = admin.session()?;
     let _ = require_admin_principal(state, session)?;
@@ -184,7 +184,7 @@ async fn list_handles(
 
     let total = rows.len() as u64;
     let start = ((page - 1) * per_page) as usize;
-    let window: Vec<AdminHandleRecord> = rows
+    let window: Vec<AdminHandleView> = rows
         .into_iter()
         .skip(start)
         .take(per_page as usize)
@@ -192,7 +192,7 @@ async fn list_handles(
     let has_more = (start as u64) + (window.len() as u64) < total;
     let next_cursor = has_more.then(|| (page + 1).to_string());
 
-    json_ok(AdminHandleListOutcome {
+    json_ok(AdminHandlePage {
         data: window,
         total,
         next_cursor,
@@ -208,7 +208,7 @@ async fn get_handle(
     admin: AdminAuth,
     handle_id: PathParam<String>,
     depot: &mut Depot,
-) -> JsonResult<AdminHandleRecord> {
+) -> JsonResult<AdminHandleView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = admin.session()?;
     let _ = require_admin_principal(state, session)?;
@@ -224,7 +224,7 @@ async fn get_handle_audit(
     admin: AdminAuth,
     handle_id: PathParam<String>,
     depot: &mut Depot,
-) -> JsonResult<AdminHandleAuditListOutcome> {
+) -> JsonResult<AdminHandleAuditPage> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = admin.session()?;
     let _ = require_admin_principal(state, session)?;
@@ -243,7 +243,7 @@ async fn get_handle_audit(
     data.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
     let total = data.len() as u64;
 
-    json_ok(AdminHandleAuditListOutcome {
+    json_ok(AdminHandleAuditPage {
         data,
         total,
         next_cursor: None,
@@ -310,7 +310,7 @@ async fn revoke_handle(
     handle_id: PathParam<String>,
     body: JsonBody<AdminHandleRevokeBody>,
     depot: &mut Depot,
-) -> JsonResult<AdminHandleRecord> {
+) -> JsonResult<AdminHandleView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = admin.session()?;
     let session = require_admin_principal(state, session)?;
@@ -368,7 +368,7 @@ async fn reassign_handle(
     handle_id: PathParam<String>,
     body: JsonBody<AdminHandleReassignBody>,
     depot: &mut Depot,
-) -> JsonResult<AdminHandleRecord> {
+) -> JsonResult<AdminHandleView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = admin.session()?;
     let session = require_admin_principal(state, session)?;

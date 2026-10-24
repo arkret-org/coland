@@ -1071,7 +1071,7 @@ async fn build_revoke_plan(
             &preview.effective_scope,
         ))
         .map_err(|error| AppError::internal(format!("effective Realm id is invalid: {error}")))?;
-        let grant_snapshot = state
+        let agent_grant_view = state
             .persistence()
             .capability_grant_current_states(&scope_realm_id)
             .await
@@ -1081,7 +1081,7 @@ async fn build_revoke_plan(
                 ))
             })?;
         let active_grant_revisions = active_applet_grant_revisions(
-            grant_snapshot,
+            agent_grant_view,
             &scope_realm_id,
             &package.service_id,
             &record.target_station_id,

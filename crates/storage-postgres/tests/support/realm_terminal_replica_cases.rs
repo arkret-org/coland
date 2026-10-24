@@ -273,8 +273,8 @@ fn signed_terminal_receipt(terminal: &AuthorityCommitTransaction) -> serde_json:
         ErasureTrigger, VerificationStub, VerificationStubScope, VerificationStubSubject,
     };
     use arkret_models_collaboration::governance::erasure::{
-        ErasureOutcome, ErasureReceipt, ErasureReceiptProof, ErasureScope, ErasureStorageBoundary,
-        ErasureSubject, ErasureSubjectKind,
+        ErasureAttemptOutcome, ErasureReceipt, ErasureReceiptProof, ErasureScope,
+        ErasureStorageBoundary, ErasureSubject, ErasureSubjectKind,
     };
     let receipt_id = format!("ak:receipt:{}", uuid::Uuid::now_v7());
     let at = terminal.commit.committed_at;
@@ -331,7 +331,7 @@ fn signed_terminal_receipt(terminal: &AuthorityCommitTransaction) -> serde_json:
         issuer_id: terminal.expected_authority.service_id.clone(),
         subject: subject.clone(),
         scope: scope.clone(),
-        outcome: ErasureOutcome::PartiallyCompleted,
+        outcome: ErasureAttemptOutcome::PartiallyCompleted,
         erased_classes: Vec::new(),
         retained_stub_digest: stub_digest.clone(),
         retained_stub: Some(stub.clone()),

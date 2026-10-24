@@ -1,4 +1,4 @@
-use arkret_models_crypto::{PeerKeyPackageRequesterAuthorization, PeerKeyPackagesClaimRequestBody};
+use arkret_models_crypto::{KeyPackagesClaimRequestBody, PeerKeyPackageRequesterAuthorization};
 use coland_storage::{PeerKeyPackageClaimRateDecision, PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
 use diesel::{QueryableByName, sql_query};
@@ -31,7 +31,7 @@ struct Count {
 // reaches this boundary; callers cannot choose a reduced identity or digest.
 pub(crate) async fn record_attempt(
     pool: &PgPool,
-    body: &PeerKeyPackagesClaimRequestBody,
+    body: &KeyPackagesClaimRequestBody,
 ) -> PersistenceResult<PeerKeyPackageClaimRateDecision> {
     body.validate_shape()
         .map_err(|error| PersistenceError::Conflict(format!("claim budget shape: {error}")))?;

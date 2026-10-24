@@ -39,8 +39,7 @@ use arkret_models_crypto::{
     KeyPackagesUploadResponseBody, PeerKeyPackageClaimErrorCode, PeerKeyPackageClaimPurpose,
     PeerKeyPackageClaimReceipt, PeerKeyPackageRequesterAuthorization,
     PeerKeyPackagesClaimQueryRequestBody, PeerKeyPackagesClaimQueryResponseBody,
-    PeerKeyPackagesClaimQueryState, PeerKeyPackagesClaimRequestBody,
-    PeerKeyPackagesClaimResponseBody, keypackage_claim_authorization_signing_bytes,
+    PeerKeyPackagesClaimQueryState, keypackage_claim_authorization_signing_bytes,
     peer_keypackage_claim_receipt_signing_bytes,
 };
 use base64::Engine;
@@ -276,7 +275,7 @@ struct MlsAttestAddHttpRequest {
     #[salvo(schema(value_type = serde_json::Value))]
     attestation: arkret_models_collaboration::mls_roster_authority::MlsAddAuthorityAttestation,
     #[salvo(schema(value_type = serde_json::Value))]
-    claim_outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody,
+    claim_outcome: arkret_models_crypto::KeyPackagesClaimResponseBody,
 }
 
 #[derive(serde::Serialize, salvo::oapi::ToSchema)]
@@ -763,7 +762,7 @@ async fn upload_keypackage(
     let actor_id = principal_id.to_string();
     let endpoint_device_id = device_id.as_deref();
     let mut accepted = 0_u32;
-    let mut key_package_refs = Vec::new();
+    let mut keypackage_refs = Vec::new();
     let mut rejected = Vec::new();
     for entry in &body.keypackages {
         if entry.keypackage_id.is_empty() {
@@ -932,13 +931,13 @@ async fn upload_keypackage(
         // the stored claim/consume state, never a freshly published projection.
         state.projections().retain_mls_key_package(stored);
         accepted += 1;
-        key_package_refs.push(keypackage_ref);
+        keypackage_refs.push(keypackage_ref);
     }
 
     json_ok(KeyPackagesUploadResponseBody {
         accepted,
         rejections: rejected,
-        key_package_refs,
+        keypackage_refs,
     })
 }
 
@@ -963,7 +962,7 @@ async fn guard_native_claim_command_outcome(
     outcome: PeerKeyPackagesClaimQueryResponseBody,
 ) -> coland_http::result::GuardedJsonResult<PeerKeyPackagesClaimQueryResponseBody> {
     let command = req
-        .parse_json::<PeerKeyPackagesClaimRequestBody>()
+        .parse_json::<KeyPackagesClaimRequestBody>()
         .await
         .map_err(|_| peer_claim_failed())?;
     let state = depot.get_typed::<AppState>().expect("state injected");
@@ -1061,21 +1060,21 @@ async fn peer_claim_keypackage_with_room(
 
 async fn claim_keypackage_at_destination(
     state: &AppState,
-    body: &PeerKeyPackagesClaimRequestBody,
+    body: &KeyPackagesClaimRequestBody,
     authorization: VerifiedClaimAuthorization,
     native_requester: Option<&(coland_storage::AppletManagedDeviceScopeGuard, DateTime<Utc>)>,
-) -> JsonResult<PeerKeyPackagesClaimResponseBody> {
+) -> JsonResult<KeyPackagesClaimResponseBody> {
     claim_keypackage_at_destination_with_room(state, body, authorization, native_requester, None)
         .await
 }
 
 async fn claim_keypackage_at_destination_with_room(
     state: &AppState,
-    body: &PeerKeyPackagesClaimRequestBody,
+    body: &KeyPackagesClaimRequestBody,
     authorization: VerifiedClaimAuthorization,
     native_requester: Option<&(coland_storage::AppletManagedDeviceScopeGuard, DateTime<Utc>)>,
     mimi_room: Option<&arkret_wire::MimiRoomUri>,
-) -> JsonResult<PeerKeyPackagesClaimResponseBody> {
+) -> JsonResult<KeyPackagesClaimResponseBody> {
     let target_principal_id = body
         .unsigned_request()
         .target_principal_id()
@@ -1487,7 +1486,7 @@ async fn query_claim_ledger(
     let claim_outcome = record
         .outcome
         .clone()
-        .map(serde_json::from_value::<PeerKeyPackagesClaimResponseBody>)
+        .map(serde_json::from_value::<KeyPackagesClaimResponseBody>)
         .transpose()
         .map_err(|error| {
             AppError::internal(format!("stored peer claim outcome invalid: {error}"))
@@ -1611,7 +1610,7 @@ struct VerifiedClaimAuthorization {
 }
 
 impl VerifiedClaimAuthorization {
-    fn for_verified_request(body: &PeerKeyPackagesClaimRequestBody) -> Result<Self, AppError> {
+    fn for_verified_request(body: &KeyPackagesClaimRequestBody) -> Result<Self, AppError> {
         Ok(Self {
             request_digest: arkret_canonical::canonical_sha256(body).map_err(|error| {
                 AppError::internal(format!("claim authorization digest: {error}"))
@@ -1635,13 +1634,13 @@ async fn verify_peer_claim_source_attestation(
     state: &AppState,
     req: &mut Request,
     local_mimi: bool,
-) -> Result<(PeerKeyPackagesClaimRequestBody, VerifiedClaimAuthorization), AppError> {
+) -> Result<(KeyPackagesClaimRequestBody, VerifiedClaimAuthorization), AppError> {
     // Authenticate before any target lookup to preserve opaque peer admission.
     crate::routing::events::peer::validate_peer_request(state, req, true).await?;
     // Decode exactly the body whose digest the source signature authenticated;
     // callers cannot pair a verified request with a separately supplied DTO.
     let body = req
-        .parse_json::<PeerKeyPackagesClaimRequestBody>()
+        .parse_json::<KeyPackagesClaimRequestBody>()
         .await
         .map_err(|error| {
             if matches!(&error, salvo::http::ParseError::SerdeJson(error) if error.is_data()) {
@@ -1724,7 +1723,7 @@ fn peer_claim_transport_binding(
     })
 }
 
-fn validate_peer_claim_time_window(body: &PeerKeyPackagesClaimRequestBody) -> Result<(), AppError> {
+fn validate_peer_claim_time_window(body: &KeyPackagesClaimRequestBody) -> Result<(), AppError> {
     let authorization = &body.requester_authorization;
     let signed_at = match authorization {
         PeerKeyPackageRequesterAuthorization::Device { signed_at, .. }
@@ -1762,7 +1761,7 @@ fn verification_method_binds_core_device(
 
 async fn verify_local_claim_participant_authorization(
     state: &AppState,
-    body: &PeerKeyPackagesClaimRequestBody,
+    body: &KeyPackagesClaimRequestBody,
 ) -> Result<bool, AppError> {
     if body.service_binding.source_id != state.service_core_id() {
         return Ok(false);
@@ -1931,7 +1930,7 @@ fn policy_refused(reason: &'static str) -> bool {
 
 async fn peer_claim_policy_authorized(
     state: &AppState,
-    body: &PeerKeyPackagesClaimRequestBody,
+    body: &KeyPackagesClaimRequestBody,
     source_id: &str,
     native_target_current: bool,
 ) -> Result<bool, AppError> {
@@ -2085,11 +2084,11 @@ async fn peer_claim_policy_authorized(
 
 async fn build_peer_claim_outcome(
     state: &AppState,
-    body: &PeerKeyPackagesClaimRequestBody,
+    body: &KeyPackagesClaimRequestBody,
     source_id: &str,
     request_digest: &str,
     claimed: &MlsKeyPackageRow,
-) -> Result<PeerKeyPackagesClaimResponseBody, AppError> {
+) -> Result<KeyPackagesClaimResponseBody, AppError> {
     let claims = vec![keypackage_claim_record(state, claimed, body).await?];
     let claims_value = serde_json::to_value(&claims)
         .map_err(|error| AppError::internal(format!("peer claim records serialize: {error}")))?;
@@ -2143,7 +2142,7 @@ async fn build_peer_claim_outcome(
     receipt.signature.signature =
         arkret_wire::Base64UrlString::new(URL_SAFE_NO_PAD.encode(signature.to_bytes()))
             .map_err(|error| AppError::internal(format!("receipt signature invalid: {error}")))?;
-    let outcome = PeerKeyPackagesClaimResponseBody {
+    let outcome = KeyPackagesClaimResponseBody {
         claim_request_id: body.claim_request_id.clone(),
         claims,
         claim_receipt: receipt,
@@ -2156,7 +2155,7 @@ async fn build_peer_claim_outcome(
 
 async fn record_peer_claim_failed(
     state: &AppState,
-    body: &PeerKeyPackagesClaimRequestBody,
+    body: &KeyPackagesClaimRequestBody,
     source_id: &str,
     request_digest: &str,
 ) -> Result<(), AppError> {
@@ -2210,7 +2209,7 @@ fn build_peer_claim_terminal_receipt(
     claim_request_id: arkret_wire::Base64UrlString,
     request_digest: Hash,
     terminal_state: KeyPackageClaimTerminalState,
-    key_package_refs: Option<Vec<String>>,
+    keypackage_refs: Option<Vec<String>>,
     source_id: arkret_wire::DidCoreId,
     terminal_at: DateTime<Utc>,
 ) -> Result<KeyPackageClaimTerminalReceipt, AppError> {
@@ -2223,7 +2222,7 @@ fn build_peer_claim_terminal_receipt(
         claim_request_id,
         request_digest,
         terminal_state,
-        key_package_refs,
+        keypackage_refs,
         source_id,
         destination_id: arkret_wire::DidCoreId::new(state.service_id().clone())
             .map_err(|error| AppError::internal(format!("service id invalid: {error}")))?,
@@ -2253,7 +2252,7 @@ fn build_peer_claim_terminal_receipt(
 fn replay_peer_claim(
     record: PeerKeyPackageClaimLedgerRecord,
     request_digest: &str,
-) -> JsonResult<PeerKeyPackagesClaimResponseBody> {
+) -> JsonResult<KeyPackagesClaimResponseBody> {
     if record.request_digest != request_digest {
         return Err(peer_claim_duplicate_conflict());
     }
@@ -2266,7 +2265,7 @@ fn replay_peer_claim(
     let Some(outcome) = record.outcome else {
         return Err(peer_claim_failed());
     };
-    let outcome: PeerKeyPackagesClaimResponseBody =
+    let outcome: KeyPackagesClaimResponseBody =
         serde_json::from_value(outcome).map_err(|error| {
             AppError::internal(format!("stored peer claim outcome invalid: {error}"))
         })?;
@@ -2331,7 +2330,7 @@ async fn claim_keypackage(
 ) -> coland_http::result::GuardedJsonResult<KeyPackagesClaimResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
-    let original_command = PeerKeyPackagesClaimRequestBody::from(&body);
+    let original_command = body.clone();
     let native = depot
         .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>()
         .ok();
@@ -2379,7 +2378,7 @@ async fn claim_keypackage(
     } else {
         (credential_deadline, Vec::new())
     };
-    let peer_outcome = PeerKeyPackagesClaimResponseBody {
+    let peer_outcome = KeyPackagesClaimResponseBody {
         claim_request_id: outcome.claim_request_id.clone(),
         claims: outcome.claims.clone(),
         claim_receipt: outcome.claim_receipt.clone(),
@@ -2436,7 +2435,7 @@ async fn claim_keypackage_session(
     }
     body.validate_shape()
         .map_err(|error| peer_claim_schema_violation(error.to_string()))?;
-    let peer_body = PeerKeyPackagesClaimRequestBody::from(&body);
+    let peer_body = body.clone();
     let local_service_id = state.service_id();
     if body.service_binding.source_id.as_str() != local_service_id {
         return Err(peer_claim_schema_violation(
@@ -2695,7 +2694,7 @@ async fn query_own_keypackage_claim(
         DateTime::from_timestamp(row.expires_at, 0).ok_or_else(keypackage_claim_unknown)?;
     let outcome = row
         .outcome
-        .map(serde_json::from_value::<PeerKeyPackagesClaimResponseBody>)
+        .map(serde_json::from_value::<KeyPackagesClaimResponseBody>)
         .transpose()
         .map_err(|error| AppError::internal(format!("stored claim outcome invalid: {error}")))?
         .ok_or_else(keypackage_claim_unknown)?;
@@ -2833,13 +2832,9 @@ pub(crate) async fn capture_relayed_keypackage_claim_outcome(
             retry_after_ms: None,
             error_code: None,
         };
-        mls_keypackage_native::capture_source_result(
-            state,
-            &PeerKeyPackagesClaimRequestBody::from(&request),
-            &query,
-        )
-        .await
-        .map_err(|e| e.message)?;
+        mls_keypackage_native::capture_source_result(state, &request.clone(), &query)
+            .await
+            .map_err(|e| e.message)?;
         return Ok(());
     }
     outcome
@@ -2965,7 +2960,7 @@ pub(crate) async fn capture_relayed_keypackage_claim_query(
     request_body: &str,
     query: &PeerKeyPackagesClaimQueryResponseBody,
 ) -> Result<(), String> {
-    let original: PeerKeyPackagesClaimRequestBody =
+    let original: KeyPackagesClaimRequestBody =
         serde_json::from_str(request_body).map_err(|e| e.to_string())?;
     if original.requester_actor_id.is_some() {
         mls_keypackage_native::capture_source_result(state, &original, query)
@@ -3043,7 +3038,7 @@ pub(crate) async fn capture_relayed_keypackage_claim_query(
             || consume.recipient_durable_receipt.recipient_id
                 != outcome.claim_receipt.destination_id
             || consume.claim_id.as_str() != claim.claim_id
-            || consume.recipient_durable_receipt.key_package_ref.as_str() != claim.keypackage_ref
+            || consume.recipient_durable_receipt.keypackage_ref.as_str() != claim.keypackage_ref
             || !recipient_matches
             || durable.realm_id != request.intended_realm_id
             || durable.mls_group_id != request.mls_group_id
@@ -3215,7 +3210,7 @@ pub(crate) async fn capture_relayed_keypackage_claim_query(
             .iter()
             .map(|claim| claim.keypackage_ref.as_str())
             .collect::<Vec<_>>();
-        let terminal_refs = terminal.key_package_refs.as_deref().ok_or_else(|| {
+        let terminal_refs = terminal.keypackage_refs.as_deref().ok_or_else(|| {
             "terminal successful claim receipt omitted KeyPackage refs".to_owned()
         })?;
         if !terminal_claim_coordinates_match(
@@ -3384,7 +3379,7 @@ async fn consume_keypackages(
                     "KeyPackage consume canonical input failed: {error}"
                 ))
             })?;
-    let keypackage_refs = [durable_receipt.key_package_ref.to_string()];
+    let keypackage_refs = [durable_receipt.keypackage_ref.to_string()];
     let cached_keypackage = verify_keypackage_consumer_signature(
         state,
         &session,
@@ -3404,7 +3399,7 @@ async fn consume_keypackages(
     // the consume CAS must start from the freshest durable lifecycle snapshot.
     let record = state
         .mls_key_packages()
-        .key_package_by_ref(durable_receipt.key_package_ref.as_str())
+        .key_package_by_ref(durable_receipt.keypackage_ref.as_str())
         .await
         .map_err(|error| AppError::internal(format!("KeyPackage lookup failed: {error}")))?
         .ok_or_else(|| AppError::conflict("KeyPackage is missing or no longer claimable"))?;
@@ -3540,7 +3535,7 @@ async fn validate_recipient_durable_receipt(
         session,
         &recipient_principal_id,
         &receipt.recipient,
-        std::slice::from_ref(&receipt.key_package_ref.to_string()),
+        std::slice::from_ref(&receipt.keypackage_ref.to_string()),
         &receipt.signature,
         &signing_input,
         cached_keypackage,
@@ -3605,7 +3600,7 @@ async fn receipt_matches_welcome_binding(
         .ok_or_else(|| AppError::internal("the bound claim has no ledger row"))?;
     let outcome = ledger
         .outcome
-        .map(serde_json::from_value::<PeerKeyPackagesClaimResponseBody>)
+        .map(serde_json::from_value::<KeyPackagesClaimResponseBody>)
         .transpose()
         .map_err(|error| AppError::internal(format!("stored claim outcome invalid: {error}")))?
         .ok_or_else(|| AppError::internal("the bound claim has no success outcome"))?;
@@ -3645,7 +3640,7 @@ async fn receipt_matches_welcome_binding(
         }
     };
     if receipt.claim_request_id != outcome.claim_request_id
-        || receipt.key_package_ref.as_str() != record.keypackage_ref
+        || receipt.keypackage_ref.as_str() != record.keypackage_ref
         || !endpoint_matches
         || receipt.realm_id != request.intended_realm_id
         || receipt.mls_group_id != request.mls_group_id
@@ -3926,7 +3921,7 @@ async fn revoke_keypackages(
             "device_id must match the calling session",
         ));
     }
-    let refs = non_empty_keypackage_refs(&body.key_package_refs)?;
+    let refs = non_empty_keypackage_refs(&body.keypackage_refs)?;
     let revoke_signing_input =
         arkret_models_crypto::http_bodies::keypackages_revoke_signing_input(&body.unsigned())
             .map_err(|error| {
@@ -4727,7 +4722,7 @@ fn keypackage_reason_code(reason_code: &str) -> arkret_wire::ReasonCode {
 
 fn non_empty_keypackage_refs(refs: &[String]) -> Result<Vec<String>, AppError> {
     if refs.is_empty() {
-        return Err(AppError::param_missing("key_package_refs is required"));
+        return Err(AppError::param_missing("keypackage_refs is required"));
     }
     Ok(refs.to_vec())
 }
@@ -4843,7 +4838,7 @@ fn last_resort_matches_realm(kp: &MlsKeyPackageRow, intended_realm_id: &str) -> 
 async fn keypackage_claim_record(
     state: &AppState,
     record: &MlsKeyPackageRow,
-    request: &PeerKeyPackagesClaimRequestBody,
+    request: &KeyPackagesClaimRequestBody,
 ) -> Result<KeyPackageClaimRecord, AppError> {
     if record.device_authorize_event_id.is_none() && record.agent_key_authorize_event_id.is_none() {
         return Err(AppError::capability_denied(
@@ -4999,9 +4994,9 @@ mod trust_binding_tests {
         destination: arkret_wire::DidCoreId,
         requester: &ClaimRequester,
         key: &ed25519_dalek::SigningKey,
-    ) -> PeerKeyPackagesClaimRequestBody {
+    ) -> KeyPackagesClaimRequestBody {
         let signed_at = arkret_canonical::normalize_timestamp_canonical(now());
-        let mut body: PeerKeyPackagesClaimRequestBody = serde_json::from_value(serde_json::json!({
+        let mut body: KeyPackagesClaimRequestBody = serde_json::from_value(serde_json::json!({
             "claim_request_id": URL_SAFE_NO_PAD.encode([71_u8; 16]),
             "target_account_id": {
                 "principal_id": "ak:did_core:web:claim-target.example",

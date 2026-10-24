@@ -33,7 +33,7 @@ use super::{handle_for_did, normalize_localpart, validate_device_id};
 use crate::ids;
 use crate::state::AppState;
 #[cfg(any(test, feature = "conformance-harness"))]
-use crate::wire::{DevLoginRequestBody, SessionLoginOutcome};
+use crate::wire::{DevLoginRequestBody, DevLoginResponseBody};
 use crate::{JsonResult, json_ok};
 
 mod login;

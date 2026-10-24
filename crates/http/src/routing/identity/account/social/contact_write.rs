@@ -1726,7 +1726,7 @@ fn plan_contact_commit<'a>(
                                 .any(|q| q.core.holder.contact_actor_id() == holder))
                 }) {
                     return Ok(ContactCommitPlan::Failed(ContactFailedResponseBody {
-                        operation_kind: ContactResultKind::Request,
+                        operation_kind: ContactOperationKind::Request,
                         operation_id: reservation.operation_id.clone(),
                         reason: ContactOperationRejectReason::ContactRoundConflict,
                     }));

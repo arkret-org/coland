@@ -38,8 +38,8 @@ impl ConfirmedPcrDeviceStatusCut {
     /// Fold this cut into the current-device admission decision shared by
     /// every human-device producer gate; an instant outside the accepted
     /// authorization window has no complete current authorization.
-    pub(crate) fn admission(&self) -> arkret_wire::DeviceRevocationAdmissionDecision {
-        use arkret_wire::DeviceRevocationAdmissionDecision as Decision;
+    pub(crate) fn admission(&self) -> arkret_wire::AccountDeviceRevocationAdmissionDecision {
+        use arkret_wire::AccountDeviceRevocationAdmissionDecision as Decision;
         match self.lifecycle {
             PcrDeviceLifecycle::Active => Decision::Allow,
             PcrDeviceLifecycle::Revoked => Decision::Revoked,

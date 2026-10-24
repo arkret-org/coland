@@ -1,6 +1,6 @@
 use arkret_wire::{
-    AcceptedDevicePossessionProof, AccountId, CommittedEventRef, DeviceId,
-    DeviceRevocationAdmissionDecision, DeviceRevocationAdmissionInput,
+    AcceptedDevicePossessionProof, AccountDeviceRevocationAdmissionDecision,
+    AccountDeviceRevocationAdmissionInput, AccountId, CommittedEventRef, DeviceId,
     DeviceRevocationDeniedAction, EventId, Hash, RealmCommitId,
 };
 use chrono::{DateTime, Utc};
@@ -57,7 +57,7 @@ fn admit_origin_current_selector(
 /// The receipt members a linearized gate status projects to, before typed-id
 /// parsing.
 struct GateDecisionProjection {
-    decision: DeviceRevocationAdmissionDecision,
+    decision: AccountDeviceRevocationAdmissionDecision,
     derived_binding: Option<CommittedEventRef>,
 }
 
@@ -73,7 +73,7 @@ fn project_gate_decision(
     GateDecisionProjection {
         decision,
         derived_binding: origin_current_selector
-            .filter(|_| decision == DeviceRevocationAdmissionDecision::Allow)
+            .filter(|_| decision == AccountDeviceRevocationAdmissionDecision::Allow)
             .map(|selector| selector.authorization_ref.clone()),
     }
 }
@@ -109,8 +109,8 @@ pub(super) struct CurrentDeviceCheckRequest {
 }
 
 impl CurrentDeviceCheckRequest {
-    fn admission_input(&self) -> DeviceRevocationAdmissionInput {
-        DeviceRevocationAdmissionInput {
+    fn admission_input(&self) -> AccountDeviceRevocationAdmissionInput {
+        AccountDeviceRevocationAdmissionInput {
             account_id: self.account_id.clone(),
             device_id: self.device_id.clone(),
             expected_device_authorize_event_id: self.expected_device_authorize_event_id.clone(),
@@ -178,7 +178,7 @@ pub(super) struct CurrentDeviceCheckOutcome {
     action_class: DeviceRevocationDeniedAction,
     intent_digest: Hash,
     accepted_device_possession_proof_digest: Option<Hash>,
-    decision: DeviceRevocationAdmissionDecision,
+    decision: AccountDeviceRevocationAdmissionDecision,
     linearization_seq: u64,
     linearized_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
@@ -429,7 +429,7 @@ pub(super) async fn check_private_current_device(
         ),
         None => (None, None, None),
     };
-    if decision == DeviceRevocationAdmissionDecision::Allow && accepted_commit_id.is_none() {
+    if decision == AccountDeviceRevocationAdmissionDecision::Allow && accepted_commit_id.is_none() {
         return Err(AppError::internal(
             "allowed current-device binding has no accepted RealmCommit",
         ));
@@ -743,7 +743,7 @@ mod tests {
             accepted_device_possession_proof_digest: Some(
                 Hash::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
             ),
-            decision: DeviceRevocationAdmissionDecision::Allow,
+            decision: AccountDeviceRevocationAdmissionDecision::Allow,
             linearization_seq: 9,
             linearized_at: now,
             expires_at: now + chrono::Duration::seconds(30),
@@ -822,7 +822,10 @@ mod tests {
 
         let projected =
             project_gate_decision(DeviceRevocationGateStatus::Active, admitted.as_ref());
-        assert_eq!(projected.decision, DeviceRevocationAdmissionDecision::Allow);
+        assert_eq!(
+            projected.decision,
+            AccountDeviceRevocationAdmissionDecision::Allow
+        );
         assert_eq!(
             projected.derived_binding,
             Some(selector().authorization_ref)
@@ -851,7 +854,7 @@ mod tests {
         );
         assert_eq!(
             projected.decision,
-            DeviceRevocationAdmissionDecision::AuthorityMismatch
+            AccountDeviceRevocationAdmissionDecision::AuthorityMismatch
         );
         assert!(projected.derived_binding.is_none());
         assert!(!accepted_device_proof_requires_verification(None));
@@ -877,10 +880,10 @@ mod tests {
     #[test]
     fn native_device_refusals_remain_refusals_instead_of_availability_faults() {
         for decision in [
-            DeviceRevocationAdmissionDecision::Revoked,
-            DeviceRevocationAdmissionDecision::RevocationPending,
-            DeviceRevocationAdmissionDecision::GenerationMismatch,
-            DeviceRevocationAdmissionDecision::AuthorityMismatch,
+            AccountDeviceRevocationAdmissionDecision::Revoked,
+            AccountDeviceRevocationAdmissionDecision::RevocationPending,
+            AccountDeviceRevocationAdmissionDecision::GenerationMismatch,
+            AccountDeviceRevocationAdmissionDecision::AuthorityMismatch,
         ] {
             let refusal = ServiceError::device_admission_refusal(decision, "native PCR cut")
                 .expect("a denied decision has a registered code");
@@ -907,15 +910,15 @@ mod tests {
                     revoke_ref: selector.authorization_ref.clone(),
                     committed_at: Utc::now(),
                 },
-                DeviceRevocationAdmissionDecision::Revoked,
+                AccountDeviceRevocationAdmissionDecision::Revoked,
             ),
             (
                 DeviceRevocationGateStatus::GenerationMismatch,
-                DeviceRevocationAdmissionDecision::GenerationMismatch,
+                AccountDeviceRevocationAdmissionDecision::GenerationMismatch,
             ),
             (
                 DeviceRevocationGateStatus::AuthorityMismatch,
-                DeviceRevocationAdmissionDecision::AuthorityMismatch,
+                AccountDeviceRevocationAdmissionDecision::AuthorityMismatch,
             ),
         ];
         for (status, expected) in cases {

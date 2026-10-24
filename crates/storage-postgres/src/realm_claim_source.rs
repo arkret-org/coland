@@ -1,7 +1,7 @@
 //! Realm-owned outbound recovery, separate from recipient allocation/consume.
 use arkret_models_crypto::{
-    PeerKeyPackagesClaimQueryResponseBody as Outcome, PeerKeyPackagesClaimQueryState as State,
-    PeerKeyPackagesClaimRequestBody as Request, RecipientMlsDurableSigner,
+    KeyPackagesClaimRequestBody as Request, PeerKeyPackagesClaimQueryResponseBody as Outcome,
+    PeerKeyPackagesClaimQueryState as State, RecipientMlsDurableSigner,
 };
 use arkret_models_identity::AuthenticatedServiceResolution;
 use arkret_wire::{DidCoreId, RealmId};
@@ -186,7 +186,7 @@ async fn validate_result(
         if !recipient
             || consume.claim_id.as_str() != claim.claim_id
             || durable.recipient_id != outcome.claim_receipt.destination_id
-            || durable.key_package_ref.as_str() != claim.keypackage_ref
+            || durable.keypackage_ref.as_str() != claim.keypackage_ref
             || durable.realm_id != request.intended_realm_id
             || durable.mls_group_id != request.mls_group_id
             || durable.durable_at > consume.consumed_at
@@ -222,7 +222,7 @@ async fn validate_result(
                 .map(|c| c.keypackage_ref.as_str())
                 .collect::<std::collections::BTreeSet<_>>();
             let actual = terminal
-                .key_package_refs
+                .keypackage_refs
                 .as_ref()
                 .ok_or_else(|| invalid("terminal package refs absent"))?
                 .iter()

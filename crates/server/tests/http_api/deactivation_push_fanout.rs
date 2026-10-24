@@ -179,8 +179,8 @@ fn gateway_route(base: &str, key: &SigningKey) -> PushGatewayRoute {
                 from_version_id: version.clone(),
                 to_version_id: version.clone(),
             },
-            evidence: ResolutionDidBindingEvidenceReceipt {
-                kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+            evidence: DidBindingEvidenceReceipt {
+                kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                 method: "web".to_owned(),
                 document_digest: digest,
                 method_proofs: vec![],

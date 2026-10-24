@@ -1418,7 +1418,7 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
         let current: arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody = serde_json::from_value(current).unwrap();
         let expected_revision = match current {
             arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody::Present {
-                entry: arkret_models_collaboration::exact_current_state::ExactCurrentStateEntry::AppletRegistration(row), ..
+                current_state: arkret_models_collaboration::exact_current_state::ExactCurrentState::AppletRegistration(row), ..
             } => Some(row.revision),
             arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody::NeverWritten { .. } => None,
             _ => panic!("wrong registration current family"),
@@ -3114,12 +3114,12 @@ mod realm_native_fixture {
                 to_method_history_head: head.clone(),
                 to_version_id: inception.version_id.clone(),
             },
-            evidence: ResolutionDidBindingEvidenceReceipt {
-                kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+            evidence: DidBindingEvidenceReceipt {
+                kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                 method: "webvh".into(),
                 document_digest: normalized_did_document_digest(&document).unwrap(),
-                method_proofs: vec![ResolutionDidBindingMethodProof {
-                    kind: ResolutionDidBindingMethodProofKind::WebvhLog,
+                method_proofs: vec![DidBindingMethodProof {
+                    kind: DidBindingMethodProofKind::WebvhLog,
                     history_head: head.clone(),
                     witnesses: vec![],
                     witness_proofs_digest: Hash::new(
@@ -3274,12 +3274,12 @@ mod realm_native_fixture {
                 to_method_history_head: head.clone(),
                 to_version_id: update.version_id,
             },
-            evidence: ResolutionDidBindingEvidenceReceipt {
-                kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+            evidence: DidBindingEvidenceReceipt {
+                kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                 method: "webvh".into(),
                 document_digest: normalized_did_document_digest(&document).unwrap(),
-                method_proofs: vec![ResolutionDidBindingMethodProof {
-                    kind: ResolutionDidBindingMethodProofKind::WebvhLog,
+                method_proofs: vec![DidBindingMethodProof {
+                    kind: DidBindingMethodProofKind::WebvhLog,
                     history_head: head,
                     witnesses: vec![],
                     witness_proofs_digest: Hash::new(
@@ -3395,12 +3395,12 @@ mod realm_native_fixture {
                 to_method_history_head: head.clone(),
                 to_version_id: rotation.version_id.clone(),
             },
-            evidence: ResolutionDidBindingEvidenceReceipt {
-                kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+            evidence: DidBindingEvidenceReceipt {
+                kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                 method: "webvh".into(),
                 document_digest: normalized_did_document_digest(&document).unwrap(),
-                method_proofs: vec![ResolutionDidBindingMethodProof {
-                    kind: ResolutionDidBindingMethodProofKind::WebvhLog,
+                method_proofs: vec![DidBindingMethodProof {
+                    kind: DidBindingMethodProofKind::WebvhLog,
                     history_head: head.clone(),
                     witnesses: vec![],
                     witness_proofs_digest: Hash::new(
@@ -4852,12 +4852,12 @@ mod realm_native_fixture {
                 to_method_history_head: head.clone(),
                 to_version_id: version.clone(),
             },
-            evidence: ResolutionDidBindingEvidenceReceipt {
-                kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+            evidence: DidBindingEvidenceReceipt {
+                kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                 method: "webvh".into(),
                 document_digest: normalized_did_document_digest(&did_document).unwrap(),
-                method_proofs: vec![ResolutionDidBindingMethodProof {
-                    kind: ResolutionDidBindingMethodProofKind::WebvhLog,
+                method_proofs: vec![DidBindingMethodProof {
+                    kind: DidBindingMethodProofKind::WebvhLog,
                     history_head: head.clone(),
                     witnesses: vec![],
                     witness_proofs_digest: Hash::new(
@@ -5406,7 +5406,11 @@ mod realm_native_fixture {
         let RealmActorMaterial::Current { entries } = &material.material else {
             panic!("current required")
         };
-        let RealmActorMaterialCurrentEntry::Present { row, source_ref } = &entries[0] else {
+        let RealmActorMaterialCurrentEntry::Present {
+            current_state: row,
+            source_ref,
+        } = &entries[0]
+        else {
             panic!("recovery must be present")
         };
         let arkret_wire::CurrentState::Value {

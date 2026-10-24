@@ -728,7 +728,7 @@ impl PersistenceHandle {
         &self,
         request: &coland_storage::AgentSessionAuthorityRequest,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<coland_storage::AgentSessionAuthorityOutcome> {
+    ) -> PersistenceResult<coland_storage::AgentSessionAuthorityView> {
         self.persistence
             .capability_grant_current_states()
             .agent_session_authority(request, at)
@@ -1063,7 +1063,7 @@ impl PersistenceHandle {
         account: &arkret_wire::AccountId,
         device_id: &arkret_wire::DeviceId,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<arkret_wire::DeviceRevocationAdmissionDecision> {
+    ) -> crate::ServiceResult<arkret_wire::AccountDeviceRevocationAdmissionDecision> {
         Ok(self
             .persistence
             .device_revocations()
@@ -1896,7 +1896,7 @@ impl coland_storage::DeviceRevocationStore for PersistenceHandle {
         account: &arkret_wire::AccountId,
         device_id: &arkret_wire::DeviceId,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<arkret_wire::DeviceRevocationAdmissionDecision> {
+    ) -> PersistenceResult<arkret_wire::AccountDeviceRevocationAdmissionDecision> {
         self.persistence
             .device_revocations()
             .pcr_device_admission(account, device_id, now)

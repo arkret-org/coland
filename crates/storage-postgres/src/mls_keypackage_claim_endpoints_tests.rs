@@ -28,8 +28,8 @@ fn fixture() -> (KeyPackageClaimRecord, MlsClaimRemoteDeviceEvidence) {
                 from_version_id: version.clone(),
                 to_version_id: version,
             },
-            evidence: ResolutionDidBindingEvidenceReceipt {
-                kind: ResolutionDidBindingEvidenceKind::AkDidBindingEvidenceV1,
+            evidence: DidBindingEvidenceReceipt {
+                kind: DidBindingEvidenceKind::AkDidBindingEvidenceV1,
                 method: "key".into(),
                 document_digest: normalized_did_document_digest(&document).unwrap(),
                 method_proofs: vec![],
@@ -88,7 +88,7 @@ fn fixture() -> (KeyPackageClaimRecord, MlsClaimRemoteDeviceEvidence) {
                 current_device_generation_ref: 3,
             },
         },
-        record: PeerQueryDeviceRecord {
+        record: PeerDeviceKeyView {
             signer_evidence_ref: arkret_wire::SignerEvidenceRef::new(format!(
                 "ak:signer_evidence:sha256:{}",
                 "a".repeat(64)

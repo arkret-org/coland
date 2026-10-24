@@ -34,8 +34,10 @@ pub enum DeviceRevocationGateStatus {
 impl DeviceRevocationGateStatus {
     /// The current-device admission decision this durable gate state denotes.
     #[must_use]
-    pub const fn admission_decision(&self) -> arkret_wire::DeviceRevocationAdmissionDecision {
-        use arkret_wire::DeviceRevocationAdmissionDecision as Decision;
+    pub const fn admission_decision(
+        &self,
+    ) -> arkret_wire::AccountDeviceRevocationAdmissionDecision {
+        use arkret_wire::AccountDeviceRevocationAdmissionDecision as Decision;
         match self {
             Self::Active => Decision::Allow,
             Self::Revoked { .. } => Decision::Revoked,
@@ -230,7 +232,7 @@ pub trait DeviceRevocationStore: Send + Sync {
         _account: &arkret_wire::AccountId,
         _device_id: &arkret_wire::DeviceId,
         _now: DateTime<Utc>,
-    ) -> PersistenceResult<arkret_wire::DeviceRevocationAdmissionDecision> {
+    ) -> PersistenceResult<arkret_wire::AccountDeviceRevocationAdmissionDecision> {
         Err(PersistenceError::SchemaViolation(
             "PCR device status provider is unavailable".to_owned(),
         ))

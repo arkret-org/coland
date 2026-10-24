@@ -169,8 +169,8 @@ pub(crate) async fn load_agent_participation_outcome(
                 arkret_wire::ReasonCode::AGENT_PARTICIPATION_CEILING_UNRESOLVED,
             ));
         }
-        entries.push(AgentParticipationEntry {
-            scope,
+        entries.push(AgentParticipationView {
+            target_scope: scope,
             selection,
             version,
             next_replace_input: (version <= arkret_models_collaboration::governance::agent_participation::MAX_PARTICIPATION_REPLACE_EXPECTED_VERSION).then_some(ParticipationNextReplaceInput {
@@ -180,6 +180,6 @@ pub(crate) async fn load_agent_participation_outcome(
     }
     Ok(AgentParticipationResponseBody {
         agent_id: agent_id.to_owned(),
-        agent_participation_entries: entries,
+        participation_entries: entries,
     })
 }

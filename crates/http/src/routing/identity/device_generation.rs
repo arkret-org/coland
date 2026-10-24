@@ -56,7 +56,7 @@ pub async fn current_device_generation(
 
 fn generation_fenced(detail: &str) -> ServiceError {
     ServiceError::device_admission_refusal(
-        arkret_wire::DeviceRevocationAdmissionDecision::GenerationMismatch,
+        arkret_wire::AccountDeviceRevocationAdmissionDecision::GenerationMismatch,
         detail,
     )
     .unwrap_or_else(|| ServiceError::internal("generation mismatch must refuse"))

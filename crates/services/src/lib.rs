@@ -131,7 +131,7 @@ impl ServiceError {
     /// decision-to-code mapping; `None` when the device is admitted.
     #[must_use]
     pub fn device_admission_refusal(
-        decision: arkret_wire::DeviceRevocationAdmissionDecision,
+        decision: arkret_wire::AccountDeviceRevocationAdmissionDecision,
         detail: impl std::fmt::Display,
     ) -> Option<Self> {
         decision

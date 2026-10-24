@@ -22,10 +22,10 @@ use super::{bearer_token, now, sha256_hex};
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
 use crate::wire::{
-    AuthorizedDeviceSigningKey, DeviceSigningKeyDirectoryOutcome,
-    DeviceSigningKeyDirectoryQueryRequestBody, DeviceStatus, KeysClaimRequestBody,
-    KeysClaimResponseBody, KeysQueryRequestBody, KeysQueryResponseBody, KeysUploadFields,
-    KeysUploadRequestBody, KeysUploadResponseBody, PeerQueryDeviceRecord, QueryDeviceRecord,
+    AuthorizedDeviceSigningKey, DeviceKeyView, DeviceSigningKeyDirectoryQueryRequestBody,
+    DeviceSigningKeyDirectoryView, DeviceStatus, KeysClaimRequestBody, KeysClaimResponseBody,
+    KeysQueryRequestBody, KeysQueryResponseBody, KeysUploadFields, KeysUploadRequestBody,
+    KeysUploadResponseBody, PeerDeviceKeyView,
 };
 
 pub(crate) fn peer_router() -> Router {
@@ -205,7 +205,7 @@ fn directory_evidence_service_error(error: coland_services::ServiceError) -> App
 /// the immutable `account_device` evidence retaining it. It is what the
 /// Station-to-Station surface (§8.2.1) returns verbatim; it is **never**
 /// handed to a client. The client-facing row is produced from a *verified*
-/// attestation by [`PeerQueryDeviceRecord::project_verified_row`].
+/// attestation by [`PeerDeviceKeyView::project_verified_row`].
 ///
 /// Returns `None` when the device is not currently usable. §8.2 makes that the
 /// only two outcomes: the surface returns a fully attested row, or it returns
@@ -217,8 +217,8 @@ pub(crate) async fn attested_device_record(
     account_id: &arkret_wire::AccountId,
     device_id: &arkret_wire::DeviceId,
     facet: crate::routing::identity::device_signing::DeviceSigningDirectoryFacet,
-    algorithms: arkret_models_crypto::AlgorithmKeyRecords,
-) -> Result<Option<PeerQueryDeviceRecord>, AppError> {
+    algorithms: arkret_models_crypto::AlgorithmPrekeys,
+) -> Result<Option<PeerDeviceKeyView>, AppError> {
     use arkret_wire::NonEmptyString;
 
     let Some((evidence, signer_evidence_ref)) =
@@ -235,7 +235,7 @@ pub(crate) async fn attested_device_record(
         .map(NonEmptyString::new)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| AppError::internal(error.to_string()))?;
-    Ok(Some(PeerQueryDeviceRecord {
+    Ok(Some(PeerDeviceKeyView {
         signer_evidence_ref,
         algorithms,
         trust_algorithms,
@@ -384,7 +384,7 @@ pub(crate) async fn prepare_current_account_device_signer_evidence(
 /// Kept separate from the proof check so both the local-origin and the remote
 /// path run byte-identical generation and status rules.
 fn attested_row_is_current(
-    record: &PeerQueryDeviceRecord,
+    record: &PeerDeviceKeyView,
     generation: &arkret_models_crypto::AccountDeviceGenerationEntry,
 ) -> bool {
     let attested = &record.device_projection_attestation.attestation;
@@ -407,9 +407,9 @@ async fn verified_remote_device_projection(
     state: &AppState,
     account_id: &arkret_wire::AccountId,
     device_id: &arkret_wire::DeviceId,
-    record: &PeerQueryDeviceRecord,
+    record: &PeerDeviceKeyView,
     generation: &arkret_models_crypto::AccountDeviceGenerationEntry,
-) -> Option<QueryDeviceRecord> {
+) -> Option<DeviceKeyView> {
     if record
         .validate_attestation_binding(account_id, device_id)
         .is_err()
@@ -819,13 +819,7 @@ pub(crate) async fn realm_mls_device_projection(
     requester: &arkret_wire::ActorId,
     account: &arkret_wire::AccountId,
     device: &arkret_wire::DeviceId,
-) -> Result<
-    (
-        QueryDeviceRecord,
-        coland_storage::MlsClaimRemoteDeviceEvidence,
-    ),
-    AppError,
-> {
+) -> Result<(DeviceKeyView, coland_storage::MlsClaimRemoteDeviceEvidence), AppError> {
     let realm = requester
         .as_realm_actor_id()
         .ok_or_else(|| AppError::param_invalid("MLS requester must be a Realm actor"))?;
@@ -882,7 +876,7 @@ pub(crate) async fn current_device_projection_for_signer(
     realm: &arkret_wire::RealmId,
     account: &arkret_wire::AccountId,
     device: &arkret_wire::DeviceId,
-) -> Option<QueryDeviceRecord> {
+) -> Option<DeviceKeyView> {
     if account.station_id == state.service_core_id() {
         let facet = super::device_signing::resolve_device_signing_directory_facet(
             state,
@@ -939,7 +933,7 @@ pub(crate) async fn current_device_projection_for_signer(
 }
 
 /// `device-lifecycle.md` §8.2.1 — the Station-to-Station surface. It returns
-/// the origin-signed `peer_query_device_record`, never the client-facing
+/// the origin-signed `peer_device_key_view`, never the client-facing
 /// projection: the requesting Station is the party that verifies the
 /// attestation, and it is the one that prunes the row afterwards.
 #[salvo::oapi::endpoint(operation_id = "ak.peer.keys.read.lookup", tags("identity"))]
@@ -1379,7 +1373,7 @@ async fn device_signing_keys_query(
     body: JsonBody<DeviceSigningKeyDirectoryQueryRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<DeviceSigningKeyDirectoryOutcome> {
+) -> JsonResult<DeviceSigningKeyDirectoryView> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     require_device_directory_bearer(state, req)?;
 
@@ -1435,7 +1429,7 @@ async fn device_signing_keys_query(
         });
     }
 
-    json_ok(DeviceSigningKeyDirectoryOutcome {
+    json_ok(DeviceSigningKeyDirectoryView {
         principal_id,
         devices,
     })

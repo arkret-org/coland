@@ -52,7 +52,7 @@ pub(crate) async fn lock_cuts(
 }
 
 fn matches_scope(
-    request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     scope: &ScopeRef,
 ) -> PersistenceResult<()> {
     if request.intended_realm_id != *scope.realm_id()
@@ -66,7 +66,7 @@ fn matches_scope(
 }
 
 fn claim_participants(
-    request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
 ) -> PersistenceResult<(ActorId, ActorId)> {
     let requester = match (
         &request.requester_account_id,
@@ -110,9 +110,9 @@ fn claim_participants(
 /// Preparing all endpoints before locking avoids room/PCR lock inversion.
 pub(crate) async fn lock_mimi_cut(
     conn: &mut AsyncPgConnection,
-    request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     room: &arkret_wire::MimiRoomUri,
-    outcome: &arkret_models_crypto::PeerKeyPackagesClaimResponseBody,
+    outcome: &arkret_models_crypto::KeyPackagesClaimResponseBody,
 ) -> PersistenceResult<()> {
     let counterparts = crate::boxed_future(|| {
         crate::mls_keypackage_claim_endpoints::prepare(
@@ -152,7 +152,7 @@ pub(crate) async fn lock_mimi_cut(
 /// It is an additional selector constraint, never a second claim identity.
 pub(crate) async fn require_mimi_room(
     conn: &mut AsyncPgConnection,
-    request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     room: &arkret_wire::MimiRoomUri,
 ) -> PersistenceResult<ScopeRef> {
     use arkret_models_collaboration::events_payloads::mimi::{
@@ -243,7 +243,7 @@ async fn member(
 /// caller can query or retry these exact bytes after a lost response.
 pub(crate) async fn prepare_source(
     conn: &mut AsyncPgConnection,
-    request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+    request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     source: &AppletManagedDeviceScopeGuard,
     deadline: chrono::DateTime<Utc>,
 ) -> PersistenceResult<bool> {
@@ -388,15 +388,14 @@ pub(crate) async fn require_admission(
         ));
     }
     if let Some(room) = &admission.mimi_room_uri {
-        let outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody =
-            serde_json::from_value(
-                attempt
-                    .ledger
-                    .outcome
-                    .clone()
-                    .ok_or_else(|| denied("claim outcome missing"))?,
-            )
-            .map_err(denied)?;
+        let outcome: arkret_models_crypto::KeyPackagesClaimResponseBody = serde_json::from_value(
+            attempt
+                .ledger
+                .outcome
+                .clone()
+                .ok_or_else(|| denied("claim outcome missing"))?,
+        )
+        .map_err(denied)?;
         crate::boxed_future(|| lock_mimi_cut(conn, request, room, &outcome)).await?;
     }
     let mut endpoints = Vec::new();
@@ -409,7 +408,7 @@ pub(crate) async fn require_admission(
     if endpoints.is_empty() {
         return Ok(());
     }
-    let outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody = serde_json::from_value(
+    let outcome: arkret_models_crypto::KeyPackagesClaimResponseBody = serde_json::from_value(
         attempt
             .ledger
             .outcome
@@ -596,7 +595,7 @@ pub(crate) async fn require_target(
 }
 
 fn outcome_matches_row(
-    outcome: &arkret_models_crypto::PeerKeyPackagesClaimResponseBody,
+    outcome: &arkret_models_crypto::KeyPackagesClaimResponseBody,
     row: &MlsKeyPackageRow,
 ) -> PersistenceResult<()> {
     outcome.validate_shape().map_err(denied)?;
@@ -663,7 +662,7 @@ pub(crate) fn require_outcome(
     let Some(admission) = &attempt.admission else {
         return Ok(());
     };
-    let outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody = serde_json::from_value(
+    let outcome: arkret_models_crypto::KeyPackagesClaimResponseBody = serde_json::from_value(
         attempt
             .ledger
             .outcome
@@ -690,7 +689,7 @@ pub(crate) fn require_outcome(
 pub(crate) async fn require_stored_outcome(
     conn: &mut AsyncPgConnection,
     operation: arkret_wire::ServiceOperationId,
-    outcome: &arkret_models_crypto::PeerKeyPackagesClaimResponseBody,
+    outcome: &arkret_models_crypto::KeyPackagesClaimResponseBody,
     endpoints: &[AppletManagedDeviceScopeGuard],
     remote_devices: &[coland_storage::MlsClaimRemoteDeviceEvidence],
 ) -> PersistenceResult<chrono::DateTime<Utc>> {

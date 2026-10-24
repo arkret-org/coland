@@ -8,18 +8,18 @@
 | 模块 | 类型 | 所有权 | 已确认消费者 | spec/SDK 对照结论 |
 | --- | --- | --- | --- | --- |
 | `admin::account_localparts` | `AccountLocalpartView` | local contract | Coland、Codmin | `/_coland/admin` 本地账号映射投影；未命中 spec wire 类型 |
-| `admin::account_localparts` | `AccountLocalpartListOutcome` | local contract | Coland、Codmin | 部署本地列表 envelope；未命中 spec wire 类型 |
+| `admin::account_localparts` | `AccountLocalpartsView` | local contract | Coland、Codmin | 部署本地列表 envelope；未命中 spec wire 类型 |
 | `admin::account_localparts` | `AccountLocalpartAddRequestBody` | local contract | Coland、Codmin | 部署本地管理命令；未命中 spec wire 类型 |
-| `admin::account_localparts` | `AccountLocalpartMutationOutcome` | local contract | Coland、Codmin | 部署本地变更结果；未命中 spec wire 类型 |
-| `admin::handles` | `AdminHandleRecord` | local contract | Coland、Codmin | 部署本地 handle 管理投影；未命中 spec wire 类型 |
+| `admin::account_localparts` | `AccountLocalpartUpdateResponseBody` | local contract | Coland、Codmin | 部署本地变更结果；未命中 spec wire 类型 |
+| `admin::handles` | `AdminHandleView` | local contract | Coland、Codmin | 部署本地 handle 管理投影；未命中 spec wire 类型 |
 | `admin::handles` | `AdminHandleAuditEvent` | local contract | Coland、Codmin | 部署本地 handle 审计投影；未命中 spec wire 类型 |
-| `admin::handles` | `AdminHandleListOutcome` | local contract | Coland、Codmin | 部署本地 handle 列表 envelope；未命中 spec wire 类型 |
-| `admin::handles` | `AdminHandleAuditListOutcome` | local contract | Coland、Codmin | 部署本地 handle 审计列表 envelope；未命中 spec wire 类型 |
+| `admin::handles` | `AdminHandlePage` | local contract | Coland、Codmin | 部署本地 handle 列表 envelope；未命中 spec wire 类型 |
+| `admin::handles` | `AdminHandleAuditPage` | local contract | Coland、Codmin | 部署本地 handle 审计列表 envelope；未命中 spec wire 类型 |
 | `admin::handles` | `AdminHandleReassignBody` | local contract | Coland、Codmin | 部署本地 handle 管理命令；未命中 spec wire 类型 |
 | `admin::handles` | `AdminHandleRevokeBody` | local contract | Coland、Codmin | 部署本地 handle 管理命令；未命中 spec wire 类型 |
 | `admin::device_signing_directory` | `DeviceSigningKeyDirectoryQueryRequestBody` | local contract | Coland、Coauth | 产品间 signing-key directory 查询；字段复用 SDK 类型，整体未命中 spec wire 类型 |
 | `admin::device_signing_directory` | `AuthorizedDeviceSigningKey` | local contract | Coland、Coauth | 产品间 signing-key directory 投影；字段复用 SDK 类型，整体未命中 spec wire 类型 |
-| `admin::device_signing_directory` | `DeviceSigningKeyDirectoryOutcome` | local contract | Coland、Coauth | 产品间 signing-key directory 响应；字段复用 SDK 类型，整体未命中 spec wire 类型 |
+| `admin::device_signing_directory` | `DeviceSigningKeyDirectoryView` | local contract | Coland、Coauth | 产品间 signing-key directory 响应；字段复用 SDK 类型，整体未命中 spec wire 类型 |
 | `admin::invite_tokens` | `AdminInviteTokenItem` | local contract | Coland、Codmin | Realm invite 状态的只读管理投影；DTO 整体未命中 spec wire 类型 |
 | `admin::queries` | `AdminActor` | local contract | Coland、Codmin | `/_coland/admin` 操作面投影；字段复用 SDK 类型，整体未命中 spec wire 类型 |
 | `admin::queries` | `AdminActorList` | local contract | Coland、Codmin | `/_coland/admin` 操作面列表 envelope；未命中 spec wire 类型 |
@@ -76,7 +76,7 @@
 | `admin::service_routes` | `AdminServiceRouteDetail` | local contract | Coland、Codmin | `GET /_coland/admin/service-routes/{service_id}/{service_kind}` 详情投影；字段复用 SDK 类型，整体未命中 spec wire 类型 |
 
 | `account_projection` | `AccountProjectionRequestBody`, `AccountLocalpartsBaseUrlError` | local contract/helper | Coland、Coauth | Deployment-private Account Authority projection of an already verified binding; fields reuse SDK identifiers. The URL helper error is not a wire model. |
-| `agent_session_authority` | `AgentSessionAuthorityRequest`, `AgentSessionAuthorityOutcome` | local contract | Coland、Coauth | Deployment-private source-snapshot binding; SDK-owned scope and identity types are reused. This projection cannot independently authorize an Arkret operation. |
+| `agent_session_authority` | `AgentSessionAuthorityRequest`, `AgentSessionAuthorityView` | local contract | Coland、Coauth | Deployment-private source-snapshot binding; SDK-owned scope and identity types are reused. This projection cannot independently authorize an Arkret operation. |
 | `admin::queries` | `CurrentCapabilityGrant` | SDK re-export | Coland、Codmin | Original SDK public name behind `CapabilitySummary`; no local definition. |
 
 若以后出现同名或等价的规范类型，必须先在 `arkret-rust-sdk` 实现，并用规范固定样例做

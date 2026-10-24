@@ -2,7 +2,7 @@
 
 use arkret_identifiers::DidCoreId;
 use arkret_models_collaboration::governance::invite_addressing::{
-    DisclosedOutcome, DisclosureLevel, IntroductionEvidence, InviteReceivePolicy,
+    DisclosedInviteDeliveryOutcome, DisclosureLevel, IntroductionEvidence, InviteReceivePolicy,
 };
 use arkret_models_identity::handle::Handle;
 use arkret_models_identity::{HandleClaim, HandleClaimStatus};
@@ -41,7 +41,7 @@ pub struct ReceiveDecision {
     pub action: InviteReceiveAction,
     pub effective_kind: &'static str,
     pub trust_tier: TrustTier,
-    pub disclosed_outcome: Option<DisclosedOutcome>,
+    pub disclosed_outcome: Option<DisclosedInviteDeliveryOutcome>,
 }
 
 pub fn evaluate_resolved(
@@ -209,12 +209,14 @@ pub fn opaque_drop(effective_kind: &'static str) -> ReceiveDecision {
 pub fn disclosed_outcome_for_action(
     disclosure_level: DisclosureLevel,
     action: &InviteReceiveAction,
-) -> Option<DisclosedOutcome> {
+) -> Option<DisclosedInviteDeliveryOutcome> {
     match (disclosure_level, action) {
         (DisclosureLevel::Outcome, InviteReceiveAction::Notify) => {
-            Some(DisclosedOutcome::Delivered)
+            Some(DisclosedInviteDeliveryOutcome::Delivered)
         }
-        (DisclosureLevel::Outcome, InviteReceiveAction::Drop) => Some(DisclosedOutcome::Blocked),
+        (DisclosureLevel::Outcome, InviteReceiveAction::Drop) => {
+            Some(DisclosedInviteDeliveryOutcome::Blocked)
+        }
         // Quarantine is holder-private consent state. It is always represented
         // externally by status=deferred without a disclosed_outcome, including
         // on high-trust/outcome routes.

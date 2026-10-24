@@ -452,7 +452,7 @@ async fn boundary_exact_current(
     let outcome: ExactCurrentStateReadResponseBody = response.take_json().await.unwrap();
     let ExactCurrentStateReadResponseBody::Present {
         governance_generation,
-        entry: ExactCurrentStateEntry::CalendarScheduleSource(row),
+        current_state: ExactCurrentState::CalendarScheduleSource(row),
         ..
     } = &outcome
     else {
@@ -1045,6 +1045,7 @@ async fn boundary_exact_floor_expiry(
     assert_eq!(refused.status_code, Some(StatusCode::NOT_FOUND));
     let problem: Value = refused.take_json().await.unwrap();
     assert!(problem.get("entry").is_none());
+    assert!(problem.get("current_state").is_none());
     assert_eq!(
         boxed_step(|| obligation_mls_footprint(fixture)).await,
         before
@@ -1052,7 +1053,10 @@ async fn boundary_exact_floor_expiry(
     assert!(matches!(positive,arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody::Present{..}));
 }
 
-#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
+)]
 pub(super) async fn realm_actor_mls_boundary(
     fixture: &Fixture,
     package: &AppletPackage,
@@ -1318,7 +1322,7 @@ async fn boundary_human_pcr_handoff(
             )
             .await
             .unwrap(),
-        arkret_wire::DeviceRevocationAdmissionDecision::Allow
+        arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
     // Both Accounts are hosted by this Station. The ordinary fixture Realm's
     // accepted join rule is public, so use the real Human's self-signed join;
@@ -1416,7 +1420,7 @@ async fn boundary_human_pcr_handoff(
             )
             .await
             .unwrap(),
-        arkret_wire::DeviceRevocationAdmissionDecision::Revoked,
+        arkret_wire::AccountDeviceRevocationAdmissionDecision::Revoked,
         "independent authoritative PCR reader must observe the real accepted command terminal, not merely a proposal or failed native replay"
     );
     assert_eq!(received.claims.len(), 1);
@@ -1657,9 +1661,10 @@ async fn boundary_terminal_human_revoke(
     )
     .unwrap();
     let prepared = SecurityTransactionPreparedPlan::SecurityRotation(plan.prepared_plan.clone());
-    let (mut initial, canonical_request) = SecurityTransactionCreateRequestBody::SecurityRotation(plan)
-        .into_initial_resource(prepared, at)
-        .unwrap();
+    let (mut initial, canonical_request) =
+        SecurityTransactionCreateRequestBody::SecurityRotation(plan)
+            .into_initial_resource(prepared, at)
+            .unwrap();
     let id = initial.transaction_id.clone();
     persistence
         .security_transactions()

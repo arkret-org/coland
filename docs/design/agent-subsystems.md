@@ -12,7 +12,7 @@
 - capability grant: 存于 cell `ak:cell:ak.component.capability.grant.v1:<capability_id>`，authz 经 durable current result 读取；Realm link 不传播 capability。
 - 消息:`apply_message` 仅写 `MessageState`,无 fanout。
 - 通知:**无** NotificationStore / fanout / mention→notification。mention 仅在 `wire_validators/mention.rs` + `routing/events/operations.rs::validate_mentions` 做语法校验。
-- session:`routing/identity/auth.rs::authenticated_session` 直接验证 session grant + DPoP,成功后返回 SDK `SessionLoginOutcome`;无 `agent_key_proof`、无 `scope_details`。
+- session:`routing/identity/auth.rs::authenticated_session` 直接验证 session grant + DPoP,成功后返回 SDK `DevLoginResponseBody`;无 `agent_key_proof`、无 `scope_details`。
 
 ---
 

@@ -146,7 +146,7 @@ pub(crate) fn require_session_content_ceiling(
     if let Some(participation) = details.get("participations") {
         // Preserved and structurally validated, but never an authority source.
         // Continuous current participation remains the caller's separate gate.
-        serde_json::from_value::<Vec<arkret_models_collaboration::governance::agent_participation::AgentParticipationEntry>>(participation.clone())
+        serde_json::from_value::<Vec<arkret_models_collaboration::governance::agent_participation::AgentParticipationView>>(participation.clone())
             .map_err(unavailable)?;
     }
     let constraints = details["constraints"]

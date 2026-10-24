@@ -1349,7 +1349,7 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
     ) -> ServiceResult<Option<MlsKeyPackageState>>;
     async fn peer_claim_candidates(
         &self,
-        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        body: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     ) -> ServiceResult<Vec<MlsKeyPackageState>>;
     async fn claim_key_package(
         &self,
@@ -1364,7 +1364,7 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
     ) -> ServiceResult<Option<MlsKeyPackageState>>;
     async fn record_peer_claim_attempt(
         &self,
-        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        body: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     ) -> ServiceResult<coland_storage::PeerKeyPackageClaimRateDecision>;
     async fn prune_peer_claim_attempts(&self) -> ServiceResult<usize>;
     async fn peer_claim(
@@ -1381,7 +1381,7 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
         &self,
         claim_request_id: &str,
         request_digest: &str,
-    ) -> ServiceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>>;
+    ) -> ServiceResult<Option<arkret_models_crypto::KeyPackagesClaimRequestBody>>;
     async fn realm_claim_source(
         &self,
         source_id: &str,
@@ -1389,14 +1389,14 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
     ) -> ServiceResult<Option<coland_storage::RealmKeyPackageClaimSource>>;
     async fn retain_realm_claim_source_result(
         &self,
-        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
         result: &arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody,
         histories: &[arkret_models_identity::AuthenticatedServiceResolution],
         governor: &arkret_wire::DidCoreId,
     ) -> ServiceResult<arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody>;
     async fn prepare_realm_claim_source(
         &self,
-        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
         source: &coland_storage::AppletManagedDeviceScopeGuard,
         transport_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> ServiceResult<bool>;
@@ -1541,7 +1541,7 @@ impl MlsKeyPackageService {
     }
     pub async fn record_peer_claim_attempt(
         &self,
-        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        body: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     ) -> ServiceResult<coland_storage::PeerKeyPackageClaimRateDecision> {
         self.key_packages.record_peer_claim_attempt(body).await
     }
@@ -1559,7 +1559,7 @@ impl MlsKeyPackageService {
     }
     pub async fn retain_realm_claim_source_result(
         &self,
-        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
         result: &arkret_models_crypto::PeerKeyPackagesClaimQueryResponseBody,
         histories: &[arkret_models_identity::AuthenticatedServiceResolution],
         governor: &arkret_wire::DidCoreId,
@@ -1570,7 +1570,7 @@ impl MlsKeyPackageService {
     }
     pub async fn prepare_realm_claim_source(
         &self,
-        request: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
         source: &coland_storage::AppletManagedDeviceScopeGuard,
         transport_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> ServiceResult<bool> {
@@ -1582,7 +1582,7 @@ impl MlsKeyPackageService {
         &self,
         claim_request_id: &str,
         request_digest: &str,
-    ) -> ServiceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>> {
+    ) -> ServiceResult<Option<arkret_models_crypto::KeyPackagesClaimRequestBody>> {
         self.key_packages
             .peer_claim_original(claim_request_id, request_digest)
             .await
@@ -1715,7 +1715,7 @@ impl MlsKeyPackageService {
     }
     pub async fn peer_claim_candidates(
         &self,
-        body: &arkret_models_crypto::PeerKeyPackagesClaimRequestBody,
+        body: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     ) -> ServiceResult<Vec<MlsKeyPackageState>> {
         self.key_packages.peer_claim_candidates(body).await
     }

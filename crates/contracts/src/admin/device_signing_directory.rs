@@ -36,7 +36,7 @@ pub struct AuthorizedDeviceSigningKey {
 /// Response from the product-local device signing-key directory.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
-pub struct DeviceSigningKeyDirectoryOutcome {
+pub struct DeviceSigningKeyDirectoryView {
     pub principal_id: DidCoreId,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<AuthorizedDeviceSigningKey>,

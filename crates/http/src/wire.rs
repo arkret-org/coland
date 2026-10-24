@@ -11,9 +11,9 @@ pub use arkret_models_collaboration::session_grants::{
     SessionGrantValidationResponseBody,
 };
 pub use arkret_models_crypto::{
-    DeviceStatus, KeysClaimRequestBody, KeysClaimResponseBody, KeysQueryRequestBody,
+    DeviceKeyView, DeviceStatus, KeysClaimRequestBody, KeysClaimResponseBody, KeysQueryRequestBody,
     KeysQueryResponseBody, KeysUploadFields, KeysUploadRequestBody, KeysUploadResponseBody,
-    PeerQueryDeviceRecord, QueryDeviceRecord,
+    PeerDeviceKeyView,
 };
 pub use arkret_models_discovery::ops::HardeningStatus;
 use arkret_models_discovery::{
@@ -29,15 +29,15 @@ use arkret_wire::{
 };
 use chrono::{DateTime, Utc};
 pub use coland_contracts::admin::{
-    AuthorizedDeviceSigningKey, DeviceSigningKeyDirectoryOutcome,
-    DeviceSigningKeyDirectoryQueryRequestBody,
+    AuthorizedDeviceSigningKey, DeviceSigningKeyDirectoryQueryRequestBody,
+    DeviceSigningKeyDirectoryView,
 };
 use coland_services::protocol_artifacts as artifacts;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 #[derive(salvo::oapi::ToSchema, Debug, Serialize)]
-pub struct HealthOutcome {
+pub struct HealthReport {
     pub ok: bool,
     pub service: &'static str,
     pub storage: &'static str,
@@ -64,7 +64,7 @@ pub struct HealthOutcome {
 }
 
 #[derive(salvo::oapi::ToSchema, Debug, Serialize)]
-pub struct ColandServerDescribeOutcome {
+pub struct ColandServiceDescription {
     #[serde(flatten)]
     pub service: ServiceDescribe,
     pub unsupported_profiles: Vec<UnsupportedProfileDescriptor>,
@@ -95,7 +95,7 @@ impl UnsupportedProfileDescriptor {
 }
 
 #[derive(salvo::oapi::ToSchema, Debug, Serialize, Deserialize)]
-pub struct AuthBridgeDescribeOutcome {
+pub struct AuthBridgeDescription {
     pub contract: String,
     pub version: String,
     pub api_base_path: String,
@@ -153,7 +153,7 @@ pub use arkret_models_collaboration::governance::authorization::{
 };
 // Moderation report request/outcome are the SDK DTOs (`arkret-models-collaboration` carries
 // `service-operation-dtos.schema.json#/$defs/ModerationReportResponseBody`:
-// `status` enum `submitted|resolved`, `routed_to` is an array of DIDs);
+// `status` is `submitted`, `routed_to_ids` contains stable core IDs);
 // no coland mirrors.
 pub use arkret_models_collaboration::governance::moderation::{
     ModerationReportRequestBody, ModerationReportResponseBody,
@@ -182,7 +182,7 @@ pub struct DevLoginRequestBody {
 
 #[cfg(any(test, feature = "conformance-harness"))]
 #[derive(salvo::oapi::ToSchema, Debug, Serialize)]
-pub struct SessionLoginOutcome {
+pub struct DevLoginResponseBody {
     pub session_credential: String,
     pub token_type: String,
     pub actor: String,
@@ -192,7 +192,7 @@ pub struct SessionLoginOutcome {
 }
 
 #[derive(salvo::oapi::ToSchema, Debug, Serialize)]
-pub struct ColandAccountRegisterOutcome {
+pub struct LocalAccountView {
     pub principal_id: arkret_wire::DidCoreId,
     pub handle: String,
     pub display_name: Option<String>,
@@ -766,7 +766,7 @@ pub fn describe(
                     "explain_fields": [
                         "matched_grants",
                         "applied_constraints",
-                        "policy_results",
+                        "policy_evaluations",
                         "missing_proofs",
                         "reason_code"
                     ],

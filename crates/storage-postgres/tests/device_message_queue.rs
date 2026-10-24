@@ -338,7 +338,7 @@ async fn queue_refuses_device_authorizations_the_station_did_not_accept() {
             .pcr_device_admission(&account, &fixture.history.founding_device_id, at)
             .await
             .unwrap(),
-        arkret_wire::DeviceRevocationAdmissionDecision::Allow
+        arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
     );
     let unaccepted_status = status
         .pcr_device_admission(&account, &unaccepted_device, at)
@@ -346,7 +346,7 @@ async fn queue_refuses_device_authorizations_the_station_did_not_accept() {
     assert!(
         !matches!(
             unaccepted_status,
-            Ok(arkret_wire::DeviceRevocationAdmissionDecision::Allow)
+            Ok(arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow)
         ),
         "a device without an accepted authorization is not admitted: {unaccepted_status:?}"
     );

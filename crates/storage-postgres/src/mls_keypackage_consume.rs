@@ -133,7 +133,7 @@ pub(crate) async fn consume(
         // The same order as own revoke: PCR, package, then exact claim ledger.
         crate::realm_authorization_cut::lock_realm_authorization_cut(conn,&authority.realm_id).await?;
         let mut package=sql_query("SELECT id,keypackage_ref,keypackage_digest,owner_actor_id,effective_scope,actor_id,device_id,endpoint_verification_method,key_package_bytes,capabilities,capabilities_digest,last_resort,last_resort_realm_id,lifetime_not_before,lifetime_not_after,claimed_by_mls_group_id,device_authorize_event_id,agent_key_authorize_event_id,claimed_at,claim_expires_at_unix_ms,consumed_at,created_at FROM mls_key_packages WHERE keypackage_ref=$1 FOR UPDATE")
-            .bind::<Text,_>(receipt.key_package_ref.as_str()).get_result::<MlsKeyPackagePgRow>(&mut *conn).await.optional()?.map(validated_keypackage_row).transpose()?
+            .bind::<Text,_>(receipt.keypackage_ref.as_str()).get_result::<MlsKeyPackagePgRow>(&mut *conn).await.optional()?.map(validated_keypackage_row).transpose()?
             .ok_or_else(||conflict("consume package is unavailable"))?;
         if package.owner_actor_id!=authority.actor_id
             || package.actor_id!=authority.actor_id.signing_principal_id().as_str()
@@ -155,7 +155,7 @@ pub(crate) async fn consume(
         if &current!=authority || at>=transport_expires_at || at>=authority.expires_at {
             return Err(denied("consume Device instance or credential window changed").into());
         }
-        let outcome:arkret_models_crypto::PeerKeyPackagesClaimResponseBody=serde_json::from_value(ledger.outcome.clone().ok_or_else(||conflict("consume has no original claim outcome"))?).map_err(PersistenceError::database)?;
+        let outcome:arkret_models_crypto::KeyPackagesClaimResponseBody=serde_json::from_value(ledger.outcome.clone().ok_or_else(||conflict("consume has no original claim outcome"))?).map_err(PersistenceError::database)?;
         outcome.validate_shape().map_err(|_|conflict("original claim outcome is invalid"))?;
         let original_authority=outcome.claim_receipt.claim_authority_ref.as_ref()
             .ok_or_else(||conflict("Realm claim has no original authority reference"))?;

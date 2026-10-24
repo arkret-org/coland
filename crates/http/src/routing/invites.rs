@@ -10,14 +10,14 @@ use arkret_canonical as canonical;
 use arkret_identifiers::{DidCoreId, Hash, InviteLocatorId};
 #[cfg(test)]
 use arkret_models_collaboration::governance::invite_addressing::{
-    DisclosedOutcome, DisclosureLevel, InviteDelivery, InviteDeliveryEntry,
+    DisclosedInviteDeliveryOutcome, DisclosureLevel, InviteDelivery, InviteDeliveryEntry,
 };
 use arkret_models_collaboration::governance::invite_addressing::{
     IntroductionEvidence, InviteDeliveryOutcomeStatus, InviteDeliveryRequestBody,
     InviteDeliveryResponseBody, InviteLocatorIssueRequestBody, InviteLocatorIssueResponseBody,
     InviteLocatorResolveRequestBody, InviteLocatorRevokeRequestBody,
-    InviteLocatorRevokeResponseBody, InviteLocatorRotateRequestBody, InviteLocatorStatus,
-    InviteReceivePolicy, PrincipalLocator, PrincipalLocatorProof, PrincipalLocatorProofPurpose,
+    InviteLocatorRevokeResponseBody, InviteLocatorRotateRequestBody, InviteReceivePolicy,
+    PrincipalLocator, PrincipalLocatorProof, PrincipalLocatorProofPurpose,
     SelfInviteDispatchRequestBody,
 };
 #[cfg(test)]
@@ -297,7 +297,6 @@ async fn revoke_invite_locator(
     json_ok(InviteLocatorRevokeResponseBody {
         locator_id: InviteLocatorId::new(record.locator_id)
             .map_err(|error| AppError::internal(format!("stored invite locator id: {error}")))?,
-        status: InviteLocatorStatus::Revoked,
         revoked_at: record.revoked_at.unwrap_or(revoked_at),
     })
 }
@@ -2019,11 +2018,11 @@ mod invite_locator_security_tests {
         );
         assert_eq!(
             disclosed_outcome_for_action(DisclosureLevel::Outcome, &InviteReceiveAction::Notify),
-            Some(DisclosedOutcome::Delivered)
+            Some(DisclosedInviteDeliveryOutcome::Delivered)
         );
         assert_eq!(
             disclosed_outcome_for_action(DisclosureLevel::Outcome, &InviteReceiveAction::Drop),
-            Some(DisclosedOutcome::Blocked)
+            Some(DisclosedInviteDeliveryOutcome::Blocked)
         );
     }
 

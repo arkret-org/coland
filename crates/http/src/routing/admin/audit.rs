@@ -11,7 +11,8 @@
 //! All persistence access is mediated by `GovernanceService`.
 
 use arkret_models_collaboration::governance::erasure::{
-    ErasureFanoutStatus, ErasureOutcome, ErasureReceipt, ErasureStorageBoundary, ErasureSubjectKind,
+    ErasureAttemptOutcome, ErasureFanoutStatus, ErasureReceipt, ErasureStorageBoundary,
+    ErasureSubjectKind,
 };
 use coland_http::error::AppError;
 use coland_http::result::{JsonResult, json_ok};
@@ -36,7 +37,7 @@ struct AuditErasureReceiptItem {
     issuer_id: Option<arkret_wire::DidCoreId>,
     subject_kind: Option<ErasureSubjectKind>,
     subject_ref: Option<String>,
-    outcome: ErasureOutcome,
+    outcome: ErasureAttemptOutcome,
     storage_boundary: Option<ErasureStorageBoundary>,
     scope_realm_id: Option<String>,
     fanout_status: ErasureFanoutStatus,
@@ -335,7 +336,7 @@ mod tests {
                 retention_policy_id: None,
                 service_scope: None,
             },
-            outcome: ErasureOutcome::Completed,
+            outcome: ErasureAttemptOutcome::Completed,
             erased_classes: vec![ErasedClass::ProjectionRows],
             retained_stub_digest: arkret_identifiers::Hash::new(
                 "sha256:aa67f34cd4e055246b8a73abe15734c39945b5c0e2e5693c00cada4e13d93e59",
@@ -379,7 +380,7 @@ mod tests {
         };
 
         let item = audit_erasure_receipt_item(&record).unwrap();
-        assert_eq!(item.outcome, ErasureOutcome::Completed);
+        assert_eq!(item.outcome, ErasureAttemptOutcome::Completed);
         assert_eq!(item.subject_kind, Some(ErasureSubjectKind::Space));
         assert_eq!(
             item.storage_boundary,

@@ -40,7 +40,7 @@ fn admission_revoke(
 ) -> KeyPackagesRevokeRequestBody {
     let method = format!("{}#{}", authority.native_did, authority.device_id);
     let body = KeyPackagesRevokeFields {
-        key_package_refs: refs,
+        keypackage_refs: refs,
         device_id: authority.device_id.clone(),
         reason: None,
     };
@@ -281,7 +281,7 @@ pub(super) async fn keypackage_admission(
         arkret_signatures::keypackages::sign_keypackages_revoke_request(&wrong, &method, &seed)
             .unwrap();
     let wrong = wrong.into_signed(signature);
-    let bad_signature = admission_revoke(&recipient, &[91; 32], revoke.key_package_refs.clone());
+    let bad_signature = admission_revoke(&recipient, &[91; 32], revoke.keypackage_refs.clone());
     for invalid in [wrong, bad_signature] {
         let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
         let (status, problem) = boxed_step(|| {
@@ -385,7 +385,7 @@ pub(super) async fn keypackage_admission(
         "real native own-package cleanup: {value}"
     );
     let result: KeyPackagesRevokeResponseBody = serde_json::from_value(value.clone()).unwrap();
-    assert_eq!(result.revoked, revoke.key_package_refs);
+    assert_eq!(result.revoked, revoke.keypackage_refs);
     assert!(result.failures.is_empty());
     let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
     let (status, replay) = boxed_step(|| {
@@ -550,7 +550,10 @@ fn admission_signed_claim(
     body
 }
 
-#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
+)]
 async fn admission_native_last_resort(
     fixture: &Fixture,
     package: &AppletPackage,
@@ -817,7 +820,7 @@ async fn admission_native_last_resort(
         )
         .unwrap(),
         claim_request_id: claim.claim_request_id.clone(),
-        key_package_ref: arkret_wire::NonEmptyString::new(reference.clone()).unwrap(),
+        keypackage_ref: arkret_wire::NonEmptyString::new(reference.clone()).unwrap(),
         recipient: RecipientMlsDurableSigner::RealmDevice {
             recipient_actor_id: recipient.actor_id.clone(),
             recipient_device_id: recipient.device_id.clone(),

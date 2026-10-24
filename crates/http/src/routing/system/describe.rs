@@ -25,10 +25,9 @@ use serde_json::{Value, json};
 
 use crate::state::AppState;
 use crate::wire::{
-    AuthBridgeAuthDescriptor, AuthBridgeDescribeOutcome, AuthBridgeExamples,
-    AuthBridgePushDescriptor, ColandServerDescribeOutcome, HealthOutcome,
-    IntegrationDependencyDescriptor, IntegrationManifest, IntegrationSurfaceDescriptor,
-    UnsupportedProfileDescriptor, describe,
+    AuthBridgeAuthDescriptor, AuthBridgeDescription, AuthBridgeExamples, AuthBridgePushDescriptor,
+    ColandServiceDescription, HealthReport, IntegrationDependencyDescriptor, IntegrationManifest,
+    IntegrationSurfaceDescriptor, UnsupportedProfileDescriptor, describe,
 };
 use crate::{JsonResult, json_ok};
 
@@ -97,7 +96,7 @@ pub(super) fn local_router() -> Router {
 
 #[endpoint(operation_id = "org.arkret.coland.system.health")]
 #[tracing::instrument(skip_all, fields(op = "org.arkret.coland.system.health"))]
-async fn health(depot: &mut Depot, res: &mut Response) -> JsonResult<HealthOutcome> {
+async fn health(depot: &mut Depot, res: &mut Response) -> JsonResult<HealthReport> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let database_ok = database_ready(state).await;
     let identity_state = state.service_identity_state();
@@ -106,7 +105,7 @@ async fn health(depot: &mut Depot, res: &mut Response) -> JsonResult<HealthOutco
     if !ok {
         res.status_code(StatusCode::SERVICE_UNAVAILABLE);
     }
-    json_ok(HealthOutcome {
+    json_ok(HealthReport {
         ok,
         service: "coland",
         storage: state.jobs().storage_mode(),
@@ -309,11 +308,11 @@ async fn server_describe(
 
 #[endpoint(operation_id = "org.arkret.coland.system.describe")]
 #[tracing::instrument(skip_all, fields(op = "org.arkret.coland.system.describe"))]
-async fn coland_describe(depot: &mut Depot) -> JsonResult<ColandServerDescribeOutcome> {
+async fn coland_describe(depot: &mut Depot) -> JsonResult<ColandServiceDescription> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let service = build_server_description_resolved(state).await?;
     let unsupported_profiles = unsupported_profiles_from_limits(&service.limits);
-    json_ok(ColandServerDescribeOutcome {
+    json_ok(ColandServiceDescription {
         service,
         unsupported_profiles,
         proof_verifier_mode: state.config().proof_verifier_mode().to_owned(),
@@ -483,8 +482,8 @@ pub(crate) fn apply_conformance_evidence(
 
 #[endpoint(operation_id = "org.arkret.coland.auth.bridge.describe")]
 #[tracing::instrument(skip_all, fields(op = "org.arkret.coland.auth.bridge.describe"))]
-pub(in crate::routing) async fn auth_bridge_describe() -> JsonResult<AuthBridgeDescribeOutcome> {
-    json_ok(AuthBridgeDescribeOutcome {
+pub(in crate::routing) async fn auth_bridge_describe() -> JsonResult<AuthBridgeDescription> {
+    json_ok(AuthBridgeDescription {
         contract: "arkret.rest.principal_bridge.v1".to_owned(),
         version: "2026-06-21-session-grant-direct".to_owned(),
         api_base_path: "/_coland".to_owned(),

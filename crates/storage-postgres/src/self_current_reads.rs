@@ -14,8 +14,8 @@
 //! Strand. No `never_written` answer is inferred from a missing row alone.
 
 use arkret_models_collaboration::exact_current_state::{
-    CurrentModerationState, CurrentRelation, ExactCurrentStateEntry,
-    ExactCurrentStateReadRequestBody, ExactCurrentStateReadResponseBody, ExactCurrentStateSelector,
+    CurrentModerationState, CurrentRelation, ExactCurrentState, ExactCurrentStateReadRequestBody,
+    ExactCurrentStateReadResponseBody, ExactCurrentStateSelector,
     ModerationStateExactCurrentSelector, ModerationStateValue,
 };
 use arkret_models_collaboration::objects::relation::Relation;
@@ -547,21 +547,23 @@ pub(crate) async fn exact_current_state_for_actor_in_connection(
                     realm_id: request.realm_id.clone(),
                     governance_generation: generation,
                     effective_stream_head: head.clone(),
-                    entry: ExactCurrentStateEntry::AppletRegistration(CurrentAppletRegistration {
-                        selector: selector.clone(),
-                        source_stream_ref: head.stream_ref.clone(),
-                        revision: CurrentRevision {
-                            commit_id: row
-                                .current_commit_id
-                                .parse()
-                                .map_err(PersistenceError::database)?,
-                            stream_position: to_u64(
-                                row.current_stream_position,
-                                "Applet registration current",
-                            )?,
+                    current_state: ExactCurrentState::AppletRegistration(
+                        CurrentAppletRegistration {
+                            selector: selector.clone(),
+                            source_stream_ref: head.stream_ref.clone(),
+                            revision: CurrentRevision {
+                                commit_id: row
+                                    .current_commit_id
+                                    .parse()
+                                    .map_err(PersistenceError::database)?,
+                                stream_position: to_u64(
+                                    row.current_stream_position,
+                                    "Applet registration current",
+                                )?,
+                            },
+                            value: row.value,
                         },
-                        value: row.value,
-                    }),
+                    ),
                 }
             } else {
                 ExactCurrentStateReadResponseBody::NeverWritten {
@@ -648,7 +650,7 @@ pub(crate) async fn exact_current_state_for_actor_in_connection(
                             "Calendar scope head",
                         )?,
                     },
-                    entry: ExactCurrentStateEntry::CalendarScheduleSource(
+                    current_state: ExactCurrentState::CalendarScheduleSource(
                         CurrentCalendarScheduleSource {
                             selector: selector.clone(),
                             source_stream_ref: stream,
@@ -678,7 +680,7 @@ pub(crate) async fn exact_current_state_for_actor_in_connection(
                     realm_id: request.realm_id.clone(),
                     governance_generation: generation,
                     effective_stream_head: head.clone(),
-                    entry: ExactCurrentStateEntry::AgentInteraction(CurrentAgentInteraction {
+                    current_state: ExactCurrentState::AgentInteraction(CurrentAgentInteraction {
                         selector: selector.clone(),
                         source_stream_ref: head.stream_ref.clone(),
                         revision: CurrentRevision {
@@ -778,7 +780,7 @@ pub(crate) async fn exact_current_state_for_actor_in_connection(
             realm_id: request.realm_id.clone(),
             governance_generation: generation,
             effective_stream_head: head,
-            entry: ExactCurrentStateEntry::Relation(CurrentRelation {
+            current_state: ExactCurrentState::Relation(CurrentRelation {
                 selector: selector.clone(),
                 source_stream_ref,
                 revision,
@@ -888,7 +890,7 @@ async fn policy_exact_read(
             realm_id: request.realm_id.clone(),
             governance_generation: generation,
             effective_stream_head: *head,
-            entry: ExactCurrentStateEntry::Policy(CurrentPolicy {
+            current_state: ExactCurrentState::Policy(CurrentPolicy {
                 selector: selector.clone(),
                 source_stream_ref: source,
                 revision,
@@ -955,7 +957,7 @@ async fn owned_agent_grant_read(
             commit_id: head.commit_id.parse().map_err(PersistenceError::database)?,
             stream_position: to_u64(head.stream_position, "Realm stream position")?,
         },
-        entry: ExactCurrentStateEntry::CapabilityGrant(CurrentCapabilityGrant {
+        current_state: ExactCurrentState::CapabilityGrant(CurrentCapabilityGrant {
             selector: selector.clone(),
             source_stream_ref: current.source.stream_ref,
             revision: current.revision,
@@ -1060,7 +1062,7 @@ async fn moderation_state_read(
             realm_id: realm_id.clone(),
             governance_generation: generation,
             effective_stream_head: head,
-            entry: ExactCurrentStateEntry::ModerationState(CurrentModerationState {
+            current_state: ExactCurrentState::ModerationState(CurrentModerationState {
                 selector: selector.clone(),
                 source_stream_ref,
                 revision,

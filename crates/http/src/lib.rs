@@ -56,7 +56,7 @@ pub mod webvh_validation {
 }
 
 pub use error::AppError;
-pub use result::{AppResult, EmptyOutcome, EmptyResult, JsonResult, empty_ok, json_ok};
+pub use result::{AppResult, EmptyResponseBody, EmptyResult, JsonResult, empty_ok, json_ok};
 pub use routing::{
     router, router_with_rate_limiter_and_request_size_config, router_with_rate_limiter_config,
 };

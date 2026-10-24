@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
-pub struct AdminHandleRecord {
+pub struct AdminHandleView {
     pub id: String,
     pub canonical_uri: String,
     pub aliases: Vec<String>,
@@ -28,15 +28,15 @@ pub struct AdminHandleAuditEvent {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
-pub struct AdminHandleListOutcome {
-    pub data: Vec<AdminHandleRecord>,
+pub struct AdminHandlePage {
+    pub data: Vec<AdminHandleView>,
     pub total: u64,
     pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(salvo_oapi::ToSchema))]
-pub struct AdminHandleAuditListOutcome {
+pub struct AdminHandleAuditPage {
     pub data: Vec<AdminHandleAuditEvent>,
     pub total: u64,
     pub next_cursor: Option<String>,

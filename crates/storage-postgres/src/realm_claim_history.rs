@@ -29,7 +29,7 @@ pub(crate) async fn original(
     conn: &mut AsyncPgConnection,
     claim_request_id: &str,
     request_digest: &str,
-) -> PersistenceResult<Option<arkret_models_crypto::PeerKeyPackagesClaimRequestBody>> {
+) -> PersistenceResult<Option<arkret_models_crypto::KeyPackagesClaimRequestBody>> {
     let rows = sql_query("SELECT request_body AS payload FROM keypackage_claim_sources WHERE claim_request_id=$1 AND request_digest=$2 UNION SELECT request_body AS payload FROM realm_keypackage_claim_sources WHERE claim_request_id=$1 AND request_digest=$2 LIMIT 2")
         .bind::<Text,_>(claim_request_id).bind::<Text,_>(request_digest)
         .get_results::<crate::JsonPayloadRow>(conn).await.map_err(PersistenceError::database)?;
@@ -39,7 +39,7 @@ pub(crate) async fn original(
     let Some(row) = rows.into_iter().next() else {
         return Ok(None);
     };
-    let request: arkret_models_crypto::PeerKeyPackagesClaimRequestBody =
+    let request: arkret_models_crypto::KeyPackagesClaimRequestBody =
         serde_json::from_value(row.payload).map_err(invalid)?;
     request.validate_shape().map_err(invalid)?;
     if request.claim_request_id.as_str() != claim_request_id
@@ -103,7 +103,7 @@ pub(crate) async fn retain(
         .claim_issuer_resolution
         .as_ref()
         .ok_or_else(|| invalid("issuing Station history is absent"))?;
-    let outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody = serde_json::from_value(
+    let outcome: arkret_models_crypto::KeyPackagesClaimResponseBody = serde_json::from_value(
         attempt
             .ledger
             .outcome
@@ -146,7 +146,7 @@ pub(crate) async fn read(
         .bind::<Text,_>(source_id).bind::<Text,_>(claim_request_id)
         .get_result::<History>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     let Some(row) = row else { return Ok(None) };
-    let outcome: arkret_models_crypto::PeerKeyPackagesClaimResponseBody =
+    let outcome: arkret_models_crypto::KeyPackagesClaimResponseBody =
         serde_json::from_value(row.outcome).map_err(invalid)?;
     let resolution: AuthenticatedServiceResolution =
         serde_json::from_value(row.resolution).map_err(invalid)?;

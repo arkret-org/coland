@@ -2561,9 +2561,13 @@ async fn revalidate_projection_inputs_in_connection(
             }
         }
         use arkret_models_collaboration::exact_current_state::{
-            ExactCurrentStateEntry as Entry, ExactCurrentStateReadResponseBody as Outcome,
+            ExactCurrentState as Entry, ExactCurrentStateReadResponseBody as Outcome,
         };
-        let Outcome::Present { entry, .. } = outcome else {
+        let Outcome::Present {
+            current_state: entry,
+            ..
+        } = outcome
+        else {
             return Err(unavailable(
                 "owned absence disclosure has no complete target proof",
             ));

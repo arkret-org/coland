@@ -1180,8 +1180,7 @@ async fn mls_lifecycle_body() {
             )
             .unwrap(),
             claim_request_id: request.claim_request_id.clone(),
-            key_package_ref: arkret_wire::NonEmptyString::new(claim.keypackage_ref.clone())
-                .unwrap(),
+            keypackage_ref: arkret_wire::NonEmptyString::new(claim.keypackage_ref.clone()).unwrap(),
             recipient: arkret_models_crypto::RecipientMlsDurableSigner::Device {
                 recipient_account_id: bob.account.clone(),
                 recipient_device_id: bob.device.clone(),

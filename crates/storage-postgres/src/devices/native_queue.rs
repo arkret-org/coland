@@ -2,7 +2,7 @@
 use arkret_models_collaboration::device_messages::{
     DeviceMessagesGetResponseBody, RecipientDelivery,
 };
-use arkret_models_crypto::{MlsCommitPayload, PeerKeyPackagesClaimResponseBody};
+use arkret_models_crypto::{KeyPackagesClaimResponseBody, MlsCommitPayload};
 use arkret_wire::ScopeRef;
 use coland_storage::{
     AccountContentDeliveryGuard, AppletDeviceQueueAck, AppletDeviceQueuePage,
@@ -293,7 +293,7 @@ async fn material_deadline(
     let row=sql_query("SELECT l.source_id,l.claim_request_id,l.request_digest,l.key_package_use,l.keypackage_id,l.outcome,l.state,l.expires_at,l.claim_expires_at_unix_ms,b.welcome_id,b.welcome_digest,b.commit_event_ref FROM keypackage_claim_welcome_bindings b JOIN peer_keypackage_claims l ON l.source_id=b.source_id AND l.claim_request_id=b.claim_request_id WHERE b.claim_id=$1 FOR SHARE OF l,b NOWAIT")
         .bind::<Text,_>(welcome.keypackage_claim_ref.as_str()).get_result::<MaterialRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
         .ok_or_else(||denied("queued Welcome has no original claim binding"))?;
-    let outcome: PeerKeyPackagesClaimResponseBody =
+    let outcome: KeyPackagesClaimResponseBody =
         serde_json::from_value(row.outcome).map_err(PersistenceError::database)?;
     outcome
         .validate_shape()

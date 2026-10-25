@@ -303,7 +303,9 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                         crate::error::error_http_status(ErrorCode::FailedPrecondition),
                         arkret_wire::problem_details::Problem::invite_live_target_occupied(
                             "the invitee already has a live directed Invite in this Realm",
-                            arkret_wire::InviteLiveTargetOccupiedProblem::new(create_event_id),
+                            arkret_wire::InviteLiveTargetOccupiedProblemExtensions::new(
+                                create_event_id,
+                            ),
                         ),
                     );
                 }

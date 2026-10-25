@@ -15,10 +15,9 @@ pub struct ArkretOpenApiDoc(pub Value);
 /// catch-all and must answer errors identically).
 ///
 /// Per `arkret-spec/spec/v1/zh/sync/api-conventions.md` §10:
-/// * Unknown path -> `404 Not Found` + JSON envelope `{"error":{"code": "unrecognized_endpoint",
-///   ...}}`.
-/// * Known path, wrong method -> `405 Method Not Allowed` + JSON envelope `{"error":{"code":
-///   "method_not_allowed", ...}}` AND the `Allow` response header MUST list the supported methods.
+/// * Unknown path -> `404 Not Found` with the `unrecognized_endpoint` Problem.
+/// * Known path, wrong method -> `405 Method Not Allowed` with the `method_not_allowed` Problem and
+///   an `Allow` header listing supported methods.
 ///
 /// Salvo's own 405 logic doesn't populate `Allow`, so we do the
 /// disambiguation here using the registered OpenAPI route table (see

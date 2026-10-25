@@ -914,7 +914,7 @@ fn semantic_backoff_unix_secs(semantic_attempts: i32, now: i64) -> i64 {
 
 /// The peer's own pacing instruction, as an absolute unix second.
 ///
-/// `Retry-After` wins; the canonical `retry_after_ms` in the error envelope is
+/// `Retry-After` wins; the canonical `retry_after_ms` Problem extension is
 /// the fallback when the header is absent (`federation.md` §8.1 / §8.5).
 fn peer_requested_retry_at(
     headers: &reqwest::header::HeaderMap,
@@ -933,12 +933,9 @@ fn peer_requested_retry_at(
             return Some(date.timestamp().max(now));
         }
     }
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    let retry_after_ms = value
-        .pointer("/error/retry_after_ms")
-        .or_else(|| value.pointer("/retry_after_ms"))?
-        .as_i64()?;
-    Some(now + retry_after_ms.max(0).div_euclid(1_000))
+    let problem: arkret_wire::problem_details::Problem = serde_json::from_str(body).ok()?;
+    let retry_after_ms = problem.extensions.get("retry_after_ms")?.as_u64()?;
+    now.checked_add(i64::try_from(retry_after_ms / 1_000).ok()?)
 }
 
 /// Whether a received response asks the sender to re-evaluate and resubmit
@@ -2408,15 +2405,25 @@ mod tests {
         // Past dates clamp to `now` — a peer can delay us, never rush us.
         assert_eq!(peer_requested_retry_at(&dated, "", now), Some(now));
 
-        // Header absent: the canonical `retry_after_ms` in the error envelope.
+        // Header absent: the canonical `retry_after_ms` Problem extension.
+        let body = serde_json::to_string(
+            &arkret_wire::problem_details::Problem::new("rate_limited", 429, "retry later")
+                .with_extension("retry_after_ms", serde_json::json!(4500)),
+        )
+        .unwrap();
         assert_eq!(
-            peer_requested_retry_at(
-                &reqwest::header::HeaderMap::new(),
-                r#"{"error":{"code":"rate_limited","retry_after_ms":4500}}"#,
-                now,
-            ),
+            peer_requested_retry_at(&reqwest::header::HeaderMap::new(), &body, now),
             Some(now + 4)
         );
+        for invalid in [
+            r#"{"error":{"code":"rate_limited","retry_after_ms":4500}}"#,
+            r#"{"retry_after_ms":4500}"#,
+        ] {
+            assert_eq!(
+                peer_requested_retry_at(&reqwest::header::HeaderMap::new(), invalid, now),
+                None
+            );
+        }
         assert_eq!(
             peer_requested_retry_at(&reqwest::header::HeaderMap::new(), "not json", now),
             None

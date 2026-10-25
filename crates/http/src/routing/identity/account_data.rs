@@ -12,7 +12,7 @@
 
 use arkret_models_identity::account::{
     AccountDataDeleteRequestBody, AccountDataDeleteResponseBody, AccountDataEntry, AccountDataList,
-    AccountDataReplaceRequestBody,
+    AccountDataReplaceRequestBody, AccountDataRevisionProblemExtensions,
 };
 use coland_http::error::AppError;
 use coland_services::identity::{AccountDataState, FindAgentControllerQuery, IdentityService};
@@ -20,7 +20,7 @@ use salvo::http::StatusCode;
 use salvo::oapi::endpoint;
 use salvo::oapi::extract::{JsonBody, PathParam};
 use salvo::prelude::*;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::AuthArgs;
 use crate::state::AppState;
@@ -228,44 +228,50 @@ fn entry_from(record: AccountDataState) -> AccountDataEntry {
     }
 }
 
-fn account_data_conflict_details(
+fn account_data_revision_extensions(
     account_data_key: &str,
     current: Option<&AccountDataState>,
-) -> Value {
-    let current_revision = current.map_or(0, |record| record.revision);
-    let mut details = json!({
-        "account_data_key": account_data_key,
-        "current_revision": current_revision,
-    });
-    if let Some(record) = current.filter(|record| !record.tombstone) {
-        details["current_entry"] = serde_json::to_value(entry_from(record.clone()))
-            .expect("account data entry serialization cannot fail");
+) -> AccountDataRevisionProblemExtensions {
+    AccountDataRevisionProblemExtensions {
+        account_data_key: account_data_key.to_owned(),
+        current_revision: current.map_or(0, |record| record.revision),
+        current_entry: current
+            .filter(|record| !record.tombstone)
+            .cloned()
+            .map(entry_from),
     }
-    details
+}
+
+fn with_account_data_revision_extensions(
+    mut error: AppError,
+    account_data_key: &str,
+    current: Option<&AccountDataState>,
+) -> AppError {
+    let fields = serde_json::to_value(account_data_revision_extensions(account_data_key, current))
+        .expect("account data revision extensions serialize");
+    for (key, value) in fields.as_object().expect("extension fragment is an object") {
+        error = error.with_wire_detail(key, value);
+    }
+    error
 }
 
 fn account_data_cas_conflict(
     account_data_key: &str,
     current: Option<&AccountDataState>,
 ) -> AppError {
-    let details = account_data_conflict_details(account_data_key, current);
-    let mut error = crate::app_error!(
+    let error = crate::app_error!(
         CasConflict,
-        "expected_revision does not match current account data revision",
+        "expected_server_revision does not match current account data revision",
     );
-    for (key, value) in details.as_object().expect("details is an object") {
-        error = error.with_wire_detail(key, value);
-    }
-    error
+    with_account_data_revision_extensions(error, account_data_key, current)
 }
 
 fn account_data_not_found(account_data_key: &str, current: Option<&AccountDataState>) -> AppError {
-    let details = account_data_conflict_details(account_data_key, current);
-    let mut error = AppError::not_found("not found");
-    for (key, value) in details.as_object().expect("details is an object") {
-        error = error.with_wire_detail(key, value);
-    }
-    error
+    with_account_data_revision_extensions(
+        AppError::not_found("not found"),
+        account_data_key,
+        current,
+    )
 }
 
 async fn session_actor_is_agent_runtime(
@@ -702,6 +708,37 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+
+    #[test]
+    fn revision_problem_extensions_are_shared_flat_and_keep_tombstone_high_water() {
+        let mut record = AccountDataState {
+            actor_id: "holder".to_owned(),
+            account_data_key: "ak.client.ui_state".to_owned(),
+            revision: 7,
+            payload: json!({"theme": "dark"}),
+            tombstone: false,
+            updated_at: DateTime::parse_from_rfc3339("2026-10-25T00:00:00.000Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        for tombstone in [false, true] {
+            record.tombstone = tombstone;
+            for error in [
+                account_data_cas_conflict(&record.account_data_key, Some(&record)),
+                account_data_not_found(&record.account_data_key, Some(&record)),
+            ] {
+                let value = serde_json::to_value(error.wire_details.as_deref().unwrap()).unwrap();
+                assert!(value.get("details").is_none());
+                let fields: AccountDataRevisionProblemExtensions =
+                    serde_json::from_value(value).unwrap();
+                assert_eq!(fields.current_revision, 7);
+                assert_eq!(fields.current_entry.is_some(), !tombstone);
+            }
+        }
+        let fields = account_data_revision_extensions(&record.account_data_key, None);
+        assert_eq!(fields.current_revision, 0);
+        assert!(fields.current_entry.is_none());
+    }
 
     #[test]
     fn account_data_holder_requires_the_exact_station_account() {

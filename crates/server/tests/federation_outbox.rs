@@ -58,6 +58,15 @@ static STORED_OUTCOME: LazyLock<String> =
 static DUPLICATE_OUTCOME: LazyLock<String> =
     LazyLock::new(|| replication_outcome(CommittedEventReplicationOutcome::Duplicate {}));
 
+static RATE_LIMITED_PROBLEM: LazyLock<String> = LazyLock::new(|| {
+    serde_json::to_string(&arkret_wire::problem_details::Problem::new(
+        "rate_limited",
+        429,
+        "retry later",
+    ))
+    .unwrap()
+});
+
 fn committed_replication_payload() -> String {
     let created_at = chrono::DateTime::parse_from_rfc3339("2026-09-03T00:00:00.000Z")
         .unwrap()
@@ -306,6 +315,7 @@ struct MockResponse {
     /// Extra header lines, each already `\r\n`-terminated.
     extra_headers: &'static str,
     body: &'static [u8],
+    content_type: &'static str,
 }
 
 impl MockResponse {
@@ -314,6 +324,7 @@ impl MockResponse {
             status,
             extra_headers: "",
             body,
+            content_type: "application/json",
         }
     }
 
@@ -326,7 +337,13 @@ impl MockResponse {
             status,
             extra_headers,
             body,
+            content_type: "application/json",
         }
+    }
+
+    const fn with_content_type(mut self, content_type: &'static str) -> Self {
+        self.content_type = content_type;
+        self
     }
 }
 
@@ -386,8 +403,9 @@ fn spawn_mock_peer_responses(responses: Vec<MockResponse>) -> (String, mpsc::Rec
             }
             let request = String::from_utf8_lossy(&received).to_string();
             let head = format!(
-                "HTTP/1.1 {}\r\ncontent-type: application/json\r\n{}content-length: {}\r\nconnection: close\r\n\r\n",
+                "HTTP/1.1 {}\r\ncontent-type: {}\r\n{}content-length: {}\r\nconnection: close\r\n\r\n",
                 response.status,
+                response.content_type,
                 response.extra_headers,
                 response.body.len(),
             );
@@ -667,11 +685,14 @@ async fn retryable_5xx_keeps_the_same_transport_identity_and_backs_off() {
 async fn peer_retry_after_is_a_floor_the_dispatcher_never_undercuts() {
     // A 429 with `Retry-After: 900` must push the next attempt at least that
     // far out, well past the ~5s first-attempt exponential backoff.
-    let (peer_url, request_rx) = spawn_mock_peer_responses(vec![MockResponse::with_headers(
-        "429 Too Many Requests",
-        "retry-after: 900\r\n",
-        br#"{"error":{"code":"rate_limited"}}"#,
-    )]);
+    let (peer_url, request_rx) = spawn_mock_peer_responses(vec![
+        MockResponse::with_headers(
+            "429 Too Many Requests",
+            "retry-after: 900\r\n",
+            RATE_LIMITED_PROBLEM.as_bytes(),
+        )
+        .with_content_type("application/problem+json"),
+    ]);
     let state = coland_test_support::app_state(outbox_test_config());
     install_verified_routes(&state, &[standard_peer_route(&peer_url)]);
     let row = enqueue_outbound(

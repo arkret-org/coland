@@ -350,14 +350,14 @@ pub struct AppError {
     pub message: Box<str>,
     /// Registry context for codes whose status varies by trust surface.
     pub status_context: Option<arkret_wire::ErrorStatusContext>,
-    /// Stable protocol reason code rendered as `error.details.reason_code`.
+    /// Stable protocol reason code rendered as the top-level Problem `reason_code` extension.
     /// Registry-locked to `registry/reason-code-registry.json`;
     /// [`AppError::with_reason_code`] enforces the lock in debug builds.
     pub reason_code: Option<Box<str>>,
     /// Free-form diagnostic explaining *why* this error fired.
     ///
-    /// Round 2 — surfaced through the rendered envelope as
-    /// `error.details.reason_detail` so on-call has something more
+    /// Surfaced through the rendered Problem as
+    /// the top-level Problem `reason_detail` extension so on-call has something more
     /// specific than the canonical `code` to grep for. The shape is
     /// intentionally `Option<String>` (no enum, no schema) because the
     /// string is unstable across releases — clients MUST NOT parse this value and may only log or
@@ -368,9 +368,9 @@ pub struct AppError {
     /// Privacy-sensitive endpoints use this field to retain the concrete
     /// rejection cause while returning the same indistinguishable protocol
     /// error in production. When `COLAND_DEVELOPMENT_MODE=true`, the writer
-    /// exposes it as the unstable `error.details.reason_detail` diagnostic.
+    /// exposes it as the unstable the top-level Problem `reason_detail` extension diagnostic.
     pub private_detail: Option<Box<str>>,
-    /// Typed protocol details inserted into `error.details`.
+    /// Typed members flattened into the top-level Problem extensions.
     ///
     /// Boxed and optional because it is empty on the overwhelming majority of
     /// errors: inline, the map's three words push `AppError` past clippy's
@@ -487,9 +487,9 @@ impl AppError {
     }
 
     /// Route a reason string of unknown provenance onto the right channel: a
-    /// registered reason code is attached as `error.details.reason_code`; a
+    /// registered reason code is attached as the top-level Problem `reason_code` extension; a
     /// registered error code equal to this error's own code is dropped (the
-    /// top-level `error.code` already classifies the rejection); anything
+    /// Problem `type` already classifies the rejection); anything
     /// else — an internal discriminator or a *different* registered error
     /// code — lands on the unstable `reason_detail` diagnostic channel rather
     /// than masquerading as a stable protocol reason code.
@@ -511,7 +511,7 @@ impl AppError {
     /// Attach a free-form diagnostic. See [`AppError::reason_detail`].
     ///
     /// The value is rendered into the wire envelope at
-    /// `error.details.reason_detail` and the OpenAPI schema annotates
+    /// the top-level Problem `reason_detail` extension and the OpenAPI schema annotates
     /// it as unstable / opaque.
     pub fn with_reason_detail(mut self, reason_detail: impl Into<String>) -> Self {
         self.reason_detail = Some(reason_detail.into().into_boxed_str());
@@ -548,7 +548,7 @@ impl AppError {
         StatusCode::from_u16(status).expect("registry status codes are valid HTTP statuses")
     }
 
-    /// The on-wire `error.code` string: always the registered [`Self::code`].
+    /// The Problem `type` URI tail: always the registered [`Self::code`].
     pub fn wire_code(&self) -> &str {
         self.code.as_str()
     }

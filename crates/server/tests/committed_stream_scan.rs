@@ -59,7 +59,8 @@ async fn authority_bundle_unknown_refuses_and_unavailable_remote_locator_fails_c
     ] {
         let request = arkret_wire::RealmAuthorityBundleRequestBody {
             realm_id,
-            nonce: arkret_wire::Base64UrlString::new("a".repeat(32)).unwrap(),
+            nonce: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode([7u8; 32]))
+                .unwrap(),
         };
         let before = state
             .test_persistence()

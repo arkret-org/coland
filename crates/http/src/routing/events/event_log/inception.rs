@@ -1,9 +1,5 @@
 use super::*;
 
-const DID_INCEPTION_REF_ROLE: &str = "did_inception";
-
-const DID_RECOVERY_ANCHOR_REF_ROLE: &str = "did_recovery_anchor";
-
 pub(super) fn principal_control_genesis_shape(
     object: &serde_json::Map<String, Value>,
     actor_id: &str,
@@ -21,29 +17,32 @@ pub(super) fn principal_control_genesis_shape(
             .is_some_and(|actor| actor.signing_principal_id().as_str() == actor_id)
 }
 
-fn anchor_refs(object: &serde_json::Map<String, Value>) -> Vec<(&str, &str, bool)> {
-    object
+fn principal_control_genesis_anchor_version(
+    object: &serde_json::Map<String, Value>,
+) -> Result<&str, EventValidationError> {
+    if object
         .get("semantic_refs")
         .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|reference| {
-            let role = reference.get("role")?.as_str()?;
-            matches!(role, DID_INCEPTION_REF_ROLE | DID_RECOVERY_ANCHOR_REF_ROLE).then(|| {
-                (
-                    role,
-                    reference
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                    reference
-                        .get("critical")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                )
-            })
+        .is_some_and(|refs| !refs.is_empty())
+    {
+        return Err(event_validation_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "schema_violation",
+            "self-principal genesis binds DID history through initial_resolution, not semantic refs",
+        ));
+    }
+    object
+        .get("payload")
+        .and_then(|payload| payload.pointer("/object/initial_resolution/version_id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            event_validation_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "schema_violation",
+                "genesis initial_resolution.version_id is required",
+            )
         })
-        .collect()
 }
 
 pub(super) async fn resolve_event_root_anchor_method(
@@ -58,26 +57,10 @@ pub(super) async fn resolve_event_root_anchor_method(
             format!("root-anchored Event actor_id must be a core id: {error}"),
         )
     })?;
-    let refs = anchor_refs(object);
-    if refs.is_empty() {
+    if !principal_control_genesis_shape(object, actor_id) {
         return Ok(None);
     }
-    if refs.len() != 1 || !refs[0].2 {
-        return Err(event_validation_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "schema_violation",
-            "root-anchored Event requires exactly one critical DID anchor reference",
-        ));
-    }
-
-    let (role, anchor_id, _) = refs[0];
-    if role != DID_INCEPTION_REF_ROLE || !principal_control_genesis_shape(object, actor_id) {
-        return Err(event_validation_error(
-            StatusCode::CONFLICT,
-            "failed_precondition",
-            "identity-root Event proof is restricted to the Account's PCR genesis",
-        ));
-    }
+    let anchor_id = principal_control_genesis_anchor_version(object)?;
     let principal_did = principal_control_genesis_resolution_did(object, &actor_core_id)?;
     let records = state
         .dids()
@@ -104,7 +87,7 @@ pub(super) async fn resolve_event_root_anchor_method(
         return Err(event_validation_error(
             StatusCode::UNAUTHORIZED,
             "signature_invalid",
-            "critical inception reference does not select the unique original DID entry",
+            "genesis initial_resolution.version_id does not select the unique original DID entry",
         ));
     }
     let operation: std::collections::BTreeMap<String, Value> =
@@ -201,6 +184,21 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn genesis_anchor_uses_only_the_signed_initial_resolution_version() {
+        let mut value = json!({ "payload": { "object": { "initial_resolution": { "version_id": "1-pinned" } } } });
+        assert_eq!(
+            principal_control_genesis_anchor_version(value.as_object().unwrap()).unwrap(),
+            "1-pinned"
+        );
+        value["semantic_refs"] =
+            json!([{ "id": "1-old", "role": "did_inception", "critical": true }]);
+        assert!(principal_control_genesis_anchor_version(value.as_object().unwrap()).is_err());
+        value.as_object_mut().unwrap().remove("semantic_refs");
+        value["payload"]["object"]["initial_resolution"]["version_id"] = json!("");
+        assert!(principal_control_genesis_anchor_version(value.as_object().unwrap()).is_err());
+    }
 
     #[test]
     fn principal_control_genesis_resolves_did_from_initial_resolution() {

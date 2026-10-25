@@ -251,10 +251,6 @@ impl DeviceHistoryFixture {
                 .verifying_key()
                 .to_bytes(),
         );
-        let inception = SemanticRef::new(
-            verified_root.did_version_id.clone(),
-            arkret_bootstrap::DID_INCEPTION_REF_ROLE,
-        );
         let create = arkret_bootstrap::build_self_principal_pcr_create(
             arkret_bootstrap::SelfPrincipalPcrCreateInput {
                 principal_id: account.principal_id.clone(),
@@ -263,7 +259,6 @@ impl DeviceHistoryFixture {
                 genesis_salt: GenesisSalt::new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
                     .unwrap(),
                 trust_domain: TrustDomainId::new("ak:trust_domain:example.net").unwrap(),
-                did_inception_ref: inception,
                 initial_resolution: ResolutionCommitment {
                     did: did.clone(),
                     method_history_head: verified_root.log_head_digest.to_string(),

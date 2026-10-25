@@ -1718,6 +1718,10 @@ async fn receive_and_consume(
     )
     .unwrap();
     boxed_step(|| install_received_roster(recipient, accepted, &mut joined)).await;
+    boxed_step(|| {
+        super::native_read_evidence::peer_mls_reads(governor, recipient, accepted, &mut joined)
+    })
+    .await;
     let record = joined.export_state_record().unwrap();
     let checkpoint =
         std::env::temp_dir().join(format!("arkret-realm-mls-{}.json", uuid::Uuid::now_v7()));
@@ -1921,6 +1925,22 @@ async fn install_received_roster(
     );
     let material = serde_json::from_value(material).unwrap();
     arkret::install_verified_mls_self_roster_bindings(group, &pages, &request, &material).unwrap();
+    super::native_read_evidence::capture(
+        ServiceOperationId::SelfMlsReadRosterAuthorityV1,
+        "POST",
+        arkret_wire::peer_operation_paths::PATH_SELF_MLS_ROSTER_AUTHORITY,
+        Some(json!(request)),
+        json!(pages[0]),
+        json!({"target":accepted,"pages":pages}),
+    );
+    super::native_read_evidence::capture(
+        ServiceOperationId::SelfMlsReadGroupStateMaterialV1,
+        "POST",
+        arkret_wire::peer_operation_paths::PATH_SELF_MLS_GROUP_STATE_MATERIAL,
+        Some(json!(material_request)),
+        json!(material),
+        json!({"target":accepted,"pages":pages}),
+    );
 }
 
 /// A real ordinary member admits the runtime Device through the same MLS

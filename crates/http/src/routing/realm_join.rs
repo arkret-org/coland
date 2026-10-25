@@ -49,8 +49,46 @@ fn unavailable(error: impl std::fmt::Display) -> AppError {
 pub(crate) fn nonce_for_request(
     request_id: &arkret_wire::RequestId,
 ) -> Result<Base64UrlString, AppError> {
-    Base64UrlString::new(request_id.as_str().trim_start_matches("ak:request:"))
-        .map_err(invalid_request)
+    // Both Stations bind the fixed-width challenge to the complete unique
+    // request. UUID text is not a 32-octet authority nonce.
+    Base64UrlString::new(arkret_canonical::base64url_encode(
+        arkret_canonical::sha256_bytes(request_id.as_str().as_bytes()),
+    ))
+    .map_err(invalid_request)
+}
+
+#[cfg(test)]
+mod request_nonce_tests {
+    use super::*;
+
+    #[test]
+    fn authority_nonce_binds_the_complete_request_at_the_registered_width() {
+        let first: arkret_wire::RequestId = "ak:request:01904100-0000-7000-8000-000000000001"
+            .parse()
+            .unwrap();
+        let second: arkret_wire::RequestId = "ak:request:01904100-0000-7000-8000-000000000002"
+            .parse()
+            .unwrap();
+        let nonce = nonce_for_request(&first).unwrap();
+        assert_eq!(nonce.as_str().len(), 43);
+        assert_eq!(
+            arkret_canonical::base64url_decode(nonce.as_str())
+                .unwrap()
+                .len(),
+            32
+        );
+        assert_eq!(nonce, nonce_for_request(&first).unwrap());
+        assert_ne!(nonce, nonce_for_request(&second).unwrap());
+        arkret_wire::RealmAuthorityBundleRequestBody {
+            realm_id: arkret_wire::RealmId::from_event_id(&arkret_wire::EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [1; 32],
+            )),
+            nonce,
+        }
+        .validate()
+        .unwrap();
+    }
 }
 
 /// This Station's own nonce-bound bundle for a Realm it currently governs.

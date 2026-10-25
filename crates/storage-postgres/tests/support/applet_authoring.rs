@@ -6,6 +6,8 @@
 mod applet_widget_inventory_fixture;
 #[path = "management_archive_fixture.rs"]
 mod management_archive_fixture;
+#[path = "native_read_evidence.rs"]
+pub mod native_read_evidence;
 #[path = "realm_actor_mls_fixture.rs"]
 mod realm_actor_mls_fixture;
 
@@ -178,6 +180,12 @@ impl Fixture {
                 arkret_wire::ServiceOperationId::SELF_SIGNER_KEYS_READ_RESOLVE_V1,
                 arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
                 arkret_wire::ServiceOperationId::SELF_REALM_ACTOR_READ_MATERIAL_V1,
+                arkret_wire::ServiceOperationId::SELF_ACTOR_PROFILE_READ_RESOLVE_V1,
+                arkret_wire::ServiceOperationId::SELF_IDENTITY_READ_RESOLUTION_AUDIT_V1,
+                arkret_wire::ServiceOperationId::SELF_CONSENT_COMMAND_REPLACE_V1,
+                arkret_wire::ServiceOperationId::SELF_CONSENT_READ_LIST_V1,
+                arkret_wire::ServiceOperationId::SELF_CONSENT_RESOURCE_GET_V1,
+                arkret_wire::ServiceOperationId::SELF_MEDIA_SERVICE_BINDING_READ_RESOLVE_V1,
             ]
             .into_iter()
             .map(str::to_owned)
@@ -2019,6 +2027,7 @@ mod realm_native_fixture {
     include!("realm_actor_authority_admission_fixture.rs");
     include!("realm_actor_revoke_boundary_fixture.rs");
     include!("realm_actor_review_fixture.rs");
+    include!("native_applet_read_fixture.rs");
     use arkret_canonical::canonical_sha256;
     use arkret_models_identity::*;
     use arkret_signatures::detached_object::sign_detached_object;
@@ -2727,6 +2736,23 @@ mod realm_native_fixture {
             &key,
         )
         .unwrap();
+        let original = fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .committed_event(&commit.event_ref)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(original.commit, *commit);
+        super::native_read_evidence::capture(
+            arkret_wire::ServiceOperationId::SelfRealmActorReadMaterialV1,
+            "POST",
+            "/_arkret/self/realm-actors/material",
+            Some(body.clone()),
+            json!(material),
+            json!({"creation":{"event":original.event,"commit":original.commit}}),
+        );
         let RealmActorMaterial::Current { entries } = material.material else {
             panic!("current material required");
         };
@@ -5798,6 +5824,37 @@ mod realm_native_fixture {
         let (status, response) =
             boxed_step(|| peer_audit_post(&account_station, fixture, &valid_peer, false)).await;
         assert_eq!(status, StatusCode::OK, "real signed peer audit: {response}");
+        let peer_material: RealmActorMaterialResponseBody =
+            serde_json::from_value(response.clone()).unwrap();
+        peer_material
+            .validate_for_request(&valid_peer.request, &requester, chrono::Utc::now())
+            .unwrap();
+        arkret_signatures::detached_object::verify_detached_object_signature(
+            &peer_material.signature,
+            &arkret_canonical::unsigned_value(&peer_material, &["signature"]).unwrap(),
+            arkret_wire::DetachedSignatureContext::RealmActorMaterial,
+            &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                bytes: fixture.state.notary_verifying_key().to_bytes().to_vec(),
+            },
+        )
+        .unwrap();
+        let accepted_grant = fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .committed_event(&grant.event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(accepted_grant.event, grant);
+        super::native_read_evidence::capture(
+            arkret_wire::ServiceOperationId::PeerRealmActorReadMaterialV1,
+            "POST",
+            "/_arkret/peer/realm-actors/material",
+            Some(json!(valid_peer)),
+            response,
+            json!({"audit_grant":{"event":accepted_grant.event,"commit":accepted_grant.commit},"requester_genesis":super::native_read_evidence::pcr_originals(&account_station.pcr)}),
+        );
         let mut wrong_source = peer();
         wrong_source.requester_account_id.station_id = fixture.state.service_core_id();
         let (status, _) =
@@ -7351,6 +7408,7 @@ mod realm_native_fixture {
             candidate
         };
         let actor = candidate.actor_id.clone();
+        boxed_step(|| native_applet_reads(&factory.fixture, &native, &candidate)).await;
         assert!(
             edge.installed_managed_authoring(&candidate.creation_scope, &actor)
                 .unwrap()
@@ -8397,6 +8455,7 @@ mod realm_native_fixture {
         };
         let mls = !matches!(suite, NativeSuite::Lifecycle);
         let (fixture, _governor_server) = Box::pin(network_fixture(pool.clone())).await;
+        boxed_step(|| super::native_read_evidence::account_reads(&fixture)).await;
         let factory = AppletAuthoringFactory {
             fixture,
             packages: Default::default(),

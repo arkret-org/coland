@@ -29,6 +29,25 @@ async fn query_managed_actor(
     client.applet_actor(&fixture.state.service_core_id(), &service.package.service_id, actor).await
 }
 
+async fn query_managed_tuple(
+    fixture: &Fixture,
+    service: &NativeService,
+    candidate: &RealmActorCreatePayload,
+) -> arkret_http_client::Result<arkret_models_integration::AppletThirdPartyUserLookupResponseBody> {
+    let external = candidate.external_ref.as_ref().expect("accepted Ghost tuple");
+    let query = arkret_models_integration::ThirdPartyUserQuery {
+        applet_id:candidate.applet_id.clone(),realm_id:candidate.actor_id.as_realm_actor_id().unwrap().realm_id.clone(),
+        protocol:external.protocol.clone(),instance_id:external.instance_id.clone(),external_id:external.external_id.clone(),
+    };
+    let client = arkret_http_client::Client::builder(service.package.base_url.parse().unwrap())
+        .http_client(native_http_client(std::time::Duration::from_secs(30)))
+        .retry(arkret_http_client::RetryConfig::disabled())
+        .http_message_signer(arkret_http_client::HttpMessageSigner::new(
+            fixture.state.service_verification_method("notary-key").unwrap().to_string(),
+            fixture.state.notary_signing_key().as_ref().clone())).build().unwrap();
+    client.applet_third_party_user(&fixture.state.service_core_id(), &service.package.service_id, &query).await
+}
+
 // Simulate a crash after the real preview and durable request save, before any effect.
 async fn freeze_manager_revoke_request(
     fixture: &Fixture,
@@ -443,6 +462,11 @@ async fn run_manager_runtime_transfer(
         "one actor's Service change must not alter another actor's manager, control or generation");
     assert!(boxed_step(|| query_managed_actor(fixture, previous, actor)).await.is_err(),
         "the previous manager must not disclose a transferred actor");
+    if candidate.external_ref.is_some() {
+        assert!(boxed_step(|| query_managed_tuple(fixture, previous, candidate)).await.is_err(),
+            "the previous manager must not disclose the exact external tuple");
+        assert_eq!(boxed_step(|| query_managed_tuple(fixture, &receiving, candidate)).await.unwrap().actor_id.as_ref(), Some(actor));
+    }
     assert_eq!(boxed_step(|| query_managed_actor(fixture, &receiving, actor)).await.unwrap().actor_id.as_ref(), Some(actor));
     assert_eq!(boxed_step(|| query_managed_actor(fixture, previous, &other_candidate.actor_id)).await.unwrap().actor_id.as_ref(), Some(&other_candidate.actor_id));
     let other_reader = boxed_step(|| previous_runtime.open_reader(&other_device)).await.unwrap();

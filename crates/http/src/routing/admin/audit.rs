@@ -119,7 +119,7 @@ fn audit_erasure_receipt_item(
         AppError::internal(format!("accepted erasure receipt is invalid: {error}"))
     })?;
     Ok(AuditErasureReceiptItem {
-        peer_receipts: receipt.peer_receipts.clone(),
+        peer_receipts: receipt.peer_receipts.clone().unwrap_or_default(),
         receipt_id: Some(receipt.receipt_id),
         issuer_id: Some(receipt.issuer_id),
         subject_kind: Some(receipt.subject.kind),
@@ -321,8 +321,8 @@ mod tests {
             )
             .unwrap(),
             subject: ErasureSubject {
-                kind: ErasureSubjectKind::Space,
-                subject_ref: "ak:space:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb".to_owned(),
+                kind: ErasureSubjectKind::Realm,
+                subject_ref: "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb".to_owned(),
             },
             scope: ErasureScope {
                 storage_boundary: ErasureStorageBoundary::ProjectionStore,
@@ -332,7 +332,7 @@ mod tests {
                     )
                     .unwrap(),
                 ),
-                target_refs: Vec::new(),
+                target_refs: None,
                 retention_policy_id: None,
                 service_scope: None,
             },
@@ -359,7 +359,7 @@ mod tests {
                 extra: BTreeMap::new(),
             }],
             fanout_status: None,
-            peer_receipts: Vec::new(),
+            peer_receipts: None,
         };
         let payload = serde_json::to_value(receipt).unwrap();
         let record = coland_services::events::AcceptedEvent {
@@ -381,7 +381,7 @@ mod tests {
 
         let item = audit_erasure_receipt_item(&record).unwrap();
         assert_eq!(item.outcome, ErasureAttemptOutcome::Completed);
-        assert_eq!(item.subject_kind, Some(ErasureSubjectKind::Space));
+        assert_eq!(item.subject_kind, Some(ErasureSubjectKind::Realm));
         assert_eq!(
             item.storage_boundary,
             Some(ErasureStorageBoundary::ProjectionStore)

@@ -778,7 +778,7 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_
          SELECT 'realm_authority_root'::text AS selector_kind, NULL::jsonb AS selector_subject, \
                 current_commit_id, current_stream_position, \
                 jsonb_build_object('controller_actor_id',controller_actor_id, \
-                    'controller_epoch',controller_epoch,'authority_generation',authority_generation, \
+                    'controller_epoch',controller_epoch,'authority_generation',authority_generation::text, \
                     'authority_event_ref',authority_event_ref) AS value \
            FROM realm_authority_root_current_states WHERE realm_id = $1 \
          UNION ALL \
@@ -968,7 +968,15 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_
            SELECT stream_ref FROM realm_commits \
            WHERE commit_id=result.current_commit_id \
              AND stream_position=result.current_stream_position \
-             AND realm_id=$1 LIMIT 1) covering ON TRUE";
+             AND realm_id=$1 \
+             AND (result.selector_kind <> 'mimi_room_binding' OR EXISTS( \
+               SELECT 1 FROM canonical_events source_event \
+               WHERE source_event.pk=realm_commits.event_pk AND source_event.state='committed' \
+                 AND source_event.realm_id=$1 AND source_event.kind='ak.mimi.room_binding' \
+                 AND source_event.envelope->'payload'=result.value \
+                 AND source_event.envelope->'payload'->'mimi_room_uri'=result.selector_subject \
+                 AND source_event.envelope->>'event_id'=realm_commits.commit_json->>'event_ref')) \
+             LIMIT 1) covering ON TRUE";
 
 pub(crate) async fn realm_state_snapshot_material_in_connection(
     conn: &mut AsyncPgConnection,
@@ -1027,6 +1035,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 ("realm_authority_root", None) => arkret_wire::CurrentSelector::RealmAuthorityRoot,
                 ("realm_profile", None) => arkret_wire::CurrentSelector::RealmProfile,
                 ("realm_preview_policy", None) => arkret_wire::CurrentSelector::RealmPreviewPolicy,
+                ("realm_asset_privacy_policy", None) => arkret_wire::CurrentSelector::RealmAssetPrivacyPolicy,
                 ("realm_policy_bundle", None) => arkret_wire::CurrentSelector::RealmPolicyBundle,
                 ("schema_definition", Some(schema_id)) => arkret_wire::CurrentSelector::SchemaDefinition {
                     schema_id: serde_json::from_value(schema_id).map_err(PersistenceError::database)?,
@@ -1325,6 +1334,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 | arkret_wire::CurrentSelector::InviteLiveTarget { .. }
                 | arkret_wire::CurrentSelector::InviteDirectedInvitee { .. }
                 | arkret_wire::CurrentSelector::MlsGroup { .. }
+                | arkret_wire::CurrentSelector::MimiRoomBinding { .. }
                 | arkret_wire::CurrentSelector::ActorProfile { .. }
         ) && !current_state_entries.iter().any(|current| {
             let arkret_wire::CurrentState::Value {
@@ -1338,6 +1348,16 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
     }
     current_state_entries
         .extend(crate::relation_current_states::snapshot_rows_in_connection(conn, realm_id).await?);
+    for entry in &mut current_state_entries {
+        if let arkret_wire::CurrentState::Value {
+            selector: arkret_wire::CurrentSelector::RealmAuthorityRoot,
+            value,
+            ..
+        } = entry
+        {
+            *value = validated_snapshot_authority_root(std::mem::take(value))?;
+        }
+    }
     let mut keyed_entries = current_state_entries
         .into_iter()
         .map(|entry| {
@@ -1386,6 +1406,13 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
             stream_floors,
         },
     }))
+}
+
+fn validated_snapshot_authority_root(value: Value) -> PersistenceResult<Value> {
+    let root: arkret_wire::RealmAuthorityRootValue =
+        decode_json(value, "snapshot Realm authority root")?;
+    root.validate().map_err(invalid)?;
+    serde_json::to_value(root).map_err(PersistenceError::database)
 }
 
 pub(crate) async fn locked_authority(
@@ -5679,6 +5706,16 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         crate::realm_default_strand_current_states::read_current(&self.pool, realm_id).await
     }
 
+    async fn realm_asset_privacy_policy_current(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+    ) -> PersistenceResult<Option<arkret_wire::CurrentState>> {
+        crate::realm_bootstrap_current_states::read_asset_privacy_policy_current(
+            &self.pool, realm_id,
+        )
+        .await
+    }
+
     async fn signal_scope_authority(
         &self,
         query: coland_storage::SignalScopeAuthorityQuery<'_>,
@@ -6413,6 +6450,72 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn snapshot_authority_root_preserves_decimal_generation_and_closed_fields() {
+        // Structural PG projection only. Native contracts independently prove
+        // the accepted source Commit, controller and signed snapshot closure.
+        let database = crate::test_database::TestDatabase::lease().await;
+        let mut conn = database.pool().get().await.unwrap();
+        let event =
+            arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0x71; 32]);
+        let realm = arkret_wire::RealmId::from_event_id(&event);
+        let commit = arkret_wire::RealmCommitId::from_digest([0x72; 32]);
+        let actor = arkret_wire::ActorId::service(
+            arkret_wire::DidCoreId::new("ak:did_core:web:controller.example").unwrap(),
+        );
+        let generation = 9_007_199_254_740_991_i64;
+        sql_query("INSERT INTO realm_authority_root_current_states(realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref,current_commit_id,current_stream_position,updated_at) VALUES($1,$2,0,$3,$4,$5,0,now())")
+            .bind::<Text,_>(realm.as_str()).bind::<Jsonb,_>(serde_json::to_value(&actor).unwrap())
+            .bind::<BigInt,_>(generation).bind::<Text,_>(event.as_str()).bind::<Text,_>(commit.as_str())
+            .execute(&mut conn).await.unwrap();
+        let rows = sql_query(SNAPSHOT_CURRENT_SQL)
+            .bind::<Text, _>(realm.as_str())
+            .load::<SnapshotCurrentRow>(&mut conn)
+            .await
+            .unwrap();
+        let [row] = rows.as_slice() else {
+            panic!("expected one structural root projection")
+        };
+        assert_eq!(row.selector_kind, "realm_authority_root");
+        let value = validated_snapshot_authority_root(row.value.clone()).unwrap();
+        assert_eq!(value["authority_generation"], generation.to_string());
+        assert_eq!(value["controller_epoch"], 0);
+        let typed: arkret_wire::RealmAuthorityRootValue =
+            serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(typed.controller_actor_id, actor);
+        assert_eq!(typed.authority_event_ref, event);
+        for changed in [
+            {
+                let mut v = value.clone();
+                v["authority_generation"] = serde_json::json!(0);
+                v
+            },
+            {
+                let mut v = value.clone();
+                v["authority_generation"] = serde_json::json!("01");
+                v
+            },
+            {
+                let mut v = value.clone();
+                v["extra"] = serde_json::json!(true);
+                v
+            },
+            {
+                let mut v = value.clone();
+                v.as_object_mut().unwrap().remove("authority_event_ref");
+                v
+            },
+        ] {
+            assert!(validated_snapshot_authority_root(changed).is_err());
+        }
+        let mut full_range = value;
+        full_range["authority_generation"] = serde_json::json!(u64::MAX.to_string());
+        assert_eq!(
+            validated_snapshot_authority_root(full_range).unwrap()["authority_generation"],
+            u64::MAX.to_string()
+        );
+    }
 
     #[test]
     fn stale_authority_is_an_atomic_admission_rollback_error() {

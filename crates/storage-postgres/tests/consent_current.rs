@@ -129,6 +129,112 @@ async fn footprint(pool: &PgPool) -> Footprint {
     diesel::sql_query("SELECT jsonb_build_array((SELECT count(*) FROM canonical_events),(SELECT count(*) FROM realm_commits),(SELECT jsonb_agg(to_jsonb(r) ORDER BY peer_id) FROM consent_current_states r),(SELECT count(*) FROM consent_result_versions),(SELECT count(*) FROM account_data_changes)) AS footprint").get_result(&mut conn).await.unwrap()
 }
 
+/// Signed storage-component inputs; this fixture makes no native issuer claim.
+async fn accept_component_erasure_status(pool: &PgPool, fixture: &pcr_genesis::PcrGenesisFixture) {
+    use arkret_models_collaboration::account_status::{
+        AccountStatusRecord, UnsignedAccountStatusReceipt, UnsignedAccountStatusRecord,
+    };
+    use arkret_models_collaboration::objects::account_status::AccountStatus;
+    use coland_storage::SyncStoreRegistry as _;
+
+    let key = SigningKey::from_bytes(&device_authorization_history::STATION_AUTHORITY_SEED);
+    let material = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+        bytes: key.verifying_key().to_bytes().to_vec(),
+    };
+    let method = DidUrl::new("did:web:coland.example#authority").unwrap();
+    let persistence = PgPersistenceStore::new(pool.clone());
+    let mut previous: Option<AccountStatusRecord> = None;
+    for status in [AccountStatus::Active, AccountStatus::ErasurePending] {
+        let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+        let record = arkret_signatures::account_status::sign_account_status_record(
+            UnsignedAccountStatusRecord {
+                schema: arkret_wire::SchemaId::ACCOUNT_STATUS_RECORD_V1.into(),
+                account_authority_id: fixture.history.account.station_id.clone(),
+                account_id: fixture.history.account.clone(),
+                principal_control_realm_id: fixture.unit.transactions[0].event.realm_id.clone(),
+                binding_version: 1,
+                status_sequence: previous
+                    .as_ref()
+                    .map_or(1, |value| value.status_sequence + 1),
+                previous_account_status_record_id: previous
+                    .as_ref()
+                    .map(|value| value.account_status_record_id.clone()),
+                status,
+                reason_code: None,
+                reason: None,
+                issued_at: at,
+                expires_at: None,
+            },
+            method.clone(),
+            &key,
+        )
+        .unwrap();
+        arkret_signatures::account_status::verify_account_status_record(&record, &material)
+            .unwrap();
+        let receipt = arkret_signatures::account_status::sign_account_status_receipt(
+            UnsignedAccountStatusReceipt {
+                receipt_id: arkret_wire::ReceiptId::new_v7_at(at.timestamp_millis() as u64),
+                account_status_record_id: record.account_status_record_id.clone(),
+                record_digest: record.payload_digest().unwrap(),
+                account_authority_id: record.account_authority_id.clone(),
+                account_id: record.account_id.clone(),
+                status_sequence: record.status_sequence,
+                receiver_id: record.account_id.station_id.clone(),
+                accepted_at: at,
+                verification_method: method.clone(),
+            },
+            &key,
+        )
+        .unwrap();
+        arkret_signatures::account_status::verify_account_status_receipt(&receipt, &material)
+            .unwrap();
+        persistence
+            .account_status_replicas()
+            .append(&record, &receipt)
+            .await
+            .unwrap();
+        previous = Some(record);
+    }
+}
+
+#[tokio::test]
+async fn pending_account_rejects_new_consent_without_rewriting_accepted_originals() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let fixture = fixture(&pool).await;
+    let store = PgConsentCurrentStore { pool: pool.clone() };
+    let peer = ActorId::account(fixture.history.account.clone());
+    let original = write(
+        &fixture,
+        &fixture.unit.transactions[1].commit,
+        EventKind::ConsentReplace,
+        replacement(&peer, None, &["voice_call"]),
+    );
+    let ConsentAdmissionOutcome::Committed(accepted) = store.admit(original.clone()).await.unwrap()
+    else {
+        panic!("the initial Consent must be accepted before Account erasure");
+    };
+    accept_component_erasure_status(&pool, &fixture).await;
+    let before = footprint(&pool).await;
+    let ConsentAdmissionOutcome::Duplicate(replayed) = store.admit(original).await.unwrap() else {
+        panic!("exact accepted original remains a read-only replay");
+    };
+    assert_eq!(replayed.commit, accepted.commit);
+    assert_eq!(footprint(&pool).await, before);
+    let candidate = write(
+        &fixture,
+        &accepted.commit,
+        EventKind::ConsentReplace,
+        replacement(&peer, Some(accepted.view().revision), &[]),
+    );
+    let error = store.admit(candidate).await.unwrap_err();
+    assert!(
+        matches!(error, coland_storage::PersistenceError::Conflict(ref message) if message.contains("erasure is irrevocably pending")),
+        "{error}"
+    );
+    assert_eq!(footprint(&pool).await, before);
+}
+
 #[tokio::test]
 async fn consent_current_rejects_duplicate_unknown_and_any_scopes_without_writes() {
     let db = TestDatabase::lease().await;
@@ -1071,21 +1177,33 @@ async fn incomplete_holder_projection_cannot_issue_or_accept_never_written_for_a
     );
     let mut misplaced = holder.clone();
     misplaced.station_id = "ak:did_core:web:other-station.example".parse().unwrap();
-    let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("UPDATE consent_current_states SET holder_account_id=$1 WHERE realm_id=$2")
-        .bind::<Jsonb, _>(serde_json::to_value(misplaced).unwrap())
-        .bind::<Text, _>(f.unit.transactions[1].commit.realm_id.as_str())
-        .execute(&mut conn)
-        .await
-        .unwrap();
-    drop(conn);
     let before = footprint(&pool).await;
-    let error = store.read_cut(holder, &selector, None).await.unwrap_err();
+    let mut conn = pool.get().await.unwrap();
+    let error = diesel::sql_query(
+        "UPDATE consent_current_states SET holder_account_id=$1 WHERE realm_id=$2",
+    )
+    .bind::<Jsonb, _>(serde_json::to_value(misplaced).unwrap())
+    .bind::<Text, _>(f.unit.transactions[1].commit.realm_id.as_str())
+    .execute(&mut conn)
+    .await
+    .unwrap_err();
     assert!(
-        error.to_string().contains("temporarily_unavailable"),
+        error
+            .to_string()
+            .contains("private payload ownership is immutable"),
         "{error}"
     );
+    drop(conn);
     assert_eq!(footprint(&pool).await, before);
+    assert_eq!(
+        store
+            .read_cut(holder, &selector, None)
+            .await
+            .unwrap()
+            .records
+            .len(),
+        1
+    );
     let candidate = write(
         &f,
         &accepted.commit,
@@ -1094,7 +1212,7 @@ async fn incomplete_holder_projection_cannot_issue_or_accept_never_written_for_a
     );
     let error = store.admit(candidate.clone()).await.unwrap_err();
     assert!(
-        error.to_string().contains("temporarily_unavailable"),
+        error.to_string().contains("Consent peer revision changed"),
         "{error}"
     );
     assert_eq!(footprint(&pool).await, before);

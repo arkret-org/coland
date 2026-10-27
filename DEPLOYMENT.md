@@ -114,8 +114,7 @@ COLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER=<shared-secret-configured-in-coauth>
 # COLAND_DEFAULT_WEBVH_PROVIDER_ID=coland.embedded
 COLAND_ACCOUNT_AUTHORITY_URL=https://coauth.example
 COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN=ak:trust_domain:coauth.example
-COLAND_SESSION_GRANT_INTROSPECTION_URL=https://coauth.example/_coauth/internal/session-grants/introspect
-COLAND_AUTH_SESSION_LOGOUT_URL=https://coauth.example/_coauth/internal/auth-sessions/logout
+COLAND_LOCAL_ACCOUNT_AUTHORITY_CONFIG=/run/issuer/config.yaml
 COLAND_INTERNAL_AUTHORITY_SHARED_SECRET=<shared-secret-configured-in-coauth>
 COLAND_OBJECT_STORAGE_BACKEND=s3-compatible
 COLAND_OBJECT_STORAGE_S3_BUCKET=coland
@@ -195,7 +194,7 @@ and rollout-only switches that should be managed deliberately.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `COLAND_ADMIN_PRINCIPAL_IDS` | empty | Comma-separated typed principal ID allowlist (`ak:did_core:…`) for production admin APIs. An empty value closes the admin API outside development mode; browser sessions additionally require `COLAND_SESSION_GRANT_INTROSPECTION_URL`. |
+| `COLAND_ADMIN_PRINCIPAL_IDS` | empty | Comma-separated typed principal ID allowlist (`ak:did_core:…`) for production admin APIs. An empty value closes the admin API outside development mode; browser sessions additionally require `COLAND_LOCAL_ACCOUNT_AUTHORITY_CONFIG`. |
 | `COLAND_ADMIN_PAGE_LIMIT` | `100` | Default admin API page size. |
 | `COLAND_ADMIN_MAX_PAGE_LIMIT` | `1000` | Maximum admin API page size; clamped above the default. |
 | `COLAND_AGENT_PARTICIPATION_CEILING` | all five bits `true` | Closed JSON object with required boolean fields `message_creation_allowed`, `reaction_addition_allowed`, `reaction_removal_allowed`, `third_party_mention_delivery_allowed`, and `acting_on_behalf_allowed`. This deployment ceiling only narrows participation; it does not grant permissions or override management restrictions. Invalid JSON or unknown fields fail startup. |
@@ -301,13 +300,13 @@ docker run --name coland --restart=always -d \
   -e COLAND_SERVICE_IDENTITY_BUNDLE_DIR=/var/lib/coland/identity-bundle \
   -e COLAND_ACCOUNT_AUTHORITY_URL=https://coauth.example \
   -e COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN=ak:trust_domain:coauth.example \
-  -e COLAND_SESSION_GRANT_INTROSPECTION_URL=https://coauth.example/_coauth/internal/session-grants/introspect \
-  -e COLAND_AUTH_SESSION_LOGOUT_URL=https://coauth.example/_coauth/internal/auth-sessions/logout \
+  -e COLAND_LOCAL_ACCOUNT_AUTHORITY_CONFIG=/run/issuer/config.yaml \
   -e COLAND_INTERNAL_AUTHORITY_SHARED_SECRET=<shared-secret-configured-in-coauth> \
   -e DATABASE_URL=postgres://coland:<password>@db:5432/coland?sslmode=verify-full \
   -e COLAND_OBJECT_STORAGE_BACKEND=filesystem \
   -e COLAND_OBJECT_STORAGE_LOCAL_ROOT=/var/lib/coland/objects \
   -e RUST_LOG=coland=info \
+  --mount type=bind,source=/secure/issuer,target=/run/issuer,readonly \
   --mount type=volume,source=coland-data,target=/var/lib/coland \
   --mount type=bind,source=/secure/coland/coland-keystore-master-key,target=/run/secrets/coland-keystore-master-key,readonly \
   ghcr.io/arkret-org/coland:<tag>
@@ -642,21 +641,14 @@ Event for a new observation.
   and `COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN` is its explicit source trust
   domain. It is never inferred from the URL.
 - The Account Authority signs as this Station with a delegated assertion method, even when it runs at a separate origin.
-- `COLAND_SESSION_GRANT_INTROSPECTION_URL` points at coauth's
-  `/_coauth/internal/session-grants/introspect`, and
-  `COLAND_INTERNAL_AUTHORITY_SHARED_SECRET` matches the shared
-  server-to-server secret configured there (coauth's
-  `stations[].internal_authority_shared_secret` for this Station).
-- Before registering the channel, Coland canonicalizes
-  `COLAND_ACCOUNT_AUTHORITY_URL` and requires every configured bearer target to
-  use its exact origin (same scheme, host and effective port). Introspection and
-  Auth-side logout must use their exact operation paths; credentials, query and
-  fragment are forbidden. The controller-gate target is derived as its exact
-  path on that same origin. Any conflict aborts startup before the bearer can be
-  sent.
+- `COLAND_LOCAL_ACCOUNT_AUTHORITY_CONFIG` names the explicit same-Station
+  Coauth configuration. Its migrated issuer database and original KeyStore must
+  be available at the configured paths. This opens the actual issuer ledger;
+  Coland does not issue keys or build a second session store. The configured
+  owning endpoint and native Station identity must agree. Grant introspection,
+  issuer logout and controller-gate issuance use this injected capability.
 - Setting that bearer together with the Authority URL/trust domain registers a
-  deployment-internal authenticated channel between this Station and that
-  Account Authority. Current-device admission enters Coland only through the
+  deployment-internal channel for incoming callbacks from that Account Authority. Current-device admission enters Coland only through the
   product-private `POST /_coland/account-authority/current-device/check`
   adapter. It is not an Arkret Operation and is never advertised through
   Service Describe. Nothing on `/_arkret/peer/*` accepts this bearer; every
@@ -664,15 +656,12 @@ Event for a new observation.
   Every plaintext proxy on this internal link is a trusted member of the same
   deployment TCB; Coland does not model or inspect the proxy chain.
 - Account Authority calls to `GET /_arkret/self/agents/{id}` and
-  `POST /_arkret/gate/account/agent-key-pair` are outside that four-operation
+  `POST /_arkret/gate/account/agent-key-pair` are outside the incoming callback
   bearer channel. They require an RFC 9421 signature whose source and
   destination service ids both equal this Station, whose trust-domain headers
   match the explicitly configured Authority and Station domains, and whose
   `keyid` is exactly this Station DID's delegated `#account-authority`
   assertion method. The shared bearer does not authorize these routes.
-- `COLAND_AUTH_SESSION_LOGOUT_URL` independently points at coauth's exact
-  `/_coauth/internal/auth-sessions/logout` private adapter; it is never
-  inferred from the introspection URL.
 - `DATABASE_URL` uses `sslmode=verify-full` and a password kept out of source
   control (Vault / Kubernetes Secret / systemd `LoadCredential`).
 - `COLAND_CORS_ALLOW_ORIGIN` is the **single** browser origin you trust;

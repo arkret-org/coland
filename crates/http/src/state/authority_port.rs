@@ -98,6 +98,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::ScopeReadReceiptPolicy
         | EventKind::RealmPlaintextVisibleServices
         | EventKind::RealmPreviewPolicy
+        | EventKind::RealmAssetPrivacyPolicy
         | EventKind::MemberIdentityUpdate
         | EventKind::CallCreate
         | EventKind::CallState
@@ -965,6 +966,7 @@ mod tests {
             EventKind::ScopeReadReceiptPolicy,
             EventKind::RealmPlaintextVisibleServices,
             EventKind::RealmPreviewPolicy,
+            EventKind::RealmAssetPrivacyPolicy,
             EventKind::RealmTombstone,
             EventKind::RealmDestroy,
             EventKind::RealmArchive,
@@ -1040,6 +1042,7 @@ mod tests {
             EventKind::ScopeReadReceiptPolicy,
             EventKind::RealmPlaintextVisibleServices,
             EventKind::RealmPreviewPolicy,
+            EventKind::RealmAssetPrivacyPolicy,
             EventKind::RealmTombstone,
             EventKind::RealmDestroy,
             EventKind::RealmArchive,

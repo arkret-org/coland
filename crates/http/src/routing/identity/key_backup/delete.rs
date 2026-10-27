@@ -25,7 +25,7 @@
 //! already expired and outside the active series.
 
 use arkret_models_crypto::{
-    KeyBackupDeleteProof, KeyBackupDeleteQuorumSignature, KeysBackupsDeleteChallenge,
+    HighRiskAuthorityProof, HighRiskDeviceQuorumSignature, KeysBackupsDeleteChallenge,
     KeysBackupsDeleteRequestBody, KeysBackupsIssueDeleteChallengeRequestBody,
 };
 use arkret_signatures::{Ed25519DetachedJwsVerifier, PublicKeyMaterial};
@@ -177,18 +177,8 @@ async fn require_owned_backup(
 pub(super) fn require_high_risk_delete_proof(
     body: &KeysBackupsDeleteRequestBody,
 ) -> Result<(), AppError> {
-    match body.proof {
-        KeyBackupDeleteProof::CurrentDevice { .. } => Err(current_device_delete_proof_rejected()),
-        KeyBackupDeleteProof::RecoverySession { .. }
-        | KeyBackupDeleteProof::DeviceQuorum { .. } => Ok(()),
-    }
-}
-
-fn current_device_delete_proof_rejected() -> AppError {
-    AppError::param_invalid(
-        "key backup delete proof must be recovery_unlock, device_quorum or \
-         trusted_recovery_service; current_device is not a delete authority",
-    )
+    body.validate()
+        .map_err(|error| AppError::schema_violation(error.to_string()))
 }
 
 /// The verified challenge a DELETE is authorized against.
@@ -209,6 +199,7 @@ pub(super) async fn authorize_key_backup_delete(
     body: &KeysBackupsDeleteRequestBody,
     backup_id: &str,
     actor_id: &str,
+    replay: coland_storage::IdempotencyRecord,
     now: DateTime<Utc>,
 ) -> Result<AuthorizedKeyBackupDelete, AppError> {
     let challenge = load_valid_challenge(state, body, backup_id, actor_id, now).await?;
@@ -225,13 +216,9 @@ pub(super) async fn authorize_key_backup_delete(
 
     let mut expected_policy = None;
     let proof_branch = match &body.proof {
-        KeyBackupDeleteProof::CurrentDevice { .. } => {
-            return Err(current_device_delete_proof_rejected());
-        }
-        KeyBackupDeleteProof::RecoverySession {
-            recovery_session_id,
-            proof,
-        } => {
+        HighRiskAuthorityProof::RecoveryUnlock(body) => {
+            let recovery_session_id = &body.recovery_session_id;
+            let proof = &body.proof;
             verify_recovery_unlock_delete(
                 state,
                 &challenge,
@@ -243,10 +230,9 @@ pub(super) async fn authorize_key_backup_delete(
             .await?;
             "recovery_unlock"
         }
-        KeyBackupDeleteProof::DeviceQuorum {
-            threshold,
-            signatures,
-        } => {
+        HighRiskAuthorityProof::DeviceQuorum(body) => {
+            let threshold = &body.threshold;
+            let signatures = &body.signatures;
             expected_policy = Some(
                 verify_device_quorum_delete(
                     state,
@@ -260,10 +246,16 @@ pub(super) async fn authorize_key_backup_delete(
             );
             "device_quorum"
         }
+        HighRiskAuthorityProof::TrustedRecoveryService(body) => {
+            verify_trusted_service_delete(state, &challenge, body, &expected_digest, &canonical)
+                .await?;
+            "trusted_recovery_service"
+        }
     };
 
     let mut quorum_devices = Vec::new();
-    if let KeyBackupDeleteProof::DeviceQuorum { signatures, .. } = &body.proof {
+    if let HighRiskAuthorityProof::DeviceQuorum(body) = &body.proof {
+        let signatures = &body.signatures;
         quorum_devices.extend(
             signatures
                 .iter()
@@ -280,16 +272,10 @@ pub(super) async fn authorize_key_backup_delete(
             },
             quorum_devices,
             expected_policy,
+            replay,
         },
         challenge_id: challenge.challenge_id.as_str().to_owned(),
-        recovery_session_id: match &body.proof {
-            KeyBackupDeleteProof::RecoverySession {
-                recovery_session_id,
-                ..
-            } => Some(recovery_session_id.as_str().to_owned()),
-            KeyBackupDeleteProof::CurrentDevice { .. }
-            | KeyBackupDeleteProof::DeviceQuorum { .. } => None,
-        },
+        recovery_session_id: body.proof.recovery_session_id().map(ToString::to_string),
         proof_branch,
     })
 }
@@ -463,6 +449,90 @@ async fn verify_recovery_unlock_delete(
     Ok(())
 }
 
+async fn verify_trusted_service_delete(
+    state: &AppState,
+    challenge: &KeysBackupsDeleteChallenge,
+    body: &arkret_models_crypto::HighRiskTrustedRecoveryServiceProofBody,
+    expected_digest: &arkret_identifiers::Hash,
+    canonical: &[u8],
+) -> Result<(), AppError> {
+    check_proof_envelope(challenge, &body.proof, expected_digest)?;
+    let session = state
+        .recovery_sessions()
+        .session(body.recovery_session_id.as_str())
+        .await
+        .map_err(|error| AppError::internal(format!("recovery session lookup failed: {error}")))?
+        .ok_or_else(|| AppError::capability_denied("trusted delete recovery session is unknown"))?;
+    super::super::recovery::validate_frozen_session_policy(state, &session, None).await?;
+    ensure_recovery_unlock_session_eligible(
+        &session.principal_id,
+        &session.station_id,
+        session.state,
+        session.transaction_id.as_deref(),
+        session.created_at,
+        session.expires_at,
+        &challenge.account_id,
+        body.proof.created_at,
+    )?;
+    if !matches!(
+        super::super::recovery::recovery_session_proof_kind(&session),
+        Some(
+            arkret_models_crypto::RecoveryProofKind::RecoveryUnlock
+                | arkret_models_crypto::RecoveryProofKind::DeviceQuorum
+        )
+    ) {
+        return Err(AppError::capability_denied(
+            "trusted delete requires a separately accepted recovery-unlock or device-quorum factor",
+        ));
+    }
+    let policy: arkret_models_crypto::RecoveryPolicy =
+        serde_json::from_value(session.policy_payload.clone()).map_err(|error| {
+            AppError::capability_denied(format!("frozen recovery policy invalid: {error}"))
+        })?;
+    let matching = policy
+        .methods
+        .iter()
+        .filter_map(|method| match method {
+            arkret_models_crypto::RecoveryMethod::TrustedRecoveryService { services } => {
+                Some(services)
+            }
+            _ => None,
+        })
+        .flatten()
+        .filter(|entry| {
+            entry.service_id == body.service_id
+                && entry.authorization_verification_method == body.proof.verification_method
+                && entry.audience.as_str() == challenge.audience.as_str()
+        })
+        .count();
+    if matching != 1 {
+        return Err(AppError::capability_denied(
+            "trusted delete service, signing method and audience must match exactly one frozen policy entry",
+        ));
+    }
+    crate::jws_verify::validate_verification_method_controller(
+        body.service_id.as_str(),
+        body.proof.verification_method.as_str(),
+    )
+    .map_err(|error| {
+        AppError::capability_denied(format!("trusted delete method controller invalid: {error}"))
+    })?;
+    let key = crate::jws_verify::resolve_ed25519_pubkey_async(
+        state,
+        body.proof.verification_method.as_str(),
+    )
+    .await
+    .map_err(|error| {
+        AppError::capability_denied(format!("trusted delete service key invalid: {error}"))
+    })?;
+    if !verify_detached_jws(&key, canonical, &body.proof.jws) {
+        return Err(AppError::capability_denied(
+            "trusted delete service signature is invalid",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ensure_recovery_unlock_session_eligible(
     principal_id: &arkret_wire::DidCoreId,
@@ -583,7 +653,7 @@ async fn verify_device_quorum_delete(
     state: &AppState,
     challenge: &KeysBackupsDeleteChallenge,
     threshold: u32,
-    signatures: &[KeyBackupDeleteQuorumSignature],
+    signatures: &[HighRiskDeviceQuorumSignature],
     expected_digest: &arkret_identifiers::Hash,
     canonical: &[u8],
 ) -> Result<Value, AppError> {

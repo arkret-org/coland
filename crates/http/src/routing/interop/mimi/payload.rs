@@ -264,7 +264,6 @@ pub(super) fn mimi_provider_directory_value(
                 "identifier_query",
                 "key_material",
                 "notify",
-                "proxy_download",
                 "report_abuse",
                 "room_update",
                 "submit_message",
@@ -327,7 +326,6 @@ fn mimi_provider_directory_endpoints(
         ("identifier_query", Op::OpenMimiReadIdentifiersV1),
         ("key_material", Op::OpenMimiExchangeRequestKeyMaterialV1),
         ("notify", Op::OpenMimiCommandNotifyV1),
-        ("proxy_download", Op::OpenMimiCommandProxyDownloadV1),
         ("report_abuse", Op::OpenMimiCommandReportAbuseV1),
         ("room_update", Op::OpenMimiCommandUpdateRoomV1),
         ("submit_message", Op::OpenMimiCommandSubmitMessageV1),
@@ -355,7 +353,7 @@ mod directory_endpoint_tests {
             ("https://station.example/tenant/", "/tenant"),
         ] {
             let rows = super::mimi_provider_directory_endpoints(base).unwrap();
-            assert_eq!(rows.len(), 8);
+            assert_eq!(rows.len(), 7);
             assert_eq!(
                 rows[0].relative_path,
                 format!("{prefix}/_arkret/open/mimi/consent/request")

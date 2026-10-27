@@ -40,6 +40,7 @@ rustls.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 coland-domain = { version = "0.3.0", path = "../domain" }
+coland-contracts = { version = "0.3.0", path = "../contracts" }
 coland-http = { version = "0.3.0", path = "../http", features = ["test-support"] }
 coland-services = { version = "0.3.0", path = "../services", features = ["test-support"] }
 coland-storage = { version = "0.3.0", path = "../storage" }

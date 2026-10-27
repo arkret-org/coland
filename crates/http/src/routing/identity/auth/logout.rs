@@ -36,12 +36,11 @@ pub(super) async fn logout(
     // principal-side termination directly. Production keeps the strict
     // grant+DPoP+introspection contract below.
     #[cfg(any(test, feature = "conformance-harness"))]
-    if state.config().development_harness_enabled()
-        && state.config().session_grant_introspection_url.is_none()
-    {
+    if state.config().development_harness_enabled() && state.local_account_authority().is_none() {
         let grant_jwt = bearer_token(req)
             .map(str::to_owned)
             .ok_or_else(|| AppError::unauthenticated("missing local development bearer"))?;
+        require_logout_body(req).await?;
         return json_ok(dev_mode_local_logout(state, &grant_jwt).await?);
     }
 
@@ -62,7 +61,7 @@ pub(super) async fn logout(
         .as_deref()
         .unwrap_or(&state.config().public_base_url);
     let digest = session_credential_hash(&grant_jwt, state.service_id());
-    let journal = if let Some(grant) = grant {
+    let (record, reserve) = if let Some(grant) = grant {
         if grant.credential_class
             != arkret_models_identity::session_credential::SessionGrantCredentialClass::Standard
             || !matches!(
@@ -106,11 +105,7 @@ pub(super) async fn logout(
             completed_at: None,
             created_at: now(),
         };
-        state
-            .persistence()
-            .reserve_push_hard_logout_journal(&record)
-            .await
-            .map_err(|error| AppError::internal(error.to_string()))?
+        (record, true)
     } else {
         let record = state
             .persistence()
@@ -127,6 +122,16 @@ pub(super) async fn logout(
             logout_public_base,
         )
         .map_err(auth_error_to_app_error)?;
+        (record, false)
+    };
+    require_logout_body(req).await?;
+    let journal = if reserve {
+        state
+            .persistence()
+            .reserve_push_hard_logout_journal(&record)
+            .await
+            .map_err(|error| AppError::internal(error.to_string()))?
+    } else {
         record
     };
     if journal.completed_at.is_some() {
@@ -190,6 +195,16 @@ pub(super) async fn logout(
     .await;
 
     json_ok(AccountLogoutResponseBody { revoked })
+}
+
+async fn require_logout_body(req: &mut Request) -> Result<(), AppError> {
+    let value = req
+        .parse_json::<serde_json::Value>()
+        .await
+        .map_err(|_| AppError::json_invalid("logout requires a JSON request body"))?;
+    serde_json::from_value::<arkret_models_identity::AccountLogoutRequestBody>(value)
+        .map_err(|_| AppError::schema_violation("logout requires a closed empty request body"))?;
+    Ok(())
 }
 
 fn auth_error_to_app_error(error: (StatusCode, &'static str, &'static str)) -> AppError {

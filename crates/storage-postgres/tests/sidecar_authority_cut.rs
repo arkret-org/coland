@@ -7452,7 +7452,7 @@ async fn management_review_atomic_join_scenario(
 }
 
 /// The native HTTP fixture uses accepted PCR/device history plus an exact-token
-/// mock issuer over the original introspection transport and real DPoP. The
+/// component-only injected issuer double and real DPoP. The
 /// production resource-server gates run; this is not normal Coauth issuance.
 struct ManagementReviewHttpFixture {
     service: std::sync::Arc<salvo::Service>,
@@ -7493,9 +7493,6 @@ async fn management_review_http_fixture(
     let identity = station.install_runtime_identity(persistence.as_ref()).await;
     let mut config = coland_test_support::app_config();
     config.development_mode = true;
-    config.session_grant_introspection_url = Some(format!(
-        "{origin}/_coauth/internal/session-grants/introspect"
-    ));
     config.account_authority_url = Some(origin.clone());
     config.account_authority_trust_domain = Some(config.trust_domain.clone());
     config.register_test_internal_authority_channel(channel.clone());
@@ -7564,6 +7561,21 @@ async fn management_review_http_fixture(
         outcome.validate().unwrap();
         outcomes.insert(token.clone(), outcome);
     }
+    let expected_audience = state.service_core_id();
+    let authority = coland_test_support::account_authority::ComponentAccountAuthority::new(
+        expected_audience.clone(),
+        move |input| {
+            let SessionGrantValidationInput::ByJwt(input) = input else {
+                panic!("exact-token validation required")
+            };
+            assert_eq!(input.audience_id.as_ref(), Some(&expected_audience));
+            Ok(outcomes
+                .get(&input.grant_jwt)
+                .expect("exact component issuer token")
+                .clone())
+        },
+    );
+    let state = state.with_local_account_authority(authority).unwrap();
     let audience = state.service_core_id();
     let public_base_url = state
         .config()
@@ -7668,26 +7680,7 @@ async fn management_review_http_fixture(
                 stream.write_all(&bytes).await.unwrap();
                 continue;
             }
-            assert!(headers.lines().any(|line| {
-                line.eq_ignore_ascii_case(&format!("authorization: Bearer {channel}"))
-            }));
-            let SessionGrantValidationInput::ByJwt(input) =
-                serde_json::from_slice::<SessionGrantValidationInput>(
-                    &request[header_end..header_end + length],
-                )
-                .unwrap()
-            else {
-                panic!("exact-token introspection required")
-            };
-            assert!(input.audience_id.as_ref() == Some(&audience));
-            let outcome = outcomes.get(&input.grant_jwt).expect("exact issuer token");
-            let bytes = arkret_canonical::canonical_json_bytes(outcome).unwrap();
-            let header = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                bytes.len()
-            );
-            stream.write_all(header.as_bytes()).await.unwrap();
-            stream.write_all(&bytes).await.unwrap();
+            panic!("component peer only implements registered account status resolution");
         }
     });
     ManagementReviewHttpFixture {
@@ -9036,7 +9029,6 @@ struct OwnedConsumerHttpFixture {
     base_url: String,
     token: String,
     key: ed25519_dalek::SigningKey,
-    issuer_task: tokio::task::JoinHandle<()>,
     issuer_status: std::sync::Arc<std::sync::atomic::AtomicU16>,
     object_storage: Option<std::sync::Arc<dyn coland_services::delivery::ObjectStoragePort>>,
     grant_expires_at: chrono::DateTime<chrono::Utc>,
@@ -9046,13 +9038,8 @@ struct OwnedConsumerHttpFixture {
     // its AppState. DeviceInventory belongs to exactly one serving Station.
     _receiver_database: Option<TestDatabase>,
 }
-impl Drop for OwnedConsumerHttpFixture {
-    fn drop(&mut self) {
-        self.issuer_task.abort();
-    }
-}
 
-// Exact-token issuer fixture over the real introspection transport. The
+// Exact-token component issuer capability. The
 // resource-server route, DPoP verification and current delivery gates are
 // production code; this is deliberately not normal Coauth OAuth evidence.
 async fn owned_consumer_http_fixture(fixture: &OwnedConsumerFixture) -> OwnedConsumerHttpFixture {
@@ -9108,8 +9095,7 @@ async fn owned_consumer_http_for_endpoint_with_storage(
     use arkret_models_collaboration::session_grants::*;
     use arkret_models_identity::session_credential::*;
     use sha2::{Digest, Sha256};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let origin = "https://component-aa.example".to_owned();
     let channel = uuid::Uuid::now_v7().to_string();
     let receiver_database = if receiving_station.is_some() {
         Some(TestDatabase::lease().await)
@@ -9176,9 +9162,6 @@ async fn owned_consumer_http_for_endpoint_with_storage(
         vault.state.config().public_base_url.clone()
     };
     config.trust_domain = vault.state.config().trust_domain.clone();
-    config.session_grant_introspection_url = Some(format!(
-        "{origin}/_coauth/internal/session-grants/introspect"
-    ));
     config.account_authority_url = Some(origin.clone());
     config.register_test_internal_authority_channel(channel.clone());
     let state =
@@ -9279,71 +9262,21 @@ async fn owned_consumer_http_for_endpoint_with_storage(
     let audience = state.service_core_id();
     let issuer_status = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(200));
     let answer_status = issuer_status.clone();
-    let issuer_task = tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        loop {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut bytes = Vec::new();
-            let (header_end, length) = loop {
-                let mut chunk = [0u8; 2048];
-                let n = stream.read(&mut chunk).await.unwrap();
-                assert!(n > 0);
-                bytes.extend_from_slice(&chunk[..n]);
-                assert!(bytes.len() < 16384);
-                if let Some(end) = bytes.windows(4).position(|b| b == b"\r\n\r\n") {
-                    let headers = String::from_utf8_lossy(&bytes[..end]);
-                    assert_eq!(
-                        headers.lines().next(),
-                        Some("POST /_coauth/internal/session-grants/introspect HTTP/1.1")
-                    );
-                    assert!(headers.lines().any(|line| {
-                        line.eq_ignore_ascii_case(&format!("authorization: Bearer {channel}"))
-                    }));
-                    let length = headers
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .and_then(|v| v.trim().parse::<usize>().ok())
-                        })
-                        .unwrap();
-                    break (end + 4, length);
-                }
+    let authority = coland_test_support::account_authority::ComponentAccountAuthority::new(
+        audience.clone(),
+        move |input| {
+            let SessionGrantValidationInput::ByJwt(input) = input else {
+                panic!("exact-token validation required")
             };
-            while bytes.len() < header_end + length {
-                let mut chunk = [0u8; 2048];
-                let n = stream.read(&mut chunk).await.unwrap();
-                assert!(n > 0);
-                bytes.extend_from_slice(&chunk[..n]);
-                assert!(bytes.len() < 16384);
+            assert_eq!(input.grant_jwt, expected_token);
+            assert_eq!(input.audience_id.as_ref(), Some(&audience));
+            if answer_status.load(std::sync::atomic::Ordering::SeqCst) != 200 {
+                return Err(coland_test_support::account_authority::AccountAuthorityUnavailable);
             }
-            let SessionGrantValidationInput::ByJwt(input) =
-                serde_json::from_slice::<SessionGrantValidationInput>(
-                    &bytes[header_end..header_end + length],
-                )
-                .unwrap()
-            else {
-                panic!("exact-token introspection required")
-            };
-            assert!(input.grant_jwt == expected_token);
-            assert!(input.audience_id.as_ref() == Some(&audience));
-            let status = answer_status.load(std::sync::atomic::Ordering::SeqCst);
-            let answer = if status == 200 {
-                arkret_canonical::canonical_json_bytes(&outcome).unwrap()
-            } else {
-                arkret_canonical::canonical_json_bytes(
-                    &arkret_wire::Problem::from_code(
-                        "temporarily_unavailable",
-                        "authority unavailable",
-                    )
-                    .with_status(503),
-                )
-                .unwrap()
-            };
-            stream.write_all(format!("HTTP/1.1 {status} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",if status == 200 { "OK" } else { "Service Unavailable" },answer.len()).as_bytes()).await.unwrap();
-            stream.write_all(&answer).await.unwrap();
-        }
-    });
+            Ok(outcome.clone())
+        },
+    );
+    let state = state.with_local_account_authority(authority).unwrap();
     OwnedConsumerHttpFixture {
         state: state.clone(),
         service: std::sync::Arc::new(coland_http::service(state.clone())),
@@ -9354,7 +9287,6 @@ async fn owned_consumer_http_for_endpoint_with_storage(
             .to_owned(),
         token,
         key,
-        issuer_task,
         issuer_status,
         object_storage,
         grant_expires_at,

@@ -13,6 +13,65 @@ use crate::{PersistenceError, PersistenceResult};
 #[allow(dead_code)]
 mod ordinary_realm;
 
+/// Read only the proven canonical policy row, including verified replica provenance.
+pub(crate) async fn read_asset_privacy_policy_current(
+    pool: &crate::PgPool,
+    realm_id: &arkret_wire::RealmId,
+) -> PersistenceResult<Option<arkret_wire::CurrentState>> {
+    #[derive(diesel::QueryableByName)]
+    struct PolicyRow {
+        #[diesel(sql_type = Text)]
+        current_commit_id: String,
+        #[diesel(sql_type = BigInt)]
+        current_stream_position: i64,
+        #[diesel(sql_type = Jsonb)]
+        value: serde_json::Value,
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        proved: bool,
+    }
+    let mut conn = crate::pg_db(pool);
+    let source = crate::object_projection_reads::current_source_sql(
+        "r",
+        "jsonb_build_object('kind','realm_asset_privacy_policy')",
+    );
+    let row = diesel::sql_query(format!(
+        "SELECT r.current_commit_id,r.current_stream_position,r.value, \
+         COALESCE({source}=jsonb_build_object('kind','realm','realm_id',r.realm_id),false) AS proved \
+         FROM realm_bootstrap_current_states r \
+         WHERE r.realm_id=$1 AND r.state_family='realm_asset_privacy_policy'"
+    ))
+    .bind::<Text, _>(realm_id.as_str())
+    .get_result::<PolicyRow>(&mut conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?;
+    row.map(|row| {
+        if !row.proved {
+            return Err(PersistenceError::Internal(
+                "asset privacy policy current has no accepted source cut".to_owned(),
+            ));
+        }
+        serde_json::from_value::<
+            arkret_models_collaboration::governance::realm_lifecycle::RealmAssetPrivacyPolicyValue,
+        >(row.value.clone())
+        .map_err(PersistenceError::database)?;
+        Ok(arkret_wire::CurrentState::Value {
+            selector: arkret_wire::CurrentSelector::RealmAssetPrivacyPolicy,
+            source_stream_ref: arkret_wire::CommitStreamRef::Realm {
+                realm_id: realm_id.clone(),
+            },
+            revision: arkret_wire::CurrentRevision {
+                commit_id: arkret_wire::RealmCommitId::new(row.current_commit_id)
+                    .map_err(PersistenceError::database)?,
+                stream_position: u64::try_from(row.current_stream_position)
+                    .map_err(PersistenceError::database)?,
+            },
+            value: row.value,
+        })
+    })
+    .transpose()
+}
+
 fn typed_payload<T>(
     event: &arkret_wire::Event,
     decode: fn(&arkret_wire::Event) -> arkret_wire::Result<T>,
@@ -387,6 +446,61 @@ pub(crate) async fn commit_preview_policy_current_state_in_connection(
         event,
         commit,
         "realm_preview_policy",
+        &result_value(&policy.value)?,
+    )
+    .await
+}
+
+pub(crate) async fn commit_asset_privacy_policy_authority_current_state_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    commit: &arkret_wire::RealmCommit,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+) -> PersistenceResult<()> {
+    if event.kind != arkret_wire::EventKind::RealmAssetPrivacyPolicy {
+        return Ok(());
+    }
+    crate::realm_authorization_cut::authorize_capability_gated_event_with_approvals(
+        conn, event, commit, prepared,
+    )
+    .await?;
+    commit_asset_privacy_policy_current_state_in_connection(conn, event, commit).await
+}
+
+/// Retain payload.value only; the optional reason remains Event audit data.
+pub(crate) async fn commit_asset_privacy_policy_current_state_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    commit: &arkret_wire::RealmCommit,
+) -> PersistenceResult<()> {
+    if event.kind != arkret_wire::EventKind::RealmAssetPrivacyPolicy {
+        return Ok(());
+    }
+    arkret_schema::validate_event_for_submit(event)
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    if event.scope_ref
+        != (arkret_wire::ScopeRef::Realm {
+            realm_id: event.realm_id.clone(),
+        })
+        || commit.stream_ref
+            != (arkret_wire::CommitStreamRef::Realm {
+                realm_id: event.realm_id.clone(),
+            })
+        || commit.realm_id != event.realm_id
+        || commit.event_ref != event.event_id
+    {
+        return Err(PersistenceError::SchemaViolation(
+            "asset privacy policy requires its exact Realm Event and covering Commit".to_owned(),
+        ));
+    }
+    let policy = event
+        .typed_payload::<arkret_wire::event_spec::RealmAssetPrivacyPolicy>()
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    advance_singleton(
+        conn,
+        event,
+        commit,
+        "realm_asset_privacy_policy",
         &result_value(&policy.value)?,
     )
     .await
@@ -819,6 +933,178 @@ mod tests {
             current.value,
             serde_json::json!({"mode":"none","audiences":["anonymous"],"fields":["title"]})
         );
+        drop(conn);
+        assert!(
+            crate::PgEventStore { pool: pool.clone() }
+                .get(candidate.authority_commit.event.event_id.as_str())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            crate::PgAuthorityCommitStore { pool }
+                .committed_event_by_commit_id(&candidate.authority_commit.commit.commit_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn asset_privacy_policy_current_is_atomic_authorized_and_preserves_absence() {
+        let database = crate::test_database::TestDatabase::lease().await;
+        let pool = database.pool();
+        let discussion =
+            ordinary_realm::open_human_discussion(&pool, &uuid::Uuid::now_v7().to_string()).await;
+        let mut previous = discussion.head.authority_commit;
+        let founder = discussion.unit.transactions[0]
+            .event
+            .actor_id
+            .signing_principal_id();
+        let uow = crate::PgEventCommitUnitOfWork::new(pool.clone());
+        let mut first = None;
+        for value in [
+            serde_json::json!({"direct_download_allowed":true}),
+            serde_json::json!({}),
+        ] {
+            let request = ordinary_realm::next_request(
+                &previous,
+                arkret_wire::EventKind::RealmAssetPrivacyPolicy,
+                founder,
+                serde_json::json!({"value":value}),
+                chrono::Utc::now(),
+            );
+            uow.commit_event(request.clone()).await.unwrap();
+            if first.is_none() {
+                first = Some(request.clone());
+            }
+            let material = crate::PgAuthorityCommitStore { pool: pool.clone() }
+                .realm_state_snapshot_material(&request.authority_commit.event.realm_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let row = material
+                .current_state_entries
+                .iter()
+                .find(|entry| {
+                    matches!(
+                        entry,
+                        arkret_wire::CurrentState::Value {
+                            selector: arkret_wire::CurrentSelector::RealmAssetPrivacyPolicy,
+                            ..
+                        }
+                    )
+                })
+                .expect("confirmed asset privacy current in material");
+            let direct = crate::PgAuthorityCommitStore { pool: pool.clone() }
+                .realm_asset_privacy_policy_current(&request.authority_commit.event.realm_id)
+                .await
+                .unwrap()
+                .expect("direct policy reader requires an accepted source cut");
+            assert_eq!(
+                serde_json::to_value(&direct).unwrap(),
+                serde_json::to_value(row).unwrap()
+            );
+            let arkret_wire::CurrentState::Value {
+                revision,
+                value: actual,
+                source_stream_ref,
+                ..
+            } = row;
+            assert_eq!(actual, &value);
+            assert_eq!(
+                revision.commit_id,
+                request.authority_commit.commit.commit_id
+            );
+            assert_eq!(
+                revision.stream_position,
+                request.authority_commit.commit.stream_position
+            );
+            assert_eq!(
+                source_stream_ref,
+                &request.authority_commit.commit.stream_ref
+            );
+            previous = request.authority_commit;
+        }
+        uow.commit_event(first.unwrap()).await.unwrap();
+        let outsider = Box::pin(ordinary_realm::human_profile::admit(
+            &pool,
+            &ordinary_realm::station(),
+            "asset-privacy-outsider",
+        ))
+        .await;
+        let denied = ordinary_realm::next_request(
+            &previous,
+            arkret_wire::EventKind::RealmAssetPrivacyPolicy,
+            &outsider.principal_id,
+            serde_json::json!({"value":{"direct_download_allowed":true}}),
+            chrono::Utc::now(),
+        );
+        let denied = Box::pin(ordinary_realm::source_request(&pool, denied)).await;
+        let denied_error = uow.commit_event(denied.clone()).await.unwrap_err();
+        assert_eq!(
+            denied_error.conflict_code(),
+            Some(coland_storage::ConflictCode::CapabilityDenied),
+            "accepted human without Realm authorization: {denied_error:?}"
+        );
+        assert!(
+            crate::PgEventStore { pool: pool.clone() }
+                .get(denied.authority_commit.event.event_id.as_str())
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let candidate = ordinary_realm::next_request(
+            &previous,
+            arkret_wire::EventKind::RealmAssetPrivacyPolicy,
+            founder,
+            serde_json::json!({"value":{"direct_download_allowed":false}}),
+            chrono::Utc::now(),
+        );
+        let mut conn = pool.get().await.unwrap();
+        diesel::sql_query("CREATE FUNCTION asset_privacy_policy_current_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state_family='realm_asset_privacy_policy' THEN RAISE EXCEPTION 'asset privacy policy current fault'; END IF; RETURN NEW; END $$").execute(&mut *conn).await.unwrap();
+        diesel::sql_query("CREATE TRIGGER asset_privacy_policy_current_fault BEFORE INSERT OR UPDATE ON realm_bootstrap_current_states FOR EACH ROW EXECUTE FUNCTION asset_privacy_policy_current_fault()").execute(&mut *conn).await.unwrap();
+        drop(conn);
+        let failed = uow.commit_event(candidate.clone()).await;
+        let mut conn = pool.get().await.unwrap();
+        diesel::sql_query(
+            "DROP TRIGGER asset_privacy_policy_current_fault ON realm_bootstrap_current_states",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        diesel::sql_query("DROP FUNCTION asset_privacy_policy_current_fault()")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert!(
+            failed.is_err(),
+            "the injected current write must actually fail"
+        );
+        let current = diesel::sql_query("SELECT current_commit_id,value FROM realm_bootstrap_current_states WHERE realm_id=$1 AND state_family='realm_asset_privacy_policy'").bind::<Text,_>(candidate.authority_commit.event.realm_id.as_str()).get_result::<Row>(&mut *conn).await.unwrap();
+        assert_eq!(
+            current.current_commit_id,
+            previous.commit.commit_id.as_str()
+        );
+        assert_eq!(current.value, serde_json::json!({}));
+        diesel::sql_query("UPDATE realm_bootstrap_current_states SET current_commit_id=$2 WHERE realm_id=$1 AND state_family='realm_asset_privacy_policy'")
+            .bind::<Text,_>(candidate.authority_commit.event.realm_id.as_str())
+            .bind::<Text,_>(candidate.authority_commit.commit.commit_id.as_str())
+            .execute(&mut *conn).await.unwrap();
+        drop(conn);
+        assert!(
+            crate::PgAuthorityCommitStore { pool: pool.clone() }
+                .realm_asset_privacy_policy_current(&candidate.authority_commit.event.realm_id)
+                .await
+                .is_err(),
+            "unproved mutable policy row must not grant direct download"
+        );
+        let mut conn = pool.get().await.unwrap();
+        diesel::sql_query("UPDATE realm_bootstrap_current_states SET current_commit_id=$2 WHERE realm_id=$1 AND state_family='realm_asset_privacy_policy'")
+            .bind::<Text,_>(candidate.authority_commit.event.realm_id.as_str())
+            .bind::<Text,_>(previous.commit.commit_id.as_str())
+            .execute(&mut *conn).await.unwrap();
         drop(conn);
         assert!(
             crate::PgEventStore { pool: pool.clone() }

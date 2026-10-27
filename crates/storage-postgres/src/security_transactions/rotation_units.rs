@@ -89,6 +89,18 @@ async fn begin_worker_step(
     canonical_request: &[u8],
     step: SecurityTransactionStep,
 ) -> Result<Option<SecurityTransactionRecord>, PgTransactionError> {
+    let realm = pcr_realm(conn, &transaction.resource.account_id).await?;
+    lock_pcr(
+        conn,
+        &realm,
+        step == SecurityTransactionStep::SwitchAuthoritativePointer,
+    )
+    .await?;
+    crate::account_private_erasure::require_private_write_in_connection(
+        conn,
+        &transaction.resource.account_id,
+    )
+    .await?;
     let transaction_id = transaction.resource.transaction_id.as_str();
     let existing = load_one(conn, transaction_id, true)
         .await?

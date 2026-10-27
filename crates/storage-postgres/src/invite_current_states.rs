@@ -484,11 +484,7 @@ async fn commit_invite_third_party_create(
             "verification service is absent from the accepted Realm policy allowlist",
         ));
     }
-    let commitment = payload
-        .third_party_invite
-        .token_commitment
-        .as_ref()
-        .ok_or_else(|| schema_violation("third-party Invite has no token commitment"))?;
+    let commitment = &payload.third_party_invite.token_commitment;
     let invite_id = InviteId::from_event_id(&event.event_id);
     let inserted = diesel::sql_query(
         "INSERT INTO invite_third_party_create_index \

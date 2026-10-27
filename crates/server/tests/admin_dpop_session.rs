@@ -20,67 +20,9 @@ use salvo::http::StatusCode;
 use salvo::test::{ResponseExt, TestClient};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const QUEUE_PATH: &str = "/_coland/admin/moderation/queue";
 const VIEWER_PATH: &str = "/_arkret/self/account/viewer";
-const INTROSPECTION_PATH: &str = "/_coauth/internal/session-grants/introspect";
-
-/// Serve every introspection request with the outcome currently in `slot`.
-async fn spawn_introspection_mock(slot: Arc<Mutex<Value>>) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("introspection mock binds");
-    let address = listener.local_addr().expect("introspection mock address");
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                return;
-            };
-            let slot = slot.clone();
-            tokio::spawn(async move {
-                read_http_request(&mut stream).await;
-                let body = serde_json::to_vec(&*slot.lock().unwrap()).expect("serialize outcome");
-                let headers = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                    body.len()
-                );
-                stream.write_all(headers.as_bytes()).await.unwrap();
-                stream.write_all(&body).await.unwrap();
-            });
-        }
-    });
-    format!("http://{address}")
-}
-
-async fn read_http_request(stream: &mut tokio::net::TcpStream) {
-    let mut request = Vec::new();
-    let mut expected = None;
-    loop {
-        let mut chunk = [0_u8; 2048];
-        let read = stream.read(&mut chunk).await.expect("read request");
-        assert!(read > 0, "introspection request ended early");
-        request.extend_from_slice(&chunk[..read]);
-        if expected.is_none()
-            && let Some(index) = request.windows(4).position(|part| part == b"\r\n\r\n")
-        {
-            let headers = String::from_utf8_lossy(&request[..index]);
-            let length = headers
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length:")
-                        .and_then(|value| value.trim().parse::<usize>().ok())
-                })
-                .unwrap_or(0);
-            expected = Some(index + 4 + length);
-        }
-        if expected.is_some_and(|total| request.len() >= total) {
-            return;
-        }
-    }
-}
-
 struct GrantSession {
     state: AppState,
     principal_id: arkret_identifiers::DidCoreId,
@@ -89,22 +31,26 @@ struct GrantSession {
 }
 
 /// A founding-device DPoP SessionGrant for an accepted PCR, vouched for by a
-/// loopback Account Authority introspection mock.
+/// component-only injected Account Authority double.
 async fn grant_session(slug: &str, configure: impl FnOnce(&mut AppConfig)) -> GrantSession {
     let holder_key = SigningKey::from_bytes(&Sha256::digest(slug.as_bytes()).into());
     let grant_jwt = format!("admin-dpop-grant.{slug}.{}", uuid::Uuid::now_v7().simple());
 
     let slot = Arc::new(Mutex::new(Value::Null));
-    let origin = spawn_introspection_mock(slot.clone()).await;
     let mut config = AppConfig {
         development_mode: true,
-        session_grant_introspection_url: Some(format!("{origin}{INTROSPECTION_PATH}")),
-        account_authority_url: Some(origin),
+        account_authority_url: Some("https://component-aa.example".to_owned()),
         ..coland_test_support::app_config()
     };
     config.register_test_internal_authority_channel(format!("admin-dpop-{slug}"));
     configure(&mut config);
     let state = coland_test_support::app_state(config);
+    let authority =
+        coland_test_support::account_authority::ComponentAccountAuthority::from_json_slot(
+            state.service_core_id(),
+            slot.clone(),
+        );
+    let state = state.with_local_account_authority(authority).unwrap();
     let fixture = PcrGenesisFixture::new(state.service_did());
     fixture.admit(&state).await.expect("durable PCR genesis");
     // The Account row the grant's account binding resolves to at this Station.
@@ -138,7 +84,7 @@ async fn grant_session(slug: &str, configure: impl FnOnce(&mut AppConfig)) -> Gr
             "id": arkret_identifiers::SessionGrantId::from_issuance_digest(
                 Sha256::digest(grant_jwt.as_bytes()).into(),
             ),
-            "issuer_id": "ak:did_core:web:coauth.example",
+            "issuer_id": state.service_id(),
             "account_id": {
                 "principal_id": fixture.history.account.principal_id,
                 "station_id": state.service_id(),
@@ -323,17 +269,10 @@ async fn dpop_session_reaches_every_admin_router_once() {
     }
 }
 
-/// Outside development mode the admin gate also introspects the presented
-/// SessionGrant for its admin scopes. It must name the DPoP-scheme credential
-/// the request authenticated with, and still consume the proof only once.
+/// Production admin scopes come from the same freshly authenticated grant.
+/// The DPoP proof is consumed exactly once by request authentication.
 #[tokio::test]
 async fn production_dpop_session_is_scope_checked_and_authenticated_once() {
-    // The loopback Account Authority mock is a private address; production
-    // egress refuses it unless the process policy allows it explicitly.
-    coland_http::security::install_egress_policy(coland_http::security::EgressPolicy {
-        allow_private_networks: Some(true),
-        ..Default::default()
-    });
     let session = grant_session("production", |config| {
         config.development_mode = false;
     })

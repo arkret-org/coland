@@ -30,6 +30,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use arkret_identifiers::{Hash, RealmId};
 use arkret_models_collaboration::agent_operations::AgentLifecycleState;
+use arkret_models_collaboration::mls_roster_authority::{
+    MlsAttestAddRequestBody, MlsAttestAddResponseBody,
+};
 use arkret_models_crypto::{
     Failure as KeypackageFailure, KeyOperationSignature, KeyPackageClaimRecord,
     KeyPackageClaimTerminalReceipt, KeyPackageClaimTerminalState, KeyPackageConsumeReceipt,
@@ -265,27 +268,6 @@ pub(crate) fn peer_router() -> Router {
         .push(Router::with_path("mls/add-authority-attestations").post(peer_mls_attest_add))
 }
 
-/// HTTP-local schema carrier: the protocol's closed nested DTOs remain owned
-/// by arkret-models-collaboration. The normative OpenAPI schema is generated
-/// from arkret-spec; these value_type annotations avoid adding Salvo derives
-/// to SDK protocol types just for this service router.
-#[derive(serde::Deserialize, salvo::oapi::ToSchema)]
-#[serde(deny_unknown_fields)]
-struct MlsAttestAddHttpRequest {
-    #[salvo(schema(value_type = serde_json::Value))]
-    attestation: arkret_models_collaboration::mls_roster_authority::MlsAddAuthorityAttestation,
-    #[salvo(schema(value_type = serde_json::Value))]
-    claim_outcome: arkret_models_crypto::KeyPackagesClaimResponseBody,
-}
-
-#[derive(serde::Serialize, salvo::oapi::ToSchema)]
-struct MlsAttestAddHttpOutcome {
-    #[salvo(schema(value_type = String))]
-    status: arkret_models_collaboration::mls_roster_authority::MlsAttestAddStatus,
-    #[salvo(schema(value_type = String))]
-    attestation_digest: arkret_wire::Hash,
-}
-
 fn mls_attest_add_service_error(error: coland_services::ServiceError) -> AppError {
     use coland_services::ServiceError;
     match error {
@@ -323,30 +305,25 @@ fn mls_attest_add_service_error(error: coland_services::ServiceError) -> AppErro
 // current authority tenure in one transaction before any installation.
 #[salvo::oapi::endpoint(
     operation_id = "ak.peer.mls.command.attest_add",
-    request_body = MlsAttestAddHttpRequest,
+    request_body = MlsAttestAddRequestBody,
     tags("governance")
 )]
 #[tracing::instrument(skip_all, fields(op = "ak.peer.mls.command.attest_add.v1"))]
 async fn peer_mls_attest_add(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<MlsAttestAddHttpOutcome> {
-    use arkret_models_collaboration::mls_roster_authority::MlsAttestAddRequestBody;
-
+) -> JsonResult<MlsAttestAddResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let peer = super::events::peer::authenticated_peer_context(state, req, true).await?;
     let body = req
-        .parse_json::<MlsAttestAddHttpRequest>()
+        .parse_json::<MlsAttestAddRequestBody>()
         .await
         .map_err(|error| {
             super::events::peer::schema_violation(format!(
                 "invalid MLS Add attestation body: {error}"
             ))
         })?;
-    let request = MlsAttestAddRequestBody {
-        attestation: body.attestation,
-        claim_outcome: body.claim_outcome,
-    };
+    let request = body;
     request.validate_claim_binding().map_err(|error| {
         super::events::peer::schema_violation(format!("invalid MLS Add attestation: {error}"))
     })?;
@@ -368,10 +345,7 @@ async fn peer_mls_attest_add(
         .install_mls_add_authority_attestation(&verified, &state.service_core_id())
         .await
         .map_err(mls_attest_add_service_error)?;
-    json_ok(MlsAttestAddHttpOutcome {
-        status: outcome.status,
-        attestation_digest: outcome.attestation_digest,
-    })
+    json_ok(outcome)
 }
 
 fn mls_group_state_material_not_found() -> AppError {

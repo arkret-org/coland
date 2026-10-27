@@ -806,6 +806,19 @@ impl PersistenceHandle {
             .await?)
     }
 
+    pub async fn erase_account_private_state(
+        &self,
+        account_id: &arkret_wire::AccountId,
+        triggering_status_record_id: &arkret_wire::AccountStatusRecordId,
+        issuer: &dyn coland_storage::AccountPrivateErasureReceiptIssuer,
+    ) -> PersistenceResult<arkret_models_collaboration::governance::erasure::ErasureReceiptPackage>
+    {
+        self.persistence
+            .accounts()
+            .erase_private_state(account_id, triggering_status_record_id, issuer)
+            .await
+    }
+
     pub async fn account_status_receipt(
         &self,
         account_authority_id: &str,

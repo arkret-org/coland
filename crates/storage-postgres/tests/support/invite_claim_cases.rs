@@ -44,11 +44,7 @@ fn claim_request(
 ) -> (EventCommitRequest, coland_storage::InviteClaimProofCommit) {
     let material:arkret_models_collaboration::governance::membership_invite::InviteThirdPartyCreatePayload=serde_json::from_value(serde_json::to_value(&create.authority_commit.event.payload).unwrap()).unwrap();
     let invite_id = arkret_wire::InviteId::from_event_id(&create.authority_commit.event.event_id);
-    let token = material
-        .third_party_invite
-        .token_commitment
-        .clone()
-        .unwrap();
+    let token = material.third_party_invite.token_commitment.clone();
     let (_, verifier_method) = did_key(verifier_key);
     let (_, subject_method) = did_key(subject_key);
     let digest=arkret_canonical::canonical_sha256(&serde_json::json!({"invite_id":invite_id,"realm_id":create.authority_commit.event.realm_id,"expires_at":arkret_canonical::format_timestamp_canonical(material.expires_at),"third_party_invite":material.third_party_invite})).unwrap();

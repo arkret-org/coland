@@ -816,11 +816,7 @@ fn outcome_from_record(
     };
     Ok(PushRegisterDeviceResponseBody {
         push_target_id,
-        registration_id: Some(
-            arkret_wire::OpaqueLocalId::new(registration_id.into_string()).map_err(|error| {
-                AppError::internal(format!("push registration id projection failed: {error}"))
-            })?,
-        ),
+        registration_id,
         expires_at,
     })
 }
@@ -1050,7 +1046,7 @@ mod tests {
         let verified = record(PushRegistrationHandoffIntentStatus::ReceiptVerified);
         let durable_outcome = outcome_from_record(&verified).unwrap();
         assert_eq!(
-            durable_outcome.registration_id.as_ref().unwrap().as_str(),
+            durable_outcome.registration_id.as_str(),
             verified.registration_id.as_str()
         );
         assert!(matches!(

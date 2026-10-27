@@ -129,6 +129,7 @@ pub struct KeyBackupDeleteGate {
     pub basis: KeyBackupPointerBasis,
     pub quorum_devices: Vec<arkret_wire::DeviceId>,
     pub expected_policy: Option<Value>,
+    pub replay: crate::IdempotencyRecord,
 }
 
 /// Encrypted key-backup envelopes (one row per `backup_id`), plus the durable

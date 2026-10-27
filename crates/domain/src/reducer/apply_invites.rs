@@ -66,20 +66,18 @@ impl ProjectionState {
                 invitee_id: existing.invitee_id.clone(),
             };
         }
-        if let Some(token_commitment) = token_commitment_for_third_party(&third_party_invite)
-            && self.invites.values().any(|existing| {
-                existing.invite_id != invite_id
-                    && matches!(
-                        existing.state.as_str(),
-                        INVITE_STATE_PENDING | INVITE_STATE_CLAIMED
-                    )
-                    && existing
-                        .third_party_invite
-                        .as_ref()
-                        .and_then(token_commitment_for_third_party)
-                        == Some(token_commitment)
-            })
-        {
+        if self.invites.values().any(|existing| {
+            existing.invite_id != invite_id
+                && matches!(
+                    existing.state.as_str(),
+                    INVITE_STATE_PENDING | INVITE_STATE_CLAIMED
+                )
+                && existing
+                    .third_party_invite
+                    .as_ref()
+                    .map(|material| material.token_commitment.as_str())
+                    == Some(third_party_invite.token_commitment.as_str())
+        }) {
             return rejected("duplicate_token_commitment");
         }
 
@@ -169,10 +167,7 @@ impl ProjectionState {
         let Some(third_party_invite) = invite.third_party_invite.as_ref() else {
             return rejected("not_found");
         };
-        let Some(expected_token_commitment) = token_commitment_for_third_party(third_party_invite)
-        else {
-            return rejected("not_found");
-        };
+        let expected_token_commitment = third_party_invite.token_commitment.as_str();
         if expected_token_commitment != token_commitment {
             return rejected("not_found");
         }
@@ -306,15 +301,6 @@ fn validate_third_party_invite(third_party_invite: &Value) -> Result<(), &'stati
         return Err("token_commitment_required");
     }
     Ok(())
-}
-
-fn token_commitment_for_third_party(third_party_invite: &ThirdPartyInvite) -> Option<&str> {
-    third_party_invite
-        .token_commitment
-        .as_ref()
-        .map(arkret_identifiers::Hash::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
 }
 
 /// `third-party-invites.md`: v1 base conformance carries a 3PID claim into

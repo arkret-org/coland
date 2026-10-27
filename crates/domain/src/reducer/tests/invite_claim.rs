@@ -149,11 +149,8 @@ fn invite_claim_converts_third_party_invite_to_claimed_invite() {
         .as_ref()
         .expect("third_party_invite");
     assert_eq!(
-        third_party_invite
-            .token_commitment
-            .as_ref()
-            .map(|h| h.as_str()),
-        Some(TOKEN_COMMITMENT)
+        third_party_invite.token_commitment.as_str(),
+        TOKEN_COMMITMENT
     );
     assert!(third_party_invite.token_salt_id.is_none());
     let member = state
@@ -393,11 +390,8 @@ fn expired_claim_is_rejected_without_mutating_the_pending_invite() {
         .as_ref()
         .expect("third_party_invite remains");
     assert_eq!(
-        third_party_invite
-            .token_commitment
-            .as_ref()
-            .map(|h| h.as_str()),
-        Some(TOKEN_COMMITMENT)
+        third_party_invite.token_commitment.as_str(),
+        TOKEN_COMMITMENT
     );
     assert_eq!(third_party_invite.token_salt_id.as_deref(), Some("salt-1"));
 }

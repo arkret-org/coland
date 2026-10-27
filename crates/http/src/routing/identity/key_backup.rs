@@ -19,10 +19,7 @@ use serde_json::{Value, json};
 use super::append_audit_log;
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
-use crate::wire::{
-    KeyBackupPutStatus, KeysBackupsDeleteResponseBody, KeysBackupsPage,
-    KeysBackupsReplaceResponseBody,
-};
+use crate::wire::{KeyBackupPutStatus, KeysBackupsPage, KeysBackupsReplaceResponseBody};
 
 mod delete;
 mod handlers;

@@ -8,16 +8,14 @@
 //!     projection event so the MIMI ingress shows up on the canonical Arkret timeline.
 //!   * `POST /mimi/strands/{strand_id}/update` -> emits a `ak.mimi.room_binding` projection event
 //!     whenever the update body carries a `room_binding` block.
-//!   * `POST /mimi/strands/{strand_id}/notify` -> broadcasts a synthetic
-//!     `ak.open.mimi.command.notify.v1` projection event so live subscribers observe MIMI fanout.
+//!   * `POST /mimi/strands/{strand_id}/notify` requires a real provider delivery consumer;
+//!     unavailable delivery never creates an Event or a fake ACK.
 //!   * `POST /mimi/report-abuse` -> verifies the closed reporter claim and current authority, then
 //!     submits a facade-service-authored `ak.self.moderation.report` Event atomically.
 //!
 //! Canonical message-ingress Events carry `payload.mimi_provenance` metadata
 //! (provider id, original MIMI envelope hash, MIMI message id) so the receiver
 //! can distinguish MIMI ingress from a native signed Move.
-
-use std::collections::BTreeMap;
 
 use arkret_identifiers::{EventId, Hash};
 use arkret_models_collaboration::events_payloads::consent::ConsentPeer;
@@ -38,6 +36,7 @@ use arkret_signatures::http_signature::{
     SignaturePolicyError, SignatureVerificationPolicy,
 };
 use arkret_wire::{Audience, MimiRoomUri, MimiUri, MlsGroupId};
+#[cfg(test)]
 use chrono::Duration;
 use coland_http::error::AppError;
 use coland_http::http_signature;

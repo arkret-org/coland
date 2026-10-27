@@ -503,7 +503,8 @@ pub(super) async fn delete_key_backup(
     backup_id: PathParam<String>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeysBackupsDeleteResponseBody> {
+    res: &mut Response,
+) -> Result<(), AppError> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let idempotency_principal_id = arkret_wire::DidCoreId::new(session.actor.clone())
@@ -545,34 +546,8 @@ pub(super) async fn delete_key_backup(
         idempotency_principal_id.clone(),
         state.service_core_id(),
     ));
-    match state
-        .jobs()
-        .scoped_idempotency_record(
-            &authenticated_actor,
-            "ak.self.keys.backups.resource.delete",
-            &idempotency_key,
-        )
-        .await
-    {
-        Ok(Some(record)) if record.request_hash == request_hash => {
-            let outcome: KeysBackupsDeleteResponseBody =
-                serde_json::from_value(record.response_body).map_err(|error| {
-                    AppError::internal(format!("stored delete outcome is corrupt: {error}"))
-                })?;
-            return json_ok(outcome);
-        }
-        Ok(Some(_)) => {
-            return Err(AppError::conflict(
-                "request_id was reused with a different delete request body",
-            )
-            .with_wire_code("duplicate_conflict"));
-        }
-        Ok(None) => {}
-        Err(error) => {
-            return Err(AppError::internal(format!(
-                "delete idempotency lookup failed: {error}"
-            )));
-        }
+    if accepted_delete_replay(state, &authenticated_actor, &idempotency_key, &request_hash).await? {
+        return empty_delete_success(res);
     }
 
     let account_actor = local_backup_actor(state, &session.actor)?;
@@ -583,18 +558,56 @@ pub(super) async fn delete_key_backup(
         .map_err(|error| AppError::internal(format!("key backup lookup failed: {error}")))?
         .filter(|backup| backup_actor_matches(backup, &account_actor));
     let Some(backup) = owned_backup else {
-        // spec `keys_backups_delete_outcome` models `deleted: const true` only;
-        // a backup that does not exist (or is not owned by this actor) cannot be
-        // represented as a success outcome, so report it as not-found.
+        if accepted_delete_replay(state, &authenticated_actor, &idempotency_key, &request_hash)
+            .await?
+        {
+            return empty_delete_success(res);
+        }
         return Err(AppError::not_found("key backup not found"));
     };
     let now = chrono::Utc::now();
+    let replay = coland_storage::IdempotencyRecord {
+        authenticated_actor: authenticated_actor.clone(),
+        operation_id: "ak.self.keys.backups.resource.delete".to_owned(),
+        idempotency_key: idempotency_key.clone(),
+        request_hash: request_hash.clone(),
+        response_status: 200,
+        response_body: Value::Null,
+        created_at: now,
+        expires_at: now + chrono::Duration::seconds(KEY_BACKUP_DELETE_IDEMPOTENCY_TTL_SECONDS),
+    };
     let authorized =
-        authorize_key_backup_delete(state, &body, &backup_id, &session.actor, now).await?;
+        match authorize_key_backup_delete(state, &body, &backup_id, &session.actor, replay, now)
+            .await
+        {
+            Ok(authorized) => authorized,
+            Err(error) => {
+                if accepted_delete_replay(
+                    state,
+                    &authenticated_actor,
+                    &idempotency_key,
+                    &request_hash,
+                )
+                .await?
+                {
+                    return empty_delete_success(res);
+                }
+                return Err(error);
+            }
+        };
     ensure_key_backup_delete_allowed(state, &session.actor, &backup).await?;
     // Policy/session validation, single-use challenge and exact backup deletion
     // share one storage transaction, including rollback on a changed object.
-    consume_key_backup_delete_challenge(state, &authorized, backup.clone(), now).await?;
+    if let Err(error) =
+        consume_key_backup_delete_challenge(state, &authorized, backup.clone(), now).await
+    {
+        if accepted_delete_replay(state, &authenticated_actor, &idempotency_key, &request_hash)
+            .await?
+        {
+            return empty_delete_success(res);
+        }
+        return Err(error);
+    }
     append_audit_log(
         state,
         Some(&session.actor),
@@ -612,54 +625,39 @@ pub(super) async fn delete_key_backup(
         "deleted",
     )
     .await;
-    let outcome = KeysBackupsDeleteResponseBody {
-        deleted: true,
-        backup_id: BackupId::new(backup_id).ok(),
-    };
-    record_delete_idempotency(
-        state,
-        &idempotency_principal_id,
-        &idempotency_key,
-        &request_hash,
-        &outcome,
-    )
-    .await;
-    json_ok(outcome)
+    empty_delete_success(res)
 }
 
-/// Persist the terminal outcome so an identical retry replays it.
-///
-/// A persist failure is logged rather than surfaced: the delete has already
-/// happened, and turning a successful delete into a 5xx would be worse than
-/// losing the replay shortcut (the retry then hits the consumed challenge and
-/// fails closed, which is safe).
-async fn record_delete_idempotency(
+fn empty_delete_success(res: &mut Response) -> Result<(), AppError> {
+    res.status_code(StatusCode::OK);
+    Ok(())
+}
+
+async fn accepted_delete_replay(
     state: &AppState,
-    actor_id: &arkret_wire::DidCoreId,
-    idempotency_key: &str,
+    actor: &arkret_wire::ActorId,
+    key: &str,
     request_hash: &str,
-    outcome: &KeysBackupsDeleteResponseBody,
-) {
-    let Ok(response_body) = serde_json::to_value(outcome) else {
-        return;
-    };
-    let created_at = chrono::Utc::now();
-    let record = coland_services::jobs::IdempotencyState {
-        authenticated_actor: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-            actor_id.clone(),
-            state.service_core_id(),
-        )),
-        operation_id: "ak.self.keys.backups.resource.delete".to_owned(),
-        idempotency_key: idempotency_key.to_owned(),
-        request_hash: request_hash.to_owned(),
-        response_status: 200,
-        response_body,
-        created_at,
-        expires_at: created_at
-            + chrono::Duration::seconds(KEY_BACKUP_DELETE_IDEMPOTENCY_TTL_SECONDS),
-    };
-    if let Err(error) = state.jobs().store_idempotency_record(record).await {
-        tracing::warn!(%error, idempotency_key, "key backup delete idempotency persist failed");
+) -> Result<bool, AppError> {
+    let record = state
+        .jobs()
+        .scoped_idempotency_record(actor, "ak.self.keys.backups.resource.delete", key)
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("delete idempotency lookup failed: {error}"))
+        })?;
+    match record {
+        Some(record) if record.request_hash == request_hash => {
+            if record.response_status != 200 || !record.response_body.is_null() {
+                return Err(AppError::internal("stored empty delete outcome is corrupt"));
+            }
+            Ok(true)
+        }
+        Some(_) => Err(AppError::conflict(
+            "request_id was reused with a different delete request body",
+        )
+        .with_wire_code("duplicate_conflict")),
+        None => Ok(false),
     }
 }
 

@@ -238,8 +238,7 @@ pub use arkret_models_crypto::KeysBackupsPutRequestBody;
 // `keys-operations.schema.json#/$defs/keys_backups_replace_response_body` /
 // `keys_backups_delete_outcome`); no coland mirrors.
 pub use arkret_models_crypto::{
-    KeyBackupPutStatus, KeysBackupsDeleteResponseBody, KeysBackupsPage,
-    KeysBackupsReplaceResponseBody,
+    KeyBackupPutStatus, KeysBackupsPage, KeysBackupsReplaceResponseBody,
 };
 pub use arkret_models_identity::identity::{
     IdentityLogListResponseBody, IdentityReceiptListResponseBody,

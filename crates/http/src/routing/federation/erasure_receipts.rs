@@ -179,13 +179,9 @@ async fn submit(
                     .with_wire_code("duplicate_conflict"),
             );
         }
-        signed_acceptance(
-            state,
-            &body,
-            ErasureReceiptAcceptanceStatus::Duplicate,
-            stored.acceptance.accepted_at,
-        )
-        .await?
+        // A new transport key does not create a new logical acceptance. The
+        // schema requires a duplicate's exact original bytes, including proof.
+        stored.acceptance
     } else {
         signed_acceptance(
             state,

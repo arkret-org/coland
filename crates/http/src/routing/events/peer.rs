@@ -17,7 +17,7 @@ use arkret_models_collaboration::principal_operations::{
     PcrGenesisAdmissionInput, PcrGenesisAdmissionResponseBody,
 };
 use arkret_models_identity::service_identity::CanonicalServiceUrl;
-use arkret_wire::{SignalRelayRequestBody, SignalRelayResponseBody};
+use arkret_wire::SignalRelayRequestBody;
 #[cfg(test)]
 use chrono::DateTime;
 use chrono::{Duration, Utc};
@@ -1060,7 +1060,8 @@ async fn validate_account_status_publication(
 async fn peer_signal_relay(
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<SignalRelayResponseBody> {
+    res: &mut Response,
+) -> coland_http::result::AppResult<()> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     if req.headers().contains_key("idempotency-key") {
         return Err(schema_violation(
@@ -1113,7 +1114,8 @@ async fn peer_signal_relay(
             );
         }
     }
-    json_ok(SignalRelayResponseBody::ACCEPTED)
+    res.status_code(StatusCode::NO_CONTENT);
+    Ok(())
 }
 
 fn validate_signal_signature_window(req: &Request) -> Result<(), AppError> {

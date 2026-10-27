@@ -38,6 +38,7 @@ pub(crate) const DISCLOSED_EVENT_KINDS: &[EventKind] = &[
     EventKind::RealmHistoryAccess,
     EventKind::ScopeReadReceiptPolicy,
     EventKind::RealmPreviewPolicy,
+    EventKind::RealmAssetPrivacyPolicy,
     EventKind::RealmDiscovery,
     EventKind::RealmAlias,
     EventKind::RealmPlaintextVisibleServices,
@@ -77,6 +78,7 @@ pub(crate) const DISCLOSED_EVENT_KINDS: &[EventKind] = &[
     EventKind::PinReorder,
     EventKind::MlsGenesis,
     EventKind::MlsCommit,
+    EventKind::MimiRoomBinding,
     EventKind::CircleCreate,
     EventKind::CircleMemberState,
     EventKind::ModerationDecision,
@@ -1226,7 +1228,6 @@ async fn disclosure_facts_in_connection(
 ) -> PersistenceResult<DisclosureFacts> {
     let undisclosed_family_row = sql_query(
         "SELECT (EXISTS(SELECT 1 FROM realm_link_current_states WHERE realm_id=$1) \
-            OR EXISTS(SELECT 1 FROM mimi_room_binding_current_states WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM policy_current_states WHERE realm_id=$1 \
                 AND (value->>'schema' IS DISTINCT FROM 'ak.schema.policy.v1' \
                     OR COALESCE(value->>'policy_kind','') NOT IN ('access','moderation','agent','applet') \
@@ -1651,6 +1652,16 @@ fn rejected(reason: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::SchemaViolation(format!("snapshot disclosure is unproved: {reason}"))
 }
 
+pub(crate) fn mimi_binding_current(
+    row: &CurrentState,
+) -> PersistenceResult<arkret_models_collaboration::events_payloads::mimi::CurrentMimiRoomBinding> {
+    let binding: arkret_models_collaboration::events_payloads::mimi::CurrentMimiRoomBinding =
+        serde_json::from_value(serde_json::to_value(row).map_err(PersistenceError::database)?)
+            .map_err(PersistenceError::database)?;
+    binding.validate().map_err(rejected)?;
+    Ok(binding)
+}
+
 async fn call_creation_fact(
     conn: &mut AsyncPgConnection,
     realm_id: &RealmId,
@@ -1799,6 +1810,7 @@ pub(crate) fn disclose_to_actor(
         })
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut private_applet_policies = std::collections::BTreeSet::new();
+    let mut mimi_binding_scopes = std::collections::BTreeMap::new();
     for row in &material.current_state_entries {
         let CurrentState::Value {
             selector,
@@ -1825,6 +1837,27 @@ pub(crate) fn disclose_to_actor(
             Ok(scope_stream(circle))
         };
         let expected = match selector {
+            CurrentSelector::MimiRoomBinding { mimi_room_uri } => {
+                let binding = mimi_binding_current(row)?;
+                let strand = strands
+                    .get(&binding.value.binding_scope.strand_id)
+                    .ok_or_else(|| rejected("MIMI binding has no accepted Strand current"))?;
+                if binding.value.binding_scope.realm_id != material.realm_id
+                    || strand.pointer("/tracks/discussion").is_none()
+                    || strand
+                        .pointer("/tracks/discussion/enabled")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(false)
+                {
+                    return Err(rejected(
+                        "MIMI binding target is not this Realm's discussion Strand",
+                    ));
+                }
+                mimi_binding_scopes.insert(mimi_room_uri.clone(), object_scope(strand)?);
+                // The accepted Commit determines the source stream. The bound
+                // Strand independently determines reference disclosure.
+                Some(source_stream_ref.clone())
+            }
             CurrentSelector::Pin { pin_scope } => Some(match pin_scope {
                 arkret_wire::PinScope::Realm { id } if id == &material.realm_id => {
                     realm_stream.clone()
@@ -1989,6 +2022,19 @@ pub(crate) fn disclose_to_actor(
             };
             visible_stream
                 && match selector {
+                    CurrentSelector::MimiRoomBinding { mimi_room_uri } => match mimi_binding_scopes
+                        .get(mimi_room_uri)
+                    {
+                        Some(CommitStreamRef::Realm { realm_id }) => realm_id == &material.realm_id,
+                        Some(CommitStreamRef::Circle {
+                            realm_id,
+                            circle_id,
+                        }) => {
+                            realm_id == &material.realm_id
+                                && facts.circle_floors.contains_key(circle_id)
+                        }
+                        _ => false,
+                    },
                     // constraint-schema §9.2.6 makes the confirmation nonce
                     // private. Snapshot §3 and current-state §3 include only
                     // rows disclosed to the requester, never a redacted value.
@@ -2063,6 +2109,16 @@ pub(crate) fn disclose_to_actor(
             ));
         }
         match selector {
+            CurrentSelector::MimiRoomBinding { .. } => {
+                let binding = mimi_binding_current(row)?;
+                if !material.current_state_entries.iter().any(|entry| {
+                    matches!(entry,
+                    CurrentState::Value { selector: CurrentSelector::Strand { strand_id }, .. }
+                    if strand_id == &binding.value.binding_scope.strand_id)
+                }) {
+                    return Err(rejected("MIMI binding target is not disclosed"));
+                }
+            }
             CurrentSelector::AgentInteraction { .. } => {
                 let _: arkret_models_collaboration::agent_interaction::AgentInteractionCurrentValue = serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
                 if source_stream_ref != &realm_stream {
@@ -2289,6 +2345,9 @@ pub(crate) fn disclose_to_actor(
             }
             CurrentSelector::RealmPreviewPolicy => {
                 let _: arkret_models_collaboration::events_payloads::preview::PreviewPolicyPayloadValue = serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+            }
+            CurrentSelector::RealmAssetPrivacyPolicy => {
+                let _: arkret_models_collaboration::governance::realm_lifecycle::RealmAssetPrivacyPolicyValue = serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
             }
             CurrentSelector::MemberState { actor_id } => {
                 own_join |=
@@ -2696,6 +2755,108 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn add_mimi_binding(
+        material: &mut coland_storage::RealmStateSnapshotMaterial,
+        strand: &StrandId,
+    ) {
+        for entry in &mut material.current_state_entries {
+            if let CurrentState::Value {
+                selector: CurrentSelector::Strand { strand_id },
+                value,
+                ..
+            } = entry
+                && strand_id == strand
+            {
+                value["tracks"] = json!({"discussion":{"enabled":true}});
+            }
+        }
+        material.current_state_entries.push(row(
+            CurrentSelector::MimiRoomBinding { mimi_room_uri: arkret_wire::MimiRoomUri::new("mimi://binding.example/rooms/current").unwrap() },
+            7,
+            json!({"profile":"ak.profile.mimi_interop.v1", "mimi_room_uri":"mimi://binding.example/rooms/current",
+                "binding_scope":{"realm_id":realm_id(), "strand_id":strand},
+                "hub_provider_id":"ak:did_core:web:binding.example", "local_provider_role":"hub", "status":"accepted"}),
+        ));
+    }
+
+    #[test]
+    fn mimi_snapshot_preserves_full_current_and_refuses_invalid_target_or_source() {
+        let (caller, mut material, facts) = fixture();
+        let strand = StrandId::from_event_id(&event_id(0x22));
+        add_mimi_binding(&mut material, &strand);
+        let original = material.current_state_entries.last().unwrap().clone();
+        assert!(
+            disclose_to_account(material.clone(), &caller, &facts)
+                .unwrap()
+                .current_state_entries
+                .contains(&original)
+        );
+        for mutation in ["uri", "realm", "strand", "source", "disabled"] {
+            let mut invalid = material.clone();
+            let CurrentState::Value {
+                value,
+                source_stream_ref,
+                ..
+            } = invalid.current_state_entries.last_mut().unwrap();
+            match mutation {
+                "uri" => value["mimi_room_uri"] = json!("mimi://binding.example/rooms/other"),
+                "realm" => {
+                    value["binding_scope"]["realm_id"] =
+                        json!(RealmId::from_event_id(&event_id(0x71)))
+                }
+                "strand" => {
+                    value["binding_scope"]["strand_id"] =
+                        json!(StrandId::from_event_id(&event_id(0x72)))
+                }
+                "source" => {
+                    *source_stream_ref = CommitStreamRef::Realm {
+                        realm_id: RealmId::from_event_id(&event_id(0x73)),
+                    }
+                }
+                _ => {
+                    for entry in &mut invalid.current_state_entries {
+                        if let CurrentState::Value {
+                            selector: CurrentSelector::Strand { strand_id },
+                            value,
+                            ..
+                        } = entry
+                            && strand_id == &strand
+                        {
+                            value["tracks"]["discussion"]["enabled"] = json!(false);
+                        }
+                    }
+                }
+            }
+            assert!(
+                disclose_to_account(invalid, &caller, &facts).is_err(),
+                "{mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn mimi_snapshot_hides_circle_reference_even_when_binding_source_is_realm() {
+        let (caller, mut material, mut facts) = circle_fixture();
+        let strand = StrandId::from_event_id(&event_id(0x52));
+        add_mimi_binding(&mut material, &strand);
+        let original = material.current_state_entries.last().unwrap().clone();
+        assert!(
+            disclose_to_account(material.clone(), &caller, &facts)
+                .unwrap()
+                .current_state_entries
+                .contains(&original)
+        );
+        facts.circle_floors.clear();
+        let hidden = disclose_to_account(material, &caller, &facts).unwrap();
+        assert!(!hidden.current_state_entries.iter().any(|entry| matches!(
+            entry,
+            CurrentState::Value {
+                selector: CurrentSelector::MimiRoomBinding { .. },
+                ..
+            }
+        )));
     }
 
     #[test]

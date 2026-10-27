@@ -20,6 +20,8 @@ struct MemberRow {
     member_id: String,
     #[diesel(sql_type = Text)]
     membership: String,
+    #[diesel(sql_type = Nullable<Jsonb>)]
+    private_owner: Option<Value>,
 }
 
 #[derive(diesel::QueryableByName)]
@@ -152,13 +154,33 @@ pub(crate) async fn publish_realm_account_summary_in_connection(
     realm_id: &arkret_wire::RealmId,
 ) -> PersistenceResult<()> {
     let members = diesel::sql_query(
-        "SELECT member_id,membership FROM member_state_current_states \
+        "SELECT member_id,membership,public.account_private_owner_for_actor(member_id) AS private_owner FROM member_state_current_states \
          WHERE realm_id=$1 ORDER BY member_id COLLATE \"C\"",
     )
     .bind::<Text, _>(realm_id.as_str())
     .load::<MemberRow>(&mut *conn)
     .await
     .map_err(PersistenceError::database)?;
+    if members.is_empty() {
+        return Ok(());
+    }
+    // Authority locks precede compatible Account SHARE fences, which precede
+    // private summary row locks. A completed recipient is never re-created by
+    // an unrelated member's later canonical Realm Event.
+    let mut writable_members = Vec::with_capacity(members.len());
+    for member in members {
+        if let Some(owner) = &member.private_owner {
+            let owner: arkret_wire::AccountId =
+                serde_json::from_value(owner.clone()).map_err(PersistenceError::database)?;
+            if !crate::account_private_erasure::lock_private_storage_in_connection(conn, &owner)
+                .await?
+            {
+                continue;
+            }
+        }
+        writable_members.push(member);
+    }
+    let members = writable_members;
     if members.is_empty() {
         return Ok(());
     }

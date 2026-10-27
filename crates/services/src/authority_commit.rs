@@ -364,6 +364,16 @@ impl AuthorityCommitApplication {
     {
         Ok(self.store().realm_media_service_current(realm).await?)
     }
+    /// Read only the durable asset policy admitted by the authority log.
+    pub async fn realm_asset_privacy_policy_current(
+        &self,
+        realm: &arkret_wire::RealmId,
+    ) -> ServiceResult<Option<arkret_wire::CurrentState>> {
+        Ok(self
+            .store()
+            .realm_asset_privacy_policy_current(realm)
+            .await?)
+    }
     pub async fn morph_list_for_actor(
         &self,
         realm: &arkret_wire::RealmId,

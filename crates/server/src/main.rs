@@ -18,6 +18,15 @@ pub(crate) mod object_storage;
 pub(crate) mod otel;
 pub(crate) mod runtime;
 
+fn federation_service_document(
+    evidence: &arkret_models_identity::AuthenticatedServiceResolution,
+    service_id: &arkret_wire::DidCoreId,
+    at: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<arkret_models_identity::service_identity::ServiceDidDocument> {
+    let document = arkret_identity::authenticated_service_document_at(evidence, service_id, at)?;
+    Ok(serde_json::from_value(serde_json::to_value(document)?)?)
+}
+
 /// Apply the native TCP latency policy before Salvo wraps the socket or starts TLS.
 /// All normal and identity-bootstrap listeners use this same typed factory.
 fn low_latency_tcp_listener(bind: String) -> NoDelayTcpListener {
@@ -322,6 +331,7 @@ async fn prepare_server(raw_args: Vec<String>) -> anyhow::Result<ServingFuture> 
         .resolution_commitment
         .clone()
         .ok_or_else(|| anyhow::anyhow!("serving service identity has no resolution commitment"))?;
+    let station_identity = bootstrap.state.clone();
     let mut state = crate::runtime::build_app_state(
         config.clone(),
         db,
@@ -330,6 +340,28 @@ async fn prepare_server(raw_args: Vec<String>) -> anyhow::Result<ServingFuture> 
         resolution_commitment,
         bootstrap.signing_seed,
     )?;
+    if let Some(path) = config.local_account_authority_config.as_deref() {
+        let resolution = state
+            .authenticated_service_resolution()
+            .await
+            .context("could not read the original native Station method proof")?;
+        let authority =
+            coauth_backend::services::station_authority::IssuerLedgerAuthority::connect_from_file(
+                path,
+                &station_identity,
+                &resolution,
+                &url::Url::parse(&config.public_base_url)?,
+                &url::Url::parse(
+                    config
+                        .account_authority_url
+                        .as_deref()
+                        .context("local issuer requires its Account Authority public endpoint")?,
+                )?,
+            )
+            .await
+            .context("could not open the explicitly delegated Account Authority")?;
+        state = state.with_local_account_authority(authority)?;
+    }
     if let Some(store) = supervisor_key_store.clone() {
         state = state.with_verifier_private_keystore(store);
     }
@@ -913,19 +945,14 @@ fn spawn_federation_peer_discovery(state: AppState) {
                             tracing::warn!(%endpoint, "verified peer route omits its retained method evidence");
                             continue;
                         };
-                        let document_value = match serde_json::to_value(
-                            &evidence.normalized_did_document,
+                        // The normalized projection is not a W3C DID document.
+                        // Recover the actual method-native document from its
+                        // verified history before applying the Service profile.
+                        let document = match federation_service_document(
+                            &evidence,
+                            &description.service_id,
+                            now,
                         ) {
-                            Ok(document) => document,
-                            Err(error) => {
-                                tracing::warn!(%endpoint, %error, "verified peer document cannot be encoded");
-                                continue;
-                            }
-                        };
-                        let document = match serde_json::from_value::<
-                            arkret_models_identity::service_identity::ServiceDidDocument,
-                        >(document_value.clone())
-                        {
                             Ok(document) => document,
                             Err(error) => {
                                 tracing::warn!(
@@ -1229,6 +1256,79 @@ async fn run_healthcheck(args: &[String]) -> anyhow::Result<()> {
             eprintln!("coland healthcheck FAIL: {url} → {err}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod federation_discovery_tests {
+    use arkret_models_identity::service_identity::{CanonicalServiceUrl, ServiceRegistrationKey};
+    use arkret_signatures::webvh::{
+        ServiceRegistrationInceptionInput, prepare_service_registration_inception,
+    };
+    use rand::SeedableRng as _;
+
+    use super::*;
+
+    #[test]
+    fn federation_discovery_recovers_native_document_from_verified_normalized_carrier() {
+        // Component evidence only: the native HTTP contracts separately prove
+        // real service registration, admitted identities and peer delivery.
+        let at = "2026-10-26T00:00:00.000Z".parse().unwrap();
+        let registration = ServiceRegistrationKey::new(
+            arkret_wire::ServiceKind::Station,
+            CanonicalServiceUrl::new("https://station.example/").unwrap(),
+        )
+        .unwrap();
+        let endpoint = "https://identity.example/".parse().unwrap();
+        let prepared = prepare_service_registration_inception(
+            &mut rand::rngs::StdRng::from_seed([91; 32]),
+            &ServiceRegistrationInceptionInput {
+                provider_endpoint: &endpoint,
+                registration_key: &registration,
+                also_known_as: &[],
+                version_created_at: at,
+                did_key_fragment: None,
+            },
+        )
+        .unwrap();
+        let did = arkret_wire::Did::new(prepared.did.clone()).unwrap();
+        let service_id = arkret_wire::project_did_to_core_id(&did).unwrap();
+        let evidence = arkret_identity::build_authenticated_webvh_service_resolution(
+            service_id.clone(),
+            "station".into(),
+            serde_json::from_value(prepared.log_entry["state"].clone()).unwrap(),
+            vec![prepared.log_entry.clone()],
+            vec![],
+            at,
+        )
+        .unwrap();
+        let wire = serde_json::to_value(&evidence).unwrap();
+        assert!(
+            wire["normalized_did_document"]
+                .get("also_known_as")
+                .is_some()
+        );
+        let transported = serde_json::from_value(wire).unwrap();
+        let document = federation_service_document(&transported, &service_id, at).unwrap();
+        document.validate_for(&registration).unwrap();
+        assert_eq!(document.id, did);
+        assert_eq!(
+            document.assertion_method,
+            evidence.normalized_did_document.raw_properties["assertionMethod"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        );
+        let mut changed = transported.clone();
+        changed
+            .normalized_did_document
+            .also_known_as
+            .push("https://unverified.example/".into());
+        assert!(federation_service_document(&changed, &service_id, at).is_err());
+        let other = arkret_wire::DidCoreId::new("ak:did_core:web:other.example").unwrap();
+        assert!(federation_service_document(&transported, &other, at).is_err());
     }
 }
 

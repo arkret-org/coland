@@ -377,23 +377,18 @@ async fn open_service_resolution_serves_byte_canonical_evidence_body() {
 }
 
 #[test]
-fn readyz_returns_503_until_session_grant_internal_channel_is_complete() {
+fn readyz_returns_503_until_requested_local_issuer_is_loaded() {
     run_on_test_runtime(
-        "readyz_returns_503_until_session_grant_internal_channel_is_complete",
-        readyz_returns_503_until_session_grant_internal_channel_is_complete_body,
+        "readyz_returns_503_until_requested_local_issuer_is_loaded",
+        readyz_returns_503_until_requested_local_issuer_is_loaded_body,
     );
 }
 
-async fn readyz_returns_503_until_session_grant_internal_channel_is_complete_body() {
+async fn readyz_returns_503_until_requested_local_issuer_is_loaded_body() {
     let mut config = test_config();
     config.development_mode = false;
-    config.session_grant_introspection_url =
-        Some("https://coauth.example/_coauth/internal/session-grants/introspect".to_owned());
-    // URL + bearer alone must not make the process ready: the unsigned
-    // introspection path is unavailable until trust-domain and integrity
-    // registration have also produced `internal_authority_channel`.
-    config.internal_authority_shared_secret = Some("configured-but-insufficient".to_owned());
-    config.internal_authority_channel = None;
+    config.local_account_authority_config = Some("issuer.yaml".into());
+    // A requested capability is not ready until the actual provider is injected.
     let service = app_from_state(coland_test_support::app_state(config));
 
     let mut response = TestClient::get("http://server/readyz").send(&service).await;

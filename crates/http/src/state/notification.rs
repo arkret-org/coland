@@ -34,6 +34,9 @@ pub struct EventNotification {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum EventNotificationKind {
+    /// An authenticated provider asks readers to refresh their authorized
+    /// canonical cut. This internal wakeup is never rendered as wire data.
+    RealmRefreshHint,
     /// Ordinary projection event (one `ak.message.create` etc.).
     Event {
         /// Stable cursor for the event — typically the canonical
@@ -79,10 +82,25 @@ pub struct EventBroadcast {
 }
 
 pub trait EventNotificationRelay: Send + Sync {
-    fn publish(&self, notification: EventNotification);
+    /// True only when the bounded relay queue accepted this wakeup.
+    /// It does not acknowledge remote delivery.
+    fn publish(&self, notification: EventNotification) -> bool;
 }
 
 impl EventBroadcast {
+    pub(crate) fn publish_refresh_hint(&self, realm_id: String) -> bool {
+        let notification = EventNotification {
+            realm_id,
+            kind: EventNotificationKind::RealmRefreshHint,
+        };
+        let relay = self
+            .relay
+            .as_ref()
+            .is_some_and(|relay| relay.publish(notification.clone()));
+        let local = self.local.send(notification).is_ok();
+        local || relay
+    }
+
     pub fn new(capacity: usize) -> Self {
         let local = broadcast::channel::<EventNotification>(capacity).0;
         Self { local, relay: None }
@@ -162,5 +180,26 @@ impl EventNotification {
             realm_id,
             kind: EventNotificationKind::Signal { signal_class },
         }
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn refresh_requires_a_real_local_consumer_without_a_relay() {
+        let queue = EventBroadcast::new(1);
+        assert!(!queue.publish_refresh_hint("component-room".into()));
+        let mut consumer = queue.subscribe();
+        assert!(queue.publish_refresh_hint("component-room".into()));
+        let received = consumer.recv().await.unwrap();
+        assert_eq!(received.realm_id, "component-room");
+        assert!(matches!(
+            received.kind,
+            EventNotificationKind::RealmRefreshHint
+        ));
+        drop(consumer);
+        assert!(!queue.publish_refresh_hint("component-room".into()));
     }
 }

@@ -542,15 +542,7 @@ async fn opaque_deactivation_recovery_body() {
         "real public-Gateway registration must succeed"
     );
     let installed: PushRegisterDeviceResponseBody = response.take_json().await.unwrap();
-    let registration_id = arkret_models_integration::PushRegistrationId::new(
-        installed
-            .registration_id
-            .as_ref()
-            .expect("public Gateway registration id")
-            .as_str()
-            .to_owned(),
-    )
-    .unwrap();
+    let registration_id = installed.registration_id;
     let persistence = state.test_persistence();
     let active = persistence
         .push_registration_handoffs()

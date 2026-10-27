@@ -212,6 +212,35 @@ async fn guard_snapshot_revisions(
         let source = serde_json::to_value(source_stream_ref).map_err(malformed)?;
         let incoming_position = position(revision.stream_position)?;
         match selector {
+            S::MimiRoomBinding { .. } => {
+                // A snapshot has no accepting EventId. Preserve its verified
+                // public Current in replica_authorization_rows, without
+                // manufacturing governing admission provenance.
+                let binding = crate::snapshot_disclosure_gate::mimi_binding_current(entry)?;
+                if binding.value.binding_scope.realm_id != *realm_id
+                    || !entries.iter().any(|candidate| {
+                        matches!(candidate,
+                        arkret_wire::CurrentState::Value { selector: S::Strand { strand_id }, .. }
+                        if strand_id == &binding.value.binding_scope.strand_id)
+                    })
+                {
+                    return Err(malformed("MIMI binding lacks its disclosed target Strand"));
+                }
+                let old = diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM replica_authorization_rows WHERE realm_id=$1 AND selector=$2 FOR UPDATE")
+                    .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(selector).map_err(malformed)?)
+                    .get_result::<ExistingFrankingProofCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+                if old.is_some_and(|old| {
+                    old.source_stream_ref != source
+                        || old.current_stream_position > incoming_position
+                        || (old.current_stream_position == incoming_position
+                            && (old.current_commit_id != revision.commit_id.as_str()
+                                || old.value != *value))
+                }) {
+                    return Err(malformed(
+                        "MIMI binding snapshot source, revision or value conflicts",
+                    ));
+                }
+            }
             S::ScopeReadReceiptPolicy { scope_ref } => {
                 let current =
                     arkret_models_collaboration::events_payloads::CurrentScopeReadReceiptPolicy {
@@ -974,6 +1003,19 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                 let _: arkret_models_collaboration::events_payloads::preview::PreviewPolicyPayloadValue = serde_json::from_value(value.clone()).map_err(malformed)?;
                 Some("realm_preview_policy")
             }
+            S::RealmAssetPrivacyPolicy => {
+                if source_stream_ref
+                    != &(arkret_wire::CommitStreamRef::Realm {
+                        realm_id: realm_id.clone(),
+                    })
+                {
+                    return Err(malformed(
+                        "asset privacy policy requires the exact Realm source stream",
+                    ));
+                }
+                let _: arkret_models_collaboration::governance::realm_lifecycle::RealmAssetPrivacyPolicyValue = serde_json::from_value(value.clone()).map_err(malformed)?;
+                Some("realm_asset_privacy_policy")
+            }
             S::RealmJoinRule => Some("realm_join_rule"),
             S::RealmHistoryAccess => Some("realm_history_access"),
             S::RealmDiscovery => Some("realm_discovery"),
@@ -1314,6 +1356,7 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             | S::InviteLifecycle { .. }
             | S::InviteLiveTarget { .. }
             | S::InviteDirectedInvitee { .. }
+            | S::MimiRoomBinding { .. }
             | S::MlsGroup { .. } => {}
             _ => {
                 return Err(malformed(format!(
@@ -1400,6 +1443,37 @@ pub(crate) async fn advance_in_connection(
     }
 
     match event.kind {
+        arkret_wire::EventKind::MimiRoomBinding => {
+            if event.realm_id != commit.realm_id
+                || event.event_id != commit.event_ref
+                || arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, None)
+                    .map_err(malformed)?
+                    != commit.stream_ref
+            {
+                return Err(malformed("MIMI binding replica source differs"));
+            }
+            let body: arkret_models_collaboration::events_payloads::mimi::MimiRoomBindingPayload =
+                serde_json::from_value(payload()?).map_err(malformed)?;
+            let entry = arkret_wire::CurrentState::Value {
+                selector: arkret_wire::CurrentSelector::MimiRoomBinding {
+                    mimi_room_uri: body.mimi_room_uri.clone(),
+                },
+                source_stream_ref: commit.stream_ref.clone(),
+                revision: arkret_wire::CurrentRevision {
+                    commit_id: commit.commit_id.clone(),
+                    stream_position: commit.stream_position,
+                },
+                value: serde_json::to_value(body).map_err(malformed)?,
+            };
+            crate::snapshot_disclosure_gate::mimi_binding_current(&entry)?;
+            crate::replica_authorization::save_row(
+                conn,
+                &event.realm_id,
+                &entry,
+                commit.committed_at,
+            )
+            .await?;
+        }
         arkret_wire::EventKind::DirectConversationBound => {
             crate::direct_conversation_admission::commit_binding_current_state_in_connection(
                 conn, event, commit,
@@ -1677,6 +1751,9 @@ pub(crate) async fn advance_in_connection(
         arkret_wire::EventKind::RealmPreviewPolicy => {
             crate::realm_bootstrap_current_states::commit_preview_policy_current_state_in_connection(conn, event, commit).await?;
         }
+        arkret_wire::EventKind::RealmAssetPrivacyPolicy => {
+            crate::realm_bootstrap_current_states::commit_asset_privacy_policy_current_state_in_connection(conn, event, commit).await?;
+        }
         arkret_wire::EventKind::RealmProfile => {
             crate::realm_bootstrap_current_states::commit_realm_profile_current_state_in_connection(
                 conn, event, commit,
@@ -1921,6 +1998,164 @@ mod call_effective_tests;
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn mimi_snapshot_and_tail_keep_public_current_without_inventing_admission() {
+        use arkret_wire::{
+            AccountId, ActorId, CommitStreamHead, CommitStreamRef, CurrentRevision,
+            CurrentSelector, CurrentState, DidCoreId, RealmCommitId, RealmId, ScopeRef, StrandId,
+        };
+        let database = TestDatabase::lease().await;
+        let pool = database.pool();
+        let mut conn = pool.get().await.unwrap();
+        let event_id =
+            arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0x6d; 32]);
+        let realm = RealmId::from_event_id(&event_id);
+        let strand_id = StrandId::from_event_id(&event_id);
+        let actor = ActorId::account(AccountId::new(
+            DidCoreId::new("ak:did_core:web:mimi-author.example").unwrap(),
+            DidCoreId::new("ak:did_core:web:mimi-station.example").unwrap(),
+        ));
+        let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+        let source = CommitStreamRef::Realm {
+            realm_id: realm.clone(),
+        };
+        let head = CommitStreamHead {
+            stream_ref: source.clone(),
+            stream_position: 7,
+            commit_id: RealmCommitId::from_digest([7; 32]),
+        };
+        let strand = arkret_models_collaboration::objects::strand::Strand::discussion(
+            strand_id.clone(),
+            realm.clone(),
+            "MIMI replica",
+            actor.clone(),
+        );
+        let strand_row = CurrentState::Value {
+            selector: CurrentSelector::Strand {
+                strand_id: strand_id.clone(),
+            },
+            source_stream_ref: source.clone(),
+            revision: CurrentRevision {
+                commit_id: head.commit_id.clone(),
+                stream_position: 7,
+            },
+            value: serde_json::to_value(strand).unwrap(),
+        };
+        let payload = json!({"profile":"ak.profile.mimi_interop.v1", "mimi_room_uri":"mimi://replica.example/rooms/current", "binding_scope":{"realm_id":realm,"strand_id":strand_id}, "hub_provider_id":"ak:did_core:web:mimi-station.example", "local_provider_role":"hub", "status":"accepted"});
+        let binding = CurrentState::Value {
+            selector: CurrentSelector::MimiRoomBinding {
+                mimi_room_uri: arkret_wire::MimiRoomUri::new(
+                    "mimi://replica.example/rooms/current",
+                )
+                .unwrap(),
+            },
+            source_stream_ref: source.clone(),
+            revision: CurrentRevision {
+                commit_id: head.commit_id.clone(),
+                stream_position: 7,
+            },
+            value: payload.clone(),
+        };
+        let entries = vec![strand_row.clone(), binding.clone()];
+        for _ in 0..2 {
+            install_snapshot_in_connection(&mut conn, &realm, &head, &entries, at)
+                .await
+                .unwrap();
+        }
+        assert!(
+            crate::replica_authorization::snapshot_current_evidence(
+                &mut conn,
+                &realm,
+                std::slice::from_ref(&head)
+            )
+            .await
+            .unwrap()
+            .contains(&binding)
+        );
+        let absent: ValueRow = diesel::sql_query("SELECT jsonb_build_object('bindings',(SELECT COUNT(*) FROM mimi_room_binding_current_states WHERE realm_id=$1),'events',(SELECT COUNT(*) FROM canonical_events WHERE realm_id=$1)) AS value")
+            .bind::<Text,_>(realm.as_str()).get_result(&mut conn).await.unwrap();
+        assert_eq!(absent.value, json!({"bindings":0,"events":0}));
+        // This component starts after source verification. Structural material
+        // exercises persistence only and never enters native coverage evidence.
+        let mut revoked = payload;
+        revoked["status"] = json!("revoked");
+        let event = arkret_wire::test_support::raw_event_for_actor_at(
+            "ak.mimi.room_binding",
+            ScopeRef::Realm {
+                realm_id: realm.clone(),
+            },
+            actor,
+            revoked.clone(),
+            at,
+        )
+        .unwrap();
+        let mut commit = arkret_wire::test_support::structural_realm_commit_at(
+            &event,
+            realm.clone(),
+            8,
+            arkret_wire::DidUrl::new("did:web:mimi-station.example#authority").unwrap(),
+            at,
+        );
+        commit.previous_commit_ref = Some(head.commit_id.clone());
+        advance_in_connection(&mut conn, &event, &commit)
+            .await
+            .unwrap();
+        crate::replica_authorization::advance_verified_head(&mut conn, &commit)
+            .await
+            .unwrap();
+        let next_head = CommitStreamHead {
+            stream_ref: source,
+            stream_position: 8,
+            commit_id: commit.commit_id.clone(),
+        };
+        let next = CurrentState::Value {
+            selector: CurrentSelector::MimiRoomBinding {
+                mimi_room_uri: arkret_wire::MimiRoomUri::new(
+                    "mimi://replica.example/rooms/current",
+                )
+                .unwrap(),
+            },
+            source_stream_ref: commit.stream_ref.clone(),
+            revision: CurrentRevision {
+                commit_id: commit.commit_id,
+                stream_position: 8,
+            },
+            value: revoked,
+        };
+        assert!(
+            crate::replica_authorization::snapshot_current_evidence(
+                &mut conn,
+                &realm,
+                std::slice::from_ref(&next_head)
+            )
+            .await
+            .unwrap()
+            .contains(&next)
+        );
+        let before:ValueRow = diesel::sql_query("SELECT jsonb_agg(to_jsonb(r) ORDER BY selector::text) AS value FROM replica_authorization_rows r WHERE realm_id=$1").bind::<Text,_>(realm.as_str()).get_result(&mut conn).await.unwrap();
+        let mut fork = next.clone();
+        let CurrentState::Value { value, .. } = &mut fork;
+        value["status"] = json!("accepted");
+        for invalid in [
+            vec![strand_row.clone(), binding],
+            vec![strand_row.clone(), fork],
+            vec![next],
+        ] {
+            diesel::sql_query("BEGIN").execute(&mut conn).await.unwrap();
+            assert!(
+                install_snapshot_in_connection(&mut conn, &realm, &next_head, &invalid, at)
+                    .await
+                    .is_err()
+            );
+            diesel::sql_query("ROLLBACK")
+                .execute(&mut conn)
+                .await
+                .unwrap();
+            let after:ValueRow = diesel::sql_query("SELECT jsonb_agg(to_jsonb(r) ORDER BY selector::text) AS value FROM replica_authorization_rows r WHERE realm_id=$1").bind::<Text,_>(realm.as_str()).get_result(&mut conn).await.unwrap();
+            assert_eq!(before.value, after.value);
+        }
+    }
+
     #[tokio::test]
     async fn agent_policy_snapshot_and_tail_keep_exact_current_without_fabricating_admission() {
         shared_policy_snapshot_and_tail("agent").await;
@@ -2554,6 +2789,7 @@ mod tests {
             "realm_join_rule",
             "realm_history_access",
             "realm_preview_policy",
+            "realm_asset_privacy_policy",
             "realm_discovery",
             "realm_alias",
             "realm_plaintext_visible_services",

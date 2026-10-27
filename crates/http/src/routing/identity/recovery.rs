@@ -139,3 +139,10 @@ pub(super) fn router() -> Router {
     Router::with_path("identity")
         .push(Router::with_path("recovery-policies").get(recovery_policies_get))
 }
+
+/// The method actually accepted for a durable session, never a caller assertion.
+pub(super) fn recovery_session_proof_kind(
+    record: &coland_services::identity::RecoverySessionState,
+) -> Option<arkret_models_crypto::RecoveryProofKind> {
+    recovery_proof_summary(record).map(|summary| summary.kind)
+}

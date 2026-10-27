@@ -608,7 +608,7 @@ const EFFECT_MANIFEST: &[EffectRegistration] = &[
         owner: EventEffectOwnership::TypedStateWriter,
         scope: EventWireScope::DurableEvent,
         reducer_input: true,
-        slot: CacheSlot::FailClosed,
+        slot: CacheSlot::Shared(apply_realm_asset_privacy_policy_dispatch),
     },
     EffectRegistration {
         kind: arkret_wire::CapabilityActionId::REALM_AUTHORITY_RESET,

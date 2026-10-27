@@ -154,6 +154,7 @@ fn decided_at_commit_cut(kind: &arkret_wire::EventKind) -> bool {
             | arkret_wire::EventKind::ScopeReadReceiptPolicy
             | arkret_wire::EventKind::RealmPlaintextVisibleServices
             | arkret_wire::EventKind::RealmPreviewPolicy
+            | arkret_wire::EventKind::RealmAssetPrivacyPolicy
             | arkret_wire::EventKind::RealmTombstone
             | arkret_wire::EventKind::RealmDestroy
             | arkret_wire::EventKind::RealmArchive

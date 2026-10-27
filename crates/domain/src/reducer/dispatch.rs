@@ -761,6 +761,14 @@ fn apply_realm_preview_policy_dispatch(
     s.apply_realm_preview_policy(op)
 }
 
+fn apply_realm_asset_privacy_policy_dispatch(
+    s: &mut ProjectionState,
+    op: &Operation,
+    _hlc: &ServerHlc,
+) -> ProjectionEffect {
+    s.apply_realm_asset_privacy_policy(op)
+}
+
 /// Dispatch for `ak.realm.media_service`; cell family is
 /// `ak.component.realm.media_service.v1`.
 fn apply_realm_media_service_dispatch(

@@ -140,6 +140,11 @@ async fn submit_in_connection(
     .await
     .optional()?
     {
+        crate::account_private_erasure::require_private_write_in_connection(
+            conn,
+            &submission.owner,
+        )
+        .await?;
         if row.canonical_event_digest != submission.canonical_event_digest {
             return Ok(ActorPrivateEventSubmitResult::Refused(
                 ActorPrivateEventRefusal::DuplicateConflict(
@@ -166,6 +171,8 @@ async fn submit_in_connection(
         )
         .await?;
     }
+    crate::account_private_erasure::require_private_write_in_connection(conn, &submission.owner)
+        .await?;
     let owner_key = submission.owner.to_string();
     let decided = match &submission.effect {
         ActorPrivateEventEffect::DevicePushRoute(payload) => {
@@ -260,12 +267,13 @@ async fn submit_in_connection(
     };
     sql_query(
         "INSERT INTO actor_private_events \
-         (id, event_id, actor_id, kind, canonical_event_digest, envelope, outcome, accepted_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+         (id, event_id, actor_id, owner_account_id, kind, canonical_event_digest, envelope, outcome, accepted_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
     )
     .bind::<Binary, _>(event.event_id.token_bytes().to_vec())
     .bind::<Text, _>(event.event_id.as_str())
     .bind::<Text, _>(event.actor_id.to_string())
+    .bind::<Jsonb, _>(serde_json::to_value(&submission.owner).map_err(internal)?)
     .bind::<Text, _>(event.kind.as_str())
     .bind::<Binary, _>(&submission.canonical_event_digest)
     .bind::<Jsonb, _>(serde_json::to_value(event).map_err(internal)?)

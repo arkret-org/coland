@@ -1,3 +1,6 @@
+DROP FUNCTION IF EXISTS public.guard_account_private_payload() CASCADE;
+DROP FUNCTION IF EXISTS public.private_storage_row_owner(jsonb,text,text[]);
+DROP FUNCTION IF EXISTS public.reject_private_erasure_original_mutation() CASCADE;
 DROP TABLE IF EXISTS public.service_registration_receipts;
 DROP TABLE IF EXISTS public.principal_resolution_current_states;
 DROP TABLE IF EXISTS public.applet_grant_registration_sources;
@@ -317,3 +320,9 @@ DROP TABLE IF EXISTS public.applet_configurations;
 DROP FUNCTION IF EXISTS public.index_contact_current();
 DROP FUNCTION IF EXISTS public.contact_operation_peer(jsonb);
 DROP FUNCTION IF EXISTS public.contact_operation_holder(jsonb);
+DROP FUNCTION IF EXISTS public.lock_account_private_storage(jsonb);
+DROP FUNCTION IF EXISTS public.account_private_erasure_authorized(jsonb);
+DROP TABLE IF EXISTS public.account_private_erasure_completions CASCADE;
+DROP TABLE IF EXISTS public.account_erasure_push_receipts CASCADE;
+DROP FUNCTION IF EXISTS public.account_private_owner_for_actor(text);
+DROP FUNCTION IF EXISTS public.account_actor_key(text,text) CASCADE;

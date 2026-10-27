@@ -1666,6 +1666,9 @@ pub(crate) async fn admit_actor_private_account_data_in_connection(
             "actor-private account data admission is not bound to its Event".to_owned(),
         ));
     }
+    let owner = event.actor_id.as_account_id().ok_or_else(|| {
+        PersistenceError::SchemaViolation("account data is owned by an Account".to_owned())
+    })?;
     let token = event.event_id.token_bytes().to_vec();
     sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
         .bind::<Text, _>(format!("actor-private-event:{}", event.event_id))
@@ -1680,6 +1683,7 @@ pub(crate) async fn admit_actor_private_account_data_in_connection(
             .optional()
             .map_err(PersistenceError::database)?
     {
+        crate::account_private_erasure::require_private_write_in_connection(conn, owner).await?;
         return if existing.canonical_event_digest == admission.canonical_event_digest {
             Ok(coland_storage::ActorPrivateAccountDataOutcome::Replayed)
         } else {
@@ -1697,10 +1701,8 @@ pub(crate) async fn admit_actor_private_account_data_in_connection(
         )
         .await?;
     }
+    crate::account_private_erasure::require_private_write_in_connection(conn, owner).await?;
     // The holder's account data lives on its own principal-control Realm.
-    let owner = event.actor_id.as_account_id().ok_or_else(|| {
-        PersistenceError::SchemaViolation("account data is owned by an Account".to_owned())
-    })?;
     let pcr = sql_query(
         "SELECT pcr_realm_id FROM principal_resolutions WHERE principal_id=$1 AND station_id=$2",
     )
@@ -1717,12 +1719,13 @@ pub(crate) async fn admit_actor_private_account_data_in_connection(
     }
     sql_query(
         "INSERT INTO actor_private_events \
-         (id, event_id, actor_id, kind, canonical_event_digest, envelope, outcome, accepted_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,NULL,$7)",
+         (id, event_id, actor_id, owner_account_id, kind, canonical_event_digest, envelope, outcome, accepted_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,$8)",
     )
     .bind::<Binary, _>(&token)
     .bind::<Text, _>(event.event_id.as_str())
     .bind::<Text, _>(event.actor_id.to_string())
+    .bind::<Jsonb, _>(serde_json::to_value(owner).map_err(PersistenceError::database)?)
     .bind::<Text, _>(event.kind.as_str())
     .bind::<Binary, _>(&admission.canonical_event_digest)
     .bind::<Jsonb, _>(serde_json::to_value(event).map_err(PersistenceError::database)?)
@@ -3436,6 +3439,7 @@ async fn commit_scope_current_states_inner(
 
     Box::pin(crate::scope_read_receipt_policy_current_states::commit_read_receipt_policy_authority_current_state_in_connection(conn, event, commit, prepared)).await?;
     Box::pin(crate::realm_bootstrap_current_states::commit_preview_policy_authority_current_state_in_connection(conn, event, commit, prepared)).await?;
+    Box::pin(crate::realm_bootstrap_current_states::commit_asset_privacy_policy_authority_current_state_in_connection(conn, event, commit, prepared)).await?;
 
     Box::pin(
         crate::organization_moderation_gate::commit_realm_organization_current_state_in_connection(
@@ -4122,9 +4126,17 @@ mod agent_draft_consumption_tests {
         let outcome = arkret_wire::ActorPrivateEventSubmitResponseBody::AgentDraftPropose {
             accepted_event_id: event.event_id.clone(),
         };
-        sql_query("INSERT INTO actor_private_events(id,event_id,actor_id,kind,canonical_event_digest,envelope,outcome,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+        let owner: arkret_wire::AccountId = serde_json::from_value(
+            event
+                .payload
+                .get("controller_account_id")
+                .expect("proposal controller")
+                .clone(),
+        )
+        .map_err(PersistenceError::database)?;
+        sql_query("INSERT INTO actor_private_events(id,event_id,actor_id,owner_account_id,kind,canonical_event_digest,envelope,outcome,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
             .bind::<Binary,_>(event.event_id.token_bytes().to_vec()).bind::<Text,_>(event.event_id.as_str())
-            .bind::<Text,_>(event.actor_id.to_string()).bind::<Text,_>(event.kind.as_str())
+            .bind::<Text,_>(event.actor_id.to_string()).bind::<Jsonb,_>(serde_json::json!(owner)).bind::<Text,_>(event.kind.as_str())
             .bind::<Binary,_>(arkret_canonical::sha256_bytes(&bytes).to_vec()).bind::<Jsonb,_>(serde_json::json!(event))
             .bind::<Jsonb,_>(serde_json::json!(outcome)).bind::<Timestamptz,_>(event.created_at)
             .execute(conn).await.map_err(PersistenceError::database)?;

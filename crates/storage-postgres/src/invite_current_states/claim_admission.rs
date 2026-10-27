@@ -93,7 +93,7 @@ pub(super) async fn commit_claim(
         || binding_expiry <= commit.committed_at
         || binding_expiry > material.expires_at
         || material.third_party_invite.max_claim_count != 1
-        || material.third_party_invite.token_commitment.as_ref() != Some(&claim.token_commitment)
+        || material.third_party_invite.token_commitment != claim.token_commitment
         || binding.verification_id != material.third_party_invite.verification_id
         || binding.realm_id != event.realm_id
     {

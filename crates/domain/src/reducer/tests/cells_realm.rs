@@ -641,8 +641,8 @@ fn valid_erasure_receipt_payload() -> Value {
         "schema": "ak.schema.erasure_receipt.v1",
         "issuer_id": "ak:did_core:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x",
         "subject": {
-            "kind": "space",
-            "subject_ref": "ak:space:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb"
+            "kind": "realm",
+            "subject_ref": "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb"
         },
         "scope": {
             "storage_boundary": "projection_store",
@@ -1794,5 +1794,36 @@ fn read_receipt_circle_and_realm_replace_independent_values() {
     }
     for (scope, value) in scopes.iter().zip(values.iter()) {
         assert_eq!(state.read_receipt_policy_value(scope), Some(value));
+    }
+}
+
+#[test]
+fn asset_privacy_projection_preserves_sparse_value_and_default_absence() {
+    let mut state = ProjectionState::new();
+    let hlc = ServerHlc::new("test");
+    let realm = "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb";
+    for value in [
+        serde_json::json!({"direct_download_allowed":true}),
+        serde_json::json!({}),
+    ] {
+        let effect = state.apply_projected(
+            &make_operation(
+                arkret_wire::EventKind::RealmAssetPrivacyPolicy,
+                realm,
+                serde_json::json!({"value":value}),
+            ),
+            &hlc,
+        );
+        assert!(matches!(
+            effect,
+            ProjectionEffect::RealmAssetPrivacyPolicyProjected { .. }
+        ));
+        assert_eq!(
+            state.facet_value(
+                realm,
+                &FacetRef::singleton(facet::REALM_ASSET_PRIVACY_POLICY)
+            ),
+            Some(&value)
+        );
     }
 }

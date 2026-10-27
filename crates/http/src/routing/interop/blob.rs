@@ -1729,13 +1729,31 @@ async fn realm_presign_policy_block(
     realm_id: Option<&str>,
 ) -> Option<&'static str> {
     let realm_id = realm_id?;
-    let Some(meta) = state.realms().realm_metadata(realm_id).await.ok().flatten() else {
+    match state.realms().realm_metadata(realm_id).await {
+        Ok(Some(meta)) if meta.minimal_metadata_realm => {
+            return Some("minimal_metadata_presign_forbidden");
+        }
+        Err(_) => return Some("direct_download_disallowed_presign_forbidden"),
+        _ => {}
+    }
+    let Ok(realm_id) = RealmId::new(realm_id.to_owned()) else {
         return Some("direct_download_disallowed_presign_forbidden");
     };
-    if meta.minimal_metadata_realm {
-        return Some("minimal_metadata_presign_forbidden");
-    }
-    if !asset_privacy_policy_allows_direct_download(meta.asset_privacy_policy.as_ref()) {
+    let Ok(Some(arkret_wire::CurrentState::Value {
+        selector: arkret_wire::CurrentSelector::RealmAssetPrivacyPolicy,
+        source_stream_ref,
+        value,
+        ..
+    })) = state
+        .authority_commits()
+        .realm_asset_privacy_policy_current(&realm_id)
+        .await
+    else {
+        return Some("direct_download_disallowed_presign_forbidden");
+    };
+    if source_stream_ref != (arkret_wire::CommitStreamRef::Realm { realm_id })
+        || !asset_privacy_policy_allows_direct_download(Some(&value))
+    {
         return Some("direct_download_disallowed_presign_forbidden");
     }
     None

@@ -310,6 +310,9 @@ pub(crate) async fn issue_actor_in_connection(
         return Err(undisclosable("history basis belongs to another Account"));
     }
     let account_key = actor_key(actor)?;
+    if let Some(owner) = actor.as_account_id() {
+        crate::account_private_erasure::require_private_write_in_connection(conn, owner).await?;
+    }
     let body = serde_json::to_value(snapshot).map_err(PersistenceError::database)?;
     let generation = i64::try_from(snapshot.governance_generation).map_err(|_| {
         PersistenceError::SchemaViolation("snapshot generation exceeds storage range".to_owned())

@@ -961,6 +961,8 @@ fn method_path_requires_fresh_introspection(method: &salvo::http::Method, path: 
         return true;
     }
     [
+        "/_coland/admin/",
+        "/_arkret/admin/",
         "/account",
         "/authz",
         "/device_messages",
@@ -1380,6 +1382,8 @@ mod tests {
     #[test]
     fn fresh_introspection_required_for_sensitive_reads() {
         for path in [
+            "/_coland/admin/metrics",
+            "/_arkret/admin/registry",
             "/_arkret/self/account",
             "/_arkret/self/authz/effective-grants",
             "/_arkret/self/device_messages",

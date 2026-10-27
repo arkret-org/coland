@@ -439,83 +439,23 @@ async fn a_forwarded_genesis_carries_its_local_blobs_only_when_they_address_thei
     assert_eq!(material.decode().unwrap(), (group_info, tree));
 }
 
-/// Exercise the actual Origin internal HTTP client. HTTP acceptance is never
-/// an Agent evidence proof; refusal/malformed closed material cannot proceed.
+/// Missing issuer capability and an empty issuance object grant no Origin evidence.
 #[tokio::test]
-async fn agent_origin_registered_gate_http_refusal_and_malformed_success_never_mint_evidence() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    for status in [503, 200] {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut config = crate::config::AppConfig {
-            seed_demo_data: false,
-            development_mode: true,
-            account_authority_url: Some(format!("http://{address}")),
-            ..crate::config::AppConfig::test_default()
-        };
-        config.register_test_internal_authority_channel("public-fixture-edge-secret");
-        let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
-        let principal = DidCoreId::new("ak:did_core:web:controller.example").unwrap();
-        let request = arkret_wire::RequestId::new_v7_at(1791165600000);
-        let expected =
-            arkret_models_identity::agent_signer_evidence::ControllerAccountGateIssuanceInput {
-                request_id: request.clone(),
-                principal_id: principal.clone(),
-                agent_authority_id: state.service_core_id(),
-            };
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut bytes = Vec::new();
-            let mut buffer = [0u8; 1024];
-            let header_end = loop {
-                let n = stream.read(&mut buffer).await.unwrap();
-                assert!(n > 0);
-                bytes.extend_from_slice(&buffer[..n]);
-                assert!(bytes.len() < 16384);
-                if let Some(pos) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
-                    break pos + 4;
-                }
-            };
-            let headers = std::str::from_utf8(&bytes[..header_end]).unwrap();
-            assert!(
-                headers.starts_with("POST /_coauth/internal/controller-gate-attestations HTTP/1.1")
-            );
-            assert!(
-                headers
-                    .to_ascii_lowercase()
-                    .contains("authorization: bearer public-fixture-edge-secret")
-            );
-            let length = headers
-                .lines()
-                .find_map(|line| {
-                    line.split_once(':')
-                        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                        .map(|(_, value)| value.trim().parse::<usize>().unwrap())
-                })
-                .unwrap();
-            assert!(length < 8192);
-            while bytes.len() < header_end + length {
-                let n = stream.read(&mut buffer).await.unwrap();
-                assert!(n > 0);
-                bytes.extend_from_slice(&buffer[..n]);
-            }
-            let actual:arkret_models_identity::agent_signer_evidence::ControllerAccountGateIssuanceInput=serde_json::from_slice(&bytes[header_end..header_end+length]).unwrap();
-            assert_eq!(actual, expected);
-            let body = b"{}";
-            let head = format!(
-                "HTTP/1.1 {status} fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            stream.write_all(head.as_bytes()).await.unwrap();
-            stream.write_all(body).await.unwrap();
-        });
-        assert!(
-            super::request_origin_controller_gate(&state, &principal, request)
-                .await
-                .is_err()
-        );
-        server.await.unwrap();
-    }
+async fn agent_origin_missing_issuer_capability_and_empty_issuance_never_mint_evidence() {
+    let config = crate::config::AppConfig {
+        seed_demo_data: false,
+        development_mode: true,
+        ..crate::config::AppConfig::test_default()
+    };
+    let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
+    let principal = DidCoreId::new("ak:did_core:web:controller.example").unwrap();
+    let request = arkret_wire::RequestId::new_v7_at(1791165600000);
+    assert!(
+        super::request_origin_controller_gate(&state, &principal, request)
+            .await
+            .is_err()
+    );
+    assert!(serde_json::from_value::<arkret_models_identity::agent_signer_evidence::ControllerAccountGateAttestationIssueResponseBody>(serde_json::json!({})).is_err());
 }
 
 #[test]

@@ -498,8 +498,17 @@ async fn response(
                 result = rx.recv() => match result {
                     Ok(notification) if !matches!(notification.kind,crate::state::EventNotificationKind::Signal { .. }) => {
                         if !selected.realms.is_empty() && !selected.realms.contains(&notification.realm_id) { continue; }
+                        if !super::subscribe::stream_session_current(&state,&session,grant.as_deref()).await {
+                            yield Ok(super::events_query::ndjson_line(&control(Kind::Unauthorized,None))); break;
+                        }
                         match streams(&state,&session,&selected).await {
-                            Ok(rows) => current_rows=rows,
+                            Ok(rows) => {
+                                current_rows=rows;
+                                if matches!(notification.kind,crate::state::EventNotificationKind::RealmRefreshHint) {
+                                    metrics::counter!("coland_mimi_notify_refresh_consumed_total", "transport" => "committed_events").increment(1);
+                                    yield Ok(super::events_query::ndjson_line(&control(Kind::Checkpoint,Some(token.clone()))));
+                                }
+                            },
                             Err(_) => { yield Ok(super::events_query::ndjson_line(&control(Kind::Unauthorized,None))); break; }
                         }
                     }

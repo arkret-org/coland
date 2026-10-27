@@ -1088,7 +1088,7 @@ pub(super) async fn account_cursor_revoke(
     crate::json_ok(
         arkret_models_identity::account::AccountCursorRevokeResponseBody {
             revoked: true,
-            expires_at: effective_expiry,
+            expires_at: Some(effective_expiry),
         },
     )
 }

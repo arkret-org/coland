@@ -342,17 +342,21 @@ pub(crate) async fn relay_signal_once(
         .send()
         .await
         .map_err(|error| error.to_string())?;
-    if !response.status().is_success() {
+    if response.status() != reqwest::StatusCode::NO_CONTENT {
         return Err(format!(
-            "Signal peer relay returned HTTP {}",
+            "Signal peer relay returned HTTP {}; expected 204",
             response.status()
         ));
     }
-    let outcome = response
-        .json::<arkret_wire::SignalRelayResponseBody>()
+    if !response
+        .bytes()
         .await
-        .map_err(|error| error.to_string())?;
-    outcome.validate().map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?
+        .is_empty()
+    {
+        return Err("Signal peer relay returned an entity body".into());
+    }
+    Ok(())
 }
 
 /// One governance Station answer to a synchronous `authority_forward`.

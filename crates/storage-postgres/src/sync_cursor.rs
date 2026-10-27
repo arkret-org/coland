@@ -609,6 +609,12 @@ pub(crate) async fn upsert_in_connection(
     if let Some((summary, global)) = floors {
         retention::check(conn, Some(summary), Some(global)).await?;
     }
+    if let Some(subject) = record.binding_subject.as_deref() {
+        if let Ok(owner) = serde_json::from_str::<arkret_wire::AccountId>(subject) {
+            crate::account_private_erasure::require_private_write_in_connection(conn, &owner)
+                .await?;
+        }
+    }
     // The entire issuance instance is immutable, including its expiry.
     let written = sql_query(
             "INSERT INTO sync_cursor_handles \

@@ -408,6 +408,8 @@ impl RecoverySessionStore for PgRecoverySessionStore {
             .map_err(PersistenceError::database)?;
         conn.transaction::<_, crate::PgTransactionError, _>(async move |conn| {
         crate::key_backup_unlock::validate_recovery_unlock_policy(conn, &recovery_policy_session_value(&record), chrono::Utc::now()).await?;
+        let owner=arkret_wire::AccountId::new(record.principal_id.clone(),record.station_id.clone());
+        crate::account_private_erasure::require_private_write_in_connection(conn,&owner).await?;
         #[derive(QueryableByName)]
         struct PolicyVersion { #[diesel(sql_type=Integer)] version:i32 }
         let head=sql_query("SELECT version FROM recovery_policies WHERE principal_id=$1 AND station_id=$2 ORDER BY version DESC LIMIT 1")
@@ -548,6 +550,8 @@ impl RecoverySessionStore for PgRecoverySessionStore {
             // The same Realm advisory lock is held by authority-commit append; the table
             // lock also excludes backup insert/delete phantoms while the frozen manifest commits.
             sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))").bind::<Text,_>(realm).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+            let owner=arkret_wire::AccountId::new(record.principal_id.clone(),record.station_id.clone());
+            crate::account_private_erasure::require_private_write_in_connection(conn,&owner).await?;
             sql_query("LOCK TABLE key_backups IN SHARE MODE").execute(&mut *conn).await.map_err(PersistenceError::database)?;
             let revision=sql_query("SELECT COALESCE((SELECT revision FROM key_backup_list_revisions WHERE actor_id=$1),0)::bigint AS revision")
                 .bind::<Text,_>(snapshot["actor_id"].as_str().ok_or_else(||PersistenceError::Conflict("manifest actor missing".to_owned()))?).get_result::<SnapshotRevision>(&mut *conn).await.map_err(PersistenceError::database)?.revision;
@@ -642,6 +646,12 @@ pub(crate) async fn lock_recovery_session_authority(
         .payload;
     crate::key_backup_unlock::validate_recovery_unlock_policy(conn, &before, chrono::Utc::now())
         .await?;
+    let owner = arkret_wire::AccountId::new(
+        serde_json::from_value(before["principal_id"].clone())
+            .map_err(PersistenceError::database)?,
+        serde_json::from_value(before["station_id"].clone()).map_err(PersistenceError::database)?,
+    );
+    crate::account_private_erasure::require_private_write_in_connection(conn, &owner).await?;
     let locked = sql_query("SELECT to_jsonb(s) AS payload FROM recovery_sessions s WHERE id=$1 AND state='verified' AND expires_at>clock_timestamp() FOR SHARE")
         .bind::<sql_types::Uuid,_>(id).get_result::<crate::JsonPayloadRow>(&mut *conn)
         .await.optional().map_err(PersistenceError::database)?

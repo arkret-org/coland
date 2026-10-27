@@ -137,10 +137,9 @@ async fn readyz(depot: &mut Depot, res: &mut Response) -> JsonResult<ReadyzOutco
     // could observe transient `relation does not exist` errors on the
     // first few requests; the gate makes that race fail-closed.
     let migrations_applied = state.jobs().migrations_applied();
-    let internal_channel_requested = state.config().session_grant_introspection_url.is_some()
-        || state.config().internal_authority_shared_secret.is_some();
+    let local_issuer_requested = state.config().local_account_authority_config.is_some();
     let session_grant_introspection_ready =
-        !internal_channel_requested || state.config().internal_authority_channel.is_some();
+        !local_issuer_requested || state.local_account_authority().is_some();
     let external_webvh_provider_ready = state.config().external_webvh_provider_url.is_none()
         || state.config().external_webvh_provider_active;
     let service_identity_ready = state.service_identity_state().is_ready();
@@ -194,7 +193,7 @@ async fn readyz(depot: &mut Depot, res: &mut Response) -> JsonResult<ReadyzOutco
             },
             session_grant_introspection: ReadyzConfiguredCheck {
                 ok: session_grant_introspection_ready,
-                configured: state.config().session_grant_introspection_url.is_some(),
+                configured: local_issuer_requested,
             },
             external_webvh_provider: ReadyzExternalWebvhProviderCheck {
                 ok: external_webvh_provider_ready,

@@ -123,6 +123,9 @@ pub enum ProjectionEffect {
     RealmPreviewPolicyProjected {
         realm_id: String,
     },
+    RealmAssetPrivacyPolicyProjected {
+        realm_id: String,
+    },
     /// `discovery/read-receipts.md` section 2.5 -- `ak.scope.read_receipt_policy`
     /// projected into the `scope_read_receipt_policy` current result. That
     /// section names this kind the family's sole carrier.

@@ -158,34 +158,47 @@ pub(super) async fn mimi_notify(
 ) -> JsonResult<MimiNotifyResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let room_id = strand_id.into_inner();
-    let body = typed_body_value(body.into_inner(), "mimi notify")?;
+    let body = body.into_inner();
     let room_uri = mimi_room_uri(state, &room_id)?;
-    verify_mimi_source_service_signature(state, req, Some(room_uri.as_str())).await?;
-    if let Some(message) = unsupported_mimi_draft(&body) {
-        return Err(AppError::param_invalid(message).with_reason_code("mimi_draft_unsupported"));
-    }
+    let source = verify_mimi_source_service_signature(state, req, Some(room_uri.as_str())).await?;
     if !valid_mimi_room_id(&room_id) {
         return Err(AppError::param_invalid("invalid MIMI room id"));
     }
-    // Notify is an ephemeral MIMI control signal, not an Arkret Event. It must
-    // not mint an Event id or enter the canonical projection timeline.
-    let _realm_id = mimi_bound_realm_id(state, &room_id).await?.ok_or_else(|| {
-        AppError::not_found("MIMI room is not bound to any Arkret Realm")
-            .with_reason_code(arkret_wire::ReasonCode::MIMI_GOVERNANCE_BINDING_MISSING)
-    })?;
-    let _receipt = mimi_receipt(
-        state,
-        arkret_wire::ServiceOperationId::OPEN_MIMI_COMMAND_NOTIFY_V1,
-        &body,
-        json!({
-            "delivery": "queued",
-            "mimi_room_uri": mimi_room_uri(state, &room_id)?,
-            "broadcast_emitted": false,
-        }),
-    );
+    if let Some(routing) = &body.routing {
+        if routing
+            .mimi_room_uri
+            .as_ref()
+            .is_some_and(|value| value != &room_uri)
+            || routing.target_provider_ids.as_ref().is_some_and(|targets| {
+                targets.as_slice() != std::slice::from_ref(&state.service_core_id())
+            })
+        {
+            return Err(AppError::capability_denied(
+                "MIMI notification routing does not identify this receiver",
+            ));
+        }
+    }
+    let binding = latest_mimi_room_binding(state, &room_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::capability_denied("MIMI notification has no current room binding")
+        })?;
+    let payload = mimi_room_binding_security_payload(&binding.binding);
+    if payload.get("status").and_then(Value::as_str) != Some("accepted")
+        || (source != state.service_id().as_str()
+            && payload.get("hub_provider_id").and_then(Value::as_str) != Some(source.as_str()))
+    {
+        return Err(AppError::capability_denied(
+            "MIMI notification source is not the current room provider",
+        ));
+    }
+    // Wake the existing authorized canonical-read consumer. The hint is not
+    // an Event, a Signal, a delivery claim or a client-visible payload.
+    let accepted = state.publish_realm_refresh_hint(binding.realm_id);
     json_ok(MimiNotifyResponseBody {
-        accepted: true,
-        retry_after_ms: None,
+        accepted,
+        retry_after_ms: (!accepted)
+            .then(|| std::num::NonZeroU64::new(1000).expect("positive retry delay")),
     })
 }
 
@@ -1347,67 +1360,20 @@ pub(super) async fn mimi_proxy_download(
     req: &mut Request,
 ) -> JsonResult<MimiProxyDownloadResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let body = typed_body_value(body.into_inner(), "mimi proxy download")?;
-    verify_mimi_source_service_signature(state, req, None).await?;
-    if let Some(message) = unsupported_mimi_draft(&body) {
-        return Err(AppError::param_invalid(message).with_reason_code("mimi_draft_unsupported"));
+    let body = body.into_inner();
+    let source = verify_mimi_source_service_signature(state, req, None).await?;
+    if source != body.requester_id.as_str() {
+        return Err(AppError::capability_denied(
+            "MIMI download requester does not match the authenticated provider",
+        ));
     }
-    let asset_ref = body
-        .get("asset_ref")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| AppError::param_missing("asset_ref is required"))?;
-    enforce_mimi_proxy_download_egress_policy(state, asset_ref)?;
-    let asset_policy = body
-        .get("asset_privacy_policy")
-        .and_then(|value| value.as_str())
-        .unwrap_or("provider_proxy");
-    let blob = state.deliveries().blob(asset_ref).await.ok().flatten();
-    let proxy_required = matches!(asset_policy, "provider_proxy" | "ohttp_relay");
-    let download_ref = if proxy_required {
-        mimi_proxy_download_ref(state, asset_ref)?
-    } else {
-        asset_ref.to_owned()
-    };
-    let download_ref = arkret_wire::NonEmptyString::new(download_ref)
-        .map_err(|_| AppError::internal("MIMI proxy download reference is empty"))?;
-    let mut headers = BTreeMap::new();
-    if let Some(blob) = blob.as_ref() {
-        headers.insert(
-            "content-type".to_owned(),
-            arkret_wire::NonEmptyString::new(blob.media_type.clone())
-                .map_err(|_| AppError::internal("MIMI proxy media type is empty"))?,
-        );
-        headers.insert(
-            "content-length".to_owned(),
-            arkret_wire::NonEmptyString::new(blob.size_bytes.to_string())
-                .map_err(|_| AppError::internal("MIMI proxy content length is empty"))?,
-        );
-    }
-    let _receipt = mimi_receipt(
-        state,
-        arkret_wire::ServiceOperationId::OPEN_MIMI_COMMAND_PROXY_DOWNLOAD_V1,
-        &body,
-        json!({
-            "asset_privacy_policy": asset_policy,
-            "direct_object_store_url_returned": false,
-            "client_must_verify_content_hash": true
-        }),
-    );
-    json_ok(MimiProxyDownloadResponseBody {
-        download_ref,
-        download_request_headers: headers,
-        expires_at: Some(now() + Duration::minutes(5)),
-    })
-}
-
-pub(super) fn mimi_proxy_download_ref(
-    state: &AppState,
-    asset_ref: &str,
-) -> Result<String, AppError> {
-    let mut url = reqwest::Url::parse(&format!("{}/proxy-download", mimi_base_url(state)))
-        .map_err(|error| AppError::internal(format!("MIMI proxy download URL invalid: {error}")))?;
-    url.query_pairs_mut().append_pair("asset_ref", asset_ref);
-    Ok(url.to_string())
+    enforce_mimi_proxy_download_egress_policy(state, body.asset_ref.as_str())?;
+    // No registered consumer currently serves this opaque reference. Never
+    // return a nonexistent URL, an unchecked asset, or a bearer presign bypass.
+    Err(
+        crate::app_error!(UnsupportedFeature, "MIMI asset proxy is not available")
+            .with_internal_reason("mimi_asset_proxy_unavailable"),
+    )
 }
 
 pub(super) fn enforce_mimi_proxy_download_egress_policy(

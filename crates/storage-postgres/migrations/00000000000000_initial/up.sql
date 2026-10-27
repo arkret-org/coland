@@ -67,6 +67,20 @@ CREATE TABLE public.account_datas (
     CONSTRAINT account_datas_revision_positive CHECK (revision >= 1)
 );
 
+-- Only the exact accepted terminal record authorizes removal of immutable
+-- account-private originals. The setting is local to the purge transaction.
+CREATE FUNCTION public.account_private_erasure_authorized(owner_id jsonb) RETURNS boolean
+LANGUAGE plpgsql STABLE AS $$
+BEGIN
+    RETURN EXISTS (
+        SELECT 1 FROM public.account_status_replica_records r
+        WHERE r.account_id=owner_id
+          AND r.record_id=current_setting('arkret.account_private_erasure_record_id', true)
+          AND r.record->>'status'='erasure_pending'
+    );
+END;
+$$;
+
 ALTER TABLE ONLY public.account_datas
     ADD CONSTRAINT account_datas_actor_data_type_key UNIQUE (actor_id, account_data_key);
 
@@ -137,6 +151,7 @@ CREATE TABLE public.actor_private_events (
     id bytea PRIMARY KEY,
     event_id text NOT NULL,
     actor_id text NOT NULL,
+    owner_account_id jsonb NOT NULL,
     kind text NOT NULL,
     canonical_event_digest bytea NOT NULL,
     envelope jsonb NOT NULL,
@@ -145,6 +160,15 @@ CREATE TABLE public.actor_private_events (
     CONSTRAINT actor_private_events_event_id_key UNIQUE (event_id),
     CONSTRAINT actor_private_events_id_length CHECK (octet_length(id) = 33),
     CONSTRAINT actor_private_events_digest_length CHECK (octet_length(canonical_event_digest) = 32),
+    CONSTRAINT actor_private_events_owner_account_check CHECK (
+        jsonb_typeof(owner_account_id) = 'object'
+        AND jsonb_typeof(owner_account_id->'principal_id') = 'string'
+        AND jsonb_typeof(owner_account_id->'station_id') = 'string'
+        AND owner_account_id->>'principal_id' LIKE 'ak:did_core:%'
+        AND owner_account_id->>'station_id' LIKE 'ak:did_core:%'
+        AND owner_account_id ?& ARRAY['principal_id', 'station_id']
+        AND owner_account_id - 'principal_id' - 'station_id' = '{}'::jsonb
+    ),
     CONSTRAINT actor_private_events_kind_check CHECK (
         kind IN ('ak.account_data.set', 'ak.agent.action_reject', 'ak.agent.action_request',
             'ak.agent.draft.propose', 'ak.device.push_route', 'ak.read_cursor.advance')
@@ -161,10 +185,16 @@ CREATE TABLE public.actor_private_events (
     )
 );
 
+-- The accepted private owner may differ from an Agent/Service Event actor.
+CREATE INDEX actor_private_events_owner_idx ON public.actor_private_events(owner_account_id);
+
 -- An accepted actor-private Event and its first outcome never change: exact
 -- retry reads them back and account sync publishes the Event as its source.
 CREATE FUNCTION public.reject_actor_private_event_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+    IF TG_OP='DELETE' AND public.account_private_erasure_authorized(OLD.owner_account_id) THEN
+        RETURN OLD;
+    END IF;
     RAISE EXCEPTION 'accepted actor-private Events are immutable';
 END;
 $$;
@@ -329,6 +359,77 @@ CREATE TABLE public.account_status_replica_records (
 
 CREATE INDEX account_status_replica_records_range_idx
     ON public.account_status_replica_records (account_authority_id, account_id, status_sequence);
+CREATE INDEX account_status_replica_records_erasure_account_idx
+    ON public.account_status_replica_records(account_id)
+    WHERE record->>'status'='erasure_pending';
+
+-- The signed package and the physical purge commit together. This is local
+-- execution custody, not another public Account lifecycle status.
+CREATE TABLE public.account_private_erasure_completions (
+    account_id jsonb PRIMARY KEY,
+    triggering_status_record_id text NOT NULL UNIQUE
+        REFERENCES public.account_status_replica_records(record_id),
+    package jsonb NOT NULL,
+    completed_at timestamptz NOT NULL,
+    CHECK (jsonb_typeof(account_id)='object'
+        AND jsonb_typeof(account_id->'principal_id')='string'
+        AND jsonb_typeof(account_id->'station_id')='string'
+        AND account_id ?& ARRAY['principal_id','station_id']
+        AND account_id - 'principal_id' - 'station_id' = '{}'::jsonb),
+    CHECK ((package #>> '{receipt,trigger,kind}'='account_status_record'
+        AND package #>> '{receipt,trigger,account_status_record_id}'=triggering_status_record_id
+        AND package #>> '{receipt,scope,storage_boundary}'='account_private_store'
+        AND package #>> '{receipt,outcome}'='completed') IS TRUE)
+);
+
+-- A verified revoked Gateway receipt contains only opaque registration,
+-- target and Device references. Provider keys/endpoints and private route
+-- aliases are removed with the original handoff intent.
+CREATE TABLE public.account_erasure_push_receipts (
+    account_id jsonb NOT NULL,
+    triggering_status_record_id text NOT NULL REFERENCES public.account_status_replica_records(record_id),
+    registration_id text NOT NULL,
+    receipt jsonb NOT NULL,
+    PRIMARY KEY(account_id,triggering_status_record_id,registration_id),
+    CHECK ((receipt->>'state'='revoked' AND receipt->>'registration_id'=registration_id) IS TRUE)
+);
+
+CREATE FUNCTION public.lock_account_private_storage(owner_id jsonb) RETURNS boolean
+LANGUAGE plpgsql VOLATILE AS $$
+BEGIN
+    IF owner_id IS NULL OR jsonb_typeof(owner_id)<>'object' THEN
+        RAISE EXCEPTION 'private storage requires an exact AccountId';
+    END IF;
+    -- The purge also updates this retained identity row. Locking its current
+    -- version makes an old REPEATABLE READ writer fail serialization instead
+    -- of missing a completion committed after its snapshot was taken.
+    PERFORM 1 FROM public.accounts
+        WHERE principal_id=owner_id->>'principal_id' AND station_id=owner_id->>'station_id'
+        FOR SHARE;
+    RETURN NOT EXISTS (SELECT 1 FROM public.account_private_erasure_completions WHERE account_id=owner_id);
+END;
+$$;
+
+-- Canonical identity projection has the same fixed field order as the shared
+-- SDK AccountId/ActorId JCS representation. Values use PostgreSQL JSON string
+-- escaping; no caller-supplied JSON or principal-only identity is inferred.
+CREATE FUNCTION public.account_actor_key(principal text,station text) RETURNS text
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
+    SELECT '{"account_id":{"principal_id":'||to_json(principal)::text||',"station_id":'||to_json(station)::text||'},"kind":"account"}'
+$$;
+CREATE INDEX accounts_actor_identity_idx ON public.accounts(public.account_actor_key(principal_id,station_id));
+CREATE INDEX account_erasure_actor_identity_idx ON public.account_private_erasure_completions(public.account_actor_key(account_id->>'principal_id',account_id->>'station_id'));
+
+CREATE FUNCTION public.account_private_owner_for_actor(actor_key text) RETURNS jsonb
+LANGUAGE sql STABLE AS $$
+    SELECT owner FROM (
+        SELECT jsonb_build_object('principal_id',principal_id,'station_id',station_id) AS owner
+        FROM public.accounts WHERE public.account_actor_key(principal_id,station_id)=actor_key
+        UNION ALL
+        SELECT account_id FROM public.account_private_erasure_completions
+        WHERE public.account_actor_key(account_id->>'principal_id',account_id->>'station_id')=actor_key
+    ) owners LIMIT 1
+$$;
 
 -- Durable, exact-AccountId affected-service evidence. One service can be
 -- evidenced by several independent state families; rows are never inferred
@@ -3574,8 +3675,15 @@ CREATE TABLE account_sync_cursor_retention (
 CREATE INDEX account_sync_cursor_summary_floor ON account_sync_cursor_retention(summary_floor);
 CREATE INDEX account_sync_cursor_global_floor ON account_sync_cursor_retention(global_floor);
 CREATE FUNCTION project_account_global_value(a TEXT,c TEXT,k TEXT,p JSONB,d BOOLEAN) RETURNS VOID LANGUAGE plpgsql AS $$
-DECLARE r BIGINT; cp BIGINT;
+DECLARE r BIGINT; cp BIGINT; owner_id JSONB;
 BEGIN
+    owner_id := public.account_private_owner_for_actor(a);
+    IF owner_id IS NOT NULL THEN
+        -- A purge removes the final sync copies itself. Publishing a withdrawal
+        -- here would recreate private history and invert the shared clock lock.
+        IF public.account_private_erasure_authorized(owner_id) THEN RETURN; END IF;
+        IF NOT public.lock_account_private_storage(owner_id) THEN RETURN; END IF;
+    END IF;
     UPDATE account_global_clock SET revision=revision+1 WHERE singleton RETURNING revision INTO r;
     INSERT INTO account_global_channel_clocks(actor_key,channel,position)
         VALUES(a,c,1)
@@ -3638,6 +3746,9 @@ AFTER INSERT OR UPDATE ON agent_draft_pending_intents
 FOR EACH ROW EXECUTE FUNCTION project_agent_draft_pending_intent();
 CREATE FUNCTION reject_agent_draft_pending_intent_delete() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+    IF public.account_private_erasure_authorized(OLD.controller_account_id) THEN
+        RETURN OLD;
+    END IF;
     RAISE EXCEPTION 'agent draft pending intent create-once identity cannot be deleted';
 END;
 $$;
@@ -5404,3 +5515,120 @@ CREATE TABLE realm_account_device_evidence (
     authorization_commit_id text NOT NULL,
     evidence_json jsonb NOT NULL CHECK(jsonb_typeof(evidence_json)='object')
 );
+
+
+-- Defense in depth for direct/background private payload writers. Primary
+-- entry points acquire the Account fence before their payload row locks.
+CREATE FUNCTION public.private_storage_row_owner(value jsonb, owner_kind text, owner_path text[]) RETURNS jsonb
+LANGUAGE plpgsql STABLE AS $$
+DECLARE raw jsonb; owner_id jsonb;
+BEGIN
+    raw := value #> owner_path;
+    IF raw IS NULL OR raw='null'::jsonb THEN RETURN NULL; END IF;
+    CASE owner_kind
+      WHEN 'account' THEN owner_id := raw;
+      WHEN 'account_key' THEN owner_id := (raw #>> '{}')::jsonb;
+      WHEN 'actor_key' THEN owner_id := ((raw #>> '{}')::jsonb)->'account_id';
+      WHEN 'account_pk' THEN
+        SELECT jsonb_build_object('principal_id',principal_id,'station_id',station_id) INTO owner_id
+        FROM public.accounts WHERE pk=(raw #>> '{}')::bigint;
+      WHEN 'device_authorization' THEN
+        owner_id := jsonb_build_object('principal_id',raw->>'principal_id','station_id',raw->>'station_id');
+      WHEN 'identity' THEN
+        owner_id := jsonb_build_object('principal_id',raw #>> '{}','station_id',value->>'station_id');
+      WHEN 'notification' THEN
+        IF value->>'controller_account_pk' IS NOT NULL THEN
+            SELECT jsonb_build_object('principal_id',principal_id,'station_id',station_id) INTO owner_id
+            FROM public.accounts WHERE pk=(value->>'controller_account_pk')::bigint;
+        ELSE
+            owner_id := ((value->>'recipient_actor_id')::jsonb)->'account_id';
+        END IF;
+      WHEN 'cursor' THEN
+        IF left(raw #>> '{}',1)<>'{' THEN RETURN NULL; END IF;
+        owner_id := (raw #>> '{}')::jsonb;
+        IF NOT (owner_id ?& ARRAY['principal_id','station_id']) THEN RETURN NULL; END IF;
+      ELSE RAISE EXCEPTION 'unregistered private storage owner kind';
+    END CASE;
+    IF owner_id IS NULL THEN RETURN NULL; END IF;
+    IF jsonb_typeof(owner_id)<>'object' OR NOT (owner_id ?& ARRAY['principal_id','station_id'])
+       OR jsonb_typeof(owner_id->'principal_id')<>'string' OR jsonb_typeof(owner_id->'station_id')<>'string'
+       OR owner_id-'principal_id'-'station_id'<>'{}'::jsonb THEN
+       RAISE EXCEPTION 'private storage owner is not an exact AccountId';
+    END IF;
+    RETURN owner_id;
+END;
+$$;
+
+CREATE FUNCTION public.guard_account_private_payload() RETURNS trigger
+LANGUAGE plpgsql VOLATILE AS $$
+DECLARE owner_id jsonb; previous_owner jsonb;
+BEGIN
+    owner_id := public.private_storage_row_owner(to_jsonb(NEW),TG_ARGV[0],TG_ARGV[1]::text[]);
+    IF TG_OP='UPDATE' THEN
+        previous_owner := public.private_storage_row_owner(to_jsonb(OLD),TG_ARGV[0],TG_ARGV[1]::text[]);
+        IF previous_owner IS NOT NULL AND previous_owner IS DISTINCT FROM owner_id THEN
+            RAISE EXCEPTION 'private payload ownership is immutable';
+        END IF;
+    END IF;
+    IF owner_id IS NOT NULL AND NOT public.account_private_erasure_authorized(owner_id)
+       AND NOT public.lock_account_private_storage(owner_id) THEN
+        IF TG_NARGS=3 AND TG_ARGV[2]='skip_erased' THEN RETURN NULL; END IF;
+        RAISE EXCEPTION 'failed_precondition: account-private storage has been erased' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.account_datas FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('actor_key','{actor_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.account_data_changes FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('actor_key','{actor_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.account_data_change_retention FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('actor_key','{actor_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.key_backups FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('actor_key','{actor_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.key_backup_list_revisions FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('actor_key','{actor_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.agent_draft_pending_intents FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_key','{controller_account_key}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.agent_action_requests FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_key','{controller_account_key}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.agent_action_rejections FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_key','{controller_account_key}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.read_cursor_winners FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_key','{account_key}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.device_push_routes FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_key','{account_key}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.key_backup_unlock_authorities FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_key','{account_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.mimi_consent_correlations FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_key','{holder_account_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.realm_state_snapshot_issuances FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_key','{account_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.realm_state_snapshot_window_reservations FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_key','{account_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.actor_private_events FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account','{owner_account_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.consent_private_effect_jobs FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account','{holder_account_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.consent_private_effect_fences FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account','{holder_account_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.consent_private_proxy_fences FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account','{holder_account_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.consent_private_proxy_cuts FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account','{holder_account_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.consent_private_effect_cuts FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account','{holder_account_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.consent_current_states FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account','{holder_account_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.push_registration_handoff_intents FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account','{local_account_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.push_devices FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account','{payload,account_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.push_hard_logout_journal FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account','{account_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.account_localparts FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_pk','{account_pk}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.sessions FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_pk','{account_pk}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.invite_receive_policies FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_pk','{account_pk}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.invite_new_source_ledgers FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_pk','{account_pk}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.invite_new_source_hmac_keys FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_pk','{account_pk}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.agent_principals FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('account_pk','{controller_account_pk}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.accounts FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('identity','{principal_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.key_backup_delete_challenges FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('identity','{principal_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.recovery_sessions FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('identity','{principal_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.security_transactions FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('identity','{principal_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.device_messages FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('device_authorization','{recipient_device_authorization}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.device_message_ack_tokens FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('device_authorization','{recipient_device_authorization}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.mls_welcome_deliveries FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('device_authorization','{recipient_device_authorization}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.device_keys FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('device_authorization','{device_authorization}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.one_time_keys FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('device_authorization','{device_authorization}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.sync_cursor_handles FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('cursor','{binding_subject}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.devices FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('identity','{actor_id}');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.notifications FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('notification','{recipient_actor_id}','skip_erased');
+CREATE TRIGGER account_private_payload_guard BEFORE INSERT OR UPDATE ON public.idempotency_keys FOR EACH ROW EXECUTE FUNCTION public.guard_account_private_payload('actor_key','{actor_key}');
+
+CREATE FUNCTION public.reject_private_erasure_original_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'committed private erasure originals are immutable';
+END;
+$$;
+CREATE TRIGGER private_erasure_original_immutable BEFORE UPDATE OR DELETE ON public.account_private_erasure_completions
+FOR EACH ROW EXECUTE FUNCTION public.reject_private_erasure_original_mutation();
+CREATE TRIGGER private_erasure_original_immutable BEFORE UPDATE OR DELETE ON public.account_erasure_push_receipts
+FOR EACH ROW EXECUTE FUNCTION public.reject_private_erasure_original_mutation();

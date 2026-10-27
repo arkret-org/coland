@@ -181,14 +181,16 @@ impl PgEventNotificationRelay {
 }
 
 impl EventNotificationRelay for PgEventNotificationRelay {
-    fn publish(&self, notification: EventNotification) {
+    fn publish(&self, notification: EventNotification) -> bool {
         match self.relay_tx.try_send(notification) {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
                 tracing::warn!("PostgreSQL event notification queue is full");
+                false
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 tracing::warn!("PostgreSQL event notification publisher stopped");
+                false
             }
         }
     }
@@ -377,6 +379,26 @@ impl savfox_gateway_server::NativePublicReplyGuard for ColandNativePublicReplyGu
 #[cfg(test)]
 mod notification_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn refresh_relay_acknowledges_only_real_queue_capacity() {
+        let (relay_tx, mut relay_rx) = mpsc::channel(1);
+        let relay = PgEventNotificationRelay { relay_tx };
+        let hint = EventNotification {
+            realm_id: "component-room".into(),
+            kind: coland_http::state::EventNotificationKind::RealmRefreshHint,
+        };
+        assert!(relay.publish(hint.clone()));
+        assert!(!relay.publish(hint.clone()));
+        let received = relay_rx.recv().await.unwrap();
+        assert_eq!(received.realm_id, hint.realm_id);
+        assert!(matches!(
+            received.kind,
+            coland_http::state::EventNotificationKind::RealmRefreshHint
+        ));
+        drop(relay_rx);
+        assert!(!relay.publish(hint));
+    }
 
     #[tokio::test]
     async fn independent_listeners_forward_large_events_without_origin_echo() {

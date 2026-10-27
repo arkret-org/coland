@@ -396,7 +396,7 @@ async fn receive_private_invite_delivery(
             // Authorization/source failures stay failures. Private authority
             // availability never reveals the holder's policy to the requester.
             if error.wire_code()=="temporarily_unavailable" {
-                tracing::warn!(op=audit_operation,"private Invite authority is unavailable");
+                tracing::warn!(op=audit_operation, %error, "private Invite authority is unavailable");
                 Ok(InviteDeliveryResponseBody{status:InviteDeliveryOutcomeStatus::Deferred,disclosed_outcome:None,received_at:Some(now()),retry_after_ms:None})
             } else {Err(error)}
         }
@@ -1200,9 +1200,7 @@ async fn verify_invite_commit(
             detail,
         )
     };
-    let nonce =
-        arkret_wire::Base64UrlString::new(URL_SAFE_NO_PAD.encode(uuid::Uuid::new_v4().as_bytes()))
-            .map_err(|error| AppError::internal(format!("authority bundle nonce: {error}")))?;
+    let nonce = invite_authority_nonce();
     let realm_id = &delivery.invite_event.realm_id;
     let mut located = super::realm_join::resolve_verified_authority(
         state,
@@ -1252,6 +1250,13 @@ async fn verify_invite_commit(
                 .to_owned(),
         )),
     }
+}
+
+fn invite_authority_nonce() -> arkret_wire::Base64UrlString {
+    arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
+        rand::random::<[u8; 32]>(),
+    ))
+    .expect("32 random bytes encode as canonical base64url")
 }
 
 fn receipt_refusal(error: coland_services::ServiceError) -> AppError {
@@ -1359,6 +1364,22 @@ mod invite_locator_security_tests {
     const PRODUCTION_INVITER: &str = "ak:did_core:web:inviter_id.example";
     const PRODUCTION_REALM: &str = "ak:realm:AYkVIjHoT1TUr0UDS-J-SsVmyIMnmNBsp4GAAxZiFj2W";
     const PRODUCTION_INVITE_EVENT: &str = "ak:event:AbMdINsWEW01xiLsvC3anbe65njppPPCVoNeYM6ES_E2";
+
+    #[test]
+    fn invite_authority_nonce_satisfies_the_registered_bundle_request_contract() {
+        let request = arkret_wire::RealmAuthorityBundleRequestBody {
+            realm_id: PRODUCTION_REALM.parse().unwrap(),
+            nonce: invite_authority_nonce(),
+        };
+        request.validate().unwrap();
+        assert_ne!(request.nonce, invite_authority_nonce());
+        let mut short = request;
+        short.nonce = arkret_wire::Base64UrlString::new(
+            URL_SAFE_NO_PAD.encode(uuid::Uuid::new_v4().as_bytes()),
+        )
+        .unwrap();
+        assert!(short.validate().is_err());
+    }
 
     #[tokio::test]
     async fn locator_trust_requires_the_account_bound_recipient_signature() {

@@ -2929,6 +2929,32 @@ pub trait AuthorityCommitStore: Send + Sync {
         realm_id: &arkret_wire::RealmId,
     ) -> PersistenceResult<Option<arkret_wire::CurrentState>>;
 
+    /// Read the accepted asset policy cut; mutable Realm metadata grants no access.
+    async fn realm_asset_privacy_policy_current(
+        &self,
+        realm_id: &arkret_wire::RealmId,
+    ) -> PersistenceResult<Option<arkret_wire::CurrentState>> {
+        let Some(material) = self.realm_state_snapshot_material(realm_id).await? else {
+            return Ok(None);
+        };
+        let mut matches = material.current_state_entries.into_iter().filter(|entry| {
+            matches!(
+                entry,
+                arkret_wire::CurrentState::Value {
+                    selector: arkret_wire::CurrentSelector::RealmAssetPrivacyPolicy,
+                    ..
+                }
+            )
+        });
+        let current = matches.next();
+        if matches.next().is_some() {
+            return Err(crate::PersistenceError::Internal(
+                "asset privacy policy has more than one accepted current".to_owned(),
+            ));
+        }
+        Ok(current)
+    }
+
     /// Governance generation and current heads for every independent Realm,
     /// Circle, and Sidecar stream at one durable cut, sorted by `stream_ref`.
     async fn realm_stream_heads(

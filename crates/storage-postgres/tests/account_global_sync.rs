@@ -171,7 +171,15 @@ async fn account_global_snapshot_is_frozen_and_changes_are_page_bounded() {
     let pool = pool().await;
     let cas = PgAccountDataStore { pool: pool.clone() };
     let sync = PgSyncCursorStore { pool };
-    let actor = format!("global-sync-{}", uuid::Uuid::now_v7());
+    let actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+        arkret_wire::DidCoreId::new(format!(
+            "ak:did_core:web:global-sync-{}.example",
+            uuid::Uuid::now_v7()
+        ))
+        .unwrap(),
+        arkret_wire::DidCoreId::new("ak:did_core:web:station.example").unwrap(),
+    ))
+    .to_string();
     for n in 0..103 {
         put(&cas, &actor, &format!("key:{n:03}"), 1, false).await;
     }

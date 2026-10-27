@@ -19,6 +19,7 @@ pub(crate) async fn create_agent_holder_account_in_connection(
     account: &arkret_wire::AccountId,
     accepted_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
+    crate::account_private_erasure::require_identity_write_in_connection(conn, account).await?;
     let inserted = sql_query(
         "WITH account AS (INSERT INTO accounts(principal_id,station_id,payload,created_at,updated_at) \
          VALUES($1,$2,'{}'::jsonb,$3,$3) ON CONFLICT(station_id,principal_id) DO NOTHING RETURNING pk), \
@@ -40,8 +41,96 @@ pub(crate) async fn create_agent_holder_account_in_connection(
     }
     Ok(())
 }
+async fn put_account_in_connection(
+    conn: &mut diesel_async::AsyncPgConnection,
+    record: &AccountRecord,
+) -> PersistenceResult<AccountPk> {
+    let owner = arkret_wire::AccountId::new(record.principal_id.clone(), record.station_id.clone());
+    crate::account_private_erasure::require_identity_write_in_connection(conn, &owner).await?;
+    let payload = serde_json::json!({
+        "biography": record.biography,
+        "avatar_blob_ref": record.avatar_blob_ref,
+    });
+    let row = sql_query(
+            "WITH account AS (INSERT INTO accounts (principal_id, station_id, display_name, payload, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $5) \
+             ON CONFLICT (station_id, principal_id) DO UPDATE SET \
+             display_name = EXCLUDED.display_name, payload = EXCLUDED.payload, updated_at = NOW() \
+             RETURNING pk), private_key AS (INSERT INTO invite_new_source_hmac_keys(account_pk,key_bytes) \
+             SELECT pk,$6 FROM account ON CONFLICT(account_pk) DO NOTHING) SELECT pk FROM account",
+        )
+        .bind::<Text, _>(record.principal_id.as_str())
+        .bind::<Text, _>(record.station_id.as_str())
+        .bind::<Nullable<Text>, _>(&record.display_name)
+        .bind::<Jsonb, _>(&payload)
+        .bind::<Timestamptz, _>(record.created_at)
+        .bind::<sql_types::Binary, _>(rand::random::<[u8;32]>().to_vec())
+        .get_result::<AccountIdRow>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+
+    if record.localpart.trim().is_empty() {
+        sql_query("DELETE FROM account_localparts WHERE account_pk = $1")
+            .bind::<BigInt, _>(row.pk)
+            .execute(&mut *conn)
+            .await
+            .map_err(PersistenceError::database)?;
+    } else {
+        sql_query(
+            "UPDATE account_localparts SET is_primary = false, updated_at = NOW() \
+                 WHERE account_pk = $1 AND localpart <> $2",
+        )
+        .bind::<BigInt, _>(row.pk)
+        .bind::<Text, _>(&record.localpart)
+        .execute(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+        let assigned = sql_query(
+            "INSERT INTO account_localparts \
+                 (id, account_pk, localpart, is_primary, created_at, updated_at) \
+                 VALUES ($1, $2, $3, true, $4, $4) \
+                 ON CONFLICT (localpart) DO UPDATE SET \
+                 account_pk = EXCLUDED.account_pk, is_primary = true, updated_at = NOW() \
+                 WHERE account_localparts.account_pk = EXCLUDED.account_pk \
+                 RETURNING localpart",
+        )
+        .bind::<sql_types::Uuid, _>(Uuid::now_v7())
+        .bind::<BigInt, _>(row.pk)
+        .bind::<Text, _>(&record.localpart)
+        .bind::<Timestamptz, _>(record.created_at)
+        .get_result::<LocalpartOnlyRow>(&mut *conn)
+        .await
+        .optional()
+        .map_err(PersistenceError::database)?;
+        let assigned_localpart = assigned.map(|row| row.localpart);
+        if assigned_localpart.is_none() {
+            return Err(PersistenceError::Conflict(format!(
+                "localpart `{}` is already assigned",
+                record.localpart
+            )));
+        }
+    }
+    Ok(AccountPk(row.pk))
+}
+
 #[async_trait]
 impl AccountStore for PgAccountStore {
+    async fn erase_private_state(
+        &self,
+        account_id: &arkret_wire::AccountId,
+        triggering_status_record_id: &arkret_wire::AccountStatusRecordId,
+        issuer: &dyn coland_storage::AccountPrivateErasureReceiptIssuer,
+    ) -> PersistenceResult<arkret_models_collaboration::governance::erasure::ErasureReceiptPackage>
+    {
+        crate::account_private_erasure::erase_private_state(
+            &self.pool,
+            account_id,
+            triggering_status_record_id,
+            issuer,
+        )
+        .await
+    }
+
     async fn get(
         &self,
         account_id: &arkret_wire::AccountId,
@@ -71,71 +160,14 @@ impl AccountStore for PgAccountStore {
     }
 
     async fn put(&self, record: &AccountRecord) -> PersistenceResult<AccountPk> {
-        let mut conn = crate::pg_db(&self.pool);
-        let payload = serde_json::json!({
-            "biography": record.biography,
-            "avatar_blob_ref": record.avatar_blob_ref,
-        });
-        let row = sql_query(
-            "WITH account AS (INSERT INTO accounts (principal_id, station_id, display_name, payload, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $5) \
-             ON CONFLICT (station_id, principal_id) DO UPDATE SET \
-             display_name = EXCLUDED.display_name, payload = EXCLUDED.payload, updated_at = NOW() \
-             RETURNING pk), private_key AS (INSERT INTO invite_new_source_hmac_keys(account_pk,key_bytes) \
-             SELECT pk,$6 FROM account ON CONFLICT(account_pk) DO NOTHING) SELECT pk FROM account",
-        )
-        .bind::<Text, _>(record.principal_id.as_str())
-        .bind::<Text, _>(record.station_id.as_str())
-        .bind::<Nullable<Text>, _>(&record.display_name)
-        .bind::<Jsonb, _>(&payload)
-        .bind::<Timestamptz, _>(record.created_at)
-        .bind::<sql_types::Binary, _>(rand::random::<[u8;32]>().to_vec())
-        .get_result::<AccountIdRow>(&mut conn)
-        .await
-        .map_err(PersistenceError::database)?;
-
-        if record.localpart.trim().is_empty() {
-            sql_query("DELETE FROM account_localparts WHERE account_pk = $1")
-                .bind::<BigInt, _>(row.pk)
-                .execute(&mut conn)
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, crate::PgTransactionError, _>(async move |conn| {
+            put_account_in_connection(conn, record)
                 .await
-                .map_err(PersistenceError::database)?;
-        } else {
-            sql_query(
-                "UPDATE account_localparts SET is_primary = false, updated_at = NOW() \
-                 WHERE account_pk = $1 AND localpart <> $2",
-            )
-            .bind::<BigInt, _>(row.pk)
-            .bind::<Text, _>(&record.localpart)
-            .execute(&mut conn)
-            .await
-            .map_err(PersistenceError::database)?;
-            let assigned = sql_query(
-                "INSERT INTO account_localparts \
-                 (id, account_pk, localpart, is_primary, created_at, updated_at) \
-                 VALUES ($1, $2, $3, true, $4, $4) \
-                 ON CONFLICT (localpart) DO UPDATE SET \
-                 account_pk = EXCLUDED.account_pk, is_primary = true, updated_at = NOW() \
-                 WHERE account_localparts.account_pk = EXCLUDED.account_pk \
-                 RETURNING localpart",
-            )
-            .bind::<sql_types::Uuid, _>(Uuid::now_v7())
-            .bind::<BigInt, _>(row.pk)
-            .bind::<Text, _>(&record.localpart)
-            .bind::<Timestamptz, _>(record.created_at)
-            .get_result::<LocalpartOnlyRow>(&mut conn)
-            .await
-            .optional()
-            .map_err(PersistenceError::database)?;
-            let assigned_localpart = assigned.map(|row| row.localpart);
-            if assigned_localpart.is_none() {
-                return Err(PersistenceError::Conflict(format!(
-                    "localpart `{}` is already assigned",
-                    record.localpart
-                )));
-            }
-        }
-        Ok(AccountPk(row.pk))
+                .map_err(Into::into)
+        })
+        .await
+        .map_err(crate::PgTransactionError::into_persistence)
     }
 
     async fn list(&self) -> PersistenceResult<Vec<AccountRecord>> {
@@ -816,7 +848,13 @@ impl PgAccountDataStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        compare_account_data_in_transaction(&mut conn, record, expected_revision, None).await
+        conn.transaction::<_, crate::PgTransactionError, _>(async move |conn| {
+            compare_account_data_in_transaction(conn, record, expected_revision, None)
+                .await
+                .map_err(Into::into)
+        })
+        .await
+        .map_err(crate::PgTransactionError::into_persistence)
     }
 }
 pub(crate) async fn compare_account_data_in_transaction(
@@ -825,6 +863,13 @@ pub(crate) async fn compare_account_data_in_transaction(
     expected_revision: u64,
     source_event_id: Option<&arkret_wire::EventId>,
 ) -> PersistenceResult<AccountDataCasResult> {
+    let actor: arkret_wire::ActorId = serde_json::from_str(&record.actor).map_err(|error| {
+        PersistenceError::SchemaViolation(format!("invalid Account Data owner: {error}"))
+    })?;
+    let owner = actor.as_account_id().ok_or_else(|| {
+        PersistenceError::SchemaViolation("Account Data requires an exact Account owner".to_owned())
+    })?;
+    crate::account_private_erasure::require_private_write_in_connection(conn, owner).await?;
     let expected_revision = i64::try_from(expected_revision).map_err(|_| {
         PersistenceError::Conflict("account_data revision exceeds i64 storage range".to_owned())
     })?;

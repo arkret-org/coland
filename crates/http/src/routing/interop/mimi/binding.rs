@@ -65,15 +65,6 @@ pub(super) async fn current_mimi_room_binding_for_event_id(
     Ok(current.filter(|binding| binding.event_id == event_id.as_str()))
 }
 
-pub(super) async fn mimi_bound_realm_id(
-    state: &AppState,
-    room_id: &str,
-) -> Result<Option<String>, AppError> {
-    latest_mimi_room_binding(state, room_id)
-        .await
-        .map(|binding| binding.map(|binding| binding.realm_id))
-}
-
 pub(super) fn enforce_mimi_writable_binding(binding: &Value) -> Result<(), AppError> {
     validate_mimi_room_binding_payload(binding)?;
     let binding_payload = mimi_room_binding_security_payload(binding);
@@ -418,7 +409,15 @@ pub(super) async fn admit_mimi_room_binding_event(
         .map_err(|error| {
             AppError::internal(format!("MIMI current binding lookup failed: {error}"))
         })?;
-    validate_mimi_binding_transition_preflight(current.as_ref(), &next)?;
+    let exact_accepted_replay = state
+        .authority_commits()
+        .committed_event(&event.event_id)
+        .await
+        .map_err(|error| AppError::internal(format!("MIMI accepted Event lookup failed: {error}")))?
+        .is_some_and(|original| original.event == *event);
+    if !exact_accepted_replay {
+        validate_mimi_binding_transition_preflight(current.as_ref(), &next)?;
+    }
     local_mimi_sender_account(&sender_actor_id, &state.service_core_id())?;
     let event_id = event.event_id.to_string();
     crate::state::submit_mimi_binding_event(state, &submission)

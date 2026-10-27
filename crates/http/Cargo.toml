@@ -73,6 +73,7 @@ serde = { workspace = true, features = ["derive"] }
 serde-saphyr.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+arkret-deployment-contracts = { workspace = true, features = ["openapi"] }
 coland-contracts = { workspace = true, features = ["openapi"] }
 coland-domain.workspace = true
 coland-services.workspace = true

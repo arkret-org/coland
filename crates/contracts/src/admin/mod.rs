@@ -1,4 +1,3 @@
-pub mod account_localparts;
 pub mod collection;
 pub mod device_signing_directory;
 pub mod handles;
@@ -9,7 +8,6 @@ pub mod queries;
 pub mod server;
 pub mod service_routes;
 
-pub use account_localparts::*;
 pub use collection::*;
 pub use device_signing_directory::*;
 pub use media::*;

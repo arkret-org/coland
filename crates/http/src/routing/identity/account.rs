@@ -11,6 +11,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use arkret_deployment_contracts::AccountProjectionRequestBody;
+use arkret_deployment_contracts::admin::{
+    AccountLocalpartAddRequestBody, AccountLocalpartUpdateResponseBody, AccountLocalpartView,
+    AccountLocalpartsView,
+};
 use arkret_identifiers::{BlobRef, DeviceId, DidCoreId, EventId, Hash, RealmId, StrandId};
 use arkret_models_collaboration::account_operations::{
     AccountUpdateProfileRequestBody, AccountView,
@@ -50,11 +55,6 @@ use arkret_models_identity::{
     PrincipalResolutionAuditRequestBody,
 };
 use arkret_wire::ActorId;
-use coland_contracts::AccountProjectionRequestBody;
-use coland_contracts::admin::{
-    AccountLocalpartAddRequestBody, AccountLocalpartUpdateResponseBody, AccountLocalpartView,
-    AccountLocalpartsView,
-};
 use coland_http::error::AppError;
 use coland_services::identity::{
     AccountLifecycleState, AccountLocalpartState as AccountLocalpartRecord,
@@ -199,7 +199,7 @@ pub(in crate::routing) fn local_router() -> Router {
 }
 
 pub(in crate::routing) fn local_service_router() -> Router {
-    Router::with_path(coland_contracts::ACCOUNT_LOCALPARTS_ROUTE)
+    Router::with_path(arkret_deployment_contracts::ACCOUNT_LOCALPARTS_ROUTE)
         .get(list_account_localparts)
         .post(add_account_localpart)
 }

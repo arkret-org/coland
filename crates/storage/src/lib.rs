@@ -10,12 +10,12 @@
 // Crate-private imports shared by the explicitly imported storage modules.
 pub(crate) use std::collections::{BTreeMap, BTreeSet};
 
+pub use arkret_deployment_contracts::agent_session_authority::{
+    AgentSessionAuthorityRequest, AgentSessionAuthorityView,
+};
 pub(crate) use arkret_event_draft::ProjectedEventOperation;
 pub(crate) use async_trait::async_trait;
 pub(crate) use chrono::Utc;
-pub use coland_contracts::agent_session_authority::{
-    AgentSessionAuthorityRequest, AgentSessionAuthorityView,
-};
 pub use coland_domain::identity::{ContactRecord, ContactRequestSlotState};
 pub(crate) use serde_json::Value;
 pub(crate) use uuid::Uuid;

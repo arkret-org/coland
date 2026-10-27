@@ -8,6 +8,7 @@ target-*
 .shared-target
 .codex-tmp
 .local
+artifacts
 # Deployment configuration is supplied at runtime; keep .env.example in source.
 .env
 .git

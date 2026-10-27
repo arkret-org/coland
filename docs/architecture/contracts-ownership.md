@@ -3,14 +3,14 @@
 本表记录阶段 0 及后续新增公共 DTO 的逐项审计。审计范围包括
 `arkret-spec/spec/v1/artifacts`、`arkret-rust-sdk` 的公开 wire 类型以及真实跨仓消费者。
 结论是：这些类型均未命中 Arkret spec wire 定义，属于部署本地的管理面或集成契约，
-因此保留在 `coland-contracts`；没有需要迁回 SDK 的本地重复定义。
+管理面独占类型继续保留在 `coland-contracts`。跨Coland／Coauth的Account投影、localpart载体与Agent会话源投影已迁至SDK的独立 `arkret-deployment-contracts`，只含纯传输类型及辅助函数，双方不链接对方实现。它们仍是私有HTTP契约，不登记为规范wire类型或原生权威证据。
 
 | 模块 | 类型 | 所有权 | 已确认消费者 | spec/SDK 对照结论 |
 | --- | --- | --- | --- | --- |
-| `admin::account_localparts` | `AccountLocalpartView` | local contract | Coland、Codmin | `/_coland/admin` 本地账号映射投影；未命中 spec wire 类型 |
-| `admin::account_localparts` | `AccountLocalpartsView` | local contract | Coland、Codmin | 部署本地列表 envelope；未命中 spec wire 类型 |
-| `admin::account_localparts` | `AccountLocalpartAddRequestBody` | local contract | Coland、Codmin | 部署本地管理命令；未命中 spec wire 类型 |
-| `admin::account_localparts` | `AccountLocalpartUpdateResponseBody` | local contract | Coland、Codmin | 部署本地变更结果；未命中 spec wire 类型 |
+| `admin::account_localparts` | `AccountLocalpartView` | SDK deployment contract | Coland、Codmin | `/_coland/admin` 本地账号映射投影；未命中 spec wire 类型 |
+| `admin::account_localparts` | `AccountLocalpartsView` | SDK deployment contract | Coland、Codmin | 部署本地列表 envelope；未命中 spec wire 类型 |
+| `admin::account_localparts` | `AccountLocalpartAddRequestBody` | SDK deployment contract | Coland、Codmin | 部署本地管理命令；未命中 spec wire 类型 |
+| `admin::account_localparts` | `AccountLocalpartUpdateResponseBody` | SDK deployment contract | Coland、Codmin | 部署本地变更结果；未命中 spec wire 类型 |
 | `admin::handles` | `AdminHandleView` | local contract | Coland、Codmin | 部署本地 handle 管理投影；未命中 spec wire 类型 |
 | `admin::handles` | `AdminHandleAuditEvent` | local contract | Coland、Codmin | 部署本地 handle 审计投影；未命中 spec wire 类型 |
 | `admin::handles` | `AdminHandlePage` | local contract | Coland、Codmin | 部署本地 handle 列表 envelope；未命中 spec wire 类型 |

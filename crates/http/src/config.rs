@@ -220,7 +220,7 @@ fn validate_persistence_key_store(
     Ok(())
 }
 
-/// The registered source domain and credential of an incoming
+/// The four registered facts and credential of one
 /// deployment-internal authenticated channel (`sync/service-http-binding.md`
 /// §2.2.3).
 ///
@@ -229,18 +229,22 @@ fn validate_persistence_key_store(
 /// use this Station's service `did_core_id`. Trust domains are not collapsed:
 /// the Account Authority/source domain is explicit here and the
 /// Station/destination domain comes from `AppConfig::trust_domain`. The fixed
-/// incoming adapter paths remain router facts, while this struct
+/// product-private adapter paths remain compile-time facts, while this struct
 /// carries the shared per-edge secret. Operators cannot widen the credential
 /// into a bearer-protected canonical path group.
 #[derive(Clone)]
 pub struct InternalAuthorityChannelConfig {
     /// Shared per-edge credential, byte-identical to the Account Authority's
     /// `stations[].internal_authority_shared_secret` for this Station. The
-    /// secret authenticates incoming AA callbacks; it never configures outgoing
-    /// Coland HTTP calls or grants authority outside the registered channel.
+    /// same secret authenticates both directions of this one edge; it is not a
+    /// general deployment bearer and grants nothing outside the fixed private
+    /// adapters.
     credential: String,
     /// Account Authority/source trust domain from explicit deployment config.
     account_authority_trust_domain: TrustDomainId,
+    /// Exact controller-gate operation endpoint derived from the canonical
+    /// Account Authority base at startup.
+    controller_gate_url: String,
 }
 
 impl InternalAuthorityChannelConfig {
@@ -249,6 +253,12 @@ impl InternalAuthorityChannelConfig {
     #[must_use]
     pub fn credential(&self) -> &str {
         &self.credential
+    }
+
+    /// Exact controller-gate operation endpoint bound to the Authority origin.
+    #[must_use]
+    pub fn controller_gate_url(&self) -> &str {
+        &self.controller_gate_url
     }
 
     /// Account Authority trust domain bound by deployment configuration.
@@ -267,6 +277,7 @@ impl std::fmt::Debug for InternalAuthorityChannelConfig {
                 "account_authority_trust_domain",
                 &self.account_authority_trust_domain,
             )
+            .field("controller_gate_url", &self.controller_gate_url)
             .finish()
     }
 }
@@ -343,9 +354,12 @@ pub struct AppConfig {
     /// tests. Parsed once here from `COLAND_FAILPOINTS` and always empty
     /// unless `development_mode` is on. See [`crate::failpoints`].
     pub failpoints: crate::failpoints::FailpointRegistry,
-    /// Explicit existing Coauth deployment used by the in-process issuer capability.
-    /// No database, signing key or identity is inferred from the resource server.
-    pub local_account_authority_config: Option<PathBuf>,
+    pub session_grant_introspection_url: Option<String>,
+    /// Exact Account Authority process S2S hard-logout endpoint. This is intentionally
+    /// independent from session-grant introspection: the two operations may
+    /// be routed or versioned separately and must never be derived from one
+    /// another by string substitution.
+    pub auth_session_logout_url: Option<String>,
     pub internal_authority_shared_secret: Option<String>,
     /// The registered deployment-internal authenticated channel between this
     /// Station and its Account Authority (`sync/service-http-binding.md`
@@ -895,7 +909,8 @@ impl AppConfig {
             oidc_client_id: None,
             development_mode: false,
             failpoints: crate::failpoints::FailpointRegistry::disabled(),
-            local_account_authority_config: None,
+            session_grant_introspection_url: None,
+            auth_session_logout_url: None,
             internal_authority_shared_secret: None,
             internal_authority_channel: None,
             agent_participation_ceiling:
@@ -967,6 +982,13 @@ impl AppConfig {
         self.internal_authority_channel = Some(InternalAuthorityChannelConfig {
             credential,
             account_authority_trust_domain: self.trust_domain.clone(),
+            controller_gate_url: internal_authority_operation_url(
+                self.account_authority_url
+                    .as_deref()
+                    .expect("checked above"),
+                INTERNAL_CONTROLLER_GATE_PATH,
+            )
+            .expect("test Account Authority URL must be valid"),
         });
     }
 }
@@ -1059,21 +1081,12 @@ impl AppConfig {
                 "COLAND_CORS_ALLOW_ORIGIN requires explicit origins; wildcard is invalid"
             );
         }
-        for retired in [
-            "COLAND_SESSION_GRANT_INTROSPECTION_URL",
-            "COLAND_AUTH_SESSION_LOGOUT_URL",
-        ] {
-            anyhow::ensure!(
-                env_non_empty(values, retired).is_none(),
-                "{retired} was removed; configure COLAND_LOCAL_ACCOUNT_AUTHORITY_CONFIG for the actual local issuer"
-            );
+        let session_grant_introspection_url =
+            env_non_empty(values, "COLAND_SESSION_GRANT_INTROSPECTION_URL");
+        let auth_session_logout_url = env_non_empty(values, "COLAND_AUTH_SESSION_LOGOUT_URL");
+        if let Some(value) = auth_session_logout_url.as_deref() {
+            validate_auth_session_logout_url(value)?;
         }
-        let local_account_authority_config =
-            env_non_empty(values, "COLAND_LOCAL_ACCOUNT_AUTHORITY_CONFIG").map(PathBuf::from);
-        anyhow::ensure!(
-            local_account_authority_config.is_none() || account_authority_url.is_some(),
-            "local issuer capability requires the public COLAND_ACCOUNT_AUTHORITY_URL"
-        );
         let internal_authority_shared_secret =
             env_non_empty(values, "COLAND_INTERNAL_AUTHORITY_SHARED_SECRET");
         let account_authority_trust_domain =
@@ -1109,10 +1122,30 @@ impl AppConfig {
             internal_authority_shared_secret.as_deref(),
             account_authority_trust_domain.as_ref(),
         ) {
-            (Some(_), Some(credential), Some(account_authority_trust_domain)) => {
+            (Some(authority_url), Some(credential), Some(account_authority_trust_domain)) => {
+                if let Some(introspection_url) = session_grant_introspection_url.as_deref() {
+                    validate_internal_authority_endpoint_binding(
+                        authority_url,
+                        introspection_url,
+                        "COLAND_SESSION_GRANT_INTROSPECTION_URL",
+                        INTERNAL_SESSION_GRANT_INTROSPECTION_PATH,
+                    )?;
+                }
+                if let Some(logout_url) = auth_session_logout_url.as_deref() {
+                    validate_internal_authority_endpoint_binding(
+                        authority_url,
+                        logout_url,
+                        "COLAND_AUTH_SESSION_LOGOUT_URL",
+                        INTERNAL_AUTH_SESSION_LOGOUT_PATH,
+                    )?;
+                }
                 Some(InternalAuthorityChannelConfig {
                     credential: credential.to_owned(),
                     account_authority_trust_domain: account_authority_trust_domain.clone(),
+                    controller_gate_url: internal_authority_operation_url(
+                        authority_url,
+                        INTERNAL_CONTROLLER_GATE_PATH,
+                    )?,
                 })
             }
             _ => None,
@@ -1374,7 +1407,8 @@ impl AppConfig {
             oidc_client_id,
             development_mode,
             failpoints,
-            local_account_authority_config,
+            session_grant_introspection_url,
+            auth_session_logout_url,
             internal_authority_shared_secret,
             internal_authority_channel,
             agent_participation_ceiling: env_non_empty(values, "COLAND_AGENT_PARTICIPATION_CEILING").map(|value| serde_json::from_str(&value)).transpose()?.unwrap_or(arkret_models_collaboration::governance::agent_participation::ParticipationBits::ALL),
@@ -1632,6 +1666,77 @@ impl AppConfig {
             warnings,
         }
     }
+}
+
+const INTERNAL_SESSION_GRANT_INTROSPECTION_PATH: &str =
+    "/_coauth/internal/session-grants/introspect";
+const INTERNAL_AUTH_SESSION_LOGOUT_PATH: &str = "/_coauth/internal/auth-sessions/logout";
+const INTERNAL_CONTROLLER_GATE_PATH: &str = "/_coauth/internal/controller-gate-attestations";
+
+fn parse_internal_authority_operation_url(
+    value: &str,
+    env_name: &str,
+    expected_path: &str,
+) -> anyhow::Result<url::Url> {
+    let parsed = url::Url::parse(value)
+        .map_err(|error| anyhow::anyhow!("{env_name} is invalid: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != expected_path
+    {
+        anyhow::bail!(
+            "{env_name} must be an http(s) URL with a host, without credentials, query, or fragment, and with exact path {expected_path}"
+        );
+    }
+    Ok(parsed)
+}
+
+fn validate_auth_session_logout_url(value: &str) -> anyhow::Result<()> {
+    parse_internal_authority_operation_url(
+        value,
+        "COLAND_AUTH_SESSION_LOGOUT_URL",
+        INTERNAL_AUTH_SESSION_LOGOUT_PATH,
+    )
+    .map(|_| ())
+}
+
+fn validate_internal_authority_endpoint_binding(
+    authority_url: &str,
+    operation_url: &str,
+    env_name: &str,
+    expected_path: &str,
+) -> anyhow::Result<()> {
+    let authority = url::Url::parse(authority_url).map_err(|error| {
+        anyhow::anyhow!("canonical COLAND_ACCOUNT_AUTHORITY_URL is invalid: {error}")
+    })?;
+    let operation = parse_internal_authority_operation_url(operation_url, env_name, expected_path)?;
+    anyhow::ensure!(
+        operation.origin() == authority.origin(),
+        "{env_name} must have the same scheme, host, and effective port as COLAND_ACCOUNT_AUTHORITY_URL"
+    );
+    Ok(())
+}
+
+fn internal_authority_operation_url(
+    authority_url: &str,
+    expected_path: &str,
+) -> anyhow::Result<String> {
+    let authority = url::Url::parse(authority_url).map_err(|error| {
+        anyhow::anyhow!("canonical COLAND_ACCOUNT_AUTHORITY_URL is invalid: {error}")
+    })?;
+    let target = authority.join(expected_path).map_err(|error| {
+        anyhow::anyhow!("Account Authority operation URL cannot be derived: {error}")
+    })?;
+    parse_internal_authority_operation_url(
+        target.as_str(),
+        "derived Account Authority operation URL",
+        expected_path,
+    )?;
+    Ok(target.to_string())
 }
 
 fn load_object_storage_config(
@@ -2145,11 +2250,19 @@ mod tests {
                 "COLAND_INTERNAL_AUTHORITY_SHARED_SECRET".to_owned(),
                 "test-internal-channel-secret".to_owned(),
             ),
+            (
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL".to_owned(),
+                "https://auth.example:443/_coauth/internal/session-grants/introspect".to_owned(),
+            ),
+            (
+                "COLAND_AUTH_SESSION_LOGOUT_URL".to_owned(),
+                "https://auth.example/_coauth/internal/auth-sessions/logout".to_owned(),
+            ),
         ])
     }
 
     #[test]
-    fn registered_internal_channel_only_authenticates_incoming_callbacks() {
+    fn registered_internal_channel_binds_every_bearer_target_to_authority_origin() {
         let config = AppConfig::from_values(
             &registered_internal_channel_values(),
             StartupOverrides::default(),
@@ -2159,36 +2272,14 @@ mod tests {
             config.account_authority_url.as_deref(),
             Some("https://auth.example/")
         );
-        assert!(config.internal_authority_channel.is_some());
-        assert!(config.local_account_authority_config.is_none());
-    }
-
-    #[test]
-    fn local_issuer_configuration_is_explicit_and_rejects_retired_http_delegation() {
-        let mut values = registered_internal_channel_values();
-        values.insert(
-            "COLAND_LOCAL_ACCOUNT_AUTHORITY_CONFIG".to_owned(),
-            "issuer.yaml".to_owned(),
-        );
-        let config = AppConfig::from_values(&values, StartupOverrides::default()).unwrap();
         assert_eq!(
-            config.local_account_authority_config.as_deref(),
-            Some(Path::new("issuer.yaml"))
+            config
+                .internal_authority_channel
+                .as_ref()
+                .unwrap()
+                .controller_gate_url(),
+            "https://auth.example/_coauth/internal/controller-gate-attestations"
         );
-        for retired in [
-            "COLAND_SESSION_GRANT_INTROSPECTION_URL",
-            "COLAND_AUTH_SESSION_LOGOUT_URL",
-        ] {
-            let mut obsolete = values.clone();
-            obsolete.insert(
-                retired.to_owned(),
-                "https://auth.example/retired".to_owned(),
-            );
-            let error = AppConfig::from_values(&obsolete, StartupOverrides::default()).unwrap_err();
-            assert!(error.to_string().contains(retired));
-        }
-        values.remove("COLAND_ACCOUNT_AUTHORITY_URL");
-        assert!(AppConfig::from_values(&values, StartupOverrides::default()).is_err());
     }
 
     #[test]
@@ -2225,6 +2316,8 @@ mod tests {
     fn signed_pairing_transport_does_not_require_the_shared_secret_channel() {
         let mut values = registered_internal_channel_values();
         values.remove("COLAND_INTERNAL_AUTHORITY_SHARED_SECRET");
+        values.remove("COLAND_SESSION_GRANT_INTROSPECTION_URL");
+        values.remove("COLAND_AUTH_SESSION_LOGOUT_URL");
         let config =
             AppConfig::from_values(&values, StartupOverrides::default()).expect("valid config");
         assert!(config.internal_authority_channel.is_none());
@@ -2263,7 +2356,7 @@ mod tests {
     }
 
     #[test]
-    fn account_authority_origin_rejects_credentials_query_and_fragment() {
+    fn registered_internal_channel_rejects_cross_origin_or_inexact_bearer_targets() {
         for (env_name, invalid) in [
             ("COLAND_ACCOUNT_AUTHORITY_URL", "https://user@auth.example/"),
             (
@@ -2273,6 +2366,38 @@ mod tests {
             (
                 "COLAND_ACCOUNT_AUTHORITY_URL",
                 "https://auth.example/#routing",
+            ),
+            (
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL",
+                "https://other.example/_coauth/internal/session-grants/introspect",
+            ),
+            (
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL",
+                "http://auth.example/_coauth/internal/session-grants/introspect",
+            ),
+            (
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL",
+                "https://auth.example:444/_coauth/internal/session-grants/introspect",
+            ),
+            (
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL",
+                "https://user@auth.example/_coauth/internal/session-grants/introspect",
+            ),
+            (
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL",
+                "https://auth.example/_coauth/internal/session-grants/introspect?copy=1",
+            ),
+            (
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL",
+                "https://auth.example/_coauth/internal/session-grants/introspect#copy",
+            ),
+            (
+                "COLAND_SESSION_GRANT_INTROSPECTION_URL",
+                "https://auth.example/_coauth/internal/session-grants/introspect/",
+            ),
+            (
+                "COLAND_AUTH_SESSION_LOGOUT_URL",
+                "https://other.example/_coauth/internal/auth-sessions/logout",
             ),
         ] {
             let mut values = registered_internal_channel_values();
@@ -2328,6 +2453,25 @@ mod tests {
         validate_persistence_key_store(Some("postgres://example"), &KeyStoreConfig::Platform)
             .unwrap();
         validate_persistence_key_store(None, &KeyStoreConfig::Disabled).unwrap();
+    }
+
+    #[test]
+    fn auth_session_logout_url_is_an_explicit_exact_operation_endpoint() {
+        validate_auth_session_logout_url(
+            "https://auth.example/_coauth/internal/auth-sessions/logout",
+        )
+        .unwrap();
+        for invalid in [
+            "https://auth.example/_coauth/internal/session-grants/introspect",
+            "https://user@auth.example/_coauth/internal/auth-sessions/logout",
+            "https://auth.example/_coauth/internal/auth-sessions/logout?version=1",
+            "ftp://auth.example/_coauth/internal/auth-sessions/logout",
+        ] {
+            assert!(
+                validate_auth_session_logout_url(invalid).is_err(),
+                "{invalid}"
+            );
+        }
     }
 
     #[test]

@@ -270,7 +270,7 @@ fn signed_audit_source(
 
 fn signed_terminal_receipt(terminal: &AuthorityCommitTransaction) -> serde_json::Value {
     use arkret_models_collaboration::events_payloads::event_wire::{
-        ErasureTrigger, VerificationStub,
+        ErasureTrigger, VerificationStub, VerificationStubScope, VerificationStubSubject,
     };
     use arkret_models_collaboration::governance::erasure::{
         ErasureAttemptOutcome, ErasureReceipt, ErasureReceiptProof, ErasureScope,
@@ -285,7 +285,7 @@ fn signed_terminal_receipt(terminal: &AuthorityCommitTransaction) -> serde_json:
     let scope = ErasureScope {
         storage_boundary: ErasureStorageBoundary::ServiceDefined,
         realm_id: Some(terminal.event.realm_id.clone()),
-        target_refs: Some(vec![subject.subject_ref.clone()]),
+        target_refs: vec![subject.subject_ref.clone()],
         retention_policy_id: None,
         service_scope: Some("trusted-source terminal audit fixture".to_owned()),
     };
@@ -296,11 +296,28 @@ fn signed_terminal_receipt(terminal: &AuthorityCommitTransaction) -> serde_json:
         stub_schema: arkret_wire::SchemaId::ERASURE_VERIFICATION_STUB_V1.to_owned(),
         receipt_id: receipt_id.clone(),
         trigger: trigger.clone(),
-        subject: subject.clone(),
-        scope: scope.clone(),
+        subject: VerificationStubSubject {
+            kind: serde_json::to_value(subject.kind)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            subject_ref: subject.subject_ref.clone(),
+        },
+        scope: VerificationStubScope {
+            storage_boundary: serde_json::to_value(scope.storage_boundary)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            realm_id: scope.realm_id.clone(),
+            target_refs: Some(scope.target_refs.clone()),
+            retention_policy_id: scope.retention_policy_id.clone(),
+            service_scope: scope.service_scope.clone(),
+        },
         event_digest: None,
         retained_digests: None,
-        committed_event_ref: None,
+        commit_ref: None,
         redaction_authorization_ref: None,
         legal_hold_ref: None,
         completed_at: at,
@@ -323,7 +340,7 @@ fn signed_terminal_receipt(terminal: &AuthorityCommitTransaction) -> serde_json:
         issued_at: None,
         proofs: Vec::new(),
         fanout_status: None,
-        peer_receipts: None,
+        peer_receipts: Vec::new(),
     };
     let bytes = receipt.canonical_proof_input().unwrap();
     let key = ed25519_dalek::SigningKey::from_bytes(&[83; 32]);
@@ -353,7 +370,7 @@ fn signed_terminal_receipt(terminal: &AuthorityCommitTransaction) -> serde_json:
     );
     assert_eq!(
         receipt.scope.target_refs,
-        Some(vec![terminal.event.event_id.to_string()])
+        vec![terminal.event.event_id.to_string()]
     );
     assert_eq!(receipt.retained_stub.as_ref(), Some(&stub));
     assert_eq!(receipt.retained_stub_digest, stub_digest);

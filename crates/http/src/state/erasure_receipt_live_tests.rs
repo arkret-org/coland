@@ -2,7 +2,9 @@
 //! Partial outcomes exercise the notification rail without claiming byte erasure.
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use arkret_models_collaboration::events_payloads::event_wire::{ErasureTrigger, VerificationStub};
+use arkret_models_collaboration::events_payloads::event_wire::{
+    ErasureTrigger, VerificationStub, VerificationStubScope, VerificationStubSubject,
+};
 use arkret_models_collaboration::governance::erasure::*;
 use salvo::prelude::*;
 
@@ -149,18 +151,27 @@ async fn package(
     let scope = ErasureScope {
         storage_boundary: ErasureStorageBoundary::ServiceDefined,
         realm_id: Some(target.event.realm_id.clone()),
-        target_refs: Some(vec![subject.subject_ref.clone()]),
+        target_refs: vec![subject.subject_ref.clone()],
         retention_policy_id: None,
         service_scope: Some("independent receipt rail verification".into()),
     };
     let stub = VerificationStub {
         stub_schema: arkret_wire::SchemaId::ERASURE_VERIFICATION_STUB_V1.into(),
         trigger: trigger.clone(),
-        subject: subject.clone(),
-        scope: scope.clone(),
+        subject: VerificationStubSubject {
+            kind: "event".into(),
+            subject_ref: subject.subject_ref.clone(),
+        },
+        scope: VerificationStubScope {
+            storage_boundary: "service_defined".into(),
+            realm_id: scope.realm_id.clone(),
+            target_refs: Some(scope.target_refs.clone()),
+            retention_policy_id: None,
+            service_scope: scope.service_scope.clone(),
+        },
         event_digest: None,
         retained_digests: None,
-        committed_event_ref: None,
+        commit_ref: None,
         redaction_authorization_ref: Some(redaction.event.event_id.to_string()),
         legal_hold_ref: None,
         receipt_id: id.clone(),
@@ -187,7 +198,7 @@ async fn package(
             issued_at: Some(at),
             proofs: Vec::new(),
             fanout_status: Some(ErasureFanoutStatus::Pending),
-            peer_receipts: None,
+            peer_receipts: Vec::new(),
         },
     };
     sign_package(source, &mut package).await;

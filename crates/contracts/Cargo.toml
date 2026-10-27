@@ -25,7 +25,6 @@ arkret-canonical.workspace = true
 arkret-identifiers.workspace = true
 arkret-models-collaboration.workspace = true
 arkret-models-crypto.workspace = true
-arkret-models-identity.workspace = true
 arkret-wire.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 salvo-oapi = { workspace = true, optional = true }

@@ -50,7 +50,7 @@ use sha2::{Digest, Sha256};
 use super::member_identity::MemberIdentityRegistry;
 use super::notification::{EventBroadcast, EventNotification, Mutex};
 use super::{
-    AccountAuthorityDevicePairingPort, LocalAccountAuthorityDevicePairing,
+    AccountAuthorityDevicePairingPort, PrivateAccountAuthorityDevicePairing,
     VerifiedBindingRouteFetcher, did_resolver_chain,
 };
 use crate::config::{AppConfig, NotarySigningKeyOrigin};
@@ -80,8 +80,6 @@ pub struct ConnectionDrain {
 /// DID resolver service, `ProjectionState`).
 #[derive(Clone)]
 pub struct AppState {
-    local_account_authority:
-        Option<Arc<dyn coland_contracts::account_authority::LocalAccountAuthority>>,
     verifier_private_keystore: Option<Arc<dyn arkret_keystore::KeyStore>>,
     config: AppConfig,
     /// Runtime-authoritative service DID. It is resolved from durable identity
@@ -947,16 +945,6 @@ impl AppState {
         self.service_resolution_commitment.load_full()
     }
 
-    /// Return the original durable method proof used by the public resolution
-    /// endpoint, also available before this process starts its listener.
-    pub async fn authenticated_service_resolution(
-        &self,
-    ) -> Result<arkret_models_identity::AuthenticatedServiceResolution, crate::error::AppError>
-    {
-        crate::routing::system::service_resolution::current_authenticated_service_resolution(self)
-            .await
-    }
-
     pub fn replace_service_resolution_commitment(&self, commitment: ResolutionCommitment) {
         self.service_resolution_commitment
             .store(Arc::new(commitment));
@@ -1033,26 +1021,6 @@ impl AppState {
     /// Origin tag for diagnostics (`Configured` / `Ephemeral` / `Rotated`).
     pub fn notary_signing_key_origin(&self) -> NotarySigningKeyOrigin {
         *self.notary_signing_key_origin.lock()
-    }
-
-    /// Install the real same-Station issuer capability before serving requests.
-    pub fn with_local_account_authority(
-        mut self,
-        authority: Arc<dyn coland_contracts::account_authority::LocalAccountAuthority>,
-    ) -> Result<Self, crate::error::AppError> {
-        if authority.station_id() != &self.service_core_id() {
-            return Err(crate::error::AppError::capability_denied(
-                "local Account Authority belongs to another Station",
-            ));
-        }
-        self.local_account_authority = Some(authority);
-        Ok(self)
-    }
-
-    pub(crate) fn local_account_authority(
-        &self,
-    ) -> Option<&dyn coland_contracts::account_authority::LocalAccountAuthority> {
-        self.local_account_authority.as_deref()
     }
 
     /// The original durable vault is shared with service bootstrap, never reopened
@@ -1209,7 +1177,6 @@ impl AppState {
         let trusted_push_gateways = Arc::new(config.trusted_push_gateways.clone());
 
         Self {
-            local_account_authority: None,
             verifier_private_keystore: None,
             config,
             service_id: service_id.clone(),
@@ -1232,7 +1199,7 @@ impl AppState {
             consents,
             contacts,
             agent_pairings,
-            account_authority_device_pairing: Arc::new(LocalAccountAuthorityDevicePairing),
+            account_authority_device_pairing: Arc::new(PrivateAccountAuthorityDevicePairing),
             agent_participations,
             key_backups,
             sessions,

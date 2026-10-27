@@ -476,68 +476,27 @@ pub(crate) async fn durable_deactivation_peer_service_targets_for_account(
     Ok(targets.into_values().collect())
 }
 
-/// Sign the exact completed boundary from the native service identity while
-/// its physical purge transaction remains open.
-struct NativePrivateErasureIssuer<'a> {
-    state: &'a AppState,
-    account: &'a arkret_wire::AccountId,
-    record: &'a arkret_wire::AccountStatusRecordId,
+fn deterministic_erasure_receipt_id(
+    triggering_status_record_id: &arkret_wire::AccountStatusRecordId,
+    storage_boundary: ErasureStorageBoundary,
+) -> String {
+    arkret_models_collaboration::governance::erasure::account_erasure_receipt_id(
+        triggering_status_record_id,
+        storage_boundary,
+    )
 }
 
-impl coland_storage::AccountPrivateErasureReceiptIssuer for NativePrivateErasureIssuer<'_> {
-    fn issuer_id(&self) -> arkret_wire::DidCoreId {
-        self.state.service_core_id()
-    }
-
-    fn issue_completed(
-        &self,
-        completed_at: chrono::DateTime<chrono::Utc>,
-    ) -> coland_storage::PersistenceResult<ErasureReceiptPackage> {
-        let actor = self.account.principal_id.as_str();
-        build_erasure_receipt_package(
-            self.state,
-            arkret_wire::ReceiptId::new_v7_at(
-                u64::try_from(completed_at.timestamp_millis())
-                    .map_err(coland_storage::PersistenceError::database)?,
-            )
-            .to_string(),
-            self.record,
-            ErasureSubject {
-                kind: ErasureSubjectKind::Principal,
-                subject_ref: actor.to_owned(),
-            },
-            ErasureScope {
-                storage_boundary: ErasureStorageBoundary::AccountPrivateStore,
-                realm_id: None,
-                target_refs: Some(vec![actor.to_owned()]),
-                retention_policy_id: None,
-                service_scope: Some("account_status.erasure_execution".to_owned()),
-            },
-            vec![
-                ErasedClass::AccountPrivateState,
-                ErasedClass::PushRoutes,
-                ErasedClass::DeviceSecrets,
-                ErasedClass::ProjectionRows,
-            ],
-            completed_at,
-        )
-        .map_err(|error| {
-            coland_storage::PersistenceError::Internal(format!(
-                "native private erasure receipt: {error}"
-            ))
-        })
-    }
-}
-
-/// Execute the accepted terminal record and recover the same durable package
-/// after a crash. Physical deletion and package custody share one transaction.
+/// Execute the physical side effects authorized by one already accepted
+/// `erasure_pending` account-status record. The caller owns durable leasing and
+/// exact replay; this function is intentionally transport-free and returns the
+/// exact package to persist before receipt fanout.
 pub(crate) async fn execute_account_status_erasure(
     state: &AppState,
     account_id: &arkret_wire::AccountId,
     triggering_status_record_id: &arkret_wire::AccountStatusRecordId,
 ) -> Result<ErasureReceiptPackage, AppError> {
     let actor = account_id.principal_id.as_str();
-    let account = state
+    let mut account = state
         .identities()
         .account(account_id)
         .await
@@ -546,51 +505,100 @@ pub(crate) async fn execute_account_status_erasure(
     if account.account_id != *account_id {
         return Err(AppError::conflict("erasure account identity mismatch"));
     }
-    // Foreign Organization PCR custody does not authorize principal-only local
-    // session/device cleanup of another Account with the same principal.
-    if account_id.station_id != state.service_core_id() {
-        return Err(crate::app_error!(
-            TemporarilyUnavailable,
-            "foreign Account erasure requires exact hosting cleanup evidence"
-        ));
+    let account_pk = account.pk;
+    let previous_localpart = account.localpart.clone();
+    account.display_name = Some("[user erased]".to_owned());
+    account.biography = None;
+    account.avatar_blob_ref = None;
+    account.localpart = String::new();
+    state
+        .identities()
+        .save_account(account)
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    state
+        .identities()
+        .clear_localparts(account_pk)
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    if !previous_localpart.is_empty() {
+        record_handle_release(state, &previous_localpart)
+            .await
+            .map_err(|error| AppError::internal(error.to_string()))?;
     }
+    // Fence new active handoffs before the fanout. The fanout is retryable
+    // after a crash, but a registration admitted during it could otherwise
+    // escape its terminal tombstone scan.
+    let changed_at = now();
     persist_account_lifecycle_record(
         state,
-        account.pk,
+        account_pk,
         actor,
         &AccountLifecycleState {
             state: "erasure_pending".to_owned(),
             reason: Some("account_status_erasure".to_owned()),
             changed_by: None,
-            changed_at: now(),
+            changed_at,
         },
     )
     .await?;
     let fanout = run_account_deactivation_fanout(state, actor).await?;
-    if state.deactivation_push_partial(actor) {
-        return Err(crate::app_error!(
-            TemporarilyUnavailable,
-            "native Gateway revocation remains incomplete"
-        ));
-    }
-    let issuer = NativePrivateErasureIssuer {
-        state,
-        account: account_id,
-        record: triggering_status_record_id,
-    };
-    let package = state
+    // `consent-model.md` section 6.1.1.4 -- erasure MUST drop the holder's
+    // whole seen-source ledger. Consent revoke and source list edits must not,
+    // which is why this lives here and not in those paths.
+    state
         .persistence()
-        .erase_account_private_state(account_id, triggering_status_record_id, &issuer)
+        .invite_new_source_ledger_store()
+        .delete_for_holder(account_id)
         .await
-        .map_err(|error| {
-            AppError::internal(format!("native private erasure transaction: {error}"))
-        })?;
+        .map_err(|error| AppError::internal(error.to_string()))?;
     let memberships_removed = remove_realm_memberships_for_actor(state, actor);
-    append_audit_log(state,Some(actor),"org.arkret.coland.audit.erasure_executed",json!({
-        "account_id":account_id,"triggering_status_record_id":triggering_status_record_id,
-        "memberships_removed":memberships_removed,"sessions_revoked":fanout.sessions_revoked,"devices_revoked":fanout.devices_revoked,
-    }),"accepted").await;
+    append_audit_log(
+        state,
+        Some(actor),
+        "org.arkret.coland.audit.erasure_executed",
+        json!({
+            "account_id": account_id,
+            "actor": actor,
+            "triggering_status_record_id": triggering_status_record_id,
+            "memberships_removed": memberships_removed,
+            "sessions_revoked": fanout.sessions_revoked,
+            "devices_revoked": fanout.devices_revoked,
+        }),
+        "accepted",
+    )
+    .await;
     append_audit_redaction_marker(state, actor).await;
+    let completed_at = now();
+    let package = build_erasure_receipt_package(
+        state,
+        deterministic_erasure_receipt_id(
+            triggering_status_record_id,
+            ErasureStorageBoundary::AccountPrivateStore,
+        ),
+        triggering_status_record_id,
+        ErasureSubject {
+            kind: ErasureSubjectKind::Principal,
+            subject_ref: actor.to_owned(),
+        },
+        ErasureScope {
+            storage_boundary: ErasureStorageBoundary::AccountPrivateStore,
+            realm_id: None,
+            target_refs: vec![actor.to_owned()],
+            retention_policy_id: None,
+            service_scope: Some("account_status.erasure_execution".to_owned()),
+        },
+        vec![
+            ErasedClass::AccountPrivateState,
+            ErasedClass::PushRoutes,
+            ErasedClass::DeviceSecrets,
+            ErasedClass::ProjectionRows,
+        ],
+        completed_at,
+    )?;
+    package
+        .validate_bindings()
+        .map_err(|error| AppError::internal(format!("erasure package self-check: {error}")))?;
     Ok(package)
 }
 
@@ -746,7 +754,7 @@ fn build_erasure_receipt_package(
         issued_at: Some(completed_at),
         proofs: Vec::new(),
         fanout_status: None,
-        peer_receipts: None,
+        peer_receipts: Vec::new(),
     };
     let payload_digest = receipt
         .canonical_payload_digest()

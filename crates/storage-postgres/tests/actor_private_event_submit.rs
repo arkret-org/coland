@@ -472,19 +472,6 @@ async fn draft_proposal_creates_one_available_pending_intent_without_a_realm_com
     );
     assert_eq!(count(&pool, "actor_private_events").await, 1);
     // The proposal is Station-private: no Realm Event or RealmCommit exists.
-    let stored_owner: serde_json::Value = serde_json::from_str(
-        &text(
-            &pool,
-            "SELECT owner_account_id::text AS value FROM actor_private_events",
-        )
-        .await,
-    )
-    .unwrap();
-    assert_eq!(stored_owner, json!(holder()));
-    assert_ne!(
-        stored_owner,
-        json!(proposal.event.actor_id.as_account_id().unwrap())
-    );
     assert_eq!(count(&pool, "realm_commits").await, 0);
     assert_eq!(count(&pool, "canonical_events").await, 0);
 }

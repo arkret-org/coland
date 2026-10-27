@@ -57,11 +57,6 @@ pub(crate) async fn write_push_device_route_in_transaction(
         ));
     }
     let binding = serde_json::to_value(authorization).map_err(PersistenceError::database)?;
-    crate::account_private_erasure::require_private_write_in_connection(
-        conn,
-        &registration.account_id,
-    )
-    .await?;
     let account =
         serde_json::to_value(&registration.account_id).map_err(PersistenceError::database)?;
     // Serialize replacement and unregistration for this exact account/device.

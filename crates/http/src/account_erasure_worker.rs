@@ -82,17 +82,6 @@ pub async fn ensure_intent(
     principal_id: &arkret_wire::DidCoreId,
     record_id: &AccountStatusRecordId,
 ) -> Result<(), AppError> {
-    if state
-        .identities()
-        .account(account_id)
-        .await
-        .map_err(|error| AppError::internal(format!("erasure boundary applicability: {error}")))?
-        .is_none()
-    {
-        // Foreign canonical content is another storage boundary. It does not
-        // create an Account-private execution owned by this deployment.
-        return Ok(());
-    }
     let principal_idempotency_id = execution_principal_id(state);
     let key = execution_key(record_id, ExecutionState::Pending);
     let execution = AccountErasureExecution {
@@ -260,43 +249,20 @@ async fn run_execution(
 /// second command carrier.
 pub async fn run_once(state: &AppState) -> Result<usize, AppError> {
     let mut processed = 0_usize;
-    let mut failed = 0_usize;
     for record in state
         .persistence()
         .erasure_pending_account_status_records(256)
         .await
         .map_err(|error| AppError::internal(format!("erasure record scan: {error}")))?
     {
-        if state
-            .identities()
-            .account(&record.account_id)
-            .await
-            .map_err(|error| {
-                AppError::internal(format!("erasure boundary applicability: {error}"))
-            })?
-            .is_none()
-        {
-            continue;
-        }
-        let execution = run_execution(
+        run_execution(
             state,
             &record.account_id,
             &record.account_id.principal_id,
             &record.account_status_record_id,
         )
-        .await;
-        match execution {
-            Ok(()) => processed += 1,
-            Err(error) => {
-                failed += 1;
-                tracing::error!(%error,account_id=%record.account_id,record_id=%record.account_status_record_id,"Account-private erasure remains incomplete");
-            }
-        }
-    }
-    if failed > 0 {
-        return Err(AppError::internal(format!(
-            "{failed} Account-private erasure executions remain incomplete; {processed} others processed"
-        )));
+        .await?;
+        processed += 1;
     }
     Ok(processed)
 }

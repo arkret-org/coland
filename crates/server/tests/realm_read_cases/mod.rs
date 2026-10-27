@@ -223,8 +223,7 @@ async fn sdk_realm_reads_enforce_visibility_and_use_durable_lifecycle_after_cold
         let frozen = Box::pin(next(&session, &fixture, &link.authority_commit, EventKind::RealmFreeze, json!({}))).await;
         Box::pin(publish_fixture_status(&session,&fixture)).await;
         let cold_state = Box::pin(coland_test_support::app_state_with_persistence(session.state.config().clone(), store.clone())).await;
-        let cold_state = cold_state.with_local_account_authority(session.authority.clone()).unwrap();
-        let session = GrantSession { state:cold_state, token:session.token, holder_key:session.holder_key, authority:session.authority };
+        let session = GrantSession { state:cold_state, token:session.token, holder_key:session.holder_key };
         let state = session.state.clone();
         let server = tokio::spawn(async move { salvo::Server::new(acceptor).serve(service(state)).await; });
         let client = sdk(&base, &session);

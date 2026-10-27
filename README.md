@@ -199,12 +199,12 @@ docker run --rm -p 8698:8698 \
   -e COLAND_SERVICE_IDENTITY_BUNDLE_DIR=/var/lib/coland/identity-bundle \
   -e COLAND_ACCOUNT_AUTHORITY_URL=https://coauth.example \
   -e COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN=ak:trust_domain:coauth.example \
-  -e COLAND_LOCAL_ACCOUNT_AUTHORITY_CONFIG=/run/issuer/config.yaml \
+  -e COLAND_SESSION_GRANT_INTROSPECTION_URL=https://coauth.example/_coauth/internal/session-grants/introspect \
+  -e COLAND_AUTH_SESSION_LOGOUT_URL=https://coauth.example/_coauth/internal/auth-sessions/logout \
   -e COLAND_INTERNAL_AUTHORITY_SHARED_SECRET=shared-secret-known-by-coauth \
   -e DATABASE_URL=postgres://coland:coland@db:5432/coland \
   -e COLAND_OBJECT_STORAGE_BACKEND=filesystem \
   -e COLAND_OBJECT_STORAGE_LOCAL_ROOT=/var/lib/coland/objects \
-  --mount type=bind,source=/secure/issuer,target=/run/issuer,readonly \
   --mount type=volume,source=coland-data,target=/var/lib/coland \
   --mount type=bind,source=/secure/coland/coland-keystore-master-key,target=/run/secrets/coland-keystore-master-key,readonly \
   ghcr.io/arkret-org/coland:<tag>
@@ -241,10 +241,11 @@ All settings can be supplied via environment variables (preferred) or a
 | `COLAND_EXTERNAL_WEBVH_PROVIDER_URL` | unset | Optional external `did:webvh` provider; any standalone registrar implementing the `did:webvh` provider surface |
 | `COLAND_EXTERNAL_WEBVH_REGISTRATION_BEARER` / `_FILE` | unset | When set with the external Provider URL, stores Coland's own service identity there (class A); no first-provisioning flag or configured DID is used |
 | `COLAND_DEFAULT_WEBVH_PROVIDER_ID` | unset | Optional coauth default provider id: `coland.embedded` or `external.webvh` |
-| `COLAND_ACCOUNT_AUTHORITY_URL` | unset | Canonical public Account Authority base URL advertised at `/_arkret/describe.authentication_metadata.account_authority`; it does not configure an outgoing private HTTP adapter |
+| `COLAND_ACCOUNT_AUTHORITY_URL` | unset | Canonical public Account Authority base URL advertised at `/_arkret/describe.authentication_metadata.account_authority`; internal bearer targets must use this exact origin |
 | `COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN` | unset | Explicit source trust domain of the configured Account Authority; required to register the unsigned §2.2.3 internal channel and never derived from its URL |
-| `COLAND_LOCAL_ACCOUNT_AUTHORITY_CONFIG` | unset | Explicit Coauth deployment configuration opened as a same-Station issuer capability. Requires its actual migrated issuer database, existing KeyStore and the exact owning Station endpoint; no key provisioning or shadow session store |
-| `COLAND_INTERNAL_AUTHORITY_SHARED_SECRET` | unset | Shared per-edge credential for incoming Account Authority callbacks under §2.2.3. Session introspection, issuer-side logout and controller-gate issuance use the same-Station in-process capability. Agent projection GET and Agent key pairing instead require the Station DID's delegated `#account-authority` RFC 9421 signature; this secret never authorizes them |
+| `COLAND_SESSION_GRANT_INTROSPECTION_URL` | unset | Exact `/_coauth/internal/session-grants/introspect` endpoint used for `ak.session.grant + DPoP`; when the internal channel is registered it must match the Account Authority scheme, host and effective port and contain no credentials/query/fragment |
+| `COLAND_AUTH_SESSION_LOGOUT_URL` | unset | Exact Account Authority process S2S `/_coauth/internal/auth-sessions/logout` endpoint; never derived from the introspection URL and subject to the same origin/URL restrictions |
+| `COLAND_INTERNAL_AUTHORITY_SHARED_SECRET` | unset | Shared per-edge secret for this Station ↔ its Account Authority, presented as an HTTP Bearer token. Together with the Authority URL/trust domain it registers the trusted-proxy §2.2.3 channel, confined to exact-token introspection, Auth-side logout, controller-gate issue, and device-revocation gate check. Agent projection GET and Agent key pairing instead require the Station DID's delegated `#account-authority` RFC 9421 signature; this secret never authorizes them |
 | `DATABASE_URL` | unset | Required for runtime startup; enables PostgreSQL and runs migrations. In-memory persistence is test-only, and a durable `COLAND_KEYSTORE_BACKEND` is mandatory |
 | `COLAND_OBJECT_STORAGE_BACKEND` | `filesystem` | Blob object backend: `filesystem`/`local` or `s3-compatible` |
 | `COLAND_OBJECT_STORAGE_LOCAL_ROOT` | system temp + `/coland-objects` | Local filesystem root when using `filesystem`/`local` |
@@ -349,20 +350,16 @@ COLAND_DEVELOPMENT_MODE=true
 COLAND_ACCOUNT_AUTHORITY_URL=https://auth.local.host
 COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN=ak:trust_domain:auth.local.host
 COLAND_OAUTH_CLIENT_ID=01GFWR28C4KNE04WG3HKXB7C9R
-COLAND_LOCAL_ACCOUNT_AUTHORITY_CONFIG=/run/issuer/config.yaml
+COLAND_SESSION_GRANT_INTROSPECTION_URL=https://auth.local.host/_coauth/internal/session-grants/introspect
+COLAND_AUTH_SESSION_LOGOUT_URL=https://auth.local.host/_coauth/internal/auth-sessions/logout
 COLAND_INTERNAL_AUTHORITY_SHARED_SECRET=local-coauth-session-grant-introspection
 COLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER=local-coland-webvh-registration
 ```
 
-The incoming callback credential must match Coauth's `arkret.stations[]`
-entry for `https://local.host/`. The local issuer configuration must point to
-that Station's actual Coauth database and existing KeyStore. Mount its referenced
-custody files at the exact paths named in the configuration. Finish Coauth's
-migrations and initial key provisioning before loading the capability; Coland
-never provisions another issuer. During first deployment, the Station may start
-without this capability to establish its identity, then restart with the explicit
-configuration after binding. Grant-authenticated operations fail closed until
-it is loaded.
+Those bearer values must match coauth's
+`arkret.stations[]` entry for `https://local.host/`; otherwise
+coauth will reject coland's introspection call and browser sign-in will end
+with `unauthenticated: invalid bearer token`.
 
 Run `just init-dev` once before starting this encrypted-file configuration;
 subsequent runs validate and retain the existing local master key.
@@ -489,7 +486,7 @@ The same list is computed at runtime and surfaced on
 - [ ] CORS limited to the configured allowed origins (`COLAND_CORS_ALLOW_ORIGIN`)
 - [ ] Secrets in a secret manager (`COLAND_NOTARY_SIGNING_KEY`, internal-authority shared secret)
 - [ ] Log redaction enabled (default outside dev mode)
-- [ ] Admin auth in production mode (`COLAND_ADMIN_PRINCIPAL_DIDS`, with browser sessions backed by `COLAND_LOCAL_ACCOUNT_AUTHORITY_CONFIG`)
+- [ ] Admin auth in production mode (`COLAND_ADMIN_PRINCIPAL_DIDS`, with browser sessions backed by `COLAND_SESSION_GRANT_INTROSPECTION_URL`)
 - [ ] Rate limit enabled (default; do not disable in production)
 - [ ] Service signing-key rotation remains disabled until the deployment can atomically commit the KeyStore key, WebVH history, DID document, durable identity, and recovery bundle; the current admin route fails closed with `unsupported_feature`
 - [ ] `COLAND_SEED_DEMO_DATA=false` (default — never on a federated production deployment)

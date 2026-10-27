@@ -166,9 +166,6 @@ async fn admit(
             "Consent holder is not an Account",
         )
     })?;
-    // The PCR/device cut does not subsume accepted Account lifecycle state.
-    // Hold the exact Account fence until all private current/results commit.
-    crate::account_private_erasure::require_private_write_in_connection(conn, holder).await?;
     // Missing or misplaced current material cannot prove never_written.
     // This uses the same accepted namespace check under the held PCR lock.
     records_in_connection(conn, holder, &event.realm_id).await?;

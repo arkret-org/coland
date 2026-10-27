@@ -38,7 +38,7 @@ mod replica_anchor;
 mod service_route_fetcher;
 #[doc(hidden)]
 pub use account_authority_device_pairing::AccountAuthorityDevicePairingPort;
-pub(crate) use account_authority_device_pairing::LocalAccountAuthorityDevicePairing;
+pub(crate) use account_authority_device_pairing::PrivateAccountAuthorityDevicePairing;
 pub(crate) use actor_private::{
     actor_private_refusal, admit_account_data_set, canonical_event_digest,
 };

@@ -214,14 +214,6 @@ impl AccountStatusReplicaStore for PgAccountStatusReplicaStore {
                 return Ok(outcome);
             }
 
-            // Linearize the accepted checkpoint after in-flight private writes.
-            // Changing the retained identity row also fences old repeatable-read
-            // snapshots; a row lock alone would leave their version unchanged.
-            sql_query("UPDATE accounts SET updated_at=clock_timestamp() WHERE principal_id=$1 AND station_id=$2")
-                .bind::<Text,_>(record.account_id.principal_id.as_str())
-                .bind::<Text,_>(record.account_id.station_id.as_str())
-                .execute(&mut *conn).await.map_err(PersistenceError::database)?;
-
             sql_query(
                 "INSERT INTO account_status_replica_records \
                  (account_authority_id, account_id, status_sequence, record_id, record, receipt) \

@@ -71,10 +71,13 @@ impl Fixture {
     ) -> Self {
         let slot = Arc::new(Mutex::new(Value::Null));
         let management_authority = Arc::new(Mutex::new(None));
-        let origin = spawn_account_status_mock(management_authority.clone()).await;
+        let origin = spawn_introspection_mock(slot.clone(), management_authority.clone()).await;
         let mut config = AppConfig {
             development_mode: true,
             embedded_webvh_registration_bearer: Some("applet-fixture-registration".to_owned()),
+            session_grant_introspection_url: Some(format!(
+                "{origin}/_coauth/internal/session-grants/introspect"
+            )),
             account_authority_url: Some(origin),
             // The fixture Applet Service is a did:webvh; registration epoch
             // evidence admits no did:web Service.
@@ -95,12 +98,6 @@ impl Fixture {
             pool.clone(),
         ));
         let state = coland_test_support::app_state_with_persistence(config, persistence).await;
-        let authority =
-            coland_test_support::account_authority::ComponentAccountAuthority::from_json_slot(
-                state.service_core_id(),
-                slot.clone(),
-            );
-        let state = state.with_local_account_authority(authority).unwrap();
         let pcr = match founding_device_seed {
             None => PcrGenesisFixture::new(state.service_did()),
             Some(seed) => PcrGenesisFixture::new_with(
@@ -875,7 +872,8 @@ struct ManagementAuthorityFixture {
     public_key: [u8; 32],
 }
 
-async fn spawn_account_status_mock(
+async fn spawn_introspection_mock(
+    slot: Arc<Mutex<Value>>,
     authority: Arc<Mutex<Option<ManagementAuthorityFixture>>>,
 ) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -887,6 +885,7 @@ async fn spawn_account_status_mock(
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
             };
+            let slot = slot.clone();
             let authority = authority.clone();
             tokio::spawn(async move {
                 let request = read_http_request(&mut stream).await;
@@ -951,7 +950,7 @@ async fn spawn_account_status_mock(
                     answer.validate_for_request(&query).unwrap();
                     arkret_canonical::canonical_json_bytes(&answer).unwrap()
                 } else {
-                    panic!("component peer only implements registered account status resolution")
+                    serde_json::to_vec(&*slot.lock().unwrap()).expect("serialize outcome")
                 };
                 let headers = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",

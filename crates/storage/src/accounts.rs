@@ -4,30 +4,6 @@ use super::{
     AccountDataCasResult, AccountDataChangeRecord, AccountDataRecord, AccountLifecycleRecord,
     AccountLocalpartRecord, AccountPk, AccountRecord, PersistenceResult, async_trait,
 };
-
-/// Signs only the completed package after the storage transaction has removed
-/// its private payloads. Issuers perform no transport or other external side
-/// effects; failure rolls back both the purge and its durable package.
-pub trait AccountPrivateErasureReceiptIssuer: Send + Sync {
-    fn issuer_id(&self) -> arkret_wire::DidCoreId;
-    fn issue_completed(
-        &self,
-        completed_at: chrono::DateTime<chrono::Utc>,
-    ) -> PersistenceResult<arkret_models_collaboration::governance::erasure::ErasureReceiptPackage>;
-}
-
-/// Read-only custody of a completed, atomically persisted Account-private purge.
-/// This capability cannot erase data, issue receipts or replace stored originals.
-#[async_trait]
-pub trait AccountPrivateErasureCompletionStore: Send + Sync {
-    async fn receipt_id(
-        &self,
-        account_id: &AccountId,
-        triggering_status_record_id: &arkret_wire::AccountStatusRecordId,
-        executor_id: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<Option<arkret_wire::ReceiptId>>;
-}
-
 /// Trait for account storage operations.
 #[async_trait]
 pub trait AccountStore: Send + Sync {
@@ -36,14 +12,6 @@ pub trait AccountStore: Send + Sync {
     async fn put(&self, record: &AccountRecord) -> PersistenceResult<AccountPk>;
     async fn list(&self) -> PersistenceResult<Vec<AccountRecord>>;
     async fn delete(&self, account_id: &AccountId) -> PersistenceResult<()>;
-    /// Remove the exact Account-private boundary and commit its native signed
-    /// completion together. Exact recovery returns the stored package bytes.
-    async fn erase_private_state(
-        &self,
-        account_id: &AccountId,
-        triggering_status_record_id: &arkret_wire::AccountStatusRecordId,
-        issuer: &dyn AccountPrivateErasureReceiptIssuer,
-    ) -> PersistenceResult<arkret_models_collaboration::governance::erasure::ErasureReceiptPackage>;
 }
 #[async_trait]
 pub trait AccountLocalpartStore: Send + Sync {

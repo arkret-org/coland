@@ -312,7 +312,6 @@ async fn lock_holder_mode(
             "is frozen for planned handoff"
         }));
     }
-    crate::account_private_erasure::require_private_write_in_connection(conn, holder).await?;
     #[derive(diesel::QueryableByName)]
     struct Head {
         #[diesel(sql_type=Jsonb)]

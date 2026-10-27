@@ -19,6 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 mod ordinary_realm;
 
 const ACCOUNT_DATA_PATH: &str = "/_arkret/self/account_data/ak.push_rules";
+const INTROSPECTION_PATH: &str = "/_coauth/internal/session-grants/introspect";
 
 fn test_config() -> AppConfig {
     AppConfig {
@@ -136,7 +137,7 @@ fn signed_account_data_tombstone(
     )
 }
 
-async fn spawn_account_status_mock() -> String {
+async fn spawn_introspection_mock(outcome: Value) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("introspection mock binds");
@@ -146,6 +147,7 @@ async fn spawn_account_status_mock() -> String {
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
             };
+            let body = serde_json::to_vec(&outcome).expect("serialize introspection outcome");
             tokio::spawn(async move {
                 let mut request = Vec::new();
                 let mut expected = None;
@@ -185,7 +187,7 @@ async fn spawn_account_status_mock() -> String {
                     let query: Value = serde_json::from_slice(&request[split + 4..]).unwrap();
                     serde_json::to_vec(&json!({"account_authority_id":query["account_authority_id"], "account_id":query["account_id"], "records":[], "has_more":false})).unwrap()
                 } else {
-                    panic!("component peer only implements registered account status resolution")
+                    body
                 };
                 let headers = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -203,7 +205,6 @@ struct GrantSession {
     state: AppState,
     token: String,
     holder_key: SigningKey,
-    authority: std::sync::Arc<coland_test_support::account_authority::ComponentAccountAuthority>,
 }
 
 async fn account_grant_session(fixture: &PcrGenesisFixture) -> GrantSession {
@@ -220,7 +221,7 @@ async fn account_grant_session_at(
         arkret_signatures::JsonWebKey::from_ed25519_verifying_key(&holder_key.verifying_key());
     let cnf_jkt = arkret_signatures::dpop::dpop_jwk_thumbprint(&holder_jwk).expect("holder jkt");
     let device_id = fixture.history.founding_device_id.clone();
-    let outcome = json!({
+    let origin = spawn_introspection_mock(json!({
         "active": true,
         "status": "active",
         "proof_required": false,
@@ -229,7 +230,7 @@ async fn account_grant_session_at(
             "id": arkret_identifiers::SessionGrantId::from_issuance_digest(
                 Sha256::digest(token.as_bytes()).into(),
             ),
-            "issuer_id": fixture.history.account.station_id,
+            "issuer_id": "ak:did_core:web:coauth.example",
             "account_id": fixture.history.account,
             "device_id": device_id,
             "audience_id": fixture.history.account.station_id,
@@ -261,23 +262,16 @@ async fn account_grant_session_at(
                 "model_generation_ref": 1,
             },
         }
-    });
-    let origin = spawn_account_status_mock().await;
+    }))
+    .await;
     let mut config = test_config();
     if let Some(base) = base {
         config.public_base_url = base;
     }
+    config.session_grant_introspection_url = Some(format!("{origin}{INTROSPECTION_PATH}"));
     config.account_authority_url = Some(origin);
     config.register_test_internal_authority_channel("account-data-sync".to_owned());
     let state = coland_test_support::app_state(config);
-    let authority =
-        coland_test_support::account_authority::ComponentAccountAuthority::from_json_slot(
-            state.service_core_id(),
-            std::sync::Arc::new(std::sync::Mutex::new(outcome)),
-        );
-    let state = state
-        .with_local_account_authority(authority.clone())
-        .unwrap();
     fixture.admit(&state).await.expect("accepted PCR genesis");
     state
         .test_persistence()
@@ -298,7 +292,6 @@ async fn account_grant_session_at(
         state,
         token,
         holder_key,
-        authority,
     }
 }
 

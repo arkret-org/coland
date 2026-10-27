@@ -331,7 +331,6 @@ async fn prepare_server(raw_args: Vec<String>) -> anyhow::Result<ServingFuture> 
         .resolution_commitment
         .clone()
         .ok_or_else(|| anyhow::anyhow!("serving service identity has no resolution commitment"))?;
-    let station_identity = bootstrap.state.clone();
     let mut state = crate::runtime::build_app_state(
         config.clone(),
         db,
@@ -340,28 +339,6 @@ async fn prepare_server(raw_args: Vec<String>) -> anyhow::Result<ServingFuture> 
         resolution_commitment,
         bootstrap.signing_seed,
     )?;
-    if let Some(path) = config.local_account_authority_config.as_deref() {
-        let resolution = state
-            .authenticated_service_resolution()
-            .await
-            .context("could not read the original native Station method proof")?;
-        let authority =
-            coauth_backend::services::station_authority::IssuerLedgerAuthority::connect_from_file(
-                path,
-                &station_identity,
-                &resolution,
-                &url::Url::parse(&config.public_base_url)?,
-                &url::Url::parse(
-                    config
-                        .account_authority_url
-                        .as_deref()
-                        .context("local issuer requires its Account Authority public endpoint")?,
-                )?,
-            )
-            .await
-            .context("could not open the explicitly delegated Account Authority")?;
-        state = state.with_local_account_authority(authority)?;
-    }
     if let Some(store) = supervisor_key_store.clone() {
         state = state.with_verifier_private_keystore(store);
     }

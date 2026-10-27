@@ -30,7 +30,6 @@ otel = [
 ]
 
 [dependencies]
-coauth-backend = { path = "../../../coauth/crates/backend" }
 savfox-gateway-server.workspace = true
 anyhow = { workspace = true }
 arkret-canonical.workspace = true

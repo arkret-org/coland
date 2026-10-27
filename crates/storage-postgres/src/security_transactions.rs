@@ -443,12 +443,10 @@ async fn lock_transaction_recovery_authority(
     conn: &mut AsyncPgConnection,
     record: &SecurityTransactionRecord,
 ) -> Result<(), PgTransactionError> {
-    if let Some(binding) = record
-        .resource
-        .recovery_plan()
-        .filter(|_| record.resource.terminal_outcome.is_none())
-        .map(|plan| &plan.binding)
-    {
+    if record.resource.terminal_outcome.is_some() {
+        return Ok(());
+    }
+    if let Some(binding) = record.resource.recovery_plan().map(|plan| &plan.binding) {
         let session = crate::recovery::lock_recovery_session_authority(
             conn,
             binding.recovery_session_id.as_str(),
@@ -465,11 +463,6 @@ async fn lock_transaction_recovery_authority(
             .into());
         }
     }
-    crate::account_private_erasure::require_private_write_in_connection(
-        conn,
-        &record.resource.account_id,
-    )
-    .await?;
     Ok(())
 }
 

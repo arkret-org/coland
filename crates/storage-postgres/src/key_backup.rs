@@ -81,10 +81,6 @@ pub(crate) async fn put_key_backup_in_connection(
     typed
         .validate()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    let owner = typed.actor_id.as_account_id().ok_or_else(|| {
-        PersistenceError::SchemaViolation("KeyBackup requires an Account owner".to_owned())
-    })?;
-    crate::account_private_erasure::require_private_write_in_connection(conn, owner).await?;
     // `metadata` is generated from `payload` by the initial schema's closed
     // `backup_metadata` projection; no writer supplies it.
     let extract_str = |key: &str| -> Option<String> {
@@ -143,55 +139,6 @@ pub(crate) async fn put_key_backup_in_connection(
     .await
     .map(|_| ())
     .map_err(map_key_backup_put_error)
-}
-
-async fn issue_delete_challenge_in_connection(
-    conn: &mut crate::AsyncPgConnection,
-    record: KeyBackupDeleteChallengeRecord,
-    now: chrono::DateTime<Utc>,
-) -> PersistenceResult<KeyBackupDeleteChallengeRecord> {
-    crate::account_private_erasure::require_private_write_in_connection(conn, &record.account_id)
-        .await?;
-    // The row is unique on `(principal_id, station_id, backup_id, request_id)`, and the
-    // `DO UPDATE ... WHERE` guard only replaces it once the held challenge
-    // is consumed or expired. So this statement mints a challenge exactly
-    // when §7.8.1 says a new one is due, and returns no row exactly when a
-    // still-valid one is held.
-    let issued = sql_query(format!(
-            "INSERT INTO key_backup_delete_challenges ({DELETE_CHALLENGE_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL) ON CONFLICT (principal_id, station_id, backup_id, request_id) DO UPDATE SET challenge_id = EXCLUDED.challenge_id, challenge = EXCLUDED.challenge, issued_at = EXCLUDED.issued_at, expires_at = EXCLUDED.expires_at, consumed_at = NULL WHERE key_backup_delete_challenges.consumed_at IS NOT NULL OR key_backup_delete_challenges.expires_at <= $9 RETURNING {DELETE_CHALLENGE_COLUMNS}"
-        ))
-        .bind::<Text, _>(&record.challenge_id)
-        .bind::<Text, _>(&record.account_id.principal_id)
-        .bind::<Text, _>(&record.account_id.station_id)
-        .bind::<Text, _>(&record.backup_id)
-        .bind::<Text, _>(&record.request_id)
-        .bind::<Jsonb, _>(&record.challenge)
-        .bind::<Timestamptz, _>(record.issued_at)
-        .bind::<Timestamptz, _>(record.expires_at)
-        .bind::<Timestamptz, _>(now)
-        .get_result::<KeyBackupDeleteChallengeRow>(&mut *conn)
-        .await
-        .optional()
-        .map_err(PersistenceError::database)?;
-    if let Some(issued) = issued {
-        return Ok(KeyBackupDeleteChallengeRecord::from(issued));
-    }
-    // No row came back, so a still-valid challenge is held for this triple.
-    // Returning it is the contract, not an error: §7.8.1 requires the same
-    // `request_id` to keep receiving the same challenge while it is valid,
-    // so a client retrying the issue call does not invalidate the challenge
-    // it is already signing.
-    sql_query(format!(
-            "SELECT {DELETE_CHALLENGE_COLUMNS} FROM key_backup_delete_challenges WHERE principal_id = $1 AND station_id = $2 AND backup_id = $3 AND request_id = $4"
-        ))
-        .bind::<Text, _>(&record.account_id.principal_id)
-        .bind::<Text, _>(&record.account_id.station_id)
-        .bind::<Text, _>(&record.backup_id)
-        .bind::<Text, _>(&record.request_id)
-        .get_result::<KeyBackupDeleteChallengeRow>(&mut *conn)
-        .await
-        .map(KeyBackupDeleteChallengeRecord::from)
-        .map_err(PersistenceError::database)
 }
 
 pub struct PgKeyBackupStore {
@@ -404,12 +351,7 @@ impl KeyBackupStore for PgKeyBackupStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        conn.transaction::<_, crate::PgTransactionError, _>(async move |conn| {
-            put_key_backup_in_connection(conn, &backup_id, &payload).await?;
-            Ok(())
-        })
-        .await
-        .map_err(crate::PgTransactionError::into_persistence)
+        put_key_backup_in_connection(&mut conn, &backup_id, &payload).await
     }
 
     async fn get(&self, backup_id: &str) -> PersistenceResult<Option<Value>> {
@@ -476,12 +418,47 @@ impl KeyBackupStore for PgKeyBackupStore {
         record: KeyBackupDeleteChallengeRecord,
         now: chrono::DateTime<Utc>,
     ) -> PersistenceResult<KeyBackupDeleteChallengeRecord> {
-        let mut conn = pg_conn(&self.pool).await?;
-        conn.transaction::<_, crate::PgTransactionError, _>(async move |conn| {
-            Ok(issue_delete_challenge_in_connection(conn, record, now).await?)
-        })
+        let mut conn = crate::pg_db(&self.pool);
+        // The row is unique on `(principal_id, station_id, backup_id, request_id)`, and the
+        // `DO UPDATE ... WHERE` guard only replaces it once the held challenge
+        // is consumed or expired. So this statement mints a challenge exactly
+        // when §7.8.1 says a new one is due, and returns no row exactly when a
+        // still-valid one is held.
+        let issued = sql_query(format!(
+            "INSERT INTO key_backup_delete_challenges ({DELETE_CHALLENGE_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL) ON CONFLICT (principal_id, station_id, backup_id, request_id) DO UPDATE SET challenge_id = EXCLUDED.challenge_id, challenge = EXCLUDED.challenge, issued_at = EXCLUDED.issued_at, expires_at = EXCLUDED.expires_at, consumed_at = NULL WHERE key_backup_delete_challenges.consumed_at IS NOT NULL OR key_backup_delete_challenges.expires_at <= $9 RETURNING {DELETE_CHALLENGE_COLUMNS}"
+        ))
+        .bind::<Text, _>(&record.challenge_id)
+        .bind::<Text, _>(&record.account_id.principal_id)
+        .bind::<Text, _>(&record.account_id.station_id)
+        .bind::<Text, _>(&record.backup_id)
+        .bind::<Text, _>(&record.request_id)
+        .bind::<Jsonb, _>(&record.challenge)
+        .bind::<Timestamptz, _>(record.issued_at)
+        .bind::<Timestamptz, _>(record.expires_at)
+        .bind::<Timestamptz, _>(now)
+        .get_result::<KeyBackupDeleteChallengeRow>(&mut conn)
         .await
-        .map_err(crate::PgTransactionError::into_persistence)
+        .optional()
+        .map_err(PersistenceError::database)?;
+        if let Some(issued) = issued {
+            return Ok(KeyBackupDeleteChallengeRecord::from(issued));
+        }
+        // No row came back, so a still-valid challenge is held for this triple.
+        // Returning it is the contract, not an error: §7.8.1 requires the same
+        // `request_id` to keep receiving the same challenge while it is valid,
+        // so a client retrying the issue call does not invalidate the challenge
+        // it is already signing.
+        sql_query(format!(
+            "SELECT {DELETE_CHALLENGE_COLUMNS} FROM key_backup_delete_challenges WHERE principal_id = $1 AND station_id = $2 AND backup_id = $3 AND request_id = $4"
+        ))
+        .bind::<Text, _>(&record.account_id.principal_id)
+        .bind::<Text, _>(&record.account_id.station_id)
+        .bind::<Text, _>(&record.backup_id)
+        .bind::<Text, _>(&record.request_id)
+        .get_result::<KeyBackupDeleteChallengeRow>(&mut conn)
+        .await
+        .map(KeyBackupDeleteChallengeRecord::from)
+        .map_err(PersistenceError::database)
     }
 
     async fn delete_challenge(

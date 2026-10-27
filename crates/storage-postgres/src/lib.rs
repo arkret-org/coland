@@ -33,8 +33,6 @@ pub(crate) use query_rows::{ExistsRow, JsonPayloadRow, MaxSeqRow};
 mod account_content_delivery;
 mod account_device_committed_evidence;
 mod account_device_signer_evidence;
-mod account_private_erasure;
-pub use account_private_erasure::PgAccountPrivateErasureCompletionStore;
 mod account_status;
 mod account_stream_scan;
 mod account_summary;

@@ -77,8 +77,6 @@ impl crate::key_backup::PgKeyBackupStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_,PgTransactionError,_>(async move |conn| {
-            let owner:arkret_wire::AccountId=serde_json::from_value(challenge["account_id"].clone()).map_err(PersistenceError::database)?;
-            crate::account_private_erasure::require_private_write_in_connection(conn,&owner).await?;
             sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))").bind::<Text,_>(format!("backup-unlock:{account}")).execute(&mut *conn).await.map_err(PersistenceError::database)?;
             let existing=sql_query("SELECT challenge AS payload FROM key_backup_unlock_authorities WHERE identity_key=$1 AND expires_at>$2 AND NOT EXISTS (SELECT 1 FROM key_backup_unlock_entries e WHERE e.authority_id=key_backup_unlock_authorities.authority_id AND consumed_at IS NOT NULL)")
                 .bind::<Text,_>(&identity).bind::<Timestamptz,_>(now).get_result::<JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
@@ -178,8 +176,6 @@ impl crate::key_backup::PgKeyBackupStore {
             // Current-device authorities carry an explicit device gate. A recovery
             // authority must acquire the same policy lock as every policy publication.
             if !current_device { lock_recovery_policy_for_session(conn,&id,now).await?; }
-            let owner:arkret_wire::AccountId=serde_json::from_value(backup["actor_id"]["account_id"].clone()).map_err(PersistenceError::database)?;
-            crate::account_private_erasure::require_private_write_in_connection(conn,&owner).await?;
             let now=chrono::Utc::now();
             let authority=sql_query("SELECT account_id,kind,expires_at,remaining_bytes::text AS remaining,rate_per_minute FROM key_backup_unlock_authorities WHERE authority_id=$1 FOR UPDATE")
                 .bind::<Text,_>(&id).get_result::<AuthorityRow>(&mut *conn).await.map_err(PersistenceError::database)?;

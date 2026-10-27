@@ -641,8 +641,8 @@ fn valid_erasure_receipt_payload() -> Value {
         "schema": "ak.schema.erasure_receipt.v1",
         "issuer_id": "ak:did_core:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x",
         "subject": {
-            "kind": "realm",
-            "subject_ref": "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb"
+            "kind": "space",
+            "subject_ref": "ak:space:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb"
         },
         "scope": {
             "storage_boundary": "projection_store",

@@ -36,7 +36,9 @@ pub(super) async fn logout(
     // principal-side termination directly. Production keeps the strict
     // grant+DPoP+introspection contract below.
     #[cfg(any(test, feature = "conformance-harness"))]
-    if state.config().development_harness_enabled() && state.local_account_authority().is_none() {
+    if state.config().development_harness_enabled()
+        && state.config().session_grant_introspection_url.is_none()
+    {
         let grant_jwt = bearer_token(req)
             .map(str::to_owned)
             .ok_or_else(|| AppError::unauthenticated("missing local development bearer"))?;

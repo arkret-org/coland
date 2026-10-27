@@ -621,18 +621,59 @@ async fn request_origin_controller_gate(
     use arkret_models_identity::agent_signer_evidence::{
         ControllerAccountGateAttestationIssueResponseBody, ControllerAccountGateIssuanceInput,
     };
-    let authority = state.local_account_authority().ok_or_else(|| {
-        temporarily_unavailable("Agent Origin has no local Account Authority capability")
-    })?;
+    let channel = state
+        .config()
+        .internal_authority_channel
+        .as_ref()
+        .ok_or_else(|| {
+            temporarily_unavailable("Agent Origin has no registered controller gate channel")
+        })?;
     let input = ControllerAccountGateIssuanceInput {
         request_id: request_id.clone(),
         principal_id: principal.clone(),
         agent_authority_id: state.service_core_id(),
     };
-    let outcome: ControllerAccountGateAttestationIssueResponseBody = authority
-        .issue_controller_gate(input)
+    let body = arkret_canonical::canonical_json_bytes(&input).map_err(temporarily_unavailable)?;
+    let (url, client) = crate::security::validate_http_url_for_egress_with_pinned_client(
+        channel.controller_gate_url(),
+        "registered controller gate issuance",
+        state.config().development_mode,
+        std::time::Duration::from_secs(10),
+    )
+    .map_err(|_| temporarily_unavailable("controller gate egress is unavailable"))?;
+    // The client is pinned and redirect-disabled by the common egress helper.
+    let mut response = client
+        .post(url)
+        .bearer_auth(channel.credential())
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
         .await
-        .map_err(|_| temporarily_unavailable("controller gate issuance is unavailable"))?;
+        .map_err(|_| temporarily_unavailable("controller gate response is unavailable"))?;
+    if response.status() != reqwest::StatusCode::OK {
+        return Err(temporarily_unavailable(
+            "controller gate issuance was refused",
+        ));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| temporarily_unavailable("controller gate response is unavailable"))?
+    {
+        if bytes.len().saturating_add(chunk.len())
+            > arkret_models_identity::AGENT_AUTHORITY_EVIDENCE_MAX_CANONICAL_BYTES
+        {
+            return Err(temporarily_unavailable(
+                "controller gate response exceeds formal carrier bound",
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let outcome: ControllerAccountGateAttestationIssueResponseBody = serde_json::from_slice(&bytes)
+        .map_err(|_| {
+            temporarily_unavailable("controller gate outcome is not closed typed material")
+        })?;
     let gate = outcome.controller_account_gate_attestation;
     gate.validate().map_err(wire_refusal)?;
     if outcome.request_id != request_id

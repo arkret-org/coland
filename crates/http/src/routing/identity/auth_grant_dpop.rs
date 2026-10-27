@@ -60,7 +60,7 @@ use sha2::{Digest, Sha256};
 use crate::state::AppState;
 use crate::wire::{
     SessionGrantAdminIntrospectionStatus, SessionGrantValidationInput,
-    SessionGrantValidationMetadata,
+    SessionGrantValidationMetadata, SessionGrantValidationResponseBody,
 };
 
 /// Device-scope prefix carried in a `ak.session.grant`'s scope set
@@ -71,6 +71,8 @@ use crate::wire::{
 /// sensitive operations bypass the cache entirely (`force_fresh`).
 const INTROSPECTION_CACHE_TTL: StdDuration = StdDuration::from_secs(120);
 const INTROSPECTION_CACHE_MAX_ENTRIES: usize = 4096;
+const INTROSPECTION_HTTP_CLIENT_TTL: StdDuration = StdDuration::from_secs(300);
+const INTROSPECTION_HTTP_CLIENT_MAX_ENTRIES: usize = 32;
 
 /// DPoP proof freshness window. The proof's `iat` MUST be within
 /// [now - WINDOW, now + skew]; combined with single-use `jti` tracking this
@@ -111,6 +113,25 @@ struct CachedIntrospection {
 static INTROSPECTION_CACHE: LazyLock<Mutex<HashMap<String, CachedIntrospection>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[derive(Clone)]
+struct CachedIntrospectionHttpClient {
+    url: reqwest::Url,
+    client: reqwest::Client,
+    inserted_at: Instant,
+}
+
+/// Reuse the connection pool for the configured Account Authority process instead of
+/// constructing a fresh reqwest client for every force-fresh introspection.
+///
+/// Sensitive self operations intentionally bypass the grant-result cache, so a
+/// long-lived process can perform thousands of remote introspections. Creating
+/// one client per request disables keep-alive and can exhaust ephemeral ports
+/// under a full conformance run. The cache is bounded and keyed by the complete
+/// configured URL plus the private-network posture; each cached client remains
+/// pinned to the addresses that passed the egress guard when it was built.
+static INTROSPECTION_HTTP_CLIENTS: LazyLock<Mutex<HashMap<String, CachedIntrospectionHttpClient>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// `api-conventions.md` §3.3: the cache key MUST isolate at least the exact
 /// token, the expected `audience_id` and the authority configuration context.
 /// It MUST NOT be the `jti` or the grant id — neither identifies the exact
@@ -132,10 +153,15 @@ fn introspection_cache_key(grant_jwt: &str, audience: &str, authority_context: &
 /// or reconfigured Account Authority is a different authority context, so its
 /// answers never collide with the previous one's in the cache.
 pub(crate) fn introspection_authority_context(state: &AppState) -> String {
-    state
-        .local_account_authority()
-        .map(|authority| authority.cache_namespace().to_owned())
-        .unwrap_or_else(|| "unconfigured-local-issuer".to_owned())
+    format!(
+        "url={}\nprivate_networks={}",
+        state
+            .config()
+            .session_grant_introspection_url
+            .as_deref()
+            .unwrap_or_default(),
+        crate::security::private_networks_allowed(state.config().development_mode),
+    )
 }
 
 fn introspection_cache_key_for(state: &AppState, grant_jwt: &str) -> String {
@@ -196,6 +222,58 @@ fn prune_introspection_cache_locked(
     cache.retain(|_, entry| now.duration_since(entry.inserted_at) < INTROSPECTION_CACHE_TTL);
 }
 
+fn introspection_http_client(
+    raw_url: &str,
+    development_mode: bool,
+) -> Result<(reqwest::Url, reqwest::Client), String> {
+    let cache_key = introspection_http_client_cache_key(raw_url, development_mode);
+    let mut clients = INTROSPECTION_HTTP_CLIENTS.lock();
+    let reusable = clients
+        .get(&cache_key)
+        .filter(|cached| cached.inserted_at.elapsed() < INTROSPECTION_HTTP_CLIENT_TTL)
+        .map(|cached| (cached.url.clone(), cached.client.clone()));
+    if let Some(cached) = reusable {
+        return Ok(cached);
+    }
+    clients.remove(&cache_key);
+
+    let (url, client) = crate::security::validate_http_url_for_egress_with_pinned_client(
+        raw_url,
+        "session grant introspection",
+        development_mode,
+        StdDuration::from_secs(10),
+    )?;
+    while clients.len() >= INTROSPECTION_HTTP_CLIENT_MAX_ENTRIES {
+        let Some(oldest_key) = clients
+            .iter()
+            .min_by_key(|(_, cached)| cached.inserted_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        clients.remove(&oldest_key);
+    }
+    clients.insert(
+        cache_key,
+        CachedIntrospectionHttpClient {
+            url: url.clone(),
+            client: client.clone(),
+            inserted_at: Instant::now(),
+        },
+    );
+    Ok((url, client))
+}
+
+fn introspection_http_client_cache_key(raw_url: &str, development_mode: bool) -> String {
+    let private_networks_allowed = crate::security::private_networks_allowed(development_mode);
+    format!("{raw_url}\nprivate_networks={private_networks_allowed}")
+}
+
+fn invalidate_introspection_http_client(raw_url: &str, development_mode: bool) {
+    let cache_key = introspection_http_client_cache_key(raw_url, development_mode);
+    INTROSPECTION_HTTP_CLIENTS.lock().remove(&cache_key);
+}
+
 /// Drop any cached introspection entry for `grant_jwt`. Called by logout so the
 /// next introspection of that grant goes to coauth and observes `active=false`
 /// (account-lifecycle.md §4.1 step 3 — the local-side invalidation).
@@ -232,7 +310,7 @@ pub(crate) async fn introspect_session_grant_cached(
         return Ok(grant);
     }
 
-    let grant = introspect_session_grant_authority(state, grant_jwt).await?;
+    let grant = introspect_session_grant_remote(state, grant_jwt).await?;
     cache_store(key, grant.clone());
     Ok(grant)
 }
@@ -312,28 +390,92 @@ fn memoized_grant(
 
 /// Raw coauth introspection (no cache). Reads `cnf_jkt`, `session_public_key`,
 /// scopes, subject, device_id and expiry off the introspection response.
-async fn introspect_session_grant_authority(
+async fn introspect_session_grant_remote(
     state: &AppState,
     grant_jwt: &str,
 ) -> Result<SessionGrantValidationMetadata, AuthError> {
-    let authority = state.local_account_authority().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "temporarily_unavailable",
-        "local Account Authority is unavailable",
-    ))?;
+    let Some(introspection_url) = state.config().session_grant_introspection_url.as_deref() else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "session grant introspection URL is not configured",
+        ));
+    };
+    let Some(channel) = state.config().internal_authority_channel.as_ref() else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "session grant introspection internal channel is not configured",
+        ));
+    };
     let request = SessionGrantValidationInput::ByJwt(SessionGrantValidationByJwt {
         grant_jwt: grant_jwt.to_owned(),
         audience_id: Some(configured_service_audience(state)?),
+        // The Account Authority returns non-secret grant metadata over this
+        // authenticated S2S channel; holder possession is verified below by the
+        // request's DPoP proof against the returned `cnf_jkt`.
         proof: None,
     });
-    let outcome = authority
-        .validate_session_grant(request)
+    // SOL-03-002: pin validated IPs into the client to close the DNS-rebinding
+    // TOCTOU window between the egress check and the connection.
+    // Introspection is read-only. A pooled keep-alive connection can be closed
+    // by the Account Authority process between requests, especially during long conformance
+    // runs that force fresh introspection on every sensitive operation. Retry
+    // one transport failure after discarding the pinned client; URL validation
+    // and address pinning are repeated before the replacement connection is
+    // used. Authentication/protocol failures below remain single-shot.
+    let mut response = None;
+    for attempt in 0..2 {
+        let (validated_url, client) =
+            introspection_http_client(introspection_url, state.config().development_mode).map_err(
+                |_| {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "temporarily_unavailable",
+                        "session grant introspection service unavailable",
+                    )
+                },
+            )?;
+        match client
+            .post(validated_url)
+            .bearer_auth(channel.credential())
+            .json(&request)
+            .send()
+            .await
+        {
+            Ok(value) => {
+                response = Some(value);
+                break;
+            }
+            Err(_) if attempt == 0 => {
+                invalidate_introspection_http_client(
+                    introspection_url,
+                    state.config().development_mode,
+                );
+            }
+            Err(_) => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "session grant introspection request failed",
+                ));
+            }
+        }
+    }
+    let response = response.ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "temporarily_unavailable",
+        "session grant introspection request failed",
+    ))?;
+    require_successful_introspection(response.status().as_u16())?;
+    let outcome = response
+        .json::<SessionGrantValidationResponseBody>()
         .await
         .map_err(|_| {
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "temporarily_unavailable",
-                "local Account Authority returned no authoritative outcome",
+                "session grant introspection response was invalid",
             )
         })?;
     if !outcome.active || outcome.status != SessionGrantAdminIntrospectionStatus::Active {
@@ -344,6 +486,24 @@ async fn introspect_session_grant_authority(
         "temporarily_unavailable",
         "session grant introspection omitted grant metadata",
     ))
+}
+
+fn require_successful_introspection(
+    status: u16,
+) -> Result<(), (StatusCode, &'static str, &'static str)> {
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        tracing::warn!(
+            upstream_status = status,
+            "session grant introspection returned no authoritative outcome"
+        );
+        Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "session grant introspection service did not return an authoritative outcome",
+        ))
+    }
 }
 
 // ── DPoP replay defense ──────────────────────────────────────────────────────
@@ -801,86 +961,74 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use arkret_identifiers::SessionGrantId;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::wire::SessionGrantValidationResponseBody;
 
-    struct CountingAuthority {
-        station_id: DidCoreId,
-        namespace: String,
-        outcome: SessionGrantValidationResponseBody,
-        count: Arc<AtomicUsize>,
+    async fn read_mock_http_request(stream: &mut tokio::net::TcpStream) {
+        let mut request = Vec::new();
+        let mut content_length = None;
+        let mut header_end = None;
+        loop {
+            let mut chunk = [0_u8; 2048];
+            let read = stream.read(&mut chunk).await.expect("read mock request");
+            assert!(read > 0, "mock request ended before its body");
+            request.extend_from_slice(&chunk[..read]);
+            if header_end.is_none()
+                && let Some(index) = request.windows(4).position(|part| part == b"\r\n\r\n")
+            {
+                let end = index + 4;
+                let headers = String::from_utf8_lossy(&request[..end]);
+                content_length = Some(
+                    headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0),
+                );
+                header_end = Some(end);
+            }
+            if header_end
+                .zip(content_length)
+                .is_some_and(|(end, length)| request.len() >= end + length)
+            {
+                return;
+            }
+        }
     }
 
-    impl coland_contracts::account_authority::LocalAccountAuthority for CountingAuthority {
-        fn stage_device_pairing(
-            &self,
-            _: arkret_models_collaboration::device_pairing::DevicePairingStageRequestBody,
-            _: String,
-        ) -> coland_contracts::account_authority::AccountAuthorityCall<
-            '_,
-            arkret_models_collaboration::device_pairing::DevicePairingStageResponseBody,
-            coland_contracts::account_authority::AccountAuthorityPairingError,
-        > {
-            Box::pin(async {
-                Err(coland_contracts::account_authority::AccountAuthorityPairingError::Unavailable)
-            })
-        }
-        fn resolve_device_pairing(
-            &self,
-            _: arkret_models_collaboration::device_pairing::DevicePairingResolveRequestBody,
-        ) -> coland_contracts::account_authority::AccountAuthorityCall<
-            '_,
-            arkret_models_collaboration::device_pairing::DevicePairingBootstrap,
-            coland_contracts::account_authority::AccountAuthorityPairingError,
-        > {
-            Box::pin(async {
-                Err(coland_contracts::account_authority::AccountAuthorityPairingError::Unavailable)
-            })
-        }
-        fn device_pairing_status(
-            &self,
-            _: arkret_models_collaboration::device_pairing::DevicePairingStatusRequestBody,
-        ) -> coland_contracts::account_authority::AccountAuthorityCall<
-            '_,
-            arkret_models_collaboration::device_pairing::DevicePairingStatusResponseBody,
-            coland_contracts::account_authority::AccountAuthorityPairingError,
-        > {
-            Box::pin(async {
-                Err(coland_contracts::account_authority::AccountAuthorityPairingError::Unavailable)
-            })
-        }
-
-        fn station_id(&self) -> &DidCoreId {
-            &self.station_id
-        }
-        fn cache_namespace(&self) -> &str {
-            &self.namespace
-        }
-        fn validate_session_grant(
-            &self,
-            _: SessionGrantValidationInput,
-        ) -> coland_contracts::account_authority::AccountAuthorityCall<
-            '_,
-            SessionGrantValidationResponseBody,
-        > {
-            Box::pin(async move {
-                self.count.fetch_add(1, Ordering::SeqCst);
-                Ok(self.outcome.clone())
-            })
-        }
-        fn terminate_authentication_session(&self, _: arkret_models_collaboration::session_grants::AuthenticationSessionTerminationInput)
-        -> coland_contracts::account_authority::AccountAuthorityCall<'_, arkret_models_collaboration::session_grants::AuthenticationSessionTerminationResponseBody>{
-            Box::pin(async {
-                Err(coland_contracts::account_authority::AccountAuthorityUnavailable)
-            })
-        }
-        fn issue_controller_gate(&self, _: arkret_models_identity::agent_signer_evidence::ControllerAccountGateIssuanceInput)
-        -> coland_contracts::account_authority::AccountAuthorityCall<'_, arkret_models_identity::agent_signer_evidence::ControllerAccountGateAttestationIssueResponseBody>{
-            Box::pin(async {
-                Err(coland_contracts::account_authority::AccountAuthorityUnavailable)
-            })
-        }
+    async fn spawn_counting_introspection_mock(
+        outcome: SessionGrantValidationResponseBody,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind introspection mock");
+        let address = listener.local_addr().expect("mock address");
+        let count = Arc::new(AtomicUsize::new(0));
+        let observed = count.clone();
+        let body = Arc::new(serde_json::to_vec(&outcome).expect("serialize mock outcome"));
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                read_mock_http_request(&mut stream).await;
+                observed.fetch_add(1, Ordering::SeqCst);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write headers");
+                stream.write_all(&body).await.expect("write body");
+            }
+        });
+        (format!("http://{address}/introspect"), count, task)
     }
 
     #[test]
@@ -923,17 +1071,14 @@ mod tests {
         assert!(!seen.contains_key("capacity-overflow"));
     }
 
-    #[tokio::test]
-    async fn missing_issuer_capability_is_unavailable_without_invalidating_the_grant() {
-        let mut config = crate::config::AppConfig::test_default();
-        config.seed_demo_data = false;
-        let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
-        let error =
-            request_authoritative_grant(&state, &Request::default(), "unavailable-grant", true)
-                .await
-                .unwrap_err();
-        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(error.1, "temporarily_unavailable");
+    #[test]
+    fn introspection_failure_never_claims_the_user_grant_is_invalid() {
+        for status in [400, 401, 403, 404, 429, 500, 502, 503, 504] {
+            let error = require_successful_introspection(status).unwrap_err();
+            assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(error.1, "temporarily_unavailable");
+        }
+        assert!(require_successful_introspection(200).is_ok());
     }
 
     #[test]
@@ -991,7 +1136,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_memo_cache_and_force_fresh_count_authority_calls() {
+    async fn request_memo_cache_and_force_fresh_count_real_http_round_trips() {
         let grant = test_introspection_grant();
         let outcome = SessionGrantValidationResponseBody {
             active: true,
@@ -1000,21 +1145,18 @@ mod tests {
             one_time_use_consumed: false,
             grant: Some(grant),
         };
-        let count = Arc::new(AtomicUsize::new(0));
+        let (url, count, mock) = spawn_counting_introspection_mock(outcome).await;
         let mut config = crate::config::AppConfig::test_default();
+        config.development_mode = true;
         config.seed_demo_data = false;
+        config.session_grant_introspection_url = Some(url.clone());
+        config.account_authority_url = Some(url.trim_end_matches("/introspect").to_owned());
+        config.register_test_internal_authority_channel("counting-mock-secret");
         let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
-        let namespace = uuid::Uuid::now_v7().to_string();
-        let authority = Arc::new(CountingAuthority {
-            station_id: state.service_core_id(),
-            namespace: namespace.clone(),
-            outcome,
-            count: count.clone(),
-        });
-        let state = state.with_local_account_authority(authority).unwrap();
-        let token = format!("counting-grant-{namespace}");
+        let token = format!("counting-grant-{}", url.rsplit(':').next().unwrap());
         let key = introspection_cache_key_for(&state, &token);
         INTROSPECTION_CACHE.lock().remove(&key);
+        invalidate_introspection_http_client(&url, true);
 
         let mut request = Request::default();
         take_request_authoritative_grant(&state, &mut request, &token, false)
@@ -1023,21 +1165,13 @@ mod tests {
         request_authoritative_grant(&state, &request, &token, false)
             .await
             .expect("second consumer reuses request memo");
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            1,
-            "two consumers use one authority call"
-        );
+        assert_eq!(count.load(Ordering::SeqCst), 1, "two consumers use one RTT");
 
         let mut warm_request = Request::default();
         take_request_authoritative_grant(&state, &mut warm_request, &token, false)
             .await
             .expect("warm cache serves low-sensitivity request");
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            1,
-            "warm cache adds no authority call"
-        );
+        assert_eq!(count.load(Ordering::SeqCst), 1, "warm cache adds no RTT");
 
         take_request_authoritative_grant(&state, &mut warm_request, &token, true)
             .await
@@ -1048,10 +1182,12 @@ mod tests {
         assert_eq!(
             count.load(Ordering::SeqCst),
             2,
-            "force-fresh adds exactly one authority call"
+            "force-fresh adds exactly one RTT"
         );
 
         INTROSPECTION_CACHE.lock().remove(&key);
+        invalidate_introspection_http_client(&url, true);
+        mock.abort();
     }
 
     #[test]
@@ -1074,6 +1210,61 @@ mod tests {
         );
         assert!(cache_lookup_at(key, inserted_at + INTROSPECTION_CACHE_TTL).is_none());
         INTROSPECTION_CACHE.lock().remove(key);
+    }
+
+    #[test]
+    fn introspection_http_client_reuses_the_pinned_connection_pool() {
+        let raw_url = "http://127.0.0.1:65530/_arkret/admin/session-grants/introspect";
+        let cache_key = introspection_http_client_cache_key(raw_url, true);
+        INTROSPECTION_HTTP_CLIENTS.lock().remove(&cache_key);
+
+        introspection_http_client(raw_url, true).unwrap();
+        let first_inserted_at = INTROSPECTION_HTTP_CLIENTS
+            .lock()
+            .get(&cache_key)
+            .expect("client cached after first construction")
+            .inserted_at;
+
+        introspection_http_client(raw_url, true).unwrap();
+        let second_inserted_at = INTROSPECTION_HTTP_CLIENTS
+            .lock()
+            .get(&cache_key)
+            .expect("client remains cached")
+            .inserted_at;
+
+        assert_eq!(first_inserted_at, second_inserted_at);
+        INTROSPECTION_HTTP_CLIENTS.lock().remove(&cache_key);
+    }
+
+    #[test]
+    fn introspection_http_client_rebuilds_an_expired_pinned_client() {
+        let raw_url = "http://127.0.0.1:65529/_arkret/admin/session-grants/introspect";
+        let cache_key = introspection_http_client_cache_key(raw_url, true);
+        INTROSPECTION_HTTP_CLIENTS.lock().remove(&cache_key);
+
+        introspection_http_client(raw_url, true).unwrap();
+        {
+            let mut clients = INTROSPECTION_HTTP_CLIENTS.lock();
+            clients
+                .get_mut(&cache_key)
+                .expect("client cached after first construction")
+                .inserted_at = Instant::now() - INTROSPECTION_HTTP_CLIENT_TTL;
+        }
+        let expired_inserted_at = INTROSPECTION_HTTP_CLIENTS
+            .lock()
+            .get(&cache_key)
+            .expect("expired client remains present until next lookup")
+            .inserted_at;
+
+        introspection_http_client(raw_url, true).unwrap();
+        let rebuilt_inserted_at = INTROSPECTION_HTTP_CLIENTS
+            .lock()
+            .get(&cache_key)
+            .expect("expired client was rebuilt")
+            .inserted_at;
+
+        assert!(rebuilt_inserted_at > expired_inserted_at);
+        INTROSPECTION_HTTP_CLIENTS.lock().remove(&cache_key);
     }
 
     fn test_introspection_grant() -> SessionGrantValidationMetadata {

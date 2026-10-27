@@ -135,16 +135,6 @@ fn verify_schema_contract(
         "database schema contract {:?} is incompatible; expected {SCHEMA_CONTRACT_VERSION}; initialize a clean database",
         row.contract_version
     );
-    diesel::sql_query("SELECT owner_account_id FROM public.actor_private_events LIMIT 0")
-        .execute(connection)
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "database lacks the exact actor-private owner required by {SCHEMA_CONTRACT_VERSION}; initialize a clean database: {error}"
-            )
-        })?;
-    diesel::sql_query("SELECT public.private_storage_row_owner(NULL::jsonb,'account','{}'::text[]) FROM public.account_private_erasure_completions LIMIT 0")
-        .execute(connection)
-        .map_err(|error| anyhow::anyhow!("database lacks Account-private erasure custody/fences; initialize a clean database: {error}"))?;
     Ok(())
 }
 

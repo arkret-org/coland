@@ -230,6 +230,7 @@ All settings can be supplied via environment variables (preferred) or a
 | `COLAND_PUBLIC_BASE_URL` | `http://<bind>` | Advertised base URL (`/_arkret/describe`) |
 | `COLAND_TLS_CERT_PATH` | unset | TLS certificate PEM path; when paired with `COLAND_TLS_KEY_PATH`, coland serves HTTPS via rustls |
 | `COLAND_TLS_KEY_PATH` | unset | TLS private-key PEM path paired with `COLAND_TLS_CERT_PATH` |
+| `COLAND_TLS_TERMINATION_PROXY_IPS` | unset | Exact comma-separated TCP proxy peer IPs allowed to attest HTTPS for WebSocket upgrades; empty trusts no forwarded scheme |
 | `COLAND_PQ_TLS_DEPLOYMENT_PROBE` | unset | Set to `verified` only after an external TLS 1.3 probe proves `X25519MLKEM768` negotiation and fail-closed classical fallback |
 | `COLAND_FIRST_PROVISIONING` | unset | One-time class-B production authorization to create a new service identity when no stored identity, local registration, or bundle exists |
 | `COLAND_SERVICE_IDENTITY_BUNDLE_DIR` | unset | SDK identity-bundle backend used to recover the same service DID after database loss; contains public evidence and KeyRefs, never private keys |
@@ -342,6 +343,8 @@ routes unavailable until it has verified the running Station.
 ```dotenv
 COLAND_BIND=127.0.0.1:8698
 COLAND_PUBLIC_BASE_URL=https://local.host
+COLAND_TLS_TERMINATION_PROXY_IPS=127.0.0.1,::1
+COLAND_CORS_ALLOW_ORIGIN=http://127.0.0.1:8080
 COLAND_KEYSTORE_BACKEND=encrypted_file
 COLAND_KEYSTORE_PATH=./.local/keystore/coland.v1
 COLAND_KEYSTORE_MASTER_KEY_FILE=./.local/secrets/coland-keystore-master-key
@@ -355,6 +358,12 @@ COLAND_AUTH_SESSION_LOGOUT_URL=https://auth.local.host/_coauth/internal/auth-ses
 COLAND_INTERNAL_AUTHORITY_SHARED_SECRET=local-coauth-session-grant-introspection
 COLAND_EMBEDDED_WEBVH_REGISTRATION_BEARER=local-coland-webvh-registration
 ```
+
+The TLS proxy list authorizes only the named TCP peers to supply a single
+`X-Forwarded-Proto: https`; configure the proxy to overwrite that header.
+Unlisted peers, missing/duplicate/comma-separated declarations, and non-HTTPS
+declarations do not satisfy the WebSocket TLS gate. Direct HTTPS needs no proxy
+entry. Set the browser origin allowlist to the actual Inkson origin in use.
 
 Those bearer values must match coauth's
 `arkret.stations[]` entry for `https://local.host/`; otherwise

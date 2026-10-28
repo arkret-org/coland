@@ -1,6 +1,7 @@
 //! Socket delivery over the canonical authenticated subscription readers.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use arkret_models_collaboration::SignalStreamFrame;
@@ -1120,6 +1121,26 @@ async fn connection_inner(
     }
 }
 
+fn secure_transport(req: &Request, trusted_proxies: &[IpAddr]) -> bool {
+    if req.scheme().as_str() == "https" {
+        return true;
+    }
+    let peer = req
+        .remote_addr()
+        .as_ipv4()
+        .map(|addr| IpAddr::V4(*addr.ip()))
+        .or_else(|| {
+            req.remote_addr()
+                .as_ipv6()
+                .map(|addr| IpAddr::V6(*addr.ip()))
+        });
+    if !peer.is_some_and(|peer| trusted_proxies.contains(&peer)) {
+        return false;
+    }
+    let mut values = req.headers().get_all("x-forwarded-proto").iter();
+    values.next().and_then(|value| value.to_str().ok()) == Some("https") && values.next().is_none()
+}
+
 #[handler]
 pub(crate) async fn upgrade(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     let state = depot
@@ -1138,7 +1159,9 @@ pub(crate) async fn upgrade(depot: &mut Depot, req: &mut Request, res: &mut Resp
         reject(res);
         return;
     };
-    if public.scheme() != "https" || req.scheme().as_str() != "https" || req.uri().query().is_some()
+    if public.scheme() != "https"
+        || !secure_transport(req, &state.config().tls_termination_proxy_ips)
+        || req.uri().query().is_some()
     {
         reject(res);
         return;
@@ -1256,6 +1279,48 @@ pub(crate) async fn upgrade(depot: &mut Depot, req: &mut Request, res: &mut Resp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tls_termination_requires_the_exact_peer_and_one_https_attestation() {
+        let trusted = ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()];
+        let mut request = Request::new();
+        *request.scheme_mut() = "https".parse().unwrap();
+        assert!(secure_transport(&request, &[]));
+        *request.scheme_mut() = "http".parse().unwrap();
+        assert!(!secure_transport(&request, &trusted));
+        for peer in ["127.0.0.1:8698", "[::1]:8698"] {
+            *request.remote_addr_mut() = peer.parse::<std::net::SocketAddr>().unwrap().into();
+            assert!(!secure_transport(&request, &trusted));
+            request
+                .headers_mut()
+                .insert("x-forwarded-proto", "https".parse().unwrap());
+            assert!(secure_transport(&request, &trusted));
+            assert!(!secure_transport(&request, &[]));
+            for value in ["http", "https,http", "https, https", "HTTPS"] {
+                request
+                    .headers_mut()
+                    .insert("x-forwarded-proto", value.parse().unwrap());
+                assert!(!secure_transport(&request, &trusted));
+            }
+            request
+                .headers_mut()
+                .insert("x-forwarded-proto", "https".parse().unwrap());
+            request
+                .headers_mut()
+                .append("x-forwarded-proto", "https".parse().unwrap());
+            assert!(!secure_transport(&request, &trusted));
+            request.headers_mut().remove("x-forwarded-proto");
+        }
+        *request.remote_addr_mut() = "192.0.2.1:8698"
+            .parse::<std::net::SocketAddr>()
+            .unwrap()
+            .into();
+        request
+            .headers_mut()
+            .insert("x-forwarded-proto", "https".parse().unwrap());
+        assert!(!secure_transport(&request, &trusted));
+    }
+
     #[tokio::test]
     async fn traffic_quota_bounds_both_bytes_and_frames_before_a_fresh_delivery_gate() {
         let mut budget = TrafficBudget::new(2, 100);

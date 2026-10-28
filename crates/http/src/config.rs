@@ -3,7 +3,7 @@ pub const CONFIGURED_SIGNING_KEY_REF: &str = "secret:COLAND_NOTARY_SIGNING_KEY";
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -323,6 +323,9 @@ pub struct AppConfig {
     /// Explicit comma-separated browser origin allowlist. Wildcards are invalid
     /// because this service also exposes authenticated protocol operations.
     pub cors_allow_origin: Option<String>,
+    /// Exact TCP peers allowed to attest TLS termination with a single
+    /// `X-Forwarded-Proto: https`. Empty by default; proxies must overwrite it.
+    pub tls_termination_proxy_ips: Vec<IpAddr>,
     /// Public Account Authority base URL advertised to browser clients in
     /// `/_arkret/describe.authentication_metadata.account_authority`. Registration,
     /// password recovery, passkey, OIDC, and email verification live there;
@@ -901,6 +904,7 @@ impl AppConfig {
             livekit: LiveKitConfig::default(),
             media: MediaIssuerConfig::test_default(),
             cors_allow_origin: None,
+            tls_termination_proxy_ips: Vec::new(),
             account_authority_url: None,
             account_authority_trust_domain: None,
             account_authority_public_key_multibase: None,
@@ -1072,6 +1076,18 @@ impl AppConfig {
                 "COLAND_CORS_ALLOW_ORIGIN requires explicit origins; wildcard is invalid"
             );
         }
+        let tls_termination_proxy_ips = env_non_empty(values, "COLAND_TLS_TERMINATION_PROXY_IPS")
+            .map(|raw| {
+                raw.split(',')
+                    .map(|ip| {
+                        ip.trim().parse::<IpAddr>().map_err(|error| {
+                            anyhow::anyhow!("COLAND_TLS_TERMINATION_PROXY_IPS requires exact IP addresses: {error}")
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
         let session_grant_introspection_url =
             env_non_empty(values, "COLAND_SESSION_GRANT_INTROSPECTION_URL");
         let auth_session_logout_url = env_non_empty(values, "COLAND_AUTH_SESSION_LOGOUT_URL");
@@ -1391,6 +1407,7 @@ impl AppConfig {
             livekit,
             media,
             cors_allow_origin,
+            tls_termination_proxy_ips,
             account_authority_url,
             account_authority_trust_domain,
             account_authority_public_key_multibase,
@@ -2213,6 +2230,33 @@ fn lookup(values: &BTreeMap<String, String>, name: &str) -> Result<String, std::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tls_termination_proxies_are_explicit_exact_ip_addresses() {
+        let mut values = registered_internal_channel_values();
+        let load = |values: &BTreeMap<String, String>| {
+            AppConfig::from_values(values, StartupOverrides::default())
+        };
+        assert!(load(&values).unwrap().tls_termination_proxy_ips.is_empty());
+        values.insert(
+            "COLAND_TLS_TERMINATION_PROXY_IPS".to_owned(),
+            "127.0.0.1, ::1".to_owned(),
+        );
+        assert_eq!(
+            load(&values).unwrap().tls_termination_proxy_ips,
+            vec![
+                "127.0.0.1".parse::<IpAddr>().unwrap(),
+                "::1".parse::<IpAddr>().unwrap()
+            ]
+        );
+        for invalid in ["*", "127.0.0.0/8", "localhost", "127.0.0.1,"] {
+            values.insert(
+                "COLAND_TLS_TERMINATION_PROXY_IPS".to_owned(),
+                invalid.to_owned(),
+            );
+            assert!(load(&values).is_err(), "accepted {invalid}");
+        }
+    }
 
     fn test_ed25519_public_key_multibase(seed: u8) -> String {
         let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key();

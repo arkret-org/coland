@@ -554,7 +554,8 @@ pub(super) async fn bootstrap_readers_in_connection(
             return Err(invalid("bootstrap reader has no exact accepted own join").into());
         }
         let own_join = match event.kind {
-            arkret_wire::EventKind::InviteAccept => {
+            arkret_wire::EventKind::InviteAccept
+            | arkret_wire::EventKind::RealmInviteLinkAccept => {
                 event.actor_id == actor
                     && matches!(stream, arkret_wire::CommitStreamRef::Realm { .. })
             }

@@ -168,7 +168,7 @@ mod tests {
         use salvo::test::ResponseExt as _;
         let mut bodies = Vec::new();
         for development_mode in [false, true, false] {
-            let error = AppError::indistinguishable_not_found("third-party invite unavailable");
+            let error = AppError::indistinguishable_not_found("Realm invite link unavailable");
             assert_eq!(error.code, ErrorCode::NotFound);
             let mut response = Response::new();
             let mut depot = Depot::new();

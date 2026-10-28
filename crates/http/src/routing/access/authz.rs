@@ -480,9 +480,7 @@ async fn invites(
     })
 }
 
-fn directed_invite_to_sdk(
-    invite: coland_storage::DirectedInviteCurrent,
-) -> Result<Invite, AppError> {
+fn directed_invite_to_sdk(invite: coland_storage::InviteCurrent) -> Result<Invite, AppError> {
     let inviter_account_id = invite
         .inviter
         .as_account_id()
@@ -494,9 +492,8 @@ fn directed_invite_to_sdk(
         id: invite.invite_id,
         realm_id: invite.realm_id,
         inviter_account_id,
-        invitee_account_id: Some(invite.invitee_account_id),
-        introduction_evidence_digest: Some(invite.introduction_evidence_digest),
-        third_party_invite: None,
+        invitee_account_id: invite.invitee_account_id,
+        introduction_evidence_digest: invite.introduction_evidence_digest,
         capability_grant_refs: Vec::new(),
         expires_at: invite.expires_at,
         state: invite.state,

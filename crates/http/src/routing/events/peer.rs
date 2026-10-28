@@ -1336,7 +1336,8 @@ impl PeerReadAuthz {
                     );
                 }
             }
-            arkret_wire::EventKind::InviteAccept => {
+            arkret_wire::EventKind::InviteAccept
+            | arkret_wire::EventKind::RealmInviteLinkAccept => {
                 let Some(invite_id) = payload
                     .get("invite_id")
                     .or_else(|| payload.get("invite_ref"))

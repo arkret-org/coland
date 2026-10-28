@@ -859,3 +859,25 @@ mod tests {
         );
     }
 }
+
+/// An invitation link supplies entry authority but never bypasses a ban or policy gate.
+pub(crate) async fn require_invitation_entry(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+) -> PersistenceResult<()> {
+    let absent = || PersistenceError::NotFound("Realm invite link not found".into());
+    require_ordinary_member(conn, &event.realm_id, &event.actor_id).await?;
+    if locked_membership(conn, &event.realm_id, &event.actor_id).await? != "leave" {
+        return Err(absent());
+    }
+    let rule = realm_current_value(conn, &event.realm_id, "realm_join_rule").await?;
+    if !matches!(
+        rule.as_ref().and_then(Value::as_str),
+        Some("invite" | "restricted" | "public" | "knock" | "knock_restricted")
+    ) {
+        return Err(absent());
+    }
+    // Parent-only gates are re-proved by prepare_parent_membership_transaction.
+    // Unsupported proof gates remain closed for every admission path.
+    check_join_policy(conn, &event.realm_id, false).await
+}

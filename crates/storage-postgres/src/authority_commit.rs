@@ -928,6 +928,13 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_
                 current_commit_id, current_stream_position, value \
            FROM message_reactions_current_states WHERE realm_id = $1 \
          UNION ALL \
+         SELECT state_kind AS selector_kind, \
+                CASE WHEN state_kind='realm_invite_link_use' THEN \
+                   jsonb_build_object('kind',state_kind,'realm_invite_link_id',realm_invite_link_id,'subject_account_id',subject_account_id::jsonb) \
+                 ELSE jsonb_build_object('kind',state_kind,'realm_invite_link_id',realm_invite_link_id) END AS selector_subject, \
+                current_commit_id,current_stream_position,value \
+           FROM realm_invite_link_current_states WHERE realm_id=$1 \
+         UNION ALL \
          SELECT 'invite_lifecycle'::text AS selector_kind, to_jsonb(invite_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
            FROM invite_lifecycle_current_states WHERE realm_id = $1 \
@@ -1212,6 +1219,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                         target_ref: target_ref.to_owned(),
                     }
                 }
+                ("realm_invite_link_definition"|"realm_invite_link_lifecycle"|"realm_invite_link_use",Some(subject))=>serde_json::from_value::<arkret_wire::CurrentSelector>(subject).map_err(PersistenceError::database)?,
                 ("invite_lifecycle", Some(invite_id)) => {
                     arkret_wire::CurrentSelector::InviteLifecycle {
                         invite_id: serde_json::from_value(invite_id).map_err(|error| {
@@ -4507,7 +4515,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                    JOIN canonical_events pe ON pe.pk=prior.event_pk AND pe.state='committed' \
                    WHERE prior.realm_id=c.realm_id AND prior.stream_key=c.stream_key AND prior.stream_ref=c.stream_ref \
                      AND prior.stream_position<c.stream_position \
-                     AND ((pe.kind='ak.invite.accept' AND pe.envelope->'actor_id'=$8) \
+                     AND ((pe.kind IN ('ak.invite.accept','ak.realm_invite_link.accept') AND pe.envelope->'actor_id'=$8) \
                        OR (pe.kind IN ('ak.member.state','ak.circle.member.state') \
                            AND pe.envelope->'payload'->'member_id'=$8)) \
                    ORDER BY prior.stream_position DESC LIMIT 1) jc ON true \
@@ -4521,7 +4529,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                    AND opening.realm_id=c.realm_id AND opening.stream_key=c.stream_key AND opening.stream_ref=c.stream_ref \
                    AND opening.stream_position<=jc.stream_position \
                    AND oe.envelope->'actor_id'=jsonb_build_object('kind','account','account_id',a.member_account_id) \
-                   AND ((oe.kind='ak.invite.accept' AND c.stream_ref->>'kind'='realm') \
+                   AND ((oe.kind IN ('ak.invite.accept','ak.realm_invite_link.accept') AND c.stream_ref->>'kind'='realm') \
                      OR (oe.kind IN ('ak.member.state','ak.circle.member.state') \
                        AND oe.envelope->'payload'->>'membership'='join' \
                        AND oe.envelope->'payload'->'member_id'=oe.envelope->'actor_id')) \
@@ -4561,7 +4569,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             };
             if !current_matches { return Ok(false); }
             let own_join = match join_event.kind {
-                arkret_wire::EventKind::InviteAccept if circle_leave.is_none() => true,
+                arkret_wire::EventKind::InviteAccept | arkret_wire::EventKind::RealmInviteLinkAccept if circle_leave.is_none() => true,
                 arkret_wire::EventKind::MemberState if circle_leave.is_none() => {
                     let value: MembershipPayload = serde_json::from_value(serde_json::to_value(&join_event.payload)
                         .map_err(PersistenceError::database)?).map_err(invalid)?;

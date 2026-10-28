@@ -158,17 +158,20 @@ fn franking_replay_nonce_ledger_has_bounded_expiry_contract() {
 }
 
 /// A directed Invite's live slot is the typed current target register. The
-/// third-party commitment index is rebuildable from accepted create Events;
-/// neither needs the retired `realm_invites` table or its status predicate.
+/// link definition, lifecycle and per-account use facts have their own current
+/// owner. Neither needs the retired `realm_invites` table or its status predicate.
 #[test]
 fn invite_current_registers_replace_the_retired_invite_table() {
     assert!(INITIAL_UP.contains("CREATE TABLE invite_lifecycle_current_states"));
     assert!(INITIAL_UP.contains("CREATE TABLE invite_live_target_current_states"));
     assert!(INITIAL_UP.contains("PRIMARY KEY(realm_id,invitee_account_id)"));
     assert!(INITIAL_UP.contains("CREATE TABLE invite_directed_invitee_current_states"));
-    assert!(INITIAL_UP.contains("CREATE TABLE invite_third_party_create_index"));
-    assert!(INITIAL_UP.contains("token_commitment TEXT COLLATE \"C\" NOT NULL UNIQUE"));
-    assert!(INITIAL_DOWN.contains("DROP TABLE IF EXISTS invite_third_party_create_index"));
+    assert!(INITIAL_UP.contains("CREATE TABLE realm_invite_link_current_states"));
+    assert!(
+        INITIAL_UP
+            .contains("PRIMARY KEY(realm_id,state_kind,realm_invite_link_id,subject_account_id)")
+    );
+    assert!(INITIAL_DOWN.contains("DROP TABLE IF EXISTS realm_invite_link_current_states"));
     assert!(
         !INITIAL_UP.contains("CREATE TABLE public.realm_invites"),
         "retired realm_invites must not return to the initial schema"

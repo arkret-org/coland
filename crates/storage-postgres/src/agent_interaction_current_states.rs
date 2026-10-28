@@ -416,6 +416,15 @@ async fn read_controller_in_connection(
             body.validate_actor(&controller_join.actor_id)
                 .map_err(invalid)?;
         }
+        EventKind::RealmInviteLinkAccept
+            if controller_join.actor_id.as_account_id() == Some(&controller) =>
+        {
+            let body: arkret_models_collaboration::governance::realm_invite_link::RealmInviteLinkAcceptPayload =
+                serde_json::from_value(json!(controller_join.payload)).map_err(invalid)?;
+            if body.subject_account_id != controller {
+                return Err(denied("owned controller link join names another account"));
+            }
+        }
         _ => {
             return Err(denied(
                 "owned controller current has no registered join writer",

@@ -275,7 +275,6 @@ async fn commit(
             event_approvals,
             franking_replay_nonce: None,
             realm_organization_proof: None,
-            invite_claim_proof: None,
             applet_record: None,
             applet_authoring_preview: None,
             agent_membership_cascade: None,

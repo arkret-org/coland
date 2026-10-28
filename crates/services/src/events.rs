@@ -612,7 +612,6 @@ pub struct CommitAcceptedEventBatchCommand {
     pub events: Vec<CommitAcceptedEventCommand>,
     pub franking_replay_nonce: Option<coland_storage::FrankingReplayNonceCommit>,
     pub realm_organization_proof: Option<coland_storage::RealmOrganizationProofCommit>,
-    pub invite_claim_proof: Option<coland_storage::InviteClaimProofCommit>,
     pub event_approvals: Option<coland_storage::EventApprovalCommit>,
     pub applet_record: Option<CommitAppletRecord>,
     pub applet_authoring_preview: Option<CommitAppletAuthoringPreview>,

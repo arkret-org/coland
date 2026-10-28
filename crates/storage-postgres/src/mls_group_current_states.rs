@@ -1570,7 +1570,10 @@ pub(crate) async fn advance_key_access_revision_in_connection(
 ) -> PersistenceResult<()> {
     if !matches!(
         event.kind,
-        EventKind::MemberState | EventKind::InviteAccept | EventKind::CircleMemberState
+        EventKind::MemberState
+            | EventKind::InviteAccept
+            | EventKind::RealmInviteLinkAccept
+            | EventKind::CircleMemberState
     ) {
         return Ok(());
     }

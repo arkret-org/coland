@@ -306,6 +306,14 @@ pub(crate) async fn owned_source_in_connection(
                     .as_account_id()
                     .map(|_| event.actor_id.clone())
             }
+            EventKind::RealmInviteLinkAccept if row.member_id == controller.to_string() => {
+                let accept: arkret_models_collaboration::governance::realm_invite_link::RealmInviteLinkAcceptPayload =
+                    serde_json::from_value(serde_json::to_value(&event.payload)
+                        .map_err(PersistenceError::database)?)
+                        .map_err(PersistenceError::database)?;
+                (event.actor_id.as_account_id() == Some(&accept.subject_account_id))
+                    .then_some(event.actor_id.clone())
+            }
             _ => None,
         };
         if event.realm_id != *realm
@@ -2418,10 +2426,9 @@ impl RealmAuthorizationCut {
         }
     }
 
-    /// Revalidate the creator of an already accepted third-party Invite at the
-    /// claim cut. Creation consumed its quota once; consuming that Invite does
-    /// not create another invitation and must not reserve a second quota.
-    pub(crate) fn require_live_invite_creator(
+    /// Revalidate a shared invitation creator at the accepting cut.
+    /// The existing creation is not another quota-consuming creation.
+    pub(crate) fn require_live_invitation_creator(
         &self,
         create: &arkret_wire::Event,
         at: chrono::DateTime<chrono::Utc>,

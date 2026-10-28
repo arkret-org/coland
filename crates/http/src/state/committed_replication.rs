@@ -132,7 +132,9 @@ pub(super) fn hosted_member_join_event(
             }
             member
         }
-        arkret_wire::EventKind::InviteAccept => event.actor_id.clone(),
+        arkret_wire::EventKind::InviteAccept | arkret_wire::EventKind::RealmInviteLinkAccept => {
+            event.actor_id.clone()
+        }
         _ => return None,
     };
     match member {

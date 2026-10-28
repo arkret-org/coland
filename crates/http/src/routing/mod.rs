@@ -34,7 +34,6 @@ pub(crate) mod message_authoring;
 pub(crate) mod realm_join;
 pub(crate) mod realm_organization;
 mod self_current_reads;
-mod third_party_invites;
 
 use access::policy::policy_document_to_response;
 pub(crate) use admin::audit::append_audit_log;

@@ -50,6 +50,9 @@ pub(crate) const DISCLOSED_EVENT_KINDS: &[EventKind] = &[
     EventKind::InviteRevoke,
     EventKind::InviteCancel,
     EventKind::InviteAccept,
+    EventKind::RealmInviteLinkCreate,
+    EventKind::RealmInviteLinkRevoke,
+    EventKind::RealmInviteLinkAccept,
     EventKind::CapabilityGrant,
     EventKind::CapabilityRevoke,
     EventKind::CapabilityRelinquish,
@@ -155,6 +158,8 @@ const AUDITED_FAMILIES: &[&str] = &[
     "invite_lifecycle_current_states",
     "invite_live_target_current_states",
     "invite_directed_invitee_current_states",
+    // Public link definition, lifecycle and uses follow the Realm stream boundary.
+    "realm_invite_link_current_states",
     // Reports and proofs have a separate exact-scope moderator disclosure gate.
     "moderation_report_current_states",
     "moderation_franking_proof_current_states",
@@ -2497,6 +2502,9 @@ pub(crate) fn disclose_to_actor(
             | CurrentSelector::RealmAlias
             | CurrentSelector::RealmPlaintextVisibleServices
             | CurrentSelector::RealmSetDefaultStrand
+            | CurrentSelector::RealmInviteLinkDefinition { .. }
+            | CurrentSelector::RealmInviteLinkLifecycle { .. }
+            | CurrentSelector::RealmInviteLinkUse { .. }
             | CurrentSelector::InviteLifecycle { .. }
             | CurrentSelector::InviteLiveTarget { .. }
             | CurrentSelector::InviteDirectedInvitee { .. }

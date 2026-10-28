@@ -104,6 +104,7 @@ mod idempotency;
 mod invite_current_states;
 mod policy_action_admission;
 mod policy_current_states;
+mod realm_invite_links;
 pub use invite_current_states::PgInviteCurrentStateStore;
 mod applet_content_delivery;
 mod applet_device_admission;

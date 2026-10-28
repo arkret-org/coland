@@ -1037,7 +1037,7 @@ async fn prior_join(
          FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
          WHERE c.stream_key=$1 AND c.stream_position < $2 AND e.state='committed' AND ( \
            (e.kind='ak.member.state' AND e.envelope->'payload'->'member_id'=$3::jsonb) \
-           OR (e.kind='ak.invite.accept' AND e.envelope->'actor_id'=$3::jsonb)) \
+           OR (e.kind IN ('ak.invite.accept','ak.realm_invite_link.accept') AND e.envelope->'actor_id'=$3::jsonb)) \
          ORDER BY c.stream_position DESC LIMIT 1",
     )
     .bind::<Text, _>(crate::authority_commit::stream_key(&realm_stream)?)
@@ -1048,7 +1048,7 @@ async fn prior_join(
     .optional()
     .map_err(PersistenceError::database)?
     .filter(|row| {
-        row.kind == arkret_wire::EventKind::InviteAccept.as_str()
+        matches!(arkret_wire::EventKind::from_wire(&row.kind), arkret_wire::EventKind::InviteAccept | arkret_wire::EventKind::RealmInviteLinkAccept)
             || row.membership.as_deref() == Some("join")
     }))
 }

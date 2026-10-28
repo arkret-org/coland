@@ -468,28 +468,16 @@ pub(super) fn admin_invite_item(
     invite: &coland_storage::InviteCurrent,
 ) -> coland_contracts::admin::invite_tokens::AdminInviteTokenItem {
     let inviter = invite.inviter.signing_principal_id().clone();
-    let invitee = invite
-        .invitee_account_id
-        .as_ref()
-        .or_else(|| {
-            invite
-                .accepted_claim
-                .as_ref()
-                .map(|claim| &claim.subject_account_id)
-        })
-        .map(|account| account.principal_id.clone());
+    let invitee = Some(invite.invitee_account_id.principal_id.clone());
     coland_contracts::admin::invite_tokens::AdminInviteTokenItem {
-        kind: "invite_token".to_owned(),
+        kind: "directed_invite".to_owned(),
         id: invite.invite_id.to_string(),
         invite_id: invite.invite_id.to_string(),
         realm_id: invite.realm_id.to_string(),
         inviter_id: inviter.clone(),
         created_by: inviter,
         invitee_id: invitee,
-        introduction_evidence_digest: invite
-            .introduction_evidence_digest
-            .as_ref()
-            .map(ToString::to_string),
+        introduction_evidence_digest: Some(invite.introduction_evidence_digest.to_string()),
         status: invite.state.as_str().to_owned(),
         uses_allowed: 1,
         uses_completed: u64::from(invite.state == arkret_wire::InviteState::Accepted),

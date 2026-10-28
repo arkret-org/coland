@@ -403,7 +403,7 @@ async fn departing_member_target(
          JOIN canonical_events pe ON pe.pk=pc.event_pk \
          WHERE e.id=$1 AND pe.state='committed' AND ( \
            (pe.kind='ak.member.state' AND pe.envelope->'payload'->'member_id'=$2::jsonb) \
-           OR (pe.kind='ak.invite.accept' AND pe.envelope->'actor_id'=$2::jsonb)) \
+           OR (pe.kind IN ('ak.invite.accept','ak.realm_invite_link.accept') AND pe.envelope->'actor_id'=$2::jsonb)) \
          ORDER BY pc.stream_position DESC LIMIT 1",
     )
     .bind::<Binary, _>(event_token.to_vec())
@@ -413,8 +413,10 @@ async fn departing_member_target(
     .optional()
     .map_err(PersistenceError::database)?;
     let joined_before = prior.is_some_and(|row| {
-        row.kind == arkret_wire::EventKind::InviteAccept.as_str()
-            || row.membership.as_deref() == Some("join")
+        matches!(
+            arkret_wire::EventKind::from_wire(&row.kind),
+            arkret_wire::EventKind::InviteAccept | arkret_wire::EventKind::RealmInviteLinkAccept
+        ) || row.membership.as_deref() == Some("join")
     });
     if !joined_before {
         return Ok(None);

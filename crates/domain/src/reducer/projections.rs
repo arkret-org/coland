@@ -9,7 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use arkret_event_draft::ProjectedEventOperation as Operation;
 use arkret_models_collaboration::events_payloads::ContentBlock;
-use arkret_models_collaboration::governance::third_party_invite::ThirdPartyInvite;
 use arkret_models_collaboration::objects::profiles::StrandTrack;
 use arkret_models_collaboration::objects::space::ChildScopePolicy;
 use arkret_wire::{AppletId, DidCoreId, EventId, Hash, ObjectStage};
@@ -23,20 +22,6 @@ pub struct PendingReplayEntry {
     pub operation_id: String,
     pub operation: Operation,
     pub queued_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InviteProjection {
-    pub invite_id: String,
-    pub realm_id: String,
-    pub inviter_id: String,
-    pub invitee_id: Option<String>,
-    pub third_party_invite: Option<ThirdPartyInvite>,
-    pub state: String,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub claim_nonces: BTreeMap<String, String>,
 }
 
 /// R3.1 — structured cache row for a single directed Realm link.

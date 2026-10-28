@@ -116,10 +116,6 @@ async fn health_and_describe_work_body() {
         "arkret-spec generated Rust descriptors"
     );
     assert_eq!(
-        describe["limits"]["registries"]["versions"]["event_kind"],
-        artifacts::registry_summary()["versions"]["event_kind"]
-    );
-    assert_eq!(
         describe["limits"]["plaintext_visible_service_capability"]["supported"],
         true
     );

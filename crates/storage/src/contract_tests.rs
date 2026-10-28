@@ -1556,7 +1556,6 @@ pub async fn assert_applet_formal_commit_transaction_contract(
             audit_unit: None,
             events: batch,
             realm_organization_proof: None,
-            invite_claim_proof: None,
             event_approvals: None,
             franking_replay_nonce: None,
             applet_record: None,

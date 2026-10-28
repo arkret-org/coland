@@ -109,7 +109,6 @@ pub(crate) async fn commit_sidecar_ensure_unit(
             events: commands,
             franking_replay_nonce: None,
             realm_organization_proof: None,
-            invite_claim_proof: None,
             event_approvals: None,
             applet_record: None,
             applet_authoring_preview: None,

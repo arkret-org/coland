@@ -874,11 +874,10 @@ async fn require_live_forward(state: &AppState, event: &arkret_wire::Event) -> S
         .authority_commits()
         .require_held_replica_write_lifecycle(event)
         .await?;
-    // Joining and a bound invite claim acquire authority through their own
+    // First joins acquire authority through their own
     // registered admission. They never reuse a departed replica's old basis.
     if super::committed_replication::hosted_member_join_event(state, event)
         .is_some_and(|member| event.actor_id.as_account_id() == Some(&member))
-        || event.kind == arkret_wire::EventKind::InviteClaim
     {
         return Ok(());
     }
@@ -1101,14 +1100,7 @@ pub(crate) async fn recover_forwarded_original(
         .map_err(|e| temporarily_unavailable(e.message))?
     };
     validate_recovery_caller(state, session, event).await?;
-    if let Some(commit) = attempt.accepted_commit.as_ref()
-        && verify_bound_invite_claim(state, &governance, event, commit, &located, session).await?
-    {
-        return Ok(Some(AuthoritySubmitResponseBody::Accepted {
-            status: arkret_wire::AuthorityCommitStatus::Duplicate,
-            commit: commit.clone(),
-        }));
-    }
+
     if attempt.accepted_commit.is_none() {
         let stream = arkret_wire::CommitStreamRef::from_scope(
             &event.scope_ref,
@@ -1266,11 +1258,7 @@ async fn send_forward(
                 .retain_forwarded_acceptance(event, commit, crate::wire::now())
                 .await?;
             validate_recovery_caller(state, session, event).await?;
-            if verify_bound_invite_claim(state, governance, event, commit, &located, session)
-                .await?
-            {
-                return Ok(outcome);
-            }
+
             super::replica_anchor::ensure_forwarded_target(
                 state,
                 governance,
@@ -1328,69 +1316,6 @@ async fn record_forward_result(
         .record_forward_attempt(&event.event_id, status, reason_code, crate::wire::now())
         .await?;
     Ok(())
-}
-
-/// A claim is not a join: its bound self result needs no member scan or replica.
-async fn verify_bound_invite_claim(
-    state: &AppState,
-    governance: &DidCoreId,
-    event: &Event,
-    commit: &arkret_wire::RealmCommit,
-    located: &crate::routing::realm_join::LocatedRealmAuthority,
-    session: &coland_services::identity::SessionIdentityState,
-) -> ServiceResult<bool> {
-    if event.kind != arkret_wire::EventKind::InviteClaim {
-        return Ok(false);
-    }
-    validate_recovery_caller(state, session, event).await?;
-    let commits = state.authority_commits();
-    let queued = commits
-        .queued_event(&event.event_id)
-        .await?
-        .ok_or_else(|| temporarily_unavailable("bound claim has no frozen submission"))?;
-    let attempt = queued
-        .forward_attempt
-        .ok_or_else(|| temporarily_unavailable("bound claim has no retained forward"))?;
-    if queued.event != *event
-        || attempt.accepted_commit.as_ref() != Some(commit)
-        || !matches!(attempt.original_submission,
-            Some(SelfAuthoritySubmitRequestBody::Event(ref original)) if original.event == *event)
-    {
-        return Err(temporarily_unavailable(
-            "bound claim differs from its frozen accepted original",
-        ));
-    }
-    let fact = state
-        .persistence()
-        .forwarded_bound_account_device_signer_fact(event, commit, governance)
-        .await
-        .map_err(temporarily_unavailable)?
-        .ok_or_else(|| {
-            temporarily_unavailable("bound claim historical producer source is unavailable")
-        })?;
-    coland_services::committed_receipt::verify_committed_event_receipt_with_source(
-        state.persistence(),
-        event,
-        commit,
-        coland_services::committed_receipt::CommitContinuity::Standalone,
-        &located.authority,
-        &located.keys,
-        &state.service_core_id(),
-        event.realm_id.digest_suite_code().digest_suite(),
-        Some(&fact.into()),
-    )
-    .await
-    .map_err(temporarily_unavailable)?;
-    validate_recovery_caller(state, session, event).await?;
-    if commits.current_authority(&event.realm_id).await?.as_ref()
-        != Some(&located.current_authority())
-    {
-        return Err(temporarily_unavailable(
-            "bound claim governing tenure changed",
-        ));
-    }
-    validate_recovery_caller(state, session, event).await?;
-    Ok(true)
 }
 
 pub(super) async fn verify_forwarded_acknowledgement(

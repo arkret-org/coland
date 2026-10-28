@@ -18,7 +18,6 @@ mod facets;
 mod apply_capability;
 mod apply_history_access;
 mod apply_identity_resolution;
-mod apply_invites;
 mod apply_messages;
 mod apply_moderation;
 mod apply_objects;
@@ -73,11 +72,11 @@ pub(crate) use projections::space_container_id_from_payload;
 pub use projections::{
     AppletProjection, CircleLifecycleState, CircleMembershipState, CircleProjection,
     ColandMembershipState, ColandRealmState, ColandRelationState, DocumentVersionProjection,
-    InviteProjection, KeyPackageLifetimeProjection, MessageState, MlsKeyPackageProjection,
-    MorphProjection, ObjectLifecycleState, PendingReplayEntry, PinProjection, PollState,
-    ProjectedMessageView, ReactionState, RealmLinkState, RealmOrganizationStatementState,
-    RedactionCellValue, RelationCurrentStateProjection, RsvpProjection, SidecarContextProjection,
-    SidecarProjection, SpaceContainerLifecycleState, SpaceContainerProjection, StrandProjection,
+    KeyPackageLifetimeProjection, MessageState, MlsKeyPackageProjection, MorphProjection,
+    ObjectLifecycleState, PendingReplayEntry, PinProjection, PollState, ProjectedMessageView,
+    ReactionState, RealmLinkState, RealmOrganizationStatementState, RedactionCellValue,
+    RelationCurrentStateProjection, RsvpProjection, SidecarContextProjection, SidecarProjection,
+    SpaceContainerLifecycleState, SpaceContainerProjection, StrandProjection,
     object_stage_from_wire_value, object_stage_wire_value,
 };
 use serde_json::Value;

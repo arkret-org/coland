@@ -1711,7 +1711,6 @@ fn the_bundle_projects_every_registered_component() {
         }},
         "account_deactivation": {"member_action": "leave_all"},
         "preauth": {"consent_required": true},
-        "allowed_third_party_invite_verification_ids": ["ak:did_core:web:verifier.example"]
     });
     serde_json::from_value::<
         arkret_models_collaboration::events_payloads::realm::RealmPolicyBundlePayload,
@@ -1737,7 +1736,6 @@ fn the_bundle_projects_every_registered_component() {
         "agent_participation",
         "account_deactivation",
         "preauth",
-        "allowed_third_party_invite_verification_ids",
     ] {
         assert!(
             projected.get(component).is_some(),

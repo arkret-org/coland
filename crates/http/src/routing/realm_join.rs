@@ -256,7 +256,7 @@ async fn peer_bootstrap(
                     .as_ref()
                     == Some(&member)
         }
-        EventKind::InviteAccept => event.actor_id == member,
+        EventKind::InviteAccept | EventKind::RealmInviteLinkAccept => event.actor_id == member,
         _ => false,
     };
     if !joins_member {

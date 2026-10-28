@@ -114,19 +114,9 @@ pub fn id_kind_forms() -> &'static HashMap<String, String> {
     })
 }
 
-pub fn registry_versions() -> Value {
-    json!({
-        "event_kind": arkret_schema::EVENT_KIND_REGISTRY_VERSION,
-        "schema": arkret_schema::SCHEMA_REGISTRY_VERSION,
-        "operation": arkret_schema::OPERATION_REGISTRY_VERSION,
-        "id_kind": arkret_schema::ID_KIND_REGISTRY_VERSION,
-    })
-}
-
 pub fn registry_summary() -> Value {
     json!({
         "source": "arkret-spec generated Rust descriptors",
-        "versions": registry_versions(),
         "counts": {
             "active_durable_event_kinds": active_durable_event_kinds().len(),
             "schemas": arkret_schema::REGISTERED_SCHEMA_IDS.len(),

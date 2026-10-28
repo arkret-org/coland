@@ -349,7 +349,6 @@ pub enum ConflictCode {
     /// The payload invitee and the stored directed invitee disagree.
     InviteDirectedInviteeMismatch,
     /// `ak.invite.cancel` targets an Invite without a stored directed invitee.
-    InviteKindRequiresRevoke,
     /// The target Invite is already in a terminal lifecycle state.
     InviteAlreadyTerminal,
     /// A Capability Grant names authority its issuer does not hold at the
@@ -398,7 +397,7 @@ pub enum ConflictCode {
 
 impl ConflictCode {
     /// Every registered code, in the order the variants are declared.
-    pub const ALL: [Self; 88] = [
+    pub const ALL: [Self; 87] = [
         Self::ApprovalNonceReused,
         Self::ApprovalRequired,
         Self::AppletRevoked,
@@ -466,7 +465,6 @@ impl ConflictCode {
         Self::UnsupportedFeature,
         Self::InviteLiveTargetOccupied,
         Self::InviteDirectedInviteeMismatch,
-        Self::InviteKindRequiresRevoke,
         Self::InviteAlreadyTerminal,
         Self::GrantExceedsIssuerAuthority,
         Self::AuthorityCycle,
@@ -581,7 +579,6 @@ impl ConflictCode {
             Self::InviteDirectedInviteeMismatch => {
                 arkret_wire::ReasonCode::INVITE_DIRECTED_INVITEE_MISMATCH
             }
-            Self::InviteKindRequiresRevoke => arkret_wire::ReasonCode::INVITE_KIND_REQUIRES_REVOKE,
             Self::InviteAlreadyTerminal => arkret_wire::ReasonCode::INVITE_ALREADY_TERMINAL,
             Self::GrantExceedsIssuerAuthority => {
                 arkret_wire::ReasonCode::GRANT_EXCEEDS_ISSUER_AUTHORITY

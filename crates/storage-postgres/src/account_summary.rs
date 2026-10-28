@@ -61,6 +61,7 @@ pub(crate) fn changes_account_summary_inputs(kind: &arkret_wire::EventKind) -> b
         *kind,
         arkret_wire::EventKind::MemberState
             | arkret_wire::EventKind::InviteAccept
+            | arkret_wire::EventKind::RealmInviteLinkAccept
             | arkret_wire::EventKind::RealmProfile
             | arkret_wire::EventKind::RealmSetDefaultStrand
     )

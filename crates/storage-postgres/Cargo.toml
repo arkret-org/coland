@@ -40,7 +40,7 @@ arkret-models-identity.workspace = true
 arkret-models-integration.workspace = true
 arkret-state.workspace = true
 arkret-schema.workspace = true
-arkret-signatures.workspace = true
+arkret-signatures = { workspace = true, features = ["collaboration"] }
 arkret-wire = { workspace = true, features = ["diesel"] }
 async-trait = { workspace = true }
 base64 = { workspace = true }

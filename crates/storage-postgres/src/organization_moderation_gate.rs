@@ -224,7 +224,9 @@ pub(crate) async fn require_organization_join_gate_in_connection(
     commit: &arkret_wire::RealmCommit,
 ) -> PersistenceResult<()> {
     let join = match event.kind {
-        arkret_wire::EventKind::InviteAccept => true,
+        arkret_wire::EventKind::InviteAccept | arkret_wire::EventKind::RealmInviteLinkAccept => {
+            true
+        }
         arkret_wire::EventKind::MemberState => {
             serde_json::to_value(&event.payload)
                 .map_err(corrupt)?

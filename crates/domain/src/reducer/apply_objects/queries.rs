@@ -494,9 +494,10 @@ impl ProjectionState {
                     true,
                 )
             }
-            Some(arkret_wire::EventKind::InviteAccept) => {
-                (Some(operation.context.sender.to_string()), true)
-            }
+            Some(
+                arkret_wire::EventKind::InviteAccept
+                | arkret_wire::EventKind::RealmInviteLinkAccept,
+            ) => (Some(operation.context.sender.to_string()), true),
             _ => return Ok(()),
         };
         let member = member.as_deref();

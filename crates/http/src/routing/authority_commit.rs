@@ -396,7 +396,6 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                 | coland_storage::ConflictCode::PinTargetNotPinned
                 | coland_storage::ConflictCode::MimiRoomBindingMigrationProofInvalid
                 | coland_storage::ConflictCode::InviteDirectedInviteeMismatch
-                | coland_storage::ConflictCode::InviteKindRequiresRevoke
                 | coland_storage::ConflictCode::InviteAlreadyTerminal
                 | coland_storage::ConflictCode::StrandNotActive
                 | coland_storage::ConflictCode::StrandNotArchived

@@ -110,9 +110,10 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::MessageRedact
         | EventKind::ModerationDecision
         | EventKind::ModerationDecisionLift
+        | EventKind::RealmInviteLinkCreate
+        | EventKind::RealmInviteLinkRevoke
+        | EventKind::RealmInviteLinkAccept
         | EventKind::InviteCreate
-        | EventKind::InviteThirdParty
-        | EventKind::InviteClaim
         | EventKind::InviteRevoke
         | EventKind::InviteCancel
         | EventKind::InviteAccept
@@ -953,7 +954,6 @@ mod tests {
             EventKind::PolicyAction,
             EventKind::AgentActionApprove,
             EventKind::DirectConversationBound,
-            EventKind::InviteClaim,
             EventKind::CircleCreate,
             EventKind::CircleMemberState,
             EventKind::MemberIdentityUpdate,
@@ -998,7 +998,6 @@ mod tests {
             EventKind::ModerationDecision,
             EventKind::ModerationDecisionLift,
             EventKind::InviteCreate,
-            EventKind::InviteThirdParty,
             EventKind::InviteRevoke,
             EventKind::InviteCancel,
             EventKind::InviteAccept,
@@ -1075,7 +1074,6 @@ mod tests {
             EventKind::ModerationDecision,
             EventKind::ModerationDecisionLift,
             EventKind::InviteCreate,
-            EventKind::InviteThirdParty,
             EventKind::InviteRevoke,
             EventKind::InviteCancel,
             EventKind::InviteAccept,
@@ -1088,7 +1086,6 @@ mod tests {
             EventKind::SpaceRestore,
             EventKind::ReactionAdd,
             EventKind::ReactionRemove,
-            EventKind::InviteClaim,
             EventKind::MimiRoomBinding,
             EventKind::PinAdd,
             EventKind::PinRemove,

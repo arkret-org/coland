@@ -1353,6 +1353,9 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             // Policy row only in replica_authorization_rows, not a fake current.
             | S::Policy { .. }
             | S::CapabilityGrant { .. }
+            | S::RealmInviteLinkDefinition { .. }
+            | S::RealmInviteLinkLifecycle { .. }
+            | S::RealmInviteLinkUse { .. }
             | S::InviteLifecycle { .. }
             | S::InviteLiveTarget { .. }
             | S::InviteDirectedInvitee { .. }
@@ -1768,6 +1771,7 @@ pub(crate) async fn advance_in_connection(
         }
         arkret_wire::EventKind::MemberState
         | arkret_wire::EventKind::InviteAccept
+        | arkret_wire::EventKind::RealmInviteLinkAccept
         | arkret_wire::EventKind::RealmPolicyBundle
         | arkret_wire::EventKind::RealmLink => {
             crate::unit_of_work::commit_parent_membership_current_states(conn, event, commit)

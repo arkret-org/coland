@@ -14,31 +14,6 @@ pub(crate) fn validate_invite_create_payload(operation: &Operation) -> Result<()
     Ok(())
 }
 
-pub(crate) fn validate_invite_third_party_payload(
-    operation: &Operation,
-) -> Result<(), &'static str> {
-    let payload = operation
-        .typed_payload::<arkret_wire::event_spec::InviteThirdParty>()
-        .map_err(|_| "operation payload violates SDK artifact schema")?;
-    payload
-        .validate()
-        .map_err(|_| "ak.invite.third_party payload is invalid")?;
-    Ok(())
-}
-
-pub(crate) fn validate_invite_claim_payload(operation: &Operation) -> Result<(), &'static str> {
-    let claim = operation
-        .typed_payload::<arkret_wire::event_spec::InviteClaim>()
-        .map_err(|_| "ak.invite.claim payload violates SDK artifact schema")?;
-    claim
-        .validate()
-        .map_err(|_| "ak.invite.claim payload is invalid")?;
-    if claim.binding_proof.realm_id != operation.realm_id {
-        return Err("binding_proof.realm_id must match envelope realm_id");
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_invite_ref_payload(operation: &Operation) -> Result<(), &'static str> {
     let payload = operation
         .payload

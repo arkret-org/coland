@@ -2,10 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use arkret_identifiers::RealmId;
-use arkret_models_collaboration::governance::third_party_invite::{
-    ThirdPartyInviteAcceptanceAttestationRequestBody,
-    ThirdPartyInviteAcceptanceAttestationResponseBody,
-};
 use coland_storage::{PersistenceResult, PersistenceStore};
 
 use crate::delivery::{DeliveryService, ObjectStoragePort};
@@ -682,37 +678,25 @@ impl PersistenceHandle {
         &self,
         invitee: &arkret_wire::AccountId,
         realm_id: Option<&arkret_wire::RealmId>,
-    ) -> PersistenceResult<Vec<coland_storage::DirectedInviteCurrent>> {
+    ) -> PersistenceResult<Vec<coland_storage::InviteCurrent>> {
         self.persistence
             .invite_current_states()
             .open_directed_invites_for_invitee(invitee, realm_id)
             .await
     }
 
-    /// Sign portable third-party Invite evidence while holding its current cut.
-    pub async fn third_party_invite_acceptance_attestation(
+    /// Invite results, optionally across all Realms, at one committed cut.
+    pub async fn check_realm_invite_link_preview(
         &self,
-        request: &ThirdPartyInviteAcceptanceAttestationRequestBody,
-        caller: &arkret_wire::AccountId,
-        station: &arkret_wire::DidCoreId,
-        verification_method: &arkret_wire::DidUrl,
-        observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
-        sign: &coland_storage::InviteAcceptanceAttestationSigner<'_>,
-    ) -> PersistenceResult<ThirdPartyInviteAcceptanceAttestationResponseBody> {
+        request: &arkret_models_collaboration::governance::realm_join_intake::PeerRealmJoinPreviewRequestBody,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<()> {
         self.persistence
             .invite_current_states()
-            .third_party_invite_acceptance_attestation(
-                request,
-                caller,
-                station,
-                verification_method,
-                observe,
-                sign,
-            )
+            .check_realm_invite_link_preview(request, at)
             .await
     }
 
-    /// Invite results, optionally across all Realms, at one committed cut.
     pub async fn invites_in_realm(
         &self,
         realm_id: Option<&arkret_wire::RealmId>,

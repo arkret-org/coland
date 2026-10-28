@@ -206,7 +206,6 @@ and rollout-only switches that should be managed deliberately.
 | `COLAND_CONFORMANCE_INVITE_DELIVERY_PAUSE_FILE` | unset | Development-only final invite delivery probe. A JSON file selects the holder Account and Invite; `.reached` marks arrival. Removing the file resumes delivery; a 15-second deadline fails the probe. Production mode ignores it. |
 | `COLAND_CONFORMANCE_MEDIA_TOKEN_RELEASE_PAUSE_FILE` | unset | Development-only media token final-cut probe. A JSON request digest selects the exchange; `.reached` marks arrival. Removing the file resumes release; a 15-second deadline fails the probe. Production mode ignores it. |
 | `COLAND_CONFORMANCE_PRIVATE_EFFECTS_PAUSE_FILE` | unset | Development-only Consent private-effects scheduler pause. An existing file pauses publication without changing admission or durable state. Remove it to resume; production mode ignores it. |
-| `COLAND_THIRD_PARTY_INVITE_PROVIDER_ENABLED` | `false` | Enable the third-party invite provider backed by `COLAND_ACCOUNT_AUTHORITY_URL`. Enabling without that authority URL fails startup. |
 | `COLAND_DB_POOL_ACQUIRE_TIMEOUT_SECS` | deadpool default | Positive database-pool acquisition timeout; unset means no explicit wait timeout. |
 | `COLAND_DB_POOL_MAX_SIZE` | CPU count × 4 | Positive database-pool size override. |
 | `COLAND_DID_RESOLVER_ALLOW_METHODS` | `web,key,uuid` | Comma-separated DID methods accepted by outbound DID resolution. |

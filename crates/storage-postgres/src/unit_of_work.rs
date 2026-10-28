@@ -423,7 +423,7 @@ fn member_state_mutation(
                 serde_json::json!({"membership": membership}),
             )
         }
-        arkret_wire::EventKind::InviteAccept => (
+        arkret_wire::EventKind::InviteAccept | arkret_wire::EventKind::RealmInviteLinkAccept => (
             event.actor_id.to_string(),
             "join".to_owned(),
             serde_json::json!({"membership":"join"}),
@@ -587,29 +587,35 @@ async fn prepare_parent_membership_transaction(
         return Ok(());
     }
 
-    if event.kind != arkret_wire::EventKind::MemberState
-        || event
-            .payload
-            .get("membership")
-            .and_then(serde_json::Value::as_str)
-            != Some("join")
+    let invitation_accept = matches!(
+        event.kind,
+        arkret_wire::EventKind::InviteAccept | arkret_wire::EventKind::RealmInviteLinkAccept
+    );
+    if !invitation_accept
+        && (event.kind != arkret_wire::EventKind::MemberState
+            || event
+                .payload
+                .get("membership")
+                .and_then(serde_json::Value::as_str)
+                != Some("join"))
     {
         if request.parent_membership_admission.is_some() {
-            return Err(PersistenceError::SchemaViolation(
-                "parent-membership admission plan is attached to a non-join Event".into(),
-            ));
+            return Err(gate_check_failed());
         }
         return Ok(());
     }
-    let member = event
-        .payload
-        .get("member_id")
-        .cloned()
-        .ok_or_else(gate_check_failed)
-        .and_then(|value| {
-            serde_json::from_value::<arkret_wire::ActorId>(value).map_err(|_| gate_check_failed())
-        })?
-        .to_string();
+    let member = if invitation_accept {
+        event.actor_id.to_string()
+    } else {
+        let value = event
+            .payload
+            .get("member_id")
+            .cloned()
+            .ok_or_else(gate_check_failed)?;
+        serde_json::from_value::<arkret_wire::ActorId>(value)
+            .map_err(|_| gate_check_failed())?
+            .to_string()
+    };
 
     // An unlocked first read discovers the authority lock set. The later
     // advisory + row lock and digest comparison make a concurrent policy
@@ -1213,7 +1219,9 @@ pub(crate) async fn commit_parent_membership_current_states(
             .await
             .map_err(PersistenceError::database)?;
         }
-        arkret_wire::EventKind::MemberState | arkret_wire::EventKind::InviteAccept => {
+        arkret_wire::EventKind::MemberState
+        | arkret_wire::EventKind::InviteAccept
+        | arkret_wire::EventKind::RealmInviteLinkAccept => {
             let Some((member_id, membership, value)) = member_state_mutation(event)? else {
                 return Ok(());
             };
@@ -2450,7 +2458,6 @@ fn commit_one_in_connection<'a>(
     request: EventCommitRequest,
     applet_record: Option<&'a coland_storage::AppletRecordCommit>,
     realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&'a coland_storage::InviteClaimProofCommit>,
     event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
     outcome: &'a mut EventCommitOutcome,
     audit_unit: Option<&'a coland_storage::RegisteredAuditCommit>,
@@ -2463,7 +2470,6 @@ fn commit_one_in_connection<'a>(
         request,
         applet_record,
         realm_organization_proof,
-        invite_claim_proof,
         event_approvals,
         outcome,
         audit_unit,
@@ -2491,7 +2497,6 @@ async fn commit_one_inner(
     request: EventCommitRequest,
     applet_record: Option<&coland_storage::AppletRecordCommit>,
     realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&coland_storage::InviteClaimProofCommit>,
     event_approvals: Option<&coland_storage::EventApprovalCommit>,
     outcome: &mut EventCommitOutcome,
     audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
@@ -2758,7 +2763,6 @@ async fn commit_one_inner(
         request,
         applet_record,
         realm_organization_proof,
-        invite_claim_proof,
         event_approvals,
         outcome,
         prepared_human,
@@ -2779,7 +2783,6 @@ fn commit_prepared_event<'a>(
     request: EventCommitRequest,
     applet_record: Option<&'a coland_storage::AppletRecordCommit>,
     realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&'a coland_storage::InviteClaimProofCommit>,
     event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
     outcome: &'a mut EventCommitOutcome,
     prepared_human: Option<
@@ -2798,7 +2801,6 @@ fn commit_prepared_event<'a>(
         request,
         applet_record,
         realm_organization_proof,
-        invite_claim_proof,
         event_approvals,
         outcome,
         prepared_human,
@@ -2818,7 +2820,6 @@ async fn commit_prepared_event_inner(
     request: EventCommitRequest,
     applet_record: Option<&coland_storage::AppletRecordCommit>,
     realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&coland_storage::InviteClaimProofCommit>,
     event_approvals: Option<&coland_storage::EventApprovalCommit>,
     outcome: &mut EventCommitOutcome,
     prepared_human: Option<
@@ -3209,7 +3210,6 @@ async fn commit_prepared_event_inner(
             conn,
             &request,
             realm_organization_proof,
-            invite_claim_proof,
             event_approvals,
             audit_unit,
         ))
@@ -3346,7 +3346,6 @@ fn commit_event_current_states_in_connection<'a>(
     conn: &'a mut AsyncPgConnection,
     request: &'a EventCommitRequest,
     realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&'a coland_storage::InviteClaimProofCommit>,
     event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
     audit_unit: Option<&'a coland_storage::RegisteredAuditCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
@@ -3355,7 +3354,6 @@ fn commit_event_current_states_in_connection<'a>(
         conn,
         request,
         realm_organization_proof,
-        invite_claim_proof,
         event_approvals,
         audit_unit,
     ))
@@ -3365,7 +3363,6 @@ async fn commit_event_current_states_inner(
     conn: &mut AsyncPgConnection,
     request: &EventCommitRequest,
     realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&coland_storage::InviteClaimProofCommit>,
     event_approvals: Option<&coland_storage::EventApprovalCommit>,
     audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
 ) -> Result<(), PgTransactionError> {
@@ -3373,7 +3370,6 @@ async fn commit_event_current_states_inner(
         conn,
         request,
         realm_organization_proof,
-        invite_claim_proof,
         audit_unit,
         event_approvals,
     ))
@@ -3394,7 +3390,6 @@ fn commit_scope_current_states<'a>(
     conn: &'a mut AsyncPgConnection,
     request: &'a EventCommitRequest,
     realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&'a coland_storage::InviteClaimProofCommit>,
     audit_unit: Option<&'a coland_storage::RegisteredAuditCommit>,
     prepared: Option<&'a coland_storage::EventApprovalCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PgTransactionError>> + Send + 'a>>
@@ -3403,7 +3398,6 @@ fn commit_scope_current_states<'a>(
         conn,
         request,
         realm_organization_proof,
-        invite_claim_proof,
         audit_unit,
         prepared,
     ))
@@ -3413,7 +3407,6 @@ async fn commit_scope_current_states_inner(
     conn: &mut AsyncPgConnection,
     request: &EventCommitRequest,
     realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
-    invite_claim_proof: Option<&coland_storage::InviteClaimProofCommit>,
     audit_unit: Option<&coland_storage::RegisteredAuditCommit>,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> Result<(), PgTransactionError> {
@@ -3495,13 +3488,14 @@ async fn commit_scope_current_states_inner(
     // An accepted Invite decides its accepting actor's `leave -> join`
     // edge against the member row before that row is written.
 
+    Box::pin(crate::realm_invite_links::commit_in_connection(
+        conn, event, commit, prepared,
+    ))
+    .await?;
+
     Box::pin(
         crate::invite_current_states::commit_invite_current_states_in_connection(
-            conn,
-            event,
-            commit,
-            invite_claim_proof,
-            prepared,
+            conn, event, commit, prepared,
         ),
     )
     .await?;
@@ -3863,7 +3857,6 @@ async fn commit_batch_in_connection(
             event,
             request.applet_record.as_ref(),
             request.realm_organization_proof.as_ref(),
-            request.invite_claim_proof.as_ref(),
             slot_approvals,
             &mut outcome,
             audit_unit,
@@ -3924,7 +3917,6 @@ impl EventCommitUnitOfWork for PgEventCommitUnitOfWork {
             audit_unit: None,
             events: vec![request],
             realm_organization_proof: None,
-            invite_claim_proof: None,
             event_approvals: None,
             franking_replay_nonce: None,
             applet_record: None,

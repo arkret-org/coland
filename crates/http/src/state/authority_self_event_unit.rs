@@ -171,9 +171,10 @@ fn decided_at_commit_cut(kind: &arkret_wire::EventKind) -> bool {
             | arkret_wire::EventKind::StrandReorder
             | arkret_wire::EventKind::StrandWatchSet
             | arkret_wire::EventKind::AgentInteractionSet
+            | arkret_wire::EventKind::RealmInviteLinkCreate
+            | arkret_wire::EventKind::RealmInviteLinkRevoke
+            | arkret_wire::EventKind::RealmInviteLinkAccept
             | arkret_wire::EventKind::InviteCreate
-            | arkret_wire::EventKind::InviteThirdParty
-            | arkret_wire::EventKind::InviteClaim
             | arkret_wire::EventKind::InviteRevoke
             | arkret_wire::EventKind::InviteCancel
             | arkret_wire::EventKind::InviteAccept
@@ -319,7 +320,6 @@ pub(super) fn commit_event_unit_with_idempotency<'a>(
     idempotency: Option<coland_services::events::IdempotentResponse>,
 ) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitResponseBody>> + Send + 'a {
     Box::pin(async move {
-        let claim = submission.event.kind == arkret_wire::EventKind::InviteClaim;
         let result = commit_event_unit_with_idempotency_impl(
             state,
             submission,
@@ -334,27 +334,8 @@ pub(super) fn commit_event_unit_with_idempotency<'a>(
             tracing::warn!(event_id = %submission.event.event_id, %error,
             "accepting cut temporarily unavailable for exact Event");
         }
-        if claim {
-            result.map_err(private_claim_refusal)
-        } else {
-            result
-        }
+        result
     })
-}
-
-fn private_claim_refusal(error: ServiceError) -> ServiceError {
-    // A moved accepting cut remains retryable; it is no claim verdict.
-    if error.conflict_code() == Some(coland_storage::ConflictCode::TemporarilyUnavailable) {
-        return error;
-    }
-    match error {
-        error @ (ServiceError::Conflict(_) | ServiceError::NotFound(_)) => {
-            tracing::info!(reason = %error, "third-party invite claim refused");
-            // third-party-invites.md section 6.1: no token-state reason on wire.
-            ServiceError::NotFound("invite claim not found".to_owned())
-        }
-        other => other,
-    }
 }
 
 fn commit_event_unit_with_idempotency_impl<'a>(
@@ -639,13 +620,6 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             realm_fanout_source: (!private_governance)
                 .then(|| EventAdmissionSubmission::new(submission.event.clone())),
         };
-        let invite_claim_proof =
-            Box::pin(crate::invite_claim_admission::prepare_invite_claim_proof(
-                state,
-                event,
-                transaction.commit.committed_at,
-            ))
-            .await?;
         let realm_organization_proof =
             Box::pin(crate::routing::organizations::prepare_realm_organization_proof(state, event))
                 .await
@@ -662,7 +636,6 @@ fn commit_event_unit_with_idempotency_impl<'a>(
         .await?;
         let committed = if franking_replay_nonce.is_some()
             || realm_organization_proof.is_some()
-            || invite_claim_proof.is_some()
             || event_approvals.is_some()
         {
             crate::boxed_future(|| {
@@ -672,7 +645,6 @@ fn commit_event_unit_with_idempotency_impl<'a>(
                         events: vec![command],
                         franking_replay_nonce,
                         realm_organization_proof,
-                        invite_claim_proof,
                         event_approvals,
                         applet_record: None,
                         applet_authoring_preview: None,

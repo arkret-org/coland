@@ -5,8 +5,7 @@
 //! Event's Commit:
 //!
 //! - `invite_lifecycle`, keyed by InviteId: the process-state register;
-//! - `invite_directed_invitee`, keyed by InviteId: the create-locked invitee, absent for a
-//!   third-party Invite;
+//! - `invite_directed_invitee`, keyed by InviteId: the create-locked directed invitee;
 //! - `invite_live_target`, keyed by `canonical_json(invitee_account_id)`: the one live
 //!   directed-invite slot of that account in the Realm, whose value is the occupying create Event
 //!   id or null.
@@ -20,23 +19,13 @@
 //! evaluator in [`crate::realm_authorization_cut`]; the in-process reducer
 //! projection and the retired `realm_invites` mirror are never read.
 
-mod acceptance_attestation;
-mod claim_admission;
-mod provider_liveness;
-
-use arkret_event_draft::EventPayloadExt;
-use arkret_models_collaboration::events_payloads::realm::RealmPolicyBundlePayload;
 use arkret_models_collaboration::governance::membership_invite::{
-    InviteAcceptPayload, InviteCancelPayload, InviteCancelTargetState, InviteClaimPayload,
-    InviteCreatePayload, InviteDirectedInviteeValue, InviteLiveTargetOccupant,
-    InviteLiveTargetValue, InvitePreviousState, InviteRevokePayload, InviteRevokePreviousState,
-    InviteRevokeTargetState, InviteThirdPartyCreatePayload, validate_invite_create_wire_keys,
+    InviteAcceptPayload, InviteCancelPayload, InviteCancelTargetState, InviteCreatePayload,
+    InviteDirectedInviteeValue, InviteLiveTargetOccupant, InviteLiveTargetValue,
+    InvitePreviousState, InviteRevokePayload, InviteRevokeTargetState,
+    validate_invite_create_wire_keys,
 };
-use arkret_models_collaboration::governance::third_party_invite::{
-    ThirdPartyInviteAcceptanceAttestationRequestBody,
-    ThirdPartyInviteAcceptanceAttestationResponseBody,
-};
-use arkret_wire::{AccountId, ActorId, EventKind, InviteId, InviteState, SecurityClass};
+use arkret_wire::{AccountId, ActorId, EventKind, InviteId, InviteState};
 use coland_storage::{ConflictCode, PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Nullable, Text, Timestamptz};
 use diesel_async::AsyncPgConnection;
@@ -415,116 +404,6 @@ async fn commit_invite_create(
     .await
 }
 
-/// Accept the 3PID create with its pure lifecycle and rebuildable commitment
-/// index at the same authority cut. A claim remains closed until its two
-/// independent signatures can be verified against accepted key history.
-async fn commit_invite_third_party_create(
-    conn: &mut AsyncPgConnection,
-    event: &arkret_wire::Event,
-    commit: &arkret_wire::RealmCommit,
-    prepared: Option<&coland_storage::EventApprovalCommit>,
-) -> PersistenceResult<()> {
-    authorize_capability_gated_event_with_approvals(conn, event, commit, prepared).await?;
-    if event.actor_id.as_account_id().is_none() {
-        return Err(coded(
-            ConflictCode::CapabilityDenied,
-            "a third-party Invite must be authored by an Account",
-        ));
-    }
-    let payload: InviteThirdPartyCreatePayload = typed_payload(event)?;
-    payload.validate().map_err(schema_violation)?;
-    let genesis = diesel::sql_query(
-        "SELECT e.envelope FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk \
-         WHERE c.realm_id=$1 AND c.stream_position=0 AND e.kind=$2 AND e.state='committed'",
-    )
-    .bind::<Text, _>(event.realm_id.as_str())
-    .bind::<Text, _>(EventKind::RealmCreate.as_str())
-    .get_result::<EnvelopeRow>(&mut *conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)?
-    .ok_or_else(|| corrupt("third-party Invite Realm has no accepted genesis"))?;
-    let genesis = serde_json::from_value::<arkret_wire::Event>(genesis.envelope)
-        .map_err(corrupt)?
-        .as_realm_create()
-        .map_err(corrupt)?
-        .object;
-    let max_lifetime = if genesis.security_class == SecurityClass::HighAssurance {
-        chrono::TimeDelta::hours(24)
-    } else {
-        chrono::TimeDelta::days(7)
-    };
-    if payload.expires_at <= commit.committed_at
-        || payload.expires_at <= event.created_at
-        || payload.expires_at > event.created_at + max_lifetime
-    {
-        return Err(coded(
-            ConflictCode::FailedPrecondition,
-            "third-party Invite is expired or exceeds its Realm security-class lifetime",
-        ));
-    }
-    let policy =
-        diesel::sql_query("SELECT value FROM realm_policy_bundle_current_states WHERE realm_id=$1")
-            .bind::<Text, _>(event.realm_id.as_str())
-            .get_result::<ValueRow>(&mut *conn)
-            .await
-            .optional()
-            .map_err(PersistenceError::database)?
-            .map(|row| {
-                serde_json::from_value::<RealmPolicyBundlePayload>(row.value).map_err(corrupt)
-            })
-            .transpose()?;
-    if !policy
-        .as_ref()
-        .and_then(|policy| policy.allowed_third_party_invite_verification_ids.as_ref())
-        .is_some_and(|allowed| allowed.contains(&payload.third_party_invite.verification_id))
-    {
-        return Err(coded(
-            ConflictCode::CapabilityDenied,
-            "verification service is absent from the accepted Realm policy allowlist",
-        ));
-    }
-    let commitment = &payload.third_party_invite.token_commitment;
-    let invite_id = InviteId::from_event_id(&event.event_id);
-    let inserted = diesel::sql_query(
-        "INSERT INTO invite_third_party_create_index \
-         (realm_id,invite_id,token_commitment,create_event_id,create_commit_id) \
-         VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING",
-    )
-    .bind::<Text, _>(event.realm_id.as_str())
-    .bind::<Text, _>(invite_id.as_str())
-    .bind::<Text, _>(commitment.as_str())
-    .bind::<Text, _>(event.event_id.as_str())
-    .bind::<Text, _>(commit.commit_id.as_str())
-    .execute(&mut *conn)
-    .await
-    .map_err(PersistenceError::database)?;
-    if inserted != 1 {
-        return Err(coded(
-            ConflictCode::DuplicateConflict,
-            "third-party Invite or token commitment already exists",
-        ));
-    }
-    let inserted = upsert(
-        conn,
-        "INSERT INTO invite_lifecycle_current_states \
-         (realm_id,invite_id,current_commit_id,current_stream_position,value,updated_at) \
-         VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",
-        event.realm_id.as_str(),
-        invite_id.as_str(),
-        &Value::String(InviteState::Pending.as_str().to_owned()),
-        commit,
-    )
-    .await?;
-    if inserted != 1 {
-        return Err(coded(
-            ConflictCode::DuplicateConflict,
-            "the third-party Invite already has a lifecycle result",
-        ));
-    }
-    Ok(())
-}
-
 async fn commit_invite_revoke(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
@@ -541,8 +420,7 @@ async fn commit_invite_revoke(
     require_transition_from(
         stored,
         match payload.previous_state {
-            InviteRevokePreviousState::Pending => InviteState::Pending,
-            InviteRevokePreviousState::Claimed => InviteState::Claimed,
+            InvitePreviousState::Pending => InviteState::Pending,
         },
     )?;
     let target = match payload.target_state {
@@ -552,7 +430,7 @@ async fn commit_invite_revoke(
     {
         // Match the stored target in both directions for every terminal edge.
         let stored_invitee = directed_invitee(conn, realm_id, &payload.invite_id).await?;
-        if stored_invitee != payload.invitee_account_id {
+        if stored_invitee.as_ref() != Some(&payload.invitee_account_id) {
             return Err(coded(
                 ConflictCode::InviteDirectedInviteeMismatch,
                 "invitee_account_id does not match the stored directed invitee",
@@ -560,9 +438,14 @@ async fn commit_invite_revoke(
         }
     }
     set_lifecycle(conn, realm_id, &payload.invite_id, target, commit).await?;
-    if let Some(invitee) = payload.invitee_account_id.as_ref() {
-        release_live_target(conn, realm_id, &payload.invite_id, invitee, commit).await?;
-    }
+    release_live_target(
+        conn,
+        realm_id,
+        &payload.invite_id,
+        &payload.invitee_account_id,
+        commit,
+    )
+    .await?;
     Ok(())
 }
 
@@ -623,7 +506,7 @@ async fn commit_invite_cancel(
     match directed_invitee(conn, realm_id, &payload.invite_id).await? {
         None => {
             return Err(coded(
-                ConflictCode::InviteKindRequiresRevoke,
+                ConflictCode::InviteDirectedInviteeMismatch,
                 "the Invite has no stored directed invitee",
             ));
         }
@@ -639,7 +522,6 @@ async fn commit_invite_cancel(
         stored,
         match payload.previous_state {
             InvitePreviousState::Pending => InviteState::Pending,
-            InvitePreviousState::Claimed => InviteState::Claimed,
         },
     )?;
     let target = match payload.target_state {
@@ -664,8 +546,7 @@ async fn commit_invite_cancel(
 /// transaction. Authorization is the invitee's own signature over the exact
 /// target Invite, not a Realm grant: the invitee is not yet a member, and
 /// `ak.invite.accept` is `subject_only` (`authz/capabilities.md` §13,
-/// decision 0113). A third-party Invite has no stored directed invitee
-/// and accepts only through the exact accepted claim and its invited member row.
+/// decision 0113).
 async fn commit_invite_accept(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
@@ -695,34 +576,13 @@ async fn commit_invite_accept(
     // `stored_field_matches_payload`, unconditional for accept: both absent,
     // or both present and byte-equal.
     let stored_invitee = directed_invitee(conn, realm_id, &payload.invite_id).await?;
-    if stored_invitee != payload.invitee_account_id {
+    if stored_invitee.as_ref() != Some(&payload.invitee_account_id) {
         return Err(coded(
             ConflictCode::InviteDirectedInviteeMismatch,
             "invitee_account_id does not match the stored directed invitee",
         ));
     }
-    let third_party = stored_invitee.is_none();
-    let invitee = match stored_invitee {
-        Some(invitee) => invitee,
-        None if stored == InviteState::Claimed
-            && payload.previous_state == InvitePreviousState::Claimed =>
-        {
-            claim_admission::accepted_claimant(conn, event, commit, &payload.invite_id)
-                .await?
-                .ok_or_else(|| {
-                    coded(
-                        ConflictCode::FailedPrecondition,
-                        "third-party acceptance has no exact accepted claim",
-                    )
-                })?
-        }
-        None => {
-            return Err(coded(
-                ConflictCode::FailedPrecondition,
-                "third-party acceptance requires claimed state",
-            ));
-        }
-    };
+    let invitee = stored_invitee.ok_or_else(|| corrupt("directed Invite has no stored target"))?;
     if event.actor_id.as_account_id() != Some(&invitee) {
         return Err(coded(
             ConflictCode::FailedPrecondition,
@@ -733,19 +593,24 @@ async fn commit_invite_accept(
         stored,
         match payload.previous_state {
             InvitePreviousState::Pending => InviteState::Pending,
-            InvitePreviousState::Claimed => InviteState::Claimed,
         },
     )?;
-    crate::member_state_admission::require_ordinary_member(conn, &event.realm_id, &event.actor_id)
-        .await?;
-    if crate::member_state_admission::locked_membership(conn, &event.realm_id, &event.actor_id)
-        .await?
-        != "leave"
-    {
-        return Err(coded(
-            ConflictCode::FailedPrecondition,
-            "invite acceptance requires its directed or claimed membership predecessor",
-        ));
+    crate::member_state_admission::require_invitation_entry(conn, event).await?;
+    let token = crate::ids::parse_event_id(payload.invite_id.event_id().as_str())
+        .ok_or_else(|| corrupt("invalid Invite ID"))?;
+    let source = diesel::sql_query(
+        "SELECT e.envelope FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk \
+        WHERE e.id=$1 AND e.realm_id=$2 AND e.kind='ak.invite.create' AND e.state='committed'",
+    )
+    .bind::<diesel::sql_types::Binary, _>(token.to_vec())
+    .bind::<Text, _>(event.realm_id.as_str())
+    .get_result::<EnvelopeRow>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    let source: arkret_wire::Event = serde_json::from_value(source.envelope).map_err(corrupt)?;
+    let create: InviteCreatePayload = typed_payload(&source)?;
+    if commit.committed_at >= create.expires_at {
+        return Err(PersistenceError::NotFound("invitation not found".into()));
     }
     set_lifecycle(
         conn,
@@ -755,11 +620,7 @@ async fn commit_invite_accept(
         commit,
     )
     .await?;
-    if third_party {
-        Ok(())
-    } else {
-        release_live_target(conn, realm_id, &payload.invite_id, &invitee, commit).await
-    }
+    release_live_target(conn, realm_id, &payload.invite_id, &invitee, commit).await
 }
 
 /// Admit and write the registered Invite typed current results of `event`.
@@ -768,14 +629,11 @@ pub(crate) async fn commit_invite_current_states_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
-    claim_proof: Option<&coland_storage::InviteClaimProofCommit>,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> PersistenceResult<()> {
     if !matches!(
         event.kind,
         EventKind::InviteCreate
-            | EventKind::InviteThirdParty
-            | EventKind::InviteClaim
             | EventKind::InviteRevoke
             | EventKind::InviteCancel
             | EventKind::InviteAccept
@@ -785,12 +643,6 @@ pub(crate) async fn commit_invite_current_states_in_connection(
     require_realm_stream_carrier(event, commit)?;
     match event.kind {
         EventKind::InviteCreate => commit_invite_create(conn, event, commit, prepared).await,
-        EventKind::InviteThirdParty => {
-            commit_invite_third_party_create(conn, event, commit, prepared).await
-        }
-        EventKind::InviteClaim => {
-            claim_admission::commit_claim(conn, event, commit, claim_proof).await
-        }
         EventKind::InviteRevoke => commit_invite_revoke(conn, event, commit, prepared).await,
         EventKind::InviteCancel => commit_invite_cancel(conn, event, commit, prepared).await,
         EventKind::InviteAccept => commit_invite_accept(conn, event, commit).await,
@@ -822,8 +674,8 @@ struct InviteCurrentRow {
     lifecycle: Value,
     #[diesel(sql_type = Timestamptz)]
     updated_at: chrono::DateTime<chrono::Utc>,
-    #[diesel(sql_type = Nullable<Jsonb>)]
-    invitee: Option<Value>,
+    #[diesel(sql_type = Jsonb)]
+    invitee: Value,
 }
 
 #[derive(diesel::QueryableByName)]
@@ -839,49 +691,36 @@ pub struct PgInviteCurrentStateStore {
 
 #[async_trait::async_trait]
 impl coland_storage::InviteCurrentStateStore for PgInviteCurrentStateStore {
-    async fn third_party_invite_acceptance_attestation(
+    async fn check_realm_invite_link_preview(
         &self,
-        request: &ThirdPartyInviteAcceptanceAttestationRequestBody,
-        caller: &AccountId,
-        station: &arkret_wire::DidCoreId,
-        verification_method: &arkret_wire::DidUrl,
-        observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
-        sign: &coland_storage::InviteAcceptanceAttestationSigner<'_>,
-    ) -> PersistenceResult<ThirdPartyInviteAcceptanceAttestationResponseBody> {
+        request: &arkret_models_collaboration::governance::realm_join_intake::PeerRealmJoinPreviewRequestBody,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<()> {
         use diesel_async::AsyncConnection as _;
+        let id = request
+            .realm_invite_link_id
+            .as_ref()
+            .ok_or_else(|| PersistenceError::NotFound("Realm invite link not found".into()))?;
+        let proof = request
+            .link_proof
+            .as_ref()
+            .ok_or_else(|| PersistenceError::NotFound("Realm invite link not found".into()))?;
         let mut conn = crate::pg_conn(&self.pool).await?;
         conn.transaction::<_, crate::PgTransactionError, _>(async |conn| {
-            Ok(acceptance_attestation::issue(
+            crate::realm_invite_links::preview_in_connection(
                 conn,
-                request,
-                caller,
-                station,
-                verification_method,
-                observe,
-                sign,
+                &request.realm_id,
+                id,
+                &request.requester_account_id,
+                &request.request_id,
+                proof,
+                at,
             )
-            .await?)
+            .await?;
+            Ok(())
         })
         .await
         .map_err(crate::PgTransactionError::into_persistence)
-    }
-
-    async fn acquire_third_party_invite_provision_device(
-        &self,
-        request: &arkret_models_collaboration::governance::third_party_invite::ThirdPartyInviteProvisionRequestBody,
-        station: &arkret_wire::DidCoreId,
-        observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
-    ) -> PersistenceResult<Box<dyn coland_storage::ThirdPartyInviteProviderLivenessGuard>> {
-        provider_liveness::acquire_provision_device(&self.pool, request, station, observe).await
-    }
-
-    async fn acquire_third_party_invite_provider_liveness(
-        &self,
-        request: &coland_storage::ThirdPartyInviteProviderLivenessRequest,
-        station: &arkret_wire::DidCoreId,
-        observe: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Send + Sync),
-    ) -> PersistenceResult<Box<dyn coland_storage::ThirdPartyInviteProviderLivenessGuard>> {
-        provider_liveness::acquire(&self.pool, request, station, observe).await
     }
 
     async fn invites_in_realm(
@@ -899,7 +738,7 @@ impl coland_storage::InviteCurrentStateStore for PgInviteCurrentStateStore {
                 "SELECT l.realm_id,l.invite_id,l.value AS lifecycle,l.updated_at, \
                         d.value->'invitee_account_id' AS invitee \
                  FROM invite_lifecycle_current_states l \
-                 LEFT JOIN invite_directed_invitee_current_states d \
+                 JOIN invite_directed_invitee_current_states d \
                    ON d.realm_id=l.realm_id AND d.invite_id=l.invite_id \
                  WHERE ($1::text IS NULL OR l.realm_id=$1) \
                  ORDER BY l.realm_id ASC,l.invite_id ASC",
@@ -921,7 +760,7 @@ impl coland_storage::InviteCurrentStateStore for PgInviteCurrentStateStore {
         &self,
         invitee: &AccountId,
         realm_id: Option<&arkret_wire::RealmId>,
-    ) -> PersistenceResult<Vec<coland_storage::DirectedInviteCurrent>> {
+    ) -> PersistenceResult<Vec<coland_storage::InviteCurrent>> {
         use diesel_async::AsyncConnection as _;
 
         let invitee_value = serde_json::to_value(invitee).map_err(schema_violation)?;
@@ -938,7 +777,7 @@ impl coland_storage::InviteCurrentStateStore for PgInviteCurrentStateStore {
                  JOIN invite_lifecycle_current_states l \
                    ON l.realm_id=d.realm_id AND l.invite_id=d.invite_id \
                  WHERE d.value->'invitee_account_id'=$1 \
-                   AND (l.value #>> '{}') IN ('pending','claimed') \
+                   AND (l.value #>> '{}') = 'pending' \
                    AND ($2::text IS NULL OR d.realm_id=$2) \
                  ORDER BY d.realm_id ASC, d.invite_id ASC",
             )
@@ -961,120 +800,23 @@ async fn invite_current(
     conn: &mut AsyncPgConnection,
     row: InviteCurrentRow,
 ) -> PersistenceResult<coland_storage::InviteCurrent> {
-    let realm_id = row
-        .realm_id
-        .parse::<arkret_wire::RealmId>()
-        .map_err(corrupt)?;
-    let invite_id = row.invite_id.parse::<InviteId>().map_err(corrupt)?;
-    let state = row
-        .lifecycle
-        .as_str()
-        .and_then(InviteState::from_wire)
-        .ok_or_else(|| corrupt("invite_lifecycle value is not a registered state"))?;
-    let invitee_account_id = row
-        .invitee
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(corrupt)?;
-    let token = crate::ids::parse_event_id(invite_id.event_id().as_str())
-        .ok_or_else(|| corrupt("InviteId does not retype to a canonical Event token"))?;
-    let envelope = diesel::sql_query(
-        "SELECT e.envelope FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk \
-         WHERE e.id=$1 AND e.realm_id=$2 AND e.kind IN ($3,$4) AND e.state='committed'",
+    open_directed_invite(
+        conn,
+        OpenDirectedInviteRow {
+            realm_id: row.realm_id,
+            invite_id: row.invite_id,
+            lifecycle: row.lifecycle,
+            updated_at: row.updated_at,
+            invitee: row.invitee,
+        },
     )
-    .bind::<diesel::sql_types::Binary, _>(token.to_vec())
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(EventKind::InviteCreate.as_str())
-    .bind::<Text, _>(EventKind::InviteThirdParty.as_str())
-    .get_result::<EnvelopeRow>(&mut *conn)
     .await
-    .optional()
-    .map_err(PersistenceError::database)?
-    .ok_or_else(|| corrupt("invite_lifecycle has no committed create Event"))?
-    .envelope;
-    let event = serde_json::from_value::<arkret_wire::Event>(envelope).map_err(corrupt)?;
-    let (introduction_evidence_digest, third_party_invite, expires_at) = match event.kind {
-        EventKind::InviteCreate => {
-            let create = typed_payload::<InviteCreatePayload>(&event)?;
-            if Some(&create.invitee_account_id) != invitee_account_id.as_ref() {
-                return Err(corrupt(
-                    "directed invitee disagrees with committed create Event",
-                ));
-            }
-            (
-                Some(create.introduction_evidence_digest),
-                None,
-                create.expires_at,
-            )
-        }
-        EventKind::InviteThirdParty => {
-            if invitee_account_id.is_some() {
-                return Err(corrupt("third-party Invite has a directed invitee"));
-            }
-            let create = typed_payload::<InviteThirdPartyCreatePayload>(&event)?;
-            (None, Some(create.third_party_invite), create.expires_at)
-        }
-        _ => return Err(corrupt("Invite create Event kind is invalid")),
-    };
-    let accepted_claim = if third_party_invite.is_some() {
-        let claims = diesel::sql_query(
-            "SELECT e.envelope FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk \
-             WHERE e.realm_id=$1 AND e.kind=$2 AND e.state='committed' \
-               AND e.envelope->'payload'->>'invite_id'=$3 LIMIT 2",
-        )
-        .bind::<Text, _>(realm_id.as_str())
-        .bind::<Text, _>(EventKind::InviteClaim.as_str())
-        .bind::<Text, _>(invite_id.as_str())
-        .load::<EnvelopeRow>(&mut *conn)
-        .await
-        .map_err(PersistenceError::database)?;
-        if claims.len() > 1 {
-            return Err(corrupt("more than one committed claim names an Invite"));
-        }
-        claims
-            .into_iter()
-            .next()
-            .map(|row| {
-                let event =
-                    serde_json::from_value::<arkret_wire::Event>(row.envelope).map_err(corrupt)?;
-                let claim = typed_payload::<InviteClaimPayload>(&event)?;
-                Ok(coland_storage::AcceptedThirdPartyClaim {
-                    event_id: event.event_id,
-                    subject_account_id: claim.subject_account_id,
-                    claim_nonce: claim.claim_nonce,
-                    token_commitment: claim.token_commitment,
-                    verification_id: claim.binding_proof.verification_id,
-                    claimed_at: event.created_at,
-                })
-            })
-            .transpose()?
-    } else {
-        None
-    };
-    if third_party_invite.is_some() && state == InviteState::Claimed && accepted_claim.is_none() {
-        return Err(corrupt(
-            "claimed third-party Invite has no committed claim Event",
-        ));
-    }
-    Ok(coland_storage::InviteCurrent {
-        realm_id,
-        invite_id,
-        state,
-        state_updated_at: row.updated_at,
-        inviter: event.actor_id,
-        invitee_account_id,
-        introduction_evidence_digest,
-        third_party_invite,
-        expires_at,
-        created_at: event.created_at,
-        accepted_claim,
-    })
 }
 
 async fn open_directed_invite(
     conn: &mut AsyncPgConnection,
     row: OpenDirectedInviteRow,
-) -> PersistenceResult<coland_storage::DirectedInviteCurrent> {
+) -> PersistenceResult<coland_storage::InviteCurrent> {
     let realm_id = row
         .realm_id
         .parse::<arkret_wire::RealmId>()
@@ -1109,7 +851,7 @@ async fn open_directed_invite(
             "invite_directed_invitee disagrees with its ak.invite.create",
         ));
     }
-    Ok(coland_storage::DirectedInviteCurrent {
+    Ok(coland_storage::InviteCurrent {
         realm_id,
         invite_id,
         state,

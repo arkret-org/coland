@@ -115,6 +115,9 @@ async fn resolve_self_preview(
         realm_id: body.target.realm_id.clone(),
         requester_account_id: account_id,
         invite_id: body.target.invite_id.clone(),
+
+        realm_invite_link_id: body.target.realm_invite_link_id.clone(),
+        link_proof: body.link_proof.clone(),
     };
     let governance = located.authority.current_service_id();
     let preview = if *governance == state.service_core_id() {
@@ -192,6 +195,20 @@ pub(super) async fn governance_preview(
     if authority.service_id != state.service_core_id() {
         return Err(preview_not_found());
     }
+    let link_holder = if request.realm_invite_link_id.is_some() {
+        state
+            .persistence()
+            .check_realm_invite_link_preview(request, crate::wire::now())
+            .await
+            .map_err(|error| match error {
+                coland_storage::PersistenceError::NotFound(_)
+                | coland_storage::PersistenceError::Conflict(_) => preview_not_found(),
+                other => AppError::internal(other.to_string()),
+            })?;
+        true
+    } else {
+        false
+    };
     let invited = match &request.invite_id {
         Some(invite_id) => {
             if !invite_binds_requester(
@@ -237,7 +254,11 @@ pub(super) async fn governance_preview(
     };
     disclose(
         &policy,
-        PreviewAudience { invited, member },
+        PreviewAudience {
+            invited,
+            member,
+            link_holder,
+        },
         &request.realm_id,
         material.governance_generation,
         &material.current_state_entries,
@@ -271,6 +292,7 @@ async fn invite_binds_requester(
 struct PreviewAudience {
     invited: bool,
     member: bool,
+    link_holder: bool,
 }
 
 impl PreviewAudience {
@@ -282,6 +304,7 @@ impl PreviewAudience {
         audiences.iter().any(|audience| match audience.as_str() {
             "anonymous" | "authenticated" => true,
             "invited" => self.invited,
+            "link_token_holder" => self.link_holder,
             "realm_member" => self.member,
             _ => false,
         })

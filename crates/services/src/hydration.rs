@@ -851,7 +851,9 @@ pub async fn hydrate_canonical_realm_memberships(
         .filter(|record| {
             matches!(
                 arkret_wire::EventKind::from_wire(&record.kind),
-                arkret_wire::EventKind::MemberState | arkret_wire::EventKind::InviteAccept
+                arkret_wire::EventKind::MemberState
+                    | arkret_wire::EventKind::InviteAccept
+                    | arkret_wire::EventKind::RealmInviteLinkAccept
             )
         })
         .collect::<Vec<_>>();
@@ -875,9 +877,7 @@ pub async fn hydrate_canonical_realm_memberships(
                     ))
                 })?;
             if operation.context.sender.as_account_id().is_none()
-                || accepted.invitee_account_id.as_ref().is_some_and(|account| {
-                    operation.context.sender.as_account_id() != Some(account)
-                })
+                || operation.context.sender.as_account_id() != Some(&accepted.invitee_account_id)
             {
                 return Err(coland_storage::PersistenceError::Internal(format!(
                     "accepted invite {} has a mismatched account",
@@ -896,6 +896,30 @@ pub async fn hydrate_canonical_realm_memberships(
                 operation.realm_id.as_str(),
                 &operation.context.sender.to_string(),
                 invited_at,
+                &operation,
+            );
+            continue;
+        }
+        if operation.event_kind == arkret_wire::EventKind::RealmInviteLinkAccept {
+            let accepted = operation
+                .typed_payload::<arkret_wire::event_spec::RealmInviteLinkAccept>()
+                .map_err(|error| {
+                    coland_storage::PersistenceError::Internal(format!(
+                        "accepted Realm invite link {} cannot rebuild membership: {error}",
+                        record.event_id
+                    ))
+                })?;
+            if operation.context.sender.as_account_id() != Some(&accepted.subject_account_id) {
+                return Err(coland_storage::PersistenceError::Internal(format!(
+                    "accepted Realm invite link {} has a mismatched account",
+                    record.event_id
+                )));
+            }
+            crate::projection::restore_invite_acceptance_membership(
+                proj,
+                operation.realm_id.as_str(),
+                &operation.context.sender.to_string(),
+                operation.created_at,
                 &operation,
             );
             continue;
@@ -1654,7 +1678,9 @@ async fn hydrate_realm_directory_records(
             hydrate_realm_profile_event(realms, record);
         } else if matches!(
             arkret_wire::EventKind::from_wire(&record.kind),
-            arkret_wire::EventKind::MemberState | arkret_wire::EventKind::InviteAccept
+            arkret_wire::EventKind::MemberState
+                | arkret_wire::EventKind::InviteAccept
+                | arkret_wire::EventKind::RealmInviteLinkAccept
         ) {
             // Membership transitions MUST be replayed too, or joined members
             // vanish from `realm_entry.members` on restart. In an ordinary
@@ -1746,15 +1772,29 @@ pub fn hydrate_realm_member_state_event(
         let Some(account) = event.actor_id.as_account_id() else {
             return;
         };
-        if accepted
-            .invitee_account_id
-            .as_ref()
-            .is_some_and(|invitee| invitee != account)
-        {
+        if &accepted.invitee_account_id != account {
             return;
         }
         if let Some(entry) = realms.get_mut(&event.realm_id) {
             entry.members.insert(account.principal_id.clone());
+        }
+        return;
+    }
+    if record.kind == arkret_wire::EventKind::RealmInviteLinkAccept.as_str() {
+        let Ok(event) = serde_json::from_value::<Event>(record.envelope.clone()) else {
+            return;
+        };
+        let Ok(accepted) = event.typed_payload::<arkret_wire::event_spec::RealmInviteLinkAccept>()
+        else {
+            return;
+        };
+        if event.actor_id.as_account_id() != Some(&accepted.subject_account_id) {
+            return;
+        }
+        if let Some(entry) = realms.get_mut(&event.realm_id) {
+            entry
+                .members
+                .insert(accepted.subject_account_id.principal_id);
         }
         return;
     }

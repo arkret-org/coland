@@ -213,8 +213,7 @@ pub async fn run(pool: PgPool) {
         expected,
         "missing native successes must fail, never export a partial corpus"
     );
-    let corpus = json!({"format_version":1,"semantics":"archival_native_read_transcript",
-        "authentication_boundary":"DPoP StandardGrant introspection uses the trusted test channel; originals and reads use native PostgreSQL admission and registered routes",
+    let corpus = json!({"semantics":"archival_native_read_transcript",
         "operations":records.values().collect::<Vec<_>>()});
     if let Some(path) = std::env::var_os("ARKRET_NATIVE_READ_EVIDENCE_OUTPUT") {
         let path = std::path::PathBuf::from(path);

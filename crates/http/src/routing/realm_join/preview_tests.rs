@@ -470,6 +470,9 @@ fn request(
         realm_id: realm_id.clone(),
         requester_account_id: requester.clone(),
         invite_id,
+
+        realm_invite_link_id: None,
+        link_proof: None,
     }
 }
 

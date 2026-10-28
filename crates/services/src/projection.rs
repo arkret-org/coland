@@ -84,13 +84,6 @@ pub struct ProjectionService {
 }
 
 #[derive(Clone, Debug)]
-pub struct InviteClaimProofContext {
-    pub expected_verification_public_key: String,
-    pub expected_verification_id: String,
-    pub invite_digest: String,
-}
-
-#[derive(Clone, Debug)]
 pub enum MlsProjectionEffect {
     KeyPackagePublished {
         keypackage_id: String,
@@ -336,46 +329,6 @@ impl ProjectionService {
                 ))
             })
             .collect()
-    }
-
-    pub fn invite_claim_proof_context(
-        &self,
-        operation: &arkret_event_draft::ProjectedEventOperation,
-    ) -> Result<Option<InviteClaimProofContext>, &'static str> {
-        if !crate::operation_semantics::operation_is_invite_claim(operation) {
-            return Ok(None);
-        }
-        let payload = operation
-            .payload
-            .as_object()
-            .ok_or("invite_claim_payload_not_object")?;
-        let invite_id = payload
-            .get("invite_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or("invite_id_required")?;
-        let state = self.state.lock();
-        let invite = state.invites.get(invite_id).ok_or("not_found")?;
-        let third_party_invite = invite.third_party_invite.as_ref().ok_or("not_found")?;
-        let expected_verification_public_key = third_party_invite.verification_public_key.trim();
-        if expected_verification_public_key.is_empty() {
-            return Err("verification_public_key_required");
-        }
-        let expected_verification_id = third_party_invite.verification_id.as_str();
-        let invite_record = serde_json::json!({
-            "expires_at": arkret_canonical::format_timestamp_canonical(invite.expires_at),
-            "invite_id": invite.invite_id,
-            "realm_id": invite.realm_id,
-            "third_party_invite": third_party_invite,
-        });
-        let invite_digest = arkret_canonical::canonical_sha256(&invite_record)
-            .map_err(|_| "invite_digest_invalid")?;
-        Ok(Some(InviteClaimProofContext {
-            expected_verification_public_key: expected_verification_public_key.to_owned(),
-            expected_verification_id: expected_verification_id.to_owned(),
-            invite_digest,
-        }))
     }
 
     /// The committed `ak.agent.action_approve` Event indexed for one complete
@@ -774,16 +727,6 @@ impl ProjectionService {
             &[
                 arkret_wire::EventKind::ModerationDecision,
                 arkret_wire::EventKind::ModerationDecisionLift,
-            ],
-        )
-    }
-
-    pub fn preflight_invite_rejection(&self, operation: &Operation) -> Option<String> {
-        self.preflight_apply_rejection(
-            operation,
-            &[
-                arkret_wire::EventKind::InviteThirdParty,
-                arkret_wire::EventKind::InviteClaim,
             ],
         )
     }

@@ -3,7 +3,7 @@
 //! These are the introspection / capability-probe surfaces every Arkret
 //! client uses to discover what the server actually implements. None of them
 //! mutate state; most are static JSON literals + a small amount of state
-//! injection (config, registry version metadata).
+//! injection from the actual runtime configuration.
 //!
 //! Surfaces:
 //! - `GET /health` — liveness + database/events health

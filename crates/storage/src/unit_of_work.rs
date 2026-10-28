@@ -258,21 +258,6 @@ pub struct RealmOrganizationProofCommit {
     pub public_key: [u8; 32],
 }
 
-/// Independently resolved historical keys for one exact Invite claim cut.
-/// Prepared by the service, never deserialized from a caller's wire request.
-#[derive(Clone, Debug)]
-pub struct InviteClaimProofCommit {
-    pub event_id: arkret_wire::EventId,
-    pub event_digest: String,
-    pub create_ref: arkret_wire::CommittedEventRef,
-    pub committed_at: DateTime<Utc>,
-    pub subject_public_key: [u8; 32],
-    pub subject_native_control:
-        Option<arkret_identity::principal_control::NativeIdentityControlKey>,
-    pub subject_control_history: Option<serde_json::Value>,
-    pub binding_public_key: [u8; 32],
-}
-
 #[derive(Clone, Debug)]
 pub struct EventBatchCommitRequest {
     pub audit_unit: Option<crate::RegisteredAuditCommit>,
@@ -283,7 +268,6 @@ pub struct EventBatchCommitRequest {
     /// once across processes.
     pub franking_replay_nonce: Option<FrankingReplayNonceCommit>,
     pub realm_organization_proof: Option<RealmOrganizationProofCommit>,
-    pub invite_claim_proof: Option<InviteClaimProofCommit>,
     pub event_approvals: Option<crate::EventApprovalCommit>,
     pub applet_record: Option<AppletRecordCommit>,
     pub applet_authoring_preview: Option<AppletAuthoringPreviewCommit>,

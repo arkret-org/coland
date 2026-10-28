@@ -103,7 +103,7 @@ mod tests {
         .unwrap();
         let did = Did::new(&inception.did).unwrap();
         let principal = arkret_wire::project_did_to_core_id(&did).unwrap();
-        let purpose = DirectIdentityControlPurpose::InviteClaimSubject;
+        let purpose = DirectIdentityControlPurpose::ApprovalSignature;
         append(&state, &did, 1, inception.log_entry.clone()).await;
         let (original, original_history) = resolve_native_identity_control(
             &state,

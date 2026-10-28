@@ -246,20 +246,7 @@ fn apply_membership_dispatch(
 ) -> ProjectionEffect {
     s.apply_membership(op, projection_received_at(op))
 }
-fn apply_invite_third_party_dispatch(
-    s: &mut ProjectionState,
-    op: &Operation,
-    _hlc: &ServerHlc,
-) -> ProjectionEffect {
-    s.apply_invite_third_party(op, op.created_at)
-}
-fn apply_invite_claim_dispatch(
-    s: &mut ProjectionState,
-    op: &Operation,
-    _hlc: &ServerHlc,
-) -> ProjectionEffect {
-    s.apply_invite_claim(op, op.created_at)
-}
+
 fn apply_realm_create_dispatch(
     s: &mut ProjectionState,
     op: &Operation,

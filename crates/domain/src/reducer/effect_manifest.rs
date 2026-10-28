@@ -359,11 +359,25 @@ const EFFECT_MANIFEST: &[EffectRegistration] = &[
         slot: CacheSlot::FailClosed,
     },
     EffectRegistration {
-        kind: arkret_wire::CapabilityActionId::INVITE_CLAIM,
+        kind: arkret_wire::CapabilityActionId::REALM_INVITE_LINK_CREATE,
         owner: EventEffectOwnership::TypedStateWriter,
         scope: EventWireScope::DurableEvent,
         reducer_input: true,
-        slot: CacheSlot::Shared(apply_invite_claim_dispatch),
+        slot: CacheSlot::FailClosed,
+    },
+    EffectRegistration {
+        kind: arkret_wire::CapabilityActionId::REALM_INVITE_LINK_REVOKE,
+        owner: EventEffectOwnership::TypedStateWriter,
+        scope: EventWireScope::DurableEvent,
+        reducer_input: true,
+        slot: CacheSlot::FailClosed,
+    },
+    EffectRegistration {
+        kind: arkret_wire::CapabilityActionId::REALM_INVITE_LINK_ACCEPT,
+        owner: EventEffectOwnership::TypedStateWriter,
+        scope: EventWireScope::DurableEvent,
+        reducer_input: true,
+        slot: CacheSlot::FailClosed,
     },
     EffectRegistration {
         kind: arkret_wire::CapabilityActionId::INVITE_CREATE,
@@ -378,13 +392,6 @@ const EFFECT_MANIFEST: &[EffectRegistration] = &[
         scope: EventWireScope::DurableEvent,
         reducer_input: true,
         slot: CacheSlot::FailClosed,
-    },
-    EffectRegistration {
-        kind: arkret_wire::CapabilityActionId::INVITE_THIRD_PARTY,
-        owner: EventEffectOwnership::TypedStateWriter,
-        scope: EventWireScope::DurableEvent,
-        reducer_input: true,
-        slot: CacheSlot::Shared(apply_invite_third_party_dispatch),
     },
     EffectRegistration {
         kind: arkret_wire::event_kind_str::KEY_BACKUP_ACTIVE_SERIES,

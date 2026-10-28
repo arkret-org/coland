@@ -72,10 +72,6 @@ pub struct ProjectionState {
         String,
         arkret_models_collaboration::events_payloads::moderation::ModerationDecisionPayload,
     >,
-    /// Server-side invite projection keyed by `invite_id`.
-    /// `ak.invite.third_party` creates pending third-party invites and
-    /// `ak.invite.claim` converts them into DID-targeted claimed invites.
-    pub invites: BTreeMap<String, InviteProjection>,
     /// Realm lifecycle state keyed by realm_id.
     pub realm_states: BTreeMap<String, ColandRealmState>,
     /// Redacted event IDs (tombstones). This stays as a flat

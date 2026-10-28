@@ -4701,20 +4701,9 @@ CREATE TABLE invite_lifecycle_current_states (
  updated_at TIMESTAMPTZ NOT NULL,
  PRIMARY KEY(realm_id,invite_id),
  CHECK(jsonb_typeof(value)='string'),
- CHECK((value #>> '{}') IN ('pending','claimed','accepted','rejected','revoked','expired'))
+ CHECK((value #>> '{}') IN ('pending','accepted','rejected','revoked','expired'))
 );
 
--- Rebuildable 3PID create index. The immutable commitment and Invite identity
--- come from the accepted `ak.invite.third_party` Event; this is not a second
--- lifecycle or claim state source.
-CREATE TABLE invite_third_party_create_index (
- realm_id TEXT NOT NULL,
- invite_id TEXT NOT NULL,
- token_commitment TEXT COLLATE "C" NOT NULL UNIQUE,
- create_event_id TEXT NOT NULL UNIQUE,
- create_commit_id TEXT NOT NULL,
- PRIMARY KEY(realm_id,invite_id)
-);
 
 -- `invite_live_target` typed current: the one live directed-invite slot of an
 -- invitee account inside the Realm, keyed by canonical_json(invitee_account_id).
@@ -4737,8 +4726,7 @@ CREATE UNIQUE INDEX invite_live_target_current_states_occupant
  WHERE jsonb_typeof(value)='object';
 
 -- `invite_directed_invitee` typed current: the create-locked invitee of one
--- directed Invite, the reverse index of its live-target slot. A third-party
--- Invite has no row.
+-- directed Invite, the reverse index of its live-target slot.
 CREATE TABLE invite_directed_invitee_current_states (
  realm_id TEXT NOT NULL,
  invite_id TEXT NOT NULL,
@@ -5403,4 +5391,21 @@ CREATE TABLE realm_account_device_evidence (
     evidence_ref text NOT NULL,
     authorization_commit_id text NOT NULL,
     evidence_json jsonb NOT NULL CHECK(jsonb_typeof(evidence_json)='object')
+);
+
+-- Registered Realm invitation families; use facts are immutable and create-locked.
+CREATE TABLE realm_invite_link_current_states (
+ realm_id TEXT NOT NULL,
+ state_kind TEXT COLLATE "C" NOT NULL,
+ realm_invite_link_id TEXT COLLATE "C" NOT NULL,
+ subject_account_id TEXT COLLATE "C" NOT NULL,
+ current_commit_id TEXT NOT NULL,
+ current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
+ value JSONB NOT NULL,
+ updated_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY(realm_id,state_kind,realm_invite_link_id,subject_account_id),
+ CHECK(state_kind IN ('realm_invite_link_definition','realm_invite_link_lifecycle','realm_invite_link_use')),
+ CHECK((state_kind='realm_invite_link_use')=(subject_account_id<>'')),
+ CHECK((state_kind='realm_invite_link_lifecycle' AND value IN ('"active"'::jsonb,'"revoked"'::jsonb))
+       OR (state_kind<>'realm_invite_link_lifecycle' AND jsonb_typeof(value)='object'))
 );

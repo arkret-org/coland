@@ -1000,9 +1000,8 @@ async fn evaluate_in_connection(
     if pair.len() != 2 || distinct.len() != members.len() || distinct != pair {
         return Ok(Err(ConflictCode::DirectConversationMemberCountInvalid));
     }
-    if event.kind == EventKind::InviteThirdParty
-        || (matches!(event.kind, EventKind::InviteCreate | EventKind::MemberState)
-            && member_candidate(event).is_none_or(|candidate| !pair.contains(&candidate)))
+    if matches!(event.kind, EventKind::InviteCreate | EventKind::MemberState)
+        && member_candidate(event).is_none_or(|candidate| !pair.contains(&candidate))
     {
         return Ok(Err(
             ConflictCode::DirectConversationThirdPartyMemberForbidden,
@@ -1010,7 +1009,10 @@ async fn evaluate_in_connection(
     }
     if matches!(
         event.kind,
-        EventKind::InviteCreate | EventKind::InviteThirdParty
+        EventKind::InviteCreate
+            | EventKind::RealmInviteLinkCreate
+            | EventKind::RealmInviteLinkAccept
+            | EventKind::RealmInviteLinkRevoke
     ) {
         return Ok(Err(ConflictCode::DirectConversationInviteForbidden));
     }

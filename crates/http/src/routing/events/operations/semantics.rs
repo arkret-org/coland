@@ -271,8 +271,6 @@ fn operation_extra_validator_for_kind(kind: &arkret_wire::EventKind) -> Option<O
         arkret_wire::EventKind::ReadCursorAdvance => Some(validate_read_marker_payload),
         arkret_wire::EventKind::AccountDataSet => Some(validate_account_data_set_payload),
         arkret_wire::EventKind::InviteCreate => Some(validate_invite_create_payload),
-        arkret_wire::EventKind::InviteThirdParty => Some(validate_invite_third_party_payload),
-        arkret_wire::EventKind::InviteClaim => Some(validate_invite_claim_payload),
         arkret_wire::EventKind::InviteCancel | arkret_wire::EventKind::InviteRevoke => {
             Some(validate_invite_ref_payload)
         }

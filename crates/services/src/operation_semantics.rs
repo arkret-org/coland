@@ -35,14 +35,6 @@ pub fn operation_is_invite_create(operation: &Operation) -> bool {
     coland_domain::kinds::operation_is_invite_create(operation)
 }
 
-pub fn operation_is_invite_claim(operation: &Operation) -> bool {
-    coland_domain::kinds::operation_is_invite_claim(operation)
-}
-
-pub fn operation_is_invite_third_party(operation: &Operation) -> bool {
-    coland_domain::kinds::operation_is_invite_third_party(operation)
-}
-
 pub fn operation_is_realm_lifecycle(operation: &Operation) -> bool {
     coland_domain::kinds::operation_is_realm_lifecycle(operation)
 }

@@ -70,7 +70,6 @@ fn batch(
         events: vec![request],
         franking_replay_nonce: None,
         realm_organization_proof: None,
-        invite_claim_proof: None,
         event_approvals: Some(proof),
         applet_record: None,
         applet_authoring_preview: None,

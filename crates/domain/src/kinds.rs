@@ -43,14 +43,6 @@ pub fn operation_is_invite_create(operation: &Operation) -> bool {
     canonical_kind_for_operation(operation) == Some(EventKind::InviteCreate)
 }
 
-pub fn operation_is_invite_claim(operation: &Operation) -> bool {
-    canonical_kind_for_operation(operation) == Some(EventKind::InviteClaim)
-}
-
-pub fn operation_is_invite_third_party(operation: &Operation) -> bool {
-    canonical_kind_for_operation(operation) == Some(EventKind::InviteThirdParty)
-}
-
 pub fn operation_is_realm_lifecycle(operation: &Operation) -> bool {
     canonical_kind_for_operation(operation)
         .is_some_and(|kind| arkret_wire::events::kinds::is_realm_lifecycle_kind(&kind))

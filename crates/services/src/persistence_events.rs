@@ -1213,7 +1213,6 @@ impl crate::events::EventCommitPort for PersistenceEventCommitter {
                     .map(persistence_event_commit_request)
                     .collect(),
                 realm_organization_proof: command.realm_organization_proof,
-                invite_claim_proof: command.invite_claim_proof,
                 event_approvals: command.event_approvals,
                 franking_replay_nonce: command.franking_replay_nonce,
                 applet_record: command.applet_record,

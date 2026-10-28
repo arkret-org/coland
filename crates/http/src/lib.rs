@@ -25,9 +25,6 @@ pub mod error;
 pub mod failpoints;
 pub mod http_signature;
 pub mod ids;
-mod invite_claim_admission;
-#[cfg(test)]
-mod invite_claim_proofs;
 pub mod jws_verify;
 pub mod metrics;
 pub mod openapi;

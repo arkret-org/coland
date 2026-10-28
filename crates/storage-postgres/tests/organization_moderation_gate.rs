@@ -80,7 +80,6 @@ fn batch(
         audit_unit: None,
         events: vec![request],
         realm_organization_proof: Some(proof),
-        invite_claim_proof: None,
         event_approvals: None,
         franking_replay_nonce: None,
         applet_record: None,

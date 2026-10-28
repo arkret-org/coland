@@ -490,7 +490,10 @@ impl Cut {
     fn apply(&mut self, commit: &RealmCommit, event: &Event) -> PersistenceResult<()> {
         if matches!(
             event.kind,
-            EventKind::MemberState | EventKind::InviteAccept | EventKind::CircleMemberState
+            EventKind::MemberState
+                | EventKind::InviteAccept
+                | EventKind::RealmInviteLinkAccept
+                | EventKind::CircleMemberState
         ) && let Some(current) = self.mls_current.as_mut()
         {
             current.current_key_access_revision = current
@@ -609,7 +612,7 @@ impl Cut {
                     },
                 );
             }
-            EventKind::InviteAccept => {
+            EventKind::InviteAccept | EventKind::RealmInviteLinkAccept => {
                 self.members.insert(
                     event.actor_id.to_string(),
                     (event.actor_id.clone(), "join".to_owned()),

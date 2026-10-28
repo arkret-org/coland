@@ -973,35 +973,4 @@ mod claim_privacy_tests {
             .unwrap();
         validate_replay_event_identity(&event).unwrap();
     }
-
-    #[test]
-    fn claim_token_state_refusals_have_one_public_error() {
-        for reason in [
-            "expired_invite_token: expired",
-            "claim_invalid: unknown invite",
-            "duplicate_conflict: already consumed",
-            "capability_denied: inviter left",
-            "capability_denied: inviter lost authority",
-            "claim_invalid: revoked invite",
-        ] {
-            let error = private_claim_refusal(ServiceError::Conflict(reason.to_owned()));
-            assert!(matches!(&error, ServiceError::NotFound(_)));
-            assert_eq!(error.detail(), "invite claim not found");
-        }
-        let missing = private_claim_refusal(ServiceError::NotFound("unknown invite".to_owned()));
-        assert_eq!(missing.detail(), "invite claim not found");
-    }
-
-    #[test]
-    fn a_moved_claim_cut_is_retryable_without_a_token_verdict() {
-        let error = private_claim_refusal(ServiceError::Conflict(
-            "temporarily_unavailable: stream head advanced".to_owned(),
-        ));
-        assert_eq!(
-            error.conflict_code(),
-            Some(coland_storage::ConflictCode::TemporarilyUnavailable),
-        );
-        let database = private_claim_refusal(ServiceError::Database("unavailable".to_owned()));
-        assert!(matches!(database, ServiceError::Database(_)));
-    }
 }

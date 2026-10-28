@@ -407,6 +407,7 @@ async fn seed_snapshot_families(conn: &mut AsyncPgConnection, first: i64, last: 
         ("invite_lifecycle_current_states", "invite_id", format!("'invite-' || {key}"), "'\"pending\"'::jsonb".to_owned()),
         ("invite_live_target_current_states", "invitee_account_id", "jsonb_build_object('account',m)::text".to_owned(), format!("jsonb_build_object('create_event_id','create-' || {key})")),
         ("invite_directed_invitee_current_states", "invite_id", format!("'invite-' || {key}"), "jsonb_build_object('invitee_account_id',jsonb_build_object('account',m))".to_owned()),
+        ("realm_invite_link_current_states", "state_kind,realm_invite_link_id,subject_account_id", format!("'realm_invite_link_definition','link-' || {key},''"), "'{}'::jsonb".to_owned()),
         ("capability_grant_current_states", "grant_id,status,current_event_id,current_stream_ref", format!("'grant-' || {key},'active','event-' || {key},'{{}}'::jsonb"), format!("jsonb_build_object('id','grant-' || {key},'schema','ak.schema.capability.v1','status','active')")),
         ("mimi_room_binding_current_states", "mimi_room_uri,current_event_id", format!("'mimi-' || {key},'event-' || {key}"), format!("jsonb_build_object('mimi_room_uri','mimi-' || {key},'binding_scope',jsonb_build_object('realm_id',{realm}))")),
         ("agent_interaction_current_states", "current_key,agent_account_id", format!("'interaction-' || {key},jsonb_build_object('principal_id','agent-' || {key},'station_id','station')"), "jsonb_build_object('interaction_mode','private')".to_owned()),

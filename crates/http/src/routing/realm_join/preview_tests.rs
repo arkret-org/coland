@@ -693,6 +693,7 @@ fn disclose_requires_the_committed_required_members() {
     let audience = PreviewAudience {
         invited: false,
         member: false,
+        link_holder: false,
     };
     let stream = CommitStreamRef::Realm {
         realm_id: realm_id.clone(),

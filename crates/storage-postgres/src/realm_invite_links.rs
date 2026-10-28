@@ -60,7 +60,6 @@ async fn current(
 
 async fn put(
     conn: &mut AsyncPgConnection,
-    event: &Event,
     commit: &RealmCommit,
     family: &str,
     link: &RealmInviteLinkId,
@@ -77,7 +76,7 @@ async fn put(
          VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING"
     };
     let changed = diesel::sql_query(sql)
-        .bind::<Text, _>(event.realm_id.as_str())
+        .bind::<Text, _>(commit.realm_id.as_str())
         .bind::<Text, _>(family)
         .bind::<Text, _>(link.as_str())
         .bind::<Text, _>(account)
@@ -263,7 +262,6 @@ pub(crate) async fn commit_in_connection(
             };
             put(
                 conn,
-                event,
                 commit,
                 "realm_invite_link_definition",
                 &id,
@@ -274,7 +272,6 @@ pub(crate) async fn commit_in_connection(
             .await?;
             put(
                 conn,
-                event,
                 commit,
                 "realm_invite_link_lifecycle",
                 &id,
@@ -304,7 +301,6 @@ pub(crate) async fn commit_in_connection(
             }
             put(
                 conn,
-                event,
                 commit,
                 "realm_invite_link_lifecycle",
                 &p.realm_invite_link_id,
@@ -348,7 +344,6 @@ pub(crate) async fn commit_in_connection(
             };
             put(
                 conn,
-                event,
                 commit,
                 "realm_invite_link_use",
                 &p.realm_invite_link_id,

@@ -173,7 +173,7 @@ pub(super) async fn claim(
                         .await?
                         .0;
                 if query.state == PeerKeyPackagesClaimQueryState::Unknown {
-                    return attempt.map(|Json(outcome)| Json(outcome.into()));
+                    return attempt;
                 }
                 query
             } else {
@@ -207,10 +207,7 @@ fn replay_source_result(
     result
         .validate_shape()
         .map_err(|e| AppError::internal(e.to_string()))?;
-    result
-        .claim_outcome
-        .map(|outcome| Json(outcome.into()))
-        .ok_or_else(peer_claim_failed)
+    result.claim_outcome.map(Json).ok_or_else(peer_claim_failed)
 }
 
 /// Retain full authenticated Station method histories before exposing a result.

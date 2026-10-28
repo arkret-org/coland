@@ -2449,8 +2449,7 @@ async fn claim_keypackage_session(
         .await
         .map_err(|error| AppError::internal(format!("self claim replay ledger: {error}")))?
     {
-        return replay_peer_claim(existing, &request_digest)
-            .map(|Json(outcome)| Json(outcome.into()));
+        return replay_peer_claim(existing, &request_digest);
     }
     validate_peer_claim_time_window(&peer_body)?;
     if body.claim_purpose == PeerKeyPackageClaimPurpose::RealmMembership
@@ -2535,9 +2534,7 @@ async fn claim_keypackage_session(
         )
         .with_internal_reason("dependency_unavailable"));
     }
-    claim_keypackage_at_destination(state, &peer_body, authorization, None)
-        .await
-        .map(|Json(outcome)| Json(outcome.into()))
+    claim_keypackage_at_destination(state, &peer_body, authorization, None).await
 }
 
 /// The one recipient endpoint a claim read is answered for
@@ -2735,7 +2732,7 @@ async fn query_own_keypackage_claim(
     } else {
         None
     };
-    coland_http::result::guarded_json_ok(outcome.into(), guard)
+    coland_http::result::guarded_json_ok(outcome, guard)
 }
 
 async fn require_relay_source(

@@ -164,19 +164,18 @@ pub(super) async fn mimi_notify(
     if !valid_mimi_room_id(&room_id) {
         return Err(AppError::param_invalid("invalid MIMI room id"));
     }
-    if let Some(routing) = &body.routing {
-        if routing
+    if let Some(routing) = &body.routing
+        && (routing
             .mimi_room_uri
             .as_ref()
             .is_some_and(|value| value != &room_uri)
             || routing.target_provider_ids.as_ref().is_some_and(|targets| {
                 targets.as_slice() != std::slice::from_ref(&state.service_core_id())
-            })
-        {
-            return Err(AppError::capability_denied(
-                "MIMI notification routing does not identify this receiver",
-            ));
-        }
+            }))
+    {
+        return Err(AppError::capability_denied(
+            "MIMI notification routing does not identify this receiver",
+        ));
     }
     let binding = latest_mimi_room_binding(state, &room_id)
         .await?

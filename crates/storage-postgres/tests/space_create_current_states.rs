@@ -210,7 +210,7 @@ async fn space_lifecycle_narrow_allow_and_space_deny_override_realm_allow_at_the
                 "schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":owner,"subject":member,
                 "actions":["ak.space.archive","ak.space.restore","ak.space.tombstone"],"resources":resources,
                 "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,
-                    "authority_event_ref":unit.transactions[0].event.event_id,"authority_generation":0}],
+                    "authority_event_ref":unit.transactions[0].event.event_id,"authority_generation":"0"}],
                 "issued_at":arkret_canonical::format_timestamp_canonical(at)
             }});
             if let Some(constraints) = constraints {
@@ -356,7 +356,7 @@ async fn space_parent_narrow_resource_cases() {
             "schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":owner,"subject":member,
             "actions":["ak.space.parent"],"resources":resources,"constraints":constraints,
             "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,
-                "authority_event_ref":opened.unit.transactions[0].event.event_id,"authority_generation":0}],
+                "authority_event_ref":opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],
             "issued_at":arkret_canonical::format_timestamp_canonical(at)
         }})
     };

@@ -90,7 +90,7 @@ fn encrypted_entry(basis: &arkret_wire::EventId, ciphertext: &str) -> Value {
             "version": "1.0",
             "content_type": "application/vnd.arkret.calendar-rsvp-response+json",
             "encryption_context": {
-                "epoch": 7,
+                "epoch": "7",
                 "group_state_ref": "ak:event:Af-qizSfVETcKiliXG093VVneO4nQF194ZXGkMWJijix"
             },
             "ciphertext": ciphertext
@@ -146,7 +146,7 @@ async fn rsvp_current_accepts_encrypted_entry_and_rejects_without_partial_commit
             "issuer_authority_refs": [{
                 "kind":"realm_root", "realm_id":realm_id,
                 "authority_event_ref":root_event_ref(&pool, &realm_id).await,
-                "authority_generation":0
+                "authority_generation":"0"
             }],
             "issued_at": arkret_canonical::format_timestamp_canonical(at)
         }}),

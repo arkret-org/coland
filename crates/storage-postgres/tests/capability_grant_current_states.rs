@@ -54,7 +54,7 @@ async fn postgres_reads_capability_value_and_revision_from_one_current_row() {
             arkret_canonical::DigestSuite::Sha256,
             [0x55; 32],
         ),
-        "authority_generation":0
+        "authority_generation":"0"
     });
     let value = serde_json::json!({
         "id": GRANT_ID,
@@ -322,7 +322,7 @@ async fn authority_transaction_admits_grants_without_subject_kind_branches() {
                     "kind":"realm_root",
                     "realm_id":realm_id.clone(),
                     "authority_event_ref":realm_event_id.clone(),
-                    "authority_generation":0
+                    "authority_generation":"0"
                 }],
                 "issued_at": "2026-09-21T00:00:00.000Z"
             }
@@ -501,7 +501,7 @@ async fn authority_transaction_admits_grants_without_subject_kind_branches() {
                 "kind":"realm_root",
                 "realm_id":realm_id,
                 "authority_event_ref":realm_event_id,
-                "authority_generation":0
+                "authority_generation":"0"
             }],
             "issued_at": "2026-09-21T00:00:00.000Z"
         })

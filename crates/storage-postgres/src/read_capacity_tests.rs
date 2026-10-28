@@ -583,12 +583,12 @@ async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_th
                 .map(str::to_owned)
                 .collect::<std::collections::BTreeSet<_>>();
             assert_eq!(observed, expected);
-            // The current union has 39 width-sized branches, including the
+            // The current union has 40 width-sized branches, including the
             // paired Calendar row on each Strand and the existing ordinary
-            // Actor Profile and Call component families. Its seven singleton
+            // Actor Profile, Call component and Realm Invite Link families. Its seven singleton
             // tables emit seven bootstrap facets and six other rows.
-            assert_eq!(observed.len(), 45);
-            let output = 39.0 * width + 13.0;
+            assert_eq!(observed.len(), 46);
+            let output = 40.0 * width + 13.0;
             assert_eq!(plan[0]["Plan"]["Actual Rows"].as_f64(), Some(output));
             // Up to four visited rows per output permits the planner's
             // low-selectivity current-table scan, but never a history scan

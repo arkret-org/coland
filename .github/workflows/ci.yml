@@ -404,6 +404,17 @@ jobs:
         with:
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
+      - name: Checkout canonical native test runner
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/cotest
+          path: arkret-org/cotest
+          token: ${{ secrets.CI_REPO_TOKEN || github.token }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -419,6 +430,42 @@ jobs:
             sleep 1
           done
 
-      - name: Test sync cursor restart behavior
-        run: cargo test --locked -p coland --test http_api cursor_handle
+      - name: Test HTTP sync cursor contracts
+        run: |
+          set -euo pipefail
+          selector='routing::events::sync::tests::'
+          test_args=(cargo test --locked -p coland-http --lib "$selector")
+          list_file="$RUNNER_TEMP/coland-http-sync-tests.txt"
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --list > "$list_file"
+          python - "$list_file" "$selector" <<'PY'
+          import pathlib
+          import sys
+
+          lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          tests = [line for line in lines if line.endswith(": test")]
+          if not tests or any(not line.startswith(sys.argv[2]) for line in tests):
+              raise SystemExit("HTTP sync selector must select its real nonempty test module")
+          print(f"Selected {len(tests)} HTTP sync contract tests")
+          PY
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}"
+        working-directory: arkret-org/coland
+
+      - name: Test PostgreSQL cursor persistence across restart
+        run: |
+          set -euo pipefail
+          selector='sync_cursor::account_summary_query_tests::cursor_issuance_remains_immutable_across_store_restart'
+          test_args=(cargo test --locked -p coland-storage-postgres --lib "$selector")
+          list_file="$RUNNER_TEMP/coland-postgres-cursor-restart-tests.txt"
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact --list > "$list_file"
+          python - "$list_file" "$selector" <<'PY'
+          import pathlib
+          import sys
+
+          lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          tests = [line for line in lines if line.endswith(": test")]
+          if tests != [f"{sys.argv[2]}: test"]:
+              raise SystemExit("PostgreSQL cursor restart selector must select exactly its one test")
+          print("Selected the PostgreSQL cursor restart regression")
+          PY
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact
         working-directory: arkret-org/coland

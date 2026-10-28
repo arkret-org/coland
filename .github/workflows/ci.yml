@@ -371,7 +371,7 @@ jobs:
       # contracts. They fail without `DATABASE_URL`, so a missing database
       # breaks the build instead of emptying the suite.
       - name: Storage contract and durable-plane tests
-        run: python ../cotest/scripts/run-native-rust-tests.py cargo test --locked -p coland-storage-postgres
+        run: python ../cotest/scripts/run-native-rust-tests.py cargo test --locked -p coland-storage-postgres --no-fail-fast
         working-directory: arkret-org/coland
 
   postgres-http-api:

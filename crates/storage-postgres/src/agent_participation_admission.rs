@@ -60,7 +60,7 @@ async fn selection_at_cut(
     scopes: &[String],
     locked: bool,
 ) -> PersistenceResult<Option<ParticipationBits>> {
-    let mut query = "SELECT jsonb_build_object('target_scope',scope,'selection',jsonb_build_object('message_creation_allowed',message_creation_allowed,'reaction_addition_allowed',reaction_addition_allowed,'reaction_removal_allowed',reaction_removal_allowed,'third_party_mention_delivery_allowed',third_party_mention_delivery_allowed,'acting_on_behalf_allowed',acting_on_behalf_allowed),'version',version,'next_replace_input',jsonb_build_object('expected_version',version)) AS value FROM agent_participation WHERE agent_id=$1 AND scope_key=ANY($2)".to_owned();
+    let mut query = "SELECT jsonb_build_object('target_scope',scope,'selection',jsonb_build_object('message_creation_allowed',message_creation_allowed,'reaction_addition_allowed',reaction_addition_allowed,'reaction_removal_allowed',reaction_removal_allowed,'third_party_mention_delivery_allowed',third_party_mention_delivery_allowed,'acting_on_behalf_allowed',acting_on_behalf_allowed),'version',version::text,'next_replace_input',jsonb_build_object('expected_version',version::text)) AS value FROM agent_participation WHERE agent_id=$1 AND scope_key=ANY($2)".to_owned();
     if locked {
         query.push_str(" FOR SHARE");
     }

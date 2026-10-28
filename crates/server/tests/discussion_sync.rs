@@ -193,7 +193,7 @@ fn history_scenario<'a>(
                 "schema":"ak.schema.strand.v1", "realm_id":realm_id,
                 "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
                 "metadata":{"title":"History floor"}, "state":"active",
-                "created_by":initial.event.actor_id, "created_at":initial.commit.committed_at,
+                "created_by":initial.event.actor_id, "created_at":arkret_canonical::format_timestamp_canonical(initial.commit.committed_at),
             }}),
             &human,
         )

@@ -134,7 +134,7 @@ async fn witness_or_case() {
             "realm_id":carol_join.authority_commit.event.realm_id,
             "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
             "metadata":{"title":"Frozen witness read"},"state":"active",
-            "created_by":founder_actor(),"created_at":at}}),
+            "created_by":founder_actor(),"created_at":arkret_canonical::format_timestamp_canonical(at)}}),
         at,
     ));
     let shared = heap_future(|| ordinary_realm::source_request(&pool, candidate)).await;

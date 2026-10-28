@@ -2369,7 +2369,7 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
                 "schema":"ak.schema.circle.v1","realm_id":strand.authority_commit.event.realm_id,
                 "title":"Own leave bound result","display":{"short_name":"Leave","color_token":"blue","symbol":{"glyph":"lock"}},
                 "directory_visibility":"members","join_rule":"public","history_access":"since_join","state":"active",
-                "created_by":owner,"created_at":create_at
+                "created_by":owner,"created_at":arkret_canonical::format_timestamp_canonical(create_at)
             }}),
             create_at,
         );

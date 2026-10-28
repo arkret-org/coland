@@ -8,6 +8,9 @@
 )]
 mod ordinary_realm;
 
+use std::future::Future;
+use std::pin::Pin;
+
 use coland_storage::{
     AuthorityCommitStore, ConflictCode, EventBatchCommitRequest, EventCommitRequest,
     EventCommitUnitOfWork,
@@ -17,6 +20,14 @@ use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
 use diesel::sql_types::{BigInt, Jsonb, Text};
 use diesel_async::RunQueryDsl;
 use ordinary_realm::next_request;
+
+// Keep large shared fixture futures out of their caller's poll frame.
+#[inline(never)]
+fn heap_future<'a, T: 'a, F: Future<Output = T> + 'a>(
+    make: impl FnOnce() -> F,
+) -> Pin<Box<dyn Future<Output = T> + 'a>> {
+    Box::pin(make())
+}
 
 #[derive(diesel::QueryableByName)]
 struct SidecarRow {
@@ -268,9 +279,14 @@ async fn sidecar_genesis_reserves_exact_controller_and_current_in_one_commit() {
 
 #[tokio::test]
 async fn sidecar_create_and_context_attach_commit_atomically_or_write_nothing() {
+    heap_future(sidecar_create_and_context_attach_case).await;
+}
+
+async fn sidecar_create_and_context_attach_case() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
-    let discussion = ordinary_realm::open_human_discussion(&pool, "sidecar-attach-cut").await;
+    let discussion =
+        heap_future(|| ordinary_realm::open_human_discussion(&pool, "sidecar-attach-cut")).await;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let at = discussion.head.authority_commit.commit.committed_at;
     let create = next_request(
@@ -295,11 +311,11 @@ async fn sidecar_create_and_context_attach_commit_atomically_or_write_nothing() 
         None,
         &create.authority_commit.event.event_id,
     );
-    let create = ordinary_realm::source_request(&pool, create).await;
+    let create = heap_future(|| ordinary_realm::source_request(&pool, create)).await;
     let mut attach = attach;
     attach.authority_commit.commit.authority_ref =
         create.authority_commit.commit.authority_ref.clone();
-    let attach = ordinary_realm::source_request(&pool, attach).await;
+    let attach = heap_future(|| ordinary_realm::source_request(&pool, attach)).await;
     uow.commit_event_batch(batch(create.clone(), attach.clone()))
         .await
         .unwrap();
@@ -328,7 +344,7 @@ async fn sidecar_create_and_context_attach_commit_atomically_or_write_nothing() 
         Some(&attach.authority_commit.event.event_id),
         &create.authority_commit.event.event_id,
     );
-    let successor = ordinary_realm::source_request(&pool, successor).await;
+    let successor = heap_future(|| ordinary_realm::source_request(&pool, successor)).await;
     uow.commit_event(successor.clone()).await.unwrap();
     let current = contexts(&pool).await;
     assert_eq!(current.len(), 1);
@@ -346,7 +362,7 @@ async fn sidecar_create_and_context_attach_commit_atomically_or_write_nothing() 
         Some(&successor.authority_commit.event.event_id),
         &create.authority_commit.event.event_id,
     );
-    let stale = ordinary_realm::source_request(&pool, stale).await;
+    let stale = heap_future(|| ordinary_realm::source_request(&pool, stale)).await;
     let error = uow.commit_event(stale.clone()).await.unwrap_err();
     assert_eq!(error.conflict_code(), Some(ConflictCode::CasConflict));
     assert_eq!(contexts(&pool).await[0].version, 2);
@@ -360,8 +376,10 @@ async fn sidecar_create_and_context_attach_commit_atomically_or_write_nothing() 
 
     let another = TestDatabase::lease().await;
     let other_pool = another.pool();
-    let other_discussion =
-        ordinary_realm::open_human_discussion(&other_pool, "sidecar-attach-rollback").await;
+    let other_discussion = heap_future(|| {
+        ordinary_realm::open_human_discussion(&other_pool, "sidecar-attach-rollback")
+    })
+    .await;
     let other_uow = PgEventCommitUnitOfWork::new(other_pool.clone());
     let other_at = other_discussion.head.authority_commit.commit.committed_at;
     let other_create = next_request(
@@ -388,8 +406,10 @@ async fn sidecar_create_and_context_attach_commit_atomically_or_write_nothing() 
         None,
         &other_create.authority_commit.event.event_id,
     );
-    let other_create = ordinary_realm::source_request(&other_pool, other_create).await;
-    let invalid_attach = ordinary_realm::source_request(&other_pool, invalid_attach).await;
+    let other_create =
+        heap_future(|| ordinary_realm::source_request(&other_pool, other_create)).await;
+    let invalid_attach =
+        heap_future(|| ordinary_realm::source_request(&other_pool, invalid_attach)).await;
     let error = other_uow
         .commit_event_batch(batch(other_create.clone(), invalid_attach.clone()))
         .await

@@ -4982,14 +4982,14 @@ mod trust_binding_tests {
             "mls_group_id": URL_SAFE_NO_PAD.encode([73_u8; 32]),
             "claim_purpose": "realm_membership",
             "required_capabilities": ["ak.content.v1"],
-            "expires_at": signed_at + chrono::Duration::minutes(4),
+            "expires_at": arkret_canonical::format_timestamp_canonical(signed_at + chrono::Duration::minutes(4)),
             "service_binding": {"source_id": source, "destination_id": destination},
             "requester_authorization": {
                 "kind": "device",
                 "verification_method": requester.verification_method,
                 "requester_device_id": requester.device_id,
                 "device_authorize_event_id": requester.device_authorize_event_id,
-                "signed_at": signed_at,
+                "signed_at": arkret_canonical::format_timestamp_canonical(signed_at),
                 "signature": {
                     "kid": requester.verification_method,
                     "signature_algorithm": "Ed25519",

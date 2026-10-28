@@ -110,7 +110,7 @@ fn space_payload(
     fields: Value,
 ) -> Value {
     let mut object = json!({"schema":"ak.schema.space.v1","realm_id":realm,
-        "kind":kind,"title":title,"fields":fields,"created_by":actor,"created_at":at});
+        "kind":kind,"title":title,"fields":fields,"created_by":actor,"created_at":arkret_canonical::format_timestamp_canonical(at)});
     if let Some(parent) = parent {
         object["parent_space_id"] = json!(parent);
     }

@@ -2487,7 +2487,7 @@ mod tests {
             "realm_id":realm,"main_strand_id":arkret_wire::StrandId::from_event_id(&id(2)),
             "founding_unit_digest":format!("sha256:{}", "2".repeat(64)),
             "authorization_basis":{"kind":"accepted_contact","event_refs":[id(3),id(6)]},
-            "initial_exact_pair_group_state_ref":id(4),"created_at":at,
+            "initial_exact_pair_group_state_ref":id(4),"created_at":arkret_canonical::format_timestamp_canonical(at),
         }))
         .unwrap();
         let initial = DirectConversationBindingCurrentValue {

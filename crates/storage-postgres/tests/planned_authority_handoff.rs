@@ -626,7 +626,7 @@ async fn call_current_handoff_scenario() {
     );
     assert_eq!(
         roster["last_source"]["source_commit"]["governance_generation"],
-        0
+        "0"
     );
     eprintln!("[2133-handoff] issued successor Snapshot");
     let minimum = store

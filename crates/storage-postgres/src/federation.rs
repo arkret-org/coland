@@ -270,7 +270,7 @@ impl FederationOutboxStore for PgFederationOutboxStore {
         sql_query(format!(
             "SELECT {OUTBOX_COLUMNS} FROM federation_outbox \
             WHERE endpoint='/_arkret/peer/erasure-receipts' \
-              AND payload_json::jsonb#>>'{{package,receipt,receipt_id}}'=$1 ORDER BY peer_id"
+              AND payload_json::jsonb#>>'{{receipt,receipt_id}}'=$1 ORDER BY peer_id"
         ))
         .bind::<Text, _>(receipt_id)
         .load::<FederationOutboxRow>(&mut conn)

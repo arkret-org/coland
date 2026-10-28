@@ -257,7 +257,7 @@ async fn canonical_scan_withholds_redacted_message_without_skipping_commit() {
             "metadata": {"title": "Redaction scan"},
             "state": "active",
             "created_by": initial.event.actor_id,
-            "created_at": initial.commit.committed_at,
+            "created_at": arkret_canonical::format_timestamp_canonical(initial.commit.committed_at),
         }}),
         &human,
         &state.service_did(),

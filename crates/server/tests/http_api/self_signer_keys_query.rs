@@ -169,7 +169,7 @@ async fn assert_all_unavailable(app: &salvo::Service, token: &str, body: &Value,
         assert_eq!(outcome[member], body[member], "{case}: echoed {member}");
     }
     let queries = body["queries"].as_array().unwrap();
-    let results = outcome["results"].as_array().unwrap();
+    let results = outcome["resolutions"].as_array().unwrap();
     assert_eq!(
         results.len(),
         queries.len(),
@@ -655,11 +655,11 @@ async fn human_frozen_body() {
         "real accepted Human query must use ordinary HTTP resolution"
     );
     assert_eq!(
-        response["results"][0],
+        response["resolutions"][0],
         serde_json::to_value(durable).unwrap()
     );
     assert_eq!(
-        response["results"][1],
+        response["resolutions"][1],
         serde_json::json!({"status":"unavailable","selector":foreign})
     );
 }

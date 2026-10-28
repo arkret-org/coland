@@ -70,6 +70,8 @@ allow-git = [
   "https://github.com/arkret-org/openmls",
   # SDK Linux keystore fork; the manifest pins the reviewed commit.
   "https://github.com/arkret-org/secret-service-rs",
+  # Savfox pins the public Matrix SDK fork with the patched Salvo dependency.
+  "https://github.com/arkret-org/matrix-bot-sdk",
   "https://github.com/openmls/openmls.git",
   "https://github.com/open-telemetry/opentelemetry-rust.git",
   "https://github.com/palpo-im/dingtalk-sdk",

@@ -245,7 +245,7 @@ fn board(
         "kind": kind,
         "title": kind,
         "created_by": founder_actor(),
-        "created_at": at,
+        "created_at": arkret_canonical::format_timestamp_canonical(at),
     });
     if let Some(parent) = parent {
         object["parent_space_id"] = json!(parent);

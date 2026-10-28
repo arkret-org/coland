@@ -4218,7 +4218,7 @@ async fn self_moderation_report_commits_exact_current_and_refuses_with_zero_writ
         "event_id": target,
         "received_by": station,
         "verification_method": "did:web:bootstrap-station.example#notary-key",
-        "received_at": message.authority_commit.commit.committed_at,
+        "received_at": arkret_canonical::format_timestamp_canonical(message.authority_commit.commit.committed_at),
         "replay_nonce": "report-nonce-0000000001",
         "signature": "c2lnbmF0dXJl"
     });
@@ -5592,6 +5592,37 @@ fn assert_refused_with_zero_writes<'a>(
     })
 }
 
+/// Schema rejection preserves the same Event, Commit and Invite zero-write boundary.
+fn assert_schema_refused_with_zero_writes<'a>(
+    uow: &'a PgEventCommitUnitOfWork,
+    store: &'a PgAuthorityCommitStore,
+    pool: &'a coland_storage_postgres::PgPool,
+    request: &'a EventCommitRequest,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
+    Box::pin(async move {
+        let request = source_if_human(pool, request.clone()).await;
+        let realm_id = &request.authority_commit.event.realm_id;
+        let before = invite_families(pool, realm_id).await;
+        let error = uow.commit_event(request.clone()).await.unwrap_err();
+        assert!(
+            matches!(&error, coland_storage::PersistenceError::SchemaViolation(_)),
+            "{error}"
+        );
+        assert!(
+            store
+                .committed_event(&request.authority_commit.event.event_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            event_row_count(pool, request.authority_commit.event.event_id.as_str()).await,
+            0
+        );
+        assert_eq!(invite_families(pool, realm_id).await, before);
+    })
+}
+
 fn circle_self_member_request(
     previous: &EventCommitRequest,
     creator: &arkret_wire::AccountId,
@@ -6932,8 +6963,8 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
         )
     };
 
-    // A declared pre-state that is not the frozen register is refused.
-    assert_refused_with_zero_writes(
+    // The schema admits only the pending pre-state.
+    assert_schema_refused_with_zero_writes(
         &uow,
         &store,
         &pool,
@@ -6944,7 +6975,6 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
                 "invitee_account_id": bob, "target_state": "revoked"
             }),
         ),
-        coland_storage::ConflictCode::FailedPrecondition,
     )
     .await;
 
@@ -6959,7 +6989,7 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
         )
     );
     // A directed Invite cannot keep its slot by omitting its invitee.
-    assert_refused_with_zero_writes(
+    assert_schema_refused_with_zero_writes(
         &uow,
         &store,
         &pool,
@@ -6969,7 +6999,6 @@ async fn invite_revoke_releases_live_target_and_stale_previous_state_fails() {
                 "invite_id": first, "previous_state": "pending", "target_state": "revoked"
             }),
         ),
-        coland_storage::ConflictCode::InviteDirectedInviteeMismatch,
     )
     .await;
 

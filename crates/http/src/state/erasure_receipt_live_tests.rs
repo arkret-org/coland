@@ -349,7 +349,7 @@ async fn run(departure: Option<&str>) {
         EventKind::StrandCreate,
         serde_json::json!({"object":{"schema":"ak.schema.strand.v1","realm_id":join.authority_commit.event.realm_id,
             "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},"metadata":{"title":"Receipt holder history"},
-            "state":"active","created_by":owner.unit.transactions[0].event.actor_id,"created_at":join.authority_commit.commit.committed_at}}),
+            "state":"active","created_by":owner.unit.transactions[0].event.actor_id,"created_at":arkret_canonical::format_timestamp_canonical(join.authority_commit.commit.committed_at)}}),
     );
     Box::pin(uow.commit_event(strand.clone())).await.unwrap();
     Box::pin(dispatch_due(

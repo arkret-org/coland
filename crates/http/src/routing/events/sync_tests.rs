@@ -487,7 +487,7 @@ async fn global_storage_failure_returns_503_without_reset_or_new_delivery_materi
             > 0
     );
     let body: AccountSubscribeParameters = serde_json::from_value(json!({
-        "after": token, "catchup": true, "realm_list": {"after": list_token},
+        "after": token, "catchup": true, "realm_list_parameters": {"after": list_token},
     }))
     .unwrap();
     let refused = super::build_sync_snapshot(&state, Some(&session), &body, &after)

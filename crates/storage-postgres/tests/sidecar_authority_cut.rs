@@ -716,7 +716,7 @@ async fn pending_agent_handshake_reads(
                 selector: arkret_wire::CurrentSelector::MlsGroup {scope_ref}, value, ..
             } if scope_ref == &material.effective_scope
                 && value["genesis_event_ref"] == serde_json::to_value(&genesis.authority_commit.event.event_id).unwrap()
-                && value["epoch"] == 1)
+                && value["epoch"] == "1")
             );
             assert!(
                 !snapshot
@@ -3571,7 +3571,7 @@ async fn ordinary_member_owned_agent_join_scenario() {
                 "value":{"schema":"ak.schema.policy.v1", "id":policy_id, "realm_id":realm_id,
                     "policy_kind":"agent", "rules":rules, "default_effect":"allow",
                     "created_by":arkret_wire::ActorId::account(founder.clone()),
-                    "created_at":previous.commit.committed_at}}),
+                    "created_at":arkret_canonical::format_timestamp_canonical(previous.commit.committed_at)}}),
             previous.commit.committed_at + chrono::TimeDelta::milliseconds(1),
         )
     };
@@ -5870,7 +5870,7 @@ async fn import_agent_management_policy(
                     "agent_target":{"kind":"controller","controller_account_id":controller},
                     "agent_operations":[operation]}],
                 "default_effect":"allow", "created_by":arkret_wire::ActorId::account(controller.clone()),
-                "created_at":previous.commit.committed_at
+                "created_at":arkret_canonical::format_timestamp_canonical(previous.commit.committed_at)
             }
         })).unwrap();
     if effect == "require_review" {
@@ -6524,7 +6524,7 @@ async fn management_review_atomic_join_scenario(
         serde_json::json!({"policy_id":policy_id,"expected_revision":null,
             "value":{"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":realm,
                 "policy_kind":"agent","default_effect":"allow",
-                "created_by":administrator,"created_at":join.authority_commit.commit.committed_at,
+                "created_by":administrator,"created_at":arkret_canonical::format_timestamp_canonical(join.authority_commit.commit.committed_at),
                 "rules":[{"rule_id":"review_original_controller_join","kind":"agent","effect":"require_review",
                     "agent_target":{"kind":"all"},"agent_operations":["join","publish"],
                     "review_requirement":{"approver_actor_ids":designated_administrators,"threshold":1,"max_age_seconds":max_age_seconds}}]}}),

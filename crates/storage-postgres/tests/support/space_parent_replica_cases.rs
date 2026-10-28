@@ -68,7 +68,7 @@ async fn accepted_space_parent_replica_cases() {
             arkret_wire::EventKind::SpaceCreate,
             &principal,
             serde_json::json!({"object":{"schema":"ak.schema.space.v1","realm_id":realm,
-                "kind":kind,"title":kind,"created_by":actor,"created_at":at}}),
+                "kind":kind,"title":kind,"created_by":actor,"created_at":arkret_canonical::format_timestamp_canonical(at)}}),
             at,
         ));
         let request = Box::pin(ordinary_realm::source_request(&governance_pool, request)).await;
@@ -181,7 +181,7 @@ async fn snapshot_only_parent_cases() {
         &caller.principal_id,
         serde_json::json!({"object":{"schema":"ak.schema.space.v1","realm_id":source_realm,
             "kind":"list","title":"Source list","created_by":source_last.event.actor_id,
-            "created_at":source_last.commit.committed_at}}),
+            "created_at":arkret_canonical::format_timestamp_canonical(source_last.commit.committed_at)}}),
         source_last.commit.committed_at,
     );
     let child = Box::pin(ordinary_realm::source_request(&source_pool, child)).await;
@@ -222,7 +222,7 @@ async fn snapshot_only_parent_cases() {
         &governor_account.principal_id,
         serde_json::json!({"object":{"schema":"ak.schema.space.v1","realm_id":foreign_realm,
             "kind":"board","title":"Foreign board","created_by":last.event.actor_id,
-            "created_at":last.commit.committed_at}}),
+            "created_at":arkret_canonical::format_timestamp_canonical(last.commit.committed_at)}}),
         last.commit.committed_at,
     );
     let foreign = Box::pin(ordinary_realm::source_request(&governor_pool, foreign)).await;

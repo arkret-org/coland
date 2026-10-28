@@ -1010,6 +1010,9 @@ mod tests {
             EventKind::SpaceRestore,
             EventKind::ReactionAdd,
             EventKind::ReactionRemove,
+            EventKind::RealmInviteLinkCreate,
+            EventKind::RealmInviteLinkRevoke,
+            EventKind::RealmInviteLinkAccept,
         ] {
             assert_eq!(
                 self_event_route(&kind).unwrap(),
@@ -1087,6 +1090,9 @@ mod tests {
             EventKind::ReactionAdd,
             EventKind::ReactionRemove,
             EventKind::MimiRoomBinding,
+            EventKind::RealmInviteLinkCreate,
+            EventKind::RealmInviteLinkRevoke,
+            EventKind::RealmInviteLinkAccept,
             EventKind::PinAdd,
             EventKind::PinRemove,
             EventKind::PinReorder,

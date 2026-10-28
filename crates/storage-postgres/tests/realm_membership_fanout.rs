@@ -356,7 +356,7 @@ async fn remote_joined_target_set_and_fanout_basis_commit_with_the_event_case() 
             "metadata":{"title":"Fanout discussion"},
             "state":"active",
             "created_by":founder_actor(),
-            "created_at":at,
+            "created_at":arkret_canonical::format_timestamp_canonical(at),
         }}),
         at,
     ));
@@ -879,6 +879,37 @@ async fn assert_accept_refused(
     assert_eq!(accept_state(pool, &realm_id).await, before);
 }
 
+async fn assert_accept_schema_refused(
+    pool: &PgPool,
+    uow: &PgEventCommitUnitOfWork,
+    request: EventCommitRequest,
+) {
+    let realm_id = request.authority_commit.event.realm_id.clone();
+    let before = accept_state(pool, &realm_id).await;
+    let request = ordinary_realm::source_request(pool, request).await;
+    let outbox = outbox_count(pool).await;
+    let error = uow.commit_event(request.clone()).await.unwrap_err();
+    assert!(
+        matches!(&error, coland_storage::PersistenceError::SchemaViolation(_)),
+        "{error}"
+    );
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    assert!(
+        store
+            .committed_event(&request.authority_commit.event.event_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a refused membership Event is not committed"
+    );
+    assert_eq!(
+        outbox_count(pool).await,
+        outbox,
+        "a refusal plans no fanout"
+    );
+    assert_eq!(accept_state(pool, &realm_id).await, before);
+}
+
 /// Real PostgreSQL: the directed invitee's `ak.invite.accept` moves the Invite
 /// `pending -> accepted`, releases its live-target slot and moves its own
 /// member row `leave -> join`, all on the accepting Commit. Another actor, a
@@ -909,24 +940,28 @@ async fn invite_accept_joins_member_atomically_and_second_accept_is_rejected_cas
         // Only the invitee accepts, even with the invitee's exact payload.
         (
             accept_request(head, &carol, &create, "pending", Some(&bob_account), 1),
-            ConflictCode::FailedPrecondition,
+            Some(ConflictCode::FailedPrecondition),
         ),
         // The payload invitee must match the stored one in both directions.
         (
             accept_request(head, &carol, &create, "pending", Some(&carol_account), 2),
-            ConflictCode::InviteDirectedInviteeMismatch,
+            Some(ConflictCode::InviteDirectedInviteeMismatch),
         ),
         (
             accept_request(head, &bob, &create, "pending", None, 3),
-            ConflictCode::InviteDirectedInviteeMismatch,
+            None,
         ),
-        // The declared pre-state is compared with the frozen register.
+        // The schema admits only the pending pre-state.
         (
             accept_request(head, &bob, &create, "claimed", Some(&bob_account), 4),
-            ConflictCode::FailedPrecondition,
+            None,
         ),
     ] {
-        heap_future(|| assert_accept_refused(&pool, &uow, request, code)).await;
+        if let Some(code) = code {
+            heap_future(|| assert_accept_refused(&pool, &uow, request, code)).await;
+        } else {
+            heap_future(|| assert_accept_schema_refused(&pool, &uow, request)).await;
+        }
     }
     assert_eq!(member_state(&pool, &realm_id, &bob).await, None);
 
@@ -2091,7 +2126,7 @@ async fn circle_create_withholds_private_object_from_remote_realm_member() {
             "history_access":"since_join",
             "state":"active",
             "created_by":founder_actor(),
-            "created_at":at,
+            "created_at":arkret_canonical::format_timestamp_canonical(at),
         }}),
         at,
     ));
@@ -2222,7 +2257,7 @@ async fn circle_create_withheld_gap_allows_next_realm_replica() {
             "history_access":"since_join",
             "state":"active",
             "created_by":founder_actor(),
-            "created_at":at,
+            "created_at":arkret_canonical::format_timestamp_canonical(at),
         }}),
         at,
     ));
@@ -2398,7 +2433,7 @@ async fn account_stream_scan_serves_joined_member_from_its_join_commit_case() {
             "metadata":{"title":"Scan discussion"},
             "state":"active",
             "created_by":founder_actor(),
-            "created_at":at,
+            "created_at":arkret_canonical::format_timestamp_canonical(at),
         }}),
         at,
     ));
@@ -3004,7 +3039,7 @@ async fn joined_realm(pool: &PgPool, seed: &str) -> Box<JoinedRealm> {
             "metadata":{"title":"Joined discussion"},
             "state":"active",
             "created_by":founder_actor(),
-            "created_at":at,
+            "created_at":arkret_canonical::format_timestamp_canonical(at),
         }}),
         at,
     ));
@@ -3715,7 +3750,7 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
             "schema":"ak.schema.strand.v1", "realm_id":realm,
             "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
             "metadata":{"title":"Next snapshot cut"}, "state":"active",
-            "created_by":founder_actor(), "created_at":join.authority_commit.commit.committed_at,
+            "created_by":founder_actor(), "created_at":arkret_canonical::format_timestamp_canonical(join.authority_commit.commit.committed_at),
         }}),
         join.authority_commit.commit.committed_at,
     ));
@@ -4254,7 +4289,7 @@ async fn peer_scan_serves_joined_and_departed_member_intervals_case() {
             "metadata":{"title":"Peer scan discussion"},
             "state":"active",
             "created_by":founder_actor(),
-            "created_at":at,
+            "created_at":arkret_canonical::format_timestamp_canonical(at),
         }}),
         at,
     ));
@@ -4536,7 +4571,7 @@ async fn member_station_anchor_case() {
             "metadata":{"title":"Anchored discussion"},
             "state":"active",
             "created_by":founder_actor(),
-            "created_at":at,
+            "created_at":arkret_canonical::format_timestamp_canonical(at),
         }}),
         at,
     ));
@@ -5841,7 +5876,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         creator.clone(),
         serde_json::json!({"object":{
             "schema":"ak.schema.circle.v1","realm_id":realm,"title":"Remote private","display":{"short_name":"Remote","color_token":"blue","symbol":{"glyph":"lock"}},
-            "directory_visibility":"members","join_rule":"public","history_access":"since_join","state":"active","created_by":creator,"created_at":at
+            "directory_visibility":"members","join_rule":"public","history_access":"since_join","state":"active","created_by":creator,"created_at":arkret_canonical::format_timestamp_canonical(at)
         }}),
         at,
     )))).await;
@@ -6195,7 +6230,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             "schema":"ak.schema.strand.v1","realm_id":realm,"scope_circle_id":circle,
             "tracks":{"discussion":{"is_primary":true,"profile":"discussion"}},
             "metadata":{"title":"Withheld gap discussion"},"state":"active",
-            "created_by":creator,"created_at":at}}),
+            "created_by":creator,"created_at":arkret_canonical::format_timestamp_canonical(at)}}),
     );
     let strand = heap_future(|| ordinary_realm::source_request(&pool, strand)).await;
     uow.commit_event(strand.clone()).await.unwrap();

@@ -6987,7 +6987,18 @@ mod realm_native_fixture {
                 })
                 .await;
                 assert_eq!(status, StatusCode::OK, "{response}");
-                assert_eq!(response["result"]["outcome"]["state"], "superseded");
+                let response: RealmActorMaterialResponseBody =
+                    serde_json::from_value(response).unwrap();
+                assert!(matches!(
+                    response.material,
+                    RealmActorMaterial::RequestStatus {
+                        request_status: RealmActorRequestStatus::Recovery {
+                            state: RealmActorRecoveryState::Superseded,
+                            ..
+                        },
+                        ..
+                    }
+                ));
                 result
             } else {
                 boxed_step(|| devices.recover_control(&actor, completed_operation))

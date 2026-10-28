@@ -271,7 +271,7 @@ async fn terminal_child_consumer_case() {
             &actor,
             arkret_wire::EventKind::SpaceCreate,
             serde_json::json!({"object":{"schema":"ak.schema.space.v1","realm_id":realm,
-                "kind":kind,"title":kind,"created_by":arkret_wire::ActorId::account(actor.clone()),"created_at":at}}),
+                "kind":kind,"title":kind,"created_by":arkret_wire::ActorId::account(actor.clone()),"created_at":arkret_canonical::format_timestamp_canonical(at)}}),
         );
         let create = lifecycle_future(|| source_if_human(&pool, create)).await;
         lifecycle_future(|| uow.commit_event(create.clone()))
@@ -353,7 +353,7 @@ async fn terminal_child_consumer_case() {
         serde_json::json!({"object":{"schema":"ak.schema.circle.v1","realm_id":realm,
             "title":"Terminal child Circle","display":{"short_name":"Terminal","color_token":"blue","symbol":{"glyph":"lock"}},
             "directory_visibility":"members","join_rule":"public","history_access":"since_join","state":"active",
-            "created_by":arkret_wire::ActorId::account(actor.clone()),"created_at":at}}),
+            "created_by":arkret_wire::ActorId::account(actor.clone()),"created_at":arkret_canonical::format_timestamp_canonical(at)}}),
     );
     let create = lifecycle_future(|| source_if_human(&pool, create)).await;
     lifecycle_future(|| uow.commit_event(create.clone()))

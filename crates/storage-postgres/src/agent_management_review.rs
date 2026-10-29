@@ -1282,6 +1282,19 @@ pub(crate) async fn material_in_connection(
     })
 }
 
+fn reviewed_producer_fact(
+    producer: &Value,
+    created_at: DateTime<Utc>,
+) -> PersistenceResult<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>
+{
+    let mut fact = producer.clone();
+    fact.as_object_mut().ok_or_else(hidden)?.insert(
+        "accepted_at".into(),
+        json!(arkret_canonical::format_timestamp_canonical(created_at)),
+    );
+    serde_json::from_value(fact).map_err(invalid)
+}
+
 pub(crate) async fn event_material_in_connection(
     conn: &mut AsyncPgConnection,
     event: &Event,
@@ -1307,12 +1320,7 @@ pub(crate) async fn event_material_in_connection(
         return Err(hidden());
     }
     if applet::creation(&request) || crate::applet_scope_profiles::is_profile(event) {
-        let mut fact = row.immutable_pins["producer"].clone();
-        fact.as_object_mut()
-            .ok_or_else(hidden)?
-            .insert("accepted_at".into(), json!(row.created_at));
-        let fact: arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact =
-            serde_json::from_value(fact).map_err(invalid)?;
+        let fact = reviewed_producer_fact(&row.immutable_pins["producer"], row.created_at)?;
         arkret_identity::account_device_signer_evidence::verify_historical_producer_event_signature(
             event, &fact, event.realm_id.digest_suite_code().digest_suite(),
         ).map_err(invalid)?;
@@ -1666,6 +1674,95 @@ pub(crate) async fn prepare_admission_in_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn realm_control_producer()
+    -> arkret_models_collaboration::authority_commit::RealmControlHistoricalSignerFact {
+        use arkret_models_collaboration::authority_commit::{
+            RealmControlHistoricalSignerFact, RealmControlHistoricalSignerFactKind,
+        };
+        let event = candidate();
+        let principal = "ak:did_core:webvh:z6mkfixture".parse().unwrap();
+        RealmControlHistoricalSignerFact {
+            kind: RealmControlHistoricalSignerFactKind::RealmControl,
+            event_id: event.event_id.clone(),
+            actor_id: ActorId::realm(arkret_wire::RealmActorId::new(
+                event.realm_id.clone(),
+                principal,
+            )),
+            verification_method: arkret_wire::DidUrl::new(
+                "did:webvh:z6mkfixture:review.example#control",
+            )
+            .unwrap(),
+            public_key_base64url: arkret_wire::Base64UrlString::new(
+                arkret_canonical::base64url_encode([7; 32]),
+            )
+            .unwrap(),
+            accepted_at: event.created_at,
+            control_event_ref: arkret_wire::CommittedEventRef {
+                event_id: event.event_id,
+                commit_id: arkret_wire::RealmCommitId::from_digest([8; 32]),
+                stream_ref: arkret_wire::CommitStreamRef::RealmControl {
+                    realm_id: event.realm_id,
+                },
+                stream_position: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn management_review_producer_fact_uses_canonical_private_time() {
+        use arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact;
+        let original = realm_control_producer();
+        original
+            .actor_id
+            .as_realm_actor_id()
+            .unwrap()
+            .validate()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_value::<
+                arkret_models_collaboration::authority_commit::RealmControlHistoricalSignerFact,
+            >(json!(original))
+            .unwrap(),
+            original,
+        );
+        assert_eq!(
+            serde_json::from_value::<HistoricalProducerSignerFact>(json!(original)).unwrap(),
+            HistoricalProducerSignerFact::RealmControl(original.clone()),
+            "the original typed producer is valid before inserting private database time",
+        );
+        let mut pins = json!(original);
+        pins.as_object_mut().unwrap().remove("accepted_at");
+        let frozen = pins.clone();
+        for timestamp in [
+            "2026-10-29T20:00:00.123456Z",
+            "2026-10-29T20:00:00.000Z",
+            "1969-12-31T23:59:59.999500Z",
+        ] {
+            let at: DateTime<Utc> = timestamp.parse().unwrap();
+            let mut expected = original.clone();
+            expected.accepted_at = arkret_canonical::normalize_timestamp_canonical(at);
+            assert_eq!(
+                reviewed_producer_fact(&pins, at).unwrap(),
+                HistoricalProducerSignerFact::RealmControl(expected),
+                "private database precision must not corrupt the frozen producer: {timestamp}",
+            );
+            assert_eq!(pins, frozen, "immutable review pins must not be rewritten");
+        }
+    }
+
+    #[test]
+    fn management_review_producer_fact_retains_closed_schema() {
+        let original = realm_control_producer();
+        let mut pins = json!(original);
+        pins.as_object_mut().unwrap().remove("accepted_at");
+        assert!(reviewed_producer_fact(&pins, original.accepted_at).is_ok());
+        let mut unknown = pins.clone();
+        unknown["unregistered_member"] = json!(true);
+        assert!(reviewed_producer_fact(&unknown, original.accepted_at).is_err());
+        pins.as_object_mut().unwrap().remove("actor_id");
+        assert!(reviewed_producer_fact(&pins, original.accepted_at).is_err());
+    }
 
     fn account(name: &str) -> AccountId {
         AccountId::new(

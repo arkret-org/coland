@@ -50,7 +50,7 @@ pub(crate) async fn controller_in_connection(
     agent: &AccountId,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<Option<AccountId>> {
-    read_controller_in_connection(conn, realm, agent, at, true).await
+    read_controller_in_connection(conn, realm, agent, at, true, None).await
 }
 
 /// The enclosing repeatable-read transaction fixes this visibility cut.
@@ -60,7 +60,27 @@ pub(crate) async fn controller_snapshot_in_connection(
     agent: &AccountId,
     at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<Option<AccountId>> {
-    read_controller_in_connection(conn, realm, agent, at, false).await
+    read_controller_in_connection(conn, realm, agent, at, false, None).await
+}
+
+/// Verify the exact accepted join that a replica reader is about to retain.
+pub(crate) async fn controller_for_accepted_join_in_connection(
+    conn: &mut AsyncPgConnection,
+    agent: &AccountId,
+    event: &Event,
+    commit: &RealmCommit,
+    at: chrono::DateTime<chrono::Utc>,
+    lock: bool,
+) -> PersistenceResult<Option<AccountId>> {
+    read_controller_in_connection(
+        conn,
+        &commit.realm_id,
+        agent,
+        at,
+        lock,
+        Some((event, commit)),
+    )
+    .await
 }
 
 #[derive(QueryableByName)]
@@ -346,6 +366,7 @@ async fn read_controller_in_connection(
     agent: &AccountId,
     at: chrono::DateTime<chrono::Utc>,
     lock: bool,
+    expected_join: Option<(&Event, &RealmCommit)>,
 ) -> PersistenceResult<Option<AccountId>> {
     let joined = sql_query(format!("SELECT m.realm_id,m.current_commit_id,m.current_stream_position,m.value,e.envelope,c.commit_json,NULL::text AS scope_set_digest,NULL::jsonb AS accountability_scope FROM member_state_current_states m LEFT JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position LEFT JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join'{}",if lock { " FOR SHARE OF m" } else { "" }))
         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(ActorId::account(agent.clone()).to_string())
@@ -354,6 +375,13 @@ async fn read_controller_in_connection(
         return Ok(None);
     };
     let (agent_join, agent_join_commit) = owned_current_source(&joined, at)?;
+    if expected_join
+        .is_some_and(|(event, commit)| &agent_join != event || &agent_join_commit != commit)
+    {
+        return Err(denied(
+            "owned Agent join differs from the requested accepted original",
+        ));
+    }
     if agent_join.kind != EventKind::MemberState || joined.value != json!({"membership":"join"}) {
         return Err(denied(
             "owned Agent join current differs from its accepted writer",

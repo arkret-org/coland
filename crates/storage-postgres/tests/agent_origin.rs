@@ -14,6 +14,12 @@ use device_history_fixture as device_authorization_history;
 )]
 mod pcr_genesis_fixture;
 use pcr_genesis_fixture as pcr_genesis;
+#[path = "support/ordinary_realm.rs"]
+#[expect(
+    dead_code,
+    reason = "Bootstrap readers use the signed ordinary Realm admission subset."
+)]
+mod ordinary_realm;
 #[path = "../../test-support/src/agent_origin.rs"]
 #[expect(
     dead_code,
@@ -24,13 +30,257 @@ use arkret_wire::{Did, DidUrl, EventKind, RealmId};
 use chrono::{Duration, Utc};
 use coland_storage::{
     ActorProfileStore, AgentControlAdmissionWrite, AgentProvisionAdmissionWrite,
-    AuthorityCommitStore,
+    AuthorityCommitStore, AuthorityCommitTransaction, EventCommitUnitOfWork,
 };
-use coland_storage_postgres::{PgActorProfileStore, PgAuthorityCommitStore, PgPersistenceStore};
+use coland_storage_postgres::{
+    PgActorProfileStore, PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPersistenceStore,
+};
 use diesel::sql_types::{BigInt, Text};
 use diesel_async::RunQueryDsl;
 use ed25519_dalek::SigningKey;
 use origin_fixture::*;
+
+struct BootstrapReaderFixture {
+    origin: Box<OriginFixture>,
+    head: AuthorityCommitTransaction,
+    controller_join: arkret_wire::EventId,
+}
+
+impl BootstrapReaderFixture {
+    async fn new() -> Self {
+        let origin = Box::new(Box::pin(OriginFixture::new()).await);
+        origin.stage(&origin.provision).await;
+        origin.admit_provision().await;
+        origin.stage(&origin.genesis).await;
+        origin.admit_genesis().await.unwrap();
+        origin.publish_agent_binding().await;
+        let controller = &origin.controller.history;
+        ordinary_realm::human_profile::register_fixture_signer(
+            &controller.account,
+            controller.device_verification_method.clone(),
+            controller.founding_device_signing_seed,
+        );
+        let unit = ordinary_realm::bootstrap_unit_for_account(
+            "accepted-agent-bootstrap-reader",
+            &controller.account,
+            &origin.station_did,
+        );
+        let unit = Box::pin(ordinary_realm::source_bootstrap(&origin.pool, unit)).await;
+        PgAuthorityCommitStore {
+            pool: origin.pool.clone(),
+        }
+        .admit_ordinary_realm_bootstrap_unit(&unit, unit.transactions[0].commit.committed_at)
+        .await
+        .unwrap();
+        let controller_join = unit
+            .transactions
+            .iter()
+            .find(|tx| tx.event.kind == EventKind::MemberState)
+            .unwrap()
+            .event
+            .event_id
+            .clone();
+        let head = unit.transactions.last().unwrap().clone();
+        Self {
+            origin,
+            head,
+            controller_join,
+        }
+    }
+
+    fn join_payload(&self) -> serde_json::Value {
+        use arkret_models_collaboration::governance::agent_membership_cascade::AgentControllerMembershipBinding;
+        use arkret_models_collaboration::governance::membership_invite::MembershipPayload;
+        let mut membership = MembershipPayload::join(
+            self.head.event.realm_id.clone(),
+            arkret_wire::ActorId::account(self.origin.agent.clone()),
+            "accepted controller-authored Agent join",
+        );
+        membership.agent_controller_binding = Some(AgentControllerMembershipBinding {
+            controller_account_id: self.origin.controller.history.account.clone(),
+            controller_membership_generation_ref: self.controller_join.clone(),
+            controller_terminal_event_ref: None,
+        });
+        membership.to_value().unwrap()
+    }
+
+    async fn join_request(&self, payload: serde_json::Value) -> coland_storage::EventCommitRequest {
+        let request = ordinary_realm::next_human_request_for_actor(
+            &self.head,
+            EventKind::MemberState,
+            arkret_wire::ActorId::account(self.origin.controller.history.account.clone()),
+            payload,
+            self.head.commit.committed_at,
+        );
+        Box::pin(ordinary_realm::source_request(&self.origin.pool, request)).await
+    }
+
+    async fn admit_join(&mut self) -> AuthorityCommitTransaction {
+        self.admit_membership(self.join_payload()).await
+    }
+
+    async fn admit_membership(&mut self, payload: serde_json::Value) -> AuthorityCommitTransaction {
+        let request = self.join_request(payload).await;
+        let original = request.authority_commit.clone();
+        Box::pin(PgEventCommitUnitOfWork::new(self.origin.pool.clone()).commit_event(request))
+            .await
+            .unwrap();
+        self.head = original.clone();
+        original
+    }
+
+    async fn readers(
+        &self,
+    ) -> coland_storage::PersistenceResult<Vec<(arkret_wire::AccountId, arkret_wire::RealmCommit)>>
+    {
+        PgAuthorityCommitStore {
+            pool: self.origin.pool.clone(),
+        }
+        .replica_bootstrap_readers(
+            &arkret_wire::CommitStreamRef::Realm {
+                realm_id: self.head.event.realm_id.clone(),
+            },
+            &self.origin.station,
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn controller_authored_agent_join_is_an_exact_accepted_bootstrap_reader() {
+    let mut f = Box::pin(BootstrapReaderFixture::new()).await;
+    let before = f.readers().await.unwrap();
+    assert_eq!(before.len(), 1);
+    let joined = f.admit_join().await;
+    assert_ne!(
+        joined.event.actor_id,
+        arkret_wire::ActorId::account(f.origin.agent.clone())
+    );
+    let readers = f.readers().await.unwrap();
+    assert_eq!(readers.len(), 2);
+    assert!(readers.contains(&(f.origin.agent.clone(), joined.commit.clone())));
+    assert!(readers.contains(&before[0]));
+    let held = PgAuthorityCommitStore {
+        pool: f.origin.pool.clone(),
+    }
+    .committed_event(&joined.event.event_id)
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(held.event, joined.event);
+    assert_eq!(held.commit, joined.commit);
+    assert_eq!(f.readers().await.unwrap(), readers);
+}
+
+#[tokio::test]
+async fn wrong_terminal_and_stale_controller_bindings_cannot_create_a_bootstrap_reader() {
+    use arkret_models_collaboration::governance::membership_invite::{
+        MembershipPayload, MembershipPayloadState,
+    };
+    let mut f = Box::pin(BootstrapReaderFixture::new()).await;
+    let baseline = f.readers().await.unwrap();
+    for invalid in ["wrong_controller", "terminal_controller"] {
+        let mut payload = f.join_payload();
+        let binding = &mut payload["agent_controller_binding"];
+        match invalid {
+            "wrong_controller" => {
+                binding["controller_account_id"]["principal_id"] =
+                    serde_json::json!("ak:did_core:web:not-the-accepted-controller.example");
+            }
+            "terminal_controller" => {
+                binding["controller_terminal_event_ref"] = serde_json::json!(f.controller_join);
+            }
+            _ => unreachable!(),
+        }
+        let request = f.join_request(payload).await;
+        let event_id = request.authority_commit.event.event_id.clone();
+        assert!(
+            Box::pin(PgEventCommitUnitOfWork::new(f.origin.pool.clone()).commit_event(request))
+                .await
+                .is_err(),
+            "{invalid} must be refused by real membership admission"
+        );
+        assert!(
+            PgAuthorityCommitStore {
+                pool: f.origin.pool.clone()
+            }
+            .committed_event(&event_id)
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(f.readers().await.unwrap(), baseline);
+    }
+    // No Agent has joined yet, so the controller's real leave needs no Agent
+    // cascade. A subsequent public rejoin establishes a new accepted generation.
+    let controller = arkret_wire::ActorId::account(f.origin.controller.history.account.clone());
+    f.admit_membership(
+        MembershipPayload::transition(
+            MembershipPayloadState::Leave,
+            controller.clone(),
+            "close original joined generation",
+        )
+        .to_value()
+        .unwrap(),
+    )
+    .await;
+    assert!(f.readers().await.unwrap().is_empty());
+    let rejoined = f
+        .admit_membership(
+            MembershipPayload::join(
+                f.head.event.realm_id.clone(),
+                controller,
+                "new controller joined generation",
+            )
+            .to_value()
+            .unwrap(),
+        )
+        .await;
+    assert_ne!(f.controller_join, rejoined.event.event_id);
+    let current = f.readers().await.unwrap();
+    let stale = f.join_request(f.join_payload()).await;
+    let stale_id = stale.authority_commit.event.event_id.clone();
+    assert!(
+        Box::pin(PgEventCommitUnitOfWork::new(f.origin.pool.clone()).commit_event(stale))
+            .await
+            .is_err()
+    );
+    assert!(
+        PgAuthorityCommitStore {
+            pool: f.origin.pool.clone()
+        }
+        .committed_event(&stale_id)
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(f.readers().await.unwrap(), current);
+    f.controller_join = rejoined.event.event_id;
+    let accepted = f.admit_join().await;
+    assert!(
+        f.readers()
+            .await
+            .unwrap()
+            .contains(&(f.origin.agent.clone(), accepted.commit))
+    );
+}
+
+#[tokio::test]
+async fn terminal_agent_cannot_reuse_its_previously_accepted_bootstrap_join() {
+    let mut f = Box::pin(BootstrapReaderFixture::new()).await;
+    f.admit_join().await;
+    assert_eq!(f.readers().await.unwrap().len(), 2);
+    f.origin
+        .lifecycle(
+            &f.origin.genesis.commit,
+            EventKind::SelfAgentDeactivate,
+            "deactivate",
+            "active",
+        )
+        .await;
+    let error = f.readers().await.unwrap_err();
+    assert!(error.to_string().contains("bootstrap reader"), "{error}");
+}
 
 #[tokio::test]
 async fn agent_slug_is_reserved_until_accepted_terminal_lifecycle() {

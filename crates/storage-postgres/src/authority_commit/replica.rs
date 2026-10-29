@@ -566,10 +566,12 @@ pub(super) async fn bootstrap_readers_in_connection(
                     serde_json::to_value(&event.payload).map_err(invalid)?
                 )
                 .map_err(invalid)?;
-                payload.member_id == actor
+                let member_join = payload.member_id == actor
                     && payload.membership
-                        == arkret_models_collaboration::governance::membership_invite::MembershipPayloadState::Join
-                    && (event.actor_id == actor
+                        == arkret_models_collaboration::governance::membership_invite::MembershipPayloadState::Join;
+                if !member_join {
+                    false
+                } else if event.actor_id == actor
                         // Direct founders accept both member joins atomically.
                         // Only the complete registered unit can establish a
                         // current join signed by the other founding member.
@@ -580,7 +582,24 @@ pub(super) async fn bootstrap_readers_in_connection(
                             commit.commit_id.as_str(),
                             i64::try_from(commit.stream_position).map_err(invalid)?,
                         )
-                        .await?)
+                        .await?
+                {
+                    true
+                } else if matches!(stream, arkret_wire::CommitStreamRef::Realm { .. })
+                    && payload.agent_controller_binding.is_some()
+                {
+                    // A controller's accepted Agent join is not self-authored.
+                    // Reuse the original ownership, producer and current join
+                    // generation checks rather than treating its payload as proof.
+                    let controller = crate::agent_interaction_current_states::controller_for_accepted_join_in_connection(
+                        conn, account, &event, &commit, chrono::Utc::now(), lock_rows,
+                    ).await?;
+                    controller.is_some_and(|controller| {
+                        event.actor_id.as_account_id() == Some(&controller)
+                    })
+                } else {
+                    false
+                }
             }
             arkret_wire::EventKind::CircleMemberState => {
                 event.actor_id == actor

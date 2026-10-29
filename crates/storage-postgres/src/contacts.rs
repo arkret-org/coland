@@ -325,32 +325,6 @@ pub(crate) async fn lock_pair_contact_in_connection(
         .map(|mut rows| rows.pop())
 }
 
-/// The exact Contact row of a pair at revision `updated_at`, locked for the
-/// accepting transaction. `None` when no row of the pair has that revision.
-pub(crate) async fn lock_pair_contact_at_in_connection(
-    conn: &mut AsyncPgConnection,
-    left: &ActorId,
-    right: &ActorId,
-    updated_at: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<Option<ContactRecord>> {
-    let rows = sql_query(format!(
-        "SELECT {CONTACT_COLUMNS} FROM contacts \
-         WHERE ((requester_id = $1 AND target_id = $2) OR (requester_id = $2 AND target_id = $1)) \
-           AND updated_at = $3 \
-         FOR UPDATE"
-    ))
-    .bind::<Text, _>(left.to_string())
-    .bind::<Text, _>(right.to_string())
-    .bind::<diesel::sql_types::Timestamptz, _>(updated_at)
-    .get_result::<ContactRow>(&mut *conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)?;
-    decode_contact_rows(rows.into_iter().collect())
-        .await
-        .map(|mut rows| rows.pop())
-}
-
 pub(crate) async fn put_if_updated_at_in_connection(
     conn: &mut AsyncPgConnection,
     expected_updated_at: chrono::DateTime<chrono::Utc>,

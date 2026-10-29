@@ -1414,18 +1414,34 @@ pub(crate) async fn commit_contact_projection(
             ));
         }
         let pre_state = match commit.expected_updated_at {
-            Some(expected) => Some(
-                crate::contacts::lock_pair_contact_at_in_connection(
+            Some(_) => Some(
+                crate::contacts::lock_pair_contact_in_connection(
                     conn,
                     &commit.record.requester_id,
                     &commit.record.target_id,
-                    expected,
                 )
                 .await?
                 .ok_or_else(|| conflict(commit.conflict_code.clone()))?,
             ),
             None => None,
         };
+        if let (Some(expected), Some(current)) = (commit.expected_updated_at, pre_state.as_ref())
+            && current.updated_at != expected
+        {
+            // The signed lifetime slot still matches. A refreshed projection
+            // needs a new plan for the same Event, never a stale overwrite.
+            if current.updated_at > expected
+                && intent
+                    .validate_slot_cas(pre_state.as_ref(), &commit.record)
+                    .is_ok()
+            {
+                return Err(conflict(format!(
+                    "{}: Contact projection advanced before the accepting transaction",
+                    coland_storage::ConflictCode::TemporarilyUnavailable.as_str(),
+                )));
+            }
+            return Err(conflict(commit.conflict_code.clone()));
+        }
         intent.validate_slot_cas(pre_state.as_ref(), &commit.record)?;
         crate::contacts::completion::stage_in_transaction(conn, committed_ref, intent).await?;
     }

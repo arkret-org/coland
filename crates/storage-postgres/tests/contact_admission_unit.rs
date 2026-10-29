@@ -570,6 +570,73 @@ async fn wrong_revision_foreign_slot_and_lost_row_cas_refuse_with_zero_writes() 
 }
 
 #[tokio::test]
+async fn moved_contact_row_retries_the_frozen_event_but_consumed_slot_still_conflicts() {
+    let database = TestDatabase::lease().await;
+    let requested = requested(&database).await;
+    let uow = PgEventCommitUnitOfWork::new(requested.pool.clone());
+    let mut planned = response(&requested, |_| {}).await;
+    let original_event =
+        arkret_canonical::canonical_json_bytes(&planned.authority_commit.event).unwrap();
+    // The private projection timestamp is stale, while the holder's signed
+    // version and predecessor still name the exact durable operation slot.
+    planned
+        .contact_projection
+        .as_mut()
+        .unwrap()
+        .expected_updated_at = Some(requested.row.updated_at - Duration::microseconds(1));
+    let error = uow.commit_event(planned.clone()).await.unwrap_err();
+    assert!(
+        error.to_string().contains("temporarily_unavailable"),
+        "{error}"
+    );
+    assert_zero_writes(&requested, &planned).await;
+
+    // A future private revision is not a confirmed concurrent advance.
+    planned
+        .contact_projection
+        .as_mut()
+        .unwrap()
+        .expected_updated_at = Some(requested.row.updated_at + Duration::microseconds(1));
+    let error = uow.commit_event(planned.clone()).await.unwrap_err();
+    assert!(
+        error.to_string().contains("contact_lineage_conflict"),
+        "{error}"
+    );
+    assert_zero_writes(&requested, &planned).await;
+
+    planned
+        .contact_projection
+        .as_mut()
+        .unwrap()
+        .expected_updated_at = Some(requested.row.updated_at);
+    assert_eq!(
+        arkret_canonical::canonical_json_bytes(&planned.authority_commit.event).unwrap(),
+        original_event,
+    );
+    uow.commit_event(planned.clone()).await.unwrap();
+    let current = PgContactStore {
+        pool: requested.pool.clone(),
+    }
+    .get(&requested.row.requester_id, &requested.row.target_id)
+    .await
+    .unwrap()
+    .unwrap();
+    let projection = planned.contact_projection.as_ref().unwrap();
+    // Accepted replay deduplication is checked separately. A new admission
+    // cannot treat this consumed slot as a retryable private-row refresh.
+    let error = projection
+        .completion_intent
+        .as_ref()
+        .unwrap()
+        .validate_slot_cas(Some(&current), &projection.record)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("contact_lineage_conflict"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
 async fn exact_replay_of_the_accepting_unit_installs_nothing_twice() {
     let database = TestDatabase::lease().await;
     let requested = requested(&database).await;

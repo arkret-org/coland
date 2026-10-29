@@ -3177,7 +3177,6 @@ async fn provision_owned_agent_binding_phase_at_head(
     let controller_authority = principal.unit.transactions[1].expected_authority.clone();
     let controller_method = principal.history.device_verification_method.clone();
     let controller_seed = principal.history.founding_device_signing_seed;
-    let profiles = coland_storage_postgres::PgActorProfileStore { pool: pool.clone() };
     let agent_id = arkret_wire::project_did_to_core_id(&agent_did).unwrap();
     let agent = AccountId::new(agent_id.clone(), station.clone());
     let delegation = format!("{agent_did}#managed-controller");
@@ -4311,6 +4310,34 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
                      expected: Option<arkret_wire::CurrentRevision>| {
         agent_mode_request(previous, mode, expected, &principal, &agent, &guard)
     };
+    // A membership Commit can win after the Station builds a candidate. The
+    // exact signed mode Event remains valid; only its Station Commit is stale.
+    let retry_at = join.authority_commit.commit.committed_at + chrono::TimeDelta::milliseconds(1);
+    let stale_candidate = agent_mode_request_at(
+        &create.authority_commit,
+        "public",
+        None,
+        &principal,
+        &agent,
+        &guard,
+        retry_at,
+    );
+    let stale_candidate = ordinary_realm::source_request(&pool, stale_candidate).await;
+    let exact_retry_event = stale_candidate.authority_commit.event.clone();
+    let exact_retry_bytes = arkret_canonical::canonical_json_bytes(&exact_retry_event).unwrap();
+    let before_head_race = agent_mode_footprint(&pool, realm_id).await;
+    let error = fixture_commit_step(&pool, stale_candidate)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("temporarily_unavailable"),
+        "{error}"
+    );
+    assert_eq!(
+        agent_mode_footprint(&pool, realm_id).await,
+        before_head_race
+    );
+
     let historical_at = key_commit.committed_at + chrono::TimeDelta::milliseconds(2);
     assert!(historical_at < parent.commit.committed_at);
     let mut historical = agent_mode_request_at(
@@ -4333,7 +4360,15 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
             .contains("owned current source coordinates differ")
     );
     assert_eq!(agent_mode_footprint(&pool, realm_id).await, before);
-    let mut public = make_mode(&join.authority_commit, "public", None);
+    let mut public =
+        ordinary_realm::request_for_event(&join.authority_commit, exact_retry_event, retry_at);
+    public.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
+        guard.clone(),
+    ));
+    assert_eq!(
+        arkret_canonical::canonical_json_bytes(&public.authority_commit.event).unwrap(),
+        exact_retry_bytes,
+    );
     source_candidate(&pool, &mut public).await;
     let mut unguarded = public.clone();
     unguarded.self_producer_guard = None;
@@ -4345,6 +4380,10 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
             .contains("capability_denied")
     );
     let public = ordinary_realm::source_request(&pool, public).await;
+    assert_eq!(
+        arkret_canonical::canonical_json_bytes(&public.authority_commit.event).unwrap(),
+        exact_retry_bytes,
+    );
     fixture_commit_step(&pool, public.clone()).await.unwrap();
     let selector = arkret_wire::CurrentSelector::AgentInteraction {
         agent_account_id: agent.clone(),
@@ -6134,10 +6173,7 @@ fn management_native_vote(
         )
         .unwrap();
     let arkret_models_integration::management_review::ManagementReviewTarget::Event { event } =
-        &request.target
-    else {
-        panic!("Event fixture")
-    };
+        &request.target;
     let mut signature = ApprovalSignature {
         input: ApprovalSignatureInput {
             approval_context: ApprovalContext::Management {

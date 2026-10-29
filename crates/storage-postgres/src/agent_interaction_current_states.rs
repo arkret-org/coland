@@ -1092,6 +1092,22 @@ pub(crate) async fn admit_in_connection(
         )
         .await?
     {
+        // A candidate built before another accepted Commit must reach the
+        // existing exact-Event retry path, not become an unknown-mode error.
+        // This check never supplies an absence proof or permits a write.
+        let head_advanced = sql_query("SELECT EXISTS(SELECT 1 FROM realm_commits WHERE realm_id=$1 AND stream_ref=jsonb_build_object('kind','realm','realm_id',$1) AND stream_position >= $2) AS present")
+            .bind::<Text, _>(event.realm_id.as_str())
+            .bind::<BigInt, _>(i64::try_from(commit.stream_position).map_err(invalid)?)
+            .get_result::<PresentRow>(&mut *conn)
+            .await
+            .map_err(PersistenceError::database)?
+            .present;
+        if head_advanced {
+            return Err(PersistenceError::Conflict(format!(
+                "{}: Realm stream head advanced before Agent mode admission",
+                coland_storage::ConflictCode::TemporarilyUnavailable.as_str(),
+            )));
+        }
         return Err(PersistenceError::Conflict(
             "revision_unavailable: Agent mode absence is not confirmed".into(),
         ));

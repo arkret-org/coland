@@ -336,6 +336,22 @@ impl ContactCompletionIntent {
                 "Contact operation changes the opposite holder cursor",
             ));
         }
+        if let ContactCompletionAction::Reject { request_receipt } = &self.plan.action
+            && before.is_some_and(|slot| {
+                matches!(
+                    &slot.request_choice,
+                    Some(coland_domain::identity::ContactRequestChoice::Glare {
+                        request_event_ref,
+                        counterpart_event_ref,
+                    }) if request_event_ref == &request_receipt.core.request_event_ref
+                        || counterpart_event_ref == &request_receipt.core.request_event_ref
+                )
+            })
+        {
+            return Err(crate::PersistenceError::Conflict(
+                "contact_lineage_conflict: glare choice is durable".into(),
+            ));
+        }
         if let ContactCompletionAction::Response {
             request_receipt,
             absence,

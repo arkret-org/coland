@@ -13,8 +13,8 @@
 mod ordinary_realm;
 
 use arkret_models_collaboration::contact_operations::{
-    ContactPeer, ContactProducerSigner, ContactRound, OutgoingRequestState,
-    OutgoingSlotAbsenceTranscript, RequestAcceptanceReceipt,
+    ContactPeer, ContactProducerSigner, ContactRound, GlareConcurrencyAttestation,
+    OutgoingRequestState, OutgoingSlotAbsenceTranscript, RequestAcceptanceReceipt,
 };
 use arkret_models_collaboration::governance::peer_contact::{
     ContactIntroductionEvidence, PeerContactAddress,
@@ -177,7 +177,9 @@ fn slot(
         version: sequence,
         head_event_ref: (*refs.last().unwrap()).clone(),
         operation_digest: None,
-        request_choice: None,
+        request_choice: Some(coland_domain::identity::ContactRequestChoice::Open {
+            request_event_ref: (*refs.last().unwrap()).clone(),
+        }),
     }
 }
 
@@ -301,6 +303,28 @@ async fn requested(database: &TestDatabase) -> Requested {
     }
 }
 
+fn sign_contact_fixture(
+    bytes: &[u8],
+    at: DateTime<Utc>,
+) -> arkret_wire::Result<arkret_wire::ProtocolSignature> {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[9_u8; 32]);
+    Ok(arkret_wire::ProtocolSignature {
+        verification_method: DidUrl::new("did:web:ordinary-station.example#receipt").unwrap(),
+        created_at: at,
+        jws: arkret_signatures::sign_ed25519_detached_jws(&key, bytes).unwrap(),
+    })
+}
+
+fn confirmed_request_receipt(
+    intent: &ContactCompletionIntent,
+    at: DateTime<Utc>,
+) -> RequestAcceptanceReceipt {
+    RequestAcceptanceReceipt::sign_with(intent.request_receipt_core().unwrap(), |bytes| {
+        sign_contact_fixture(bytes, at)
+    })
+    .unwrap()
+}
+
 /// Bob's normal response to `requested`, planned against its current row.
 /// `edit` rewrites the frozen absence observation before the unit is built.
 async fn response(
@@ -309,19 +333,7 @@ async fn response(
 ) -> EventCommitRequest {
     let request_event = &requested.request.authority_commit.event;
     let accepted_at = requested.row.updated_at + Duration::seconds(1);
-    let key = ed25519_dalek::SigningKey::from_bytes(&[9_u8; 32]);
-    let receipt = RequestAcceptanceReceipt::sign_with(
-        requested.request_intent.request_receipt_core().unwrap(),
-        |bytes| {
-            Ok(arkret_wire::ProtocolSignature {
-                verification_method: DidUrl::new("did:web:ordinary-station.example#receipt")
-                    .unwrap(),
-                created_at: accepted_at,
-                jws: arkret_signatures::sign_ed25519_detached_jws(&key, bytes).unwrap(),
-            })
-        },
-    )
-    .unwrap();
+    let receipt = confirmed_request_receipt(&requested.request_intent, accepted_at);
     let mut pair = [alice().contact_actor_id(), bob().contact_actor_id()];
     if arkret_canonical::canonical_json_bytes(&pair[0]).unwrap()
         > arkret_canonical::canonical_json_bytes(&pair[1]).unwrap()
@@ -397,6 +409,127 @@ async fn response(
     });
     unit.contact_projection = Some(ContactProjectionCommit {
         completion_intent: Some(response_intent),
+        record: Box::new(row),
+        expected_updated_at: Some(requested.row.updated_at),
+        conflict_code: "contact_lineage_conflict".to_owned(),
+        verified_mirror: None,
+        invite_policy: None,
+    });
+    unit.projections.clear();
+    unit
+}
+
+/// Accept the opposite request through its own real PCR/Device and Realm cut.
+async fn reverse_request(requested: &mut Requested) -> ContactCompletionIntent {
+    let at = requested.row.updated_at + Duration::seconds(1);
+    let mut unit = contact_request(
+        &requested.pool,
+        &requested.responder_guard,
+        &requested.responder_head,
+        EventKind::ContactRequested,
+        &bob(),
+        serde_json::json!({
+            "trust_domain_id":"ak:trust_domain:contact.test","version":1,"peer":alice(),
+            "granted_to_peer_scopes":["direct_message"],
+            "introduction_evidence_digest":format!("sha256:{}", "f".repeat(64)),
+        }),
+        at,
+    )
+    .await;
+    let event = &unit.authority_commit.event;
+    let plan = intent(
+        event,
+        &bob(),
+        &alice(),
+        ContactCompletionAction::Request {
+            version: 1,
+            predecessor_event_ref: None,
+        },
+        at,
+    );
+    let mut row = requested.row.clone();
+    row.requester_id = bob().contact_actor_id();
+    row.target_id = alice().contact_actor_id();
+    row.request_event_ref = Some(event.event_id.clone());
+    row.updated_at = at;
+    row.request_slot_states.push(slot(
+        &bob(),
+        &alice(),
+        1,
+        plan.request_core_digest().unwrap(),
+        &[&event.event_id],
+    ));
+    row.request_slot_states
+        .sort_by_key(|state| state.owner_id.clone());
+    unit.contact_projection = Some(ContactProjectionCommit {
+        completion_intent: Some(plan.clone()),
+        record: Box::new(row.clone()),
+        expected_updated_at: Some(requested.row.updated_at),
+        conflict_code: "contact_lineage_conflict".to_owned(),
+        verified_mirror: None,
+        invite_policy: None,
+    });
+    unit.projections.clear();
+    PgEventCommitUnitOfWork::new(requested.pool.clone())
+        .commit_event(unit.clone())
+        .await
+        .expect("the opposite signed request commits");
+    requested.responder_head = unit.authority_commit;
+    requested.row = row;
+    plan
+}
+
+async fn rejection(
+    requested: &Requested,
+    receipt: &RequestAcceptanceReceipt,
+) -> EventCommitRequest {
+    let predecessor = requested.responder_head.event.event_id.clone();
+    let at = arkret_canonical::normalize_timestamp_canonical(
+        requested.row.updated_at + Duration::seconds(1),
+    );
+    let mut unit = contact_request(
+        &requested.pool,
+        &requested.responder_guard,
+        &requested.responder_head,
+        EventKind::ContactRejected,
+        &bob(),
+        serde_json::json!({
+            "trust_domain_id":"ak:trust_domain:contact.test","peer":alice(),
+            "version":2,"predecessor_event_ref":predecessor,
+            "request_event_ref":receipt.core.request_event_ref,
+            "request_acceptance_receipt_digest":receipt.computed_receipt_digest().unwrap(),
+        }),
+        at,
+    )
+    .await;
+    let event = &unit.authority_commit.event;
+    let plan = intent(
+        event,
+        &bob(),
+        &alice(),
+        ContactCompletionAction::Reject {
+            request_receipt: Box::new(receipt.clone()),
+        },
+        at,
+    );
+    let mut row = requested.row.clone();
+    row.status = "rejected".to_owned();
+    row.request_receipts.clear();
+    row.request_mirror_receipts.clear();
+    row.response_event_ref = Some(event.event_id.clone());
+    row.updated_at = at;
+    let own = row
+        .request_slot_states
+        .iter_mut()
+        .find(|state| state.owner_id == bob().contact_actor_id())
+        .unwrap();
+    own.version = 2;
+    own.head_event_ref = event.event_id.clone();
+    own.request_choice = Some(coland_domain::identity::ContactRequestChoice::Rejected {
+        request_event_ref: receipt.core.request_event_ref.clone(),
+    });
+    unit.contact_projection = Some(ContactProjectionCommit {
+        completion_intent: Some(plan),
         record: Box::new(row),
         expected_updated_at: Some(requested.row.updated_at),
         conflict_code: "contact_lineage_conflict".to_owned(),
@@ -634,6 +767,134 @@ async fn moved_contact_row_retries_the_frozen_event_but_consumed_slot_still_conf
         error.to_string().contains("contact_lineage_conflict"),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn glare_choice_refuses_stale_rejection_without_advancing_the_slot() {
+    use coland_domain::identity::ContactRequestChoice;
+    for select_glare in [false, true] {
+        let database = TestDatabase::lease().await;
+        let mut requested = Box::pin(requested(&database)).await;
+        let reverse = Box::pin(reverse_request(&mut requested)).await;
+        let incoming = confirmed_request_receipt(
+            &requested.request_intent,
+            requested.request_intent.accepted_at().unwrap(),
+        );
+        let outgoing = confirmed_request_receipt(&reverse, reverse.accepted_at().unwrap());
+        let contacts = PgContactStore {
+            pool: requested.pool.clone(),
+        };
+        let prior = requested.row.updated_at;
+        requested.row.request_receipts = vec![incoming.clone(), outgoing.clone()];
+        requested.row.updated_at += Duration::microseconds(1);
+        assert!(
+            contacts
+                .put_if_updated_at(prior, &requested.row)
+                .await
+                .unwrap()
+        );
+        let mut planned = Box::pin(rejection(&requested, &incoming)).await;
+        let original =
+            arkret_canonical::canonical_json_bytes(&planned.authority_commit.event).unwrap();
+        let uow = PgEventCommitUnitOfWork::new(requested.pool.clone());
+        if !select_glare {
+            assert!(
+                uow.commit_event(planned)
+                    .await
+                    .expect("an unconsumed request can be rejected")
+                    .event_inserted
+            );
+            continue;
+        }
+
+        let receipts = [incoming.clone(), outgoing.clone()];
+        let round = ContactRound::glare_from_request_receipts(&receipts).unwrap();
+        let ContactRound::Glare { requests, .. } = &round else {
+            unreachable!()
+        };
+        let observed_at = planned
+            .contact_projection
+            .as_ref()
+            .unwrap()
+            .completion_intent
+            .as_ref()
+            .unwrap()
+            .accepted_at()
+            .unwrap();
+        let attestation = GlareConcurrencyAttestation::sign_with(
+            outgoing.core.trust_domain_id.clone(),
+            outgoing.core.initial_contact_round_id.clone(),
+            round.compute_id().unwrap(),
+            outgoing.core.version,
+            outgoing.core.request_event_ref.clone(),
+            bob().contact_actor_id(),
+            outgoing.core.issuer_id.clone(),
+            alice().contact_actor_id(),
+            requests
+                .each_ref()
+                .map(|request| request.request_acceptance_receipt_digest.clone()),
+            observed_at,
+            |bytes| sign_contact_fixture(bytes, observed_at),
+        )
+        .unwrap();
+        let prior = requested.row.updated_at;
+        let own = requested
+            .row
+            .request_slot_states
+            .iter_mut()
+            .find(|state| state.owner_id == bob().contact_actor_id())
+            .unwrap();
+        assert_eq!(own.version, outgoing.core.version);
+        assert_eq!(own.head_event_ref, outgoing.core.request_event_ref);
+        assert!(
+            matches!(&own.request_choice, Some(ContactRequestChoice::Open {request_event_ref}) if request_event_ref == &outgoing.core.request_event_ref)
+        );
+        own.request_choice = Some(ContactRequestChoice::Glare {
+            request_event_ref: outgoing.core.request_event_ref.clone(),
+            counterpart_event_ref: incoming.core.request_event_ref.clone(),
+        });
+        requested
+            .row
+            .current_state
+            .local_glare_attestations
+            .push(attestation);
+        requested.row.updated_at = observed_at;
+        assert!(
+            contacts
+                .put_if_updated_at(prior, &requested.row)
+                .await
+                .unwrap()
+        );
+
+        let error = uow.commit_event(planned.clone()).await.unwrap_err();
+        assert!(
+            error.to_string().contains("contact_lineage_conflict"),
+            "durable glare must be permanent, not a private-source retry: {error}"
+        );
+        assert!(
+            !error.to_string().contains("temporarily_unavailable"),
+            "{error}"
+        );
+        assert_zero_writes(&requested, &planned).await;
+        // Even a refreshed private timestamp cannot reopen the consumed choice.
+        let projection = planned.contact_projection.as_mut().unwrap();
+        projection.expected_updated_at = Some(requested.row.updated_at);
+        projection.record.updated_at = requested.row.updated_at + Duration::microseconds(1);
+        assert_eq!(
+            arkret_canonical::canonical_json_bytes(&planned.authority_commit.event).unwrap(),
+            original
+        );
+        let error = uow.commit_event(planned.clone()).await.unwrap_err();
+        assert!(
+            error.to_string().contains("contact_lineage_conflict"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("glare choice is durable"),
+            "{error}"
+        );
+        assert_zero_writes(&requested, &planned).await;
+    }
 }
 
 #[tokio::test]

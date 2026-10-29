@@ -2689,16 +2689,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "debugid"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bef552e6f588e446098f6ba40d89ac146c8c7b64aade83c051ee00bb5d2bc18d"
-dependencies = [
- "serde",
- "uuid",
-]
-
-[[package]]
 name = "debugserver-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8800,17 +8790,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "savfox-feedback"
-version = "0.3.1"
-dependencies = [
- "anyhow",
- "savfox-protocol",
- "sentry",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "savfox-file-search"
 version = "0.3.1"
 dependencies = [
@@ -8864,7 +8843,6 @@ dependencies = [
  "savfox-common",
  "savfox-core",
  "savfox-exec-policy",
- "savfox-feedback",
  "savfox-gateway-shared",
  "savfox-http-client",
  "savfox-keyring-store",
@@ -9382,46 +9360,6 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 dependencies = [
  "serde",
  "serde_core",
-]
-
-[[package]]
-name = "sentry"
-version = "0.47.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb25f439f97d26fea01d717fa626167ceffcd981addaa670001e70505b72acbb"
-dependencies = [
- "cfg_aliases 0.2.2",
- "sentry-core",
-]
-
-[[package]]
-name = "sentry-core"
-version = "0.47.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ac170a5bba8bec6e3339c90432569d89641fa7a3d3e4f44987d24f0762e6adf"
-dependencies = [
- "rand 0.9.5",
- "sentry-types",
- "serde",
- "serde_json",
- "url",
-]
-
-[[package]]
-name = "sentry-types"
-version = "0.47.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56780cb5597d676bf22e6c11d1f062eb4def46390ea3bfb047bcbcf7dfd19bdb"
-dependencies = [
- "debugid",
- "hex",
- "rand 0.9.5",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "time",
- "url",
- "uuid",
 ]
 
 [[package]]

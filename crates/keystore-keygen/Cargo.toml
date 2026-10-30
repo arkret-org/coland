@@ -7,6 +7,8 @@ description = "Cross-platform master-key generator for the Coland encrypted-file
 license.workspace = true
 repository.workspace = true
 publish = false
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true

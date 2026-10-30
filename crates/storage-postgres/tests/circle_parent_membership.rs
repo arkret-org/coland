@@ -194,6 +194,150 @@ fn refusal_code(error: &PersistenceError) -> Option<ConflictCode> {
     error.conflict_code()
 }
 
+async fn handoff_circle_proofs(
+    pool: &PgPool,
+    snapshot: &arkret_wire::RealmStateSnapshot,
+    circle: &CircleId,
+    member: &ActorId,
+) -> Vec<Value> {
+    #[derive(diesel::QueryableByName)]
+    struct ProofRow {
+        #[diesel(sql_type = Jsonb)]
+        observation: Value,
+        #[diesel(sql_type = Jsonb)]
+        cut: Value,
+        #[diesel(sql_type = Jsonb)]
+        commit_json: Value,
+        #[diesel(sql_type = Bool)]
+        proved: bool,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let mut proofs = Vec::new();
+    for selector in [
+        arkret_wire::CurrentSelector::Circle {
+            circle_id: circle.clone(),
+        },
+        arkret_wire::CurrentSelector::CircleMemberState {
+            circle_id: circle.clone(),
+            member_actor_id: member.clone(),
+        },
+    ] {
+        let arkret_wire::CurrentState::Value {
+            source_stream_ref,
+            revision,
+            value,
+            ..
+        } = snapshot
+            .current_state_entries
+            .iter()
+            .find(|entry| matches!(entry, arkret_wire::CurrentState::Value { selector: actual, .. } if actual == &selector))
+            .expect("the actual complete handoff discloses this Circle current");
+        let head = snapshot
+            .visible_stream_heads
+            .iter()
+            .find(|head| &head.stream_ref == source_stream_ref)
+            .unwrap();
+        let row = diesel::sql_query(
+            "SELECT to_jsonb(r) AS observation,to_jsonb(h) AS cut,c.commit_json, \
+             circle_current_row_proved(r.realm_id,r.selector,r.source_stream_ref, \
+               r.current_commit_id,r.current_stream_position,r.value) AS proved \
+             FROM replica_authorization_rows r \
+             JOIN replica_authorization_cuts h ON h.realm_id=r.realm_id AND h.source_stream_ref=r.source_stream_ref \
+             JOIN realm_commits c ON c.realm_id=r.realm_id AND c.stream_ref=r.source_stream_ref \
+               AND c.commit_id=r.current_commit_id AND c.stream_position=r.current_stream_position \
+             WHERE r.realm_id=$1 AND r.selector=$2",
+        )
+        .bind::<Text, _>(snapshot.realm_id.as_str())
+        .bind::<Jsonb, _>(json!(selector))
+        .get_result::<ProofRow>(&mut conn)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.observation["source_stream_ref"],
+            json!(source_stream_ref)
+        );
+        assert_eq!(
+            row.observation["current_commit_id"],
+            json!(revision.commit_id)
+        );
+        assert_eq!(
+            row.observation["current_stream_position"],
+            json!(revision.stream_position)
+        );
+        assert_eq!(&row.observation["value"], value);
+        assert_eq!(
+            row.observation["observed_anchor_commit_id"],
+            json!(head.commit_id)
+        );
+        assert_eq!(
+            row.observation["observed_anchor_stream_position"],
+            json!(head.stream_position)
+        );
+        assert!(!row.observation["circle_continuation_id"].is_null());
+        assert_eq!(
+            row.observation["circle_continuation_id"],
+            row.cut["circle_continuation_id"]
+        );
+        assert_eq!(
+            row.cut["circle_effect_base_commit_id"],
+            json!(head.commit_id)
+        );
+        assert_eq!(
+            row.cut["circle_effect_base_stream_position"],
+            json!(head.stream_position)
+        );
+        assert_eq!(row.cut["head_commit_id"], json!(head.commit_id));
+        assert_eq!(row.cut["head_stream_position"], json!(head.stream_position));
+        let original: arkret_wire::RealmCommit = serde_json::from_value(row.commit_json).unwrap();
+        assert_eq!(original.commit_id, revision.commit_id);
+        assert_eq!(
+            original.governance_generation,
+            snapshot.governance_generation
+        );
+        assert!(
+            row.proved,
+            "full handoff must retain proof after final authority activation"
+        );
+        proofs.push(json!({"observation":row.observation,"cut":row.cut}));
+    }
+    proofs
+}
+
+async fn handoff_replay_footprint(pool: &PgPool) -> Value {
+    #[derive(diesel::QueryableByName)]
+    struct Rows {
+        #[diesel(sql_type = Jsonb)]
+        value: Value,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let mut footprint = serde_json::Map::new();
+    for table in [
+        "realm_authorities",
+        "canonical_events",
+        "realm_commits",
+        "circle_current_states",
+        "circle_member_state_current_states",
+        "member_state_current_states",
+        "replica_authorization_rows",
+        "replica_authorization_cuts",
+        "replica_stream_anchors",
+        "realm_state_snapshots",
+        "realm_state_snapshot_issuances",
+        "realm_state_snapshot_window_reservations",
+        "idempotency_keys",
+    ] {
+        let query = format!(
+            "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) AS value FROM {table} t"
+        );
+        let rows = diesel::sql_query(query)
+            .get_result::<Rows>(&mut conn)
+            .await
+            .unwrap();
+        footprint.insert(table.to_owned(), rows.value);
+    }
+    Value::Object(footprint)
+}
+
 #[tokio::test]
 async fn circle_join_binds_the_exact_parent_join_and_parent_changes_invalidate_it() {
     for history in ["since_join", "all_history_for_current_members"] {
@@ -793,12 +937,36 @@ product_agent: None,
                         old_authority_signature: old_signature,
                         new_authority_acceptance_signature: new_signature,
                     };
+                    let before_handoff_member = circle_member(&pool, &circle, &alice).await;
+                    assert_eq!(before_handoff_member.current_commit_id, circle_join.authority_commit.commit.commit_id.as_str());
+                    assert_eq!(before_handoff_member.value, joined.value);
                     // Storage fixtures use structural signatures; the Garth verified-scan fixture
                     // independently verifies the real dual Ed25519 signatures and complete manifest.
                     store
                         .install_handoff_with_private_state(&handoff, &heads, &snapshot, None, &management)
                         .await
                         .unwrap();
+                    let active = store.current_authority(&realm).await.unwrap().unwrap();
+                    assert_eq!(active.generation, handoff.to_generation);
+                    assert_eq!(active.service_id, handoff.to_service_id);
+                    assert_eq!(active.authority_ref, arkret_wire::RealmCommitAuthorityRef::Handoff(handoff.handoff_id.clone()));
+                    #[derive(diesel::QueryableByName)]
+                    struct LocalStation {
+                        #[diesel(sql_type = Text)]
+                        station: String,
+                    }
+                    let local = diesel::sql_query("SELECT current_device_inventory_station() AS station")
+                        .get_result::<LocalStation>(&mut pool.get().await.unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(local.station, handoff.from_service_id.as_str());
+                    assert_ne!(active.service_id, handoff.from_service_id);
+                    let after_handoff_member = circle_member(&pool, &circle, &alice).await;
+                    assert_eq!(after_handoff_member.current_commit_id, before_handoff_member.current_commit_id);
+                    assert_eq!(after_handoff_member.value, before_handoff_member.value);
+                    assert_eq!(after_handoff_member.membership, before_handoff_member.membership);
+                    assert!(after_handoff_member.effective);
+                    let qualified_proofs = handoff_circle_proofs(&pool, &snapshot, &circle, &alice).await;
                     assert!(
                         store
                             .signal_scope_authority(coland_storage::SignalScopeAuthorityQuery {
@@ -817,6 +985,40 @@ product_agent: None,
                             .is_some(),
                         "accepted complete handoff preserves an unchanged Circle head"
                     );
+                    // Reuse the real outgoing Realm anchor, not Alice's Circle
+                    // join hosted at another Station. Generation is the only
+                    // stale property of this previously accepted full Snapshot.
+                    let realm_stream = &change.authority_commit.commit.stream_ref;
+                    let outgoing = store.replica_anchor_for_stream(realm_stream).await.unwrap()
+                        .expect("complete handoff retains the creator's actual local Realm anchor");
+                    assert_eq!(outgoing.member_account_id.station_id, handoff.from_service_id);
+                    assert_eq!(ActorId::account(outgoing.member_account_id.clone()), creator);
+                    assert!(outgoing.anchored_head.is_some());
+                    assert!(snapshot.current_state_entries.iter().any(|entry| matches!(entry,
+                        arkret_wire::CurrentState::Value {
+                            selector: arkret_wire::CurrentSelector::MemberState { actor_id },
+                            source_stream_ref, revision, value
+                        } if actor_id == &creator && source_stream_ref == realm_stream
+                            && revision.commit_id == outgoing.join_commit.commit_id
+                            && revision.stream_position == outgoing.join_commit.stream_position
+                            && value.get("membership").and_then(Value::as_str) == Some("join")
+                    )));
+                    let before_stale_snapshot = handoff_replay_footprint(&pool).await;
+                    let stale_snapshot = coland_storage::ReplicaAnchorInstall {
+                        realm_id: realm.clone(),
+                        join_commit_id: outgoing.join_commit.commit_id.clone(),
+                        governance_generation: snapshot.governance_generation,
+                        snapshot_head: heads.iter().find(|head| &head.stream_ref == realm_stream).unwrap().clone(),
+                        visible_stream_heads: snapshot.visible_stream_heads.clone(),
+                        current_state_entries: snapshot.current_state_entries.clone(),
+                        verified_snapshot: snapshot.clone(),
+                    };
+                    assert_eq!(stale_snapshot.governance_generation, handoff.from_generation);
+                    let refused_snapshot = store.install_replica_anchor(&stale_snapshot).await.unwrap_err();
+                    assert_eq!(refusal_code(&refused_snapshot), Some(ConflictCode::ForkQuarantine));
+                    assert_eq!(handoff_replay_footprint(&pool).await, before_stale_snapshot,
+                        "a delayed old-tenure Snapshot must not change any persisted observation or current");
+                    assert_eq!(handoff_circle_proofs(&pool, &snapshot, &circle, &alice).await, qualified_proofs);
                     let mut stale = handoff.clone();
                     stale.handoff_id = arkret_wire::RealmAuthorityHandoffId::from_digest([0x93; 32]);
                     assert!(matches!(

@@ -5840,6 +5840,7 @@ enum CircleCoverageControl {
     HigherCut,
     OtherHostedMember,
     WrongEndpoint,
+    HistoricalArchive,
 }
 
 #[tokio::test]
@@ -5914,6 +5915,17 @@ async fn held_full_at_snapshot_endpoint_rejects_other_commit_id_without_writes()
         circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(
             true,
             Some(CircleCoverageControl::WrongEndpoint),
+        )
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn trusted_archival_join_requires_real_interval_observation_for_self_terminal() {
+    heap_future(|| {
+        circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(
+            true,
+            Some(CircleCoverageControl::HistoricalArchive),
         )
     })
     .await;
@@ -6647,7 +6659,8 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                         coland_storage::AccountStreamScan::Page(_)
                     ));
                 }
-                CircleCoverageControl::OtherHostedMember => {
+                CircleCoverageControl::OtherHostedMember
+                | CircleCoverageControl::HistoricalArchive => {
                     // This separate existential-basis control really admits B;
                     // the original same-H nondisclosure case above does not.
                     let mut permission_event = ordinary_realm::event_for_actor(
@@ -6690,6 +6703,257 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                         heap_future(|| ordinary_realm::source_request(&pool, sourced(request)))
                             .await;
                     uow.commit_event(request.clone()).await.unwrap();
+                    if matches!(control, CircleCoverageControl::HistoricalArchive) {
+                        // This is explicitly a trusted archival-state storage
+                        // control, not a reachable HTTP history-backfill flow.
+                        let archive_db = TestDatabase::lease().await;
+                        let archived = PgAuthorityCommitStore {
+                            pool: archive_db.pool(),
+                        };
+                        let mut conn = archived.pool.get().await.unwrap();
+                        diesel::sql_query("INSERT INTO device_inventory_station(singleton,station_id) VALUES(TRUE,$1)")
+                            .bind::<Text,_>(member_station().as_str()).execute(&mut conn).await.unwrap();
+                        drop(conn);
+                        archived
+                            .install_committed_replica(&replica(&unit, &other_join, true))
+                            .await
+                            .unwrap();
+                        let realm_material = governor
+                            .member_station_bootstrap_material(
+                                &realm,
+                                other.as_account_id().unwrap(),
+                                &other_join.authority_commit.commit.commit_id,
+                            )
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        let realm_head = realm_material
+                            .visible_stream_heads
+                            .iter()
+                            .find(|head| head.stream_ref == realm_stream)
+                            .unwrap()
+                            .clone();
+                        archived
+                            .install_replica_anchor(&ReplicaAnchorInstall {
+                                realm_id: realm.clone(),
+                                join_commit_id: other_join
+                                    .authority_commit
+                                    .commit
+                                    .commit_id
+                                    .clone(),
+                                governance_generation: realm_material.governance_generation,
+                                snapshot_head: realm_head,
+                                visible_stream_heads: realm_material.visible_stream_heads.clone(),
+                                current_state_entries: realm_material.current_state_entries.clone(),
+                                verified_snapshot: bootstrap_snapshot_from_material(
+                                    &realm_material,
+                                ),
+                            })
+                            .await
+                            .unwrap();
+                        archived
+                            .install_committed_replica(&replica(&unit, &request, true))
+                            .await
+                            .unwrap();
+                        let circle_material = governor
+                            .member_station_bootstrap_material(
+                                &realm,
+                                other.as_account_id().unwrap(),
+                                &request.authority_commit.commit.commit_id,
+                            )
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        let circle_head = circle_material
+                            .visible_stream_heads
+                            .iter()
+                            .find(|head| head.stream_ref == stream)
+                            .unwrap()
+                            .clone();
+                        let install = ReplicaAnchorInstall {
+                            realm_id: realm.clone(),
+                            join_commit_id: request.authority_commit.commit.commit_id.clone(),
+                            governance_generation: circle_material.governance_generation,
+                            snapshot_head: circle_head,
+                            visible_stream_heads: circle_material.visible_stream_heads.clone(),
+                            current_state_entries: circle_material.current_state_entries.clone(),
+                            verified_snapshot: bootstrap_snapshot_from_material(&circle_material),
+                        };
+                        archived.install_replica_anchor(&install).await.unwrap();
+                        assert!(
+                            circle_join.authority_commit.commit.stream_position
+                                < request.authority_commit.commit.stream_position
+                        );
+                        assert!(
+                            archived
+                                .committed_event(&circle_join.authority_commit.event.event_id)
+                                .await
+                                .unwrap()
+                                .is_none()
+                        );
+                        let interval = archived
+                            .replica_anchor_for_stream(&stream)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(interval.join_commit, request.authority_commit.commit);
+                        let remove_metadata = || async {
+                            let mut conn = archived.pool.get().await.unwrap();
+                            assert_eq!(diesel::sql_query("DELETE FROM circle_current_states WHERE realm_id=$1 AND circle_id=$2")
+                                .bind::<Text,_>(realm.as_str()).bind::<Text,_>(circle.as_str()).execute(&mut conn).await.unwrap(),1);
+                        };
+                        remove_metadata().await;
+                        let leave =
+                            circle_transition(&request.authority_commit, "leave", Some("join"));
+                        let leave =
+                            heap_future(|| ordinary_realm::source_request(&pool, leave)).await;
+                        uow.commit_event(leave.clone()).await.unwrap();
+                        let incoming = replica(&unit, &leave, false);
+                        let before = governance_gate_footprint(&archived.pool).await;
+                        assert_code(
+                            &archived
+                                .install_committed_replica(&incoming)
+                                .await
+                                .unwrap_err(),
+                            ConflictCode::TemporarilyUnavailable,
+                        );
+                        assert_eq!(
+                            governance_gate_footprint(&archived.pool).await,
+                            before,
+                            "snapshot observation cannot invent an absent accepted join original"
+                        );
+                        #[derive(diesel::QueryableByName)]
+                        struct OriginalRows {
+                            #[diesel(sql_type=Jsonb)]
+                            event_row: serde_json::Value,
+                            #[diesel(sql_type=Jsonb)]
+                            commit_row: serde_json::Value,
+                        }
+                        let mut source = pool.get().await.unwrap();
+                        let original=diesel::sql_query("SELECT to_jsonb(e) AS event_row,to_jsonb(c) AS commit_row FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE c.commit_id=$1")
+                            .bind::<Text,_>(circle_join.authority_commit.commit.commit_id.as_str()).get_result::<OriginalRows>(&mut source).await.unwrap();
+                        drop(source);
+                        let old_event: arkret_wire::Event =
+                            serde_json::from_value(original.event_row["envelope"].clone()).unwrap();
+                        let old_commit: arkret_wire::RealmCommit =
+                            serde_json::from_value(original.commit_row["commit_json"].clone())
+                                .unwrap();
+                        assert_eq!(old_event, circle_join.authority_commit.event);
+                        assert_eq!(old_commit, circle_join.authority_commit.commit);
+                        old_event
+                            .verify_event_id_matches_content_with_digest_suite(
+                                old_event.event_id.digest_suite_code().digest_suite(),
+                            )
+                            .unwrap();
+                        old_commit.verify_commit_id_matches_content().unwrap();
+                        old_commit.validate_shape().unwrap();
+                        assert_eq!(old_commit.stream_ref, stream);
+                        assert_eq!(old_commit.event_ref, old_event.event_id);
+                        assert_eq!(
+                            old_commit.commit_id,
+                            request
+                                .authority_commit
+                                .commit
+                                .previous_commit_ref
+                                .clone()
+                                .unwrap()
+                        );
+                        // Copy only the source's actual immutable originals.
+                        // Local surrogate PKs are remapped; no anchor, head,
+                        // membership, grant or observation marker is changed.
+                        let archive_basis = || async {
+                            #[derive(diesel::QueryableByName)]
+                            struct Row {
+                                #[diesel(sql_type=Jsonb)]
+                                value: serde_json::Value,
+                            }
+                            let mut conn = archived.pool.get().await.unwrap();
+                            diesel::sql_query("SELECT jsonb_build_object('anchor',(SELECT to_jsonb(a) FROM replica_stream_anchors a WHERE a.realm_id=$1 AND a.join_commit_id=$2),'head',(SELECT c.commit_json FROM realm_commits c WHERE c.realm_id=$1 AND c.stream_ref=$3 ORDER BY c.stream_position DESC LIMIT 1),'members',(SELECT jsonb_agg(to_jsonb(m) ORDER BY m.member_id) FROM circle_member_state_current_states m WHERE m.realm_id=$1 AND m.circle_id=$4),'observations',(SELECT jsonb_agg(to_jsonb(r) ORDER BY r.selector::text) FROM replica_authorization_rows r WHERE r.realm_id=$1),'cuts',(SELECT jsonb_agg(to_jsonb(h) ORDER BY h.source_stream_ref::text) FROM replica_authorization_cuts h WHERE h.realm_id=$1)) AS value")
+                                .bind::<Text,_>(realm.as_str()).bind::<Text,_>(request.authority_commit.commit.commit_id.as_str()).bind::<Jsonb,_>(serde_json::json!(stream)).bind::<Text,_>(circle.as_str())
+                                .get_result::<Row>(&mut conn).await.unwrap().value
+                        };
+                        let untouched = archive_basis().await;
+                        let mut conn = archived.pool.get().await.unwrap();
+                        assert_eq!(diesel::sql_query("WITH copied AS (INSERT INTO canonical_events(id,digest_suite,digest,actor_id,realm_id,realm_pk,scope_ref,kind,schema_id,canonical_bytes,envelope,state,received_at,committed_at,rejection_reason) SELECT e.id,e.digest_suite,e.digest,e.actor_id,e.realm_id,(SELECT pk FROM canonical_realms WHERE wire_id=e.realm_id),e.scope_ref,e.kind,e.schema_id,e.canonical_bytes,e.envelope,e.state,e.received_at,e.committed_at,e.rejection_reason FROM jsonb_populate_record(NULL::canonical_events,$1) e RETURNING pk) INSERT INTO realm_commits(commit_id,realm_id,stream_key,stream_ref,stream_position,previous_commit_ref,event_pk,governance_generation,commit_json,committed_at) SELECT c.commit_id,c.realm_id,c.stream_key,c.stream_ref,c.stream_position,c.previous_commit_ref,copied.pk,c.governance_generation,c.commit_json,c.committed_at FROM jsonb_populate_record(NULL::realm_commits,$2) c CROSS JOIN copied")
+                            .bind::<Jsonb,_>(&original.event_row).bind::<Jsonb,_>(&original.commit_row).execute(&mut conn).await.unwrap(),1);
+                        drop(conn);
+                        assert_eq!(
+                            archive_basis().await,
+                            untouched,
+                            "archival precondition cannot alter the interval or any current proof"
+                        );
+                        assert_eq!(
+                            archived.replica_anchor_for_stream(&stream).await.unwrap(),
+                            Some(interval.clone())
+                        );
+                        let held = archived
+                            .committed_event(&old_event.event_id)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(held.event, old_event);
+                        assert_eq!(held.commit, old_commit);
+                        let mut conn = archived.pool.get().await.unwrap();
+                        assert_eq!(diesel::sql_query("DELETE FROM replica_authorization_rows WHERE realm_id=$1 AND selector=jsonb_build_object('kind','circle_member_state','circle_id',$2::text,'member_actor_id',$3::jsonb)")
+                            .bind::<Text,_>(realm.as_str()).bind::<Text,_>(circle.as_str()).bind::<Jsonb,_>(serde_json::json!(remote)).execute(&mut conn).await.unwrap(),1);
+                        drop(conn);
+                        let before = governance_gate_footprint(&archived.pool).await;
+                        assert_code(
+                            &archived
+                                .install_committed_replica(&incoming)
+                                .await
+                                .unwrap_err(),
+                            ConflictCode::TemporarilyUnavailable,
+                        );
+                        assert_eq!(
+                            governance_gate_footprint(&archived.pool).await,
+                            before,
+                            "old archive without a qualified observation in this interval cannot terminate"
+                        );
+                        // Restore the actual previously issued same-cut material,
+                        // never a hand-written UUID or fabricated old revision.
+                        archived.install_replica_anchor(&install).await.unwrap();
+                        remove_metadata().await;
+                        assert_eq!(
+                            archived.install_committed_replica(&incoming).await.unwrap(),
+                            CommittedReplicaOutcome::Stored
+                        );
+                        assert_eq!(
+                            archived.replica_anchor_for_stream(&stream).await.unwrap(),
+                            Some(interval)
+                        );
+                        assert!(matches!(
+                            archived
+                                .scan_stream_for_account(
+                                    &scan,
+                                    remote.as_account_id().unwrap(),
+                                    &member_station()
+                                )
+                                .await
+                                .unwrap(),
+                            coland_storage::AccountStreamScan::Unproved(
+                                "the caller has no held Circle join"
+                            )
+                        ));
+                        let rejoin =
+                            circle_transition(&leave.authority_commit, "join", Some("leave"));
+                        let rejoin =
+                            heap_future(|| ordinary_realm::source_request(&pool, rejoin)).await;
+                        uow.commit_event(rejoin.clone()).await.unwrap();
+                        let before = governance_gate_footprint(&archived.pool).await;
+                        assert!(
+                            archived
+                                .install_committed_replica(&replica(&unit, &rejoin, false))
+                                .await
+                                .is_err()
+                        );
+                        assert_eq!(
+                            governance_gate_footprint(&archived.pool).await,
+                            before,
+                            "the historical terminal exception grants no ordinary successor authority"
+                        );
+                        return;
+                    }
                     let fresh = governor
                         .member_station_bootstrap_material(
                             &realm,

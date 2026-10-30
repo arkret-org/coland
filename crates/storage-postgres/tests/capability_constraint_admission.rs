@@ -682,6 +682,55 @@ async fn an_admission_waiting_on_the_realm_lock_observes_a_concurrent_revocation
 }
 
 #[tokio::test]
+async fn grant_admission_requires_the_registered_strand_field_allowance_without_writes() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let member = local(&pool, "required-field-grantee").await;
+    let discussion = discussion(&pool, "required-field-admission", &member).await;
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+
+    for constraints in [
+        serde_json::json!([]),
+        serde_json::json!([{
+            "constraint_kind":"field_access", "effect":"allow",
+            "allowed_write_fields":[]
+        }]),
+        serde_json::json!([{
+            "constraint_kind":"field_access", "effect":"allow",
+            "applies_to_actions":["ak.morph.update"],
+            "allowed_write_fields":["content", "encrypted_content"]
+        }]),
+    ] {
+        let candidate = grant(
+            &pool,
+            &discussion,
+            &discussion.head.authority_commit,
+            &member,
+            &["ak.strand.update", "ak.morph.update"],
+            constraints,
+        )
+        .await;
+        let before = durable_rows(&pool).await;
+        assert_refused(&pool, &uow, candidate, ConflictCode::FailedPrecondition).await;
+        assert_eq!(durable_rows(&pool).await, before);
+    }
+
+    let permission = grant(
+        &pool,
+        &discussion,
+        &discussion.head.authority_commit,
+        &member,
+        &["ak.strand.update"],
+        serde_json::json!([{
+            "constraint_kind":"field_access", "effect":"allow",
+            "allowed_write_fields":["content", "encrypted_content"]
+        }]),
+    )
+    .await;
+    uow.commit_event(permission).await.unwrap();
+}
+
+#[tokio::test]
 async fn strand_patch_exact_resource_and_field_grant_are_decided_at_the_pg_cut() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();

@@ -1735,14 +1735,13 @@ async fn acquire_remote_watch_delivery(
                         // stream. A later accepted parent revision ends this
                         // exact older parent-bound Circle membership.
                         revoked = true;
-                    } else if revision.stream_position == bound.stream_position {
-                        if revision.commit_id != bound.commit_id
-                            || parent.membership != arkret_wire::MembershipState::Join
-                        {
-                            return Err(unavailable(
-                                "observed parent conflicts with the Circle witness binding",
-                            ));
-                        }
+                    } else if revision.stream_position == bound.stream_position
+                        && (revision.commit_id != bound.commit_id
+                            || parent.membership != arkret_wire::MembershipState::Join)
+                    {
+                        return Err(unavailable(
+                            "observed parent conflicts with the Circle witness binding",
+                        ));
                     }
                     // An older local parent (including an old leave before
                     // the signed rejoin) is unknown, not observed withdrawal.

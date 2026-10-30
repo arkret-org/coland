@@ -252,7 +252,7 @@ async fn list_circles(
         .authority_commits()
         .circle_reads_for_actor(&realm_id, &actor)
         .await
-        .map_err(|error| circle_submission_error(error.into()))?;
+        .map_err(circle_submission_error)?;
     json_ok(CircleList { realm_id, circles })
 }
 
@@ -279,7 +279,7 @@ async fn get_circle(
         .authority_commits()
         .circle_read_for_actor(&id, &actor)
         .await
-        .map_err(|error| circle_submission_error(error.into()))?
+        .map_err(circle_submission_error)?
         .ok_or_else(|| AppError::not_found("circle not found"))?;
     json_ok(read)
 }

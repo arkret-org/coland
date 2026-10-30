@@ -143,6 +143,52 @@ fn assert_bootstrap_join_floor(
 
 const MEMBER_STATION: &str = "ak:did_core:web:member-station.example";
 
+/// Refresh the fixture's held stream from the governor's actual current cut.
+/// This uses the existing trusted-caller PG snapshot shape, not an HTTP proof.
+async fn refresh_qualified_member_stream(
+    governor: &PgAuthorityCommitStore,
+    member: &PgAuthorityCommitStore,
+    realm: &arkret_wire::RealmId,
+    account: &arkret_wire::AccountId,
+    opening: &arkret_wire::RealmCommit,
+    expected_head: &arkret_wire::RealmCommit,
+) {
+    assert_eq!(opening.stream_ref, expected_head.stream_ref);
+    let material = governor
+        .member_station_bootstrap_material(realm, account, &opening.commit_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot_head = material
+        .visible_stream_heads
+        .iter()
+        .find(|head| head.stream_ref == opening.stream_ref)
+        .unwrap()
+        .clone();
+    assert_eq!(
+        snapshot_head,
+        arkret_wire::CommitStreamHead {
+            stream_ref: expected_head.stream_ref.clone(),
+            commit_id: expected_head.commit_id.clone(),
+            stream_position: expected_head.stream_position,
+        }
+    );
+    let snapshot = bootstrap_snapshot_from_material(&material);
+    assert_bootstrap_join_floor(&snapshot, opening);
+    member
+        .install_replica_anchor(&ReplicaAnchorInstall {
+            realm_id: realm.clone(),
+            join_commit_id: opening.commit_id.clone(),
+            governance_generation: material.governance_generation,
+            snapshot_head,
+            visible_stream_heads: material.visible_stream_heads,
+            current_state_entries: material.current_state_entries,
+            verified_snapshot: snapshot,
+        })
+        .await
+        .unwrap();
+}
+
 fn member_station() -> arkret_wire::DidCoreId {
     arkret_wire::DidCoreId::new(MEMBER_STATION).unwrap()
 }
@@ -6462,7 +6508,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             // Future layout, including when the same-H case takes no control.
             heap_future(|| async {
                 match control {
-                CircleCoverageControl::MissingMember => {
+                CircleCoverageControl::MissingMember => heap_future(|| async {
                     let mut conn = member.pool.get().await.unwrap();
                     assert_eq!(diesel::sql_query("DELETE FROM circle_member_state_current_states WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3")
                         .bind::<Text,_>(realm.as_str()).bind::<Text,_>(circle.as_str()).bind::<Text,_>(remote.to_string()).execute(&mut conn).await.unwrap(), 1);
@@ -6487,8 +6533,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                             .is_err()
                     );
                     assert_eq!(governance_gate_footprint(&member.pool).await, before);
-                }
-                CircleCoverageControl::UnknownOpening | CircleCoverageControl::TerminalReplay => {
+                })
+                .await,
+                CircleCoverageControl::UnknownOpening | CircleCoverageControl::TerminalReplay => heap_future(|| async {
                     let mut conn = member.pool.get().await.unwrap();
                     assert_eq!(
                         diesel::sql_query(
@@ -6589,8 +6636,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                         );
                         assert_eq!(governance_gate_footprint(&member.pool).await, before);
                     }
-                }
-                CircleCoverageControl::HigherCut => {
+                })
+                .await,
+                CircleCoverageControl::HigherCut => heap_future(|| async {
                     let mut event = ordinary_realm::event_for_actor(
                         arkret_wire::EventKind::RealmProfile,
                         arkret_wire::ScopeRef::Realm {
@@ -6683,9 +6731,10 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                             .unwrap(),
                         coland_storage::AccountStreamScan::Page(_)
                     ));
-                }
+                })
+                .await,
                 CircleCoverageControl::OtherHostedMember
-                | CircleCoverageControl::HistoricalArchive => {
+                | CircleCoverageControl::HistoricalArchive => heap_future(|| async {
                     // This separate existential-basis control really admits B;
                     // the original same-H nondisclosure case above does not.
                     let mut permission_event = ordinary_realm::event_for_actor(
@@ -7072,8 +7121,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                             .unwrap(),
                         coland_storage::AccountStreamScan::Page(_)
                     ));
-                }
-                CircleCoverageControl::SameCutReplay | CircleCoverageControl::WrongEndpoint => {
+                })
+                .await,
+                CircleCoverageControl::SameCutReplay | CircleCoverageControl::WrongEndpoint => heap_future(|| async {
                     let creator_parent =
                         ordinary_realm::parent_membership_revision(&pool, &realm, &creator).await;
                     let mut event = ordinary_realm::event_for_actor(
@@ -7172,13 +7222,28 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                         (CommittedReplicaOutcome::Stored, false)
                     );
                     assert_eq!(governance_gate_footprint(&member.pool).await, before);
-                }
+                })
+                .await,
                 }
             })
             .await;
         }
         return;
     }
+    // The Circle snapshot can expose a newer Realm cut without advancing its
+    // separate transport anchor. Qualify that exact real Realm head before
+    // receiving the first ordinary Circle successor.
+    heap_future(|| {
+        refresh_qualified_member_stream(
+            &governor,
+            &member,
+            &realm,
+            remote.as_account_id().unwrap(),
+            &join.authority_commit.commit,
+            &grant.authority_commit.commit,
+        )
+    })
+    .await;
     // The Circle's creator joins as well, then writes a plaintext Message.
     // Alice's Station holds the Circle stream but is not in the Realm's
     // plaintext-visible service set, so it gets only the Message Commit via
@@ -7246,6 +7311,19 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         commit_id: scoped_grant.authority_commit.commit.commit_id.clone(),
         stream_position: scoped_grant.authority_commit.commit.stream_position,
     };
+    // Grant changes conservatively invalidate the replica's current cut.
+    // Actual governor material, not the held chain alone, requalifies it.
+    heap_future(|| {
+        refresh_qualified_member_stream(
+            &governor,
+            &member,
+            &realm,
+            remote.as_account_id().unwrap(),
+            &circle_join.authority_commit.commit,
+            &scoped_grant.authority_commit.commit,
+        )
+    })
+    .await;
     let scoped_revoke = circle_event(
         &scoped_grant.authority_commit,
         arkret_wire::EventKind::CapabilityRevoke,
@@ -7267,6 +7345,17 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             .unwrap(),
         CommittedReplicaOutcome::Stored
     );
+    heap_future(|| {
+        refresh_qualified_member_stream(
+            &governor,
+            &member,
+            &realm,
+            remote.as_account_id().unwrap(),
+            &circle_join.authority_commit.commit,
+            &scoped_revoke.authority_commit.commit,
+        )
+    })
+    .await;
     let strand = circle_event(
         &scoped_revoke.authority_commit,
         arkret_wire::EventKind::StrandCreate,

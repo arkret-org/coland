@@ -4230,7 +4230,10 @@ mod operation_fact_tests {
         let mut child:CapabilityGrant=serde_json::from_value(json!({"id":child_id,"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":service,"subject":actor,"actions":["ak.message.create","ak.event.read"],"resources":[{"kind":"realm","realm_id":realm}],"constraints":[{"constraint_kind":"temporal","effect":"allow","applies_to_actions":["ak.event.read"],"expires_at":"2026-09-22T00:00:00.000Z"}],"issuer_authority_refs":[{"kind":"grant","grant_id":parent_id}],"authority_depth":2,"authority_root_refs":[root_ref],"issued_at":"2026-09-21T00:00:00.000Z","status":"active"})).unwrap();
         let target = WireResourceSelector::realm(realm.clone());
         let at = "2026-09-23T00:00:00Z".parse().unwrap();
-        assert!(!grant_is_active_at(&child, at));
+        assert!(
+            grant_is_active_at(&child, at),
+            "an expired action-specific window does not expire the whole grant"
+        );
         let mut cut = RealmAuthorizationCut {
             realm_id: realm.clone(),
             actor,
@@ -4260,6 +4263,22 @@ mod operation_fact_tests {
             ),
             GrantEvaluation::Allowed(_)
         ));
+        cut.native_operation = Some((CapabilityActionId::EventRead, target.clone()));
+        assert_eq!(
+            cut.effective_grants(at).count(),
+            0,
+            "the expired EventRead window closes that exact native action at the same cut"
+        );
+        assert!(matches!(
+            cut.evaluate(
+                &[CapabilityActionId::EVENT_READ],
+                &target,
+                &OperationFacts::default(),
+                at
+            ),
+            GrantEvaluation::Unnamed
+        ));
+        cut.native_operation = Some((CapabilityActionId::MessageCreate, target.clone()));
         let circle_target = WireResourceSelector::circle(
             cut.realm_id.clone(),
             arkret_wire::CircleId::from_event_id(&event(0x74)),

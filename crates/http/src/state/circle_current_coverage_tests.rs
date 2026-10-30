@@ -831,6 +831,28 @@ async fn refused_fresh_bootstrap_still_consumes_actual_withheld_prefix_and_exact
         let predecessor = Box::pin(scene.owner_circle_join()).await;
         let leave = Box::pin(scene.alice_leave(&predecessor.authority_commit)).await;
         let bob = Box::pin(scene.bob_realm_snapshot()).await;
+        // Bob's same head snapshot preserves Alice's independently qualified
+        // Circle current. Explicitly lose only its derived metadata before
+        // testing unknown coverage; retained accepted originals stay intact.
+        assert_eq!(
+            scene
+                .member()
+                .replica_stream_has_hosted_member(&scene.stream(), &scene.origin.service_core_id())
+                .await
+                .unwrap(),
+            Some(true)
+        );
+        Box::pin(scene.remove_only_derived_circle_metadata()).await;
+        let unknown = scene
+            .member()
+            .replica_stream_has_hosted_member(&scene.stream(), &scene.origin.service_core_id())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            unknown.conflict_code(),
+            Some(coland_storage::ConflictCode::TemporarilyUnavailable),
+            "retained accepted membership with missing current is unknown, not an ended interval: {unknown:?}"
+        );
         let scan = StreamScanRequestBody { realm_id:leave.authority_commit.event.realm_id.clone(),
             stream_ref:scene.stream(),direction:StreamScanDirection::After(Some(scene.circle_join.authority_commit.commit.stream_position)),limit:128 };
         let coland_storage::PeerStreamScan::Page(page) = scene.source().scan_stream_for_peer(

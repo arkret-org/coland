@@ -267,6 +267,9 @@ async fn owner_request(
     request.authority_commit.commit.producer_signer_fact_digest = Some(fact.digest().unwrap());
     request.authority_commit.producer_signer_fact = Some(fact.into());
     seal_service_commit(&mut request.authority_commit.commit, state);
+    request.realm_fanout_source = Some(EventAdmissionSubmission::new(
+        request.authority_commit.event.clone(),
+    ));
     admit_fixture_event(pool, request.clone()).await;
     request
 }

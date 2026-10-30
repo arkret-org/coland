@@ -5956,25 +5956,29 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         .bind::<Text,_>(ordinary_realm::station().as_str()).execute(&mut *connection).await.unwrap();
     drop(connection);
     let creator = arkret_wire::ActorId::account(
-        ordinary_realm::human_profile::admit_without_profile(
-            &pool,
-            &ordinary_realm::station(),
-            "circle-bootstrap-creator",
-        )
+        heap_future(|| async {
+            ordinary_realm::human_profile::admit_without_profile(
+                &pool,
+                &ordinary_realm::station(),
+                "circle-bootstrap-creator",
+            )
+            .await
+        })
         .await,
     );
-    let unit = ordinary_realm::source_bootstrap(
-        &pool,
-        ordinary_realm::bootstrap_unit_for_account(
-            &uuid::Uuid::now_v7().to_string(),
-            creator.as_account_id().unwrap(),
-            &did,
-        ),
-    )
+    let unit = heap_future(|| {
+        ordinary_realm::source_bootstrap(
+            &pool,
+            ordinary_realm::bootstrap_unit_for_account(
+                &uuid::Uuid::now_v7().to_string(),
+                creator.as_account_id().unwrap(),
+                &did,
+            ),
+        )
+    })
     .await;
     let at = unit.transactions.last().unwrap().commit.committed_at;
-    governor
-        .admit_ordinary_realm_bootstrap_unit(&unit, at)
+    heap_future(|| governor.admit_ordinary_realm_bootstrap_unit(&unit, at))
         .await
         .unwrap();
     let realm = unit.transactions[0].event.realm_id.clone();
@@ -5985,7 +5989,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         &remote,
         "join",
     );
-    uow.commit_event(join.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(join.clone()))
+        .await
+        .unwrap();
     assert_eq!(
         member
             .install_committed_replica(&replica(&unit, &join, true))
@@ -6044,7 +6050,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
     let other_join = if check_other_account_snapshot {
         let other = remote_member("circle-realm-only-reader");
         let request = membership_request(&join.authority_commit, other.clone(), &other, "join");
-        uow.commit_event(request.clone()).await.unwrap();
+        heap_future(|| uow.commit_event(request.clone()))
+            .await
+            .unwrap();
         assert_eq!(
             member
                 .install_committed_replica(&replica(&unit, &request, false))
@@ -6071,7 +6079,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         }}),
         at,
     )))).await;
-    uow.commit_event(create.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(create.clone()))
+        .await
+        .unwrap();
     assert!(
         fanout_rows(&pool, &create).await.is_empty(),
         "parent Realm membership does not disclose a Circle object"
@@ -6104,7 +6114,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         )
     })
     .await;
-    uow.commit_event(grant.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(grant.clone()))
+        .await
+        .unwrap();
     let stream = arkret_wire::CommitStreamRef::Circle {
         realm_id: realm.clone(),
         circle_id: circle.clone(),
@@ -6137,7 +6149,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         sourced(request)
     };
     let circle_join = circle_transition(&create.authority_commit, "join", None);
-    uow.commit_event(circle_join.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(circle_join.clone()))
+        .await
+        .unwrap();
     let join_rows = fanout_rows(&pool, &circle_join).await;
     assert_eq!(join_rows.len(), 1);
     let witnesses: Vec<RealmFanoutAuthorityWitness> =
@@ -6487,11 +6501,15 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                     drop(conn);
                     let leave =
                         circle_transition(&circle_join.authority_commit, "leave", Some("join"));
-                    uow.commit_event(leave.clone()).await.unwrap();
+                    heap_future(|| uow.commit_event(leave.clone()))
+                        .await
+                        .unwrap();
                     if matches!(control, CircleCoverageControl::UnknownOpening) {
                         let rejoin =
                             circle_transition(&leave.authority_commit, "join", Some("leave"));
-                        uow.commit_event(rejoin.clone()).await.unwrap();
+                        heap_future(|| uow.commit_event(rejoin.clone()))
+                            .await
+                            .unwrap();
                         let before = governance_gate_footprint(&member.pool).await;
                         let error = member
                             .install_committed_replica(&replica(&unit, &rejoin, true))
@@ -6556,7 +6574,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                         ));
                         let rejoin =
                             circle_transition(&leave.authority_commit, "join", Some("leave"));
-                        uow.commit_event(rejoin.clone()).await.unwrap();
+                        heap_future(|| uow.commit_event(rejoin.clone()))
+                            .await
+                            .unwrap();
                         let before = governance_gate_footprint(&member.pool).await;
                         assert!(
                             member
@@ -6585,7 +6605,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                     let request =
                         heap_future(|| ordinary_realm::source_request(&pool, sourced(request)))
                             .await;
-                    uow.commit_event(request.clone()).await.unwrap();
+                    heap_future(|| uow.commit_event(request.clone()))
+                        .await
+                        .unwrap();
                     let fresh = governor
                         .member_station_bootstrap_material(
                             &realm,
@@ -6686,7 +6708,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                     let permission =
                         heap_future(|| ordinary_realm::source_request(&pool, sourced(permission)))
                             .await;
-                    uow.commit_event(permission).await.unwrap();
+                    heap_future(|| uow.commit_event(permission)).await.unwrap();
                     let mut event = ordinary_realm::event_for_actor(
                         arkret_wire::EventKind::CircleMemberState,
                         scope.clone(),
@@ -6702,7 +6724,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                     let request =
                         heap_future(|| ordinary_realm::source_request(&pool, sourced(request)))
                             .await;
-                    uow.commit_event(request.clone()).await.unwrap();
+                    heap_future(|| uow.commit_event(request.clone()))
+                        .await
+                        .unwrap();
                     if matches!(control, CircleCoverageControl::HistoricalArchive) {
                         // This is explicitly a trusted archival-state storage
                         // control, not a reachable HTTP history-backfill flow.
@@ -6807,7 +6831,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                             circle_transition(&request.authority_commit, "leave", Some("join"));
                         let leave =
                             heap_future(|| ordinary_realm::source_request(&pool, leave)).await;
-                        uow.commit_event(leave.clone()).await.unwrap();
+                        heap_future(|| uow.commit_event(leave.clone()))
+                            .await
+                            .unwrap();
                         let incoming = replica(&unit, &leave, false);
                         let before = governance_gate_footprint(&archived.pool).await;
                         assert_code(
@@ -6939,7 +6965,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                             circle_transition(&leave.authority_commit, "join", Some("leave"));
                         let rejoin =
                             heap_future(|| ordinary_realm::source_request(&pool, rejoin)).await;
-                        uow.commit_event(rejoin.clone()).await.unwrap();
+                        heap_future(|| uow.commit_event(rejoin.clone()))
+                            .await
+                            .unwrap();
                         let before = governance_gate_footprint(&archived.pool).await;
                         assert!(
                             archived
@@ -7058,7 +7086,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                     next.authority_commit.commit.stream_ref = stream.clone();
                     let next = sourced(next);
                     let next = heap_future(|| ordinary_realm::source_request(&pool, next)).await;
-                    uow.commit_event(next.clone()).await.unwrap();
+                    heap_future(|| uow.commit_event(next.clone()))
+                        .await
+                        .unwrap();
                     let fresh = governor
                         .member_station_bootstrap_material(
                             &realm,
@@ -7166,7 +7196,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             "parent_membership_revision":creator_parent,"expected_membership":null}),
     );
     let creator_join = heap_future(|| ordinary_realm::source_request(&pool, creator_join)).await;
-    uow.commit_event(creator_join.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(creator_join.clone()))
+        .await
+        .unwrap();
     assert_eq!(
         member
             .install_committed_replica(&replica(&unit, &creator_join, false))
@@ -7188,7 +7220,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         }}),
     );
     let scoped_grant = heap_future(|| ordinary_realm::source_request(&pool, scoped_grant)).await;
-    uow.commit_event(scoped_grant.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(scoped_grant.clone()))
+        .await
+        .unwrap();
     let grant_rows = fanout_rows(&pool, &scoped_grant).await;
     assert_eq!(grant_rows.len(), 1);
     let grant_witnesses: Vec<RealmFanoutAuthorityWitness> =
@@ -7213,7 +7247,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         serde_json::json!({"grant_id":grant_id,"expected_revision":grant_revision,"reason":"scoped_source_closed"}),
     );
     let scoped_revoke = heap_future(|| ordinary_realm::source_request(&pool, scoped_revoke)).await;
-    uow.commit_event(scoped_revoke.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(scoped_revoke.clone()))
+        .await
+        .unwrap();
     let revoke_rows = fanout_rows(&pool, &scoped_revoke).await;
     assert_eq!(revoke_rows.len(), 1);
     let revoke_witnesses: Vec<RealmFanoutAuthorityWitness> =
@@ -7236,7 +7272,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             "created_by":creator,"created_at":arkret_canonical::format_timestamp_canonical(at)}}),
     );
     let strand = heap_future(|| ordinary_realm::source_request(&pool, strand)).await;
-    uow.commit_event(strand.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(strand.clone()))
+        .await
+        .unwrap();
     assert_eq!(
         member
             .install_committed_replica(&replica(&unit, &strand, false))
@@ -7251,10 +7289,14 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         message_payload(&strand_id, "Circle plaintext stays at the governor"),
     );
     let message = heap_future(|| ordinary_realm::source_request(&pool, message)).await;
-    uow.commit_event(message.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(message.clone()))
+        .await
+        .unwrap();
     assert!(fanout_rows(&pool, &message).await.is_empty());
     let leave = circle_transition(&message.authority_commit, "leave", Some("join"));
-    uow.commit_event(leave.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(leave.clone()))
+        .await
+        .unwrap();
     assert_code(
         &member
             .install_committed_replica(&replica(&unit, &leave, false))

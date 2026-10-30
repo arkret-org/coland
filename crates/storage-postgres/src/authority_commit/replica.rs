@@ -1335,7 +1335,7 @@ pub(super) async fn install_committed_peer_replica_in_connection(
     .await?;
     let opening = matches!(&replica.role, CommittedReplicaRole::OpeningJoin { member_account_id }
         if member_account_id.station_id == replica.local_service_id);
-    let terminal = accepted_own_circle_cleanup_in_connection(conn, replica).await?
+    let terminal = accepted_own_circle_cleanup_for_role_in_connection(conn, replica).await?
         || held_own_circle_terminal_in_connection(conn, replica).await?
         || held_own_circle_terminal_replay_in_connection(conn, replica).await?;
     if !opening
@@ -1712,7 +1712,7 @@ async fn store_held_successor(
     let commit = &replica.commit;
     let anchored = anchored_head(anchor)?;
     require_direct_successor(head, commit)?;
-    let terminal = accepted_own_circle_cleanup_in_connection(conn, replica).await?
+    let terminal = accepted_own_circle_cleanup_for_role_in_connection(conn, replica).await?
         || held_own_circle_terminal_in_connection(conn, replica).await?;
     if !terminal
         && !hosts_joined_member(conn, &commit.stream_ref, &replica.local_service_id).await?
@@ -1956,6 +1956,26 @@ async fn held_own_circle_terminal_replay_in_connection(
         .bind::<Text,_>(commit.commit_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(commit).map_err(invalid)?)
         .bind::<Jsonb,_>(serde_json::to_value(event).map_err(invalid)?).bind::<Text,_>(replica.local_service_id.as_str())
         .get_result::<Eligible>(&mut *conn).await?.present)
+}
+
+/// An explicit cleanup role carries no ordinary replication basis. Prove its
+/// original exception before consulting fallible current/hosted-member guards.
+async fn accepted_own_circle_cleanup_for_role_in_connection(
+    conn: &mut AsyncPgConnection,
+    replica: &CommittedReplica,
+) -> Result<bool, PgTransactionError> {
+    let accepted = accepted_own_circle_cleanup_in_connection(conn, replica).await?;
+    if matches!(
+        replica.role,
+        CommittedReplicaRole::AcceptedOwnCircleLeave { .. }
+    ) && !accepted
+    {
+        return Err(conflict(
+            ConflictCode::CapabilityDenied,
+            "the exact accepted own Circle cleanup role is unproved",
+        ));
+    }
+    Ok(accepted)
 }
 
 /// The original self-submission may explicitly clear an old Circle join that

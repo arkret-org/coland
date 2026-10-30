@@ -195,7 +195,6 @@ pub(crate) async fn require_active_author_in_connection(
             "Circle source or Realm membership differs",
         ));
     }
-    require_member_current_in_connection(conn, realm_id, circle_id, &event.actor_id).await?;
     let active = sql_query(
         "SELECT EXISTS (SELECT 1 FROM circle_current_states circle \
          JOIN realm_commits cc ON cc.commit_id=circle.current_commit_id \
@@ -215,6 +214,7 @@ pub(crate) async fn require_active_author_in_connection(
             "circle_not_active",
         ));
     }
+    require_member_current_in_connection(conn, realm_id, circle_id, &event.actor_id).await?;
     let present = sql_query(
         "SELECT EXISTS (SELECT 1 FROM circle_current_states circle \
          JOIN realm_commits cc ON cc.commit_id=circle.current_commit_id \

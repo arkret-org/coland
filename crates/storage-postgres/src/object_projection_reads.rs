@@ -1277,8 +1277,9 @@ mod tests {
             .execute(&mut *conn)
             .await
             .unwrap();
+        // Corrupt the endpoint without violating the interval shape constraint.
         diesel::sql_query(
-            "UPDATE replica_authorization_cuts SET head_commit_id=$2 WHERE realm_id=$1",
+            "UPDATE replica_authorization_cuts SET head_commit_id=$2,circle_effect_base_commit_id=$2 WHERE realm_id=$1",
         )
         .bind::<Text, _>(realm.as_str())
         .bind::<Text, _>(RealmCommitId::from_digest([8; 32]).as_str())
@@ -1289,7 +1290,7 @@ mod tests {
             store.snapshot().await.is_err(),
             "equal-position evidence must bind the exact cut Commit"
         );
-        diesel::sql_query("UPDATE replica_authorization_cuts SET head_commit_id=$2,head_stream_position=2 WHERE realm_id=$1")
+        diesel::sql_query("UPDATE replica_authorization_cuts SET head_commit_id=$2,head_stream_position=2,circle_effect_base_commit_id=$2,circle_effect_base_stream_position=2 WHERE realm_id=$1")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(head.commit_id.as_str())
             .execute(&mut *conn).await.unwrap();
         assert!(

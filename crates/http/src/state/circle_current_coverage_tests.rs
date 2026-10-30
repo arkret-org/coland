@@ -244,7 +244,7 @@ async fn owner_request(
 ) -> coland_storage::EventCommitRequest {
     let at = previous.commit.committed_at + Duration::seconds(1);
     let mut event = historical_human::signed_ordinary_event(owner, previous, kind, payload, at);
-    if kind == EventKind::CircleMemberState {
+    if event.kind == EventKind::CircleMemberState {
         event.scope_ref = arkret_wire::ScopeRef::Circle {
             realm_id: previous.event.realm_id.clone(),
             circle_id: serde_json::from_value(event.payload["circle_id"].clone()).unwrap(),
@@ -495,7 +495,7 @@ impl LivePeer {
         let runtime = tokio::runtime::Handle::current();
         let worker = tokio::task::spawn_blocking(move || {
             listener.listener.set_nonblocking(true).unwrap();
-            while !end.load(Ordering::SeqCst) {
+            while !AtomicBool::load(end.as_ref(), Ordering::SeqCst) {
                 let socket = match listener.listener.accept() {
                     Ok((socket, _)) => socket,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {

@@ -99,6 +99,48 @@ fn bootstrap_snapshot(
     snapshot
 }
 
+/// Preserve the actual governor material's per-stream history floors. This
+/// remains the existing trusted-caller PG fixture, not a cryptographic proof.
+fn bootstrap_snapshot_from_material(
+    material: &coland_storage::RealmStateSnapshotMaterial,
+) -> arkret_wire::RealmStateSnapshot {
+    let mut snapshot = bootstrap_snapshot(
+        &material.realm_id,
+        material.governance_generation,
+        &material.visible_stream_heads,
+        &material.current_state_entries,
+    );
+    snapshot.retention_and_history_floor = material.retention_and_history_floor.clone();
+    let mut identity = serde_json::to_value(&snapshot).unwrap();
+    identity.as_object_mut().unwrap().remove("snapshot_id");
+    identity.as_object_mut().unwrap().remove("signature");
+    snapshot.snapshot_id = arkret_wire::RealmSnapshotId::from_digest(
+        arkret_canonical::sha256_bytes(arkret_canonical::canonical_json_bytes(&identity).unwrap()),
+    );
+    snapshot
+}
+
+fn assert_bootstrap_join_floor(
+    snapshot: &arkret_wire::RealmStateSnapshot,
+    join: &arkret_wire::RealmCommit,
+) {
+    let floors = snapshot
+        .retention_and_history_floor
+        .stream_floors
+        .iter()
+        .filter(|floor| floor.stream_ref == join.stream_ref)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        floors.len(),
+        1,
+        "the actual join stream has exactly one floor"
+    );
+    assert_eq!(
+        floors[0].oldest_position, join.stream_position,
+        "the bootstrap floor must equal this Account's exact accepted join"
+    );
+}
+
 const MEMBER_STATION: &str = "ak:did_core:web:member-station.example";
 
 fn member_station() -> arkret_wire::DidCoreId {
@@ -5858,6 +5900,11 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         .find(|h| matches!(h.stream_ref, arkret_wire::CommitStreamRef::Realm { .. }))
         .unwrap()
         .clone();
+    let exact_snapshot = check_other_account_snapshot.then(|| {
+        let snapshot = bootstrap_snapshot_from_material(&material);
+        assert_bootstrap_join_floor(&snapshot, &join.authority_commit.commit);
+        snapshot
+    });
     member
         .install_replica_anchor(&{
             let mut install = ReplicaAnchorInstall {
@@ -5876,6 +5923,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                 &install.visible_stream_heads,
                 &install.current_state_entries,
             );
+            if let Some(snapshot) = exact_snapshot {
+                install.verified_snapshot = snapshot;
+            }
             install
         })
         .await
@@ -6121,6 +6171,12 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         circle_head.commit_id,
         circle_join.authority_commit.commit.commit_id
     );
+    let exact_snapshot = check_other_account_snapshot.then(|| {
+        let snapshot = bootstrap_snapshot_from_material(&material);
+        assert_bootstrap_join_floor(&snapshot, &circle_join.authority_commit.commit);
+        assert_bootstrap_join_floor(&snapshot, &join.authority_commit.commit);
+        snapshot
+    });
     member
         .install_replica_anchor(&{
             let mut install = ReplicaAnchorInstall {
@@ -6139,6 +6195,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                 &install.visible_stream_heads,
                 &install.current_state_entries,
             );
+            if let Some(snapshot) = exact_snapshot {
+                install.verified_snapshot = snapshot;
+            }
             install
         })
         .await
@@ -6233,12 +6292,8 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         assert!(!before["circle"].is_null());
         assert!(!before["authorization"].is_null());
         let circle_anchor = member.replica_anchor_for_stream(&stream).await.unwrap();
-        let snapshot = bootstrap_snapshot(
-            &realm,
-            other_material.governance_generation,
-            &other_material.visible_stream_heads,
-            &other_material.current_state_entries,
-        );
+        let snapshot = bootstrap_snapshot_from_material(&other_material);
+        assert_bootstrap_join_floor(&snapshot, &other_join.authority_commit.commit);
         member
             .install_replica_anchor(&ReplicaAnchorInstall {
                 realm_id: realm.clone(),

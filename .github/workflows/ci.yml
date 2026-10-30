@@ -514,3 +514,57 @@ jobs:
           PY
           python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact
         working-directory: arkret-org/coland
+
+      - name: Test Storage action windows and bounded current reads
+        run: |
+          set -euo pipefail
+          selectors=(
+            'realm_authorization_cut::operation_fact_tests::native_message_cut_uses_action_windows_and_keeps_global_refusals'
+            'read_capacity_tests::typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_thousand_realms'
+          )
+          for selector in "${selectors[@]}"; do
+            test_args=(cargo test --locked -p coland-storage-postgres --lib "$selector")
+            list_file="$RUNNER_TEMP/coland-storage-circle-lib-fast-tests.txt"
+            python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact --list > "$list_file"
+            python - "$list_file" "$selector" <<'PY'
+          import pathlib
+          import sys
+
+          lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          tests = [line for line in lines if line.endswith(": test")]
+          if tests != [f"{sys.argv[2]}: test"]:
+              raise SystemExit("Storage library selector must select exactly its real regression")
+          print(f"Selected Storage regression {sys.argv[2]}")
+          PY
+            python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact
+          done
+        working-directory: arkret-org/coland
+
+      - name: Test real Circle grants and same-cut account snapshots
+        run: |
+          set -euo pipefail
+          for target in circle_convenience_reads realm_membership_fanout; do
+            case "$target" in
+              circle_convenience_reads)
+                selector='durable_circle_directory_and_member_details_follow_accepted_current'
+                ;;
+              realm_membership_fanout)
+                selector='account_scoped_realm_snapshot_preserves_another_hosted_accounts_circle_at_the_same_cut'
+                ;;
+            esac
+            test_args=(cargo test --locked -p coland-storage-postgres --test "$target" "$selector")
+            list_file="$RUNNER_TEMP/coland-storage-circle-integration-fast-tests.txt"
+            python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact --list > "$list_file"
+            python - "$list_file" "$selector" <<'PY'
+          import pathlib
+          import sys
+
+          lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          tests = [line for line in lines if line.endswith(": test")]
+          if tests != [f"{sys.argv[2]}: test"]:
+              raise SystemExit("Storage integration selector must select exactly its real regression")
+          print(f"Selected Storage regression {sys.argv[2]}")
+          PY
+            python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact
+          done
+        working-directory: arkret-org/coland

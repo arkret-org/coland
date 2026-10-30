@@ -234,6 +234,7 @@ async fn check_native_current_requires_create_history(
 /// snapshot. The member never receives the earlier CircleCreate original.
 async fn check_remote_snapshot_without_create_history(visibility: &str) {
     use arkret_models_collaboration::governance::circle::CircleMembership;
+    use diesel_async::RunQueryDsl;
 
     let mut origin_config = coland_test_support::app_config();
     origin_config.public_base_url = "https://circle-convenience-member.example".into();
@@ -316,6 +317,44 @@ async fn check_remote_snapshot_without_create_history(visibility: &str) {
     Box::pin(member_store.install_replica_anchor(&realm_anchor))
         .await
         .unwrap();
+
+    // Public Circle entry still needs the caller's own, exactly scoped action
+    // (circle.md section 9). Parent Realm membership alone is not that grant.
+    #[derive(diesel::QueryableByName)]
+    struct RootRef {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        authority_event_ref: String,
+    }
+    let mut conn = governor_pool.get().await.unwrap();
+    let root = diesel::sql_query(
+        "SELECT authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1",
+    )
+    .bind::<diesel::sql_types::Text, _>(realm.as_str())
+    .get_result::<RootRef>(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let mut grant = ordinary_realm::next_request_for_actor(
+        &realm_join.authority_commit,
+        EventKind::CapabilityGrant,
+        last.event.actor_id.clone(),
+        serde_json::json!({"grant":{
+            "schema":"ak.schema.capability.v1","realm_id":realm,
+            "issuer_id":last.event.actor_id,"subject":actor,
+            "actions":["ak.circle.member.add"],
+            "resources":[{"kind":"circle","realm_id":realm,"circle_id":circle}],
+            "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,
+                "authority_event_ref":root.authority_event_ref,
+                "authority_generation":last.expected_authority.generation.to_string()}],
+            "issued_at":arkret_canonical::format_timestamp_canonical(at)
+        }}),
+        at,
+    );
+    grant.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
+        grant.authority_commit.event.clone(),
+    ));
+    let grant = Box::pin(ordinary_realm::source_request(&governor_pool, grant)).await;
+    Box::pin(uow.commit_event(grant)).await.unwrap();
 
     let parent = Box::pin(ordinary_realm::parent_membership_revision(
         &governor_pool,

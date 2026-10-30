@@ -6458,7 +6458,10 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             coland_storage::AccountStreamScan::Unproved("the caller has no held Circle join")
         ));
         if let Some(control) = control {
-            match control {
+            // Keep the large optional control matrix out of the shared case's
+            // Future layout, including when the same-H case takes no control.
+            heap_future(|| async {
+                match control {
                 CircleCoverageControl::MissingMember => {
                     let mut conn = member.pool.get().await.unwrap();
                     assert_eq!(diesel::sql_query("DELETE FROM circle_member_state_current_states WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3")
@@ -7170,7 +7173,9 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                     );
                     assert_eq!(governance_gate_footprint(&member.pool).await, before);
                 }
-            }
+                }
+            })
+            .await;
         }
         return;
     }

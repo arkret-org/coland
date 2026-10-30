@@ -52,7 +52,7 @@ async fn admitted_circle_template() -> Value {
         EventKind::CircleCreate,
         actor.clone(),
         serde_json::json!({"object":{"schema":"ak.schema.circle.v1","realm_id":realm,
-            "title":"Capacity template","display":{"short_name":"capacity-template","color_token":"blue","symbol":{"glyph":"lock"}},
+            "title":"Capacity template","display":{"short_name":"Capacity-template","color_token":"blue","symbol":{"glyph":"lock"}},
             "directory_visibility":"realm_members","join_rule":"public","history_access":"since_join","state":"active",
             "created_by":actor,"created_at":arkret_canonical::format_timestamp_canonical(at)}}),
         at,

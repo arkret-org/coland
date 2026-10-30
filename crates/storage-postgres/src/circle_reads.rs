@@ -95,16 +95,7 @@ fn covering_event(
 
 fn verified_current_sql(alias: &str, selector: &str) -> String {
     format!(
-        "EXISTS(SELECT 1 FROM replica_authorization_rows v \
-         JOIN replica_authorization_cuts h ON h.realm_id=v.realm_id \
-           AND h.source_stream_ref=v.source_stream_ref \
-         WHERE v.realm_id={alias}.realm_id AND v.selector={selector} \
-           AND v.source_stream_ref={alias}.source_stream_ref \
-           AND v.current_commit_id={alias}.current_commit_id \
-           AND v.current_stream_position={alias}.current_stream_position \
-           AND v.value={alias}.value AND v.current_stream_position<=h.head_stream_position \
-           AND (v.current_stream_position<h.head_stream_position \
-                OR v.current_commit_id=h.head_commit_id)) AS verified_current"
+        "circle_current_row_proved({alias}.realm_id,{selector},{alias}.source_stream_ref,{alias}.current_commit_id,{alias}.current_stream_position,{alias}.value) AS verified_current"
     )
 }
 
@@ -114,6 +105,8 @@ async fn views(
     circle_id: Option<&CircleId>,
     actor: &ActorId,
 ) -> PersistenceResult<Vec<CircleReadView>> {
+    crate::circle_current_states::require_actor_target_in_connection(conn, realm, circle_id, actor)
+        .await?;
     let circles = diesel::sql_query(format!(
         "SELECT r.value,e.envelope,c.commit_json,r.circle_id,{} FROM circle_current_states r \
          LEFT JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id \
@@ -145,6 +138,27 @@ async fn views(
         if terminal.present {
             continue;
         }
+        if !crate::authority_commit::accepted_current_member_joined_in_connection(
+            conn,
+            &circle.realm_id,
+            actor,
+        )
+        .await?
+        {
+            continue;
+        }
+        let candidate = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value)) AS present")
+            .bind::<Text,_>(circle.realm_id.as_str()).bind::<Text,_>(id.as_str()).bind::<Text,_>(actor.to_string())
+            .get_result::<crate::ExistsRow>(&mut *conn).await.map_err(PersistenceError::database)?.present;
+        if !candidate && circle.directory_visibility != CircleDirectoryVisibility::RealmMembers {
+            continue;
+        }
+        if !row.verified_current {
+            return Err(PersistenceError::Conflict(format!(
+                "{}: Circle metadata current coverage is unproved",
+                coland_storage::ConflictCode::TemporarilyUnavailable
+            )));
+        }
         if let Some(create) = covering_event(row.envelope, row.commit_json, row.verified_current)? {
             let mut payload: arkret_models_collaboration::events_payloads::circle::CircleCreatePayload =
             serde_json::from_value(serde_json::json!(&create.payload)).map_err(corrupt)?;
@@ -168,15 +182,6 @@ async fn views(
         if circle.profile_ref.is_some()
             || circle.title == "Agent Sidecar Scope"
             || circle.display.short_name.starts_with("SC-")
-        {
-            continue;
-        }
-        if !crate::authority_commit::accepted_current_member_joined_in_connection(
-            conn,
-            &circle.realm_id,
-            actor,
-        )
-        .await?
         {
             continue;
         }
@@ -216,6 +221,12 @@ async fn views(
                 });
         }
         for member in members {
+            if !member.verified_current {
+                return Err(PersistenceError::Conflict(format!(
+                    "{}: Circle membership current coverage is unproved",
+                    coland_storage::ConflictCode::TemporarilyUnavailable
+                )));
+            }
             let who: ActorId = serde_json::from_str(&member.member_id).map_err(corrupt)?;
             let current: arkret_wire::CircleMemberStateValue =
                 serde_json::from_value(member.value).map_err(corrupt)?;

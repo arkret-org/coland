@@ -24,7 +24,7 @@ use coland_storage::{
 };
 
 use super::{
-    AsyncPgConnection, BigInt, CommitRow, CurrentRealmAuthority, Jsonb, Nullable,
+    AsyncPgConnection, BigInt, Bool, CommitRow, CurrentRealmAuthority, Jsonb, Nullable,
     OptionalExtension, PersistenceError, PgTransactionError, QueryableByName, RunQueryDsl, Text,
     Timestamptz, Value, decode_json, invalid, locked_authority, same_authority, sql_query,
     stream_key, to_i64,
@@ -317,6 +317,7 @@ pub(super) async fn record_remote_authority_in_connection(
             "two different verified authorities share one generation",
         ));
     }
+    crate::replica_authorization::invalidate_circle_continuation(conn, &authority.realm_id).await?;
     sql_query(
         "UPDATE realm_authorities SET generation = $2, service_id = $3, authority_ref = $4, \
          last_handoff_ref = $5, updated_at = now() WHERE realm_id = $1",
@@ -420,6 +421,7 @@ pub(crate) async fn materialize_founding_in_connection(
     {
         return Err(invalid("founding reducer cut differs from the accepted unit").into());
     }
+    crate::replica_authorization::install_verified_head(conn, &source_head, received_at).await?;
     for entry in &material.current_state_entries {
         let arkret_wire::CurrentState::Value {
             source_stream_ref,
@@ -435,7 +437,6 @@ pub(crate) async fn materialize_founding_in_connection(
         }
         crate::replica_authorization::save_row(conn, &facts.realm_id, entry, received_at).await?;
     }
-    crate::replica_authorization::install_verified_head(conn, &source_head, received_at).await?;
     crate::account_summary::publish_realm_account_summary_in_connection(conn, &facts.realm_id)
         .await?;
     Ok(())
@@ -465,6 +466,77 @@ async fn hosted_member_basis(
     local_service_id: &arkret_wire::DidCoreId,
     lock_rows: bool,
 ) -> Result<bool, PgTransactionError> {
+    if let arkret_wire::CommitStreamRef::Circle {
+        realm_id,
+        circle_id,
+    } = stream
+    {
+        let lock = if lock_rows { " FOR SHARE" } else { "" };
+        let mut members = sql_query(format!("SELECT member_id FROM circle_member_state_current_states WHERE realm_id=$1 AND circle_id=$2 AND membership='join'{lock}"))
+            .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).load::<MemberIdRow>(&mut *conn).await?;
+        for (account, _) in
+            bootstrap_readers_in_connection(conn, stream, local_service_id, lock_rows).await?
+        {
+            let member_id = arkret_wire::ActorId::account(account).to_string();
+            if !members.iter().any(|member| member.member_id == member_id) {
+                members.push(MemberIdRow { member_id });
+            }
+        }
+        let mut count = 0;
+        let mut unknown = false;
+        for member in members {
+            let actor: arkret_wire::ActorId =
+                serde_json::from_str(&member.member_id).map_err(invalid)?;
+            if actor.fixed_route_service_id() != Some(local_service_id) {
+                continue;
+            }
+            count += 1;
+            match crate::circle_current_states::effective_member_in_connection(
+                conn, realm_id, circle_id, &actor,
+            )
+            .await
+            {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(error)
+                    if error.conflict_code() == Some(ConflictCode::TemporarilyUnavailable) =>
+                {
+                    unknown = true
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if unknown {
+            return Err(conflict(
+                ConflictCode::TemporarilyUnavailable,
+                "no qualified hosted Circle member; retained candidates are unproved",
+            ));
+        }
+        if count > 0 {
+            return Ok(false);
+        }
+        #[derive(QueryableByName)]
+        struct Ended {
+            #[diesel(sql_type=Bool)]
+            present: bool,
+        }
+        let ended = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_ref=m.source_stream_ref AND c.stream_position=m.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' JOIN replica_stream_anchors a ON a.stream_key=c.stream_key AND a.realm_id=m.realm_id AND a.anchor_commit_id IS NOT NULL AND a.anchor_stream_position<=c.stream_position WHERE m.realm_id=$1 AND m.circle_id=$2 AND c.stream_key=$3 AND m.membership='leave' AND m.member_id::jsonb->>'kind'='account' AND m.member_id::jsonb#>>'{account_id,station_id}'=$4 AND e.kind='ak.circle.member.state' AND e.envelope->'actor_id'=m.member_id::jsonb AND e.envelope#>'{payload,member_id}'=m.member_id::jsonb AND e.envelope#>>'{payload,membership}'='leave' AND NOT EXISTS(SELECT 1 FROM realm_commits tail WHERE tail.stream_key=c.stream_key AND tail.stream_position>c.stream_position) AND NOT EXISTS(SELECT 1 FROM circle_member_state_current_states held WHERE held.realm_id=m.realm_id AND held.circle_id=m.circle_id AND held.membership='join' AND held.member_id::jsonb->>'kind'='account' AND held.member_id::jsonb#>>'{account_id,station_id}'=$4)) AS present")
+            .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(stream_key(stream)?)
+            .bind::<Text,_>(local_service_id.as_str()).get_result::<Ended>(&mut *conn).await?.present;
+        if ended {
+            return Ok(false);
+        }
+        let negative = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id::jsonb->>'kind'='account' AND m.member_id::jsonb#>>'{account_id,station_id}'=$3 AND m.membership<>'join' AND circle_current_row_proved(m.realm_id,jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb),m.source_stream_ref,m.current_commit_id,m.current_stream_position,m.value)) AND NOT EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id::jsonb->>'kind'='account' AND m.member_id::jsonb#>>'{account_id,station_id}'=$3 AND NOT circle_current_row_proved(m.realm_id,jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb),m.source_stream_ref,m.current_commit_id,m.current_stream_position,m.value)) AS present")
+                .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(local_service_id.as_str())
+                .get_result::<Ended>(&mut *conn).await?.present;
+        if negative {
+            return Ok(false);
+        }
+        return Err(conflict(
+            ConflictCode::TemporarilyUnavailable,
+            "held Circle membership absence is unproved",
+        ));
+    }
     let lock = if lock_rows { " FOR SHARE" } else { "" };
     let rows = match stream {
         arkret_wire::CommitStreamRef::Realm { realm_id } => sql_query(format!("SELECT member_id FROM member_state_current_states WHERE realm_id=$1 AND membership='join'{lock}"))
@@ -480,6 +552,16 @@ async fn hosted_member_basis(
                 PersistenceError::Internal(format!("replica member identity is malformed: {error}"))
             })?;
         if member.fixed_route_service_id() == Some(local_service_id) {
+            if let arkret_wire::CommitStreamRef::Circle {
+                realm_id,
+                circle_id,
+            } = stream
+            {
+                crate::circle_current_states::require_member_current_in_connection(
+                    conn, realm_id, circle_id, &member,
+                )
+                .await?;
+            }
             return Ok(true);
         }
     }
@@ -505,7 +587,7 @@ pub(super) async fn bootstrap_readers_in_connection(
     }
     let scope = serde_json::to_value(stream).map_err(PersistenceError::database)?;
     let lock = if lock_rows { " FOR SHARE OF m" } else { "" };
-    let rows = match stream {
+    let mut rows = match stream {
         arkret_wire::CommitStreamRef::Realm { realm_id } => sql_query(format!(
             "SELECT m.member_id,c.commit_json,e.envelope FROM member_state_current_states m \
              JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id \
@@ -517,17 +599,37 @@ pub(super) async fn bootstrap_readers_in_connection(
         arkret_wire::CommitStreamRef::Circle { realm_id, circle_id } => sql_query(format!(
             "SELECT m.member_id,c.commit_json,e.envelope FROM circle_member_state_current_states m \
              JOIN member_state_current_states rm ON rm.realm_id=m.realm_id AND rm.member_id=m.member_id \
-             JOIN circle_current_states circle ON circle.circle_id=m.circle_id AND circle.realm_id=m.realm_id \
              JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id \
                 AND c.stream_position=m.current_stream_position AND c.stream_ref=$2 \
              JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' \
              WHERE m.realm_id=$1 AND m.circle_id=$3 AND m.membership='join' AND rm.membership='join' \
                 AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) \
-                AND circle.value->>'state'='active' ORDER BY m.member_id{lock}"
+                ORDER BY m.member_id{lock}"
         )).bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(&scope).bind::<Text,_>(circle_id.as_str())
             .load::<ReaderRow>(&mut *conn).await?,
         _ => return Ok(Vec::new()),
     };
+    if let arkret_wire::CommitStreamRef::Circle {
+        realm_id,
+        circle_id,
+    } = stream
+    {
+        // These accepted originals are refresh candidates only. A missing
+        // derived member cell cannot erase the retained opening provenance;
+        // a governing nonce-bound current snapshot must qualify it afresh.
+        let candidates = sql_query("SELECT (e.envelope#>'{payload,member_id}')::text AS member_id,c.commit_json,e.envelope FROM replica_stream_anchors a JOIN realm_commits c ON c.commit_id=a.join_commit_id AND c.realm_id=a.realm_id AND c.stream_key=a.stream_key AND c.stream_ref=$2 JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE a.realm_id=$1 AND a.stream_key=$4 AND e.kind='ak.circle.member.state' AND e.envelope#>>'{payload,membership}'='join' AND e.envelope->'actor_id'=jsonb_build_object('kind','account','account_id',a.member_account_id) AND e.envelope#>'{payload,member_id}'=e.envelope->'actor_id' UNION SELECT (r.selector->'member_actor_id')::text AS member_id,c.commit_json,e.envelope FROM replica_authorization_rows r JOIN realm_commits c ON c.commit_id=r.current_commit_id AND c.realm_id=r.realm_id AND c.stream_ref=r.source_stream_ref AND c.stream_position=r.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE r.realm_id=$1 AND r.source_stream_ref=$2 AND r.selector->>'kind'='circle_member_state' AND r.selector->>'circle_id'=$3 AND r.value->>'membership'='join'")
+            .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(&scope).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(stream_key(stream)?)
+            .load::<ReaderRow>(&mut *conn).await?;
+        for row in candidates {
+            let actor: arkret_wire::ActorId =
+                serde_json::from_str(&row.member_id).map_err(invalid)?;
+            let exists = sql_query("SELECT member_id FROM circle_member_state_current_states WHERE circle_id=$1 AND member_id=$2")
+                .bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(actor.to_string()).get_result::<MemberIdRow>(&mut *conn).await.optional()?.is_some();
+            if !exists {
+                rows.push(row);
+            }
+        }
+    }
     let mut readers = Vec::new();
     for row in rows {
         let actor: arkret_wire::ActorId = serde_json::from_str(&row.member_id).map_err(invalid)?;
@@ -618,7 +720,32 @@ pub(super) async fn bootstrap_readers_in_connection(
         if !own_join {
             return Err(invalid("bootstrap reader has no exact accepted own join").into());
         }
-        readers.push((account.clone(), commit));
+        if let arkret_wire::CommitStreamRef::Circle { .. } = stream {
+            let payload: arkret_models_collaboration::events_payloads::CircleMemberStatePayload =
+                serde_json::from_value(serde_json::to_value(&event.payload).map_err(invalid)?)
+                    .map_err(invalid)?;
+            payload.validate().map_err(invalid)?;
+            let Some(parent) = payload.parent_membership_revision.as_ref() else {
+                continue;
+            };
+            if !super::parent_join_at_revision_in_connection(
+                conn,
+                stream.realm_id(),
+                &actor,
+                parent,
+            )
+            .await?
+            {
+                continue;
+            }
+        }
+        if !readers.iter().any(
+            |(existing, join): &(arkret_wire::AccountId, arkret_wire::RealmCommit)| {
+                existing == account && join.commit_id == commit.commit_id
+            },
+        ) {
+            readers.push((account.clone(), commit));
+        }
     }
     Ok(readers)
 }
@@ -1119,9 +1246,15 @@ async fn peer_recipient_basis_digest(
         "sidecar_exchange_controls_current_states",
         "agent_interaction_current_states",
         "replica_authorization_rows",
+        "replica_authorization_cuts",
     ] {
+        let projection = if table == "replica_authorization_cuts" {
+            "to_jsonb(t)-'updated_at'-'verified_at'"
+        } else {
+            "to_jsonb(t)-'updated_at'"
+        };
         let query = format!(
-            "SELECT coalesce(jsonb_agg(to_jsonb(t)-'updated_at' ORDER BY (to_jsonb(t)-'updated_at')::text),'[]'::jsonb) AS value FROM {table} t WHERE realm_id=$1"
+            "SELECT coalesce(jsonb_agg({projection} ORDER BY ({projection})::text),'[]'::jsonb) AS value FROM {table} t WHERE realm_id=$1"
         );
         let row = sql_query(query)
             .bind::<Text, _>(realm.as_str())
@@ -1202,7 +1335,11 @@ pub(super) async fn install_committed_peer_replica_in_connection(
     .await?;
     let opening = matches!(&replica.role, CommittedReplicaRole::OpeningJoin { member_account_id }
         if member_account_id.station_id == replica.local_service_id);
+    let terminal = accepted_own_circle_cleanup_in_connection(conn, replica).await?
+        || held_own_circle_terminal_in_connection(conn, replica).await?
+        || held_own_circle_terminal_replay_in_connection(conn, replica).await?;
     if !opening
+        && !terminal
         && !hosts_joined_member(conn, &replica.commit.stream_ref, &replica.local_service_id).await?
         && !crate::account_stream_scan::peer_replication_right_at_in_connection(
             conn,
@@ -1575,8 +1712,10 @@ async fn store_held_successor(
     let commit = &replica.commit;
     let anchored = anchored_head(anchor)?;
     require_direct_successor(head, commit)?;
-    if !hosts_joined_member(conn, &commit.stream_ref, &replica.local_service_id).await?
-        && !accepted_own_circle_cleanup_in_connection(conn, replica).await?
+    let terminal = accepted_own_circle_cleanup_in_connection(conn, replica).await?
+        || held_own_circle_terminal_in_connection(conn, replica).await?;
+    if !terminal
+        && !hosts_joined_member(conn, &commit.stream_ref, &replica.local_service_id).await?
     {
         return Err(conflict(
             ConflictCode::CapabilityDenied,
@@ -1584,7 +1723,15 @@ async fn store_held_successor(
         ));
     }
     require_visible(conn, event, &replica.local_service_id).await?;
-    if commit.stream_position <= anchored.stream_position {
+    if commit.stream_position == anchored.stream_position && commit.commit_id != anchored.commit_id
+    {
+        return Err(conflict(
+            ConflictCode::ForkQuarantine,
+            "held successor differs from the exact installed snapshot endpoint",
+        ));
+    }
+    let covered = crate::replica_authorization::circle_effect_covered(conn, commit).await?;
+    if commit.stream_position <= anchored.stream_position || covered {
         // The installed snapshot already carries this Commit's effect.
         store_replica_rows(conn, event, commit, key, replica.received_at).await?;
         return Ok(CommittedReplicaOutcome::Stored);
@@ -1597,6 +1744,218 @@ async fn store_held_successor(
             .await?;
     }
     Ok(CommittedReplicaOutcome::Stored)
+}
+
+/// The held interval may receive its member's own accepted terminal fact
+/// without granting ordinary current access or any future replica right.
+async fn held_own_circle_terminal_in_connection(
+    conn: &mut AsyncPgConnection,
+    replica: &CommittedReplica,
+) -> Result<bool, PgTransactionError> {
+    use arkret_models_collaboration::events_payloads::CircleMemberStatePayload;
+    use arkret_models_collaboration::governance::circle::CircleMembership;
+    if !matches!(replica.role, CommittedReplicaRole::HeldStream) {
+        return Ok(false);
+    }
+    let event = &replica.event;
+    let commit = &replica.commit;
+    let arkret_wire::ScopeRef::Circle {
+        realm_id,
+        circle_id,
+    } = &event.scope_ref
+    else {
+        return Ok(false);
+    };
+    let Some(account) = event.actor_id.as_account_id() else {
+        return Ok(false);
+    };
+    if event.kind != arkret_wire::EventKind::CircleMemberState
+        || account.station_id != replica.local_service_id
+        || event.executed_by.is_some()
+        || commit.stream_ref
+            != arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, None).map_err(invalid)?
+        || event.account_device_producer().map_err(invalid)?.is_none()
+        || replica
+            .producer_signer_fact
+            .as_ref()
+            .and_then(|fact| fact.as_account_device())
+            .is_none()
+    {
+        return Ok(false);
+    }
+    let payload: CircleMemberStatePayload =
+        serde_json::from_value(serde_json::to_value(&event.payload).map_err(invalid)?)
+            .map_err(invalid)?;
+    payload.validate().map_err(invalid)?;
+    if payload.membership != CircleMembership::Leave
+        || payload.member_id != event.actor_id
+        || payload.circle_id != *circle_id
+        || payload.parent_membership_revision.is_some()
+    {
+        return Ok(false);
+    }
+    let key = stream_key(&commit.stream_ref)?;
+    let Some(held) = locked_head(conn, &key).await? else {
+        return Ok(false);
+    };
+    if commit.previous_commit_ref.as_ref() != Some(&held.commit_id)
+        || held.stream_position.checked_add(1) != Some(commit.stream_position)
+    {
+        return Ok(false);
+    }
+    #[derive(QueryableByName)]
+    struct TerminalBasis {
+        #[diesel(sql_type=Jsonb)]
+        envelope: Value,
+        #[diesel(sql_type=Jsonb)]
+        commit_json: Value,
+        #[diesel(sql_type=Jsonb)]
+        member_value: Value,
+        #[diesel(sql_type=Jsonb)]
+        interval_envelope: Value,
+        #[diesel(sql_type=Jsonb)]
+        interval_commit_json: Value,
+    }
+    // An older immutable join may enter this held interval through an
+    // actually qualified snapshot observation. Its historical marker is
+    // used only for this terminal; it never requalifies ordinary current.
+    let basis = sql_query("SELECT e.envelope,c.commit_json,m.value AS member_value,oe.envelope AS interval_envelope,opening.commit_json AS interval_commit_json FROM circle_member_state_current_states m JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_ref=m.source_stream_ref AND c.stream_position=m.current_stream_position JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' JOIN replica_stream_anchors a ON a.realm_id=m.realm_id AND a.stream_key=$4 AND a.anchor_commit_id IS NOT NULL AND a.anchor_stream_position<$6 JOIN realm_commits opening ON opening.commit_id=a.join_commit_id AND opening.realm_id=m.realm_id AND opening.stream_ref=c.stream_ref AND opening.stream_key=a.stream_key AND (opening.stream_position<=c.stream_position OR EXISTS(SELECT 1 FROM replica_authorization_rows observation WHERE observation.realm_id=m.realm_id AND observation.selector=jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb) AND observation.source_stream_ref=m.source_stream_ref AND observation.current_commit_id=m.current_commit_id AND observation.current_stream_position=m.current_stream_position AND observation.value=m.value AND observation.circle_continuation_id IS NOT NULL AND observation.observed_anchor_commit_id IS NOT NULL AND observation.observed_anchor_stream_position BETWEEN opening.stream_position AND $8 AND ((observation.observed_anchor_stream_position=opening.stream_position AND observation.observed_anchor_commit_id=opening.commit_id) OR (observation.observed_anchor_stream_position=a.anchor_stream_position AND observation.observed_anchor_commit_id=a.anchor_commit_id) OR EXISTS(SELECT 1 FROM realm_commits observed WHERE observed.commit_id=observation.observed_anchor_commit_id AND observed.realm_id=m.realm_id AND observed.stream_ref=m.source_stream_ref AND observed.stream_position=observation.observed_anchor_stream_position)))) JOIN canonical_events oe ON oe.pk=opening.event_pk AND oe.state='committed' AND oe.kind='ak.circle.member.state' AND oe.envelope#>>'{payload,membership}'='join' AND oe.envelope->'actor_id'=jsonb_build_object('kind','account','account_id',a.member_account_id) AND oe.envelope#>'{payload,member_id}'=oe.envelope->'actor_id' WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND c.stream_ref=$5 AND c.stream_position<$6 AND a.member_account_id->>'station_id'=$7")
+        .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(event.actor_id.to_string())
+        .bind::<Text,_>(stream_key(&commit.stream_ref)?).bind::<Jsonb,_>(serde_json::to_value(&commit.stream_ref).map_err(invalid)?)
+        .bind::<BigInt,_>(to_i64(commit.stream_position,"Circle terminal position")?).bind::<Text,_>(replica.local_service_id.as_str()).bind::<BigInt,_>(to_i64(held.stream_position,"held terminal predecessor")?)
+        .get_result::<TerminalBasis>(&mut *conn).await.optional()?;
+    let Some(basis) = basis else {
+        return Ok(false);
+    };
+    let original: arkret_wire::Event =
+        decode_json(basis.envelope, "Circle terminal opening Event")?;
+    let original_commit: arkret_wire::RealmCommit =
+        decode_json(basis.commit_json, "Circle terminal opening Commit")?;
+    let member: arkret_wire::CircleMemberStateValue =
+        decode_json(basis.member_value, "Circle pre-event member current")?;
+    let interval_event: arkret_wire::Event = decode_json(
+        basis.interval_envelope,
+        "Circle held interval opening Event",
+    )?;
+    let interval_commit: arkret_wire::RealmCommit = decode_json(
+        basis.interval_commit_json,
+        "Circle held interval opening Commit",
+    )?;
+    interval_event
+        .verify_event_id_matches_content_with_digest_suite(
+            interval_event.event_id.digest_suite_code().digest_suite(),
+        )
+        .map_err(invalid)?;
+    interval_commit.validate_shape().map_err(invalid)?;
+    interval_commit
+        .verify_commit_id_matches_content()
+        .map_err(invalid)?;
+    if interval_commit.event_ref != interval_event.event_id
+        || interval_commit.stream_ref != commit.stream_ref
+        || interval_event.realm_id != *realm_id
+        || interval_event.scope_ref != event.scope_ref
+    {
+        return Ok(false);
+    }
+    let opening: CircleMemberStatePayload =
+        serde_json::from_value(serde_json::to_value(&original.payload).map_err(invalid)?)
+            .map_err(invalid)?;
+    original
+        .verify_event_id_matches_content_with_digest_suite(
+            original.event_id.digest_suite_code().digest_suite(),
+        )
+        .map_err(invalid)?;
+    original_commit.validate_shape().map_err(invalid)?;
+    original_commit
+        .verify_commit_id_matches_content()
+        .map_err(invalid)?;
+    opening.validate().map_err(invalid)?;
+    let Some(parent) = member.parent_membership_revision.as_ref() else {
+        return Ok(false);
+    };
+    if crate::replica_authorization::parent_binding_superseded(
+        conn,
+        realm_id,
+        &event.actor_id,
+        parent,
+    )
+    .await?
+        != Some(false)
+    {
+        return Ok(false);
+    }
+    Ok(original.kind == arkret_wire::EventKind::CircleMemberState
+        && original.actor_id == event.actor_id
+        && original.scope_ref == event.scope_ref
+        && original.realm_id == *realm_id
+        && original_commit.event_ref == original.event_id
+        && original_commit.stream_ref == commit.stream_ref
+        && opening.membership == CircleMembership::Join
+        && opening.member_id == event.actor_id
+        && opening.circle_id == *circle_id
+        && opening.parent_membership_revision.as_ref() == Some(parent)
+        && member.membership == arkret_wire::MembershipState::Join
+        && member.effective_at == opening.effective_at.unwrap_or(original.created_at))
+}
+
+/// An exact already-held terminal may reach the original receipt checks. This
+/// is historical eligibility for this body only, never a successor basis.
+async fn held_own_circle_terminal_replay_in_connection(
+    conn: &mut AsyncPgConnection,
+    replica: &CommittedReplica,
+) -> Result<bool, PgTransactionError> {
+    use arkret_models_collaboration::events_payloads::CircleMemberStatePayload;
+    use arkret_models_collaboration::governance::circle::CircleMembership;
+    if !matches!(replica.role, CommittedReplicaRole::HeldStream) {
+        return Ok(false);
+    }
+    let event = &replica.event;
+    let commit = &replica.commit;
+    let arkret_wire::ScopeRef::Circle {
+        realm_id,
+        circle_id,
+    } = &event.scope_ref
+    else {
+        return Ok(false);
+    };
+    let Some(account) = event.actor_id.as_account_id() else {
+        return Ok(false);
+    };
+    if event.kind != arkret_wire::EventKind::CircleMemberState
+        || account.station_id != replica.local_service_id
+        || event.executed_by.is_some()
+        || commit.stream_ref
+            != arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, None).map_err(invalid)?
+        || event.account_device_producer().map_err(invalid)?.is_none()
+        || replica
+            .producer_signer_fact
+            .as_ref()
+            .and_then(|fact| fact.as_account_device())
+            .is_none()
+    {
+        return Ok(false);
+    }
+    let payload: CircleMemberStatePayload =
+        serde_json::from_value(serde_json::to_value(&event.payload).map_err(invalid)?)
+            .map_err(invalid)?;
+    payload.validate().map_err(invalid)?;
+    if payload.membership != CircleMembership::Leave
+        || payload.member_id != event.actor_id
+        || payload.circle_id != *circle_id
+        || payload.parent_membership_revision.is_some()
+    {
+        return Ok(false);
+    }
+    #[derive(QueryableByName)]
+    struct Eligible {
+        #[diesel(sql_type=Bool)]
+        present: bool,
+    }
+    Ok(sql_query("SELECT EXISTS(SELECT 1 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' JOIN circle_member_state_current_states m ON m.realm_id=c.realm_id AND m.circle_id=$2 AND m.member_id=$3 AND m.current_commit_id=c.commit_id AND m.current_stream_position=c.stream_position AND m.source_stream_ref=c.stream_ref AND m.membership='leave' JOIN replica_stream_anchors a ON a.realm_id=c.realm_id AND a.stream_key=c.stream_key AND a.anchor_commit_id IS NOT NULL AND a.anchor_stream_position<=c.stream_position JOIN realm_commits opening ON opening.commit_id=a.join_commit_id AND opening.realm_id=c.realm_id AND opening.stream_key=c.stream_key AND opening.stream_ref=c.stream_ref AND opening.stream_position<=c.stream_position JOIN canonical_events oe ON oe.pk=opening.event_pk AND oe.state='committed' AND oe.kind='ak.circle.member.state' AND oe.envelope#>>'{payload,membership}'='join' AND oe.envelope->'actor_id'=jsonb_build_object('kind','account','account_id',a.member_account_id) AND oe.envelope#>'{payload,member_id}'=oe.envelope->'actor_id' WHERE c.realm_id=$1 AND c.commit_id=$4 AND c.commit_json=$5 AND e.envelope=$6 AND a.member_account_id->>'station_id'=$7 AND NOT EXISTS(SELECT 1 FROM realm_commits later WHERE later.stream_key=c.stream_key AND later.stream_position>c.stream_position)) AS present")
+        .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(event.actor_id.to_string())
+        .bind::<Text,_>(commit.commit_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(commit).map_err(invalid)?)
+        .bind::<Jsonb,_>(serde_json::to_value(event).map_err(invalid)?).bind::<Text,_>(replica.local_service_id.as_str())
+        .get_result::<Eligible>(&mut *conn).await?.present)
 }
 
 /// The original self-submission may explicitly clear an old Circle join that

@@ -1064,9 +1064,21 @@ CREATE TABLE public.replica_authorization_cuts (
  source_stream_ref JSONB NOT NULL,
  head_commit_id TEXT NOT NULL,
  head_stream_position BIGINT NOT NULL CHECK(head_stream_position BETWEEN 0 AND 9007199254740991),
+ circle_effect_base_commit_id TEXT,
+ circle_effect_base_stream_position BIGINT,
+ circle_continuation_id UUID,
  verified_at TIMESTAMPTZ NOT NULL,
+ CHECK ((circle_effect_base_commit_id IS NULL AND circle_effect_base_stream_position IS NULL AND circle_continuation_id IS NULL)
+     OR (circle_effect_base_commit_id IS NOT NULL AND circle_effect_base_stream_position IS NOT NULL AND circle_effect_base_stream_position BETWEEN 0 AND head_stream_position AND circle_continuation_id IS NOT NULL
+         AND (circle_effect_base_stream_position<head_stream_position OR circle_effect_base_commit_id=head_commit_id))),
  PRIMARY KEY(realm_id,source_stream_ref)
 );
+
+-- Indexed same-source tail probes must not walk a Realm's retained history.
+-- The JSONB source also covers signed extra snapshot heads whose originals
+-- have not yet been imported; no copied JCS stream-key construction is needed.
+CREATE INDEX realm_commits_source_position ON public.realm_commits
+ (realm_id,stream_ref,stream_position DESC);
 
 CREATE TABLE public.replica_authorization_rows (
  realm_id TEXT NOT NULL,
@@ -1074,8 +1086,13 @@ CREATE TABLE public.replica_authorization_rows (
  source_stream_ref JSONB NOT NULL,
  current_commit_id TEXT NOT NULL,
  current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
+ observed_anchor_commit_id TEXT,
+ observed_anchor_stream_position BIGINT,
+ circle_continuation_id UUID,
  value JSONB NOT NULL,
  updated_at TIMESTAMPTZ NOT NULL,
+ CHECK ((observed_anchor_commit_id IS NULL AND observed_anchor_stream_position IS NULL AND circle_continuation_id IS NULL)
+     OR (observed_anchor_commit_id IS NOT NULL AND observed_anchor_stream_position IS NOT NULL AND observed_anchor_stream_position BETWEEN current_stream_position AND 9007199254740991 AND circle_continuation_id IS NOT NULL)),
  PRIMARY KEY(realm_id,selector)
 );
 
@@ -5409,3 +5426,64 @@ CREATE TABLE realm_invite_link_current_states (
  CHECK((state_kind='realm_invite_link_lifecycle' AND value IN ('"active"'::jsonb,'"revoked"'::jsonb))
        OR (state_kind<>'realm_invite_link_lifecycle' AND jsonb_typeof(value)='object'))
 );
+
+-- A retained value is not a fresh current claim. This read-only predicate is
+-- shared by repeatable-read convenience and authorization readers. Native
+-- provenance is tied to the actual Station and current authority; replicas
+-- additionally need an exact, uninterrupted Circle-domain observation segment.
+CREATE FUNCTION circle_current_row_proved(
+ p_realm TEXT, p_selector JSONB, p_source JSONB, p_commit TEXT,
+ p_position BIGINT, p_value JSONB
+) RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
+ SELECT EXISTS (
+   SELECT 1 FROM realm_authorities a
+   WHERE a.realm_id=p_realm AND current_device_inventory_station() IS NOT NULL
+     AND (
+       (a.service_id=current_device_inventory_station() AND EXISTS (
+         SELECT 1 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk
+         WHERE c.realm_id=p_realm AND c.stream_ref=p_source
+           AND c.commit_id=p_commit AND c.stream_position=p_position
+           AND e.state='committed'
+       ))
+       OR (a.service_id<>current_device_inventory_station() AND EXISTS (
+         SELECT 1 FROM replica_authorization_rows r
+         JOIN replica_authorization_cuts h ON h.realm_id=r.realm_id
+           AND h.source_stream_ref=r.source_stream_ref
+         WHERE r.realm_id=p_realm AND r.selector=p_selector
+           AND r.source_stream_ref=p_source AND r.current_commit_id=p_commit
+           AND r.current_stream_position=p_position AND r.value=p_value
+           AND r.circle_continuation_id IS NOT NULL
+           AND r.circle_continuation_id=h.circle_continuation_id
+           AND h.circle_effect_base_commit_id IS NOT NULL
+           AND r.observed_anchor_commit_id IS NOT NULL
+           AND r.observed_anchor_stream_position BETWEEN h.circle_effect_base_stream_position AND h.head_stream_position
+           AND r.current_stream_position<=r.observed_anchor_stream_position
+           AND (r.current_stream_position<r.observed_anchor_stream_position OR r.current_commit_id=r.observed_anchor_commit_id)
+           AND (
+             (r.observed_anchor_stream_position=h.circle_effect_base_stream_position AND r.observed_anchor_commit_id=h.circle_effect_base_commit_id)
+             OR (r.observed_anchor_stream_position=h.head_stream_position AND r.observed_anchor_commit_id=h.head_commit_id)
+             OR (r.observed_anchor_stream_position>h.circle_effect_base_stream_position AND r.observed_anchor_stream_position<h.head_stream_position AND EXISTS (
+               SELECT 1 FROM realm_commits interior WHERE interior.realm_id=r.realm_id
+                 AND interior.stream_ref=r.source_stream_ref
+                 AND interior.commit_id=r.observed_anchor_commit_id
+                 AND interior.stream_position=r.observed_anchor_stream_position
+             ))
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM (SELECT held.commit_id,held.stream_position FROM realm_commits held
+               WHERE held.realm_id=h.realm_id AND held.stream_ref=h.source_stream_ref
+               ORDER BY held.stream_position DESC LIMIT 1) tail
+             WHERE tail.stream_position>h.head_stream_position OR (tail.stream_position=h.head_stream_position AND tail.commit_id<>h.head_commit_id)
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM replica_stream_anchors tail JOIN realm_commits opening ON opening.commit_id=tail.join_commit_id
+             WHERE tail.stream_key=(SELECT held.stream_key FROM realm_commits held
+               WHERE held.realm_id=h.realm_id AND held.stream_ref=h.source_stream_ref
+               ORDER BY held.stream_position DESC LIMIT 1)
+               AND opening.realm_id=h.realm_id AND opening.stream_ref=h.source_stream_ref AND opening.stream_key=tail.stream_key
+               AND (tail.anchor_stream_position>h.head_stream_position OR (tail.anchor_stream_position=h.head_stream_position AND tail.anchor_commit_id<>h.head_commit_id))
+           )
+       ))
+     )
+ )
+$$;

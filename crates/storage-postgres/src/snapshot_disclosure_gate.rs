@@ -1231,6 +1231,8 @@ async fn disclosure_facts_in_connection(
     authority_material: &coland_storage::RealmStateSnapshotMaterial,
     material: &coland_storage::RealmStateSnapshotMaterial,
 ) -> PersistenceResult<DisclosureFacts> {
+    crate::circle_current_states::require_actor_currents_in_connection(conn, Some(realm_id), actor)
+        .await?;
     let undisclosed_family_row = sql_query(
         "SELECT (EXISTS(SELECT 1 FROM realm_link_current_states WHERE realm_id=$1) \
             OR EXISTS(SELECT 1 FROM policy_current_states WHERE realm_id=$1 \

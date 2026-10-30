@@ -3,6 +3,8 @@
 //! does not claim a live OIDC/DPoP middleware or subprocess-crash test.
 //! Box the admission/recovery phases separately so signed multi-Station
 //! regression futures fit the ordinary test-thread stack in debug builds.
+#[path = "circle_current_coverage_tests.rs"]
+mod circle_current_coverage_tests;
 #[path = "../../../storage-postgres/tests/support/historical_human.rs"]
 mod historical_human;
 #[path = "realm_terminal_fanout_tests.rs"]

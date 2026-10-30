@@ -1,3 +1,4 @@
+DROP FUNCTION IF EXISTS circle_current_row_proved(TEXT, JSONB, JSONB, TEXT, BIGINT, JSONB);
 DROP TABLE IF EXISTS realm_invite_link_current_states;
 DROP TABLE IF EXISTS public.service_registration_receipts;
 DROP TABLE IF EXISTS public.principal_resolution_current_states;

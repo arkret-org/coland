@@ -252,7 +252,7 @@ async fn list_circles(
         .authority_commits()
         .circle_reads_for_actor(&realm_id, &actor)
         .await
-        .map_err(|e| AppError::internal(e.to_string()))?;
+        .map_err(|error| circle_submission_error(error.into()))?;
     json_ok(CircleList { realm_id, circles })
 }
 
@@ -279,7 +279,7 @@ async fn get_circle(
         .authority_commits()
         .circle_read_for_actor(&id, &actor)
         .await
-        .map_err(|e| AppError::internal(e.to_string()))?
+        .map_err(|error| circle_submission_error(error.into()))?
         .ok_or_else(|| AppError::not_found("circle not found"))?;
     json_ok(read)
 }
@@ -655,6 +655,16 @@ mod tests {
             assert_eq!(mapped.http_status().as_u16(), expected_status);
             assert_eq!(mapped.wire_code(), code.as_str());
         }
+        let unproved = coland_storage::PersistenceError::Conflict(format!(
+            "{}: Circle current coverage is unproved",
+            coland_storage::ConflictCode::TemporarilyUnavailable,
+        ));
+        let mapped = circle_submission_error(unproved.into());
+        assert_eq!(mapped.http_status().as_u16(), 503);
+        assert_eq!(
+            mapped.wire_code(),
+            arkret_wire::ErrorCode::TEMPORARILY_UNAVAILABLE
+        );
         let opaque = circle_submission_error(coland_services::ServiceError::Conflict(
             "opaque temporarily_unavailable diagnostic".into(),
         ));

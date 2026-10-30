@@ -582,6 +582,14 @@ impl NotificationStore for PgNotificationStore {
                 .transpose()?;
             let strand = match strand {
                 Some(strand) => {
+                    if let Some(circle_id) = &strand.scope_circle_id {
+                        crate::circle_current_states::require_scope_currents_in_connection(
+                            conn,
+                            &strand.realm_id,
+                            circle_id,
+                        )
+                        .await?;
+                    }
                     let circle_members = match strand.scope_circle_id.as_ref() {
                         Some(circle_id) => sql_query(FANOUT_CIRCLE_MEMBERS_SQL)
                             .bind::<Text, _>(strand.realm_id.as_str())

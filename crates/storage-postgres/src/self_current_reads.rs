@@ -312,10 +312,26 @@ async fn list_streams_in_connection(
     let realm_head = match member_cut(conn, realm_id, caller, issuer).await? {
         MemberCut::NotVisible => return Ok(AccountRealmStreamList::NotVisible),
         MemberCut::ForeignTenure => {
-            return Ok(crate::replica_stream_listing::in_connection(conn, realm_id, caller).await?);
+            let listing =
+                crate::replica_stream_listing::in_connection(conn, realm_id, caller).await?;
+            if matches!(listing, AccountRealmStreamList::Listed(_)) {
+                crate::circle_current_states::require_actor_currents_in_connection(
+                    conn,
+                    Some(realm_id),
+                    caller,
+                )
+                .await?;
+            }
+            return Ok(listing);
         }
         MemberCut::Member { realm_head, .. } => realm_head,
     };
+    crate::circle_current_states::require_actor_currents_in_connection(
+        conn,
+        Some(realm_id),
+        caller,
+    )
+    .await?;
     let Some(head) = realm_head else {
         return Ok(AccountRealmStreamList::Listed(Vec::new()));
     };
@@ -1169,7 +1185,19 @@ pub(crate) async fn strand_watch_observation_in_connection(
         ));
     }
     let head = if let ScopeRef::Circle { circle_id, .. } = &scope {
-        let visible = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m JOIN circle_current_states c ON c.realm_id=m.realm_id AND c.circle_id=m.circle_id JOIN realm_commits mc ON mc.commit_id=m.current_commit_id AND mc.realm_id=m.realm_id AND mc.stream_ref=m.source_stream_ref AND mc.stream_position=m.current_stream_position JOIN realm_commits cc ON cc.commit_id=c.current_commit_id AND cc.realm_id=c.realm_id AND cc.stream_ref=c.source_stream_ref AND cc.stream_position=c.current_stream_position WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND c.value->>'state'='active') AS present")
+        if audit.is_none() {
+            if !crate::circle_current_states::effective_member_in_connection(
+                conn,
+                &request.realm_id,
+                circle_id,
+                &caller,
+            )
+            .await?
+            {
+                return Ok(SelfExactCurrentRead::NotFound);
+            }
+        }
+        let visible = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m JOIN circle_current_states c ON c.realm_id=m.realm_id AND c.circle_id=m.circle_id WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND c.value->>'state'='active' AND circle_current_row_proved(m.realm_id,jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb),m.source_stream_ref,m.current_commit_id,m.current_stream_position,m.value) AND circle_current_row_proved(c.realm_id,jsonb_build_object('kind','circle','circle_id',c.circle_id),c.source_stream_ref,c.current_commit_id,c.current_stream_position,c.value)) AS present")
             .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(caller.to_string()).get_result::<ExistsRow>(&mut *conn).await?.present;
         if !visible && audit.is_none() {
             return Ok(SelfExactCurrentRead::NotFound);

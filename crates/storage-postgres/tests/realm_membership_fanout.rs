@@ -5776,12 +5776,22 @@ async fn recipient_mls_add_attestation_outbox_is_atomic_durable_and_idempotent()
 #[tokio::test]
 async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires() {
     heap_future(|| {
-        circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case()
+        circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(false)
     })
     .await;
 }
 
-async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case() {
+#[tokio::test]
+async fn account_scoped_realm_snapshot_preserves_another_hosted_accounts_circle_at_the_same_cut() {
+    heap_future(|| {
+        circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(true)
+    })
+    .await;
+}
+
+async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(
+    check_other_account_snapshot: bool,
+) {
     let governor_db = TestDatabase::lease().await;
     let replica_db = TestDatabase::lease().await;
     let pool = governor_db.pool();
@@ -5870,8 +5880,31 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         })
         .await
         .unwrap();
+    // A second hosted Account joins only the parent Realm. Its legitimate
+    // bootstrap disclosure must not claim that the first Account's private
+    // Circle is absent from their shared member Station.
+    let other_join = if check_other_account_snapshot {
+        let other = remote_member("circle-realm-only-reader");
+        let request = membership_request(&join.authority_commit, other.clone(), &other, "join");
+        uow.commit_event(request.clone()).await.unwrap();
+        assert_eq!(
+            member
+                .install_committed_replica(&replica(&unit, &request, false))
+                .await
+                .unwrap(),
+            CommittedReplicaOutcome::Stored
+        );
+        Some((other, request))
+    } else {
+        None
+    };
+    let before_create = other_join
+        .as_ref()
+        .map_or(&join.authority_commit, |(_, request)| {
+            &request.authority_commit
+        });
     let create = heap_future(|| ordinary_realm::source_request(&pool, sourced(next_request_for_actor(
-        &join.authority_commit,
+        before_create,
         arkret_wire::EventKind::CircleCreate,
         creator.clone(),
         serde_json::json!({"object":{
@@ -6141,6 +6174,114 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         ),
         vec![true]
     );
+    if let Some((other, other_join)) = other_join {
+        let other_material = governor
+            .member_station_bootstrap_material(
+                &realm,
+                other.as_account_id().unwrap(),
+                &other_join.authority_commit.commit.commit_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(other_material.visible_stream_heads.iter().all(|head| {
+            !matches!(
+                &head.stream_ref,
+                arkret_wire::CommitStreamRef::Circle { .. }
+            )
+        }));
+        assert!(other_material.current_state_entries.iter().all(|entry| {
+            !matches!(
+                entry,
+                arkret_wire::CurrentState::Value {
+                    selector: arkret_wire::CurrentSelector::Circle { .. }
+                        | arkret_wire::CurrentSelector::CircleMemberState { .. },
+                    ..
+                }
+            )
+        }));
+        let realm_stream = arkret_wire::CommitStreamRef::Realm {
+            realm_id: realm.clone(),
+        };
+        let other_head = other_material
+            .visible_stream_heads
+            .iter()
+            .find(|head| head.stream_ref == realm_stream)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            material
+                .visible_stream_heads
+                .iter()
+                .find(|head| head.stream_ref == realm_stream),
+            Some(&other_head),
+            "the two Account disclosures must describe the same Realm cut"
+        );
+        let footprint = || async {
+            #[derive(diesel::QueryableByName)]
+            struct Row {
+                #[diesel(sql_type = Jsonb)]
+                value: serde_json::Value,
+            }
+            let mut conn = member.pool.get().await.unwrap();
+            diesel::sql_query("SELECT jsonb_build_object('circle',(SELECT to_jsonb(c) FROM circle_current_states c WHERE circle_id=$1),'authorization',(SELECT to_jsonb(r) FROM replica_authorization_rows r WHERE realm_id=$2 AND selector=jsonb_build_object('kind','circle','circle_id',$1::text))) AS value")
+                .bind::<Text, _>(circle.as_str())
+                .bind::<Text, _>(realm.as_str())
+                .get_result::<Row>(&mut conn).await.unwrap().value
+        };
+        let before = footprint().await;
+        assert!(!before["circle"].is_null());
+        assert!(!before["authorization"].is_null());
+        let circle_anchor = member.replica_anchor_for_stream(&stream).await.unwrap();
+        let snapshot = bootstrap_snapshot(
+            &realm,
+            other_material.governance_generation,
+            &other_material.visible_stream_heads,
+            &other_material.current_state_entries,
+        );
+        member
+            .install_replica_anchor(&ReplicaAnchorInstall {
+                realm_id: realm.clone(),
+                join_commit_id: other_join.authority_commit.commit.commit_id,
+                governance_generation: other_material.governance_generation,
+                snapshot_head: other_head,
+                visible_stream_heads: other_material.visible_stream_heads,
+                current_state_entries: other_material.current_state_entries,
+                verified_snapshot: snapshot,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            footprint().await,
+            before,
+            "one Account's hidden Circle is not a deletion for another hosted Account"
+        );
+        assert_eq!(
+            member.replica_anchor_for_stream(&stream).await.unwrap(),
+            circle_anchor
+        );
+        assert_eq!(
+            rows_of_circle_scan(
+                member
+                    .scan_stream_for_account(
+                        &scan,
+                        remote.as_account_id().unwrap(),
+                        &member_station()
+                    )
+                    .await
+                    .unwrap()
+            ),
+            vec![true]
+        );
+        assert!(matches!(
+            member
+                .scan_stream_for_account(&scan, other.as_account_id().unwrap(), &member_station())
+                .await
+                .unwrap(),
+            coland_storage::AccountStreamScan::Unproved("the caller has no held Circle join")
+        ));
+        return;
+    }
     // The Circle's creator joins as well, then writes a plaintext Message.
     // Alice's Station holds the Circle stream but is not in the Realm's
     // plaintext-visible service set, so it gets only the Message Commit via

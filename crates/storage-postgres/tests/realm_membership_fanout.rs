@@ -6133,6 +6133,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         .await
         .unwrap();
     let realm = unit.transactions[0].event.realm_id.clone();
+    let governor_station = ordinary_realm::station();
     let case_replica = |request: &EventCommitRequest, opens_stream: bool| {
         let mut incoming = replica(&unit, request, opens_stream);
         incoming.local_service_id = local_station.clone();
@@ -6153,7 +6154,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             source_origin.as_deref(),
             &member.pool,
             &did,
-            &ordinary_realm::station(),
+            &governor_station,
             join,
         )
     })
@@ -6227,7 +6228,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                 source_origin.as_deref(),
                 &member.pool,
                 &did,
-                &ordinary_realm::station(),
+                &governor_station,
                 request,
             )
         })
@@ -6336,7 +6337,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             source_origin.as_deref(),
             &member.pool,
             &did,
-            &ordinary_realm::station(),
+            &governor_station,
             circle_join,
         )
     })
@@ -6694,7 +6695,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                     let leave =
                         circle_transition(&circle_join.authority_commit, "leave", Some("join"));
                     let leave = heap_future(|| circle_control_origin_request(
-                        source_origin.as_deref(), &member.pool, &did, &ordinary_realm::station(), leave,
+                        source_origin.as_deref(), &member.pool, &did, &governor_station, leave,
                     )).await;
 
                     heap_future(|| uow.commit_event(leave.clone()))
@@ -6704,7 +6705,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                         let rejoin =
                             circle_transition(&leave.authority_commit, "join", Some("leave"));
                         let rejoin = heap_future(|| circle_control_origin_request(
-                            source_origin.as_deref(), &member.pool, &did, &ordinary_realm::station(), rejoin,
+                            source_origin.as_deref(), &member.pool, &did, &governor_station, rejoin,
                         )).await;
                         heap_future(|| uow.commit_event(rejoin.clone()))
                             .await
@@ -6774,7 +6775,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                         let rejoin =
                             circle_transition(&leave.authority_commit, "join", Some("leave"));
                         let rejoin = heap_future(|| circle_control_origin_request(
-                            source_origin.as_deref(), &member.pool, &did, &ordinary_realm::station(), rejoin,
+                            source_origin.as_deref(), &member.pool, &did, &governor_station, rejoin,
                         )).await;
                         heap_future(|| uow.commit_event(rejoin.clone()))
                             .await
@@ -6927,7 +6928,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                     request.authority_commit.commit.stream_ref = stream.clone();
                     let request =
                         heap_future(|| circle_control_origin_request(
-                            source_origin.as_deref(), &member.pool, &did, &ordinary_realm::station(), sourced(request),
+                            source_origin.as_deref(), &member.pool, &did, &governor_station, sourced(request),
                         )).await;
                     heap_future(|| uow.commit_event(request.clone()))
                         .await
@@ -7036,7 +7037,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                             circle_transition(&request.authority_commit, "leave", Some("join"));
                         let leave =
                             heap_future(|| circle_control_origin_request(
-                                source_origin.as_deref(), &member.pool, &did, &ordinary_realm::station(), leave,
+                                source_origin.as_deref(), &member.pool, &did, &governor_station, leave,
                             )).await;
                         heap_future(|| uow.commit_event(leave.clone()))
                             .await
@@ -7189,7 +7190,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                             circle_transition(&leave.authority_commit, "join", Some("leave"));
                         let rejoin =
                             heap_future(|| circle_control_origin_request(
-                                source_origin.as_deref(), &member.pool, &did, &ordinary_realm::station(), rejoin,
+                                source_origin.as_deref(), &member.pool, &did, &governor_station, rejoin,
                             )).await;
                         heap_future(|| uow.commit_event(rejoin.clone()))
                             .await

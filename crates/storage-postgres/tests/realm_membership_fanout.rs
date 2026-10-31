@@ -6956,6 +6956,13 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                         .await
                         .unwrap();
                     if matches!(control, CircleCoverageControl::HistoricalArchive) {
+                        heap_future(|| async {
+                        {
+                            use std::io::Write as _;
+                            let mut stderr = std::io::stderr().lock();
+                            let _ = stderr.write_all(b"CIRCLE_HISTORICAL_PHASE child_enter\n");
+                            let _ = stderr.flush();
+                        }
                         // This is explicitly a trusted archival-state storage
                         // control, not a reachable HTTP history-backfill flow.
                         let archive_db = TestDatabase::lease().await;
@@ -7032,6 +7039,12 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                             verified_snapshot: bootstrap_snapshot_from_material(&circle_material),
                         };
                         archived.install_replica_anchor(&install).await.unwrap();
+                        {
+                            use std::io::Write as _;
+                            let mut stderr = std::io::stderr().lock();
+                            let _ = stderr.write_all(b"CIRCLE_HISTORICAL_PHASE anchors_installed\n");
+                            let _ = stderr.flush();
+                        }
                         assert!(
                             circle_join.authority_commit.commit.stream_position
                                 < request.authority_commit.commit.stream_position
@@ -7144,6 +7157,12 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                                 .get_result::<Row>(&mut conn).await.unwrap().value
                         };
                         let untouched = archive_basis().await;
+                        {
+                            use std::io::Write as _;
+                            let mut stderr = std::io::stderr().lock();
+                            let _ = stderr.write_all(b"CIRCLE_HISTORICAL_PHASE originals_verified_before_archive\n");
+                            let _ = stderr.flush();
+                        }
                         let mut conn = archived.pool.get().await.unwrap();
                         assert_eq!(diesel::sql_query("WITH copied AS (INSERT INTO canonical_events(id,digest_suite,digest,actor_id,realm_id,realm_pk,scope_ref,kind,schema_id,canonical_bytes,envelope,state,received_at,committed_at,rejection_reason) SELECT e.id,e.digest_suite,e.digest,e.actor_id,e.realm_id,(SELECT pk FROM canonical_realms WHERE wire_id=e.realm_id),e.scope_ref,e.kind,e.schema_id,e.canonical_bytes,e.envelope,e.state,e.received_at,e.committed_at,e.rejection_reason FROM jsonb_populate_record(NULL::canonical_events,$1) e RETURNING pk), committed AS (INSERT INTO realm_commits(commit_id,realm_id,stream_key,stream_ref,stream_position,previous_commit_ref,event_pk,governance_generation,commit_json,committed_at) SELECT c.commit_id,c.realm_id,c.stream_key,c.stream_ref,c.stream_position,c.previous_commit_ref,copied.pk,c.governance_generation,c.commit_json,c.committed_at FROM jsonb_populate_record(NULL::realm_commits,$2) c CROSS JOIN copied RETURNING commit_id) INSERT INTO agent_producer_signer_keys(commit_id,outcome,producer_source_fact,self_admission_account,self_admission_kind,self_admission_provenance) SELECT k.commit_id,k.outcome,k.producer_source_fact,k.self_admission_account,k.self_admission_kind,k.self_admission_provenance FROM jsonb_populate_record(NULL::agent_producer_signer_keys,$3) k JOIN committed c ON c.commit_id=k.commit_id")
                             .bind::<Jsonb,_>(&original.event_row).bind::<Jsonb,_>(&original.commit_row).bind::<Jsonb,_>(&original.signer_row).execute(&mut conn).await.unwrap(),1);
@@ -7186,6 +7205,12 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                         // Restore the actual previously issued same-cut material,
                         // never a hand-written UUID or fabricated old revision.
                         archived.install_replica_anchor(&install).await.unwrap();
+                        {
+                            use std::io::Write as _;
+                            let mut stderr = std::io::stderr().lock();
+                            let _ = stderr.write_all(b"CIRCLE_HISTORICAL_PHASE same_cut_materializer_restored\n");
+                            let _ = stderr.flush();
+                        }
                         remove_metadata().await;
                         assert_eq!(
                             archived.install_committed_replica(&incoming).await.unwrap(),
@@ -7229,6 +7254,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                             before,
                             "the historical terminal exception grants no ordinary successor authority"
                         );
+                        }).await;
                         return;
                     }
                     let fresh = governor

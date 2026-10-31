@@ -610,3 +610,60 @@ jobs:
           PY
           python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact
         working-directory: arkret-org/coland
+
+      - name: Test the complete Circle fanout matrix independently
+        if: ${{ !cancelled() }}
+        working-directory: arkret-org/coland
+        run: |
+          set -euo pipefail
+          target='realm_membership_fanout'
+          test -f 'crates/storage-postgres/tests/realm_membership_fanout.rs'
+          test_args=(cargo test --locked -p coland-storage-postgres --test "$target")
+          list_file="$RUNNER_TEMP/coland-complete-realm-membership-fanout-list.txt"
+          list_metadata="$RUNNER_TEMP/coland-complete-realm-membership-fanout-list.json"
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --list > "$list_file"
+          python - "$list_file" "$target" "$list_metadata" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import re
+          import sys
+
+          def parse_full_target_list(text, target):
+              if target != "realm_membership_fanout":
+                  raise ValueError("The complete Circle fanout target must be selected")
+              names = []
+              summaries = []
+              other = 0
+              for raw in text.splitlines():
+                  line = re.sub(r"\x1b\[[0-9;]*m", "", raw).strip()
+                  if not line:
+                      continue
+                  test = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*): test", line)
+                  summary = re.fullmatch(r"([0-9]+) tests?, ([0-9]+) benchmarks?", line)
+                  if test:
+                      names.append(test.group(1))
+                  elif summary:
+                      summaries.append((int(summary.group(1)), int(summary.group(2))))
+                  elif line.endswith(": benchmark"):
+                      raise ValueError("The Circle fanout contract target must not select benchmarks")
+                  else:
+                      # Wrapper diagnostics are not test identities and are never echoed.
+                      other += 1
+              if not names or len(names) != len(set(names)) or summaries != [(len(names), 0)]:
+                  raise ValueError("The complete Circle fanout list must be nonempty, unique and count-consistent")
+              return {"package": "coland-storage-postgres", "target": target,
+                      "test_count": len(names), "tests": names, "benchmarks": 0,
+                      "non_test_output_line_count": other}
+
+          if __name__ == "__main__":
+              source = pathlib.Path(sys.argv[1])
+              try:
+                  value = parse_full_target_list(source.read_text(encoding="utf-8-sig"), sys.argv[2])
+              except (OSError, UnicodeError, ValueError):
+                  raise SystemExit("Invalid complete Circle fanout test list") from None
+              value["raw_list_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+              pathlib.Path(sys.argv[3]).write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+              print(json.dumps(value, sort_keys=True))
+          PY
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --test-threads=1

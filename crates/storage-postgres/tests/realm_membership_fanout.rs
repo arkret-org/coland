@@ -7045,6 +7045,13 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                             let _ = stderr.write_all(b"CIRCLE_HISTORICAL_PHASE anchors_installed\n");
                             let _ = stderr.flush();
                         }
+                        heap_future(|| async {
+                        {
+                            use std::io::Write as _;
+                            let mut stderr = std::io::stderr().lock();
+                            let _ = stderr.write_all(b"CIRCLE_HISTORICAL_PHASE post_anchor_enter\n");
+                            let _ = stderr.flush();
+                        }
                         assert!(
                             circle_join.authority_commit.commit.stream_position
                                 < request.authority_commit.commit.stream_position
@@ -7056,6 +7063,12 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                                 .unwrap()
                                 .is_none()
                         );
+                        {
+                            use std::io::Write as _;
+                            let mut stderr = std::io::stderr().lock();
+                            let _ = stderr.write_all(b"CIRCLE_HISTORICAL_PHASE missing_original_checked\n");
+                            let _ = stderr.flush();
+                        }
                         let interval = archived
                             .replica_anchor_for_stream(&stream)
                             .await
@@ -7077,6 +7090,12 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                         heap_future(|| uow.commit_event(leave.clone()))
                             .await
                             .unwrap();
+                        {
+                            use std::io::Write as _;
+                            let mut stderr = std::io::stderr().lock();
+                            let _ = stderr.write_all(b"CIRCLE_HISTORICAL_PHASE leave_committed\n");
+                            let _ = stderr.flush();
+                        }
                         let incoming = case_replica(&leave, false);
                         let before = governance_gate_footprint(&archived.pool).await;
                         assert_code(
@@ -7091,6 +7110,13 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                             before,
                             "snapshot observation cannot invent an absent accepted join original"
                         );
+                        {
+                            use std::io::Write as _;
+                            let mut stderr = std::io::stderr().lock();
+                            let _ = stderr.write_all(b"CIRCLE_HISTORICAL_PHASE missing_original_rejected\n");
+                            let _ = stderr.flush();
+                        }
+                        heap_future(|| async {
                         #[derive(diesel::QueryableByName)]
                         struct OriginalRows {
                             #[diesel(sql_type=Jsonb)]
@@ -7104,6 +7130,12 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                         let original=diesel::sql_query("SELECT to_jsonb(e) AS event_row,to_jsonb(c) AS commit_row,to_jsonb(k) AS signer_row FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' JOIN agent_producer_signer_keys k ON k.commit_id=c.commit_id WHERE c.commit_id=$1")
                             .bind::<Text,_>(circle_join.authority_commit.commit.commit_id.as_str()).get_result::<OriginalRows>(&mut source).await.unwrap();
                         drop(source);
+                        {
+                            use std::io::Write as _;
+                            let mut stderr = std::io::stderr().lock();
+                            let _ = stderr.write_all(b"CIRCLE_HISTORICAL_PHASE original_rows_loaded\n");
+                            let _ = stderr.flush();
+                        }
                         let old_event: arkret_wire::Event =
                             serde_json::from_value(original.event_row["envelope"].clone()).unwrap();
                         let old_commit: arkret_wire::RealmCommit =
@@ -7142,6 +7174,12 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                             serde_json::from_value(original.signer_row["outcome"].clone()).unwrap();
                         assert_eq!(governor.historical_producer_signer_key(&realm, original_outcome.selector()).await.unwrap(), Some(original_outcome.clone()));
                         assert!(archived.historical_producer_signer_key(&realm, original_outcome.selector()).await.unwrap().is_none());
+                        {
+                            use std::io::Write as _;
+                            let mut stderr = std::io::stderr().lock();
+                            let _ = stderr.write_all(b"CIRCLE_HISTORICAL_PHASE original_proof_verified\n");
+                            let _ = stderr.flush();
+                        }
                         // Copy only the source's actual immutable originals.
                         // Local surrogate PKs are remapped; no anchor, head,
                         // membership, grant or observation marker is changed.
@@ -7254,6 +7292,8 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                             before,
                             "the historical terminal exception grants no ordinary successor authority"
                         );
+                        }).await;
+                        }).await;
                         }).await;
                         return;
                     }

@@ -6069,11 +6069,33 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         .as_deref()
         .map_or_else(member_station, |origin| origin.service_core_id());
     let mut member_connection = member.pool.get().await.unwrap();
-    diesel::sql_query("INSERT INTO device_inventory_station(singleton,station_id) VALUES(TRUE,$1)")
+    if source_origin.is_some() {
+        // Persisting the actual origin service identity already bound this
+        // immutable directory. Verify that owner; never ignore or replace it.
+        #[derive(diesel::QueryableByName)]
+        struct BoundInventoryStation {
+            #[diesel(sql_type = Text)]
+            station_id: String,
+        }
+        let bound =
+            diesel::sql_query("SELECT station_id FROM device_inventory_station WHERE singleton")
+                .get_result::<BoundInventoryStation>(&mut *member_connection)
+                .await
+                .unwrap();
+        assert_eq!(
+            bound.station_id,
+            local_station.as_str(),
+            "the real origin identity must own this exact device inventory"
+        );
+    } else {
+        diesel::sql_query(
+            "INSERT INTO device_inventory_station(singleton,station_id) VALUES(TRUE,$1)",
+        )
         .bind::<Text, _>(local_station.as_str())
         .execute(&mut *member_connection)
         .await
         .unwrap();
+    }
     drop(member_connection);
     let source_accounts = if let Some(origin) = source_origin.as_deref() {
         Some(

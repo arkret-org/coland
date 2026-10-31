@@ -216,12 +216,12 @@ async fn qualify_wip_review(pool: &PgPool, setup: &WipSetup) -> coland_storage::
         &first.authority_commit,
         arkret_wire::EventKind::CapabilityGrant,
         &founder(),
-        json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":actor,"subject":approver,"actions":["ak.space.update"],"resources":[arkret_wire::WireResourceSelector::space(realm.clone(),list_id.clone())],"constraints":[],"issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],"issued_at":arkret_canonical::format_timestamp_canonical(at)}}),
+        json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":actor,"subject":approver,"actions":["ak.space.update"],"resources":[arkret_wire::WireResourceSelector::space(realm.clone(),list_id.clone())],"constraints":[{"constraint_kind":"kind_restriction","effect":"allow","allowed_space_kinds":["board"]}],"issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],"issued_at":arkret_canonical::format_timestamp_canonical(at)}}),
         at,
     ))).await;
     uow.commit_event(grant.clone()).await.unwrap();
-    // A joined approver's exact-resource grant still needs the action's
-    // registered allowed_space_kinds constraint before it can earn a vote.
+    // This exact-resource grant has a valid registered kind restriction, but
+    // its board allowance cannot authorize a vote over the actual List.
     let incomplete_review = Box::pin(ordinary_realm::source_request(&pool, next_request(
         &grant.authority_commit,
         arkret_wire::EventKind::StrandMove,

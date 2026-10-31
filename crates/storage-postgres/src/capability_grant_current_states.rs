@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use arkret_models_collaboration::governance::grant_constraint::{
     AuthorityRootRef, CapabilityGrant, CapabilityGrantStatus, CapabilitySubject,
-    GrantConstraintEffect, GrantConstraintKind, IssuerAuthorityRef,
+    GrantConstraintKind, IssuerAuthorityRef,
 };
 use arkret_wire::{
     ActorId, CommitStreamRef, CommittedEventRef, CurrentRevision, EventId, GrantId, RealmCommitId,
@@ -648,16 +648,7 @@ fn revision_matches(
 fn finite_global_expiry(
     constraints: &[arkret_models_collaboration::governance::grant_constraint::GrantConstraint],
 ) -> Option<chrono::DateTime<chrono::Utc>> {
-    constraints
-        .iter()
-        .filter(|constraint| {
-            constraint.constraint_kind == GrantConstraintKind::Temporal
-                && constraint.effect == GrantConstraintEffect::Allow
-                && constraint.applies_to_actions.is_empty()
-                && constraint.recurrence.is_none()
-        })
-        .filter_map(|constraint| constraint.expires_at)
-        .min()
+    arkret_policy::grant_evaluation::capability_constraints_expires_at(constraints)
 }
 
 /// The one `non_event_grant_authority_rules[]` row across compiled profiles
@@ -1052,17 +1043,23 @@ async fn materialize_capability_grant_inner(
     if child_expiry.is_some_and(|expires_at| expires_at <= commit.committed_at) {
         return Err(conflict("grant_exceeds_issuer_authority"));
     }
-    // capabilities.md section 8: grant admission never branches on the subject
-    // kind. Only registry `required_constraints` add an expiry requirement, and
-    // they apply to every subject alike.
-    let mut registry_expiry_required = false;
+    // Registry requirements apply to every subject at this locked authority
+    // cut, using the same SDK declarations as later grant exercise.
     for action in &body.actions {
-        let descriptor = arkret_schema::capability_action(action)
-            .ok_or_else(|| schema_violation(format!("unregistered grant action {action}")))?;
-        registry_expiry_required |= descriptor.required_constraints.contains(&"expires_at");
-    }
-    if registry_expiry_required && child_expiry.is_none() {
-        return Err(conflict("grant requires a finite global expiry"));
+        if arkret_schema::capability_action(action).is_none() {
+            return Err(schema_violation(format!(
+                "unregistered grant action {action}"
+            )));
+        }
+        if !arkret_policy::grant_evaluation::capability_grant_action_requirements_declared(
+            action,
+            &body.resources,
+            &body.constraints,
+        ) {
+            return Err(conflict(format!(
+                "grant is missing required constraints for {action}"
+            )));
+        }
     }
 
     if let CapabilitySubject::Actor(subject) = &body.subject {

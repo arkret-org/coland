@@ -469,3 +469,201 @@ jobs:
           PY
           python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact
         working-directory: arkret-org/coland
+
+      - name: Test qualified Circle current recovery contracts
+        run: |
+          set -euo pipefail
+          selector='state::authority_forward::recovery_tests::circle_current_coverage_tests::'
+          test_args=(cargo test --locked -p coland-http --lib "$selector")
+          list_file="$RUNNER_TEMP/coland-http-circle-current-tests.txt"
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --list > "$list_file"
+          python - "$list_file" "$selector" <<'PY'
+          import pathlib
+          import sys
+
+          lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          tests = [line for line in lines if line.endswith(": test")]
+          expected = [
+              f"{sys.argv[2]}qualified_circle_refresh_precedes_full_tail_when_metadata_is_physically_absent: test",
+              f"{sys.argv[2]}unproved_circle_rejects_wrong_nonce_and_other_station_snapshot_without_effects: test",
+              f"{sys.argv[2]}refused_fresh_bootstrap_still_consumes_actual_withheld_prefix_and_exact_self_leave: test",
+          ]
+          if sorted(tests) != sorted(expected):
+              raise SystemExit("Circle current selector must select its three actual recovery tests")
+          print("Selected all three qualified Circle current recovery tests")
+          PY
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}"
+        working-directory: arkret-org/coland
+
+      - name: Test accepted own Circle leave keeps reads closed
+        run: |
+          set -euo pipefail
+          selector='state::authority_forward::recovery_tests::accepted_own_leave_returns_original_bound_result_after_terminal_membership_and_keeps_reads_closed'
+          test_args=(cargo test --locked -p coland-http --lib "$selector")
+          list_file="$RUNNER_TEMP/coland-http-circle-own-leave-tests.txt"
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact --list > "$list_file"
+          python - "$list_file" "$selector" <<'PY'
+          import pathlib
+          import sys
+
+          lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          tests = [line for line in lines if line.endswith(": test")]
+          if tests != [f"{sys.argv[2]}: test"]:
+              raise SystemExit("Own Circle leave selector must select exactly its accepted-result regression")
+          print("Selected the accepted own Circle leave regression")
+          PY
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact
+        working-directory: arkret-org/coland
+
+      - name: Test Storage action windows and bounded current reads
+        run: |
+          set -euo pipefail
+          selectors=(
+            'realm_authorization_cut::operation_fact_tests::native_message_cut_uses_action_windows_and_keeps_global_refusals'
+            'read_capacity_tests::typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_thousand_realms'
+          )
+          for selector in "${selectors[@]}"; do
+            test_args=(cargo test --locked -p coland-storage-postgres --lib "$selector")
+            list_file="$RUNNER_TEMP/coland-storage-circle-lib-fast-tests.txt"
+            python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact --list > "$list_file"
+            python - "$list_file" "$selector" <<'PY'
+          import pathlib
+          import sys
+
+          lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          tests = [line for line in lines if line.endswith(": test")]
+          if tests != [f"{sys.argv[2]}: test"]:
+              raise SystemExit("Storage library selector must select exactly its real regression")
+          print(f"Selected Storage regression {sys.argv[2]}")
+          PY
+            python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact
+          done
+        working-directory: arkret-org/coland
+
+      - name: Test real Circle grants and same-cut account snapshots
+        run: |
+          set -euo pipefail
+          for target in circle_convenience_reads realm_membership_fanout; do
+            case "$target" in
+              circle_convenience_reads)
+                selector='durable_circle_directory_and_member_details_follow_accepted_current'
+                ;;
+              realm_membership_fanout)
+                selector='account_scoped_realm_snapshot_preserves_another_hosted_accounts_circle_at_the_same_cut'
+                ;;
+            esac
+            test_args=(cargo test --locked -p coland-storage-postgres --test "$target" "$selector")
+            list_file="$RUNNER_TEMP/coland-storage-circle-integration-fast-tests.txt"
+            python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact --list > "$list_file"
+            python - "$list_file" "$selector" <<'PY'
+          import pathlib
+          import sys
+
+          lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          tests = [line for line in lines if line.endswith(": test")]
+          if tests != [f"{sys.argv[2]}: test"]:
+              raise SystemExit("Storage integration selector must select exactly its real regression")
+          print(f"Selected Storage regression {sys.argv[2]}")
+          PY
+            python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact
+          done
+        working-directory: arkret-org/coland
+
+      - name: Test Circle opening join membership basis independently
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          selector='circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires'
+          test_args=(cargo test --locked -p coland-storage-postgres --test realm_membership_fanout "$selector")
+          list_file="$RUNNER_TEMP/coland-circle-opening-join-exact-test.txt"
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact --list > "$list_file"
+          python - "$list_file" "$selector" <<'PY'
+          import pathlib
+          import sys
+
+          lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          tests = [line for line in lines if line.endswith(": test")]
+          if tests != [f"{sys.argv[2]}: test"]:
+              raise SystemExit("Circle opening join selector must select exactly its real regression")
+          print("Selected the Circle opening join membership-basis regression")
+          PY
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact
+        working-directory: arkret-org/coland
+
+      - name: Test held Full snapshot endpoint independently
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          selector='held_full_at_snapshot_endpoint_rejects_other_commit_id_without_writes'
+          test_args=(cargo test --locked -p coland-storage-postgres --test realm_membership_fanout "$selector")
+          list_file="$RUNNER_TEMP/coland-held-full-snapshot-endpoint-exact-test.txt"
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact --list > "$list_file"
+          python - "$list_file" "$selector" <<'PY'
+          import pathlib
+          import sys
+
+          lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          tests = [line for line in lines if line.endswith(": test")]
+          if tests != [f"{sys.argv[2]}: test"]:
+              raise SystemExit("Held Full endpoint selector must select exactly its real regression")
+          print("Selected the held Full snapshot-endpoint regression")
+          PY
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --exact
+        working-directory: arkret-org/coland
+
+      - name: Test the complete Circle fanout matrix independently
+        if: ${{ !cancelled() }}
+        working-directory: arkret-org/coland
+        run: |
+          set -euo pipefail
+          target='realm_membership_fanout'
+          test -f 'crates/storage-postgres/tests/realm_membership_fanout.rs'
+          test_args=(cargo test --locked -p coland-storage-postgres --test "$target")
+          list_file="$RUNNER_TEMP/coland-complete-realm-membership-fanout-list.txt"
+          list_metadata="$RUNNER_TEMP/coland-complete-realm-membership-fanout-list.json"
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --list > "$list_file"
+          python - "$list_file" "$target" "$list_metadata" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import re
+          import sys
+
+          def parse_full_target_list(text, target):
+              if target != "realm_membership_fanout":
+                  raise ValueError("The complete Circle fanout target must be selected")
+              names = []
+              summaries = []
+              other = 0
+              for raw in text.splitlines():
+                  line = re.sub(r"\x1b\[[0-9;]*m", "", raw).strip()
+                  if not line:
+                      continue
+                  test = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*): test", line)
+                  summary = re.fullmatch(r"([0-9]+) tests?, ([0-9]+) benchmarks?", line)
+                  if test:
+                      names.append(test.group(1))
+                  elif summary:
+                      summaries.append((int(summary.group(1)), int(summary.group(2))))
+                  elif line.endswith(": benchmark"):
+                      raise ValueError("The Circle fanout contract target must not select benchmarks")
+                  else:
+                      # Wrapper diagnostics are not test identities and are never echoed.
+                      other += 1
+              if not names or len(names) != len(set(names)) or summaries != [(len(names), 0)]:
+                  raise ValueError("The complete Circle fanout list must be nonempty, unique and count-consistent")
+              return {"package": "coland-storage-postgres", "target": target,
+                      "test_count": len(names), "tests": names, "benchmarks": 0,
+                      "non_test_output_line_count": other}
+
+          if __name__ == "__main__":
+              source = pathlib.Path(sys.argv[1])
+              try:
+                  value = parse_full_target_list(source.read_text(encoding="utf-8-sig"), sys.argv[2])
+              except (OSError, UnicodeError, ValueError):
+                  raise SystemExit("Invalid complete Circle fanout test list") from None
+              value["raw_list_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+              pathlib.Path(sys.argv[3]).write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+              print(json.dumps(value, sort_keys=True))
+          PY
+          python ../cotest/scripts/run-native-rust-tests.py "${test_args[@]}" -- --test-threads=1

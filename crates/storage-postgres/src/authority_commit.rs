@@ -841,12 +841,12 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_
          UNION ALL \
          SELECT 'circle'::text AS selector_kind, to_jsonb(circle_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM circle_current_states WHERE realm_id = $1 \
+           FROM circle_current_states WHERE realm_id = $1 AND circle_current_row_proved(realm_id,jsonb_build_object('kind','circle','circle_id',circle_id),source_stream_ref,current_commit_id,current_stream_position,value) \
          UNION ALL \
          SELECT 'circle_member_state'::text AS selector_kind, \
                 jsonb_build_object('kind','circle_member_state','circle_id',circle_id,'member_actor_id',member_id::jsonb) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
-           FROM circle_member_state_current_states WHERE realm_id = $1 \
+           FROM circle_member_state_current_states WHERE realm_id = $1 AND circle_current_row_proved(realm_id,jsonb_build_object('kind','circle_member_state','circle_id',circle_id,'member_actor_id',member_id::jsonb),source_stream_ref,current_commit_id,current_stream_position,value) \
          UNION ALL \
          SELECT 'call_state'::text AS selector_kind, to_jsonb(call_id) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
@@ -4642,7 +4642,33 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         stream: &arkret_wire::CommitStreamRef,
     ) -> PersistenceResult<Option<arkret_wire::CommitStreamHead>> {
         let mut conn = pg_conn(&self.pool).await?;
-        crate::replica_authorization::verified_head(&mut conn, stream).await
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+        sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *conn).await?;
+        if let arkret_wire::CommitStreamRef::Circle {
+            realm_id,
+            circle_id,
+        } = stream
+        {
+            if !crate::circle_current_states::metadata_proved_in_connection(
+                &mut *conn, realm_id, circle_id,
+            )
+            .await?
+            {
+                return Ok(None);
+            }
+            #[derive(QueryableByName)]
+            struct Unknown {
+                #[diesel(sql_type=diesel::sql_types::Bool)]
+                present: bool,
+            }
+            let unknown = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND NOT circle_current_row_proved(m.realm_id,jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb),m.source_stream_ref,m.current_commit_id,m.current_stream_position,m.value)) AS present")
+                .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).get_result::<Unknown>(&mut *conn).await.map_err(PersistenceError::database)?.present;
+            if unknown {
+                return Ok(None);
+            }
+        }
+        crate::replica_authorization::verified_head(conn, stream).await.map_err(Into::into)
+        }).await.map_err(PgTransactionError::into_persistence)
     }
 
     async fn replica_bootstrap_readers(
@@ -4665,7 +4691,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             stream_ref: serde_json::Value,
         }
         let mut conn = pg_conn(&self.pool).await?;
-        sql_query("SELECT c.stream_ref FROM replica_stream_anchors a JOIN realm_commits c ON c.commit_id=a.join_commit_id WHERE a.anchor_commit_id IS NULL OR NOT EXISTS(SELECT 1 FROM replica_authorization_cuts cut WHERE cut.realm_id=a.realm_id AND cut.source_stream_ref=jsonb_build_object('kind','realm','realm_id',a.realm_id)) ORDER BY a.stream_key")
+        sql_query("SELECT c.stream_ref FROM replica_stream_anchors a JOIN realm_commits c ON c.commit_id=a.join_commit_id WHERE a.anchor_commit_id IS NULL OR NOT EXISTS(SELECT 1 FROM replica_authorization_cuts cut WHERE cut.realm_id=a.realm_id AND cut.source_stream_ref=jsonb_build_object('kind','realm','realm_id',a.realm_id)) OR (c.stream_ref->>'kind'='circle' AND EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE m.realm_id=a.realm_id AND m.circle_id=c.stream_ref->>'circle_id' AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value)) AND (NOT EXISTS(SELECT 1 FROM circle_current_states r WHERE r.realm_id=a.realm_id AND r.circle_id=c.stream_ref->>'circle_id' AND circle_current_row_proved(r.realm_id,jsonb_build_object('kind','circle','circle_id',r.circle_id),r.source_stream_ref,r.current_commit_id,r.current_stream_position,r.value)) OR EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE m.realm_id=a.realm_id AND m.circle_id=c.stream_ref->>'circle_id' AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND NOT circle_current_row_proved(m.realm_id,jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb),m.source_stream_ref,m.current_commit_id,m.current_stream_position,m.value)))) ORDER BY a.stream_key")
             .load::<StreamRow>(&mut conn).await.map_err(PersistenceError::database)?.into_iter().map(|row| decode_json(row.stream_ref, "pending replica stream")).collect()
     }
 
@@ -6831,6 +6857,7 @@ impl PgAuthorityCommitStore {
                     .bind::<Text,_>(handoff.handoff_id.as_str()).bind::<Text,_>(handoff.realm_id.as_str())
                     .bind::<Jsonb,_>(serde_json::to_value(manifest).map_err(invalid)?).execute(&mut *conn).await?;
             }
+            crate::replica_authorization::invalidate_circle_continuation(conn, &handoff.realm_id).await?;
             handoff_replica::retain_outgoing_cut(conn, handoff, snapshot, &originals).await?;
             sql_query("INSERT INTO management_private_handoff_imports(handoff_id,realm_id,manifest) VALUES($1,$2,$3)")
                 .bind::<Text,_>(handoff.handoff_id.as_str()).bind::<Text,_>(handoff.realm_id.as_str())

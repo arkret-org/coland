@@ -273,14 +273,15 @@ pub(crate) async fn lists_for_actor_in_connection(
             },
         )));
     }
+    crate::circle_current_states::require_actor_currents_in_connection(conn, Some(realm_id), actor)
+        .await?;
     let circle_rows = diesel::sql_query(
         "SELECT m.circle_id FROM circle_member_state_current_states m \
              JOIN circle_current_states c ON c.circle_id=m.circle_id AND c.realm_id=m.realm_id \
-             JOIN realm_commits rc ON rc.commit_id=m.current_commit_id \
-               AND rc.realm_id=m.realm_id AND rc.stream_position=m.current_stream_position \
-               AND rc.stream_ref=m.source_stream_ref \
              WHERE m.realm_id=$1 AND m.member_id=$2 AND m.membership='join' \
                AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) \
+               AND circle_current_row_proved(m.realm_id,jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb),m.source_stream_ref,m.current_commit_id,m.current_stream_position,m.value) \
+               AND circle_current_row_proved(c.realm_id,jsonb_build_object('kind','circle','circle_id',c.circle_id),c.source_stream_ref,c.current_commit_id,c.current_stream_position,c.value) \
                AND c.value->>'state'='active' \
                AND m.source_stream_ref->>'circle_id'=m.circle_id",
     )
@@ -922,14 +923,16 @@ pub(crate) async fn visible_strand_scope_for_actor(
                 realm_id: realm_id.clone(),
             }));
         };
+        if !crate::circle_current_states::effective_member_in_connection(conn, realm_id, &circle_id, actor).await? {
+            return Ok(None);
+        }
         let joined = diesel::sql_query(
             "SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m \
              JOIN circle_current_states c ON c.circle_id=m.circle_id AND c.realm_id=m.realm_id \
-             JOIN realm_commits rc ON rc.commit_id=m.current_commit_id \
-               AND rc.realm_id=m.realm_id AND rc.stream_position=m.current_stream_position \
-               AND rc.stream_ref=m.source_stream_ref \
              WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' \
                AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) \
+               AND circle_current_row_proved(m.realm_id,jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb),m.source_stream_ref,m.current_commit_id,m.current_stream_position,m.value) \
+               AND circle_current_row_proved(c.realm_id,jsonb_build_object('kind','circle','circle_id',c.circle_id),c.source_stream_ref,c.current_commit_id,c.current_stream_position,c.value) \
                AND c.value->>'state'='active' \
                AND m.source_stream_ref->>'circle_id'=m.circle_id) AS present",
         )
@@ -1274,8 +1277,9 @@ mod tests {
             .execute(&mut *conn)
             .await
             .unwrap();
+        // Corrupt the endpoint without violating the interval shape constraint.
         diesel::sql_query(
-            "UPDATE replica_authorization_cuts SET head_commit_id=$2 WHERE realm_id=$1",
+            "UPDATE replica_authorization_cuts SET head_commit_id=$2,circle_effect_base_commit_id=$2 WHERE realm_id=$1",
         )
         .bind::<Text, _>(realm.as_str())
         .bind::<Text, _>(RealmCommitId::from_digest([8; 32]).as_str())
@@ -1286,7 +1290,7 @@ mod tests {
             store.snapshot().await.is_err(),
             "equal-position evidence must bind the exact cut Commit"
         );
-        diesel::sql_query("UPDATE replica_authorization_cuts SET head_commit_id=$2,head_stream_position=2 WHERE realm_id=$1")
+        diesel::sql_query("UPDATE replica_authorization_cuts SET head_commit_id=$2,head_stream_position=2,circle_effect_base_commit_id=$2,circle_effect_base_stream_position=2 WHERE realm_id=$1")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(head.commit_id.as_str())
             .execute(&mut *conn).await.unwrap();
         assert!(

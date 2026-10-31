@@ -8,7 +8,10 @@
 //! hot Realm's history or the number of Realms. A sequential scan of either
 //! table fails the matrix outright.
 
-use diesel::sql_types::{Array, BigInt, Json, Text};
+#[path = "../tests/support/historical_human.rs"]
+mod capacity_human;
+
+use diesel::sql_types::{Array, BigInt, Json, Jsonb, Text};
 use diesel_async::SimpleAsyncConnection;
 use horme::RunQueryDsl;
 use serde_json::Value;
@@ -18,6 +21,182 @@ use crate::{AsyncPgConnection, QueryableByName, pg_conn, sql_query};
 const HOT_HISTORY: i64 = 20_000;
 const COLD_HISTORY: i64 = 20;
 const PAGE: i64 = 100;
+
+// Obtain the native relational shape from a separately admitted fixture. Its
+// database never participates in the physical capacity measurements below.
+async fn admitted_circle_template() -> Value {
+    use arkret_wire::{ActorId, CommitStreamRef, EventAdmissionSubmission, EventKind, ScopeRef};
+    use capacity_human::ordinary_realm;
+    use coland_storage::EventCommitUnitOfWork;
+
+    let database = crate::test_database::TestDatabase::lease().await;
+    let pool = database.pool();
+    let fixture = Box::pin(capacity_human::HumanFixture::new(
+        &pool,
+        ordinary_realm::human_profile::station_did(&ordinary_realm::station()),
+    ))
+    .await;
+    ordinary_realm::human_profile::register_fixture_signer(
+        &fixture.pcr.history.account,
+        fixture.pcr.history.device_verification_method.clone(),
+        fixture.pcr.history.founding_device_signing_seed,
+    );
+    Box::pin(fixture.admit(&pool)).await;
+    let actor = ActorId::account(fixture.pcr.history.account.clone());
+    let head = fixture.unit.transactions.last().unwrap();
+    let realm = head.event.realm_id.clone();
+    let at = head.commit.committed_at;
+    let uow = crate::PgEventCommitUnitOfWork::new(pool.clone());
+    let create = ordinary_realm::next_request_for_actor(
+        head,
+        EventKind::CircleCreate,
+        actor.clone(),
+        serde_json::json!({"object":{"schema":"ak.schema.circle.v1","realm_id":realm,
+            "title":"Capacity template","display":{"short_name":"Capacity-template","color_token":"blue","symbol":{"glyph":"lock"}},
+            "directory_visibility":"realm_members","join_rule":"public","history_access":"since_join","state":"active",
+            "created_by":actor,"created_at":arkret_canonical::format_timestamp_canonical(at)}}),
+        at,
+    );
+    let create = Box::pin(ordinary_realm::source_request(&pool, create)).await;
+    Box::pin(uow.commit_event(create.clone())).await.unwrap();
+    let circle = arkret_wire::CircleId::from_event_id(&create.authority_commit.event.event_id);
+    let parent = Box::pin(ordinary_realm::parent_membership_revision(
+        &pool, &realm, &actor,
+    ))
+    .await;
+    let event = ordinary_realm::event_for_actor(
+        EventKind::CircleMemberState,
+        ScopeRef::Circle {
+            realm_id: realm.clone(),
+            circle_id: circle.clone(),
+        },
+        actor.clone(),
+        serde_json::json!({"circle_id":circle,"member_id":actor,"membership":"join","expected_membership":null,"parent_membership_revision":parent}),
+        at,
+    );
+    let mut join = ordinary_realm::request_for_event(&create.authority_commit, event, at);
+    join.authority_commit.commit.stream_ref = CommitStreamRef::Circle {
+        realm_id: realm.clone(),
+        circle_id: circle.clone(),
+    };
+    join.authority_commit.commit.stream_position = 0;
+    join.authority_commit.commit.previous_commit_ref = None;
+    join.realm_fanout_source = Some(EventAdmissionSubmission::new(
+        join.authority_commit.event.clone(),
+    ));
+    let join = Box::pin(ordinary_realm::source_request(&pool, join)).await;
+    Box::pin(uow.commit_event(join)).await.unwrap();
+    let mut conn = pg_conn(&pool).await.unwrap();
+    let proved = sql_query("SELECT circle_current_row_proved(c.realm_id,jsonb_build_object('kind','circle','circle_id',c.circle_id),c.source_stream_ref,c.current_commit_id,c.current_stream_position,c.value) AND circle_current_row_proved(m.realm_id,jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb),m.source_stream_ref,m.current_commit_id,m.current_stream_position,m.value) AS present FROM circle_current_states c JOIN circle_member_state_current_states m ON m.realm_id=c.realm_id AND m.circle_id=c.circle_id WHERE c.circle_id=$1")
+        .bind::<Text,_>(circle.as_str()).get_result::<crate::ExistsRow>(&mut *conn).await.unwrap();
+    assert!(
+        proved.present,
+        "the template must have actual admitted native originals"
+    );
+    sql_query("SELECT jsonb_build_object('station',current_device_inventory_station(),'authority',(SELECT to_jsonb(a) FROM realm_authorities a WHERE a.realm_id=c.realm_id),'create_event',ce.envelope,'member_event',me.envelope) AS payload FROM circle_current_states c JOIN realm_commits cc ON cc.commit_id=c.current_commit_id JOIN canonical_events ce ON ce.pk=cc.event_pk JOIN circle_member_state_current_states m ON m.realm_id=c.realm_id AND m.circle_id=c.circle_id JOIN realm_commits mc ON mc.commit_id=m.current_commit_id JOIN canonical_events me ON me.pk=mc.event_pk WHERE c.circle_id=$1")
+        .bind::<Text,_>(circle.as_str()).get_result::<crate::JsonPayloadRow>(&mut *conn).await.unwrap().payload
+}
+
+// These remapped rows are synthetic query-plan data, not newly signed Events
+// or semantic admission evidence; their remapped identifiers and old proofs
+// are deliberately not claimed to be content-addressed or re-signed. Preserve
+// the template's native relationship:
+// actual Station -> current authority -> exact source/position -> Event FK.
+// Each Circle has its own Realm create Commit and Circle member Commit. No
+// replica observation, continuation UUID or authorization cache is fabricated.
+async fn seed_circle_support(
+    conn: &mut AsyncPgConnection,
+    first: i64,
+    last: i64,
+    width: i64,
+    template: &Value,
+) {
+    sql_query("INSERT INTO device_inventory_station(singleton,station_id) VALUES(TRUE,$1) ON CONFLICT(singleton) DO NOTHING")
+        .bind::<Text,_>(template["station"].as_str().unwrap()).execute(&mut *conn).await.unwrap();
+    sql_query(format!("INSERT INTO realm_authorities(realm_id,generation,service_id,authority_ref,last_handoff_ref,updated_at) SELECT 'ak:realm:capacity-' || r,($1::jsonb#>>'{{authority,generation}}')::bigint,$1::jsonb->>'station',$1::jsonb#>'{{authority,authority_ref}}',NULL,now() FROM generate_series({first},{last}) r"))
+        .bind::<Jsonb,_>(template).execute(&mut *conn).await.unwrap();
+    for member in [false, true] {
+        let suffix = if member { "member" } else { "create" };
+        let kind = if member {
+            "ak.circle.member.state"
+        } else {
+            "ak.circle.create"
+        };
+        let source = if member {
+            "jsonb_build_object('kind','circle','realm_id',realm,'circle_id',circle)"
+        } else {
+            "jsonb_build_object('kind','realm','realm_id',realm)"
+        };
+        let stream = if member {
+            "'capacity-circle-stream-' || r || '-' || m"
+        } else {
+            "'capacity-circle-realm-' || r"
+        };
+        let position = if member { "0" } else { "m-1" };
+        let previous = if member {
+            "NULL::text"
+        } else {
+            "CASE WHEN m=1 THEN NULL ELSE 'capacity-circle-' || r || '-' || (m-1) || '-create' END"
+        };
+        let payload = if member {
+            "($1::jsonb#>'{member_event,payload}') || jsonb_build_object('circle_id',circle,'member_id',jsonb_build_object('member',m),'parent_membership_revision',jsonb_build_object('commit_id','capacity-' || r || '-0','stream_position',0))"
+        } else {
+            "($1::jsonb#>'{create_event,payload}') || jsonb_build_object('object',($1::jsonb#>'{create_event,payload,object}') || jsonb_build_object('id',circle,'realm_id',realm))"
+        };
+        let actor = if member {
+            "jsonb_build_object('member',m)"
+        } else {
+            "$1::jsonb#>'{create_event,actor_id}'"
+        };
+        sql_query(format!("WITH physical AS (
+            SELECT r,m,'ak:realm:capacity-' || r AS realm,'circle-' || r || '-' || m AS circle,
+                   'capacity-circle-' || r || '-' || m || '-{suffix}' AS id
+            FROM generate_series({first},{last}) r,generate_series(1,{width}) m
+        ), shaped AS (
+            SELECT *,{source} AS source,
+                   ($1::jsonb->'{suffix}_event') || jsonb_build_object('event_id',id,'realm_id',realm,'scope_ref',{source},'kind','{kind}','actor_id',{actor},'payload',{payload}) AS envelope
+            FROM physical
+        ), originals AS (
+            INSERT INTO canonical_events(id,digest_suite,digest,actor_id,realm_id,scope_ref,kind,canonical_bytes,envelope,state,committed_at)
+            SELECT '\\x01'::bytea || sha256(convert_to(id,'UTF8')),1,sha256(convert_to(id,'UTF8')),
+                   (envelope->'actor_id')::text,realm,source,'{kind}',convert_to(envelope::text,'UTF8'),envelope,'committed',now()
+            FROM shaped RETURNING pk,realm_id,envelope
+        )
+        INSERT INTO realm_commits(commit_id,realm_id,stream_key,stream_ref,stream_position,previous_commit_ref,event_pk,governance_generation,commit_json,committed_at)
+        SELECT s.id,s.realm,{stream},s.source,{position},{previous},e.pk,0,
+               jsonb_build_object('commit_id',s.id,'event_ref',s.id,'realm_id',s.realm,'stream_ref',s.source,'stream_position',{position}),now()
+        FROM shaped s JOIN originals e ON e.realm_id=s.realm AND e.envelope->>'event_id'=s.id"))
+            .bind::<Jsonb,_>(template).execute(&mut *conn).await.unwrap();
+    }
+}
+
+async fn assert_capacity_circle_binding(conn: &mut AsyncPgConnection) {
+    const PROVED: &str = "SELECT circle_current_row_proved(c.realm_id,jsonb_build_object('kind','circle','circle_id',c.circle_id),c.source_stream_ref,c.current_commit_id,c.current_stream_position,c.value) AS present FROM circle_current_states c WHERE c.realm_id='ak:realm:capacity-1' AND c.circle_id='circle-1-1'";
+    assert!(
+        sql_query(PROVED)
+            .get_result::<crate::ExistsRow>(&mut *conn)
+            .await
+            .unwrap()
+            .present
+    );
+    conn.batch_execute("BEGIN; UPDATE realm_commits SET event_pk=NULL WHERE commit_id='capacity-circle-1-1-create'").await.unwrap();
+    let detached = sql_query(PROVED)
+        .get_result::<crate::ExistsRow>(&mut *conn)
+        .await
+        .unwrap();
+    conn.batch_execute("ROLLBACK").await.unwrap();
+    assert!(
+        !detached.present,
+        "the physical matrix must still require the exact canonical Event FK"
+    );
+    assert!(
+        sql_query(PROVED)
+            .get_result::<crate::ExistsRow>(&mut *conn)
+            .await
+            .unwrap()
+            .present
+    );
+}
 
 #[derive(QueryableByName)]
 struct PlanRow {
@@ -332,7 +511,13 @@ async fn per_stream_reads_stay_bounded_across_one_hundred_and_one_thousand_realm
 
 // These are query-plan fixtures, not admission evidence. The larger member
 // and message families expose a scan hidden by tiny bootstrap-only Realms.
-async fn seed_current(conn: &mut AsyncPgConnection, first: i64, last: i64, width: i64) {
+async fn seed_current(
+    conn: &mut AsyncPgConnection,
+    first: i64,
+    last: i64,
+    width: i64,
+    template: &Value,
+) {
     conn.batch_execute(&format!(
         "INSERT INTO member_state_current_states
            (realm_id,member_id,membership,current_commit_id,current_stream_position,value,updated_at)
@@ -357,12 +542,19 @@ async fn seed_current(conn: &mut AsyncPgConnection, first: i64, last: i64, width
                 '{{}}'::jsonb, now()
          FROM generate_series({first},{last}) r, generate_series(1,{width}) m;"
     )).await.unwrap();
-    seed_snapshot_families(conn, first, last, width).await;
+    seed_snapshot_families(conn, first, last, width, template).await;
 }
 
 // Every table in the production snapshot union is populated. These are
 // physical query-plan fixtures, not signed admission or disclosure evidence.
-async fn seed_snapshot_families(conn: &mut AsyncPgConnection, first: i64, last: i64, width: i64) {
+async fn seed_snapshot_families(
+    conn: &mut AsyncPgConnection,
+    first: i64,
+    last: i64,
+    width: i64,
+    template: &Value,
+) {
+    seed_circle_support(conn, first, last, width, template).await;
     let rows = format!("FROM generate_series({first},{last}) r, generate_series(1,{width}) m");
     let realm = "'ak:realm:capacity-' || r";
     let commit = "'capacity-' || r || '-0'";
@@ -380,7 +572,7 @@ async fn seed_snapshot_families(conn: &mut AsyncPgConnection, first: i64, last: 
         ("call_component_current_states", "call_id,selector,source_stream_ref", format!("'call-' || {key},jsonb_build_object('kind','call_focus','call_id','call-' || {key}),jsonb_build_object('kind','realm','realm_id',{realm})"), "'{}'::jsonb".to_owned()),
         ("applet_registration_current_states", "applet_id,service_id,instance_event_ref", format!("'applet-' || {key},'ak:did_core:web:capacity-service-' || {key} || '.example','registration-event-' || {key}"), format!("jsonb_build_object('applet_id','applet-' || {key},'service_id','ak:did_core:web:capacity-service-' || {key} || '.example')")),
         ("member_identity_updates_current_states", "member_id,segment", "jsonb_build_object('member',m)::text,'member_identity'".to_owned(), "jsonb_build_object('assertions','[]'::jsonb)".to_owned()),
-        ("circle_current_states", "circle_id,create_event_id,source_stream_ref,short_name_folded", format!("'circle-' || {key},'circle-event-' || {key},jsonb_build_object('kind','realm','realm_id',{realm}),'circle-' || m"), format!("jsonb_build_object('id','circle-' || {key},'realm_id',{realm})")),
+        ("circle_current_states", "circle_id,create_event_id,source_stream_ref,short_name_folded", format!("'circle-' || {key},'capacity-circle-' || {key} || '-create',jsonb_build_object('kind','realm','realm_id',{realm}),'circle-' || m"), format!("jsonb_build_object('id','circle-' || {key},'realm_id',{realm})")),
         ("circle_member_state_current_states", "circle_id,member_id,membership,source_stream_ref", format!("'circle-' || {key},jsonb_build_object('member',m)::text,'join',jsonb_build_object('kind','circle','realm_id',{realm},'circle_id','circle-' || {key})"), format!("jsonb_build_object('membership','join','parent_membership_revision',jsonb_build_object('commit_id',{commit},'stream_position',0))")),
         ("call_state_current_states", "call_id,create_event_id,source_stream_ref", format!("'call-' || {key},'call-event-' || {key},jsonb_build_object('kind','realm','realm_id',{realm})"), "jsonb_build_object('from',NULL,'to','ringing')".to_owned()),
         ("moderation_franking_proof_current_states", "target_event_id,source_stream_ref", format!("'franking-target-' || {key},jsonb_build_object('kind','realm','realm_id',{realm})"), "'{}'::jsonb".to_owned()),
@@ -414,7 +606,11 @@ async fn seed_snapshot_families(conn: &mut AsyncPgConnection, first: i64, last: 
         ("agent_status_current_states", "current_key,agent_id,actor_id", format!("'agent-' || {key},'agent-' || {key},'{{}}'::jsonb"), "'\"active\"'::jsonb".to_owned()),
         ("agent_key_current_states", "current_key,agent_id,agent_key_id", format!("'key-' || {key},'agent-' || {key},'key-' || {key}"), "jsonb_build_object('authorizations','[]'::jsonb)".to_owned()),
     ] {
-        let (covering, position) = if table == "moderation_report_current_states" {
+        let (covering, position) = if table == "circle_current_states" {
+            ("'capacity-circle-' || r || '-' || m || '-create'", "m-1")
+        } else if table == "circle_member_state_current_states" {
+            ("'capacity-circle-' || r || '-' || m || '-member'", "0")
+        } else if table == "moderation_report_current_states" {
             ("'capacity-' || r || '-' || (m-1)", "m-1")
         } else if matches!(table, "schema_definition_current_states" | "pin_current_states" | "actor_profile_current_states" | "call_component_current_states") {
             ("'capacity-' || r || '-1'", "1")
@@ -538,17 +734,65 @@ fn assert_each_snapshot_family_bounded(
     }
 }
 
-#[tokio::test]
-async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_thousand_realms() {
+// Circle provenance adds real scoped streams to the current-state fixture.
+// Keep the original single-stream negative oracle in its own history-only
+// matrix, with the same hot/cold histories, Realm counts, keys and scan bound.
+// This guard ends before either later fixture leases its database.
+async fn assert_single_stream_scope_capacity() {
     let database = crate::test_database::TestDatabase::lease().await;
     let mut conn = pg_conn(&database.pool()).await.unwrap();
     seed(&mut conn, 1, 1, HOT_HISTORY).await;
-    seed_current(&mut conn, 1, 1, 1000).await;
     let mut seeded = 1;
     for realms in [1_i64, 100, 1000] {
         if realms > seeded {
             seed_history(&mut conn, seeded + 1, realms, COLD_HISTORY, true).await;
-            seed_current(&mut conn, seeded + 1, realms, 20).await;
+            seeded = realms;
+        }
+        conn.batch_execute("ANALYZE").await.unwrap();
+        for realm in [
+            "ak:realm:capacity-1".to_owned(),
+            format!("ak:realm:capacity-{realms}"),
+        ] {
+            let key = realm.replace("ak:realm:capacity-", "stream-");
+            let label = format!("single stream realms={realms} realm={realm} no scoped stream");
+            let plan = sql_query(format!(
+                "EXPLAIN (ANALYZE, FORMAT JSON) {}",
+                crate::self_current_reads::SCOPED_STREAMS_SQL
+            ))
+            .bind::<Text, _>(&realm)
+            .bind::<Text, _>(&key)
+            .get_result::<PlanRow>(&mut *conn)
+            .await
+            .unwrap()
+            .plan;
+            measured_current(plan, &label, 4.0);
+            let result = sql_query(crate::self_current_reads::SCOPED_STREAMS_SQL)
+                .bind::<Text, _>(&realm)
+                .bind::<Text, _>(&key)
+                .get_result::<crate::ExistsRow>(&mut *conn)
+                .await
+                .unwrap();
+            assert!(!result.present, "{label}");
+        }
+    }
+    drop(conn);
+    drop(database);
+}
+
+#[tokio::test]
+async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_thousand_realms() {
+    Box::pin(assert_single_stream_scope_capacity()).await;
+    let template = Box::pin(admitted_circle_template()).await;
+    let database = crate::test_database::TestDatabase::lease().await;
+    let mut conn = pg_conn(&database.pool()).await.unwrap();
+    seed(&mut conn, 1, 1, HOT_HISTORY).await;
+    seed_current(&mut conn, 1, 1, 1000, &template).await;
+    assert_capacity_circle_binding(&mut conn).await;
+    let mut seeded = 1;
+    for realms in [1_i64, 100, 1000] {
+        if realms > seeded {
+            seed_history(&mut conn, seeded + 1, realms, COLD_HISTORY, true).await;
+            seed_current(&mut conn, seeded + 1, realms, 20, &template).await;
             seeded = realms;
         }
         conn.batch_execute("ANALYZE").await.unwrap();
@@ -606,7 +850,7 @@ async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_th
                     "{\"member\": 0}",
                 ),
                 (
-                    "no scoped stream",
+                    "scoped streams present",
                     crate::self_current_reads::SCOPED_STREAMS_SQL,
                     "stream-1",
                 ),
@@ -653,7 +897,7 @@ async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_th
             ] {
                 let label = format!("self current realms={realms} realm={realm} {name}");
                 let realm_stream = realm.replace("ak:realm:capacity-", "stream-");
-                let key = if name == "no scoped stream" {
+                let key = if name == "scoped streams present" {
                     realm_stream.as_str()
                 } else {
                     key
@@ -667,6 +911,16 @@ async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_th
                     .plan;
                 measured_current(plan, &label, 4.0);
             }
+            // The complete Circle support graph now has additional streams.
+            // Test its positive result without substituting it for the
+            // history-only false control above.
+            let scoped = sql_query(crate::self_current_reads::SCOPED_STREAMS_SQL)
+                .bind::<Text, _>(&realm)
+                .bind::<Text, _>(realm.replace("ak:realm:capacity-", "stream-"))
+                .get_result::<crate::ExistsRow>(&mut *conn)
+                .await
+                .unwrap();
+            assert!(scoped.present, "{label}: real Circle streams are present");
             let number = realm.strip_prefix("ak:realm:capacity-").unwrap();
             for (suffix, expected_rows) in [("1", 1.0), ("0", 0.0)] {
                 let strand = format!("strand-{number}-{suffix}");
@@ -717,11 +971,6 @@ async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_th
                 (
                     crate::self_current_reads::MEMBER_PRESENT_SQL,
                     "{\"member\": 0}".to_owned(),
-                    false,
-                ),
-                (
-                    crate::self_current_reads::SCOPED_STREAMS_SQL,
-                    realm.replace("ak:realm:capacity-", "stream-"),
                     false,
                 ),
                 (

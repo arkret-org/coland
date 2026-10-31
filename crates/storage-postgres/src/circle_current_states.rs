@@ -32,6 +32,135 @@ struct PresentRow {
     present: bool,
 }
 
+/// Check freshness in the caller's existing protected read/acceptance cut.
+/// This performs no row locking and is safe inside READ ONLY transactions.
+pub(crate) async fn require_metadata_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    circle: &CircleId,
+) -> PersistenceResult<()> {
+    if !metadata_proved_in_connection(conn, realm, circle).await? {
+        return Err(unproved("Circle metadata current coverage is unproved"));
+    }
+    Ok(())
+}
+
+pub(crate) async fn metadata_proved_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    circle: &CircleId,
+) -> PersistenceResult<bool> {
+    let proved = sql_query("SELECT EXISTS(SELECT 1 FROM circle_current_states c WHERE c.realm_id=$1 AND c.circle_id=$2 AND circle_current_row_proved(c.realm_id,jsonb_build_object('kind','circle','circle_id',c.circle_id),c.source_stream_ref,c.current_commit_id,c.current_stream_position,c.value)) AS present")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(circle.as_str())
+        .get_result::<PresentRow>(conn).await.map_err(PersistenceError::database)?;
+    Ok(proved.present)
+}
+
+pub(crate) async fn require_member_current_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    circle: &CircleId,
+    actor: &arkret_wire::ActorId,
+) -> PersistenceResult<()> {
+    require_metadata_in_connection(conn, realm, circle).await?;
+    if !member_proved_in_connection(conn, realm, circle, actor).await? {
+        return Err(unproved("Circle membership current coverage is unproved"));
+    }
+    Ok(())
+}
+
+async fn member_proved_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    circle: &CircleId,
+    actor: &arkret_wire::ActorId,
+) -> PersistenceResult<bool> {
+    let proved = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND circle_current_row_proved(m.realm_id,jsonb_build_object('kind','circle_member_state','circle_id',m.circle_id,'member_actor_id',m.member_id::jsonb),m.source_stream_ref,m.current_commit_id,m.current_stream_position,m.value)) AS present")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(circle.as_str()).bind::<Text,_>(actor.to_string())
+        .get_result::<PresentRow>(conn).await.map_err(PersistenceError::database)?;
+    Ok(proved.present)
+}
+
+/// Retained accepted/signed join evidence is a reason to refresh a missing
+/// projection, never a substitute for current authorization.
+async fn retained_join_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    circle: &CircleId,
+    actor: &arkret_wire::ActorId,
+) -> PersistenceResult<bool> {
+    Ok(sql_query("SELECT EXISTS(SELECT 1 FROM replica_authorization_rows r WHERE r.realm_id=$1 AND r.selector=jsonb_build_object('kind','circle_member_state','circle_id',$2::text,'member_actor_id',$3::jsonb) AND r.value->>'membership'='join') OR EXISTS(SELECT 1 FROM replica_stream_anchors a JOIN realm_commits c ON c.commit_id=a.join_commit_id AND c.realm_id=a.realm_id AND c.stream_key=a.stream_key JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE a.realm_id=$1 AND c.stream_ref=jsonb_build_object('kind','circle','realm_id',$1::text,'circle_id',$2::text) AND e.kind='ak.circle.member.state' AND e.envelope->'actor_id'=$3 AND e.envelope#>'{payload,member_id}'=$3 AND e.envelope#>>'{payload,membership}'='join') AS present")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(circle.as_str()).bind::<Jsonb,_>(serde_json::to_value(actor).map_err(PersistenceError::database)?)
+        .get_result::<PresentRow>(conn).await.map_err(PersistenceError::database)?.present)
+}
+
+/// A list cannot silently turn an unproved retained membership into an empty
+/// result. Call this inside the same read cut as the eventual projection.
+pub(crate) async fn require_actor_currents_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: Option<&arkret_wire::RealmId>,
+    actor: &arkret_wire::ActorId,
+) -> PersistenceResult<()> {
+    require_actor_target_in_connection(conn, realm, None, actor).await
+}
+
+pub(crate) async fn require_actor_target_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: Option<&arkret_wire::RealmId>,
+    circle: Option<&CircleId>,
+    actor: &arkret_wire::ActorId,
+) -> PersistenceResult<()> {
+    #[derive(diesel::QueryableByName)]
+    struct ScopeRow {
+        #[diesel(sql_type=Text)]
+        realm_id: String,
+        #[diesel(sql_type=Text)]
+        circle_id: String,
+    }
+    let rows = sql_query("SELECT realm_id,circle_id FROM circle_member_state_current_states m WHERE ($1::text IS NULL OR m.realm_id=$1) AND m.member_id=$2 AND m.membership='join' AND ($3::text IS NULL OR m.circle_id=$3) UNION SELECT r.realm_id,r.selector->>'circle_id' AS circle_id FROM replica_authorization_rows r WHERE ($1::text IS NULL OR r.realm_id=$1) AND r.selector->>'kind'='circle_member_state' AND r.selector->'member_actor_id'=$2::jsonb AND r.value->>'membership'='join' AND ($3::text IS NULL OR r.selector->>'circle_id'=$3) AND NOT EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE m.realm_id=r.realm_id AND m.circle_id=r.selector->>'circle_id' AND m.member_id=$2) UNION SELECT a.realm_id,c.stream_ref->>'circle_id' AS circle_id FROM replica_stream_anchors a JOIN realm_commits c ON c.commit_id=a.join_commit_id AND c.realm_id=a.realm_id AND c.stream_key=a.stream_key JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE ($1::text IS NULL OR a.realm_id=$1) AND c.stream_ref->>'kind'='circle' AND ($3::text IS NULL OR c.stream_ref->>'circle_id'=$3) AND e.kind='ak.circle.member.state' AND e.envelope->'actor_id'=$2::jsonb AND e.envelope#>'{payload,member_id}'=$2::jsonb AND e.envelope#>>'{payload,membership}'='join' AND NOT EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE m.realm_id=a.realm_id AND m.circle_id=c.stream_ref->>'circle_id' AND m.member_id=$2)")
+        .bind::<diesel::sql_types::Nullable<Text>,_>(realm.map(arkret_wire::RealmId::as_str))
+        .bind::<Text,_>(actor.to_string()).bind::<diesel::sql_types::Nullable<Text>,_>(circle.map(CircleId::as_str))
+        .load::<ScopeRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    for row in rows {
+        let realm_id = row.realm_id.parse().map_err(PersistenceError::database)?;
+        if !crate::authority_commit::accepted_current_member_joined_in_connection(
+            conn, &realm_id, actor,
+        )
+        .await?
+        {
+            continue;
+        }
+        effective_member_in_connection(
+            conn,
+            &realm_id,
+            &row.circle_id.parse().map_err(PersistenceError::database)?,
+            actor,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn require_scope_currents_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    circle: &CircleId,
+) -> PersistenceResult<()> {
+    require_metadata_in_connection(conn, realm, circle).await?;
+    #[derive(diesel::QueryableByName)]
+    struct Member {
+        #[diesel(sql_type=Text)]
+        member_id: String,
+    }
+    let members = sql_query("SELECT member_id FROM circle_member_state_current_states WHERE realm_id=$1 AND circle_id=$2 AND membership='join' UNION SELECT (r.selector->'member_actor_id')::text AS member_id FROM replica_authorization_rows r WHERE r.realm_id=$1 AND r.selector=jsonb_build_object('kind','circle_member_state','circle_id',$2::text,'member_actor_id',r.selector->'member_actor_id') AND r.value->>'membership'='join' AND NOT EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id::jsonb=r.selector->'member_actor_id')")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(circle.as_str()).load::<Member>(&mut *conn).await.map_err(PersistenceError::database)?;
+    for member in members {
+        let actor = serde_json::from_str(&member.member_id).map_err(PersistenceError::database)?;
+        effective_member_in_connection(conn, realm, circle, &actor).await?;
+    }
+    Ok(())
+}
+
 /// A Circle-scoped content writer must use the signed Circle stream and the
 /// durable active Circle/member currents at its accepting cut. The Realm
 /// authority lock held by capability authorization serializes governance
@@ -85,6 +214,7 @@ pub(crate) async fn require_active_author_in_connection(
             "circle_not_active",
         ));
     }
+    require_member_current_in_connection(conn, realm_id, circle_id, &event.actor_id).await?;
     let present = sql_query(
         "SELECT EXISTS (SELECT 1 FROM circle_current_states circle \
          JOIN realm_commits cc ON cc.commit_id=circle.current_commit_id \
@@ -126,18 +256,40 @@ pub(crate) async fn effective_member_in_connection(
     circle_id: &CircleId,
     actor: &arkret_wire::ActorId,
 ) -> PersistenceResult<bool> {
-    Ok(sql_query(
-        "SELECT EXISTS (SELECT 1 FROM circle_member_state_current_states m \
-         WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' \
-           AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value)) AS present",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(circle_id.as_str())
-    .bind::<Text, _>(actor.to_string())
-    .get_result::<PresentRow>(&mut *conn)
-    .await
-    .map_err(PersistenceError::database)?
-    .present)
+    let current = sql_query("SELECT value FROM circle_member_state_current_states WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3")
+        .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(actor.to_string())
+        .get_result::<CircleRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let Some(current) = current else {
+        if retained_join_in_connection(conn, realm_id, circle_id, actor).await? {
+            return Err(unproved(
+                "accepted Circle join has no derived member current",
+            ));
+        }
+        return Ok(false);
+    };
+    let current: CircleMemberStateValue =
+        serde_json::from_value(current.value).map_err(PersistenceError::database)?;
+    if current.membership != arkret_wire::MembershipState::Join {
+        return Ok(false);
+    }
+    let parent = current
+        .parent_membership_revision
+        .as_ref()
+        .ok_or_else(|| unproved("joined Circle current has no parent binding"))?;
+    match crate::replica_authorization::parent_binding_superseded(conn, realm_id, actor, parent)
+        .await?
+    {
+        Some(true) => return Ok(false),
+        Some(false) => {}
+        None => return Err(unproved("Circle parent current coverage is unproved")),
+    }
+    if !member_proved_in_connection(conn, realm_id, circle_id, actor).await? {
+        return Err(unproved("Circle member source coverage is unproved"));
+    }
+    require_metadata_in_connection(conn, realm_id, circle_id).await?;
+    Ok(sql_query("SELECT EXISTS(SELECT 1 FROM circle_current_states WHERE realm_id=$1 AND circle_id=$2 AND value->>'state'='active') AS present")
+        .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(circle_id.as_str())
+        .get_result::<PresentRow>(conn).await.map_err(PersistenceError::database)?.present)
 }
 
 fn conflict(code: ConflictCode, detail: &str) -> PersistenceError {
@@ -166,6 +318,10 @@ fn member_current(event: &Event) -> PersistenceResult<CircleMemberStateValue> {
         .validate()
         .map_err(|error| schema(&error.to_string()))?;
     Ok(current)
+}
+
+fn unproved(detail: &str) -> PersistenceError {
+    conflict(ConflictCode::TemporarilyUnavailable, detail)
 }
 
 fn unavailable(detail: &str) -> PersistenceError {

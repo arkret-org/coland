@@ -3,6 +3,8 @@
 //! does not claim a live OIDC/DPoP middleware or subprocess-crash test.
 //! Box the admission/recovery phases separately so signed multi-Station
 //! regression futures fit the ordinary test-thread stack in debug builds.
+#[path = "circle_current_coverage_tests.rs"]
+mod circle_current_coverage_tests;
 #[path = "../../../storage-postgres/tests/support/historical_human.rs"]
 mod historical_human;
 #[path = "realm_terminal_fanout_tests.rs"]
@@ -3247,6 +3249,19 @@ async fn circle_own_leave_bound_result_cases(
         .enumerate()
     {
         eprintln!("[2133-circle-recovery] phase={index} state={state}");
+        let retained_circle_before_parent_rejoin = if index == 3 {
+            assert!(
+                store
+                    .circle_view_for_actor(circle_id, &actor)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "the accepted Circle rejoin must be readable before its parent is replaced"
+            );
+            Some(circle_cleanup_retained_facts(origin_pool, circle_id).await)
+        } else {
+            None
+        };
         if index == 3 {
             parent_join = scenario_future(|| {
                 circle_cleanup_parent_rejoin(
@@ -3308,6 +3323,7 @@ async fn circle_own_leave_bound_result_cases(
                 event,
                 commit,
                 request.authority_commit.producer_signer_fact.clone(),
+                retained_circle_before_parent_rejoin.as_ref().unwrap(),
             ))
             .await;
         }
@@ -3650,6 +3666,37 @@ async fn circle_cleanup_parent_rejoin(
     previous
 }
 
+async fn circle_cleanup_retained_facts(
+    pool: &PgPool,
+    circle_id: &arkret_wire::CircleId,
+) -> serde_json::Value {
+    use diesel_async::RunQueryDsl as _;
+    #[derive(diesel::QueryableByName)]
+    struct RetainedCircle {
+        #[diesel(sql_type=diesel::sql_types::Jsonb)]
+        value: serde_json::Value,
+    }
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query(
+        "SELECT jsonb_build_object( \
+         'circle',jsonb_build_object('realm_id',c.realm_id,'circle_id',c.circle_id, \
+             'create_event_id',c.create_event_id,'source_stream_ref',c.source_stream_ref, \
+             'current_commit_id',c.current_commit_id,'current_stream_position',c.current_stream_position,'value',c.value), \
+         'authorization',jsonb_build_object('source_stream_ref',r.source_stream_ref, \
+             'current_commit_id',r.current_commit_id,'current_stream_position',r.current_stream_position,'value',r.value, \
+             'circle_continuation_id',r.circle_continuation_id,'observed_anchor_commit_id',r.observed_anchor_commit_id, \
+             'observed_anchor_stream_position',r.observed_anchor_stream_position)) AS value \
+         FROM circle_current_states c JOIN replica_authorization_rows r ON r.realm_id=c.realm_id \
+             AND r.selector=jsonb_build_object('kind','circle','circle_id',c.circle_id) \
+         WHERE c.circle_id=$1",
+    )
+    .bind::<diesel::sql_types::Text, _>(circle_id.as_str())
+    .get_result::<RetainedCircle>(&mut *conn)
+    .await
+    .unwrap()
+    .value
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "The negative regression uses the exact accepted Full and its two Station fixtures."
@@ -3663,6 +3710,7 @@ async fn circle_cleanup_install_refusals(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
     fact: Option<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
+    expected_retained_circle: &serde_json::Value,
 ) {
     use diesel_async::RunQueryDsl as _;
     #[derive(diesel::QueryableByName)]
@@ -3795,10 +3843,27 @@ async fn circle_cleanup_install_refusals(
         .bind::<diesel::sql_types::Text,_>(commit.previous_commit_ref.as_ref().unwrap().as_str())
         .bind::<diesel::sql_types::Text,_>(event.actor_id.to_string())
         .get_result::<CleanupCut>(&mut *conn).await.unwrap().value;
-    // The replacement parent Snapshot cannot disclose metadata of this
-    // effective-invalid Circle. Its own canonical join is still held, and
-    // only the separately accepted cleanup result may install its leave.
-    assert!(diagnostic["active"].is_null());
+    // A parent replacement cannot rewrite the accepted Circle or make its
+    // old join effective again (circle.md section 9.1). Its retained source
+    // is historical evidence, not permission to read after that replacement.
+    let arkret_wire::ScopeRef::Circle { circle_id, .. } = &event.scope_ref else {
+        panic!("Circle cleanup must retain the original Circle scope");
+    };
+    drop(conn);
+    assert_eq!(
+        circle_cleanup_retained_facts(pool, circle_id).await,
+        *expected_retained_circle,
+        "parent replacement must preserve the exact retained Circle and its source observation"
+    );
+    assert!(
+        store
+            .circle_view_for_actor(circle_id, &event.actor_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "an old Circle join must not regain read access through a new parent join"
+    );
+    conn = pool.get().await.unwrap();
     assert_eq!(diagnostic["join_commit"], diagnostic["member_commit"]);
     assert_eq!(
         diagnostic["parent"]["commit_id"],

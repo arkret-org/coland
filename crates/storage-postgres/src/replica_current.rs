@@ -925,11 +925,20 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
         let source =
             serde_json::to_value(&source_head.stream_ref).map_err(PersistenceError::database)?;
         for table in MEMBER_STATION_FAMILIES {
+            // Account-scoped disclosure is not a negative statement about
+            // another hosted Account's private Circle. Retained rows remain
+            // subject to their own continuation proof, including after jumps.
+            if matches!(
+                *table,
+                "circle_current_states" | "circle_member_state_current_states"
+            ) {
+                continue;
+            }
             diesel::sql_query(format!("DELETE FROM {table} WHERE realm_id=$1 AND current_commit_id IN (SELECT current_commit_id FROM replica_authorization_rows WHERE realm_id=$1 AND source_stream_ref=$2)"))
                 .bind::<Text, _>(realm_id.as_str()).bind::<Jsonb, _>(&source).execute(&mut *conn).await.map_err(PersistenceError::database)?;
         }
         diesel::sql_query(
-            "DELETE FROM replica_authorization_rows WHERE realm_id=$1 AND source_stream_ref=$2",
+            "DELETE FROM replica_authorization_rows WHERE realm_id=$1 AND source_stream_ref=$2 AND selector->>'kind' NOT IN ('circle','circle_member_state')",
         )
         .bind::<Text, _>(realm_id.as_str())
         .bind::<Jsonb, _>(&source)
@@ -1419,6 +1428,9 @@ pub(crate) async fn advance_in_connection(
     event: &arkret_wire::Event,
     commit: &arkret_wire::RealmCommit,
 ) -> PersistenceResult<()> {
+    if crate::replica_authorization::circle_effect_covered(conn, commit).await? {
+        return Ok(());
+    }
     let commit_id = commit.commit_id.to_string();
     let row = Revision {
         commit_id: &commit_id,
@@ -1445,6 +1457,7 @@ pub(crate) async fn advance_in_connection(
         diesel::sql_query("DELETE FROM replica_authorization_rows WHERE realm_id=$1 AND selector->>'kind' IN ('realm_authority_root','realm_policy_bundle')").bind::<Text, _>(event.realm_id.as_str()).execute(&mut *conn).await.map_err(PersistenceError::database)?;
     }
 
+    let mut complete_circle_effects = true;
     match event.kind {
         arkret_wire::EventKind::MimiRoomBinding => {
             if event.realm_id != commit.realm_id
@@ -1982,9 +1995,84 @@ pub(crate) async fn advance_in_connection(
             )
             .await?;
         }
-        _ => {}
+        _ => {
+            // A Full envelope alone is not a reducer completeness proof.
+            // Unsupported Circle lifecycle effects must not recertify an
+            // old active value or manufacture a new snapshot observation.
+            complete_circle_effects = false;
+        }
+    }
+    if !complete_circle_effects {
+        crate::replica_authorization::invalidate_circle_continuation(conn, &event.realm_id).await?;
     }
     crate::replica_authorization::advance_verified_head(conn, commit).await?;
+    if matches!(
+        event.kind,
+        arkret_wire::EventKind::MemberState
+            | arkret_wire::EventKind::InviteAccept
+            | arkret_wire::EventKind::RealmInviteLinkAccept
+    ) {
+        let member = if event.kind == arkret_wire::EventKind::MemberState {
+            let body: arkret_models_collaboration::governance::membership_invite::MembershipPayload = serde_json::from_value(payload()?).map_err(malformed)?;
+            body.member_id
+        } else {
+            event.actor_id.clone()
+        };
+        #[derive(diesel::QueryableByName)]
+        struct ParentEffect {
+            #[diesel(sql_type=Jsonb)]
+            value: Value,
+        }
+        let projected = diesel::sql_query("SELECT value FROM member_state_current_states WHERE realm_id=$1 AND member_id=$2 AND current_commit_id=$3 AND current_stream_position=$4")
+            .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(member.to_string()).bind::<Text,_>(commit.commit_id.as_str())
+            .bind::<BigInt,_>(position(commit.stream_position)?).get_result::<ParentEffect>(&mut *conn).await.map_err(PersistenceError::database)?;
+        let value: arkret_wire::MemberStateValue =
+            serde_json::from_value(projected.value).map_err(malformed)?;
+        let entry = arkret_wire::CurrentState::Value {
+            selector: arkret_wire::CurrentSelector::MemberState { actor_id: member },
+            source_stream_ref: commit.stream_ref.clone(),
+            revision: arkret_wire::CurrentRevision {
+                commit_id: commit.commit_id.clone(),
+                stream_position: commit.stream_position,
+            },
+            value: serde_json::to_value(value).map_err(malformed)?,
+        };
+        crate::replica_authorization::save_row(conn, &event.realm_id, &entry, commit.committed_at)
+            .await?;
+    }
+    if matches!(
+        event.kind,
+        arkret_wire::EventKind::CircleCreate | arkret_wire::EventKind::CircleMemberState
+    ) {
+        #[derive(diesel::QueryableByName)]
+        struct EffectRow {
+            #[diesel(sql_type=Jsonb)]
+            entry: Value,
+        }
+        let (circle, member) = if event.kind == arkret_wire::EventKind::CircleCreate {
+            (arkret_wire::CircleId::from_event_id(&event.event_id), None)
+        } else {
+            let body: arkret_models_collaboration::events_payloads::CircleMemberStatePayload =
+                serde_json::from_value(payload()?).map_err(malformed)?;
+            (body.circle_id, Some(body.member_id.to_string()))
+        };
+        let projected = diesel::sql_query("SELECT jsonb_build_object('selector',jsonb_build_object('kind','circle','circle_id',circle_id),'source_stream_ref',source_stream_ref,'revision',jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position),'value',value) AS entry FROM circle_current_states WHERE circle_id=$3 AND realm_id=$1 AND current_commit_id=$2 AND $4::text IS NULL UNION ALL SELECT jsonb_build_object('selector',jsonb_build_object('kind','circle_member_state','circle_id',circle_id,'member_actor_id',member_id::jsonb),'source_stream_ref',source_stream_ref,'revision',jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position),'value',value) AS entry FROM circle_member_state_current_states WHERE circle_id=$3 AND member_id=$4 AND realm_id=$1 AND current_commit_id=$2")
+            .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(commit.commit_id.as_str())
+            .bind::<Text,_>(circle.as_str()).bind::<diesel::sql_types::Nullable<Text>,_>(member)
+            .load::<EffectRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+        if projected.len() != 1 {
+            return Err(malformed("Circle effect has no unique projected current"));
+        }
+        let entry = serde_json::from_value(projected.into_iter().next().unwrap().entry)
+            .map_err(malformed)?;
+        crate::replica_authorization::save_effect_row(
+            conn,
+            &event.realm_id,
+            &entry,
+            commit.committed_at,
+        )
+        .await?;
+    }
     Ok(())
 }
 

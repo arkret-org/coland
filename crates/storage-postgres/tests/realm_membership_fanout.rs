@@ -5966,15 +5966,25 @@ async fn held_full_at_snapshot_endpoint_rejects_other_commit_id_without_writes()
     .await;
 }
 
-#[tokio::test]
-async fn trusted_archival_join_requires_real_interval_observation_for_self_terminal() {
-    heap_future(|| {
-        circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(
-            true,
-            Some(CircleCoverageControl::HistoricalArchive),
-        )
-    })
-    .await;
+#[test]
+fn trusted_archival_join_requires_real_interval_observation_for_self_terminal() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(heap_future(|| {
+                    circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(
+                        true,
+                        Some(CircleCoverageControl::HistoricalArchive),
+                    )
+                }));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 // Only the three device-producer controls opt into a real origin source.
@@ -6814,7 +6824,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                 })
                 .await,
                 CircleCoverageControl::HigherCut => heap_future(|| async {
-                    let mut event = ordinary_realm::event_for_actor(
+                    let event = ordinary_realm::event_for_actor(
                         arkret_wire::EventKind::RealmProfile,
                         arkret_wire::ScopeRef::Realm {
                             realm_id: realm.clone(),

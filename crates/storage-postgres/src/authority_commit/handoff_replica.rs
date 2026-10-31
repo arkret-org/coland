@@ -48,6 +48,8 @@ pub(super) fn retain_outgoing_cut<'a>(
             .collect::<Vec<_>>();
         crate::replica_authorization::guard_current_rows(conn, &handoff.realm_id, &public_rows)
             .await?;
+        // The authority transition cleared the old tenure before this fully
+        // verified seed; its final activation must not erase the new proof.
         for head in &snapshot.visible_stream_heads {
             if matches!(
                 head.stream_ref,

@@ -65,6 +65,27 @@ pub(crate) async fn save_row(
     entry: &CurrentState,
     installed_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
+    save_row_with_observation(conn, realm, entry, installed_at, false).await
+}
+
+/// A reducer can observe only the effect it just materialized, never a
+/// future qualified snapshot's cut for an omitted historical selector.
+pub(crate) async fn save_effect_row(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    entry: &CurrentState,
+    installed_at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<()> {
+    save_row_with_observation(conn, realm, entry, installed_at, true).await
+}
+
+async fn save_row_with_observation(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    entry: &CurrentState,
+    installed_at: chrono::DateTime<chrono::Utc>,
+    effect_only: bool,
+) -> PersistenceResult<()> {
     let CurrentState::Value {
         selector,
         source_stream_ref,
@@ -81,10 +102,20 @@ pub(crate) async fn save_row(
         .map_err(|_| invalid("source position exceeds PostgreSQL BIGINT"))?;
     let changed = diesel::sql_query(
         "INSERT INTO replica_authorization_rows \
-         (realm_id,selector,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) \
-         VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(realm_id,selector) DO UPDATE SET \
+         (realm_id,selector,source_stream_ref,current_commit_id,current_stream_position,value,updated_at, \
+          observed_anchor_commit_id,observed_anchor_stream_position,circle_continuation_id) \
+         SELECT $1,$2,$3,$4,$5,$6,$7,h.head_commit_id,h.head_stream_position,h.circle_continuation_id \
+         FROM (SELECT 1) seed LEFT JOIN replica_authorization_cuts h \
+           ON h.realm_id=$1 AND h.source_stream_ref=$3 AND h.circle_continuation_id IS NOT NULL \
+             AND $2->>'kind' IN ('circle','circle_member_state') \
+             AND ($5<h.head_stream_position OR ($5=h.head_stream_position AND $4=h.head_commit_id)) \
+             AND (NOT $8 OR ($5=h.head_stream_position AND $4=h.head_commit_id)) \
+         ON CONFLICT(realm_id,selector) DO UPDATE SET \
          source_stream_ref=EXCLUDED.source_stream_ref,current_commit_id=EXCLUDED.current_commit_id, \
          current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value, \
+         observed_anchor_commit_id=EXCLUDED.observed_anchor_commit_id, \
+         observed_anchor_stream_position=EXCLUDED.observed_anchor_stream_position, \
+         circle_continuation_id=EXCLUDED.circle_continuation_id, \
          updated_at=EXCLUDED.updated_at \
          WHERE replica_authorization_rows.current_commit_id<>EXCLUDED.current_commit_id \
            OR replica_authorization_rows.current_stream_position<>EXCLUDED.current_stream_position \
@@ -98,6 +129,7 @@ pub(crate) async fn save_row(
     .bind::<BigInt, _>(position)
     .bind::<Jsonb, _>(value)
     .bind::<Timestamptz, _>(installed_at)
+    .bind::<diesel::sql_types::Bool, _>(effect_only)
     .execute(conn)
     .await
     .map_err(PersistenceError::database)?;
@@ -308,6 +340,37 @@ pub(crate) async fn verified_head(
         .get_result::<CutRow>(conn).await.optional().map_err(PersistenceError::database)?.map(|row| Ok(arkret_wire::CommitStreamHead { stream_ref:stream.clone(), commit_id:row.head_commit_id.parse().map_err(invalid)?, stream_position:u64::try_from(row.head_stream_position).map_err(invalid)? })).transpose()
 }
 
+/// A qualified Circle-domain source cut already materialized this prefix.
+/// Such Full originals are continuity only, including extra snapshot heads
+/// whose transport anchor has not caught up yet.
+pub(crate) async fn circle_effect_covered(
+    conn: &mut AsyncPgConnection,
+    commit: &arkret_wire::RealmCommit,
+) -> PersistenceResult<bool> {
+    if !matches!(
+        commit.stream_ref,
+        arkret_wire::CommitStreamRef::Circle { .. }
+    ) {
+        return Ok(false);
+    }
+    let covered = diesel::sql_query("SELECT head_commit_id,head_stream_position FROM replica_authorization_cuts WHERE realm_id=$1 AND source_stream_ref=$2 AND circle_continuation_id IS NOT NULL AND circle_effect_base_commit_id IS NOT NULL")
+        .bind::<Text,_>(commit.realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&commit.stream_ref).map_err(invalid)?)
+        .get_result::<CutRow>(conn).await.optional().map_err(PersistenceError::database)?;
+    let Some(covered) = covered else {
+        return Ok(false);
+    };
+    let position = i64::try_from(commit.stream_position).map_err(invalid)?;
+    if position == covered.head_stream_position
+        && commit.commit_id.as_str() != covered.head_commit_id
+    {
+        return Err(PersistenceError::Conflict(format!(
+            "{}: Circle effect differs from the exact qualified source endpoint",
+            coland_storage::ConflictCode::ForkQuarantine
+        )));
+    }
+    Ok(position <= covered.head_stream_position)
+}
+
 #[derive(diesel::QueryableByName)]
 struct CurrentEvidenceRow {
     #[diesel(sql_type = Jsonb)]
@@ -384,6 +447,9 @@ pub(crate) async fn exact_current_evidence(
             || (revision.stream_position == head.stream_position
                 && revision.commit_id != head.commit_id)
         {
+            return Ok(None);
+        }
+        if circle_selector(selector) && !circle_entry_proved(conn, realm, &entry).await? {
             return Ok(None);
         }
         entries.push(entry);
@@ -807,7 +873,9 @@ pub(crate) async fn snapshot_current_evidence(
         if source_stream_ref.realm_id() != realm {
             return Err(invalid("current evidence belongs to another Realm"));
         }
+        let CurrentState::Value { selector, .. } = &entry;
         if verified.contains(source_stream_ref)
+            && (!circle_selector(selector) || circle_entry_proved(conn, realm, &entry).await?)
             && heads.iter().any(|head| {
                 &head.stream_ref == source_stream_ref
                     && (revision.stream_position < head.stream_position
@@ -835,8 +903,8 @@ pub(crate) async fn install_verified_head(
             "snapshot regresses an already verified authorization cut",
         ));
     }
-    diesel::sql_query("INSERT INTO replica_authorization_cuts (realm_id,source_stream_ref,head_commit_id,head_stream_position,verified_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(realm_id,source_stream_ref) DO UPDATE SET head_commit_id=EXCLUDED.head_commit_id,head_stream_position=EXCLUDED.head_stream_position,verified_at=EXCLUDED.verified_at")
-        .bind::<Text, _>(head.stream_ref.realm_id().as_str()).bind::<Jsonb, _>(serde_json::to_value(&head.stream_ref).map_err(invalid)?).bind::<Text, _>(head.commit_id.as_str()).bind::<BigInt, _>(i64::try_from(head.stream_position).map_err(invalid)?).bind::<Timestamptz, _>(at).execute(conn).await.map_err(PersistenceError::database)?;
+    diesel::sql_query("INSERT INTO replica_authorization_cuts (realm_id,source_stream_ref,head_commit_id,head_stream_position,verified_at,circle_effect_base_commit_id,circle_effect_base_stream_position,circle_continuation_id) VALUES($1,$2,$3,$4,$5,$3,$4,$6::uuid) ON CONFLICT(realm_id,source_stream_ref) DO UPDATE SET head_commit_id=EXCLUDED.head_commit_id,head_stream_position=EXCLUDED.head_stream_position,verified_at=EXCLUDED.verified_at, circle_effect_base_commit_id=CASE WHEN replica_authorization_cuts.head_commit_id=EXCLUDED.head_commit_id AND replica_authorization_cuts.head_stream_position=EXCLUDED.head_stream_position AND replica_authorization_cuts.circle_continuation_id IS NOT NULL THEN replica_authorization_cuts.circle_effect_base_commit_id ELSE EXCLUDED.circle_effect_base_commit_id END, circle_effect_base_stream_position=CASE WHEN replica_authorization_cuts.head_commit_id=EXCLUDED.head_commit_id AND replica_authorization_cuts.head_stream_position=EXCLUDED.head_stream_position AND replica_authorization_cuts.circle_continuation_id IS NOT NULL THEN replica_authorization_cuts.circle_effect_base_stream_position ELSE EXCLUDED.circle_effect_base_stream_position END, circle_continuation_id=CASE WHEN replica_authorization_cuts.head_commit_id=EXCLUDED.head_commit_id AND replica_authorization_cuts.head_stream_position=EXCLUDED.head_stream_position AND replica_authorization_cuts.circle_continuation_id IS NOT NULL THEN replica_authorization_cuts.circle_continuation_id ELSE EXCLUDED.circle_continuation_id END")
+        .bind::<Text, _>(head.stream_ref.realm_id().as_str()).bind::<Jsonb, _>(serde_json::to_value(&head.stream_ref).map_err(invalid)?).bind::<Text, _>(head.commit_id.as_str()).bind::<BigInt, _>(i64::try_from(head.stream_position).map_err(invalid)?).bind::<Timestamptz, _>(at).bind::<Text,_>(uuid::Uuid::new_v4().to_string()).execute(conn).await.map_err(PersistenceError::database)?;
     Ok(())
 }
 
@@ -844,8 +912,24 @@ pub(crate) async fn advance_verified_head(
     conn: &mut AsyncPgConnection,
     commit: &arkret_wire::RealmCommit,
 ) -> PersistenceResult<()> {
-    let Some(previous) = verified_head(conn, &commit.stream_ref).await? else {
+    #[derive(diesel::QueryableByName)]
+    struct Segment {
+        #[diesel(sql_type=Text)]
+        head_commit_id: String,
+        #[diesel(sql_type=BigInt)]
+        head_stream_position: i64,
+        #[diesel(sql_type=diesel::sql_types::Nullable<Text>)]
+        continuation_id: Option<String>,
+    }
+    let Some(segment) = diesel::sql_query("SELECT head_commit_id,head_stream_position,circle_continuation_id::text AS continuation_id FROM replica_authorization_cuts WHERE realm_id=$1 AND source_stream_ref=$2")
+        .bind::<Text,_>(commit.realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&commit.stream_ref).map_err(invalid)?)
+        .get_result::<Segment>(&mut *conn).await.optional().map_err(PersistenceError::database)? else {
         return Ok(());
+    };
+    let previous = arkret_wire::CommitStreamHead {
+        stream_ref: commit.stream_ref.clone(),
+        commit_id: segment.head_commit_id.parse().map_err(invalid)?,
+        stream_position: u64::try_from(segment.head_stream_position).map_err(invalid)?,
     };
     if commit.stream_position <= previous.stream_position {
         return Ok(());
@@ -855,14 +939,138 @@ pub(crate) async fn advance_verified_head(
     {
         return Err(invalid("authorization cut tail is not contiguous"));
     }
-    install_verified_head(
-        conn,
-        &arkret_wire::CommitStreamHead {
-            stream_ref: commit.stream_ref.clone(),
-            commit_id: commit.commit_id.clone(),
-            stream_position: commit.stream_position,
-        },
-        commit.committed_at,
+    // Advancing a materialized direct successor preserves its segment. It is
+    // not a qualified snapshot and cannot create a new observation segment.
+    let changed = diesel::sql_query("UPDATE replica_authorization_cuts SET head_commit_id=$3,head_stream_position=$4,verified_at=$5 WHERE realm_id=$1 AND source_stream_ref=$2 AND head_commit_id=$6 AND head_stream_position=$7 AND circle_continuation_id IS NOT DISTINCT FROM $8::uuid")
+        .bind::<Text,_>(commit.realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(&commit.stream_ref).map_err(invalid)?)
+        .bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(i64::try_from(commit.stream_position).map_err(invalid)?)
+        .bind::<Timestamptz,_>(commit.committed_at).bind::<Text,_>(previous.commit_id.as_str())
+        .bind::<BigInt,_>(i64::try_from(previous.stream_position).map_err(invalid)?)
+        .bind::<diesel::sql_types::Nullable<Text>,_>(segment.continuation_id)
+        .execute(conn).await.map_err(PersistenceError::database)?;
+    if changed != 1 {
+        return Err(invalid(
+            "authorization cut changed during successor projection",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn circle_selector(selector: &CurrentSelector) -> bool {
+    matches!(
+        selector,
+        CurrentSelector::Circle { .. } | CurrentSelector::CircleMemberState { .. }
     )
-    .await
+}
+
+/// Compare only two revisions of the same Realm parent stream. An older
+/// cache cannot refute a newer signed parent binding; a same-position fork
+/// is unavailable rather than a normal membership withdrawal.
+pub(crate) async fn parent_binding_superseded(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    actor: &ActorId,
+    bound: &arkret_wire::CurrentRevision,
+) -> PersistenceResult<Option<bool>> {
+    let stream = arkret_wire::CommitStreamRef::Realm {
+        realm_id: realm.clone(),
+    };
+    let selector = CurrentSelector::MemberState {
+        actor_id: actor.clone(),
+    };
+    #[derive(diesel::QueryableByName)]
+    struct ActualRole {
+        #[diesel(sql_type=diesel::sql_types::Bool)]
+        is_native: bool,
+    }
+    let role = diesel::sql_query("SELECT service_id=current_device_inventory_station() AS is_native FROM realm_authorities WHERE realm_id=$1 AND current_device_inventory_station() IS NOT NULL")
+        .bind::<Text,_>(realm.as_str()).get_result::<ActualRole>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let Some(role) = role else {
+        return Ok(None);
+    };
+    let current = if role.is_native {
+        diesel::sql_query("SELECT jsonb_build_object('selector',jsonb_build_object('kind','member_state','actor_id',$2::jsonb),'source_stream_ref',c.stream_ref,'revision',jsonb_build_object('commit_id',m.current_commit_id,'stream_position',m.current_stream_position),'value',m.value) AS entry_json FROM member_state_current_states m JOIN realm_authorities a ON a.realm_id=m.realm_id AND a.service_id=current_device_inventory_station() JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position AND c.stream_ref=$3 JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE m.realm_id=$1 AND m.member_id=$4")
+            .bind::<Text,_>(realm.as_str()).bind::<Jsonb,_>(serde_json::to_value(actor).map_err(invalid)?)
+            .bind::<Jsonb,_>(serde_json::to_value(&stream).map_err(invalid)?).bind::<Text,_>(actor.to_string())
+            .get_result::<CurrentEvidenceRow>(conn).await.optional().map_err(PersistenceError::database)?
+            .map(|row| serde_json::from_value(row.entry_json).map_err(invalid)).transpose()?
+    } else {
+        exact_current_evidence(conn, &stream, &[selector])
+            .await?
+            .and_then(|(_, parents)| parents.into_iter().next())
+    };
+    let Some(CurrentState::Value {
+        revision, value, ..
+    }) = current
+    else {
+        return Ok(None);
+    };
+    #[derive(diesel::QueryableByName)]
+    struct ParentProjection {
+        #[diesel(sql_type=diesel::sql_types::Bool)]
+        present: bool,
+    }
+    let agrees = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM member_state_current_states WHERE realm_id=$1 AND member_id=$2 AND current_commit_id=$3 AND current_stream_position=$4 AND value=$5) AS present")
+        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(actor.to_string()).bind::<Text,_>(revision.commit_id.as_str())
+        .bind::<BigInt,_>(i64::try_from(revision.stream_position).map_err(invalid)?).bind::<Jsonb,_>(&value)
+        .get_result::<ParentProjection>(conn).await.map_err(PersistenceError::database)?.present;
+    if !agrees {
+        return Ok(None);
+    }
+    let parent: arkret_wire::MemberStateValue = serde_json::from_value(value).map_err(invalid)?;
+    if revision.stream_position < bound.stream_position {
+        return Ok(None);
+    }
+    if revision.stream_position > bound.stream_position {
+        return Ok(Some(true));
+    }
+    if revision.commit_id != bound.commit_id
+        || parent.membership != arkret_wire::MembershipState::Join
+    {
+        return Err(PersistenceError::Conflict(format!(
+            "{}: observed parent conflicts with the signed Circle binding",
+            coland_storage::ConflictCode::TemporarilyUnavailable
+        )));
+    }
+    Ok(Some(false))
+}
+
+pub(crate) async fn circle_entry_proved(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    entry: &CurrentState,
+) -> PersistenceResult<bool> {
+    #[derive(diesel::QueryableByName)]
+    struct Proof {
+        #[diesel(sql_type=diesel::sql_types::Bool)]
+        present: bool,
+    }
+    let CurrentState::Value {
+        selector,
+        source_stream_ref,
+        revision,
+        value,
+    } = entry;
+    Ok(
+        diesel::sql_query("SELECT circle_current_row_proved($1,$2,$3,$4,$5,$6) AS present")
+            .bind::<Text, _>(realm.as_str())
+            .bind::<Jsonb, _>(serde_json::to_value(selector).map_err(invalid)?)
+            .bind::<Jsonb, _>(serde_json::to_value(source_stream_ref).map_err(invalid)?)
+            .bind::<Text, _>(revision.commit_id.as_str())
+            .bind::<BigInt, _>(i64::try_from(revision.stream_position).map_err(invalid)?)
+            .bind::<Jsonb, _>(value)
+            .get_result::<Proof>(conn)
+            .await
+            .map_err(PersistenceError::database)?
+            .present,
+    )
+}
+
+pub(crate) async fn invalidate_circle_continuation(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+) -> PersistenceResult<()> {
+    diesel::sql_query("UPDATE replica_authorization_cuts SET circle_effect_base_commit_id=NULL,circle_effect_base_stream_position=NULL,circle_continuation_id=NULL WHERE realm_id=$1 AND circle_continuation_id IS NOT NULL")
+        .bind::<Text,_>(realm.as_str()).execute(conn).await.map_err(PersistenceError::database)?;
+    Ok(())
 }

@@ -862,6 +862,10 @@ async fn member_circle_floor_in_connection(
     let Some(join) = current_circle_join(conn, &stream, caller).await? else {
         return Ok(None);
     };
+    crate::circle_current_states::require_member_current_in_connection(
+        conn, realm_id, circle_id, caller,
+    )
+    .await?;
     let Some(history) = circle_history_access(conn, realm_id, circle_id).await? else {
         return Ok(None);
     };
@@ -899,6 +903,10 @@ pub(crate) async fn replica_circle_floor_in_connection(
     let Some(join) = current_circle_join(conn, &stream, caller).await? else {
         return Ok(Err("the caller has no held Circle join"));
     };
+    crate::circle_current_states::require_member_current_in_connection(
+        conn, realm_id, circle_id, caller,
+    )
+    .await?;
     if history == Some(arkret_wire::HistoryAccess::SinceJoin)
         && join.current_stream_position < anchor.join_position
     {

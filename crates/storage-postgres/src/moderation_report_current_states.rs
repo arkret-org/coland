@@ -300,6 +300,13 @@ async fn scope_member_at_cut(
         return Ok(false);
     }
     if let arkret_wire::ScopeRef::Circle { circle_id, .. } = scope {
+        if !crate::circle_current_states::effective_member_in_connection(
+            conn, realm, circle_id, actor,
+        )
+        .await?
+        {
+            return Ok(false);
+        }
         let joined = diesel::sql_query(
             "SELECT EXISTS (SELECT 1 FROM circle_member_state_current_states m \
             JOIN circle_current_states c ON c.circle_id=m.circle_id AND c.realm_id=m.realm_id \

@@ -1688,9 +1688,66 @@ async fn acquire_remote_watch_delivery(
         }
     }
     if let arkret_wire::CommitStreamRef::Circle { circle_id, .. } = &head.stream_ref {
-        let revoked = sql_query("SELECT EXISTS(SELECT 1 FROM circle_member_state_current_states m WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3 AND (membership<>'join' OR NOT circle_member_parent_join_current(m.realm_id,m.member_id,m.value))) AS present")
-            .bind::<Text,_>(request.realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(actor.to_string())
-            .get_result::<crate::ExistsRow>(held.connection()).await.map_err(PersistenceError::database)?.present;
+        // Only an exact proved Circle cut can contradict this fresh remote
+        // witness. A missing parent cache is unknown, not observed withdrawal.
+        let selector = arkret_wire::CurrentSelector::CircleMemberState {
+            circle_id: circle_id.clone(),
+            member_actor_id: actor.clone(),
+        };
+        let evidence = crate::replica_authorization::exact_current_evidence(
+            held.connection(),
+            &head.stream_ref,
+            &[selector],
+        )
+        .await?;
+        let mut revoked = false;
+        if let Some((observed, rows)) = evidence.filter(|(observed, _)| observed == head) {
+            let _ = observed;
+            let arkret_wire::CurrentState::Value { value, .. } = &rows[0];
+            let member: arkret_wire::CircleMemberStateValue =
+                serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+            revoked = member.membership != arkret_wire::MembershipState::Join;
+            if !revoked {
+                let parent_stream = arkret_wire::CommitStreamRef::Realm {
+                    realm_id: request.realm_id.clone(),
+                };
+                let parent_selector = arkret_wire::CurrentSelector::MemberState {
+                    actor_id: actor.clone(),
+                };
+                if let Some((_, parents)) = crate::replica_authorization::exact_current_evidence(
+                    held.connection(),
+                    &parent_stream,
+                    &[parent_selector],
+                )
+                .await?
+                {
+                    let arkret_wire::CurrentState::Value {
+                        revision, value, ..
+                    } = &parents[0];
+                    let parent: arkret_wire::MemberStateValue =
+                        serde_json::from_value(value.clone())
+                            .map_err(PersistenceError::database)?;
+                    let bound = member.parent_membership_revision.as_ref().ok_or_else(|| {
+                        unavailable("joined Circle witness has no parent binding")
+                    })?;
+                    if revision.stream_position > bound.stream_position {
+                        // These two coordinates belong to the same Realm
+                        // stream. A later accepted parent revision ends this
+                        // exact older parent-bound Circle membership.
+                        revoked = true;
+                    } else if revision.stream_position == bound.stream_position
+                        && (revision.commit_id != bound.commit_id
+                            || parent.membership != arkret_wire::MembershipState::Join)
+                    {
+                        return Err(unavailable(
+                            "observed parent conflicts with the Circle witness binding",
+                        ));
+                    }
+                    // An older local parent (including an old leave before
+                    // the signed rejoin) is unknown, not observed withdrawal.
+                }
+            }
+        }
         if revoked && audited.is_none() {
             return Err(PersistenceError::NotFound(
                 "remote Watch Circle withdrawal has been observed".to_owned(),

@@ -7387,6 +7387,50 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         .await
         .unwrap();
     assert!(fanout_rows(&pool, &message).await.is_empty());
+    // This legacy structural-producer case uses an ordinary qualified cut,
+    // not the AccountDevice-only terminal exception. Capture it while the
+    // source still proves this exact opening join is current.
+    let closing_install = heap_future(|| async {
+        let material = governor
+            .member_station_bootstrap_material(
+                &realm,
+                remote.as_account_id().unwrap(),
+                &circle_join.authority_commit.commit.commit_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            material.purpose,
+            arkret_wire::RealmSnapshotPurpose::FullRecovery
+        );
+        let snapshot_head = material
+            .visible_stream_heads
+            .iter()
+            .find(|head| head.stream_ref == stream)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            snapshot_head,
+            arkret_wire::CommitStreamHead {
+                stream_ref: stream.clone(),
+                commit_id: message.authority_commit.commit.commit_id.clone(),
+                stream_position: message.authority_commit.commit.stream_position,
+            }
+        );
+        let snapshot = bootstrap_snapshot_from_material(&material);
+        assert_bootstrap_join_floor(&snapshot, &circle_join.authority_commit.commit);
+        ReplicaAnchorInstall {
+            realm_id: realm.clone(),
+            join_commit_id: circle_join.authority_commit.commit.commit_id.clone(),
+            governance_generation: material.governance_generation,
+            snapshot_head,
+            visible_stream_heads: material.visible_stream_heads,
+            current_state_entries: material.current_state_entries,
+            verified_snapshot: snapshot,
+        }
+    })
+    .await;
     let leave = circle_transition(&message.authority_commit, "leave", Some("join"));
     heap_future(|| uow.commit_event(leave.clone()))
         .await
@@ -7454,6 +7498,12 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             .unwrap()
             .is_none()
     );
+    // The immutable Withheld predecessor is now held. Install only the cut
+    // captured before the source accepted Leave; do not ask the departed
+    // member's old join for new positive material.
+    heap_future(|| member.install_replica_anchor(&closing_install))
+        .await
+        .unwrap();
     assert_eq!(
         member
             .install_committed_replica(&replica(&unit, &leave, false))

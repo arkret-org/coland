@@ -306,6 +306,107 @@ fn member_state_payload(event: &Event) -> PersistenceResult<CircleMemberStatePay
         .map_err(|error| schema(&format!("Circle membership payload is invalid: {error}")))
 }
 
+/// The same accepted Circle value is used by the reducer and frozen handoff
+/// verification. This function has no current-authorization side effects.
+fn create_current(event: &Event) -> PersistenceResult<Circle> {
+    let mut payload: CircleCreatePayload = serde_json::from_value(json!(&event.payload))
+        .map_err(|_| schema("Circle create payload is invalid"))?;
+    payload.object.id = Some(circle_id(event));
+    Ok(payload.object)
+}
+
+/// Typed current plus every reducer-derived serving/index column of its row.
+/// Timestamps are operational metadata and are not accepted authorization facts.
+#[derive(PartialEq)]
+pub(crate) struct FrozenHandoffCurrentEffect {
+    pub(crate) current: arkret_wire::CurrentState,
+    pub(crate) create_event_id: Option<String>,
+    pub(crate) short_name_folded: Option<String>,
+    pub(crate) membership: Option<String>,
+}
+
+/// Derive one of the two supported Circle current effects from its exact Full.
+/// The caller must first verify the complete accepted genesis-to-head archive.
+/// This is a projection, never permission to admit or disclose a new Event.
+pub(crate) fn frozen_handoff_current_effect(
+    full: &arkret_wire::CommittedEventFullView,
+) -> PersistenceResult<Option<FrozenHandoffCurrentEffect>> {
+    let event = &full.event;
+    let commit = &full.commit;
+    let (selector, value, source, create_event_id, short_name_folded, membership) = match &event
+        .kind
+    {
+        EventKind::CircleCreate => {
+            if !matches!(&event.scope_ref, ScopeRef::Realm { realm_id } if realm_id == &event.realm_id)
+            {
+                return Err(schema("frozen Circle creation has a non-Realm scope"));
+            }
+            let current = create_current(event)?;
+            let short_name = folded_short_name(&current.display.short_name)?;
+            (
+                arkret_wire::CurrentSelector::Circle {
+                    circle_id: circle_id(event),
+                },
+                serde_json::to_value(current).map_err(PersistenceError::database)?,
+                CommitStreamRef::Realm {
+                    realm_id: event.realm_id.clone(),
+                },
+                Some(event.event_id.to_string()),
+                Some(short_name),
+                None,
+            )
+        }
+        EventKind::CircleMemberState => {
+            let ScopeRef::Circle {
+                realm_id,
+                circle_id,
+            } = &event.scope_ref
+            else {
+                return Err(schema("frozen Circle membership has a non-Circle scope"));
+            };
+            if realm_id != &event.realm_id {
+                return Err(schema("frozen Circle membership has a different Realm"));
+            }
+            let payload = member_state_payload(event)?;
+            let membership = payload.membership.as_str().to_owned();
+            (
+                arkret_wire::CurrentSelector::CircleMemberState {
+                    circle_id: circle_id.clone(),
+                    member_actor_id: payload.member_id,
+                },
+                serde_json::to_value(member_current(event)?).map_err(PersistenceError::database)?,
+                CommitStreamRef::Circle {
+                    realm_id: realm_id.clone(),
+                    circle_id: circle_id.clone(),
+                },
+                None,
+                None,
+                Some(membership),
+            )
+        }
+        _ => return Ok(None),
+    };
+    if commit.event_ref != event.event_id || commit.stream_ref != source {
+        return Err(schema(
+            "frozen Circle effect has a different accepted source",
+        ));
+    }
+    Ok(Some(FrozenHandoffCurrentEffect {
+        current: arkret_wire::CurrentState::Value {
+            selector,
+            source_stream_ref: source,
+            revision: arkret_wire::CurrentRevision {
+                commit_id: commit.commit_id.clone(),
+                stream_position: commit.stream_position,
+            },
+            value,
+        },
+        create_event_id,
+        short_name_folded,
+        membership,
+    }))
+}
+
 fn member_current(event: &Event) -> PersistenceResult<CircleMemberStateValue> {
     let payload = member_state_payload(event)?;
     let current = CircleMemberStateValue {
@@ -762,12 +863,10 @@ pub(crate) async fn commit_in_connection(
         .map_err(|_| schema("Circle stream position exceeds storage"))?;
     match &event.kind {
         EventKind::CircleCreate => {
-            let mut payload: CircleCreatePayload = serde_json::from_value(json!(&event.payload))
-                .map_err(|_| schema("Circle create payload is invalid"))?;
+            let current = create_current(event)?;
             let id = circle_id(event);
-            let short_name = folded_short_name(&payload.object.display.short_name)?;
-            payload.object.id = Some(id.clone());
-            let value = serde_json::to_value(payload.object).map_err(PersistenceError::database)?;
+            let short_name = folded_short_name(&current.display.short_name)?;
+            let value = serde_json::to_value(current).map_err(PersistenceError::database)?;
             let changed = sql_query(
                 "INSERT INTO circle_current_states \
                  (realm_id,circle_id,create_event_id,current_commit_id,current_stream_position,source_stream_ref,short_name_folded,value,updated_at) \

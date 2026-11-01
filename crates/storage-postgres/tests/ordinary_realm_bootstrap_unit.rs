@@ -26,13 +26,12 @@ use arkret_models_collaboration::authority_commit::{
 use coland_services::projection::ProjectionService;
 use coland_storage::{
     AuthorityCommitStore, AuthorityCommitTransaction, CurrentRealmAuthority, EventCommitRequest,
-    EventCommitUnitOfWork, InviteCurrentStateStore, OrdinaryRealmBootstrapCommitOutcome,
-    OrdinaryRealmBootstrapCommitUnit, SelfProducerCommitGuard,
+    EventCommitUnitOfWork, OrdinaryRealmBootstrapCommitOutcome, OrdinaryRealmBootstrapCommitUnit,
+    SelfProducerCommitGuard,
 };
 use coland_storage_postgres::test_database::TestDatabase;
 use coland_storage_postgres::{
-    PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgInviteCurrentStateStore,
-    account_snapshot_material,
+    PgAuthorityCommitStore, PgEventCommitUnitOfWork, account_snapshot_material,
 };
 use diesel::sql_types::{BigInt, Text};
 use diesel_async::RunQueryDsl;

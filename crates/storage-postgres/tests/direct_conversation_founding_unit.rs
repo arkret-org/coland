@@ -28,9 +28,7 @@ use arkret_models_collaboration::authority_commit::{
     DirectConversationFoundingUnitKind, DirectConversationFoundingUnitSubmission,
 };
 use arkret_models_collaboration::contact_operations::{
-    ContactCurrentProof, ContactPeer, ContactProducerSigner, ContactRound,
-    ContactRoundEvidenceBundle, NormalResponseAcceptanceReceipt, RequestAcceptanceReceipt,
-    RequestAcceptanceReceiptCore,
+    ContactProducerSigner, ContactRoundEvidenceBundle,
 };
 use arkret_wire::{AccountId, ActorId, DidCoreId, DidUrl, EventKind, Hash, RealmId};
 use coland_storage::{

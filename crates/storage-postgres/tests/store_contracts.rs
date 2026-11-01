@@ -1,4 +1,8 @@
 #[path = "support/applet_authoring.rs"]
+#[expect(
+    dead_code,
+    reason = "This integration binary uses only the AppletAuthoringFactory subset of the shared fixture."
+)]
 mod applet_authoring;
 #[path = "../../test-support/src/device_authorization_history.rs"]
 #[allow(dead_code)]

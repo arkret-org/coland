@@ -819,3 +819,519 @@ async fn isolated_commit(
     });
     admissions.join_next().await.unwrap().unwrap()
 }
+
+/// Complete operational import, retaining the independent receiving deployment's
+/// exact five identity tables across the restore. This does not invent a new
+/// Station binding or add any replica cut. The bind before import is the normal
+/// storage fixture initialization, and the restored value must equal that binding.
+async fn copy_frozen_archive_preserving_deployment(
+    source: &str,
+    destination: &str,
+    incoming_pool: &PgPool,
+) {
+    use diesel::sql_types::{Jsonb, Text};
+    use diesel_async::{AsyncConnection as _, RunQueryDsl as _};
+    const DEPLOYMENT_TABLES: [&str; 5] = [
+        "device_inventory_station",
+        "devices",
+        "service_identity",
+        "webvh_documents",
+        "webvh_log_events",
+    ];
+    let mut retained = Vec::new();
+    let mut conn = incoming_pool.get().await.unwrap();
+    for table in DEPLOYMENT_TABLES {
+        let query =
+            format!("SELECT COALESCE(jsonb_agg(to_jsonb(r)),'[]'::jsonb) AS value FROM {table} r");
+        let rows = diesel::sql_query(query)
+            .get_result::<FrozenJson>(&mut conn)
+            .await
+            .unwrap();
+        retained.push((table, rows.value.as_array().unwrap().clone()));
+    }
+    drop(conn);
+    let source = source.to_owned();
+    let destination = destination.to_owned();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+        // Keep the complete schema in the dump: excluding devices while
+        // dropping its default-value function would break restore dependencies.
+        let dump =
+            Command::new(std::env::var_os("COTEST_PG_DUMP").unwrap_or_else(|| "pg_dump".into()))
+                .args(["--clean", "--if-exists", "--no-owner", "--no-privileges"])
+                .arg(source)
+                .output()
+                .expect("frozen source pg_dump");
+        assert!(dump.status.success(), "frozen source export failed");
+        let mut child =
+            Command::new(std::env::var_os("COTEST_PSQL").unwrap_or_else(|| "psql".into()))
+                .args([
+                    "-X",
+                    "--quiet",
+                    "--single-transaction",
+                    "--set=ON_ERROR_STOP=1",
+                ])
+                .arg(destination)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("frozen target psql");
+        child.stdin.take().unwrap().write_all(&dump.stdout).unwrap();
+        let result = child.wait_with_output().unwrap();
+        assert!(result.status.success(), "frozen target import failed");
+    })
+    .await
+    .unwrap();
+    let mut conn = incoming_pool.get().await.unwrap();
+    conn.transaction::<(), diesel::result::Error, _>(async move |conn| {
+        for table in ["service_identity", "devices", "device_inventory_station"] {
+            diesel::sql_query(format!("DELETE FROM {table}"))
+                .execute(&mut *conn)
+                .await?;
+        }
+        for (table, records) in retained {
+            for record in records {
+                if matches!(table, "webvh_documents" | "webvh_log_events") {
+                    // Source method history can remain. A colliding receiving
+                    // record must already be exact; no blind conflict swallowing.
+                    let id = record["id"].as_str().unwrap();
+                    let found = diesel::sql_query(format!(
+                        "SELECT to_jsonb(r) AS value FROM {table} r WHERE id=$1"
+                    ))
+                    .bind::<Text, _>(id)
+                    .load::<FrozenJson>(&mut *conn)
+                    .await?;
+                    assert!(found.len() <= 1);
+                    if let Some(found) = found.first() {
+                        assert!(found.value == record, "conflicting deployment history");
+                        continue;
+                    }
+                }
+                let query = format!(
+                    "INSERT INTO {table} SELECT * FROM jsonb_populate_record(NULL::{table},$1)"
+                );
+                diesel::sql_query(query)
+                    .bind::<Jsonb, _>(&record)
+                    .execute(&mut *conn)
+                    .await?;
+            }
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+async fn frozen_circle_request(
+    fixture: &HumanFixture,
+    pool: &PgPool,
+    previous: &coland_storage::AuthorityCommitTransaction,
+    circle: &arkret_wire::CircleId,
+    payload: serde_json::Value,
+) -> coland_storage::EventCommitRequest {
+    let at = previous.commit.committed_at + chrono::TimeDelta::seconds(1);
+    let scope = arkret_wire::ScopeRef::Circle {
+        realm_id: previous.event.realm_id.clone(),
+        circle_id: circle.clone(),
+    };
+    let unsigned = ordinary_realm::event_for_actor(
+        EventKind::CircleMemberState,
+        scope,
+        ActorId::account(fixture.pcr.history.account.clone()),
+        payload,
+        at,
+    );
+    let event = device_authorization_history::sign_event(
+        unsigned,
+        fixture.pcr.history.device_verification_method.clone(),
+        fixture.pcr.history.founding_device_signing_seed,
+    );
+    let mut request = ordinary_realm::request_for_event(previous, event, at);
+    let stream = arkret_wire::CommitStreamRef::Circle {
+        realm_id: previous.event.realm_id.clone(),
+        circle_id: circle.clone(),
+    };
+    if previous.commit.stream_ref != stream {
+        request.authority_commit.commit.stream_position = 0;
+        request.authority_commit.commit.previous_commit_ref = None;
+    }
+    request.authority_commit.commit.stream_ref = stream;
+    request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
+        request.authority_commit.event.clone(),
+    ));
+    request.self_producer_guard = Some(SelfProducerCommitGuard::HumanDevice(fixture.guard.clone()));
+    ordinary_realm::source_request(pool, request).await
+}
+
+#[derive(diesel::QueryableByName)]
+struct FrozenCheck {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    local_station: String,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    cuts: i64,
+}
+
+#[derive(diesel::QueryableByName)]
+struct FrozenJson {
+    #[diesel(sql_type = diesel::sql_types::Jsonb)]
+    value: serde_json::Value,
+}
+
+/// Hash all public table rows without printing any private archived material.
+async fn frozen_footprint(pool: &PgPool) -> String {
+    use diesel_async::RunQueryDsl as _;
+    let mut conn = pool.get().await.unwrap();
+    let tables = diesel::sql_query("SELECT COALESCE(jsonb_agg(tablename ORDER BY tablename),'[]'::jsonb) AS value FROM pg_tables WHERE schemaname='public'")
+        .get_result::<FrozenJson>(&mut conn).await.unwrap();
+    let mut all = serde_json::Map::new();
+    for table in tables.value.as_array().unwrap() {
+        let name = table.as_str().unwrap();
+        assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
+        let query = format!(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) AS value FROM public.\"{name}\" t"
+        );
+        let rows = diesel::sql_query(query)
+            .get_result::<FrozenJson>(&mut conn)
+            .await
+            .unwrap();
+        all.insert(name.to_owned(), rows.value);
+    }
+    arkret_canonical::canonical_sha256(&serde_json::Value::Object(all)).unwrap()
+}
+
+#[tokio::test]
+async fn incoming_frozen_circle_current_uses_full_originals_without_replica_rights() {
+    ordinary_realm::case_future(incoming_frozen_circle_current_scenario).await;
+}
+
+async fn incoming_frozen_circle_current_scenario() {
+    use diesel::sql_types::Text;
+    use diesel_async::RunQueryDsl as _;
+    let source = TestDatabase::lease().await;
+    let destination = TestDatabase::lease().await;
+    assert_ne!(source.url(), destination.url());
+    let next: arkret_wire::DidCoreId = "ak:did_core:web:incoming-frozen-circle.example"
+        .parse()
+        .unwrap();
+    // This is the established storage fixture initialization contract, not a
+    // rebind of the outgoing Station to manufacture local current permission.
+    destination.bind_device_inventory_station(next.as_str());
+    let pool = source.pool();
+    let fixture = Box::pin(HumanFixture::new(
+        &pool,
+        "did:web:frozen-circle-source.example".parse().unwrap(),
+    ))
+    .await;
+    Box::pin(fixture.admit(&pool)).await;
+    let actor = ActorId::account(fixture.pcr.history.account.clone());
+    let old = PgAuthorityCommitStore { pool: pool.clone() };
+    let mut tail = fixture.unit.transactions.last().unwrap().clone();
+    let realm = tail.event.realm_id.clone();
+    let parent = ordinary_realm::parent_membership_revision(&pool, &realm, &actor).await;
+    let mut circles = Vec::new();
+    for index in 0..2 {
+        let at = tail.commit.committed_at + chrono::TimeDelta::seconds(1);
+        let create = Box::pin(request(&fixture, &pool, &tail, EventKind::CircleCreate,
+            serde_json::json!({"object":{"schema":"ak.schema.circle.v1","realm_id":realm,
+                "title":format!("Frozen Circle {index}"),"display":{"short_name":format!("Frozen-{index}"),
+                    "color_token":"blue","symbol":{"glyph":"lock"}},"directory_visibility":"members",
+                "join_rule":"public","history_access":"all_history_for_current_members","state":"active",
+                "created_by":actor,"created_at":arkret_canonical::format_timestamp_canonical(at)}}))).await;
+        isolated_commit(&pool, Box::new(create.clone()))
+            .await
+            .unwrap();
+        let circle = arkret_wire::CircleId::from_event_id(&create.authority_commit.event.event_id);
+        tail = create.authority_commit.clone();
+        let join = Box::pin(frozen_circle_request(
+            &fixture,
+            &pool,
+            &tail,
+            &circle,
+            serde_json::json!({"circle_id":circle,"member_id":actor,"membership":"join",
+                "expected_membership":null,"parent_membership_revision":parent}),
+        ))
+        .await;
+        isolated_commit(&pool, Box::new(join.clone()))
+            .await
+            .unwrap();
+        if index == 1 {
+            let leave = Box::pin(frozen_circle_request(&fixture, &pool, &join.authority_commit, &circle,
+                serde_json::json!({"circle_id":circle,"member_id":actor,"membership":"leave","expected_membership":"join"}))).await;
+            isolated_commit(&pool, Box::new(leave)).await.unwrap();
+        }
+        circles.push(circle);
+    }
+    let change = Box::pin(request(&fixture, &pool, &tail, EventKind::RealmGovernanceStationChange,
+        serde_json::json!({"expected_governance_generation":"0","expected_realm_stream_commit_id":tail.commit.commit_id,
+            "new_governance_station_id":next}))).await;
+    isolated_commit(&pool, Box::new(change.clone()))
+        .await
+        .unwrap();
+    let material = old
+        .realm_state_snapshot_material(&realm)
+        .await
+        .unwrap()
+        .unwrap();
+    let is_circle = |row: &arkret_wire::CurrentState| {
+        let arkret_wire::CurrentState::Value { selector, .. } = row;
+        matches!(
+            selector,
+            arkret_wire::CurrentSelector::Circle { .. }
+                | arkret_wire::CurrentSelector::CircleMemberState { .. }
+        )
+    };
+    assert_eq!(
+        material
+            .current_state_entries
+            .iter()
+            .filter(|row| is_circle(row))
+            .count(),
+        4
+    );
+    let at = chrono::Utc::now();
+    let key = ed25519_dalek::SigningKey::from_bytes(&historical_human::station_authority_seed());
+    let snapshot = coland_services::authority_commit::build_signed_realm_state_snapshot(
+        &material,
+        "did:web:frozen-circle-source.example#authority"
+            .parse()
+            .unwrap(),
+        &key,
+        at,
+    )
+    .unwrap();
+    let facts = inventory(&old, &realm).await;
+    let heads = material.visible_stream_heads.clone();
+    let (management, bytes) = old.export_management_private_state(&realm).await.unwrap();
+    let mut handoff = arkret_wire::RealmAuthorityHandoff {
+        management_private_state_digest: Some(management.digest().unwrap()),
+        pcr_private_state_digest: None,
+        handoff_id: arkret_wire::RealmAuthorityHandoffId::from_digest([93; 32]),
+        realm_id: realm.clone(),
+        from_generation: 0,
+        to_generation: 1,
+        from_service_id: fixture.pcr.history.account.station_id.clone(),
+        to_service_id: next.clone(),
+        change_event_ref: change.authority_commit.event.event_id.clone(),
+        change_commit_id: change.authority_commit.commit.commit_id.clone(),
+        final_stream_heads_digest: arkret_wire::Hash::new(
+            arkret_canonical::canonical_sha256(&heads).unwrap(),
+        )
+        .unwrap(),
+        historical_signer_facts_digest: Some(historical_signer_facts_digest(&facts).unwrap()),
+        snapshot_ref: snapshot.snapshot_id.clone(),
+        old_authority_signature: snapshot.signature.clone(),
+        new_authority_acceptance_signature: snapshot.signature.clone(),
+    };
+    let unsigned = arkret_canonical::unsigned_value(
+        &handoff,
+        &[
+            "old_authority_signature",
+            "new_authority_acceptance_signature",
+        ],
+    )
+    .unwrap();
+    handoff.old_authority_signature = arkret_signatures::detached_object::sign_detached_object(
+        &unsigned,
+        DetachedSignatureContext::RealmAuthorityHandoffOld,
+        "did:web:frozen-circle-source.example#authority"
+            .parse()
+            .unwrap(),
+        at,
+        &key,
+    )
+    .unwrap();
+    handoff.new_authority_acceptance_signature =
+        arkret_signatures::detached_object::sign_detached_object(
+            &unsigned,
+            DetachedSignatureContext::RealmAuthorityHandoffNewAcceptance,
+            "did:web:incoming-frozen-circle.example#authority"
+                .parse()
+                .unwrap(),
+            at,
+            &ed25519_dalek::SigningKey::from_bytes(&[94; 32]),
+        )
+        .unwrap();
+    let new = PgAuthorityCommitStore {
+        pool: destination.pool(),
+    };
+    // Each malformed import is rejected before changing any public table row.
+    for fault in [
+        "value",
+        "missing",
+        "extra",
+        "source",
+        "revision",
+        "original",
+        "create_id",
+        "short_name",
+        "membership",
+    ] {
+        copy_frozen_archive_preserving_deployment(
+            source.url(),
+            destination.url(),
+            &destination.pool(),
+        )
+        .await;
+        new.import_management_private_state(&management, &bytes)
+            .await
+            .unwrap();
+        let mut conn = destination.pool().get().await.unwrap();
+        let check = diesel::sql_query("SELECT current_device_inventory_station() AS local_station,(SELECT count(*) FROM replica_authorization_cuts WHERE realm_id=$1) AS cuts")
+            .bind::<Text,_>(realm.as_str()).get_result::<FrozenCheck>(&mut conn).await.unwrap();
+        assert_eq!(check.local_station, next.as_str());
+        assert_eq!(check.cuts, 0);
+        let query = match fault {
+            "value" => {
+                "UPDATE circle_current_states SET value=jsonb_set(value,'{title}','\"tampered\"'::jsonb) WHERE circle_id=$1"
+            }
+            "create_id" => "UPDATE circle_current_states SET create_event_id=$2 WHERE circle_id=$1",
+            "short_name" => {
+                "UPDATE circle_current_states SET short_name_folded='wrong-frozen-index' WHERE circle_id=$1"
+            }
+            "membership" => {
+                "UPDATE circle_member_state_current_states SET membership='leave',value=(value-'parent_membership_revision')||jsonb_build_object('membership','leave') WHERE circle_id=$1"
+            }
+            "missing" => "DELETE FROM circle_member_state_current_states WHERE circle_id=$1",
+            "extra" => {
+                "INSERT INTO circle_member_state_current_states SELECT realm_id,circle_id,$2,membership,current_commit_id,current_stream_position,source_stream_ref,value,updated_at FROM circle_member_state_current_states WHERE circle_id=$1"
+            }
+            "source" => {
+                "UPDATE circle_member_state_current_states SET source_stream_ref=jsonb_set(source_stream_ref,'{circle_id}',to_jsonb($2::text)) WHERE circle_id=$1"
+            }
+            "revision" => {
+                "UPDATE circle_member_state_current_states SET current_stream_position=current_stream_position+1 WHERE circle_id=$1"
+            }
+            _ => {
+                "UPDATE realm_commits SET event_pk=NULL WHERE commit_id=(SELECT current_commit_id FROM circle_member_state_current_states WHERE circle_id=$1)"
+            }
+        };
+        let changed = if fault == "create_id" {
+            let foreign_id =
+                arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [95; 32]);
+            diesel::sql_query(query)
+                .bind::<Text, _>(circles[0].as_str())
+                .bind::<Text, _>(foreign_id.as_str())
+                .execute(&mut conn)
+                .await
+                .unwrap()
+        } else if fault == "extra" {
+            let extra = ActorId::account(arkret_wire::AccountId::new(
+                "ak:did_core:web:extra-frozen-member.example"
+                    .parse()
+                    .unwrap(),
+                next.clone(),
+            ));
+            diesel::sql_query(query)
+                .bind::<Text, _>(circles[0].as_str())
+                .bind::<Text, _>(extra.to_string())
+                .execute(&mut conn)
+                .await
+                .unwrap()
+        } else if fault == "source" {
+            diesel::sql_query(query)
+                .bind::<Text, _>(circles[0].as_str())
+                .bind::<Text, _>(circles[1].as_str())
+                .execute(&mut conn)
+                .await
+                .unwrap()
+        } else {
+            diesel::sql_query(query)
+                .bind::<Text, _>(circles[0].as_str())
+                .execute(&mut conn)
+                .await
+                .unwrap()
+        };
+        assert_eq!(
+            changed, 1,
+            "the negative control must change exactly its intended row: {fault}"
+        );
+        drop(conn);
+        let before = frozen_footprint(&destination.pool()).await;
+        assert!(
+            new.install_handoff_with_private_state(&handoff, &heads, &snapshot, None, &management)
+                .await
+                .is_err(),
+            "{fault}"
+        );
+        assert_eq!(
+            frozen_footprint(&destination.pool()).await,
+            before,
+            "{fault}"
+        );
+    }
+    let foreign = TestDatabase::lease().await;
+    foreign.bind_device_inventory_station("ak:did_core:web:not-a-handoff-participant.example");
+    copy_frozen_archive_preserving_deployment(source.url(), foreign.url(), &foreign.pool()).await;
+    let foreign_store = PgAuthorityCommitStore {
+        pool: foreign.pool(),
+    };
+    foreign_store
+        .import_management_private_state(&management, &bytes)
+        .await
+        .unwrap();
+    let before_foreign = frozen_footprint(&foreign.pool()).await;
+    assert!(
+        foreign_store
+            .install_handoff_with_private_state(&handoff, &heads, &snapshot, None, &management)
+            .await
+            .is_err()
+    );
+    assert_eq!(frozen_footprint(&foreign.pool()).await, before_foreign);
+    copy_frozen_archive_preserving_deployment(source.url(), destination.url(), &destination.pool())
+        .await;
+    new.import_management_private_state(&management, &bytes)
+        .await
+        .unwrap();
+    let before = new
+        .realm_state_snapshot_material(&realm)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !before.current_state_entries.iter().any(is_circle),
+        "ordinary member/current proof remains unchanged before activation"
+    );
+    assert_eq!(
+        new.current_authority(&realm)
+            .await
+            .unwrap()
+            .unwrap()
+            .service_id,
+        handoff.from_service_id
+    );
+    new.install_handoff_with_private_state(&handoff, &heads, &snapshot, None, &management)
+        .await
+        .unwrap();
+    let active = new.current_authority(&realm).await.unwrap().unwrap();
+    assert_eq!(active.service_id, next);
+    assert_eq!(active.generation, 1);
+    let after = new
+        .realm_state_snapshot_material(&realm)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        after.current_state_entries == snapshot.current_state_entries,
+        "activated current must match the frozen signed original"
+    );
+    assert!(
+        after.visible_stream_heads == snapshot.visible_stream_heads,
+        "activated heads must match the frozen signed original"
+    );
+    assert!(
+        after.retention_and_history_floor == snapshot.retention_and_history_floor,
+        "activated floors must match the frozen signed original"
+    );
+    assert!(after.current_state_entries.iter().any(|row| {
+        let arkret_wire::CurrentState::Value { selector, value, .. } = row;
+        matches!(selector, arkret_wire::CurrentSelector::CircleMemberState { circle_id, .. } if circle_id == &circles[1])
+            && value["membership"] == "leave"
+    }));
+    let before_replay = frozen_footprint(&destination.pool()).await;
+    new.install_handoff_with_private_state(&handoff, &heads, &snapshot, None, &management)
+        .await
+        .unwrap();
+    assert_eq!(frozen_footprint(&destination.pool()).await, before_replay);
+}

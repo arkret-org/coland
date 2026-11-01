@@ -19,6 +19,7 @@ use crate::capability_grant_current_states::{
     commit_realm_authority_root_current_state_in_connection,
 };
 
+mod handoff_current;
 mod handoff_replica;
 pub(crate) mod replica;
 
@@ -6820,7 +6821,7 @@ impl PgAuthorityCommitStore {
             if handoff.historical_signer_facts_digest.as_ref() != Some(&digest) {
                 return Err(invalid("handoff requires the complete imported signer fact inventory").into());
             }
-            let material = realm_state_snapshot_material_in_connection(conn, &handoff.realm_id).await?
+            let material = handoff_current::frozen_material(conn, handoff, &originals).await?
                 .ok_or_else(|| invalid("handoff typed current is not imported"))?;
             if !coland_storage::signed_snapshot_matches_material(snapshot, &material) {
                 return Err(invalid("handoff Snapshot differs from the complete imported current and floors").into());

@@ -904,7 +904,7 @@ async fn copy_frozen_archive_preserving_deployment(
                     .load::<FrozenJson>(&mut *conn)
                     .await?;
                     assert!(found.len() <= 1);
-                    if let Some(found) = found.first() {
+                    if let Some(found) = found.as_slice().first() {
                         assert!(found.value == record, "conflicting deployment history");
                         continue;
                     }
@@ -1094,9 +1094,7 @@ async fn incoming_frozen_circle_current_scenario() {
     let key = ed25519_dalek::SigningKey::from_bytes(&historical_human::station_authority_seed());
     let snapshot = coland_services::authority_commit::build_signed_realm_state_snapshot(
         &material,
-        "did:web:frozen-circle-source.example#authority"
-            .parse()
-            .unwrap(),
+        arkret_wire::DidUrl::new("did:web:frozen-circle-source.example#authority").unwrap(),
         &key,
         at,
     )
@@ -1135,9 +1133,7 @@ async fn incoming_frozen_circle_current_scenario() {
     handoff.old_authority_signature = arkret_signatures::detached_object::sign_detached_object(
         &unsigned,
         DetachedSignatureContext::RealmAuthorityHandoffOld,
-        "did:web:frozen-circle-source.example#authority"
-            .parse()
-            .unwrap(),
+        arkret_wire::DidUrl::new("did:web:frozen-circle-source.example#authority").unwrap(),
         at,
         &key,
     )
@@ -1146,9 +1142,7 @@ async fn incoming_frozen_circle_current_scenario() {
         arkret_signatures::detached_object::sign_detached_object(
             &unsigned,
             DetachedSignatureContext::RealmAuthorityHandoffNewAcceptance,
-            "did:web:incoming-frozen-circle.example#authority"
-                .parse()
-                .unwrap(),
+            arkret_wire::DidUrl::new("did:web:incoming-frozen-circle.example#authority").unwrap(),
             at,
             &ed25519_dalek::SigningKey::from_bytes(&[94; 32]),
         )

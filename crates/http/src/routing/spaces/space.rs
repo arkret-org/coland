@@ -55,7 +55,7 @@ async fn get_realm(
         .authority_commits()
         .realm_lifecycle_for_actor(&realm_id, &actor)
         .await
-        .map_err(|error| AppError::internal(error.to_string()))?
+        .map_err(realm_lifecycle_read_error)?
         .ok_or_else(|| AppError::not_found("not found"))?;
     let input = coland_storage::AccountContentDeliveryInput {
         realms: vec![realm_id],
@@ -481,4 +481,40 @@ pub async fn realm_allows_plaintext_service_for_data_class_id(
             && service.data_classes.contains(&data_class)
             && service.expires_at.is_none_or(|expires_at| expires_at > now)
     })
+}
+
+fn realm_lifecycle_read_error(error: coland_services::ServiceError) -> AppError {
+    if error.conflict_code() == Some(coland_storage::ConflictCode::TemporarilyUnavailable) {
+        return AppError::new(
+            coland_http::error::ErrorCode::TemporarilyUnavailable,
+            error.to_string(),
+        );
+    }
+    AppError::internal(error.to_string())
+}
+
+#[cfg(test)]
+mod lifecycle_read_error_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_authorization_cut_remains_retryable_without_masking_internal_failures() {
+        use coland_http::error::ErrorCode;
+        use coland_services::ServiceError;
+        let unavailable = realm_lifecycle_read_error(ServiceError::Conflict(
+            "temporarily_unavailable: complete accepted authorization cut unavailable".into(),
+        ));
+        assert_eq!(unavailable.code, ErrorCode::TemporarilyUnavailable);
+        assert_eq!(unavailable.code.http_status(), 503);
+        for error in [
+            ServiceError::Conflict("unclassified invariant violation".into()),
+            ServiceError::Database("temporarily_unavailable".into()),
+            ServiceError::Internal("temporarily_unavailable".into()),
+        ] {
+            assert_eq!(
+                realm_lifecycle_read_error(error).code,
+                ErrorCode::InternalError
+            );
+        }
+    }
 }

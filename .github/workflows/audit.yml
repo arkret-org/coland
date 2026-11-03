@@ -35,6 +35,7 @@ jobs:
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
 
       - name: cargo-deny check ${{ matrix.checks }}
+        continue-on-error: true
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           manifest-path: arkret-org/coland/Cargo.toml

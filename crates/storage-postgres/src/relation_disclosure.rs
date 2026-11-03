@@ -26,7 +26,7 @@ struct EventRow {
     commit_json: serde_json::Value,
 }
 
-async fn scope_visible(
+pub(crate) async fn scope_visible(
     conn: &mut AsyncPgConnection,
     scope: &ScopeRef,
     caller: &ActorId,
@@ -163,20 +163,85 @@ async fn endpoint_visible(
     endpoint: &RelationEndpoint,
     caller: &ActorId,
 ) -> PersistenceResult<bool> {
+    Ok(endpoint_scope(conn, source_realm, endpoint, caller)
+        .await?
+        .is_some())
+}
+
+/// Prove every selector endpoint before disclosing an absent primary domain.
+/// The read cut fixes all streams together; an unrelated scoped stream cannot
+/// hide an otherwise visible Realm domain or authorize a hidden endpoint.
+pub(crate) async fn domain_scope_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &RealmId,
+    domain: &arkret_wire::relation::RelationPrimaryConflictDomain,
+    caller: &ActorId,
+) -> PersistenceResult<Option<ScopeRef>> {
+    let structural =
+        arkret_wire::relation::relation_kind_is_structural(domain.relation_kind.as_str());
+    let mut effective = ScopeRef::Realm {
+        realm_id: realm_id.clone(),
+    };
+    for (index, endpoint) in std::iter::once(&domain.from_ref)
+        .chain(domain.to_ref.iter())
+        .enumerate()
+    {
+        let Some(scope) = endpoint_scope(conn, realm_id, endpoint, caller).await? else {
+            return Ok(None);
+        };
+        if scope.realm_id() != realm_id {
+            if structural {
+                return Ok(None);
+            }
+            continue;
+        }
+        // A missing weak edge has no narrower installed source stream. Use
+        // its source endpoint's cut, while still proving every target visible.
+        // A later create must independently pass its current scope and CAS gates.
+        if !structural {
+            if index == 0 {
+                effective = scope;
+            }
+            continue;
+        }
+        match &scope {
+            ScopeRef::Realm { .. } => {}
+            ScopeRef::Circle { .. } => {
+                if matches!(effective, ScopeRef::Circle { .. }) && effective != scope {
+                    return Ok(None);
+                }
+                effective = scope;
+            }
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some(effective))
+}
+
+async fn endpoint_scope(
+    conn: &mut AsyncPgConnection,
+    source_realm: &RealmId,
+    endpoint: &RelationEndpoint,
+    caller: &ActorId,
+) -> PersistenceResult<Option<ScopeRef>> {
     let reference = match endpoint {
         RelationEndpoint::Actor(actor) => {
-            return Ok(actor == caller
+            return Ok((actor == caller
                 || crate::authority_commit::accepted_current_member_joined_in_connection(
                     conn,
                     source_realm,
                     actor,
                 )
-                .await?);
+                .await?)
+                .then(|| ScopeRef::Realm {
+                    realm_id: source_realm.clone(),
+                }));
         }
         RelationEndpoint::Object(reference) => reference,
     };
     if let Ok(realm_id) = RealmId::new(reference) {
-        return scope_visible(conn, &ScopeRef::Realm { realm_id }, caller).await;
+        let scope = ScopeRef::Realm { realm_id };
+        return Ok(scope_visible(conn, &scope, caller).await?.then_some(scope));
     }
     let query = if arkret_wire::StrandId::new(reference).is_ok() {
         Some(
@@ -201,7 +266,7 @@ async fn endpoint_visible(
             .optional()
             .map_err(PersistenceError::database)?
         else {
-            return Ok(false);
+            return Ok(None);
         };
         let realm_id = RealmId::new(row.realm_id).map_err(PersistenceError::database)?;
         let (id, home, circle) = if arkret_wire::StrandId::new(reference).is_ok() {
@@ -258,7 +323,7 @@ async fn endpoint_visible(
                 "Relation endpoint scope differs from its covering Commit".to_owned(),
             ));
         }
-        return scope_visible(conn, &scope, caller).await;
+        return Ok(scope_visible(conn, &scope, caller).await?.then_some(scope));
     }
     let event_id = if let Ok(message_id) = arkret_wire::MessageId::new(reference) {
         Some(message_id.event_id())
@@ -268,7 +333,7 @@ async fn endpoint_visible(
     let Some(event_id) = event_id else {
         // No target-side reference evidence: source membership never makes an
         // unknown, remote or unproved object reference disclosable.
-        return Ok(false);
+        return Ok(None);
     };
     let token = crate::ids::parse_event_id(event_id.as_str()).ok_or_else(|| {
         PersistenceError::SchemaViolation("Relation Event endpoint is not canonical".to_owned())
@@ -281,7 +346,7 @@ async fn endpoint_visible(
              AND r.target_ref IN ($2,e.envelope->>'event_id'))",
     ).bind::<diesel::sql_types::Binary, _>(token.to_vec()).bind::<Text, _>(reference)
         .get_result::<EventRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
-    else { return Ok(false); };
+    else { return Ok(None); };
     let event: arkret_wire::Event =
         serde_json::from_value(row.envelope).map_err(PersistenceError::database)?;
     let commit: arkret_wire::RealmCommit =
@@ -313,9 +378,10 @@ async fn endpoint_visible(
         _ => None,
     };
     if floor.is_none_or(|floor| commit.stream_position < floor.oldest_position) {
-        return Ok(false);
+        return Ok(None);
     }
-    Box::pin(
+    let scope = event.scope_ref.clone();
+    let visible = Box::pin(
         crate::committed_disclosure::full_event_for_member_in_connection(
             conn,
             &arkret_wire::CommittedEventFullView { event, commit },
@@ -323,5 +389,6 @@ async fn endpoint_visible(
             chrono::Utc::now(),
         ),
     )
-    .await
+    .await?;
+    Ok(visible.then_some(scope))
 }

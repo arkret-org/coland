@@ -734,54 +734,8 @@ fn assert_each_snapshot_family_bounded(
     }
 }
 
-// Circle provenance adds real scoped streams to the current-state fixture.
-// Keep the original single-stream negative oracle in its own history-only
-// matrix, with the same hot/cold histories, Realm counts, keys and scan bound.
-// This guard ends before either later fixture leases its database.
-async fn assert_single_stream_scope_capacity() {
-    let database = crate::test_database::TestDatabase::lease().await;
-    let mut conn = pg_conn(&database.pool()).await.unwrap();
-    seed(&mut conn, 1, 1, HOT_HISTORY).await;
-    let mut seeded = 1;
-    for realms in [1_i64, 100, 1000] {
-        if realms > seeded {
-            seed_history(&mut conn, seeded + 1, realms, COLD_HISTORY, true).await;
-            seeded = realms;
-        }
-        conn.batch_execute("ANALYZE").await.unwrap();
-        for realm in [
-            "ak:realm:capacity-1".to_owned(),
-            format!("ak:realm:capacity-{realms}"),
-        ] {
-            let key = realm.replace("ak:realm:capacity-", "stream-");
-            let label = format!("single stream realms={realms} realm={realm} no scoped stream");
-            let plan = sql_query(format!(
-                "EXPLAIN (ANALYZE, FORMAT JSON) {}",
-                crate::self_current_reads::SCOPED_STREAMS_SQL
-            ))
-            .bind::<Text, _>(&realm)
-            .bind::<Text, _>(&key)
-            .get_result::<PlanRow>(&mut *conn)
-            .await
-            .unwrap()
-            .plan;
-            measured_current(plan, &label, 4.0);
-            let result = sql_query(crate::self_current_reads::SCOPED_STREAMS_SQL)
-                .bind::<Text, _>(&realm)
-                .bind::<Text, _>(&key)
-                .get_result::<crate::ExistsRow>(&mut *conn)
-                .await
-                .unwrap();
-            assert!(!result.present, "{label}");
-        }
-    }
-    drop(conn);
-    drop(database);
-}
-
 #[tokio::test]
 async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_thousand_realms() {
-    Box::pin(assert_single_stream_scope_capacity()).await;
     let template = Box::pin(admitted_circle_template()).await;
     let database = crate::test_database::TestDatabase::lease().await;
     let mut conn = pg_conn(&database.pool()).await.unwrap();
@@ -850,21 +804,6 @@ async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_th
                     "{\"member\": 0}",
                 ),
                 (
-                    "scoped streams present",
-                    crate::self_current_reads::SCOPED_STREAMS_SQL,
-                    "stream-1",
-                ),
-                (
-                    "stream above",
-                    crate::self_current_reads::SCOPED_STREAMS_SQL,
-                    "stream-0",
-                ),
-                (
-                    "stream below",
-                    crate::self_current_reads::SCOPED_STREAMS_SQL,
-                    "stream-zzzz",
-                ),
-                (
                     "media absent",
                     crate::self_current_reads::MEDIA_ANCHOR_SQL,
                     "ak.realm.media_service",
@@ -911,16 +850,6 @@ async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_th
                     .plan;
                 measured_current(plan, &label, 4.0);
             }
-            // The complete Circle support graph now has additional streams.
-            // Test its positive result without substituting it for the
-            // history-only false control above.
-            let scoped = sql_query(crate::self_current_reads::SCOPED_STREAMS_SQL)
-                .bind::<Text, _>(&realm)
-                .bind::<Text, _>(realm.replace("ak:realm:capacity-", "stream-"))
-                .get_result::<crate::ExistsRow>(&mut *conn)
-                .await
-                .unwrap();
-            assert!(scoped.present, "{label}: real Circle streams are present");
             let number = realm.strip_prefix("ak:realm:capacity-").unwrap();
             for (suffix, expected_rows) in [("1", 1.0), ("0", 0.0)] {
                 let strand = format!("strand-{number}-{suffix}");
@@ -972,16 +901,6 @@ async fn typed_current_and_self_reads_stay_bounded_across_one_hundred_and_one_th
                     crate::self_current_reads::MEMBER_PRESENT_SQL,
                     "{\"member\": 0}".to_owned(),
                     false,
-                ),
-                (
-                    crate::self_current_reads::SCOPED_STREAMS_SQL,
-                    "stream-0".to_owned(),
-                    true,
-                ),
-                (
-                    crate::self_current_reads::SCOPED_STREAMS_SQL,
-                    "stream-zzzz".to_owned(),
-                    true,
                 ),
                 (
                     crate::self_current_reads::MEDIA_ANCHOR_SQL,

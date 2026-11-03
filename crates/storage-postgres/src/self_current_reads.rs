@@ -68,17 +68,6 @@ pub(crate) const MEMBER_PRESENT_SQL: &str = "SELECT COALESCE(( \
 
 pub(crate) const WATCH_CURRENT_SQL: &str = "SELECT w.current_commit_id,w.current_stream_position,w.value,c.stream_ref FROM strand_watch_current_states w JOIN realm_commits c ON c.commit_id=w.current_commit_id WHERE w.realm_id=$1 AND w.strand_id=$2 AND w.watcher_actor_id=$3 AND c.realm_id=w.realm_id AND c.stream_position=w.current_stream_position";
 
-// Probe the adjacent keys on both sides of the Realm stream. Tuple bounds
-// keep each probe on the Realm-prefixed index. Scalar ORDER BY/LIMIT prevents
-// EXISTS from discarding that order and choosing a history scan instead.
-pub(crate) const SCOPED_STREAMS_SQL: &str = "SELECT ( \
-    (SELECT stream_key FROM realm_commits \
-     WHERE realm_id=$1 AND (realm_id,stream_key)<($1,$2) \
-     ORDER BY realm_id DESC,stream_key DESC LIMIT 1) IS NOT NULL OR \
-    (SELECT stream_key FROM realm_commits \
-     WHERE realm_id=$1 AND (realm_id,stream_key)>($1,$2) \
-     ORDER BY realm_id,stream_key LIMIT 1) IS NOT NULL) AS present";
-
 // Probe the first key at or above the exact selector. The ordered, bounded
 // probe uses the (realm_id, kind) primary key even when PostgreSQL estimates
 // a small table scan as cheaper for a plain EXISTS predicate.
@@ -129,8 +118,6 @@ enum MemberCut {
         generation: u64,
         /// Head of the Realm stream; `None` before the genesis Commit.
         realm_head: Option<CommitStreamHead>,
-        /// Whether any Circle or Sidecar stream has an established chain.
-        scoped_streams: bool,
     },
 }
 
@@ -202,16 +189,9 @@ async fn member_cut(
         })
     })
     .transpose()?;
-    let scoped_streams = sql_query(SCOPED_STREAMS_SQL)
-        .bind::<Text, _>(realm_id.as_str())
-        .bind::<Text, _>(&realm_key)
-        .get_result::<ExistsRow>(&mut *conn)
-        .await?
-        .present;
     Ok(MemberCut::Member {
         generation: to_u64(tenure.generation, "governance generation")?,
         realm_head,
-        scoped_streams,
     })
 }
 
@@ -465,14 +445,6 @@ pub(crate) async fn exact_current_state_for_actor_in_connection(
         MemberCut::ForeignTenure => {
             return Ok(SelfExactCurrentRead::Unresolved(
                 "this Station does not hold the Realm's governing tenure",
-            ));
-        }
-        MemberCut::Member {
-            scoped_streams: true,
-            ..
-        } if matches!(request.selector, ExactCurrentStateSelector::Relation(_)) => {
-            return Ok(SelfExactCurrentRead::Unresolved(
-                "Circle and Sidecar scope visibility is not proved at this cut",
             ));
         }
         MemberCut::Member {
@@ -765,23 +737,99 @@ pub(crate) async fn exact_current_state_for_actor_in_connection(
         .await
         .optional()?
     else {
-        // Absence of a row cannot prove never_written until the domain's
-        // endpoint visibility is decided at this cut.
-        return Ok(SelfExactCurrentRead::Unresolved(
-            "the Relation domain's endpoint visibility is not proved at this cut",
-        ));
+        let Some(scope) = crate::relation_disclosure::domain_scope_in_connection(
+            conn,
+            &request.realm_id,
+            &selector.primary_conflict_domain,
+            &caller,
+        )
+        .await?
+        else {
+            return Ok(SelfExactCurrentRead::NotFound);
+        };
+        #[derive(QueryableByName)]
+        struct RawRelation {
+            #[diesel(sql_type = Jsonb)]
+            value: serde_json::Value,
+        }
+        let orphan = sql_query(
+            "SELECT value FROM relation_current_states WHERE realm_id=$1 AND domain_key=$2",
+        )
+        .bind::<Text, _>(request.realm_id.as_str())
+        .bind::<Text, _>(&domain_key)
+        .get_result::<RawRelation>(&mut *conn)
+        .await
+        .optional()?;
+        if let Some(orphan) = orphan {
+            let Ok(value) = serde_json::from_value::<Relation>(orphan.value) else {
+                return Ok(SelfExactCurrentRead::NotFound);
+            };
+            if value
+                .validate_current_for_domain(&request.realm_id, &selector.primary_conflict_domain)
+                .is_err()
+                || !crate::relation_disclosure::relation_visible_in_connection(
+                    conn, &value, &caller,
+                )
+                .await?
+            {
+                return Ok(SelfExactCurrentRead::NotFound);
+            }
+            return Ok(SelfExactCurrentRead::Unresolved(
+                "Relation covering Commit is unavailable",
+            ));
+        }
+        let Some(head) = relation_scope_head(conn, &scope, &head).await? else {
+            return Ok(SelfExactCurrentRead::Unresolved(
+                "Relation scope head is unavailable",
+            ));
+        };
+        let outcome = ExactCurrentStateReadResponseBody::NeverWritten {
+            realm_id: request.realm_id.clone(),
+            governance_generation: generation,
+            effective_stream_head: head,
+            selector: arkret_models_collaboration::exact_current_state::NeverWrittenExactCurrentSelector::Relation(selector.clone()),
+        };
+        outcome
+            .validate_for_request(request, generation)
+            .map_err(|error| corrupt(error.to_string()))?;
+        return Ok(SelfExactCurrentRead::Answer(outcome));
     };
+    // An unavailable or damaged private carrier cannot disclose its existence
+    // through an integrity error before its actual stream is visible.
+    let Ok(source_stream_ref) = serde_json::from_value::<CommitStreamRef>(row.stream_ref) else {
+        return Ok(SelfExactCurrentRead::NotFound);
+    };
+    if source_stream_ref.realm_id() != &request.realm_id
+        || !crate::relation_disclosure::scope_visible(conn, &source_stream_ref.scope_ref(), &caller)
+            .await?
+    {
+        return Ok(SelfExactCurrentRead::NotFound);
+    }
     let value = serde_json::from_value::<Relation>(row.value)
         .map_err(|error| corrupt(format!("stored Relation current value is invalid: {error}")))?;
-    let source_stream_ref = serde_json::from_value::<CommitStreamRef>(row.stream_ref)
-        .map_err(|error| corrupt(format!("stored RealmCommit stream is invalid: {error}")))?;
-    let realm_scoped = matches!(
-        &value.effective_scope,
-        Some(ScopeRef::Realm { realm_id }) if realm_id == &request.realm_id
-    );
-    if !realm_scoped || source_stream_ref != head.stream_ref {
+    if !crate::relation_disclosure::relation_visible_in_connection(conn, &value, &caller).await? {
+        return Ok(SelfExactCurrentRead::NotFound);
+    }
+    value
+        .validate_current_for_domain(&request.realm_id, &selector.primary_conflict_domain)
+        .map_err(|error| corrupt(error.to_string()))?;
+    let scope = match &value.scope_circle_id {
+        Some(circle_id) => ScopeRef::Circle {
+            realm_id: request.realm_id.clone(),
+            circle_id: circle_id.clone(),
+        },
+        None => ScopeRef::Realm {
+            realm_id: request.realm_id.clone(),
+        },
+    };
+    let Some(head) = relation_scope_head(conn, &scope, &head).await? else {
         return Ok(SelfExactCurrentRead::Unresolved(
-            "the Relation's scope visibility is not proved at this cut",
+            "Relation scope head is unavailable",
+        ));
+    };
+    if source_stream_ref != head.stream_ref {
+        return Ok(SelfExactCurrentRead::Unresolved(
+            "Relation scope differs from its covering Commit",
         ));
     }
     let revision = CurrentRevision {
@@ -791,19 +839,48 @@ pub(crate) async fn exact_current_state_for_actor_in_connection(
             .map_err(|error| corrupt(format!("stored Relation Commit id is invalid: {error}")))?,
         stream_position: to_u64(row.current_stream_position, "Relation stream position")?,
     };
-    Ok(SelfExactCurrentRead::Answer(
-        ExactCurrentStateReadResponseBody::Present {
-            realm_id: request.realm_id.clone(),
-            governance_generation: generation,
-            effective_stream_head: head,
-            current_state: ExactCurrentState::Relation(CurrentRelation {
-                selector: selector.clone(),
-                source_stream_ref,
-                revision,
-                value,
-            }),
-        },
-    ))
+    let outcome = ExactCurrentStateReadResponseBody::Present {
+        realm_id: request.realm_id.clone(),
+        governance_generation: generation,
+        effective_stream_head: head,
+        current_state: ExactCurrentState::Relation(CurrentRelation {
+            selector: selector.clone(),
+            source_stream_ref,
+            revision,
+            value,
+        }),
+    };
+    outcome
+        .validate_for_request(request, generation)
+        .map_err(|error| corrupt(error.to_string()))?;
+    Ok(SelfExactCurrentRead::Answer(outcome))
+}
+
+async fn relation_scope_head(
+    conn: &mut AsyncPgConnection,
+    scope: &ScopeRef,
+    realm_head: &CommitStreamHead,
+) -> Result<Option<CommitStreamHead>, PgTransactionError> {
+    let stream =
+        CommitStreamRef::from_scope(scope, None).map_err(|error| corrupt(error.to_string()))?;
+    if stream == realm_head.stream_ref {
+        return Ok(Some(realm_head.clone()));
+    }
+    let key = crate::authority_commit::stream_key(&stream)?;
+    let row = sql_query("SELECT commit_id,stream_position FROM realm_commits WHERE realm_id=$1 AND stream_key=$2 ORDER BY stream_position DESC LIMIT 1")
+        .bind::<Text, _>(scope.realm_id().as_str()).bind::<Text, _>(key)
+        .get_result::<HeadRow>(&mut *conn).await.optional()?;
+    row.map(|row| {
+        Ok(CommitStreamHead {
+            stream_ref: stream,
+            commit_id: row
+                .commit_id
+                .parse()
+                .map_err(|error| corrupt(format!("invalid Relation scope head: {error}")))?,
+            stream_position: to_u64(row.stream_position, "Relation scope head")?,
+        })
+    })
+    .transpose()
 }
 
 async fn policy_exact_read(

@@ -4982,12 +4982,12 @@ async fn self_current_reads_answer_only_the_provable_cut() {
         AccountRealmStreamList::Unproved(_)
     ));
 
-    // Exact Relation read: no row is never inferred as never_written.
+    // Exact Relation absence is proved only for visible known endpoints.
     let domain = serde_json::json!({
         "domain_kind":"tuple",
         "relation_kind":"references",
-        "from_ref":"ak:strand:AUifoAUG8AEOHYXp999WnI7WlLt19ByDoqYUsFwbw4A4",
-        "to_ref":"ak:strand:AQdknt9AByYY2gb16KB093xeB4J8b02mTEd4Mt8z2rO-"
+        "from_ref":realm_id,
+        "to_ref":realm_id
     });
     let relation_request = |realm: &arkret_wire::RealmId| {
         serde_json::from_value::<ExactCurrentStateReadRequestBody>(serde_json::json!({
@@ -5014,7 +5014,7 @@ async fn self_current_reads_answer_only_the_provable_cut() {
             station.clone()
         )
         .await,
-        SelfExactCurrentRead::Unresolved(_)
+        SelfExactCurrentRead::Answer(ExactCurrentStateReadResponseBody::NeverWritten { .. })
     ));
     let relation_id = "ak:relation:AcFfzgdHkT6eFkto1gjLaKniVuMXx9sD0GKQwk8BXykz";
     let value = serde_json::json!({
@@ -5023,8 +5023,8 @@ async fn self_current_reads_answer_only_the_provable_cut() {
         "realm_id":realm_id,
         "effective_scope":{"kind":"realm","realm_id":realm_id},
         "relation_kind":"references",
-        "from_ref":"ak:strand:AUifoAUG8AEOHYXp999WnI7WlLt19ByDoqYUsFwbw4A4",
-        "to_ref":"ak:strand:AQdknt9AByYY2gb16KB093xeB4J8b02mTEd4Mt8z2rO-",
+        "from_ref":realm_id,
+        "to_ref":realm_id,
         "state":"active",
         "created_by":unit.transactions[0].event.actor_id,
         "created_at":"2026-09-21T00:00:00.000Z"
@@ -8702,4 +8702,178 @@ fn seal_request_fact(mut request: EventCommitRequest) -> EventCommitRequest {
     }
     seal_suite_commit(&mut request.authority_commit.commit);
     request
+}
+
+#[tokio::test]
+async fn relation_exact_current_uses_selector_scope_and_hides_private_domains() {
+    use arkret_models_collaboration::exact_current_state::{
+        ExactCurrentStateReadRequestBody, ExactCurrentStateReadResponseBody,
+    };
+    use coland_storage::SelfExactCurrentRead;
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let base = relation_snapshot_base(&pool).await;
+    let fixture = relation_snapshot_fixture(&pool, base).await;
+    let creator = creator_account(&fixture.unit);
+    let realm = fixture.unit.transactions[0].event.realm_id.clone();
+    let circle =
+        arkret_wire::CircleId::from_event_id(&fixture.circle.authority_commit.event.event_id);
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let request = |from: serde_json::Value| -> ExactCurrentStateReadRequestBody {
+        serde_json::from_value(serde_json::json!({"realm_id":realm,"selector":{
+            "kind":"relation", "primary_conflict_domain":{"domain_kind":"tuple","relation_kind":"assigned_to",
+            "from_ref":from,"to_ref":arkret_wire::ActorId::account(creator.clone())},
+        }})).unwrap()
+    };
+    let public = request(serde_json::json!(arkret_wire::StrandId::from_event_id(
+        &fixture.public.authority_commit.event.event_id
+    )));
+    for account in [&creator, &fixture.bob] {
+        let SelfExactCurrentRead::Answer(
+            answer @ ExactCurrentStateReadResponseBody::NeverWritten { .. },
+        ) = store
+            .exact_current_state_for_account(&public, account, &creator.station_id)
+            .await
+            .unwrap()
+        else {
+            panic!("unrelated Circle does not block a visible Realm domain");
+        };
+        answer.validate_for_request(&public, 0).unwrap();
+    }
+    let private = request(serde_json::json!(fixture.private_id));
+    let SelfExactCurrentRead::Answer(
+        answer @ ExactCurrentStateReadResponseBody::NeverWritten { .. },
+    ) = store
+        .exact_current_state_for_account(&private, &creator, &creator.station_id)
+        .await
+        .unwrap()
+    else {
+        panic!("Circle member can prove its private domain absent");
+    };
+    answer.validate_for_request(&private, 0).unwrap();
+    let ExactCurrentStateReadResponseBody::NeverWritten {
+        effective_stream_head,
+        ..
+    } = answer
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        effective_stream_head.stream_ref,
+        arkret_wire::CommitStreamRef::Circle {
+            realm_id: realm.clone(),
+            circle_id: circle.clone()
+        }
+    );
+    assert!(matches!(
+        store
+            .exact_current_state_for_account(&private, &fixture.bob, &creator.station_id)
+            .await
+            .unwrap(),
+        SelfExactCurrentRead::NotFound
+    ));
+    let payload = serde_json::to_value(&fixture.relation.authority_commit.event.payload).unwrap();
+    let present: ExactCurrentStateReadRequestBody =
+        serde_json::from_value(serde_json::json!({"realm_id":realm,"selector":{
+            "kind":"relation", "primary_conflict_domain":payload["primary_conflict_domain"],
+        }}))
+        .unwrap();
+    let SelfExactCurrentRead::Answer(answer @ ExactCurrentStateReadResponseBody::Present { .. }) =
+        store
+            .exact_current_state_for_account(&present, &creator, &creator.station_id)
+            .await
+            .unwrap()
+    else {
+        panic!("visible Circle Relation is answered from its own stream");
+    };
+    answer.validate_for_request(&present, 0).unwrap();
+    assert!(matches!(
+        store
+            .exact_current_state_for_account(&present, &fixture.bob, &creator.station_id)
+            .await
+            .unwrap(),
+        SelfExactCurrentRead::NotFound
+    ));
+    let public_id =
+        arkret_wire::StrandId::from_event_id(&fixture.public.authority_commit.event.event_id);
+    let hidden_domain = serde_json::json!({"domain_kind":"tuple", "relation_kind":"references", "from_ref":public_id, "to_ref":arkret_wire::ActorId::account(creator.clone())});
+    let hidden = scoped_event_request_as(
+        &fixture.relation,
+        &creator,
+        arkret_wire::EventKind::RelationCreate,
+        serde_json::json!({"primary_conflict_domain":hidden_domain, "expected_revision":null,
+            "relation":{"relation_kind":"references", "scope_circle_id":circle, "from_ref":public_id, "to_ref":arkret_wire::ActorId::account(creator.clone())}}),
+        fixture.relation.authority_commit.event.scope_ref.clone(),
+    );
+    let hidden = source_if_human(&pool, hidden).await;
+    PgEventCommitUnitOfWork::new(pool.clone())
+        .commit_event(hidden.clone())
+        .await
+        .unwrap();
+    let hidden_request = serde_json::from_value(serde_json::json!({"realm_id":realm,"selector":{"kind":"relation","primary_conflict_domain":hidden_domain}})).unwrap();
+    assert!(matches!(
+        store
+            .exact_current_state_for_account(&hidden_request, &fixture.bob, &creator.station_id)
+            .await
+            .unwrap(),
+        SelfExactCurrentRead::NotFound
+    ));
+    let mut conn = pool.get().await.unwrap();
+    let hidden_id = arkret_wire::RelationId::from_event_id(&hidden.authority_commit.event.event_id);
+    for malformed in [false, true] {
+        if malformed {
+            diesel::sql_query("UPDATE relation_current_states SET value=value-'relation_kind' WHERE relation_id=$1")
+                .bind::<Text, _>(hidden_id.as_str()).execute(&mut conn).await.unwrap();
+        } else {
+            diesel::sql_query("UPDATE relation_current_states SET value=jsonb_set(value,'{relation_kind}',$2) WHERE relation_id=$1")
+                .bind::<Text, _>(hidden_id.as_str())
+                .bind::<diesel::sql_types::Jsonb, _>(serde_json::json!("assigned_to"))
+                .execute(&mut conn).await.unwrap();
+        }
+        assert!(
+            matches!(
+                store
+                    .exact_current_state_for_account(
+                        &hidden_request,
+                        &fixture.bob,
+                        &creator.station_id
+                    )
+                    .await
+                    .unwrap(),
+                SelfExactCurrentRead::NotFound
+            ),
+            "a hidden private value must not disclose corruption or a mismatched domain"
+        );
+        assert!(
+            store
+                .exact_current_state_for_account(&hidden_request, &creator, &creator.station_id)
+                .await
+                .is_err(),
+            "an authorized reader still observes the integrity refusal"
+        );
+        diesel::sql_query("UPDATE relation_current_states SET value=jsonb_set(value,'{relation_kind}',$2) WHERE relation_id=$1")
+            .bind::<Text, _>(hidden_id.as_str())
+            .bind::<diesel::sql_types::Jsonb, _>(serde_json::json!("references"))
+            .execute(&mut conn).await.unwrap();
+    }
+    diesel::sql_query("UPDATE relation_current_states SET current_stream_position=current_stream_position+1 WHERE relation_id=$1")
+        .bind::<Text, _>(arkret_wire::RelationId::from_event_id(&hidden.authority_commit.event.event_id).as_str())
+        .execute(&mut conn).await.unwrap();
+    assert!(
+        matches!(
+            store
+                .exact_current_state_for_account(&hidden_request, &fixture.bob, &creator.station_id)
+                .await
+                .unwrap(),
+            SelfExactCurrentRead::NotFound
+        ),
+        "missing covering Commit cannot disclose a private Relation with public endpoints"
+    );
+    assert!(matches!(
+        store
+            .exact_current_state_for_account(&hidden_request, &creator, &creator.station_id)
+            .await
+            .unwrap(),
+        SelfExactCurrentRead::Unresolved(_)
+    ));
 }

@@ -893,3 +893,136 @@ async fn schema_subjects_are_immutable_and_policy_revisions_are_contiguous() {
         assert_eq!(count(&pool, "realm_commits", &realm).await, baseline);
     }
 }
+
+#[tokio::test]
+async fn relation_exact_current_proves_first_assignment_and_preserves_station_identity() {
+    use arkret_models_collaboration::exact_current_state::{
+        ExactCurrentState, ExactCurrentStateReadRequestBody, ExactCurrentStateReadResponseBody,
+    };
+    use coland_storage::SelfExactCurrentRead;
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let discussion = Box::pin(open_discussion(&pool, "relation-exact-first-assignment")).await;
+    let other = Box::pin(open_discussion(&pool, "relation-exact-foreign-endpoint")).await;
+    let realm = discussion.realm_id();
+    let caller = founder_actor().as_account_id().unwrap().clone();
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let payload = relation_create(
+        "assigned_to",
+        "tuple",
+        json!(discussion.strand_id),
+        json!(founder_actor()),
+    );
+    let request: ExactCurrentStateReadRequestBody = serde_json::from_value(json!({
+        "realm_id": realm,
+        "selector": {"kind":"relation", "primary_conflict_domain":payload["primary_conflict_domain"]},
+    })).unwrap();
+    let before = count(&pool, "realm_commits", &realm).await;
+    let SelfExactCurrentRead::Answer(
+        absent @ ExactCurrentStateReadResponseBody::NeverWritten { .. },
+    ) = store
+        .exact_current_state_for_account(&request, &caller, &ordinary_realm::station())
+        .await
+        .unwrap()
+    else {
+        panic!("known admitted Strand and exact joined Account prove first assignment absence");
+    };
+    absent.validate_for_request(&request, 0).unwrap();
+    assert_eq!(count(&pool, "realm_commits", &realm).await, before);
+    for target in [
+        json!(arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+            caller.principal_id.clone(),
+            arkret_wire::DidCoreId::new("ak:did_core:web:other-station.example").unwrap()
+        ))),
+        json!(arkret_wire::ActorId::account(
+            ordinary_realm::human_profile::account(&ordinary_realm::station(), "unknown-assignee")
+        )),
+    ] {
+        let mut hidden = serde_json::to_value(&request).unwrap();
+        hidden["selector"]["primary_conflict_domain"]["to_ref"] = target;
+        let hidden = serde_json::from_value(hidden).unwrap();
+        assert!(matches!(
+            store
+                .exact_current_state_for_account(&hidden, &caller, &ordinary_realm::station())
+                .await
+                .unwrap(),
+            SelfExactCurrentRead::NotFound
+        ));
+    }
+    let mut cross = serde_json::to_value(&request).unwrap();
+    cross["selector"]["primary_conflict_domain"]["from_ref"] = json!(other.strand_id);
+    let cross = serde_json::from_value(cross).unwrap();
+    assert!(
+        matches!(
+            store
+                .exact_current_state_for_account(&cross, &caller, &ordinary_realm::station())
+                .await
+                .unwrap(),
+            SelfExactCurrentRead::Answer(ExactCurrentStateReadResponseBody::NeverWritten { .. })
+        ),
+        "assigned_to is weak semantic and both endpoints are disclosed here"
+    );
+    let cross: ExactCurrentStateReadRequestBody = serde_json::from_value(json!({
+        "realm_id":realm, "selector":{"kind":"relation", "primary_conflict_domain":{
+            "domain_kind":"from", "relation_kind":"belongs_to", "from_ref":other.strand_id,
+        }},
+    }))
+    .unwrap();
+    assert!(matches!(
+        store
+            .exact_current_state_for_account(&cross, &caller, &ordinary_realm::station())
+            .await
+            .unwrap(),
+        SelfExactCurrentRead::NotFound
+    ));
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let accepted = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &discussion.head.authority_commit,
+            arkret_wire::EventKind::RelationCreate,
+            &founder(),
+            payload,
+            discussion.committed_at(),
+        ),
+    ))
+    .await;
+    uow.commit_event(accepted.clone()).await.unwrap();
+    let SelfExactCurrentRead::Answer(present @ ExactCurrentStateReadResponseBody::Present { .. }) =
+        store
+            .exact_current_state_for_account(&request, &caller, &ordinary_realm::station())
+            .await
+            .unwrap()
+    else {
+        panic!("accepted assignment is present rather than never_written");
+    };
+    present.validate_for_request(&request, 0).unwrap();
+    let ExactCurrentStateReadResponseBody::Present {
+        current_state: ExactCurrentState::Relation(row),
+        ..
+    } = present
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        row.value.to_ref,
+        arkret_wire::relation::RelationEndpoint::Actor(founder_actor())
+    );
+    assert_eq!(
+        row.revision.commit_id,
+        accepted.authority_commit.commit.commit_id
+    );
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("UPDATE relation_current_states SET current_stream_position=current_stream_position+1 WHERE realm_id=$1")
+        .bind::<Text, _>(realm.as_str()).execute(&mut conn).await.unwrap();
+    assert!(
+        matches!(
+            store
+                .exact_current_state_for_account(&request, &caller, &ordinary_realm::station())
+                .await
+                .unwrap(),
+            SelfExactCurrentRead::Unresolved(_)
+        ),
+        "a current row with a missing covering Commit cannot become absence"
+    );
+}

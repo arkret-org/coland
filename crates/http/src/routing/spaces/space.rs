@@ -485,10 +485,7 @@ pub async fn realm_allows_plaintext_service_for_data_class_id(
 
 fn realm_lifecycle_read_error(error: coland_services::ServiceError) -> AppError {
     if error.conflict_code() == Some(coland_storage::ConflictCode::TemporarilyUnavailable) {
-        return AppError::new(
-            coland_http::error::ErrorCode::TemporarilyUnavailable,
-            error.to_string(),
-        );
+        return crate::app_error!(TemporarilyUnavailable, error.to_string());
     }
     AppError::internal(error.to_string())
 }

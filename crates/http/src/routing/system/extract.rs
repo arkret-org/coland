@@ -39,12 +39,15 @@ impl salvo::oapi::EndpointArgRegister for AuthArgs {
         use salvo::oapi::security::{Http, HttpAuthScheme, SecurityRequirement, SecurityScheme};
         components.security_schemes.insert(
             "bearer_session".to_owned(),
-            SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer).bearer_format("JWT")),
+            SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer).bearer_format("JWT")).into(),
         );
-        operation.securities.push(SecurityRequirement::new(
-            "bearer_session",
-            Vec::<String>::new(),
-        ));
+        operation
+            .securities
+            .get_or_insert_with(Vec::new)
+            .push(SecurityRequirement::new(
+                "bearer_session",
+                Vec::<String>::new(),
+            ));
     }
 }
 

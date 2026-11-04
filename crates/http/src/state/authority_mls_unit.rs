@@ -224,7 +224,6 @@ async fn admit_mls_event_inner(
                 welcomes,
                 native_request,
             }),
-            ..SelfEventUnitEffects::default()
         },
     )
     .await;

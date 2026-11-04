@@ -95,7 +95,7 @@ fn reject_carried_event_derived_object_id(
         return Ok(());
     }
     let forbidden: Vec<(String, String)> = derived_id_kinds
-        .into_iter()
+        .iter()
         .map(|id_kind| (format!("{id_kind}_id"), format!("ak:{id_kind}:")))
         .collect();
 

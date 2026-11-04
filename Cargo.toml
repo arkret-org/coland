@@ -83,7 +83,7 @@ chrono = "0.4.45"
 chacha20poly1305 = "0.11"
 chrono-tz = { version = "0.10.4", default-features = false }
 deadpool = "0.13"
-diesel = "2.3.12"
+diesel = "2.3.14"
 pq-sys = { version = "0.7.5", features = ["bundled"] }
 diesel-async = "0.9"
 diesel_migrations = "2.3.2"

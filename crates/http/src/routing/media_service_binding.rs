@@ -134,7 +134,7 @@ pub(crate) async fn resolve_issuer(
     let document = &evidence.normalized_did_document;
     let mut signing_keys = Vec::new();
     for method in document.verification_methods.keys() {
-        let method = arkret_wire::DidUrl::new(method.clone()).map_err(&unavailable)?;
+        let method = arkret_wire::DidUrl::new(method.clone()).map_err(unavailable)?;
         if arkret_identity::validate_verification_method_relationship(
             document,
             &method,

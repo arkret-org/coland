@@ -1138,15 +1138,14 @@ fn device_message_envelope_from_record(
     ) {
         return None;
     }
-    if let DeviceMessageSender::Station { sender_id } = &envelope.sender {
-        if *sender_id != state.service_core_id()
+    if let DeviceMessageSender::Station { sender_id } = &envelope.sender
+        && (*sender_id != state.service_core_id()
             || !matches!(
                 envelope.kind.as_str(),
                 "ak.account_data.update" | "ak.read_cursor.update"
-            )
-        {
-            return None;
-        }
+            ))
+    {
+        return None;
     }
     Some(envelope)
 }

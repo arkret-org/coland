@@ -10,6 +10,7 @@
 //!     whenever the update body carries a `room_binding` block.
 //!   * `POST /mimi/strands/{strand_id}/notify` requires a real provider delivery consumer;
 //!     unavailable delivery never creates an Event or a fake ACK.
+//!
 //! Canonical message-ingress Events carry `payload.mimi_provenance` metadata
 //! (provider id, original MIMI envelope hash, MIMI message id) so the receiver
 //! can distinguish MIMI ingress from a native signed Move.

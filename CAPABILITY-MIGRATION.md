@@ -650,8 +650,7 @@ Reference implementation: `e309b047^:crates/signatures/src/agent_evidence.rs`
 - `AgentKeyCellEntry` and `agent_authorization_cell_ref` carry `Cell`, which is
   removed vocabulary under the authority-commit clean break. Rebuild them under
   the current state naming, do not copy the old names back.
-- `SignerKeyResolution`, `AccountSubscribeReadAction` and
-  `ModerationQueueItem` are NC-TYPE-001 violations in the same area (`Result` is
+- `SignerKeyResolution` and `AccountSubscribeReadAction` are NC-TYPE-001 violations in the same area (`Result` is
   not in the closed wrapper-word table; `Outcome` and `Row` are). Fix them in
   the same pass rather than propagating them.
 

@@ -267,7 +267,7 @@ fn mount_application_routes(router: Router, conformance_harness_enabled: bool) -
         // Four sibling sub-trees are resolved by salvo fallthrough; ordering
         // matters only where paths overlap:
         //   1. `server_ops_router` — coland-local admin endpoints (server/status, accounts,
-        //      devices, moderation/queue).
+        //      devices).
         //   2. `admin_router`  — operator surface (Realm and account administration).
         //   3. `router`        — collection (`/_coland/admin/{resource}`), cells, control-frames,
         //      retention.

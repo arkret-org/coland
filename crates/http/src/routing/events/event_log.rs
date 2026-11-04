@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(test)]
 use arkret_canonical as canonical;
 use arkret_event_draft::ProjectedEventOperation as Operation;
 #[cfg(test)]

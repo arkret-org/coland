@@ -36,35 +36,6 @@ pub(super) async fn current_mimi_room_binding_for_uri(
         .transpose()
 }
 
-/// Resolve an authority-carried room-binding Event ref to the unique current
-/// binding for that Event's signed canonical room URI.
-pub(super) async fn current_mimi_room_binding_for_event_id(
-    state: &AppState,
-    event_id: &arkret_wire::EventId,
-) -> Result<Option<MimiRoomBindingProjection>, AppError> {
-    let room_uri = state
-        .authority_commits()
-        .committed_event(event_id)
-        .await
-        .map_err(|error| {
-            AppError::internal(format!("MIMI committed Event lookup failed: {error}"))
-        })?
-        .filter(|record| record.event.kind == arkret_wire::EventKind::MimiRoomBinding)
-        .and_then(|record| {
-            record
-                .event
-                .payload
-                .get("mimi_room_uri")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        });
-    let Some(room_uri) = room_uri else {
-        return Ok(None);
-    };
-    let current = current_mimi_room_binding_for_uri(state, &room_uri).await?;
-    Ok(current.filter(|binding| binding.event_id == event_id.as_str()))
-}
-
 pub(super) fn enforce_mimi_writable_binding(binding: &Value) -> Result<(), AppError> {
     validate_mimi_room_binding_payload(binding)?;
     let binding_payload = mimi_room_binding_security_payload(binding);

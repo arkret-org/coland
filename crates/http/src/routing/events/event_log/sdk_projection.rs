@@ -92,6 +92,7 @@ fn event_for_canonical_digest(envelope: &Value) -> Result<Event, EventValidation
     })
 }
 
+#[cfg(test)]
 pub(in crate::routing) fn event_canonical_bytes(
     envelope: &Value,
 ) -> Result<Vec<u8>, EventValidationError> {
@@ -259,6 +260,7 @@ pub(crate) fn effective_scope_for_envelope(envelope: &Value) -> Option<String> {
 
 /// Strict accepted-envelope materialization for canonical scans. Privacy views
 /// are applied by the caller; signed payloads must never be rewritten in place.
+#[cfg(test)]
 pub(crate) fn canonical_event_for_read(record: &AcceptedEvent) -> Result<Event, AppError> {
     let event: Event = serde_json::from_value(record.envelope.clone())
         .map_err(|error| AppError::internal(format!("invalid canonical Event: {error}")))?;

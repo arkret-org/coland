@@ -449,12 +449,12 @@ mod tests {
     }
 
     #[test]
-    fn provider_preflight_matches_only_the_nine_registered_operations() {
+    fn provider_preflight_matches_only_the_eight_registered_operations() {
         let selected: Vec<_> = SERVICE_OPERATION_DESCRIPTORS
             .iter()
             .filter(|item| requires_mimi_provider_signature(item.http_method, item.http_path))
             .collect();
-        assert_eq!(selected.len(), 9);
+        assert_eq!(selected.len(), 8);
         assert!(!requires_mimi_provider_signature(
             "GET",
             "/_arkret/open/mimi/provider-directory"

@@ -349,7 +349,7 @@ mod directory_endpoint_tests {
             ("https://station.example/tenant/", "/tenant"),
         ] {
             let rows = super::mimi_provider_directory_endpoints(base).unwrap();
-            assert_eq!(rows.len(), 7);
+            assert_eq!(rows.len(), 6);
             assert_eq!(
                 rows[0].relative_path,
                 format!("{prefix}/_arkret/open/mimi/consent/request")

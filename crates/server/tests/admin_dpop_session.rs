@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const QUEUE_PATH: &str = "/_coland/admin/moderation/queue";
+const ADMIN_PATH: &str = "/_coland/admin/actors";
 const VIEWER_PATH: &str = "/_arkret/self/account/viewer";
 const INTROSPECTION_PATH: &str = "/_coauth/internal/session-grants/introspect";
 
@@ -280,23 +280,30 @@ async fn dpop_session_reaches_admin_route_once_and_replay_is_rejected() {
 
     // One proof, one authentication: the gate consumes the proof and the
     // handler reads the authenticated principal instead of re-verifying it.
-    let headers = session.headers("GET", QUEUE_PATH);
-    let (status, body) = session.get(QUEUE_PATH, Some(&headers)).await;
+    let headers = session.headers("GET", ADMIN_PATH);
+    let (status, body) = session.get(ADMIN_PATH, Some(&headers)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body["items"].is_array(), "{body}");
+    let actors: coland_contracts::admin::AdminActorList =
+        serde_json::from_value(body).expect("typed admin Actor list");
+    assert!(
+        actors
+            .actors
+            .iter()
+            .any(|actor| actor.principal_id == session.principal_id)
+    );
 
     // The exact same proof on a second request is a replay.
-    let (status, body) = session.get(QUEUE_PATH, Some(&headers)).await;
+    let (status, body) = session.get(ADMIN_PATH, Some(&headers)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(problem_code(&body), "unauthenticated", "{body}");
 
     // A fresh proof for the same grant is admitted again.
-    let fresh = session.headers("GET", QUEUE_PATH);
-    let (status, body) = session.get(QUEUE_PATH, Some(&fresh)).await;
+    let fresh = session.headers("GET", ADMIN_PATH);
+    let (status, body) = session.get(ADMIN_PATH, Some(&fresh)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
     // No credential at all never reaches the handler.
-    let (status, body) = session.get(QUEUE_PATH, None).await;
+    let (status, body) = session.get(ADMIN_PATH, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(problem_code(&body), "unauthenticated", "{body}");
 }
@@ -340,18 +347,18 @@ async fn production_dpop_session_is_scope_checked_and_authenticated_once() {
     .await;
 
     // Not yet an admin principal: authenticated, then denied by the gate.
-    let headers = session.headers("GET", QUEUE_PATH);
-    let (status, body) = session.get(QUEUE_PATH, Some(&headers)).await;
+    let headers = session.headers("GET", ADMIN_PATH);
+    let (status, body) = session.get(ADMIN_PATH, Some(&headers)).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 
     let mut settings = (*session.state.settings()).clone();
     settings.admin_principal_ids = vec![session.principal_id.clone()];
     session.state.replace_settings(settings);
 
-    let headers = session.headers("GET", QUEUE_PATH);
-    let (status, body) = session.get(QUEUE_PATH, Some(&headers)).await;
+    let headers = session.headers("GET", ADMIN_PATH);
+    let (status, body) = session.get(ADMIN_PATH, Some(&headers)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let (status, body) = session.get(QUEUE_PATH, Some(&headers)).await;
+    let (status, body) = session.get(ADMIN_PATH, Some(&headers)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(problem_code(&body), "unauthenticated", "{body}");
 }

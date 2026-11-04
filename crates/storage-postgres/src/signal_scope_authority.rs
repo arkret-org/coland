@@ -1433,21 +1433,10 @@ async fn read_in_connection(
     let current_mls = match current.mls_current.clone() {
         Some(current) => current,
         None => {
-            let key = String::from_utf8(
-                arkret_canonical::canonical_json_bytes(scope).map_err(unavailable)?,
-            )
-            .map_err(unavailable)?;
-            let row =
-                diesel::sql_query("SELECT value FROM mls_group_current_states WHERE scope_key=$1")
-                    .bind::<Text, _>(&key)
-                    .get_result::<ValueRow>(conn)
-                    .await
-                    .optional()
-                    .map_err(PersistenceError::database)?;
-            let Some(row) = row else {
+            let Some(held) = held_mls_current(conn, scope, &current_rows.head).await? else {
                 return Ok(denied("accepted current MLS is not held"));
             };
-            serde_json::from_value(row.value).map_err(unavailable)?
+            held
         }
     };
     let Some(historical_mls_event_ref) = historical.mls.clone() else {
@@ -1549,6 +1538,46 @@ pub(crate) async fn recipient_realms(
         }
         Ok(result)
     }).await.map_err(PgTransactionError::into_persistence)
+}
+
+async fn held_mls_current(
+    conn: &mut AsyncPgConnection,
+    scope: &ScopeRef,
+    expected_head: &arkret_wire::CommitStreamHead,
+) -> PersistenceResult<Option<arkret_wire::MlsGroupValue>> {
+    let key =
+        String::from_utf8(arkret_canonical::canonical_json_bytes(scope).map_err(unavailable)?)
+            .map_err(unavailable)?;
+    if let Some(row) =
+        diesel::sql_query("SELECT value FROM mls_group_current_states WHERE scope_key=$1")
+            .bind::<Text, _>(&key)
+            .get_result::<ValueRow>(&mut *conn)
+            .await
+            .optional()
+            .map_err(PersistenceError::database)?
+    {
+        return serde_json::from_value(row.value)
+            .map(Some)
+            .map_err(unavailable);
+    }
+    // Replicas hold verified authority projections, never admission-owned group state.
+    // Reuse the exact covered-cut reader; stale, forked or uncovered rows fail closed.
+    let stream = CommitStreamRef::from_scope(scope, None).map_err(unavailable)?;
+    let selector = arkret_wire::CurrentSelector::MlsGroup {
+        scope_ref: scope.clone(),
+    };
+    let Some((head, entries)) =
+        crate::replica_authorization::exact_current_evidence(conn, &stream, &[selector]).await?
+    else {
+        return Ok(None);
+    };
+    if head != *expected_head {
+        return Ok(None);
+    }
+    let Some(arkret_wire::CurrentState::Value { value, .. }) = entries.into_iter().next() else {
+        return Ok(None);
+    };
+    serde_json::from_value(value).map(Some).map_err(unavailable)
 }
 
 #[cfg(test)]
@@ -1927,5 +1956,189 @@ mod typed_replay_tests {
             assert!(cut.members.is_empty());
             assert!(cut.member_revisions.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod held_mls_current_tests {
+    use arkret_wire::{
+        CommitStreamHead, CurrentRevision, CurrentSelector, CurrentState, MlsGroupValue,
+    };
+
+    use super::*;
+    use crate::test_database::TestDatabase;
+
+    // Storage selection fixtures use trusted rows, not protocol acceptance or MLS signatures.
+    async fn replica_fixture(
+        conn: &mut AsyncPgConnection,
+    ) -> (ScopeRef, CommitStreamHead, MlsGroupValue) {
+        let genesis = EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0x91; 32]);
+        let realm = RealmId::from_event_id(&genesis);
+        let scope = ScopeRef::Realm {
+            realm_id: realm.clone(),
+        };
+        let stream = CommitStreamRef::Realm {
+            realm_id: realm.clone(),
+        };
+        let head = CommitStreamHead {
+            stream_ref: stream.clone(),
+            commit_id: RealmCommitId::from_digest([0x92; 32]),
+            stream_position: 0,
+        };
+        let value = MlsGroupValue {
+            effective_scope: scope.clone(),
+            genesis_event_ref: genesis,
+            cipher_suite: arkret_wire::NonEmptyString::new(
+                "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+            )
+            .unwrap(),
+            current_mls_commit_event_ref: EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [0x93; 32],
+            ),
+            epoch: 1,
+            current_key_access_revision: 0,
+            covered_key_access_revision: 0,
+            public_tree_ref: arkret_wire::BlobRef::new(format!(
+                "ak:blob:sha256:{}",
+                "94".repeat(32)
+            ))
+            .unwrap(),
+        };
+        let at = Utc::now();
+        diesel::sql_query("INSERT INTO realm_commits(commit_id,realm_id,stream_key,stream_ref,stream_position,governance_generation,commit_json,committed_at) VALUES($1,$2,$3,$4,0,0,'{}',$5)")
+            .bind::<Text,_>(head.commit_id.as_str()).bind::<Text,_>(realm.as_str())
+            .bind::<Text,_>(crate::authority_commit::stream_key(&stream).unwrap())
+            .bind::<Jsonb,_>(serde_json::to_value(&stream).unwrap())
+            .bind::<diesel::sql_types::Timestamptz,_>(at).execute(&mut *conn).await.unwrap();
+        crate::replica_authorization::save_row(
+            conn,
+            &realm,
+            &CurrentState::Value {
+                selector: CurrentSelector::MlsGroup {
+                    scope_ref: scope.clone(),
+                },
+                source_stream_ref: stream,
+                revision: CurrentRevision {
+                    commit_id: head.commit_id.clone(),
+                    stream_position: 0,
+                },
+                value: serde_json::to_value(&value).unwrap(),
+            },
+            at,
+        )
+        .await
+        .unwrap();
+        crate::replica_authorization::install_verified_head(conn, &head, at)
+            .await
+            .unwrap();
+        (scope, head, value)
+    }
+
+    #[tokio::test]
+    async fn verified_replica_mls_is_available_without_governing_state_or_writes() {
+        let database = TestDatabase::lease().await;
+        let mut conn = pg_conn(&database.pool()).await.unwrap();
+        let (scope, head, value) = replica_fixture(&mut conn).await;
+        diesel::sql_query("BEGIN TRANSACTION READ ONLY")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let held = held_mls_current(&mut conn, &scope, &head).await.unwrap();
+        diesel::sql_query("ROLLBACK")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(
+            held,
+            Some(value),
+            "verified replica MLS must be usable without an admission-owned group row"
+        );
+        #[derive(diesel::QueryableByName)]
+        struct Count {
+            #[diesel(sql_type=diesel::sql_types::BigInt)]
+            n: i64,
+        }
+        let count = diesel::sql_query("SELECT COUNT(*) AS n FROM mls_group_current_states")
+            .get_result::<Count>(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(
+            count.n, 0,
+            "Signal reads must not create governing MLS state"
+        );
+    }
+
+    #[tokio::test]
+    async fn replica_mls_requires_exact_verified_current_cut_and_covered_row() {
+        let database = TestDatabase::lease().await;
+        let mut conn = pg_conn(&database.pool()).await.unwrap();
+        let (scope, head, _) = replica_fixture(&mut conn).await;
+        let mut different_head = head.clone();
+        different_head.commit_id = RealmCommitId::from_digest([0x95; 32]);
+        assert!(
+            held_mls_current(&mut conn, &scope, &different_head)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let other_scope = ScopeRef::Realm {
+            realm_id: RealmId::from_event_id(&EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [0x96; 32],
+            )),
+        };
+        assert!(
+            held_mls_current(&mut conn, &other_scope, &head)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for mutation in [
+            "UPDATE replica_authorization_cuts SET head_commit_id=$1,circle_effect_base_commit_id=$1",
+            "UPDATE replica_authorization_rows SET current_commit_id=$1",
+            "UPDATE replica_authorization_rows SET current_stream_position=1 WHERE current_commit_id=$1",
+            "DELETE FROM replica_authorization_cuts WHERE head_commit_id=$1",
+            "DELETE FROM replica_authorization_rows WHERE current_commit_id=$1",
+        ] {
+            diesel::sql_query("BEGIN")
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+            let commit = if mutation.starts_with("UPDATE")
+                && mutation.contains("SET")
+                && !mutation.contains("position=1")
+            {
+                &different_head.commit_id
+            } else {
+                &head.commit_id
+            };
+            diesel::sql_query(mutation)
+                .bind::<Text, _>(commit.as_str())
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+            let held = held_mls_current(&mut conn, &scope, &head).await.unwrap();
+            diesel::sql_query("ROLLBACK")
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+            assert!(
+                held.is_none(),
+                "unproved replica must fail closed: {mutation}"
+            );
+        }
+        diesel::sql_query("INSERT INTO realm_commits(commit_id,realm_id,stream_key,stream_ref,stream_position,previous_commit_ref,governance_generation,commit_json,committed_at) VALUES($1,$2,$3,$4,1,$5,0,'{}',$6)")
+            .bind::<Text,_>(different_head.commit_id.as_str()).bind::<Text,_>(scope.realm_id().as_str())
+            .bind::<Text,_>(crate::authority_commit::stream_key(&head.stream_ref).unwrap())
+            .bind::<Jsonb,_>(serde_json::to_value(&head.stream_ref).unwrap()).bind::<Text,_>(head.commit_id.as_str())
+            .bind::<diesel::sql_types::Timestamptz,_>(Utc::now()).execute(&mut *conn).await.unwrap();
+        assert!(
+            held_mls_current(&mut conn, &scope, &head)
+                .await
+                .unwrap()
+                .is_none(),
+            "verified cache behind a known commit is unavailable"
+        );
     }
 }

@@ -6,7 +6,7 @@ use super::*;
 type OperationValidator = fn(&Operation) -> Result<(), &'static str>;
 
 pub fn validate_operation_semantics(
-    state: &AppState,
+    _state: &AppState,
     operations: &[Operation],
 ) -> Result<(), &'static str> {
     for operation in operations {
@@ -24,7 +24,6 @@ pub fn validate_operation_semantics(
         // check so a removed `target_ref` payload is rejected with the
         // typed-shape reason rather than the generic SDK schema error.
         validate_typed_payload_shapes(&kind, operation)?;
-        validate_moderation_report_provenance(state, &kind, operation)?;
         validate_operation_patch_semantics(&kind, operation)?;
         validate_reaction_target_kind(&kind, operation)?;
         validate_operation_payload_schema(&kind, operation)?;
@@ -94,48 +93,6 @@ pub(crate) fn validate_reaction_target_kind(
 /// For the space lifecycle events the SDK's typed payload requires
 /// `space_id`. The validator here HARD-REJECTS the
 /// wire-broken `target_ref` form; producers must emit canonical `space_id`.
-fn validate_moderation_report_provenance(
-    state: &AppState,
-    kind: &arkret_wire::EventKind,
-    operation: &Operation,
-) -> Result<(), &'static str> {
-    if kind != &arkret_wire::EventKind::SelfModerationReport {
-        return Ok(());
-    }
-    let payload = operation
-        .typed_payload::<arkret_wire::event_spec::SelfModerationReport>()
-        .map_err(|_| arkret_wire::ErrorCode::SCHEMA_VIOLATION)?;
-    if payload.realm_id != operation.realm_id {
-        return Err(arkret_wire::ErrorCode::SCHEMA_VIOLATION);
-    }
-    let mimi = payload.provenance
-        == Some(
-            arkret_models_collaboration::events_payloads::ModerationReportProvenance::MimiFacade,
-        );
-    if (mimi && operation.context.sender != arkret_wire::ActorId::service(state.service_core_id()))
-        || (!mimi && &payload.reporter_id != operation.context.sender.signing_principal_id())
-    {
-        return Err(arkret_wire::ErrorCode::SCHEMA_VIOLATION);
-    }
-    match payload.provenance {
-        Some(
-            arkret_models_collaboration::events_payloads::ModerationReportProvenance::MimiFacade,
-        ) if payload.source_provider_id.is_none() => {
-            return Err(arkret_wire::ErrorCode::SCHEMA_VIOLATION);
-        }
-        None
-        | Some(
-            arkret_models_collaboration::events_payloads::ModerationReportProvenance::SelfAuthored,
-        ) if payload.source_provider_id.is_some() => {
-            return Err(arkret_wire::ErrorCode::SCHEMA_VIOLATION);
-        }
-        _ => {}
-    }
-    // The independent MimiFacade guard authenticates the local Service
-    // producer and exact reporter Account at the accepting transaction cut.
-    Ok(())
-}
-
 fn validate_typed_payload_shapes(
     kind: &arkret_wire::EventKind,
     operation: &Operation,

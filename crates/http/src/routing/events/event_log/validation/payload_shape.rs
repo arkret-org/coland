@@ -323,10 +323,6 @@ mod tests {
                 "ak.message.create",
                 json!({"message_id": "ak:message:AV1bzsPGpTD74Cq12d9EOrCkieTddiSndS0kDtK1W2hM"}),
             ),
-            (
-                "ak.self.moderation.report",
-                json!({"moderation_queue_item_id": "ak:moderation_queue_item:AV1bzsPGpTD74Cq12d9EOrCkieTddiSndS0kDtK1W2hM"}),
-            ),
         ] {
             let error = validate_pre_schema_wire_shape(kind, &payload)
                 .expect_err("a create payload cannot carry its derived object id");

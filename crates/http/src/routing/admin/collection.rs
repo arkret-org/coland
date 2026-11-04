@@ -98,18 +98,6 @@ pub(super) async fn admin_collection(
         "spaces" => ("spaces", admin_space_container_items(state)),
         "federation" => ("federation", admin_federation_items(state).await),
         "applets" => ("applets", admin_applet_items(state)),
-        "reports" => (
-            "reports",
-            crate::routing::interop::moderation::moderation_queue_for_session(
-                state,
-                &session.actor,
-                None,
-            )
-            .await?
-            .into_iter()
-            .map(|item| json!(item))
-            .collect(),
-        ),
         "invite-tokens" => (
             "invite_tokens",
             admin_invite_items(state)

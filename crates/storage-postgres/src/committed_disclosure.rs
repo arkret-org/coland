@@ -187,7 +187,7 @@ async fn member_event_visible_in_connection(
     conn: &mut AsyncPgConnection,
     row: &CommittedEventFullView,
     caller: &arkret_wire::ActorId,
-    at: chrono::DateTime<chrono::Utc>,
+    _at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<bool> {
     let event = &row.event;
     if matches!(
@@ -213,52 +213,6 @@ async fn member_event_visible_in_connection(
     }
     if author_private_source(event) {
         return Ok(&event.actor_id == caller);
-    }
-    if matches!(
-        event.kind,
-        arkret_wire::EventKind::SelfModerationReport
-            | arkret_wire::EventKind::ModerationFrankingProof
-    ) {
-        let scope = if event.kind == arkret_wire::EventKind::ModerationFrankingProof {
-            let proof: arkret_models_collaboration::events_payloads::moderation::FrankingProof =
-                serde_json::from_value(
-                    serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
-                )
-                .map_err(PersistenceError::database)?;
-            crate::moderation_franking_proof_current_states::franking_target_scope_in_connection(
-                conn,
-                &event.realm_id,
-                &proof.event_id,
-            )
-            .await?
-        } else {
-            event.scope_ref.clone()
-        };
-        let actions = [
-            arkret_wire::CapabilityActionId::POLICY_MANAGE,
-            arkret_wire::CapabilityActionId::MODERATION_DECISION,
-        ];
-        if crate::moderation_report_current_states::scope_moderator(
-            conn,
-            &event.realm_id,
-            &scope,
-            caller,
-            &actions,
-            at,
-        )
-        .await?
-        {
-            return Ok(true);
-        }
-        return crate::replica_authorization::scope_moderator(
-            conn,
-            &event.realm_id,
-            caller,
-            &scope,
-            &actions,
-            at,
-        )
-        .await;
     }
     let circle = if event.kind == arkret_wire::EventKind::CircleCreate {
         Some(arkret_wire::CircleId::from_event_id(&event.event_id))

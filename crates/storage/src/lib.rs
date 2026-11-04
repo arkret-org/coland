@@ -54,7 +54,6 @@ mod device_revocations;
 mod devices;
 mod events;
 mod federation;
-mod franking;
 mod governance;
 mod grant_evaluation;
 mod idempotency;
@@ -65,7 +64,6 @@ mod invite_new_source_ledger;
 mod key_backup;
 mod member_identity;
 mod mls;
-mod moderation;
 mod notifications;
 mod organization_registration;
 #[cfg(test)]
@@ -109,7 +107,6 @@ pub use device_revocations::*;
 pub use devices::*;
 pub use events::*;
 pub use federation::*;
-pub use franking::*;
 pub use governance::*;
 pub use grant_evaluation::*;
 pub use idempotency::*;
@@ -118,7 +115,6 @@ pub use invite_new_source_ledger::*;
 pub use key_backup::*;
 pub use member_identity::*;
 pub use mls::*;
-pub use moderation::*;
 pub use notifications::*;
 pub use organization_registration::*;
 pub use policy::*;
@@ -704,7 +700,6 @@ pub trait FederationGovernanceStoreRegistry: Send + Sync {
 
 /// Delivery, policy, recovery, and service identity persistence registry.
 pub trait DeliveryPolicyStoreRegistry: Send + Sync {
-    fn moderation(&self) -> &dyn ModerationStore;
     fn federation_operations(&self) -> &dyn FederationOperationsStore;
     fn push_devices(&self) -> &dyn PushDeviceStore;
     fn push_registration_handoffs(&self) -> &dyn PushRegistrationHandoffStore;

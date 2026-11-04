@@ -1384,12 +1384,7 @@ async fn peer_holds_full_event(
         }
     }
     if matches!(event.scope_ref, arkret_wire::ScopeRef::Realm { .. })
-        && !matches!(
-            event.kind,
-            arkret_wire::EventKind::CircleCreate
-                | arkret_wire::EventKind::SelfModerationReport
-                | arkret_wire::EventKind::ModerationFrankingProof
-        )
+        && !matches!(event.kind, arkret_wire::EventKind::CircleCreate)
         && crate::snapshot_disclosure_gate::member_shared_event_kind(&event.kind)
     {
         return Ok(true);

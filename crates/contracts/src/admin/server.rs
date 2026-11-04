@@ -37,7 +37,6 @@ pub struct AdminServerStats {
     pub active_actor_count: u64,
     pub realm_count: u64,
     pub device_count: u64,
-    pub report_count: u64,
     pub federation_peer_count: u64,
     pub applet_count: u64,
     pub blob_count: u64,

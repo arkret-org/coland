@@ -49,7 +49,6 @@ pub struct PgPersistenceStore {
     push_registration_handoffs: PgPushRegistrationHandoffStore,
     events: PgEventStore,
     federation_operations: PgFederationOperationsStore,
-    moderation: PgModerationStore,
     signal_relay: PgSignalRelayStore,
     webvh: PgWebvhStore,
     service_identity: PgServiceIdentityStore,
@@ -135,7 +134,6 @@ impl PgPersistenceStore {
             push_registration_handoffs: PgPushRegistrationHandoffStore { pool: pool.clone() },
             events: PgEventStore { pool: pool.clone() },
             federation_operations: PgFederationOperationsStore { pool: pool.clone() },
-            moderation: PgModerationStore { pool: pool.clone() },
             signal_relay: PgSignalRelayStore { pool: pool.clone() },
             webvh: PgWebvhStore { pool: pool.clone() },
             service_identity: PgServiceIdentityStore { pool: pool.clone() },
@@ -329,10 +327,6 @@ impl FederationGovernanceStoreRegistry for PgPersistenceStore {
 }
 
 impl DeliveryPolicyStoreRegistry for PgPersistenceStore {
-    fn moderation(&self) -> &dyn ModerationStore {
-        &self.moderation
-    }
-
     fn federation_operations(&self) -> &dyn FederationOperationsStore {
         &self.federation_operations
     }

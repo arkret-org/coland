@@ -122,9 +122,6 @@ fn current_resources(
         S::InviteLifecycle { invite_id } | S::InviteDirectedInvitee { invite_id } => {
             vec![invite_id.to_string()]
         }
-        S::ModerationReport { event_id } | S::ModerationFrankingProof { event_id } => {
-            vec![event_id.to_string()]
-        }
         S::Policy { policy_id }
         | S::PolicyAction {
             subject: PolicyActionSelector::PolicyRef { policy_id, .. },

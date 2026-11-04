@@ -217,8 +217,8 @@ peer-merge graph.
   device-revocation gate and target, Contact and consent projections, Contact
   completion intent, projection rows, federation outbox rows, and the
   idempotency reservation in one `conn.transaction`. Batch-level Applet
-  installation, Applet authoring preview, Agent membership cascade, and
-  moderation franking-nonce effects commit in that same transaction.
+  installation, Applet authoring preview, and Agent membership cascade commit
+  in that same transaction.
 - [~] Account lifecycle, sessions, account data, and contacts. Storage is wired
   and `crates/services/src/identity.rs` now compiles: consent grants are
   addressed by `ConsentId`, account status reads come from

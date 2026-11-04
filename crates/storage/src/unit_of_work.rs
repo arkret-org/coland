@@ -1,12 +1,10 @@
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use serde_json::Value;
-
 use crate::{
     AccountDataRecord, CanonicalEventRecord, ContactRecord, ContactVerifiedMirrorRecord,
     DeviceRevocationGateSelector, DeviceRevocationTransition, FederationOutboxRecord,
     IdempotencyRecord, PersistenceError, PersistenceResult, ProjectionEventRecord,
 };
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
 /// Project an already-admitted Agent cascade Event onto the frozen Agent ActorId
 /// set. This is not admission authority: the full signed actor (including its
@@ -262,89 +260,11 @@ pub struct RealmOrganizationProofCommit {
 pub struct EventBatchCommitRequest {
     pub audit_unit: Option<crate::RegisteredAuditCommit>,
     pub events: Vec<EventCommitRequest>,
-    /// One moderation franking nonce consumed by a report Event in this
-    /// batch. The ledger write is inseparable from the report Event: a failed
-    /// commit consumes nothing, and a concurrent replay can commit at most
-    /// once across processes.
-    pub franking_replay_nonce: Option<FrankingReplayNonceCommit>,
     pub realm_organization_proof: Option<RealmOrganizationProofCommit>,
     pub event_approvals: Option<crate::EventApprovalCommit>,
     pub applet_record: Option<AppletRecordCommit>,
     pub applet_authoring_preview: Option<AppletAuthoringPreviewCommit>,
     pub agent_membership_cascade: Option<crate::AgentMembershipCascadeCommit>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FrankingReplayNonceCommit {
-    pub realm_id: String,
-    pub received_by: arkret_identifiers::DidCoreId,
-    pub replay_nonce: String,
-    pub report_event_id: String,
-    pub consumed_at: DateTime<Utc>,
-}
-
-/// Coland's local retention default for a consumed franking nonce. The wire
-/// protocol requires a finite window but does not assign its duration.
-pub const LOCAL_FRANKING_REPLAY_NONCE_TTL_SECONDS: i64 = 24 * 60 * 60;
-
-/// Coland's local active-row ceiling per `(realm_id, received_by)` scope.
-/// Capacity exhaustion fails closed instead of evicting an active nonce.
-pub const LOCAL_FRANKING_REPLAY_NONCE_MAX_ACTIVE_PER_SCOPE: usize = 4096;
-
-pub fn franking_replay_nonce_expires_at(
-    consumed_at: DateTime<Utc>,
-) -> PersistenceResult<DateTime<Utc>> {
-    consumed_at
-        .checked_add_signed(chrono::TimeDelta::seconds(
-            LOCAL_FRANKING_REPLAY_NONCE_TTL_SECONDS,
-        ))
-        .ok_or_else(|| {
-            PersistenceError::Conflict(
-                "schema_violation: franking nonce expiry overflows canonical time".to_owned(),
-            )
-        })
-}
-
-/// Refuse a nonce ledger row unless the same batch contains the exact report
-/// Event and its signed franking payload. Persistence repeats this binding so
-/// a future caller cannot accidentally turn the ledger into an unscoped
-/// uniqueness service.
-pub fn validate_franking_replay_nonce_commit(
-    events: &[EventCommitRequest],
-    commit: Option<&FrankingReplayNonceCommit>,
-) -> PersistenceResult<()> {
-    let Some(commit) = commit else {
-        return Ok(());
-    };
-    let Some(report) = events
-        .iter()
-        .find(|request| request.event.event_id == commit.report_event_id)
-    else {
-        return Err(PersistenceError::Conflict(
-            "schema_violation: franking nonce is not bound to a report Event in the batch"
-                .to_owned(),
-        ));
-    };
-    if report.event.kind != arkret_wire::EventKind::SelfModerationReport.as_str()
-        || report.event.realm_id.as_deref() != Some(commit.realm_id.as_str())
-        || report
-            .event
-            .envelope
-            .pointer("/payload/franking_proof/received_by")
-            .and_then(Value::as_str)
-            != Some(commit.received_by.as_str())
-        || report
-            .event
-            .envelope
-            .pointer("/payload/franking_proof/replay_nonce")
-            .and_then(Value::as_str)
-            != Some(commit.replay_nonce.as_str())
-    {
-        return Err(PersistenceError::Conflict(
-            "schema_violation: franking nonce does not match its report Event payload".to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug)]

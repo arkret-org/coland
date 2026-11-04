@@ -530,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_message_requires_canonical_franking_event() {
+    fn encrypted_message_is_detected() {
         assert!(is_encrypted_message(
             &parsed(arkret_wire::EventKind::MessageCreate.as_str()),
             &json!({
@@ -547,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn plaintext_messages_do_not_get_a_franking_proof() {
+    fn plaintext_message_is_not_encrypted() {
         assert!(!is_encrypted_message(
             &parsed(arkret_wire::EventKind::MessageCreate.as_str()),
             &json!({"payload": {"content": {"body": "hello"}}}),

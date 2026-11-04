@@ -53,9 +53,7 @@ const MEMBER_STATION_FAMILIES: &[&str] = &[
     "call_state_current_states",
     "call_component_current_states",
     "realm_media_service_current_states",
-    "moderation_report_current_states",
     "moderation_state_current_states",
-    "moderation_franking_proof_current_states",
 ];
 
 fn position(value: u64) -> PersistenceResult<i64> {
@@ -146,7 +144,7 @@ struct ExistingCircleMemberCurrent {
 }
 
 #[derive(diesel::QueryableByName)]
-struct ExistingFrankingProofCurrent {
+struct ExistingCurrent {
     #[diesel(sql_type = Text)]
     current_commit_id: String,
     #[diesel(sql_type = BigInt)]
@@ -228,7 +226,7 @@ async fn guard_snapshot_revisions(
                 }
                 let old = diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM replica_authorization_rows WHERE realm_id=$1 AND selector=$2 FOR UPDATE")
                     .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(selector).map_err(malformed)?)
-                    .get_result::<ExistingFrankingProofCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+                    .get_result::<ExistingCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
                 if old.is_some_and(|old| {
                     old.source_stream_ref != source
                         || old.current_stream_position > incoming_position
@@ -252,7 +250,7 @@ async fn guard_snapshot_revisions(
                 current.validate().map_err(malformed)?;
                 let old = diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM scope_read_receipt_policy_current_states WHERE realm_id=$1 AND scope_ref=$2 FOR UPDATE")
                     .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(scope_ref).map_err(malformed)?)
-                    .get_result::<ExistingFrankingProofCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+                    .get_result::<ExistingCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
                 if old.is_some_and(|old| {
                     old.source_stream_ref != source
                         || old.current_stream_position > incoming_position
@@ -274,7 +272,7 @@ async fn guard_snapshot_revisions(
                 )?;
                 let old = diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM replica_authorization_rows WHERE realm_id=$1 AND selector=$2 FOR UPDATE")
                     .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(selector).map_err(malformed)?)
-                    .get_result::<ExistingFrankingProofCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+                    .get_result::<ExistingCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
                 if old.is_some_and(|old| {
                     old.source_stream_ref != source
                         || old.current_stream_position > incoming_position
@@ -316,7 +314,7 @@ async fn guard_snapshot_revisions(
             | S::CallModeration { call_id } => {
                 let old=diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM call_component_current_states WHERE realm_id=$1 AND call_id=$2 AND selector=$3 FOR UPDATE")
                     .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(call_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(selector).map_err(malformed)?)
-                    .get_result::<ExistingFrankingProofCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+                    .get_result::<ExistingCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
                 if !matches!(selector, S::CallFocus { .. }) {
                     verify_retained_call_projection(
                         conn,
@@ -356,7 +354,7 @@ async fn guard_snapshot_revisions(
                     arkret_canonical::canonical_sha256(source_context_ref).map_err(malformed)?;
                 let old = diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM sidecar_exchange_controls_current_states WHERE realm_id=$1 AND sidecar_id=$2 AND context_ref_digest=$3 FOR UPDATE")
                     .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(sidecar_id.as_str()).bind::<Text,_>(&subject)
-                    .get_result::<ExistingFrankingProofCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+                    .get_result::<ExistingCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
                 if let Some(old) = old {
                     let retained: AgentSidecarExchangeControlsValue =
                         serde_json::from_value(old.value.clone()).map_err(malformed)?;
@@ -383,7 +381,7 @@ async fn guard_snapshot_revisions(
                     arkret_canonical::canonical_json_string(pin_scope).map_err(malformed)?;
                 let old = diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM pin_current_states WHERE realm_id=$1 AND pin_scope_key=$2 FOR UPDATE")
                     .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(&subject)
-                    .get_result::<ExistingFrankingProofCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+                    .get_result::<ExistingCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
                 if let Some(old) = old {
                     let retained: PinCurrentValue =
                         serde_json::from_value(old.value.clone()).map_err(malformed)?;
@@ -453,34 +451,6 @@ async fn guard_snapshot_revisions(
                                 || old.value != *value)))
                 {
                     return Err(PersistenceError::Conflict("failed_precondition: Circle member snapshot current revision or value differs".to_owned()));
-                }
-            }
-            S::ModerationFrankingProof { event_id } => {
-                if *source_stream_ref
-                    != (arkret_wire::CommitStreamRef::Realm {
-                        realm_id: realm_id.clone(),
-                    })
-                    || value.get("event_id").and_then(Value::as_str) != Some(event_id.as_str())
-                {
-                    return Err(malformed(
-                        "franking proof selector, source and value differ",
-                    ));
-                }
-                let old = diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM moderation_franking_proof_current_states WHERE realm_id=$1 AND target_event_id=$2 FOR UPDATE")
-                    .bind::<Text, _>(realm_id.as_str())
-                    .bind::<Text, _>(event_id.as_str())
-                    .get_result::<ExistingFrankingProofCurrent>(&mut *conn)
-                    .await
-                    .optional()
-                    .map_err(PersistenceError::database)?;
-                if let Some(old) = old
-                    && (old.source_stream_ref != source
-                        || old.current_stream_position > incoming_position
-                        || (old.current_stream_position == incoming_position
-                            && (old.current_commit_id != revision.commit_id.as_str()
-                                || old.value != *value)))
-                {
-                    return Err(PersistenceError::Conflict("failed_precondition: franking proof snapshot current revision or value differs".to_owned()));
                 }
             }
             _ => {}
@@ -616,7 +586,6 @@ async fn upsert_keyed(
                 | "space_parent_current_states"
                 | "space_child_scope_policy_current_states" => "space_id",
                 "message_revision_current_states" => "message_id",
-                "moderation_report_current_states" => "realm_id,report_event_id",
                 _ => "realm_id,target_ref",
             },
         ),
@@ -643,49 +612,6 @@ async fn upsert_keyed(
         Some((_, key)) => query.bind::<Text, _>(key).execute(conn).await,
         None => query.execute(conn).await,
     }
-    .map_err(PersistenceError::database)?;
-    require_one_current_write(changed)
-}
-
-async fn upsert_franking_proof(
-    conn: &mut AsyncPgConnection,
-    realm_id: &arkret_wire::RealmId,
-    target: &arkret_wire::EventId,
-    source: &arkret_wire::CommitStreamRef,
-    revision: &Revision<'_>,
-    value: &Value,
-) -> PersistenceResult<()> {
-    if *source
-        != (arkret_wire::CommitStreamRef::Realm {
-            realm_id: realm_id.clone(),
-        })
-        || value.get("event_id").and_then(Value::as_str) != Some(target.as_str())
-    {
-        return Err(malformed(
-            "franking proof selector, source and value differ",
-        ));
-    }
-    let changed = diesel::sql_query(
-        "INSERT INTO moderation_franking_proof_current_states \
-         (realm_id,target_event_id,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) \
-         VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(realm_id,target_event_id) DO UPDATE SET \
-         current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position, \
-         value=EXCLUDED.value,updated_at=EXCLUDED.updated_at \
-         WHERE moderation_franking_proof_current_states.source_stream_ref=EXCLUDED.source_stream_ref \
-           AND (moderation_franking_proof_current_states.current_stream_position<EXCLUDED.current_stream_position \
-             OR (moderation_franking_proof_current_states.current_stream_position=EXCLUDED.current_stream_position \
-               AND moderation_franking_proof_current_states.current_commit_id=EXCLUDED.current_commit_id \
-               AND moderation_franking_proof_current_states.value=EXCLUDED.value))",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(target.as_str())
-    .bind::<Jsonb, _>(serde_json::to_value(source).map_err(malformed)?)
-    .bind::<Text, _>(revision.commit_id)
-    .bind::<BigInt, _>(revision.stream_position)
-    .bind::<Jsonb, _>(value)
-    .bind::<Timestamptz, _>(revision.updated_at)
-    .execute(conn)
-    .await
     .map_err(PersistenceError::database)?;
     require_one_current_write(changed)
 }
@@ -727,7 +653,6 @@ async fn upsert_member_state(
     require_one_current_write(changed)
 }
 
-/// Compare the exact locally retained original and its materialized axis.
 /// An unavailable original remains the authenticated Snapshot trust boundary;
 /// ordinary consumption never scans or replays the accepted history.
 #[allow(
@@ -742,7 +667,7 @@ async fn verify_retained_call_projection(
     stream: &arkret_wire::CommitStreamRef,
     revision: &arkret_wire::CurrentRevision,
     candidate: &Value,
-    old: Option<&ExistingFrankingProofCurrent>,
+    old: Option<&ExistingCurrent>,
 ) -> PersistenceResult<()> {
     #[derive(diesel::QueryableByName)]
     struct Original {
@@ -1166,21 +1091,6 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                     value,
                 )
                 .await?;
-            }
-            S::ModerationReport { event_id } => {
-                upsert_keyed(
-                    conn,
-                    realm_id,
-                    "moderation_report_current_states",
-                    Some(("report_event_id", event_id.as_str())),
-                    &row,
-                    value,
-                )
-                .await?;
-            }
-            S::ModerationFrankingProof { event_id } => {
-                upsert_franking_proof(conn, realm_id, event_id, source_stream_ref, &row, value)
-                    .await?;
             }
             S::RealmPolicyBundle => {
                 upsert_keyed(
@@ -1688,30 +1598,6 @@ pub(crate) async fn advance_in_connection(
         arkret_wire::EventKind::PolicyAction => {
             crate::policy_current_states::commit_in_connection(conn, event, commit).await?;
         }
-        arkret_wire::EventKind::SelfModerationReport => {
-            upsert_keyed(
-                conn,
-                &event.realm_id,
-                "moderation_report_current_states",
-                Some(("report_event_id", event.event_id.as_str())),
-                &row,
-                &payload()?,
-            )
-            .await?;
-        }
-        arkret_wire::EventKind::ModerationFrankingProof => {
-            let proof: arkret_models_collaboration::events_payloads::moderation::FrankingProof =
-                serde_json::from_value(payload()?).map_err(malformed)?;
-            upsert_franking_proof(
-                conn,
-                &event.realm_id,
-                &proof.event_id,
-                &commit.stream_ref,
-                &row,
-                &payload()?,
-            )
-            .await?;
-        }
         arkret_wire::EventKind::ModerationDecision
         | arkret_wire::EventKind::ModerationDecisionLift => {
             let body = payload()?;
@@ -2090,6 +1976,12 @@ mod call_effective_tests;
 
 #[cfg(test)]
 mod tests {
+    #[derive(diesel::QueryableByName)]
+    struct ValueRow {
+        #[diesel(sql_type = Jsonb)]
+        value: Value,
+    }
+
     #[tokio::test]
     async fn mimi_snapshot_and_tail_keep_public_current_without_inventing_admission() {
         use arkret_wire::{
@@ -3012,90 +2904,6 @@ mod tests {
 
     use super::*;
     use crate::test_database::TestDatabase;
-
-    #[tokio::test]
-    async fn franking_replica_current_rejects_stale_and_forked_revisions() {
-        let database = TestDatabase::lease().await;
-        let mut conn = database.pool().get().await.unwrap();
-        let id = |byte| {
-            arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [byte; 32])
-        };
-        let realm = arkret_wire::RealmId::from_event_id(&id(1));
-        let target = id(2);
-        let source = arkret_wire::CommitStreamRef::Realm {
-            realm_id: realm.clone(),
-        };
-        let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
-        let original = Revision {
-            commit_id: "proof-original",
-            stream_position: 7,
-            updated_at: at,
-        };
-        let value = json!({"event_id":target,"proof":"original"});
-        upsert_franking_proof(&mut conn, &realm, &target, &source, &original, &value)
-            .await
-            .unwrap();
-        upsert_franking_proof(&mut conn, &realm, &target, &source, &original, &value)
-            .await
-            .unwrap();
-        for (commit_id, stream_position, candidate) in [
-            ("stale", 6, value.clone()),
-            ("fork", 7, value.clone()),
-            (
-                "proof-original",
-                7,
-                json!({"event_id":target,"proof":"fork"}),
-            ),
-        ] {
-            let revision = Revision {
-                commit_id,
-                stream_position,
-                updated_at: at,
-            };
-            assert!(matches!(
-                upsert_franking_proof(&mut conn, &realm, &target, &source, &revision, &candidate)
-                    .await,
-                Err(PersistenceError::Conflict(_))
-            ));
-        }
-        let entry = arkret_wire::CurrentState::Value {
-            selector: arkret_wire::CurrentSelector::ModerationFrankingProof {
-                event_id: target.clone(),
-            },
-            source_stream_ref: source.clone(),
-            revision: arkret_wire::CurrentRevision {
-                commit_id: arkret_wire::RealmCommitId::from_digest([9; 32]),
-                stream_position: 7,
-            },
-            value: value.clone(),
-        };
-        assert!(matches!(
-            guard_snapshot_revisions(&mut conn, &realm, &[entry]).await,
-            Err(PersistenceError::Conflict(_))
-        ));
-        let next = Revision {
-            commit_id: "proof-next",
-            stream_position: 8,
-            updated_at: at,
-        };
-        let updated = json!({"event_id":target,"proof":"next"});
-        upsert_franking_proof(&mut conn, &realm, &target, &source, &next, &updated)
-            .await
-            .unwrap();
-        let row = diesel::sql_query("SELECT value FROM moderation_franking_proof_current_states WHERE realm_id=$1 AND target_event_id=$2")
-            .bind::<Text, _>(realm.as_str())
-            .bind::<Text, _>(target.as_str())
-            .get_result::<ValueRow>(&mut conn)
-            .await
-            .unwrap();
-        assert_eq!(row.value, updated);
-    }
-
-    #[derive(diesel::QueryableByName)]
-    struct ValueRow {
-        #[diesel(sql_type = Jsonb)]
-        value: Value,
-    }
 
     #[tokio::test]
     async fn terminal_snapshot_is_sticky_and_blocks_fresh_child_effects() {

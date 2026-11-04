@@ -201,7 +201,7 @@ pub(crate) async fn commit_mls_group_current_state_in_connection(
             "the MLS effective scope has no supported authority cut".to_owned(),
         ));
     }
-    if !crate::moderation_report_current_states::scope_member_in_connection(
+    if !crate::scope_access::scope_member_in_connection(
         conn,
         &event.realm_id,
         &event.scope_ref,
@@ -1001,11 +1001,7 @@ async fn require_joined_recipient(
             "Sidecar Welcome recipient is outside the desired roster",
         ));
     }
-    if crate::moderation_report_current_states::scope_member_in_connection(
-        conn, realm_id, scope, recipient,
-    )
-    .await?
-    {
+    if crate::scope_access::scope_member_in_connection(conn, realm_id, scope, recipient).await? {
         Ok(())
     } else {
         Err(PersistenceError::Conflict(

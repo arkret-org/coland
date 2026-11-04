@@ -107,7 +107,6 @@ pub(crate) async fn commit_sidecar_ensure_unit(
         .commit_accepted_event_batch(coland_services::events::CommitAcceptedEventBatchCommand {
             audit_unit: None,
             events: commands,
-            franking_replay_nonce: None,
             realm_organization_proof: None,
             event_approvals: None,
             applet_record: None,

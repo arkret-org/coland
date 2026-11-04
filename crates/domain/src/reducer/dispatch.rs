@@ -891,11 +891,7 @@ mod tests {
                 .filter(|entry| matches!(entry.slot, super::CacheSlot::Shared(_)))
                 .count()
         );
-        for kind in [
-            EventKind::SelfModerationReport,
-            EventKind::MlsGenesis,
-            EventKind::MlsCommit,
-        ] {
+        for kind in [EventKind::MlsGenesis, EventKind::MlsCommit] {
             let entry = super::EFFECT_MANIFEST
                 .iter()
                 .find(|entry| entry.kind == kind.as_str())
@@ -1122,11 +1118,7 @@ mod tests {
     fn durable_fact_owners_have_an_explicit_non_projection_effect() {
         let mut state = super::ProjectionState::default();
         let hlc = super::ServerHlc::new("durable-fact-owner-test");
-        for kind in [
-            EventKind::AppletBridgeError,
-            EventKind::AuditAccessed,
-            EventKind::SelfModerationReport,
-        ] {
+        for kind in [EventKind::AppletBridgeError, EventKind::AuditAccessed] {
             let effect = state.apply_projected(&operation(&kind), &hlc);
             assert!(
                 matches!(

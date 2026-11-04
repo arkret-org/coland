@@ -429,7 +429,7 @@ pub type RealmActorMaterialSigner<'a> = &'a (
 #[derive(Clone, Debug, PartialEq)]
 pub enum SelfProducerCommitGuard {
     /// The locally configured MIMI facade authored this Event. The exact
-    /// binding and independently verified reporter/sender are rechecked at cut.
+    /// binding and independently verified sender are rechecked at cut.
     MimiFacade {
         service_id: arkret_wire::DidCoreId,
         verification_method: arkret_wire::DidUrl,
@@ -437,10 +437,8 @@ pub enum SelfProducerCommitGuard {
         binding_event_id: arkret_wire::EventId,
         attributed_actor: arkret_wire::ActorId,
         source_provider_id: arkret_wire::DidCoreId,
-        reporter_authority: Option<serde_json::Value>,
         submit_request_body: Option<serde_json::Value>,
         mapping_receipt: Option<serde_json::Value>,
-        reporter_device_guard: Option<Box<crate::DeviceRevocationGateSelector>>,
     },
     /// Native managed Device identity and exact signed business scope. Current
     /// permission and source provenance are rechecked in the accepting unit.
@@ -2170,36 +2168,6 @@ pub trait AuthorityCommitStore: Send + Sync {
     ) -> PersistenceResult<Option<SignalScopeAuthority>> {
         Err(crate::PersistenceError::Conflict(
             "unsupported_feature: verified Signal scope cuts are unavailable".to_owned(),
-        ))
-    }
-
-    async fn pending_franking_proofs(
-        &self,
-        receiver: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<Vec<crate::PendingFrankingProof>> {
-        let _ = receiver;
-        Ok(Vec::new())
-    }
-
-    async fn fix_franking_proof(
-        &self,
-        prepared: &crate::PreparedFrankingProof,
-    ) -> PersistenceResult<Event> {
-        let _ = prepared;
-        Err(crate::PersistenceError::Conflict(
-            "unsupported_feature: durable franking publication is unavailable".to_owned(),
-        ))
-    }
-
-    async fn complete_franking_proof(
-        &self,
-        realm: &arkret_wire::RealmId,
-        target: &arkret_wire::EventId,
-        proof_event: &arkret_wire::EventId,
-    ) -> PersistenceResult<()> {
-        let _ = (realm, target, proof_event);
-        Err(crate::PersistenceError::Conflict(
-            "unsupported_feature: durable franking publication is unavailable".to_owned(),
         ))
     }
 

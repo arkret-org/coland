@@ -442,7 +442,6 @@ async fn prepare_server(raw_args: Vec<String>) -> anyhow::Result<ServingFuture> 
     // Member Station replica anchors a restart or an unreachable governing
     // Station left pending (`federation.md` section 4.1.1).
     let _replica_anchor_sweeper = coland_http::state::spawn_pending_anchor_sweeper(state.clone());
-    let _franking_sweeper = coland_http::state::spawn_pending_franking_sweeper(state.clone());
     let _applet_completion_sweeper =
         coland_http::state::spawn_pending_applet_completion_sweeper(state.clone());
     tracing::info!(
@@ -465,7 +464,6 @@ async fn prepare_server(raw_args: Vec<String>) -> anyhow::Result<ServingFuture> 
         let _runtime_guards = (
             _metrics_server,
             _applet_completion_sweeper,
-            _franking_sweeper,
             _replica_anchor_sweeper,
             _federation_dispatcher,
             _resumable_upload_ttl_sweeper,

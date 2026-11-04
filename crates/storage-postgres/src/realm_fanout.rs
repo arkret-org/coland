@@ -15,9 +15,7 @@
 //! A remote Station enters the target set only when one of its members may
 //! hold the Event's complete canonical bytes: a plaintext Message body is
 //! replicated only to a Station the Realm lists as a private plaintext
-//! service for message content, and a moderation report, readable only by
-//! moderators, only to a Station hosting a member who holds a moderation
-//! capability at this cut.
+//! service for message content.
 //!
 //! A `leave` or `ban` that ends a member's joined state removes that member
 //! from the accepted joined set, so the member's own Station would never
@@ -546,7 +544,7 @@ async fn membership_targets(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     authority_station: &arkret_wire::DidCoreId,
-    commit_at: chrono::DateTime<chrono::Utc>,
+    _commit_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<BTreeMap<arkret_wire::DidCoreId, Vec<RealmFanoutAuthorityWitness>>> {
     // A joined-member witness cannot authorize private controller nonce or
     // PolicyRef source bytes. This carrier has no withheld Event branch.
@@ -597,24 +595,6 @@ async fn membership_targets(
     if event.kind == arkret_wire::EventKind::CircleCreate {
         return Ok(BTreeMap::new());
     }
-    let moderation_private = matches!(
-        event.kind,
-        arkret_wire::EventKind::SelfModerationReport
-            | arkret_wire::EventKind::ModerationFrankingProof
-    );
-    let effective_scope = if event.kind == arkret_wire::EventKind::ModerationFrankingProof {
-        let proof: arkret_models_collaboration::events_payloads::moderation::FrankingProof =
-            serde_json::from_value(serde_json::to_value(&event.payload).map_err(internal)?)
-                .map_err(internal)?;
-        crate::moderation_franking_proof_current_states::franking_target_scope_in_connection(
-            conn,
-            &event.realm_id,
-            &proof.event_id,
-        )
-        .await?
-    } else {
-        event.scope_ref.clone()
-    };
     let rows = sql_query(
         "SELECT m.member_id, e.envelope->>'event_id' AS membership_event_id \
          FROM member_state_current_states m \
@@ -651,38 +631,18 @@ async fn membership_targets(
         {
             continue;
         }
-        let circle_membership_event_ref = if !moderation_private {
-            if let arkret_wire::ScopeRef::Circle {
-                realm_id,
-                circle_id,
-            } = &effective_scope
-            {
-                let Some(basis) = sql_query("SELECT e.envelope->>'event_id' AS event_id FROM circle_member_state_current_states m JOIN circle_current_states circle ON circle.circle_id=m.circle_id AND circle.realm_id=m.realm_id JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position AND c.stream_ref=m.source_stream_ref JOIN canonical_events e ON e.pk=c.event_pk WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND circle.value->>'state'='active' AND e.state='committed'")
+        let circle_membership_event_ref = if let arkret_wire::ScopeRef::Circle {
+            realm_id,
+            circle_id,
+        } = &event.scope_ref
+        {
+            let Some(basis) = sql_query("SELECT e.envelope->>'event_id' AS event_id FROM circle_member_state_current_states m JOIN circle_current_states circle ON circle.circle_id=m.circle_id AND circle.realm_id=m.realm_id JOIN realm_commits c ON c.commit_id=m.current_commit_id AND c.realm_id=m.realm_id AND c.stream_position=m.current_stream_position AND c.stream_ref=m.source_stream_ref JOIN canonical_events e ON e.pk=c.event_pk WHERE m.realm_id=$1 AND m.circle_id=$2 AND m.member_id=$3 AND m.membership='join' AND circle_member_parent_join_current(m.realm_id,m.member_id,m.value) AND circle.value->>'state'='active' AND e.state='committed'")
                 .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(circle_id.as_str()).bind::<Text, _>(member.to_string())
                 .get_result::<MembershipEventRow>(&mut *conn).await.optional().map_err(PersistenceError::database)? else { continue; };
-                Some(arkret_wire::EventId::new(basis.event_id).map_err(internal)?)
-            } else {
-                None
-            }
+            Some(arkret_wire::EventId::new(basis.event_id).map_err(internal)?)
         } else {
             None
         };
-        if moderation_private
-            && !crate::moderation_report_current_states::scope_moderator(
-                conn,
-                &event.realm_id,
-                &effective_scope,
-                &member,
-                &[
-                    arkret_wire::CapabilityActionId::POLICY_MANAGE,
-                    arkret_wire::CapabilityActionId::MODERATION_DECISION,
-                ],
-                commit_at,
-            )
-            .await?
-        {
-            continue;
-        }
         arkret_wire::EventId::new(row.membership_event_id.clone())
             .map_err(|error| internal(format!("membership Event id is malformed: {error}")))?;
         targets
@@ -820,7 +780,6 @@ pub(crate) async fn plan_realm_fanout_in_connection(
                     | arkret_wire::EventKind::MessageCreate
                     | arkret_wire::EventKind::MessageRevise
                     | arkret_wire::EventKind::MessageRedact
-                    | arkret_wire::EventKind::SelfModerationReport
                     | arkret_wire::EventKind::ModerationDecision
                     | arkret_wire::EventKind::ModerationDecisionLift
                     | arkret_wire::EventKind::RelationCreate

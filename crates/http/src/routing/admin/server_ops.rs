@@ -56,18 +56,6 @@ struct AdminAccountLifecycleOutcome {
     devices_revoked: usize,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, salvo::oapi::ToSchema)]
-struct AdminModerationQueueOutcome {
-    /// `moderation-queue-item.schema.json` View items.
-    #[salvo(schema(value_type = Vec<serde_json::Value>))]
-    items: Vec<arkret_models_collaboration::governance::moderation_queue::ModerationQueueItem>,
-    /// Original accepted Events whose require_review add is still active.
-    #[salvo(schema(value_type = Vec<serde_json::Value>))]
-    pending_review_events: Vec<arkret_wire::Event>,
-    total: usize,
-    generated_at: String,
-}
-
 pub(super) fn router() -> Router {
     Router::with_path("admin")
         .push(Router::with_path("server/status").get(get_server_status))
@@ -79,9 +67,6 @@ pub(super) fn router() -> Router {
         .push(Router::with_path("accounts/{account_id}/suspend").post(suspend_account))
         .push(Router::with_path("accounts/{account_id}/unsuspend").post(unsuspend_account))
         .push(Router::with_path("accounts/{account_id}/deactivate").post(deactivate_account))
-        // `GET /_coland/admin/moderation/queue` is the caller's moderation
-        // queue View; the queue holds no writable state of its own.
-        .push(Router::with_path("moderation/queue").get(get_moderation_queue))
 }
 
 #[endpoint(
@@ -176,11 +161,6 @@ async fn get_server_stats(admin: AdminAuth, depot: &mut Depot) -> JsonResult<Adm
         .await
         .map(|items| items.len() as u64)
         .unwrap_or(0);
-    let report_count = state
-        .governance()
-        .moderation_report_count()
-        .await
-        .unwrap_or(0);
     let federation_peer_count = state.settings().federation_peers.len() as u64;
     let applet_count = {
         let proj = state.projections().snapshot();
@@ -195,7 +175,6 @@ async fn get_server_stats(admin: AdminAuth, depot: &mut Depot) -> JsonResult<Adm
         active_actor_count,
         realm_count,
         device_count,
-        report_count,
         federation_peer_count,
         applet_count,
         blob_count,
@@ -422,31 +401,4 @@ fn account_lifecycle_change_response(
         sessions_revoked: change.sessions_revoked,
         devices_revoked: change.devices_revoked,
     }
-}
-
-#[endpoint(
-    operation_id = "org.arkret.coland.admin.get_moderation_queue",
-    tags("coland_admin")
-)]
-#[tracing::instrument(skip_all, fields(op = "org.arkret.coland.admin.get_moderation_queue"))]
-async fn get_moderation_queue(
-    admin: AdminAuth,
-    depot: &mut Depot,
-) -> JsonResult<AdminModerationQueueOutcome> {
-    let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = admin.session()?;
-    let session = require_admin_principal(state, session)?;
-    let view = crate::routing::interop::moderation::moderation_management_view_for_session(
-        state,
-        &session.actor,
-        None,
-    )
-    .await?;
-    let total = view.items.len() + view.pending_review_events.len();
-    json_ok(AdminModerationQueueOutcome {
-        items: view.items,
-        pending_review_events: view.pending_review_events,
-        total,
-        generated_at: arkret_canonical::format_timestamp_canonical(super::now()),
-    })
 }

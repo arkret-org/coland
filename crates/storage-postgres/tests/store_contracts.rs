@@ -7,8 +7,6 @@ mod applet_authoring;
 #[path = "../../test-support/src/device_authorization_history.rs"]
 #[allow(dead_code)]
 mod device_authorization_history;
-#[path = "support/franking.rs"]
-mod franking;
 #[path = "support/ordinary_realm.rs"]
 #[expect(
     dead_code,
@@ -918,7 +916,7 @@ fn fixture_idempotency_record(
     clippy::too_many_arguments,
     reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
 )]
-fn franking_event_request(
+fn signed_event_request(
     stream: &mut FixtureCommitStream,
     settlement: FixtureCommitSettlement,
     realm_id: &arkret_identifiers::RealmId,
@@ -950,7 +948,7 @@ fn franking_event_request(
     event.producer_proof = Some(arkret_wire::ProducerEventProof {
         kind: arkret_wire::proof_kind::DETACHED_JWS.to_owned(),
         verification_method: arkret_wire::DidUrl::new(format!(
-            "{}#franking-device",
+            "{}#fixture-device",
             fixture_did(&actor_id)
         ))
         .expect("fixture producer verification method"),
@@ -983,7 +981,7 @@ fn franking_event_request(
             actor_id: event.actor_id.to_string(),
             realm_id: Some(realm_id.to_string()),
             kind: kind.to_owned(),
-            schema_id: "ak.schema.franking_fixture.v1".to_owned(),
+            schema_id: "ak.schema.event_fixture.v1".to_owned(),
             digest_suite: arkret_canonical::DigestSuite::Sha256,
             canonical_digest,
             canonical_bytes,
@@ -1043,7 +1041,7 @@ async fn postgres_self_producer_guard_rejects_before_event_and_commit_writes() {
     let mut stream = FixtureCommitStream::new(&realm_id, &station_id);
     stream.install(&pool).await;
     let now = chrono::Utc::now();
-    let mut request = franking_event_request(
+    let mut request = signed_event_request(
         &mut stream,
         FixtureCommitSettlement::RolledBack,
         &realm_id,
@@ -1188,7 +1186,7 @@ async fn postgres_relation_current_state_is_exact_commit_cas_and_atomic() {
                    kind: arkret_wire::EventKind,
                    payload: serde_json::Value,
                    at: chrono::DateTime<chrono::Utc>| {
-        franking_event_request(
+        signed_event_request(
             stream,
             settlement,
             &realm_id,
@@ -1532,380 +1530,6 @@ async fn postgres_relation_current_state_is_exact_commit_cas_and_atomic() {
 }
 
 #[tokio::test]
-async fn postgres_franking_nonce_ledger_is_bounded_atomic_and_restart_stable() {
-    ordinary_realm::case_future(postgres_franking_nonce_ledger_case).await;
-}
-
-async fn postgres_franking_nonce_ledger_case() {
-    use coland_storage::{
-        AuthorityCommitTransaction, EventBatchCommitRequest, EventCommitUnitOfWork, EventStore,
-        FrankingReplayNonceCommit, PersistenceError,
-    };
-    use diesel::sql_types::{BigInt, Text, Timestamptz};
-    use diesel_async::RunQueryDsl;
-    use ed25519_dalek::Signer as _;
-
-    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
-    let pool = database.pool();
-    let _db_guard = DB_GUARD.lock().await;
-    // Every report in this ledger belongs to one ordinary Realm, so they share
-    // one authority and one chained Realm stream; the nonce binding requires
-    // the report and its nonce commit to name the same Realm. The reporter is
-    // the Realm's confirmed joined founder and every report targets one
-    // committed discussion Message.
-    let fixture = Box::pin(franking::prepare(
-        &pool,
-        &format!("franking-ledger:{}", uuid::Uuid::now_v7()),
-    ))
-    .await;
-    let target = fixture.accepted_target.clone();
-    let realm_id = target.authority_commit.event.realm_id.clone();
-    let received_by = fixture.proof_payload.received_by.clone();
-    let reporter = target
-        .authority_commit
-        .event
-        .actor_id
-        .signing_principal_id();
-    let target_event_id = target.authority_commit.event.event_id.clone();
-    // Only an accepted report advances the Realm stream head; a refused one
-    // leaves it where it is, and the next report reuses that position.
-    let mut head: AuthorityCommitTransaction = target.authority_commit.clone();
-    let make_request = async |head: &AuthorityCommitTransaction,
-                              replay_nonce: &str,
-                              consumed_at: chrono::DateTime<chrono::Utc>| {
-        let mut payload =
-            ordinary_realm::report_payload(&realm_id, target_event_id.as_str(), reporter);
-        let mut receipt = fixture.proof_payload.clone();
-        receipt.replay_nonce = replay_nonce.to_owned();
-        receipt.signature = arkret_canonical::base64url_encode(
-            fixture
-                .service_signing_key
-                .sign(&receipt.canonical_signing_bytes().unwrap())
-                .to_bytes(),
-        );
-        payload["franking_proof"] = serde_json::to_value(receipt).unwrap();
-        let event = ordinary_realm::next_request(
-            head,
-            arkret_wire::EventKind::SelfModerationReport,
-            reporter,
-            payload,
-            consumed_at,
-        );
-        let event = Box::pin(ordinary_realm::source_request(&pool, event)).await;
-        let event_id = event.event.event_id.clone();
-        (
-            event,
-            FrankingReplayNonceCommit {
-                realm_id: realm_id.to_string(),
-                received_by: received_by.clone(),
-                replay_nonce: replay_nonce.to_owned(),
-                report_event_id: event_id,
-                consumed_at,
-            },
-        )
-    };
-    let commit = |event, nonce| EventBatchCommitRequest {
-        audit_unit: None,
-        events: vec![event],
-        realm_organization_proof: None,
-        event_approvals: None,
-        franking_replay_nonce: Some(nonce),
-        applet_record: None,
-        applet_authoring_preview: None,
-        agent_membership_cascade: None,
-    };
-    let consumed_at =
-        chrono::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros()).unwrap();
-    let replay_nonce = "shared_nonce_0123456789";
-    let (first_event, first_nonce) = make_request(&head, replay_nonce, consumed_at).await;
-    let first_event_id = first_event.event.event_id.clone();
-    let first_head = first_event.authority_commit.clone();
-    PgEventCommitUnitOfWork::new(pool.clone())
-        .commit_event_batch(commit(first_event, first_nonce))
-        .await
-        .unwrap();
-    head = first_head;
-
-    // Treat the successful write above as a lost response: reconstruct the
-    // adapter and retry the same durable nonce with a competing Event.
-    let (replay_event, replay_commit) = make_request(
-        &head,
-        replay_nonce,
-        consumed_at + chrono::TimeDelta::seconds(1),
-    )
-    .await;
-    let replay_event_id = replay_event.event.event_id.clone();
-    let replay_error = PgEventCommitUnitOfWork::new(pool.clone())
-        .commit_event_batch(commit(replay_event, replay_commit))
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        replay_error,
-        PersistenceError::Conflict(reason) if reason == "duplicate_conflict"
-    ));
-    let event_store = PgEventStore { pool: pool.clone() };
-    assert!(event_store.contains(&first_event_id).await.unwrap());
-    assert!(!event_store.contains(&replay_event_id).await.unwrap());
-
-    let expires_at = coland_storage::franking_replay_nonce_expires_at(consumed_at).unwrap();
-    let mut conn = pool.get().await.unwrap();
-    let stored_expiry = diesel::sql_query(
-        "SELECT expires_at AS value FROM moderation_franking_replay_nonces \
-         WHERE realm_id = $1 AND received_by = $2 AND replay_nonce = $3",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(received_by.as_str())
-    .bind::<Text, _>(replay_nonce)
-    .get_result::<TimestampRow>(&mut conn)
-    .await
-    .unwrap()
-    .value;
-    assert_eq!(stored_expiry, expires_at);
-
-    let (just_before_event, just_before_nonce) = make_request(
-        &head,
-        replay_nonce,
-        expires_at - chrono::TimeDelta::microseconds(1),
-    )
-    .await;
-    let just_before_event_id = just_before_event.event.event_id.clone();
-    let just_before_error = PgEventCommitUnitOfWork::new(pool.clone())
-        .commit_event_batch(commit(just_before_event, just_before_nonce))
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        just_before_error,
-        PersistenceError::Conflict(reason) if reason == "duplicate_conflict"
-    ));
-    assert!(!event_store.contains(&just_before_event_id).await.unwrap());
-
-    let (at_expiry_event, at_expiry_nonce) = make_request(&head, replay_nonce, expires_at).await;
-    let at_expiry_event_id = at_expiry_event.event.event_id.clone();
-    let at_expiry_head = at_expiry_event.authority_commit.clone();
-    PgEventCommitUnitOfWork::new(pool.clone())
-        .commit_event_batch(commit(at_expiry_event, at_expiry_nonce))
-        .await
-        .unwrap();
-    head = at_expiry_head;
-    assert!(event_store.contains(&at_expiry_event_id).await.unwrap());
-
-    diesel::sql_query(
-        "INSERT INTO moderation_franking_replay_nonces \
-         (realm_id, received_by, replay_nonce, report_event_id, consumed_at, expires_at) \
-         VALUES ($1, $2, 'expired_nonce_0123456789', $3, $4, $5)",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(received_by.as_str())
-    .bind::<Text, _>(format!("expired-report-{}", uuid::Uuid::now_v7()))
-    .bind::<Timestamptz, _>(consumed_at - chrono::TimeDelta::hours(25))
-    .bind::<Timestamptz, _>(consumed_at - chrono::TimeDelta::hours(1))
-    .execute(&mut conn)
-    .await
-    .unwrap();
-    drop(conn);
-    let (after_expiry_event, after_expiry_nonce) = make_request(
-        &head,
-        "after_expiry_nonce_0123456789",
-        consumed_at + chrono::TimeDelta::seconds(2),
-    )
-    .await;
-    let after_expiry_head = after_expiry_event.authority_commit.clone();
-    PgEventCommitUnitOfWork::new(pool.clone())
-        .commit_event_batch(commit(after_expiry_event, after_expiry_nonce))
-        .await
-        .unwrap();
-    head = after_expiry_head;
-    let mut conn = pool.get().await.unwrap();
-    let expired_count = diesel::sql_query(
-        "SELECT COUNT(*) AS value FROM moderation_franking_replay_nonces \
-         WHERE replay_nonce = 'expired_nonce_0123456789'",
-    )
-    .get_result::<LedgerCountRow>(&mut conn)
-    .await
-    .unwrap()
-    .value;
-    assert_eq!(expired_count, 0);
-
-    diesel::sql_query(
-        "DELETE FROM moderation_franking_replay_nonces \
-         WHERE realm_id = $1 AND received_by = $2",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(received_by.as_str())
-    .execute(&mut conn)
-    .await
-    .unwrap();
-    diesel::sql_query(
-        "INSERT INTO moderation_franking_replay_nonces \
-         (realm_id, received_by, replay_nonce, report_event_id, consumed_at, expires_at) \
-         SELECT $1, $2, 'capacity_nonce_' || n, 'capacity_report_' || $1 || '_' || n, $3, $4 \
-         FROM generate_series(1, $5) AS n",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(received_by.as_str())
-    .bind::<Timestamptz, _>(consumed_at)
-    .bind::<Timestamptz, _>(expires_at)
-    .bind::<BigInt, _>(
-        i64::try_from(coland_storage::LOCAL_FRANKING_REPLAY_NONCE_MAX_ACTIVE_PER_SCOPE).unwrap(),
-    )
-    .execute(&mut conn)
-    .await
-    .unwrap();
-    drop(conn);
-    let (overflow_event, overflow_nonce) = make_request(
-        &head,
-        "overflow_nonce_0123456789",
-        consumed_at + chrono::TimeDelta::seconds(3),
-    )
-    .await;
-    let overflow_event_id = overflow_event.event.event_id.clone();
-    let overflow_error = PgEventCommitUnitOfWork::new(pool.clone())
-        .commit_event_batch(commit(overflow_event, overflow_nonce))
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        overflow_error,
-        PersistenceError::Conflict(reason) if reason == "duplicate_conflict"
-    ));
-    assert!(!event_store.contains(&overflow_event_id).await.unwrap());
-    let mut conn = pool.get().await.unwrap();
-    let active_count = diesel::sql_query(
-        "SELECT COUNT(*) AS value FROM moderation_franking_replay_nonces \
-         WHERE realm_id = $1 AND received_by = $2",
-    )
-    .bind::<Text, _>(realm_id.as_str())
-    .bind::<Text, _>(received_by.as_str())
-    .get_result::<LedgerCountRow>(&mut conn)
-    .await
-    .unwrap()
-    .value;
-    assert_eq!(
-        active_count,
-        i64::try_from(coland_storage::LOCAL_FRANKING_REPLAY_NONCE_MAX_ACTIVE_PER_SCOPE).unwrap()
-    );
-}
-
-#[tokio::test]
-async fn postgres_franking_target_proof_fault_and_restart_contract() {
-    Box::pin(postgres_franking_target_proof_case()).await;
-}
-
-async fn postgres_franking_target_proof_case() {
-    use coland_storage::{
-        EventBatchCommitRequest, EventCommitUnitOfWork, EventStore, PersistenceError,
-    };
-
-    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
-    let pool = database.pool();
-    let _db_guard = DB_GUARD.lock().await;
-    let fixture = Box::pin(franking::prepare(
-        &pool,
-        &format!("franking-target-proof:{}", uuid::Uuid::now_v7()),
-    ))
-    .await;
-    let realm_id = fixture.proof_payload.realm_id.clone();
-    let received_by = fixture.proof_payload.received_by.clone();
-    let receipt_target_id = fixture
-        .accepted_target
-        .authority_commit
-        .event
-        .event_id
-        .clone();
-    // Spec content-moderation section 3.4 fixes the authenticated receipt only
-    // after accepting its encrypted target. A later batch's new Message prefix
-    // and that exact proof must both roll back if publication's last write fails.
-    let target = fixture.prefix;
-    let mut proof = fixture.proof;
-    let created_at = proof.authority_commit.commit.committed_at;
-    let target_event_id = target.event.event_id.clone();
-    let proof_event_id = proof.event.event_id.clone();
-    // The fault has to fail inside the database rather than before it, so it
-    // rides the proof element's last durable write: a NUL byte cannot be
-    // stored in a text column, and the idempotency row is written after the
-    // proof Event's own commit and inside the same batch transaction.
-    let clean_idempotency_key = format!("franking-proof-{}", uuid::Uuid::now_v7());
-    proof.idempotency = Some(fixture_idempotency_record(
-        &proof,
-        format!("{clean_idempotency_key}\0"),
-        created_at,
-    ));
-    let failing_batch = EventBatchCommitRequest {
-        audit_unit: None,
-        events: vec![target.clone(), proof.clone()],
-        realm_organization_proof: None,
-        event_approvals: None,
-        franking_replay_nonce: None,
-        applet_record: None,
-        applet_authoring_preview: None,
-        agent_membership_cascade: None,
-    };
-
-    let database_error = PgEventCommitUnitOfWork::new(pool.clone())
-        .commit_event_batch(failing_batch)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(database_error, PersistenceError::Database(_)),
-        "{database_error:?}"
-    );
-    let event_store = PgEventStore { pool: pool.clone() };
-    assert!(!event_store.contains(&target_event_id).await.unwrap());
-    assert!(!event_store.contains(&proof_event_id).await.unwrap());
-    assert!(
-        event_store
-            .contains(receipt_target_id.as_str())
-            .await
-            .unwrap()
-    );
-    assert!(
-        event_store
-            .franking_proofs_for_target(realm_id.as_str(), &received_by, receipt_target_id.as_str())
-            .await
-            .unwrap()
-            .is_empty(),
-        "a database error while inserting the proof must roll back its target prefix"
-    );
-
-    proof.idempotency = Some(fixture_idempotency_record(
-        &proof,
-        clean_idempotency_key,
-        created_at,
-    ));
-    let clean_batch = EventBatchCommitRequest {
-        audit_unit: None,
-        events: vec![target, proof],
-        realm_organization_proof: None,
-        event_approvals: None,
-        franking_replay_nonce: None,
-        applet_record: None,
-        applet_authoring_preview: None,
-        agent_membership_cascade: None,
-    };
-    PgEventCommitUnitOfWork::new(pool.clone())
-        .commit_event_batch(clean_batch.clone())
-        .await
-        .unwrap();
-
-    // Model a lost success response by reconstructing the adapter without
-    // carrying the first outcome into the retry. This is not a process-kill
-    // claim; it proves only the durable retry boundary.
-    let retry = PgEventCommitUnitOfWork::new(pool.clone())
-        .commit_event_batch(clean_batch)
-        .await
-        .unwrap();
-    assert_eq!(retry, coland_storage::EventCommitOutcome::default());
-    assert_eq!(
-        event_store
-            .franking_proofs_for_target(realm_id.as_str(), &received_by, receipt_target_id.as_str())
-            .await
-            .unwrap()
-            .len(),
-        1,
-        "restart retry must not materialize a second proof Event"
-    );
-}
-
-#[tokio::test]
 async fn postgres_queue_refuses_a_second_envelope_under_one_event_id() {
     use coland_storage::{
         EventBatchCommitRequest, EventCommitUnitOfWork, EventStore, PersistenceError,
@@ -1926,7 +1550,6 @@ async fn postgres_queue_refuses_a_second_envelope_under_one_event_id() {
         events: vec![event],
         realm_organization_proof: None,
         event_approvals: None,
-        franking_replay_nonce: None,
         applet_record: None,
         applet_authoring_preview: None,
         agent_membership_cascade: None,

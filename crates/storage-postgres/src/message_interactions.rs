@@ -158,7 +158,7 @@ pub(crate) async fn require_reply_and_mentions_in_connection(
                     .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
             for mention in mentions {
                 let actor = arkret_wire::ActorId::account(mention.subject_account_id);
-                crate::moderation_report_current_states::ensure_scope_member(
+                crate::scope_access::ensure_scope_member(
                     conn,
                     &event.realm_id,
                     &event.scope_ref,

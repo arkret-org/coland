@@ -575,7 +575,6 @@ async fn seed_snapshot_families(
         ("circle_current_states", "circle_id,create_event_id,source_stream_ref,short_name_folded", format!("'circle-' || {key},'capacity-circle-' || {key} || '-create',jsonb_build_object('kind','realm','realm_id',{realm}),'circle-' || m"), format!("jsonb_build_object('id','circle-' || {key},'realm_id',{realm})")),
         ("circle_member_state_current_states", "circle_id,member_id,membership,source_stream_ref", format!("'circle-' || {key},jsonb_build_object('member',m)::text,'join',jsonb_build_object('kind','circle','realm_id',{realm},'circle_id','circle-' || {key})"), format!("jsonb_build_object('membership','join','parent_membership_revision',jsonb_build_object('commit_id',{commit},'stream_position',0))")),
         ("call_state_current_states", "call_id,create_event_id,source_stream_ref", format!("'call-' || {key},'call-event-' || {key},jsonb_build_object('kind','realm','realm_id',{realm})"), "jsonb_build_object('from',NULL,'to','ringing')".to_owned()),
-        ("moderation_franking_proof_current_states", "target_event_id,source_stream_ref", format!("'franking-target-' || {key},jsonb_build_object('kind','realm','realm_id',{realm})"), "'{}'::jsonb".to_owned()),
         ("realm_organization_current_states", "organization_id,relationship,organization_public_key", format!("'organization-' || {key},'owner',decode(repeat('00',32),'hex')"), format!("jsonb_build_object('realm_id',{realm},'organization_id','organization-' || {key},'relationship','owner')")),
         ("schema_definition_current_states", "schema_id", format!("'schema-' || {key}"), format!("jsonb_build_object('$id','schema-' || {key},'type','object')")),
         ("pin_current_states", "pin_scope_key,pin_scope,source_stream_ref", format!("'pin-' || {key},jsonb_build_object('kind','strand','id','strand-' || {key}),jsonb_build_object('kind','realm','realm_id',{realm})"), "jsonb_build_object('assertions',jsonb_build_array(jsonb_build_object('tag_id','pin-dot')))".to_owned()),
@@ -591,8 +590,6 @@ async fn seed_snapshot_families(
         ("space_parent_current_states", "space_id", format!("'space-' || {key}"), "jsonb_build_object('parent_space_id',NULL)".to_owned()),
         ("space_child_scope_policy_current_states", "space_id", format!("'space-' || {key}"), "'null'::jsonb".to_owned()),
         ("mls_group_current_states", "scope_key,mls_group_id,public_state", format!("'scope-' || {key},'group-' || {key},'\\x00'::bytea"), format!("jsonb_build_object('effective_scope',jsonb_build_object('kind','realm','realm_id',{realm}),'covered_key_access_revision',0,'current_key_access_revision',0)")),
-        // Reports have distinct covering Commits. They cannot all share position 0.
-        ("moderation_report_current_states", "report_event_id", format!("'report-' || {key}"), format!("jsonb_build_object('realm_id',{realm},'target_ref','target-' || m,'reporter_id','reporter')")),
         ("object_redaction_current_states", "target_ref", "'target-' || m".to_owned(), "jsonb_build_object('assertions',jsonb_build_array(jsonb_build_object('tag_id','dot')))".to_owned()),
         ("message_reactions_current_states", "target_ref", "'target-' || m".to_owned(), "jsonb_build_object('assertions',jsonb_build_array(jsonb_build_object('tag_id','dot')))".to_owned()),
         ("sidecar_exchange_controls_current_states", "sidecar_id,context_ref_digest,context_ref,source_stream_ref", format!("'sidecar-' || {key},'context-' || {key},jsonb_build_object('kind','strand','strand_id','strand-' || {key}),jsonb_build_object('kind','sidecar','realm_id',{realm},'sidecar_id','sidecar-' || {key})"), "jsonb_build_object('assertions',jsonb_build_array(jsonb_build_object('tag_id','control-dot')))".to_owned()),
@@ -610,8 +607,6 @@ async fn seed_snapshot_families(
             ("'capacity-circle-' || r || '-' || m || '-create'", "m-1")
         } else if table == "circle_member_state_current_states" {
             ("'capacity-circle-' || r || '-' || m || '-member'", "0")
-        } else if table == "moderation_report_current_states" {
-            ("'capacity-' || r || '-' || (m-1)", "m-1")
         } else if matches!(table, "schema_definition_current_states" | "pin_current_states" | "actor_profile_current_states" | "call_component_current_states") {
             ("'capacity-' || r || '-1'", "1")
         } else {

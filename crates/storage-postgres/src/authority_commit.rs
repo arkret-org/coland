@@ -909,14 +909,6 @@ pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_
                 current_commit_id, current_stream_position, value \
            FROM mls_group_current_states WHERE realm_id = $1 \
          UNION ALL \
-         SELECT 'moderation_report'::text AS selector_kind, to_jsonb(report_event_id) AS selector_subject, \
-                current_commit_id, current_stream_position, value \
-           FROM moderation_report_current_states WHERE realm_id = $1 \
-         UNION ALL \
-         SELECT 'moderation_franking_proof'::text AS selector_kind, to_jsonb(target_event_id) AS selector_subject, \
-                current_commit_id, current_stream_position, value \
-           FROM moderation_franking_proof_current_states WHERE realm_id = $1 \
-         UNION ALL \
          SELECT 'moderation_state'::text AS selector_kind, to_jsonb(target_ref) AS selector_subject, \
                 current_commit_id, current_stream_position, value \
            FROM moderation_state_current_states WHERE realm_id = $1 \
@@ -1168,20 +1160,6 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                         ))
                     })?,
                 },
-                ("moderation_report", Some(event_id)) => {
-                    arkret_wire::CurrentSelector::ModerationReport {
-                        event_id: serde_json::from_value(event_id).map_err(|error| {
-                            PersistenceError::Internal(format!(
-                                "stored moderation report selector identity is invalid: {error}"
-                            ))
-                        })?,
-                    }
-                }
-                ("moderation_franking_proof", Some(event_id)) => {
-                    arkret_wire::CurrentSelector::ModerationFrankingProof {
-                        event_id: serde_json::from_value(event_id).map_err(PersistenceError::database)?,
-                    }
-                }
                 ("realm_organization", Some(selector)) => {
                     serde_json::from_value::<arkret_wire::CurrentSelector>(selector)
                         .map_err(PersistenceError::database)?
@@ -4328,50 +4306,6 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         replica::replica_stream_anchor_in_connection(&mut conn, realm_id)
             .await
             .map_err(PgTransactionError::into_persistence)
-    }
-
-    async fn pending_franking_proofs(
-        &self,
-        receiver: &arkret_wire::DidCoreId,
-    ) -> PersistenceResult<Vec<coland_storage::PendingFrankingProof>> {
-        let mut conn = pg_conn(&self.pool).await?;
-        crate::moderation_franking_proof_current_states::pending_franking_in_connection(
-            &mut conn, receiver,
-        )
-        .await
-    }
-
-    async fn fix_franking_proof(
-        &self,
-        prepared: &coland_storage::PreparedFrankingProof,
-    ) -> PersistenceResult<arkret_wire::Event> {
-        let mut conn = pg_conn(&self.pool).await?;
-        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            Ok(
-                crate::moderation_franking_proof_current_states::fix_franking_in_connection(
-                    conn, prepared,
-                )
-                .await?,
-            )
-        })
-        .await
-        .map_err(PgTransactionError::into_persistence)
-    }
-
-    async fn complete_franking_proof(
-        &self,
-        realm: &arkret_wire::RealmId,
-        target: &arkret_wire::EventId,
-        proof_event: &arkret_wire::EventId,
-    ) -> PersistenceResult<()> {
-        let mut conn = pg_conn(&self.pool).await?;
-        crate::moderation_franking_proof_current_states::complete_franking_in_connection(
-            &mut conn,
-            realm,
-            target,
-            proof_event,
-        )
-        .await
     }
 
     async fn replica_anchor_for_stream(

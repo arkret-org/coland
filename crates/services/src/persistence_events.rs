@@ -203,18 +203,6 @@ impl crate::events::EventReadPort for PersistenceEventReader {
     ) -> crate::ServiceResult<Vec<crate::events::AcceptedEvent>> {
         Ok(self.0.events().list_for_actor(actor_id).await?)
     }
-    async fn franking_proofs_for_target(
-        &self,
-        realm_id: &str,
-        received_by: &arkret_identifiers::DidCoreId,
-        target_event_id: &str,
-    ) -> crate::ServiceResult<Vec<crate::events::AcceptedEvent>> {
-        Ok(self
-            .0
-            .events()
-            .franking_proofs_for_target(realm_id, received_by, target_event_id)
-            .await?)
-    }
     async fn identity_anchor_account_slot(
         &self,
         account_id: &arkret_wire::AccountId,
@@ -1214,7 +1202,6 @@ impl crate::events::EventCommitPort for PersistenceEventCommitter {
                     .collect(),
                 realm_organization_proof: command.realm_organization_proof,
                 event_approvals: command.event_approvals,
-                franking_replay_nonce: command.franking_replay_nonce,
                 applet_record: command.applet_record,
                 applet_authoring_preview: command.applet_authoring_preview,
                 agent_membership_cascade: command.agent_membership_cascade,

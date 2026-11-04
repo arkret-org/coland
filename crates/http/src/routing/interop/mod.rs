@@ -3,7 +3,6 @@ use salvo::prelude::*;
 mod blob;
 mod blob_resumable;
 mod mimi;
-pub(crate) mod moderation;
 mod push;
 mod push_handoff;
 pub(crate) mod webrtc;
@@ -53,13 +52,12 @@ pub fn protocol_router() -> Router {
                     .push(Router::with_path("push/unregister-device").post(push::push_unregister)),
             ),
         )
-        // `self` — RTC, blob, moderation report.
+        // `self` — RTC and blob surfaces.
         .push(
             Router::with_path("self")
                 .push(webrtc::protocol_router())
                 .push(blob::router())
-                .push(blob_resumable::router())
-                .push(moderation::protocol_router()),
+                .push(blob_resumable::router()),
         )
         // `open` — non-Arkret external vendor interop (MIMI).
         .push(Router::with_path("open").push(mimi::router()))

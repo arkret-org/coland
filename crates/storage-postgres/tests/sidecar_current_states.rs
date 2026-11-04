@@ -149,7 +149,6 @@ fn batch(create: EventCommitRequest, attach: EventCommitRequest) -> EventBatchCo
         events: vec![create, attach],
         realm_organization_proof: None,
         event_approvals: None,
-        franking_replay_nonce: None,
         applet_record: None,
         applet_authoring_preview: None,
         agent_membership_cascade: None,

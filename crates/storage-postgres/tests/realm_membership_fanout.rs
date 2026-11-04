@@ -5860,7 +5860,6 @@ async fn recipient_mls_add_attestation_outbox_is_atomic_durable_and_idempotent()
 }
 
 /// Structural producer proofs isolate accepted-state replication and disclosure.
-/// Real franking signatures are exercised separately in franking_receipt_commit.
 #[tokio::test]
 async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires() {
     heap_future(|| {

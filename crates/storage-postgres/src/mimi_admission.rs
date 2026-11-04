@@ -18,7 +18,7 @@ pub(crate) async fn check_facade_producer_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     guard: &SelfProducerCommitGuard,
-    committed_at: chrono::DateTime<chrono::Utc>,
+    _committed_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
     let SelfProducerCommitGuard::MimiFacade {
         service_id,
@@ -27,10 +27,8 @@ pub(crate) async fn check_facade_producer_in_connection(
         binding_event_id,
         attributed_actor,
         source_provider_id,
-        reporter_authority,
         submit_request_body,
         mapping_receipt,
-        reporter_device_guard,
     } = guard
     else {
         return Err(refused("missing MIMI facade guard"));
@@ -39,10 +37,7 @@ pub(crate) async fn check_facade_producer_in_connection(
         || event.executed_by.is_some()
         || event.authorization_ref.is_some()
         || event.applet_id.is_some()
-        || !matches!(
-            event.kind,
-            arkret_wire::EventKind::MessageCreate | arkret_wire::EventKind::SelfModerationReport
-        )
+        || event.kind != arkret_wire::EventKind::MessageCreate
     {
         return Err(refused(
             "MIMI Event is not directly authored by the configured Service",
@@ -116,7 +111,7 @@ pub(crate) async fn check_facade_producer_in_connection(
     {
         return Err(refused("MIMI binding is not writable"));
     }
-    crate::moderation_report_current_states::ensure_scope_member(
+    crate::scope_access::ensure_scope_member(
         conn,
         &event.realm_id,
         &event.scope_ref,
@@ -260,103 +255,6 @@ pub(crate) async fn check_facade_producer_in_connection(
                 return Err(mismatch());
             }
         }
-    } else {
-        let body: arkret_models_collaboration::mimi_operations::MimiReportAbuseRequestBody =
-            serde_json::from_value(
-                reporter_authority
-                    .clone()
-                    .ok_or_else(|| refused("MIMI reporter request missing"))?,
-            )
-            .map_err(PersistenceError::database)?;
-        body.validate()
-            .map_err(|_| refused("MIMI report claim invalid"))?;
-        let authority = &body.reporter_authority;
-        if &authority.actor_id != attributed_actor
-            || authority.expires_at <= committed_at
-            || authority.room_binding_ref.event_id != *binding_event_id
-            || body.report_claim.scope_ref != event.scope_ref
-        {
-            return Err(refused("MIMI reporter authority differs or expired"));
-        }
-        for (reference, table, predicate, subject) in [
-            (
-                &authority.room_binding_ref,
-                "mimi_room_binding_current_states",
-                "mimi_room_uri",
-                room_uri.as_str().to_owned(),
-            ),
-            (
-                &authority.membership_ref,
-                "member_state_current_states",
-                "member_id",
-                attributed_actor.to_string(),
-            ),
-        ] {
-            // Table and predicate are closed implementation constants, never request strings.
-            let query = format!(
-                "SELECT c.commit_json AS value FROM {table} r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.{predicate}=$2 AND e.state='committed' AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position FOR SHARE OF r"
-            );
-            let row = diesel::sql_query(query)
-                .bind::<Text, _>(event.realm_id.as_str())
-                .bind::<Text, _>(subject)
-                .get_result::<JsonRow>(&mut *conn)
-                .await
-                .optional()
-                .map_err(PersistenceError::database)?
-                .ok_or_else(|| refused("MIMI reporter current reference unavailable"))?;
-            let commit: arkret_wire::RealmCommit =
-                serde_json::from_value(row.value).map_err(PersistenceError::database)?;
-            if commit.commit_id != reference.commit_id
-                || commit.event_ref != reference.event_id
-                || commit.stream_ref != reference.stream_ref
-                || commit.stream_position != reference.stream_position
-            {
-                return Err(refused(
-                    "MIMI reporter reference is no longer exact current",
-                ));
-            }
-        }
-        let selector = reporter_device_guard
-            .as_ref()
-            .ok_or_else(|| refused("MIMI reporter device authority unavailable"))?;
-        crate::ensure_gate_allowed_in_transaction(conn, selector).await?;
-        let payload = serde_json::to_value(&event.payload).map_err(PersistenceError::database)?;
-        if payload.get("reporter_id").and_then(Value::as_str)
-            != Some(attributed_actor.signing_principal_id().as_str())
-            || payload.get("source_provider_id").and_then(Value::as_str)
-                != Some(source_provider_id.as_str())
-            || payload.get("target_ref")
-                != Some(
-                    &serde_json::to_value(&body.report_claim.target_ref)
-                        .map_err(PersistenceError::database)?,
-                )
-        {
-            return Err(refused("MIMI report attribution differs"));
-        }
-    }
-    Ok(())
-}
-
-/// A losing concurrent report must roll back its Event as well as its response.
-pub(crate) async fn record_report_idempotency_in_connection(
-    conn: &mut AsyncPgConnection,
-    record: &coland_storage::IdempotencyRecord,
-) -> PersistenceResult<()> {
-    use diesel::sql_types::{Integer, Timestamptz};
-    let actor_key = record
-        .authenticated_actor
-        .canonical_key()
-        .map_err(|e| refused(&e.to_string()))?;
-    let inserted = diesel::sql_query("INSERT INTO idempotency_keys (actor_key,authenticated_actor,operation_id,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(actor_key,operation_id,idempotency_key) DO NOTHING")
-        .bind::<Text,_>(actor_key).bind::<Jsonb,_>(serde_json::to_value(&record.authenticated_actor).map_err(PersistenceError::database)?)
-        .bind::<Text,_>(&record.operation_id).bind::<Text,_>(&record.idempotency_key).bind::<Text,_>(&record.request_hash)
-        .bind::<Integer,_>(record.response_status).bind::<Jsonb,_>(&record.response_body)
-        .bind::<Timestamptz,_>(record.created_at).bind::<Timestamptz,_>(record.expires_at)
-        .execute(conn).await.map_err(PersistenceError::database)?;
-    if inserted != 1 {
-        return Err(PersistenceError::Conflict(
-            "duplicate_conflict: MIMI report request already committed".into(),
-        ));
     }
     Ok(())
 }

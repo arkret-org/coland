@@ -499,9 +499,6 @@ impl coland_storage::FederationGovernanceStoreRegistry for FaultInjectingStore {
 }
 
 impl coland_storage::DeliveryPolicyStoreRegistry for FaultInjectingStore {
-    fn moderation(&self) -> &dyn coland_storage::ModerationStore {
-        self.inner.moderation()
-    }
     fn federation_operations(&self) -> &dyn coland_storage::FederationOperationsStore {
         self.inner.federation_operations()
     }

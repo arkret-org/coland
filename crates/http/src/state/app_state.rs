@@ -38,9 +38,7 @@ use coland_services::persistence_events::PersistenceEventServices;
 use coland_services::persistence_identity::PersistenceIdentityServices;
 use coland_services::persistence_operations::PersistenceOperationalServices;
 use coland_services::projection::{ProjectionService, ServiceClock};
-use coland_services::runtime_guards::{
-    KeyBackupDownloadOutcome, ModerationReportRateOutcome, RuntimeGuardService,
-};
+use coland_services::runtime_guards::{KeyBackupDownloadOutcome, RuntimeGuardService};
 use coland_services::service_route::ServiceRouteResolver;
 use coland_services::sync::SyncService;
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -1833,27 +1831,6 @@ impl AppState {
     ) -> KeyBackupDownloadOutcome {
         self.runtime_guards
             .record_key_backup_download(principal_id, limit)
-    }
-
-    /// Record one moderation report attempt across the entrypoint's layered
-    /// anti-abuse buckets. The generic HTTP rate limiter remains the broad
-    /// transport guard; this protocol-level limiter adds reporter_id, source
-    /// service, Realm, source IP, and duplicate-target pressure.
-    pub fn record_moderation_report_attempt(
-        &self,
-        reporter_id: &str,
-        source_service: Option<&str>,
-        realm_id: &str,
-        source_ip_hash: &str,
-        target_ref: &str,
-    ) -> ModerationReportRateOutcome {
-        self.runtime_guards.record_moderation_report_attempt(
-            reporter_id,
-            source_service,
-            realm_id,
-            source_ip_hash,
-            target_ref,
-        )
     }
 }
 

@@ -833,10 +833,8 @@ fn event_payload_validator_enforces_strand_update_patch_schema() {
 
 #[test]
 fn event_payload_validator_catalog_covers_active_standard_durable_events() {
-    const SIBLING_SCHEMA_EVENT_KINDS: &[&str] = &[
-        arkret_wire::EventKind::ModerationFrankingProof.as_str(),
-        arkret_wire::EventKind::RelationTombstone.as_str(),
-    ];
+    const SIBLING_SCHEMA_EVENT_KINDS: &[&str] =
+        &[arkret_wire::EventKind::RelationTombstone.as_str()];
     let catalog = arkret_schema_conformance::event_payload_validator_catalog().unwrap();
     let event_kinds = coland_services::protocol_artifacts::active_durable_event_kinds()
         .iter()

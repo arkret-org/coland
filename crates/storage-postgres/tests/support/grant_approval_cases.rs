@@ -103,7 +103,6 @@ fn batch(
     coland_storage::EventBatchCommitRequest {
         audit_unit: None,
         events: vec![request],
-        franking_replay_nonce: None,
         realm_organization_proof: None,
         event_approvals: Some(proof),
         applet_record: None,

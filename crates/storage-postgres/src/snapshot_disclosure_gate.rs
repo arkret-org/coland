@@ -5,8 +5,6 @@
 //! Current rows retain their source stream and revision, including state
 //! below that stream's history floor. Message content is constrained by its
 //! original accepted scope, covering position, retention and redaction overlay.
-//! Reports and franking proofs additionally require exact target-scope
-//! moderator authority; a Realm-stream proof never broadens a Circle target.
 //!
 //! Every installed current family and the installed handoff tenure are audited.
 //! Unsupported families remain unproved. Bootstrap changes only its own
@@ -86,8 +84,6 @@ pub(crate) const DISCLOSED_EVENT_KINDS: &[EventKind] = &[
     EventKind::CircleMemberState,
     EventKind::ModerationDecision,
     EventKind::ModerationDecisionLift,
-    EventKind::SelfModerationReport,
-    EventKind::ModerationFrankingProof,
     EventKind::RealmOrganization,
     EventKind::CallCreate,
 ];
@@ -161,8 +157,6 @@ const AUDITED_FAMILIES: &[&str] = &[
     // Public link definition, lifecycle and uses follow the Realm stream boundary.
     "realm_invite_link_current_states",
     // Reports and proofs have a separate exact-scope moderator disclosure gate.
-    "moderation_report_current_states",
-    "moderation_franking_proof_current_states",
     "moderation_state_current_states",
     "realm_organization_current_states",
     "realm_bootstrap_current_states",
@@ -254,9 +248,7 @@ pub(crate) struct DisclosureFacts {
         std::collections::BTreeMap<arkret_wire::SidecarId, ReadableFloor>,
     pub(crate) owned_sidecars: std::collections::BTreeSet<arkret_wire::SidecarId>,
     /// Report subjects whose exact scope's moderator grant is proved at this cut.
-    pub(crate) report_subjects: std::collections::BTreeSet<arkret_wire::EventId>,
     /// Encrypted target subjects authorized through their actual signed scopes.
-    pub(crate) franking_subjects: std::collections::BTreeSet<arkret_wire::EventId>,
     pub(crate) relation_subjects: std::collections::BTreeSet<arkret_wire::RelationId>,
     /// The caller's readable floor on the Realm stream, `None` when the caller
     /// is not a currently joined member or the floor is not provable.
@@ -1445,80 +1437,6 @@ async fn disclosure_facts_in_connection(
         }
         circle_floors.insert(circle_id.clone(), floor);
     }
-    let mut report_subjects = std::collections::BTreeSet::new();
-    let at = chrono::Utc::now();
-    for entry in &material.current_state_entries {
-        let CurrentState::Value {
-            selector: CurrentSelector::ModerationReport { event_id },
-            source_stream_ref,
-            ..
-        } = entry
-        else {
-            continue;
-        };
-        let scope = match source_stream_ref {
-            CommitStreamRef::Realm { realm_id: realm } if realm == realm_id => {
-                arkret_wire::ScopeRef::Realm {
-                    realm_id: realm.clone(),
-                }
-            }
-            CommitStreamRef::Circle {
-                realm_id: realm,
-                circle_id,
-            } if realm == realm_id && circle_floors.contains_key(circle_id) => {
-                arkret_wire::ScopeRef::Circle {
-                    realm_id: realm.clone(),
-                    circle_id: circle_id.clone(),
-                }
-            }
-            _ => continue,
-        };
-        if crate::moderation_report_current_states::scope_moderator(
-            conn,
-            realm_id,
-            &scope,
-            &caller,
-            &[
-                arkret_wire::CapabilityActionId::POLICY_MANAGE,
-                arkret_wire::CapabilityActionId::MODERATION_DECISION,
-            ],
-            at,
-        )
-        .await?
-        {
-            report_subjects.insert(event_id.clone());
-        }
-    }
-    let mut franking_subjects = std::collections::BTreeSet::new();
-    for entry in &material.current_state_entries {
-        let CurrentState::Value {
-            selector: CurrentSelector::ModerationFrankingProof { event_id },
-            ..
-        } = entry
-        else {
-            continue;
-        };
-        let scope =
-            crate::moderation_franking_proof_current_states::franking_target_scope_in_connection(
-                conn, realm_id, event_id,
-            )
-            .await?;
-        if crate::moderation_report_current_states::scope_moderator(
-            conn,
-            realm_id,
-            &scope,
-            &caller,
-            &[
-                arkret_wire::CapabilityActionId::POLICY_MANAGE,
-                arkret_wire::CapabilityActionId::MODERATION_DECISION,
-            ],
-            at,
-        )
-        .await?
-        {
-            franking_subjects.insert(event_id.clone());
-        }
-    }
     let mut sidecar_floors = std::collections::BTreeMap::new();
     let mut sidecar_public_floors = std::collections::BTreeMap::new();
     let mut owned_sidecars = std::collections::BTreeSet::new();
@@ -1603,8 +1521,6 @@ async fn disclosure_facts_in_connection(
         sidecar_floors,
         sidecar_public_floors,
         owned_sidecars,
-        report_subjects,
-        franking_subjects,
         relation_subjects,
         caller_floor,
         undisclosed_kind,
@@ -1983,7 +1899,6 @@ pub(crate) fn disclose_to_actor(
                     .clone(),
             ),
             CurrentSelector::AppletRegistration { .. }
-            | CurrentSelector::ModerationReport { .. }
             | CurrentSelector::ModerationState { .. }
             | CurrentSelector::CapabilityGrant { .. }
             | CurrentSelector::ObjectRedaction { .. } => None,
@@ -2067,12 +1982,6 @@ pub(crate) fn disclose_to_actor(
                     CurrentSelector::Circle { circle_id }
                     | CurrentSelector::CircleMemberState { circle_id, .. } => {
                         facts.circle_floors.contains_key(circle_id)
-                    }
-                    CurrentSelector::ModerationReport { event_id } => {
-                        facts.report_subjects.contains(event_id)
-                    }
-                    CurrentSelector::ModerationFrankingProof { event_id } => {
-                        facts.franking_subjects.contains(event_id)
                     }
                     CurrentSelector::Relation { .. } => {
                         serde_json::from_value::<arkret_wire::RelationId>(value["id"].clone())
@@ -2294,19 +2203,6 @@ pub(crate) fn disclose_to_actor(
                 {
                     return Err(rejected(
                         "Circle member current differs from its Circle source",
-                    ));
-                }
-            }
-            CurrentSelector::ModerationReport { .. } => {}
-            CurrentSelector::ModerationFrankingProof { event_id } => {
-                let proof: arkret_models_collaboration::events_payloads::moderation::FrankingProof =
-                    serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
-                if proof.event_id != *event_id
-                    || proof.realm_id != material.realm_id
-                    || source_stream_ref != &realm_stream
-                {
-                    return Err(rejected(
-                        "franking current differs from its target or accepted Realm source",
                     ));
                 }
             }
@@ -3018,8 +2914,6 @@ mod tests {
             sidecar_floors: Default::default(),
             sidecar_public_floors: Default::default(),
             owned_sidecars: Default::default(),
-            report_subjects: Default::default(),
-            franking_subjects: Default::default(),
             relation_subjects: Default::default(),
             call_creations: Default::default(),
             caller_floor: Some(ReadableFloor {
@@ -3110,8 +3004,6 @@ mod tests {
             sidecar_floors: Default::default(),
             sidecar_public_floors: Default::default(),
             owned_sidecars: Default::default(),
-            report_subjects: Default::default(),
-            franking_subjects: Default::default(),
             relation_subjects: Default::default(),
             call_creations: Default::default(),
             caller_floor: Some(ReadableFloor {
@@ -3731,22 +3623,6 @@ mod tests {
         facts.undisclosed_family_row = true;
         let error = disclose_to_account(material, &founder, &facts).unwrap_err();
         assert!(error.to_string().contains("outside the disclosure subset"));
-        let (founder, mut material, facts) = fixture();
-        material.current_state_entries.push(row(
-            CurrentSelector::ModerationReport {
-                event_id: event_id(0x44),
-            },
-            9,
-            json!({}),
-        ));
-        let disclosed = disclose_to_account(material, &founder, &facts).unwrap();
-        assert!(!disclosed.current_state_entries.iter().any(|row| matches!(
-            row,
-            CurrentState::Value {
-                selector: CurrentSelector::ModerationReport { .. },
-                ..
-            }
-        )));
     }
 
     #[test]

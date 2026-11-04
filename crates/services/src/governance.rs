@@ -31,23 +31,6 @@ pub trait AuditLogPort: Send + Sync {
 }
 
 #[async_trait]
-pub trait ModerationPort: Send + Sync {
-    async fn queue_view_for_actor(
-        &self,
-        actor: &arkret_wire::ActorId,
-        realm_id: Option<&arkret_wire::RealmId>,
-    ) -> ServiceResult<
-        Vec<arkret_models_collaboration::governance::moderation_queue::ModerationQueueItem>,
-    >;
-    async fn management_view_for_actor(
-        &self,
-        actor: &arkret_wire::ActorId,
-        realm_id: Option<&arkret_wire::RealmId>,
-    ) -> ServiceResult<coland_storage::ModerationManagementView>;
-    async fn report_count(&self) -> ServiceResult<u64>;
-}
-
-#[async_trait]
 pub trait GovernanceRecordsPort: Send + Sync {
     async fn organization(
         &self,
@@ -89,7 +72,6 @@ pub trait GovernanceRecordsPort: Send + Sync {
 #[derive(Clone)]
 pub struct GovernanceService {
     audit_log: Arc<dyn AuditLogPort>,
-    moderation: Arc<dyn ModerationPort>,
     records: Arc<dyn GovernanceRecordsPort>,
     organizations: Arc<Mutex<BTreeMap<String, OrganizationRecord>>>,
     realm_organizations: Arc<Mutex<BTreeMap<String, BTreeSet<DidCoreId>>>>,
@@ -157,13 +139,11 @@ impl GovernanceService {
 
     pub fn new(
         audit_log: Arc<dyn AuditLogPort>,
-        moderation: Arc<dyn ModerationPort>,
         records: Arc<dyn GovernanceRecordsPort>,
         runtime_settings: Arc<dyn RuntimeSettingsPort>,
     ) -> Self {
         Self {
             audit_log,
-            moderation,
             records,
             organizations: Arc::new(Mutex::new(BTreeMap::new())),
             realm_organizations: Arc::new(Mutex::new(BTreeMap::new())),
@@ -261,28 +241,6 @@ impl GovernanceService {
         self.audit_log.entries().await
     }
 
-    /// The moderation queue View for `actor` from one durable cut.
-    pub async fn moderation_queue_for_actor(
-        &self,
-        actor: &arkret_wire::ActorId,
-        realm_id: Option<&arkret_wire::RealmId>,
-    ) -> ServiceResult<
-        Vec<arkret_models_collaboration::governance::moderation_queue::ModerationQueueItem>,
-    > {
-        self.moderation.queue_view_for_actor(actor, realm_id).await
-    }
-    pub async fn moderation_management_view_for_actor(
-        &self,
-        actor: &arkret_wire::ActorId,
-        realm_id: Option<&arkret_wire::RealmId>,
-    ) -> ServiceResult<coland_storage::ModerationManagementView> {
-        self.moderation
-            .management_view_for_actor(actor, realm_id)
-            .await
-    }
-    pub async fn moderation_report_count(&self) -> ServiceResult<u64> {
-        self.moderation.report_count().await
-    }
     pub async fn retention_policy(
         &self,
         realm_id: &str,
@@ -350,7 +308,6 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingAuditLog(Mutex<Vec<Value>>);
-    struct NoModeration;
 
     struct NoRuntimeSettings;
 
@@ -448,29 +405,6 @@ mod tests {
     }
 
     #[async_trait]
-    impl ModerationPort for NoModeration {
-        async fn queue_view_for_actor(
-            &self,
-            _actor: &arkret_wire::ActorId,
-            _realm_id: Option<&arkret_wire::RealmId>,
-        ) -> ServiceResult<
-            Vec<arkret_models_collaboration::governance::moderation_queue::ModerationQueueItem>,
-        > {
-            Ok(Vec::new())
-        }
-        async fn management_view_for_actor(
-            &self,
-            _actor: &arkret_wire::ActorId,
-            _realm_id: Option<&arkret_wire::RealmId>,
-        ) -> ServiceResult<coland_storage::ModerationManagementView> {
-            Ok(coland_storage::ModerationManagementView::default())
-        }
-        async fn report_count(&self) -> ServiceResult<u64> {
-            Ok(0)
-        }
-    }
-
-    #[async_trait]
     impl AuditLogPort for RecordingAuditLog {
         async fn append(&self, entry: Value) -> ServiceResult<()> {
             self.0.lock().expect("audit lock").push(entry);
@@ -491,7 +425,6 @@ mod tests {
         let port = Arc::new(RecordingAuditLog::default());
         let service = GovernanceService::new(
             port.clone(),
-            Arc::new(NoModeration),
             Arc::new(NoGovernanceRecords),
             Arc::new(NoRuntimeSettings),
         );

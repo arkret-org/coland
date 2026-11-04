@@ -18,7 +18,6 @@ pub(crate) mod authority_consent;
 mod authority_contact;
 mod authority_direct_conversation;
 mod authority_forward;
-mod authority_franking;
 mod authority_handoff;
 mod authority_key_backup_pointer;
 mod authority_managed_device;
@@ -56,7 +55,6 @@ pub(crate) use authority_forward::{
     admit_forwarded_event, admit_forwarded_mls, forward_self_event, fresh_device_request,
     fresh_forward_request, fresh_producer_agent_evidence, prepare_native_forward_request,
 };
-pub use authority_franking::spawn_pending_franking_sweeper;
 #[cfg(feature = "test-support")]
 pub(crate) use authority_handoff::install as install_test_handoff;
 pub(crate) use authority_producer_validation::{
@@ -65,7 +63,6 @@ pub(crate) use authority_producer_validation::{
 };
 pub(crate) use authority_self_event_unit::{
     refresh_direct_conversation_peer_claim, submit_applet_event, submit_mimi_binding_event,
-    submit_self_moderation_report,
 };
 pub use coland_services::events::{RealmDirectoryEntry, RealmDirectoryIndex, RealmDirectoryQuery};
 pub(crate) use member_identity::HandleClaimEvidenceRecord;
@@ -79,6 +76,4 @@ pub(crate) use replica_anchor::{account_continuation_recoverable, refresh_accoun
 pub(crate) use service_route_fetcher::VerifiedBindingRouteFetcher;
 
 mod authority_mimi_unit;
-pub(crate) use authority_mimi_unit::{
-    author_mimi_event, commit_mimi_event, mimi_reporter_device_guard,
-};
+pub(crate) use authority_mimi_unit::{author_mimi_event, commit_mimi_event};

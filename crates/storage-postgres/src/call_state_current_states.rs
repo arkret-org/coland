@@ -69,7 +69,7 @@ pub(crate) async fn commit_in_connection(
         conn, event, commit, prepared,
     )
     .await?;
-    if !crate::moderation_report_current_states::scope_member_in_connection(
+    if !crate::scope_access::scope_member_in_connection(
         conn,
         &event.realm_id,
         &event.scope_ref,
@@ -172,11 +172,7 @@ async fn read_before_in_connection(
         },
         _ => return Err(invalid("Call current uses a non-call stream")),
     };
-    if !crate::moderation_report_current_states::scope_member_in_connection(
-        conn, realm, &scope, actor,
-    )
-    .await?
-    {
+    if !crate::scope_access::scope_member_in_connection(conn, realm, &scope, actor).await? {
         return Ok(None);
     }
     #[derive(QueryableByName)]

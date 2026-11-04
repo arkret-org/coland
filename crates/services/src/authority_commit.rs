@@ -2110,32 +2110,6 @@ impl AuthorityCommitApplication {
         Ok(self.store().replica_stream_anchor(realm_id).await?)
     }
 
-    pub async fn pending_franking_proofs(
-        &self,
-        receiver: &arkret_wire::DidCoreId,
-    ) -> ServiceResult<Vec<coland_storage::PendingFrankingProof>> {
-        Ok(self.store().pending_franking_proofs(receiver).await?)
-    }
-
-    pub async fn fix_franking_proof(
-        &self,
-        prepared: &coland_storage::PreparedFrankingProof,
-    ) -> ServiceResult<arkret_wire::Event> {
-        Ok(self.store().fix_franking_proof(prepared).await?)
-    }
-
-    pub async fn complete_franking_proof(
-        &self,
-        realm: &arkret_wire::RealmId,
-        target: &arkret_wire::EventId,
-        proof_event: &arkret_wire::EventId,
-    ) -> ServiceResult<()> {
-        Ok(self
-            .store()
-            .complete_franking_proof(realm, target, proof_event)
-            .await?)
-    }
-
     pub async fn replica_stream_has_hosted_member(
         &self,
         stream: &arkret_wire::CommitStreamRef,

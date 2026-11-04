@@ -273,7 +273,6 @@ async fn commit(
             audit_unit: Some(audit_unit),
             events: commands,
             event_approvals,
-            franking_replay_nonce: None,
             realm_organization_proof: None,
             applet_record: None,
             applet_authoring_preview: None,

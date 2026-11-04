@@ -25,7 +25,6 @@ fn batch(events: Vec<EventCommitRequest>, unit: RegisteredAuditCommit) -> EventB
     EventBatchCommitRequest {
         audit_unit: Some(unit),
         events,
-        franking_replay_nonce: None,
         realm_organization_proof: None,
         event_approvals: None,
         applet_record: None,

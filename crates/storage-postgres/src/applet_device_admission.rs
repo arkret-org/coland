@@ -767,7 +767,7 @@ pub(crate) async fn require_mls_permission_source(
     if !matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit) {
         return Err(denied("native MLS permission requires an actual MLS Event"));
     }
-    if !crate::moderation_report_current_states::scope_member_in_connection(
+    if !crate::scope_access::scope_member_in_connection(
         conn,
         &event.realm_id,
         &event.scope_ref,

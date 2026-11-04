@@ -2211,70 +2211,6 @@ async fn stage_agent_membership_cascade(
     Ok(())
 }
 
-/// Consume one moderation franking replay nonce.
-async fn commit_franking_replay_nonce(
-    conn: &mut AsyncPgConnection,
-    nonce: &coland_storage::FrankingReplayNonceCommit,
-) -> PersistenceResult<()> {
-    let expires_at = coland_storage::franking_replay_nonce_expires_at(nonce.consumed_at)?;
-    let scope_lock = format!(
-        "moderation_franking_replay_nonces.capacity.v1|{}:{}|{}:{}",
-        nonce.realm_id.len(),
-        nonce.realm_id,
-        nonce.received_by.as_str().len(),
-        nonce.received_by
-    );
-    sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind::<Text, _>(&scope_lock)
-        .execute(&mut *conn)
-        .await
-        .map_err(PersistenceError::database)?;
-    sql_query(
-        "DELETE FROM moderation_franking_replay_nonces \
-         WHERE realm_id = $1 AND received_by = $2 AND expires_at <= $3",
-    )
-    .bind::<Text, _>(&nonce.realm_id)
-    .bind::<Text, _>(nonce.received_by.as_str())
-    .bind::<Timestamptz, _>(nonce.consumed_at)
-    .execute(&mut *conn)
-    .await
-    .map_err(PersistenceError::database)?;
-    let active = sql_query(
-        "SELECT COUNT(*) AS count FROM moderation_franking_replay_nonces \
-         WHERE realm_id = $1 AND received_by = $2",
-    )
-    .bind::<Text, _>(&nonce.realm_id)
-    .bind::<Text, _>(nonce.received_by.as_str())
-    .get_result::<CountRow>(&mut *conn)
-    .await
-    .map_err(PersistenceError::database)?
-    .count;
-    if active
-        >= i64::try_from(coland_storage::LOCAL_FRANKING_REPLAY_NONCE_MAX_ACTIVE_PER_SCOPE)
-            .expect("franking replay ledger per-scope bound fits i64")
-    {
-        return Err(conflict("duplicate_conflict"));
-    }
-    let inserted = sql_query(
-        "INSERT INTO moderation_franking_replay_nonces \
-         (realm_id, received_by, replay_nonce, report_event_id, consumed_at, expires_at) \
-         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
-    )
-    .bind::<Text, _>(&nonce.realm_id)
-    .bind::<Text, _>(nonce.received_by.as_str())
-    .bind::<Text, _>(&nonce.replay_nonce)
-    .bind::<Text, _>(&nonce.report_event_id)
-    .bind::<Timestamptz, _>(nonce.consumed_at)
-    .bind::<Timestamptz, _>(expires_at)
-    .execute(&mut *conn)
-    .await
-    .map_err(PersistenceError::database)?;
-    if inserted != 1 {
-        return Err(conflict("duplicate_conflict"));
-    }
-    Ok(())
-}
-
 /// Install one Applet installation aggregate: the managed-identity winner, the
 /// per-scope installation record, its namespace claims, and every managed
 /// authority anchor it introduces.
@@ -3297,13 +3233,7 @@ async fn commit_prepared_event_inner(
         }
     }
     if let Some(record) = request.idempotency.as_ref() {
-        if matches!(
-            request.self_producer_guard,
-            Some(coland_storage::SelfProducerCommitGuard::MimiFacade { .. })
-        ) && event.kind == arkret_wire::EventKind::SelfModerationReport
-        {
-            crate::mimi_admission::record_report_idempotency_in_connection(conn, record).await?;
-        } else if event.kind == arkret_wire::EventKind::MlsCommit
+        if event.kind == arkret_wire::EventKind::MlsCommit
             && matches!(
                 request.self_producer_guard,
                 Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(_))
@@ -3755,27 +3685,12 @@ async fn commit_content_current_states_inner(
         event_approvals,
     ))
     .await?;
-    Box::pin(crate::moderation_report_current_states::commit_moderation_report_current_state_in_connection(
-        conn, event, commit,
-    )).await?;
     Box::pin(
         crate::moderation_state_current_states::commit_moderation_state_current_state_in_connection(
             conn,
             event,
             commit,
             event_approvals,
-        ),
-    )
-    .await?;
-    Box::pin(crate::moderation_franking_proof_current_states::commit_franking_current_state_in_connection(
-        conn, event, commit,
-    )).await?;
-    Box::pin(
-        crate::moderation_franking_proof_current_states::enqueue_franking_in_connection(
-            conn,
-            event,
-            &request.authority_commit.expected_authority.service_id,
-            request.event.received_at,
         ),
     )
     .await?;
@@ -3802,10 +3717,6 @@ async fn commit_batch_in_connection(
     if request.events.is_empty() {
         return Err(PersistenceError::SchemaViolation("empty event batch".to_owned()).into());
     }
-    coland_storage::validate_franking_replay_nonce_commit(
-        &request.events,
-        request.franking_replay_nonce.as_ref(),
-    )?;
     crate::registered_audit::bind_approvals(&mut request)?;
     let audit_unit = request.audit_unit.as_ref();
     if let Some(original) =
@@ -3881,9 +3792,6 @@ async fn commit_batch_in_connection(
         .await?;
     }
 
-    if let Some(nonce) = request.franking_replay_nonce.as_ref() {
-        commit_franking_replay_nonce(conn, nonce).await?;
-    }
     if let Some(preview) = request.applet_authoring_preview.as_ref() {
         let updated = sql_query(
             "UPDATE applet_authoring_previews SET status = 'committed', committed_at = NOW() \
@@ -3934,7 +3842,6 @@ impl EventCommitUnitOfWork for PgEventCommitUnitOfWork {
             events: vec![request],
             realm_organization_proof: None,
             event_approvals: None,
-            franking_replay_nonce: None,
             applet_record: None,
             applet_authoring_preview: None,
             agent_membership_cascade: None,

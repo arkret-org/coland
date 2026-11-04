@@ -5,22 +5,19 @@
 //! `RealmCommit` at the exact per-stream head, the kind's registered typed
 //! current result, the source outbox (empty for the supported local-only
 //! Realm kinds), the projection event and any kind-specific effect such as the
-//! consumed franking replay nonce. A same-Station producer guard is rechecked
+//! committed event effects. A same-Station producer guard is rechecked
 //! against the local PCR, and a cross-Station producer's verified
 //! `producer_device_evidence` is retained, inside that transaction together
 //! with the stream head, so a failure leaves zero writes.
 //!
 //! Only kinds with a registered same-cut current writer enter this unit. The
-//! generic `/_arkret/self/events` route, `authority_forward` on
-//! `/_arkret/peer/events` and dedicated operations such as
-//! `ak.self.moderation.command.report.v1` share it; every other kind stays
-//! closed at its caller.
+//! generic `/_arkret/self/events` route and `authority_forward` on
+//! `/_arkret/peer/events` share it; every other kind stays closed at its caller.
 
 use arkret_wire::{
     AuthorityCommitStatus, AuthoritySubmitResponseBody, Event, EventAdmissionSubmission,
 };
 use chrono::Utc;
-use coland_services::identity::SessionIdentityState;
 use coland_services::{ServiceError, ServiceResult};
 use coland_storage::SelfProducerCommitGuard;
 
@@ -109,9 +106,6 @@ impl AdmittedProducer {
 /// Kind-specific durable effects committed atomically with the Event.
 #[derive(Default)]
 pub(super) struct SelfEventUnitEffects {
-    /// The report's embedded franking proof nonce; its `consumed_at` is set to
-    /// the accepting Commit time inside the unit.
-    pub(super) franking_replay_nonce: Option<coland_storage::FrankingReplayNonceCommit>,
     /// The verified public MLS transition and Welcomes of an `ak.mls.genesis`
     /// or `ak.mls.commit` (`authority_mls_unit`).
     pub(super) mls: Option<super::authority_mls_unit::MlsUnitInstallation>,
@@ -137,7 +131,6 @@ fn decided_at_commit_cut(kind: &arkret_wire::EventKind) -> bool {
             | arkret_wire::EventKind::RealmSetDefaultStrand
             | arkret_wire::EventKind::RealmJoinRule
             | arkret_wire::EventKind::RealmHistoryAccess
-            | arkret_wire::EventKind::SelfModerationReport
             | arkret_wire::EventKind::ModerationDecision
             | arkret_wire::EventKind::ModerationDecisionLift
             | arkret_wire::EventKind::SpaceCreate
@@ -462,10 +455,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             ),
         )
         .map_err(|error| ServiceError::Internal(error.to_string()))?;
-        let SelfEventUnitEffects {
-            franking_replay_nonce,
-            mls,
-        } = effects;
+        let SelfEventUnitEffects { mls } = effects;
         let is_mls = matches!(
             event.kind,
             arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit
@@ -624,26 +614,18 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             Box::pin(crate::routing::organizations::prepare_realm_organization_proof(state, event))
                 .await
                 .map_err(|reason| ServiceError::Conflict(reason.to_owned()))?;
-        let franking_replay_nonce = franking_replay_nonce.map(|mut nonce| {
-            nonce.consumed_at = committed_at;
-            nonce
-        });
         let event_approvals = Box::pin(crate::approval_admission::prepare_event_approvals(
             state,
             submission,
             transaction.commit.committed_at,
         ))
         .await?;
-        let committed = if franking_replay_nonce.is_some()
-            || realm_organization_proof.is_some()
-            || event_approvals.is_some()
-        {
+        let committed = if realm_organization_proof.is_some() || event_approvals.is_some() {
             crate::boxed_future(|| {
                 state.events().commit_accepted_event_batch(
                     coland_services::events::CommitAcceptedEventBatchCommand {
                         audit_unit: None,
                         events: vec![command],
-                        franking_replay_nonce,
                         realm_organization_proof,
                         event_approvals,
                         applet_record: None,
@@ -725,72 +707,6 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             commit: transaction.commit,
         })
     })
-}
-
-/// `ak.self.moderation.command.report.v1`: admit the reporter's exact signed
-/// `ak.self.moderation.report` Event (content-moderation.md §3.1/§3.3).
-///
-/// The Station never authors, re-signs or injects guards into the Event; it
-/// only signs the covering RealmCommit. The report's current state and
-/// any consumed franking nonce commit with it. Realm and Circle reports use
-/// their exact signed source stream; MIMI facade reports have their own ingress.
-pub(crate) async fn submit_self_moderation_report(
-    state: &AppState,
-    session: &SessionIdentityState,
-    request: EventAdmissionSubmission,
-) -> ServiceResult<AuthoritySubmitResponseBody> {
-    request
-        .validate()
-        .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
-    let event = &request.event;
-    if event.kind != arkret_wire::EventKind::SelfModerationReport {
-        return Err(ServiceError::SchemaViolation(
-            "report_event must be ak.self.moderation.report".to_owned(),
-        ));
-    }
-    if request.approval_signatures.is_some() {
-        return Err(ServiceError::SchemaViolation(
-            "self moderation report carries no approval signatures".to_owned(),
-        ));
-    }
-    if event.executed_by.is_some() || event.authorization_ref.is_some() || event.applet_id.is_some()
-    {
-        return Err(ServiceError::SchemaViolation(
-            "self moderation report must be directly authored by its reporter".to_owned(),
-        ));
-    }
-    let producer_guard =
-        super::authority_producer_validation::verify_self_event_producer(state, session, event)
-            .await?;
-    let payload: arkret_models_collaboration::events_payloads::moderation::ModerationReportPayload =
-        serde_json::from_value(
-            serde_json::to_value(&event.payload)
-                .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?,
-        )
-        .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
-    payload
-        .validate_self_endpoint(event.actor_id.signing_principal_id())
-        .map_err(|error| ServiceError::SchemaViolation(error.to_owned()))?;
-    let franking_replay_nonce =
-        payload
-            .franking_proof
-            .map(|proof| coland_storage::FrankingReplayNonceCommit {
-                realm_id: event.realm_id.to_string(),
-                received_by: proof.received_by,
-                replay_nonce: proof.replay_nonce,
-                report_event_id: event.event_id.to_string(),
-                consumed_at: Utc::now(),
-            });
-    commit_event_unit(
-        state,
-        &request,
-        AdmittedProducer::Local(Box::new(producer_guard)),
-        SelfEventUnitEffects {
-            franking_replay_nonce,
-            mls: None,
-        },
-    )
-    .await
 }
 
 /// Admit an Applet producer using its independently checked current Service key.

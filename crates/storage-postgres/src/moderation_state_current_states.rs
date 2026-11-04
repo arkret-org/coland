@@ -11,7 +11,7 @@
 //! identity alone does not authorize a Circle decision.
 
 use coland_storage::{PersistenceError, PersistenceResult};
-use diesel::sql_types::{BigInt, Bool, Jsonb, Text, Timestamptz};
+use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel_async::AsyncPgConnection;
 use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::{Value, json};
@@ -26,12 +26,6 @@ struct StateRow {
     current_commit_id: String,
     #[diesel(sql_type = BigInt)]
     current_stream_position: i64,
-}
-
-#[derive(diesel::QueryableByName)]
-struct PresentRow {
-    #[diesel(sql_type = Bool)]
-    present: bool,
 }
 
 fn conflict(detail: impl Into<String>) -> PersistenceError {
@@ -79,37 +73,6 @@ fn assertions(value: &Value) -> PersistenceResult<Vec<Value>> {
         .ok_or_else(|| corrupt("value has no assertions"))
 }
 
-/// A report queue item may be dismissed only by naming an accepted report of
-/// this Realm committed strictly before the decision.
-async fn ensure_report_target(
-    conn: &mut AsyncPgConnection,
-    realm_id: &str,
-    report_event_id: &str,
-    before_position: i64,
-    stream: &arkret_wire::CommitStreamRef,
-) -> PersistenceResult<()> {
-    let present = diesel::sql_query(
-        "SELECT EXISTS (SELECT 1 FROM moderation_report_current_states r \
-         JOIN realm_commits c ON c.commit_id=r.current_commit_id \
-         WHERE r.realm_id=$1 AND r.report_event_id=$2 AND c.stream_position<$3 \
-           AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position \
-           AND c.stream_ref=$4) AS present",
-    )
-    .bind::<Text, _>(realm_id)
-    .bind::<Text, _>(report_event_id)
-    .bind::<BigInt, _>(before_position)
-    .bind::<Jsonb, _>(serde_json::to_value(stream).map_err(PersistenceError::database)?)
-    .get_result::<PresentRow>(&mut *conn)
-    .await
-    .map_err(PersistenceError::database)?
-    .present;
-    if present {
-        Ok(())
-    } else {
-        Err(target_not_found())
-    }
-}
-
 pub(crate) async fn commit_moderation_state_current_state_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
@@ -123,7 +86,7 @@ pub(crate) async fn commit_moderation_state_current_state_in_connection(
     };
     arkret_schema::validate_event_for_submit(event)
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    let stream = crate::moderation_report_current_states::moderation_stream(event)?;
+    let stream = crate::scope_access::scoped_event_stream(event)?;
     if commit.stream_ref != stream || commit.event_ref != event.event_id {
         return Err(conflict(
             "moderation_state source stream differs from signed scope",
@@ -173,19 +136,14 @@ pub(crate) async fn commit_moderation_state_current_state_in_connection(
                 "moderation_actor_mismatch: issuer_id is not the signing issuer",
             ));
         }
-        if typed.decision == "dismiss" {
-            ensure_report_target(conn, realm_id, typed.target_ref.as_str(), before, &stream)
-                .await?;
-        } else {
-            crate::moderation_report_current_states::ensure_scope_target(
-                conn,
-                &event.realm_id,
-                &event.scope_ref,
-                typed.target_ref.as_str(),
-                before,
-            )
-            .await?;
-        }
+        crate::scope_access::ensure_scope_target(
+            conn,
+            &event.realm_id,
+            &event.scope_ref,
+            typed.target_ref.as_str(),
+            before,
+        )
+        .await?;
         typed.target_ref
     };
     let current = locked_state(conn, realm_id, target_ref.as_str()).await?;

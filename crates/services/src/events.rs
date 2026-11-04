@@ -610,7 +610,6 @@ pub use coland_storage::{
 pub struct CommitAcceptedEventBatchCommand {
     pub audit_unit: Option<coland_storage::RegisteredAuditCommit>,
     pub events: Vec<CommitAcceptedEventCommand>,
-    pub franking_replay_nonce: Option<coland_storage::FrankingReplayNonceCommit>,
     pub realm_organization_proof: Option<coland_storage::RealmOrganizationProofCommit>,
     pub event_approvals: Option<coland_storage::EventApprovalCommit>,
     pub applet_record: Option<CommitAppletRecord>,
@@ -662,12 +661,6 @@ pub trait EventReadPort: Send + Sync {
     async fn canonical_events(&self) -> ServiceResult<Vec<AcceptedEvent>>;
     async fn canonical_events_for_actor(&self, actor_id: &str)
     -> ServiceResult<Vec<AcceptedEvent>>;
-    async fn franking_proofs_for_target(
-        &self,
-        realm_id: &str,
-        received_by: &arkret_identifiers::DidCoreId,
-        target_event_id: &str,
-    ) -> ServiceResult<Vec<AcceptedEvent>>;
     async fn identity_anchor_account_slot(
         &self,
         account_id: &arkret_wire::AccountId,
@@ -804,16 +797,6 @@ impl EventQueryService {
         actor_id: &str,
     ) -> ServiceResult<Vec<AcceptedEvent>> {
         self.events.canonical_events_for_actor(actor_id).await
-    }
-    pub async fn franking_proofs_for_target(
-        &self,
-        realm_id: &str,
-        received_by: &arkret_identifiers::DidCoreId,
-        target_event_id: &str,
-    ) -> ServiceResult<Vec<AcceptedEvent>> {
-        self.events
-            .franking_proofs_for_target(realm_id, received_by, target_event_id)
-            .await
     }
     pub async fn identity_anchor_account_slot(
         &self,

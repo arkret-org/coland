@@ -1014,52 +1014,6 @@ async fn require_visible(
             ));
         }
     }
-    if matches!(
-        event.kind,
-        arkret_wire::EventKind::SelfModerationReport
-            | arkret_wire::EventKind::ModerationFrankingProof
-    ) {
-        let scope = if event.kind == arkret_wire::EventKind::ModerationFrankingProof {
-            let proof: arkret_models_collaboration::events_payloads::moderation::FrankingProof =
-                serde_json::from_value(
-                    serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
-                )
-                .map_err(PersistenceError::database)?;
-            crate::moderation_franking_proof_current_states::franking_target_scope_in_connection(
-                conn,
-                &event.realm_id,
-                &proof.event_id,
-            )
-            .await?
-        } else {
-            event.scope_ref.clone()
-        };
-        let rows = sql_query("SELECT member_id FROM member_state_current_states WHERE realm_id=$1 AND membership='join'").bind::<Text, _>(event.realm_id.as_str()).load::<MemberIdRow>(&mut *conn).await?;
-        for row in rows {
-            let member: arkret_wire::ActorId =
-                serde_json::from_str(&row.member_id).map_err(PersistenceError::database)?;
-            if member.fixed_route_service_id() == Some(local_service_id)
-                && crate::replica_authorization::scope_moderator(
-                    conn,
-                    &event.realm_id,
-                    &member,
-                    &scope,
-                    &[
-                        arkret_wire::CapabilityActionId::POLICY_MANAGE,
-                        arkret_wire::CapabilityActionId::MODERATION_DECISION,
-                    ],
-                    chrono::Utc::now(),
-                )
-                .await?
-            {
-                return Ok(());
-            }
-        }
-        return Err(conflict(
-            ConflictCode::CapabilityDenied,
-            "no hosted exact-scope moderator is proved at the verified replica cut",
-        ));
-    }
     Ok(())
 }
 

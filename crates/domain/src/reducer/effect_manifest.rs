@@ -471,13 +471,6 @@ const EFFECT_MANIFEST: &[EffectRegistration] = &[
         slot: CacheSlot::Shared(apply_moderation_decision_lift_dispatch),
     },
     EffectRegistration {
-        kind: arkret_wire::event_kind_str::MODERATION_FRANKING_PROOF,
-        owner: EventEffectOwnership::TypedStateWriter,
-        scope: EventWireScope::DurableEvent,
-        reducer_input: true,
-        slot: CacheSlot::FailClosed,
-    },
-    EffectRegistration {
         kind: arkret_wire::CapabilityActionId::MORPH_ARCHIVE,
         owner: EventEffectOwnership::TypedStateWriter,
         scope: EventWireScope::DurableEvent,
@@ -840,13 +833,6 @@ const EFFECT_MANIFEST: &[EffectRegistration] = &[
         scope: EventWireScope::DurableEvent,
         reducer_input: true,
         slot: CacheSlot::Shared(apply_agent_resume_dispatch),
-    },
-    EffectRegistration {
-        kind: arkret_wire::event_kind_str::SELF_MODERATION_REPORT,
-        owner: EventEffectOwnership::TypedStateWriter,
-        scope: EventWireScope::DurableEvent,
-        reducer_input: true,
-        slot: CacheSlot::Shared(apply_durable_fact_dispatch),
     },
     EffectRegistration {
         kind: arkret_wire::event_kind_str::SIDECAR_CONTEXT_ATTACH,

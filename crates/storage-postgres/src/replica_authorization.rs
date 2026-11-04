@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use arkret_models_collaboration::governance::grant_constraint::{
     AuthorityRootRef, CapabilityGrant, CapabilitySubject, IssuerAuthorityRef,
 };
+
 use arkret_wire::{ActorId, CurrentSelector, CurrentState, GrantId, RealmId, ScopeRef};
-use coland_storage::{AuthorizationOperation, OperationFacts, PersistenceError, PersistenceResult};
+use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel_async::AsyncPgConnection;
 use horme::{OptionalExtension as _, RunQueryDsl};
@@ -145,13 +146,9 @@ async fn save_row_with_observation(
 struct StoredRow {
     #[diesel(sql_type = Jsonb)]
     selector: serde_json::Value,
-    #[diesel(sql_type = Jsonb)]
-    value: serde_json::Value,
 }
 
-/// The Station signature establishes each grant's reducer-derived root refs.
-/// The member Station checks their Realm/generation and every live parent,
-/// without guessing a root Event ref not disclosed by the root value.
+/// Validate the complete reducer-derived authority chain for a retained grant.
 pub(crate) fn intact_chain(
     id: &GrantId,
     grants: &BTreeMap<GrantId, CapabilityGrant>,
@@ -206,120 +203,6 @@ pub(crate) fn intact_chain(
     });
     visiting.remove(id);
     valid
-}
-
-/// This is a governance metadata read, not ordinary Circle content access.
-/// The caller separately proves its hosted membership and anchored stream.
-pub(crate) async fn scope_moderator(
-    conn: &mut AsyncPgConnection,
-    realm: &RealmId,
-    actor: &ActorId,
-    scope: &ScopeRef,
-    actions: &[&str],
-    at: chrono::DateTime<chrono::Utc>,
-) -> PersistenceResult<bool> {
-    let realm_stream = arkret_wire::CommitStreamRef::Realm {
-        realm_id: realm.clone(),
-    };
-    let Some(cut) = verified_head(conn, &realm_stream).await? else {
-        return Ok(false);
-    };
-    let key = crate::authority_commit::stream_key(&realm_stream)?;
-    let known = diesel::sql_query(
-        "SELECT commit_id AS head_commit_id,stream_position AS head_stream_position FROM realm_commits WHERE stream_key=$1 \
-         UNION ALL SELECT anchor_commit_id AS head_commit_id,anchor_stream_position AS head_stream_position FROM replica_stream_anchors \
-         WHERE stream_key=$1 AND anchor_commit_id IS NOT NULL ORDER BY head_stream_position DESC LIMIT 1",
-    ).bind::<Text, _>(&key).get_result::<CutRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-    if known.is_some_and(|head| {
-        u64::try_from(head.head_stream_position).map_or(true, |position| {
-            position > cut.stream_position
-                || (position == cut.stream_position
-                    && head.head_commit_id != cut.commit_id.as_str())
-        })
-    }) {
-        return Ok(false);
-    }
-    let rows = diesel::sql_query(
-        "SELECT selector,value FROM replica_authorization_rows WHERE realm_id=$1 ORDER BY selector::text",
-    )
-    .bind::<Text, _>(realm.as_str())
-    .load::<StoredRow>(conn)
-    .await
-    .map_err(PersistenceError::database)?;
-    let mut root = None;
-    let mut policy_present = false;
-    let mut grants = BTreeMap::new();
-    for row in rows {
-        let selector: CurrentSelector = serde_json::from_value(row.selector).map_err(invalid)?;
-        match selector {
-            CurrentSelector::RealmAuthorityRoot => root = Some(row.value),
-            CurrentSelector::RealmPolicyBundle => {
-                serde_json::from_value::<
-                    arkret_models_collaboration::events_payloads::realm::RealmPolicyBundlePayload,
-                >(row.value)
-                .map_err(invalid)?;
-                policy_present = true;
-            }
-            CurrentSelector::CapabilityGrant { grant_id } => {
-                let grant: CapabilityGrant = serde_json::from_value(row.value).map_err(invalid)?;
-                if grant.id != grant_id || grant.realm_id.as_ref() != Some(realm) {
-                    return Err(invalid("grant identity differs from its selector"));
-                }
-                grants.insert(grant_id, grant);
-            }
-            CurrentSelector::MemberState { .. } => {}
-            _ => {}
-        }
-    }
-    let Some(root) = root.filter(|_| policy_present) else {
-        return Ok(false);
-    };
-    let controller: ActorId = serde_json::from_value(
-        root.get("controller_actor_id")
-            .cloned()
-            .ok_or_else(|| invalid("root controller is absent"))?,
-    )
-    .map_err(invalid)?;
-    root.get("controller_epoch")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| invalid("root controller epoch is absent"))?;
-    let generation = root
-        .get("authority_generation")
-        .and_then(arkret_canonical::serde_helpers::parse_uint64_decimal_value)
-        .ok_or_else(|| invalid("root generation is absent"))?;
-    let target = match scope {
-        ScopeRef::Realm { realm_id } if realm_id == realm => {
-            if controller == *actor {
-                return Ok(true);
-            }
-            arkret_wire::WireResourceSelector::realm(realm.clone())
-        }
-        ScopeRef::Circle {
-            realm_id,
-            circle_id,
-        } if realm_id == realm => {
-            arkret_wire::WireResourceSelector::circle(realm.clone(), circle_id.clone())
-        }
-        _ => return Ok(false),
-    };
-    let effective = grants.iter().filter_map(|(id, grant)| {
-        (matches!(&grant.subject, CapabilitySubject::Actor(subject) if subject == actor)
-            && intact_chain(id, &grants, realm, generation, at, &mut BTreeSet::new(), 0))
-        .then_some(grant)
-    });
-    let facts = OperationFacts::default();
-    Ok(!coland_storage::evaluate_grants(
-        &AuthorizationOperation {
-            actor,
-            actions,
-            target: &target,
-            at,
-            facts: &facts,
-        },
-        effective,
-    )
-    .unreserved()
-    .is_empty())
 }
 
 #[derive(diesel::QueryableByName)]
@@ -464,7 +347,7 @@ pub(crate) async fn authorization_evidence(
     realm: &RealmId,
 ) -> PersistenceResult<Option<Vec<CurrentState>>> {
     let rows = diesel::sql_query(
-        "SELECT selector,value FROM replica_authorization_rows WHERE realm_id=$1 \
+        "SELECT selector FROM replica_authorization_rows WHERE realm_id=$1 \
          AND selector->>'kind' IN ('realm_authority_root','realm_policy_bundle','capability_grant') \
          ORDER BY selector::text",
     )

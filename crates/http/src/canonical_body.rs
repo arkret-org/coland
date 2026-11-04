@@ -29,7 +29,6 @@ fn requires_mimi_provider_signature(method: &str, path: &str) -> bool {
         Some(
             ServiceOperationId::OpenMimiCommandNotifyV1
                 | ServiceOperationId::OpenMimiCommandProxyDownloadV1
-                | ServiceOperationId::OpenMimiCommandReportAbuseV1
                 | ServiceOperationId::OpenMimiCommandRequestConsentV1
                 | ServiceOperationId::OpenMimiCommandSubmitMessageV1
                 | ServiceOperationId::OpenMimiCommandUpdateConsentV1

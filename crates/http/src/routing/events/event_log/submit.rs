@@ -764,9 +764,7 @@ fn identity_creation_control_proof_window_valid(
 
 mod value;
 
-pub(in crate::routing) use value::{
-    submit_applet_revoke_event_submission, submit_event_value, submit_initial_event_submission,
-};
+pub(in crate::routing) use value::{submit_applet_revoke_event_submission, submit_event_value};
 // `submit_one_error_to_app_error` is defined in this module, so it needs no
 // re-export here; `event_log.rs` names it directly.
 

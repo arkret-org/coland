@@ -1258,13 +1258,6 @@ CREATE INDEX canonical_events_agent_provision_account_idx ON public.canonical_ev
     ((envelope->'actor_id'->'account_id'->>'station_id'))
 ) WHERE state='committed' AND kind='ak.agent.provision';
 
-CREATE INDEX canonical_events_franking_target_idx ON public.canonical_events USING btree (
-    realm_pk,
-    actor_id,
-    ((envelope -> 'payload' ->> 'event_id'))
-) WHERE state = 'committed' AND kind = 'ak.moderation.franking_proof';
-
-
 CREATE INDEX canonical_events_received_idx ON public.canonical_events USING btree (received_at, id);
 
 CREATE UNIQUE INDEX canonical_events_realm_create_unique_idx ON public.canonical_events USING btree (realm_id) WHERE (kind = 'ak.realm.create'::text AND state = 'committed'::text);
@@ -3122,22 +3115,6 @@ CREATE TABLE public.idempotency_keys (
 
 CREATE INDEX idempotency_keys_expiry_idx ON public.idempotency_keys USING btree (expires_at);
 
-CREATE TABLE public.moderation_franking_replay_nonces (
-    realm_id text NOT NULL,
-    received_by text NOT NULL CHECK (received_by LIKE 'ak:did_core:%'),
-    replay_nonce text NOT NULL,
-    report_event_id text NOT NULL UNIQUE,
-    consumed_at timestamp with time zone NOT NULL,
-    expires_at timestamp with time zone NOT NULL,
-    CONSTRAINT moderation_franking_replay_nonces_pkey
-        PRIMARY KEY (realm_id, received_by, replay_nonce),
-    CONSTRAINT moderation_franking_replay_nonces_expiry_check
-        CHECK (expires_at > consumed_at)
-);
-
-CREATE INDEX moderation_franking_replay_nonces_expiry_idx
-    ON public.moderation_franking_replay_nonces (realm_id, received_by, expires_at);
-
 CREATE TABLE public.webvh_documents (
     id text PRIMARY KEY,
     did_document jsonb NOT NULL,
@@ -4611,68 +4588,10 @@ CREATE TABLE object_redaction_current_states (
  CHECK(jsonb_array_length(value->'assertions')>0)
 );
 
--- `moderation_report` typed current: the accepted `ak.self.moderation.report`
--- Event itself, keyed by its own EventId and stored with the exact complete
--- signed payload at the covering RealmCommit. The report queue item is a
--- read-side View over this family; it has no second writable state here.
--- Existing franking typed current, published from the exact durable receipt job.
-CREATE TABLE moderation_franking_proof_current_states (
- realm_id TEXT NOT NULL,
- target_event_id TEXT NOT NULL,
- source_stream_ref JSONB NOT NULL,
- current_commit_id TEXT NOT NULL,
- current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
- value JSONB NOT NULL,
- updated_at TIMESTAMPTZ NOT NULL,
- PRIMARY KEY(realm_id,target_event_id),
- CHECK(jsonb_typeof(source_stream_ref)='object'),
- CHECK(jsonb_typeof(value)='object')
-);
-
--- Internal restart-safe work; the signed Event bytes and nonce are fixed once.
-CREATE TABLE moderation_franking_jobs (
- realm_id TEXT NOT NULL,
- target_event_id TEXT NOT NULL,
- received_by TEXT NOT NULL,
- received_at TIMESTAMPTZ NOT NULL,
- prepared_event JSONB,
- verification_key BYTEA,
- PRIMARY KEY(realm_id,target_event_id,received_by),
- CHECK((prepared_event IS NULL)=(verification_key IS NULL)),
- CHECK(verification_key IS NULL OR octet_length(verification_key)=32)
-);
-
-CREATE TABLE moderation_franking_proof_nonces (
- realm_id TEXT NOT NULL,
- received_by TEXT NOT NULL,
- replay_nonce TEXT NOT NULL,
- proof_event_id TEXT NOT NULL,
- consumed_at TIMESTAMPTZ NOT NULL,
- expires_at TIMESTAMPTZ NOT NULL,
- PRIMARY KEY(realm_id,received_by,replay_nonce),
- CHECK(expires_at>consumed_at)
-);
-CREATE INDEX moderation_franking_proof_nonces_expiry ON moderation_franking_proof_nonces(realm_id,received_by,expires_at);
-
-CREATE TABLE moderation_report_current_states (
- realm_id TEXT NOT NULL,
- report_event_id TEXT NOT NULL PRIMARY KEY,
- current_commit_id TEXT NOT NULL UNIQUE,
- current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
- value JSONB NOT NULL,
- updated_at TIMESTAMPTZ NOT NULL,
- CHECK(jsonb_typeof(value)='object'),
- CHECK(value->>'realm_id'=realm_id),
- CHECK(jsonb_typeof(value->'target_ref')='string'),
- CHECK(jsonb_typeof(value->'reporter_id')='string')
-);
-CREATE INDEX moderation_report_current_states_realm ON moderation_report_current_states(realm_id,report_event_id);
-
 -- `moderation_state` typed current: the canonically sorted set of committed
 -- `ak.moderation.decision` / `.lift` assertions on one moderated target, each
 -- tagged by its accepting Event's `<event_id>:0` dot with the complete payload.
--- No element is ever removed; the active fold and the queue item status are
--- read-side derivations.
+-- No element is ever removed; the active fold is a read-side derivation.
 CREATE TABLE moderation_state_current_states (
  realm_id TEXT NOT NULL,
  target_ref TEXT NOT NULL,

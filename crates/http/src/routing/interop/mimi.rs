@@ -10,9 +10,6 @@
 //!     whenever the update body carries a `room_binding` block.
 //!   * `POST /mimi/strands/{strand_id}/notify` requires a real provider delivery consumer;
 //!     unavailable delivery never creates an Event or a fake ACK.
-//!   * `POST /mimi/report-abuse` -> verifies the closed reporter claim and current authority, then
-//!     submits a facade-service-authored `ak.self.moderation.report` Event atomically.
-//!
 //! Canonical message-ingress Events carry `payload.mimi_provenance` metadata
 //! (provider id, original MIMI envelope hash, MIMI message id) so the receiver
 //! can distinguish MIMI ingress from a native signed Move.
@@ -22,10 +19,9 @@ use arkret_models_collaboration::events_payloads::consent::ConsentPeer;
 use arkret_models_collaboration::mimi_operations::{
     MimiIdentifierQueryRequestBody, MimiIdentifierQueryResponseBody, MimiNotifyRequestBody,
     MimiNotifyResponseBody, MimiProxyDownloadRequestBody, MimiProxyDownloadResponseBody,
-    MimiReportAbuseRequestBody, MimiReportAbuseResponseBody, MimiRequestConsentRequestBody,
-    MimiRequestConsentResponseBody, MimiRoomUpdateRequestBody, MimiRoomUpdateResponseBody,
-    MimiSubmitMessageRequestBody, MimiSubmitMessageResponseBody, MimiUpdateConsentRequestBody,
-    MimiUpdateConsentResponseBody,
+    MimiRequestConsentRequestBody, MimiRequestConsentResponseBody, MimiRoomUpdateRequestBody,
+    MimiRoomUpdateResponseBody, MimiSubmitMessageRequestBody, MimiSubmitMessageResponseBody,
+    MimiUpdateConsentRequestBody, MimiUpdateConsentResponseBody,
 };
 use arkret_models_collaboration::objects::mimi::{
     MimiCiphertext, MimiConsentPurpose, MimiDelivery, MimiDeliveryStatus, MimiIdentifierMatch,
@@ -78,7 +74,6 @@ pub(super) fn router() -> Router {
         .push(Router::with_path("consent/request").post(mimi_consent_request))
         .push(Router::with_path("consent/update").post(mimi_consent_update))
         .push(Router::with_path("identifiers/query").post(mimi_identifiers_query))
-        .push(Router::with_path("report-abuse").post(mimi_report_abuse))
         .push(Router::with_path("proxy-download").post(mimi_proxy_download))
 }
 

@@ -1,7 +1,6 @@
 //! An ordinary collaboration Realm admitted through its registered units.
 //!
-//! Realm-scope Events such as `ak.message.create` and
-//! `ak.self.moderation.report` are admitted only at a confirmed current cut:
+//! Realm-scope Events such as `ak.message.create` are admitted only at a confirmed current cut:
 //! the Realm was created through the ordinary bootstrap unit, its author is a
 //! confirmed joined member, and a Message names an active discussion Strand.
 //! A storage fixture that needs such an Event therefore builds that cut the
@@ -142,8 +141,8 @@ pub fn signature_for_did(
 ///
 /// `seed` becomes the genesis salt, so every seed names its own Realm even
 /// when two fixtures are built within one millisecond. The governing Station
-/// is declared the Realm's plaintext-visible service: a local plain-text
-/// Message needs that policy, and a franking notary is that service.
+/// is declared the Realm's plaintext-visible service because a local
+/// plain-text Message needs that policy.
 pub fn bootstrap_unit(seed: &str) -> OrdinaryRealmBootstrapCommitUnit {
     bootstrap_unit_with_join_rule(seed, "invite")
 }
@@ -581,21 +580,6 @@ pub fn message_payload(strand_id: &arkret_wire::StrandId, body: &str) -> serde_j
         "strand_id":strand_id,
         "track_name":"discussion",
         "content":{"kind":"ak.content.text","body":body,"format":"plain"}
-    })
-}
-
-/// A directly authored self moderation report on `target_ref`.
-pub fn report_payload(
-    realm_id: &arkret_wire::RealmId,
-    target_ref: &str,
-    reporter: &arkret_wire::DidCoreId,
-) -> serde_json::Value {
-    serde_json::json!({
-        "realm_id": realm_id,
-        "target_ref": target_ref,
-        "report_reason_code": "spam",
-        "reporter_id": reporter,
-        "provenance": "self"
     })
 }
 

@@ -146,17 +146,6 @@ fn applet_identity_winner_is_independent_from_exact_scope_installations() {
     assert!(INITIAL_DOWN.contains("DROP TABLE IF EXISTS applet_managed_identities CASCADE"));
 }
 
-#[test]
-fn franking_replay_nonce_ledger_has_bounded_expiry_contract() {
-    assert!(INITIAL_UP.contains("CREATE TABLE public.moderation_franking_replay_nonces"));
-    assert!(INITIAL_UP.contains("expires_at timestamp with time zone NOT NULL"));
-    assert!(INITIAL_UP.contains("moderation_franking_replay_nonces_expiry_check"));
-    assert!(INITIAL_UP.contains("moderation_franking_replay_nonces_expiry_idx"));
-    assert!(
-        INITIAL_DOWN.contains("DROP TABLE IF EXISTS moderation_franking_replay_nonces CASCADE")
-    );
-}
-
 /// A directed Invite's live slot is the typed current target register. The
 /// link definition, lifecycle and per-account use facts have their own current
 /// owner. Neither needs the retired `realm_invites` table or its status predicate.
@@ -216,7 +205,6 @@ fn canonical_event_surfaces_use_the_committed_terminal_state() {
 
     for stale in [
         "WHERE event.state = 'accepted'",
-        "WHERE state = 'accepted' AND kind = 'ak.moderation.franking_proof'",
         "kind = 'ak.realm.create'::text AND state = 'accepted'::text",
         "OLD.kind='ak.account_data.set' AND OLD.state='accepted'",
         "visible := NEW.state='accepted'",

@@ -73,9 +73,7 @@ pub(super) async fn persist_mimi_canonical_message_event(
         binding_event_id,
         attributed_actor: request.sender_actor_id.clone(),
         source_provider_id,
-        reporter_authority: None,
         mapping_receipt: Some(receipt),
-        reporter_device_guard: None,
         submit_request_body: Some(
             serde_json::to_value(request).map_err(|e| AppError::internal(e.to_string()))?,
         ),
@@ -264,7 +262,6 @@ pub(super) fn mimi_provider_directory_value(
                 "identifier_query",
                 "key_material",
                 "notify",
-                "report_abuse",
                 "room_update",
                 "submit_message",
             ]
@@ -326,7 +323,6 @@ fn mimi_provider_directory_endpoints(
         ("identifier_query", Op::OpenMimiReadIdentifiersV1),
         ("key_material", Op::OpenMimiExchangeRequestKeyMaterialV1),
         ("notify", Op::OpenMimiCommandNotifyV1),
-        ("report_abuse", Op::OpenMimiCommandReportAbuseV1),
         ("room_update", Op::OpenMimiCommandUpdateRoomV1),
         ("submit_message", Op::OpenMimiCommandSubmitMessageV1),
     ]

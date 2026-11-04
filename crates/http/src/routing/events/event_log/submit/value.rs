@@ -25,55 +25,6 @@ pub(in crate::routing) async fn submit_event_value(
         "internal Event authoring awaits guarded Event/RealmCommit admission",
     ))
 }
-/// Internal boundary for one caller-signed Event admission submission made by
-/// a dedicated self operation.
-///
-/// A kind enters only when it has a registered durable semantics and a guarded
-/// Event/RealmCommit/current-state unit of work at the current governing
-/// Station. `ak.self.moderation.report` (Realm scope) is the one such kind
-/// here. Everything else — including the actor-private `ak.read_cursor.advance`,
-/// which must never take a RealmCommit — stays closed with zero writes.
-pub(in crate::routing) async fn submit_initial_event_submission(
-    state: &AppState,
-    session: &SessionRecord,
-    submission: arkret_wire::EventAdmissionSubmission,
-) -> Result<SubmittedEventOutcome, SubmitOneError> {
-    submission.validate().map_err(|error| {
-        SubmitOneError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "schema_violation",
-            format!("invalid Event admission submission: {error}"),
-        )
-    })?;
-    let event = &submission.event;
-    let realm_scope = matches!(
-        &event.scope_ref,
-        arkret_wire::ScopeRef::Realm { realm_id } if realm_id == &event.realm_id
-    );
-    if event.kind != arkret_wire::EventKind::SelfModerationReport || !realm_scope {
-        return Err(SubmitOneError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "service_unavailable",
-            "internal Event submission has no guarded Event/RealmCommit unit for this kind or scope",
-        ));
-    }
-    let event_id = event.event_id.to_string();
-    let outcome = crate::state::submit_self_moderation_report(state, session, submission)
-        .await
-        .map_err(guarded_unit_error)?;
-    let arkret_wire::AuthoritySubmitResponseBody::Accepted { status, .. } = outcome else {
-        return Err(SubmitOneError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            "guarded self Event unit returned a non-accepted outcome",
-        ));
-    };
-    Ok(SubmittedEventOutcome {
-        event_id,
-        duplicate: status == arkret_wire::AuthorityCommitStatus::Duplicate,
-    })
-}
-
 /// Submit only the caller-signed Event effects listed in an Applet revoke
 /// plan. The Applet endpoint has already bound each submission to the current
 /// plan; the ordinary self authority port still verifies its producer and

@@ -151,13 +151,6 @@ pub struct AuthBridgeExamples {
 pub use arkret_models_collaboration::governance::authorization::{
     AuthorizationCheckRequestBody, AuthorizationCheckResponseBody,
 };
-// Moderation report request/outcome are the SDK DTOs (`arkret-models-collaboration` carries
-// `service-operation-dtos.schema.json#/$defs/ModerationReportResponseBody`:
-// `status` is `submitted`, `routed_to_ids` contains stable core IDs);
-// no coland mirrors.
-pub use arkret_models_collaboration::governance::moderation::{
-    ModerationReportRequestBody, ModerationReportResponseBody,
-};
 pub use arkret_models_collaboration::sync_frames::account_subscribe::AccountSubscribeParameters;
 pub use arkret_models_integration::integration::{
     IntegrationDependencyDescriptor, IntegrationManifest, IntegrationSurfaceDescriptor,

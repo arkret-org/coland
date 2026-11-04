@@ -185,7 +185,7 @@ impl ProjectionState {
         if decision_kind == "dismiss" {
             if arkret_identifiers::EventId::new(target_ref.as_str()).is_err() {
                 return ProjectionEffect::Rejected {
-                    reason: "moderation_dismiss_requires_report_event".to_owned(),
+                    reason: "moderation_dismiss_target_event_invalid".to_owned(),
                 };
             }
             let Ok(decision) =

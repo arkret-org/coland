@@ -513,31 +513,6 @@ impl EventStore for PgEventStore {
         decode_events(rows)
     }
 
-    async fn franking_proofs_for_target(
-        &self,
-        realm_id: &str,
-        received_by: &arkret_identifiers::DidCoreId,
-        target_event_id: &str,
-    ) -> PersistenceResult<Vec<CanonicalEventRecord>> {
-        let mut conn = crate::pg_db(&self.pool);
-        let rows = sql_query(format!(
-            "SELECT {EVENT_COLUMNS} FROM canonical_events \
-             WHERE realm_id = $1 AND actor_id = $2 AND kind = $3 AND state = 'committed' \
-               AND envelope -> 'payload' ->> 'event_id' = $4 \
-             ORDER BY received_at ASC, id ASC"
-        ))
-        .bind::<Text, _>(realm_id)
-        // A proof is authored by the receiving service, and `actor_id` stores
-        // the canonical key of the complete ActorId.
-        .bind::<Text, _>(arkret_wire::ActorId::service(received_by.clone()).to_string())
-        .bind::<Text, _>(arkret_wire::EventKind::ModerationFrankingProof.as_str())
-        .bind::<Text, _>(target_event_id)
-        .load::<CanonicalEventRow>(&mut conn)
-        .await
-        .map_err(PersistenceError::database)?;
-        decode_events(rows)
-    }
-
     async fn snapshot_all(&self) -> PersistenceResult<Vec<CanonicalEventRecord>> {
         let mut conn = crate::pg_db(&self.pool);
         let rows = sql_query(format!(

@@ -342,34 +342,6 @@ async fn prepare_or_replicate_one(
             )));
         }
     }
-    if matches!(
-        event.kind,
-        arkret_wire::EventKind::SelfModerationReport
-            | arkret_wire::EventKind::ModerationFrankingProof
-    ) {
-        let realm_stream = CommitStreamRef::Realm {
-            realm_id: event.realm_id.clone(),
-        };
-        let cached = state
-            .authority_commits()
-            .replica_authorization_head(&realm_stream)
-            .await?;
-        let latest = &located.bundle.realm_stream_head;
-        let current = cached.as_ref().is_some_and(|head| {
-            head == latest
-                || (commit.stream_ref == realm_stream
-                    && latest.commit_id == commit.commit_id
-                    && latest.stream_position == commit.stream_position
-                    && commit.previous_commit_ref.as_ref() == Some(&head.commit_id)
-                    && commit.stream_position == head.stream_position + 1)
-        });
-        if !current {
-            return Err(ServiceError::Conflict(format!(
-                "{}: a fresh signed authorization snapshot is required",
-                ConflictCode::DependencyMissing
-            )));
-        }
-    }
     if arkret_identity::RealmAuthorityKeyDirectory::public_key_at(
         &located.keys,
         &commit.signature.verification_method,

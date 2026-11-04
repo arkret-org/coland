@@ -10,7 +10,6 @@ use crate::sync::SyncService;
 
 struct PersistenceFederationOutbox(Arc<dyn PersistenceStore>);
 struct PersistenceAuditLog(Arc<dyn PersistenceStore>);
-struct PersistenceModeration(Arc<dyn PersistenceStore>);
 struct PersistenceGovernanceRecords(Arc<dyn PersistenceStore>);
 struct PersistenceCursorStore(Arc<dyn PersistenceStore>);
 struct PersistenceWebsocketAuth(Arc<dyn PersistenceStore>);
@@ -368,37 +367,6 @@ impl crate::governance::AuditLogPort for PersistenceAuditLog {
 
     async fn entries_for_actor(&self, actor_id: &str) -> crate::ServiceResult<Vec<Value>> {
         Ok(self.0.audit().list_for_actor(actor_id).await?)
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::governance::ModerationPort for PersistenceModeration {
-    async fn queue_view_for_actor(
-        &self,
-        actor: &arkret_wire::ActorId,
-        realm_id: Option<&arkret_wire::RealmId>,
-    ) -> crate::ServiceResult<
-        Vec<arkret_models_collaboration::governance::moderation_queue::ModerationQueueItem>,
-    > {
-        Ok(self
-            .0
-            .moderation()
-            .queue_view_for_actor(actor, realm_id)
-            .await?)
-    }
-    async fn management_view_for_actor(
-        &self,
-        actor: &arkret_wire::ActorId,
-        realm_id: Option<&arkret_wire::RealmId>,
-    ) -> crate::ServiceResult<coland_storage::ModerationManagementView> {
-        Ok(self
-            .0
-            .moderation()
-            .management_view_for_actor(actor, realm_id)
-            .await?)
-    }
-    async fn report_count(&self) -> crate::ServiceResult<u64> {
-        Ok(self.0.moderation().report_count().await?)
     }
 }
 
@@ -763,7 +731,6 @@ pub fn build_persistence_operational_services(
         ),
         governance: GovernanceService::new(
             Arc::new(PersistenceAuditLog(persistence.clone())),
-            Arc::new(PersistenceModeration(persistence.clone())),
             Arc::new(PersistenceGovernanceRecords(persistence.clone())),
             runtime_settings,
         ),

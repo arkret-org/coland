@@ -151,8 +151,8 @@ pub(in crate::routing) use submit::ValidatedEventEnvelope;
 use submit::event_validation_error;
 pub(in crate::routing) use submit::{
     EventValidationError, applet_committed_ref, submit_applet_authoring_unit,
-    submit_applet_revoke_event_submission, submit_event_value, submit_initial_event_submission,
-    submit_one_error_to_app_error, submit_peer_pcr_genesis, submit_sidecar_ensure_batch,
+    submit_applet_revoke_event_submission, submit_event_value, submit_one_error_to_app_error,
+    submit_peer_pcr_genesis, submit_sidecar_ensure_batch,
 };
 
 #[cfg(test)]

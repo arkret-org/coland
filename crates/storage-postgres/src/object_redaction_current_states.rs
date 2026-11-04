@@ -75,7 +75,7 @@ pub(crate) async fn commit_message_redact_current_state_in_connection(
     if target.scope_ref != event.scope_ref {
         return Err(PersistenceError::NotFound("message not found".to_owned()));
     }
-    crate::moderation_report_current_states::ensure_scope_member(
+    crate::scope_access::ensure_scope_member(
         conn,
         &event.realm_id,
         &event.scope_ref,

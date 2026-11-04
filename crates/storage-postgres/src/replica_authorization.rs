@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use arkret_models_collaboration::governance::grant_constraint::{
     AuthorityRootRef, CapabilityGrant, CapabilitySubject, IssuerAuthorityRef,
 };
-
 use arkret_wire::{ActorId, CurrentSelector, CurrentState, GrantId, RealmId, ScopeRef};
 use coland_storage::{PersistenceError, PersistenceResult};
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};

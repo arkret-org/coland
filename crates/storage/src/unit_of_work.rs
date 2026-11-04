@@ -1,10 +1,11 @@
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+
 use crate::{
     AccountDataRecord, CanonicalEventRecord, ContactRecord, ContactVerifiedMirrorRecord,
     DeviceRevocationGateSelector, DeviceRevocationTransition, FederationOutboxRecord,
     IdempotencyRecord, PersistenceError, PersistenceResult, ProjectionEventRecord,
 };
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 
 /// Project an already-admitted Agent cascade Event onto the frozen Agent ActorId
 /// set. This is not admission authority: the full signed actor (including its

@@ -58,10 +58,10 @@ jobs:
         run: ./scripts/configure-windows-openssl.ps1
         working-directory: arkret-org/coland
 
-      - name: Install Rust 1.98
+      - name: Install Rust 1.99
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.98"
+          toolchain: "1.99"
           components: clippy
 
       - name: Install nightly rustfmt
@@ -101,7 +101,7 @@ jobs:
         working-directory: arkret-org/coland
 
       - name: Crate layering gate
-        run: cargo +1.98 run -p xtask --bin check_layering --locked
+        run: cargo +1.99 run -p xtask --bin check_layering --locked
         working-directory: arkret-org/coland
 
       - name: Rustfmt
@@ -110,24 +110,24 @@ jobs:
         working-directory: arkret-org/coland
 
       - name: Clippy
-        run: cargo +1.98 clippy --all-targets --locked -- -D warnings
+        run: cargo +1.99 clippy --all-targets --locked -- -D warnings
         working-directory: arkret-org/coland
 
       - name: Standalone HTTP feature surface
         if: runner.os == 'Linux'
-        run: cargo +1.98 clippy --locked -p coland-http --lib --features conformance-harness -- -D warnings
+        run: cargo +1.99 clippy --locked -p coland-http --lib --features conformance-harness -- -D warnings
         working-directory: arkret-org/coland
 
       - name: KeyStore keygen Clippy
-        run: cargo +1.98 clippy --locked -p coland-keystore-keygen --all-targets -- -D warnings
+        run: cargo +1.99 clippy --locked -p coland-keystore-keygen --all-targets -- -D warnings
         working-directory: arkret-org/coland
 
       - name: KeyStore keygen tests
-        run: cargo +1.98 test --locked -p coland-keystore-keygen
+        run: cargo +1.99 test --locked -p coland-keystore-keygen
         working-directory: arkret-org/coland
 
       - name: Clippy with OpenTelemetry
-        run: cargo +1.98 clippy --features otel --all-targets --locked -- -D warnings
+        run: cargo +1.99 clippy --features otel --all-targets --locked -- -D warnings
         working-directory: arkret-org/coland
 
       # Keep test binaries separate from `target/dev`, matching the local
@@ -141,7 +141,7 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/test
         run: >-
-          cargo +1.98 test --locked
+          cargo +1.99 test --locked
           -p coland-domain -p coland-contracts -p coland-keystore-keygen
         working-directory: arkret-org/coland
 
@@ -202,10 +202,10 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install Rust 1.98
+      - name: Install Rust 1.99
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.98"
+          toolchain: "1.99"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -229,7 +229,7 @@ jobs:
           CARGO_TARGET_DIR: target/test
         # Each process receives its own client config and a run-scoped CA;
         # the harness still verifies TLS and executes the entire workspace.
-        run: python ../cotest/scripts/run-native-rust-tests.py cargo +1.98 test --locked --workspace
+        run: python ../cotest/scripts/run-native-rust-tests.py cargo +1.99 test --locked --workspace
         working-directory: arkret-org/coland
 
   migration-cycle:

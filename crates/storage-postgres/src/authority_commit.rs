@@ -1320,6 +1320,9 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 | arkret_wire::CurrentSelector::InviteLifecycle { .. }
                 | arkret_wire::CurrentSelector::InviteLiveTarget { .. }
                 | arkret_wire::CurrentSelector::InviteDirectedInvitee { .. }
+                | arkret_wire::CurrentSelector::RealmInviteLinkDefinition { .. }
+                | arkret_wire::CurrentSelector::RealmInviteLinkLifecycle { .. }
+                | arkret_wire::CurrentSelector::RealmInviteLinkUse { .. }
                 | arkret_wire::CurrentSelector::MlsGroup { .. }
                 | arkret_wire::CurrentSelector::MimiRoomBinding { .. }
                 | arkret_wire::CurrentSelector::ActorProfile { .. }

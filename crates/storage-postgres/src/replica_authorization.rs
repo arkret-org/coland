@@ -956,3 +956,182 @@ pub(crate) async fn invalidate_circle_continuation(
         .bind::<Text,_>(realm.as_str()).execute(conn).await.map_err(PersistenceError::database)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod snapshot_evidence_tests {
+    use base64::Engine as _;
+
+    use super::*;
+    use crate::pg_conn;
+    use crate::test_database::TestDatabase;
+
+    #[tokio::test]
+    async fn verified_invite_link_snapshot_rows_survive_without_governing_tables() {
+        let database = TestDatabase::lease().await;
+        let mut conn = pg_conn(&database.pool()).await.unwrap();
+        let genesis =
+            arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [61; 32]);
+        let realm = RealmId::from_event_id(&genesis);
+        let stream = arkret_wire::CommitStreamRef::Realm {
+            realm_id: realm.clone(),
+        };
+        let key = crate::authority_commit::stream_key(&stream).unwrap();
+        let commit = arkret_wire::RealmCommitId::from_digest([62; 32]);
+        let later = arkret_wire::RealmCommitId::from_digest([63; 32]);
+        let source = arkret_wire::DidCoreId::new("ak:did_core:web:governor.example").unwrap();
+        let creator = ActorId::account(arkret_wire::AccountId::new(
+            arkret_wire::DidCoreId::new("ak:did_core:web:coordinator.example").unwrap(),
+            source.clone(),
+        ));
+        let event =
+            arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [64; 32]);
+        let link = arkret_wire::RealmInviteLinkId::from_event_id(&event);
+        let at = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0).unwrap();
+        // Trusted-row storage fixture, not a claim of signed Event admission.
+        diesel::sql_query("INSERT INTO realm_authorities(realm_id,generation,service_id,authority_ref) VALUES($1,0,$2,$3)")
+            .bind::<Text,_>(realm.as_str()).bind::<Text,_>(source.as_str())
+            .bind::<Jsonb,_>(serde_json::to_value(arkret_wire::RealmCommitAuthorityRef::GenesisOrChangeEvent(genesis)).unwrap())
+            .execute(&mut *conn).await.unwrap();
+        diesel::sql_query("INSERT INTO realm_commits(commit_id,realm_id,stream_key,stream_ref,stream_position,governance_generation,commit_json,committed_at) VALUES($1,$2,$3,$4,0,0,'{}',$5)")
+            .bind::<Text,_>(commit.as_str()).bind::<Text,_>(realm.as_str()).bind::<Text,_>(&key)
+            .bind::<Jsonb,_>(serde_json::to_value(&stream).unwrap()).bind::<Timestamptz,_>(at)
+            .execute(&mut *conn).await.unwrap();
+        let row = |selector, value| CurrentState::Value {
+            selector,
+            source_stream_ref: stream.clone(),
+            revision: arkret_wire::CurrentRevision {
+                commit_id: commit.clone(),
+                stream_position: 0,
+            },
+            value,
+        };
+        let public_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            ed25519_dalek::SigningKey::from_bytes(&[11; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let mut expected = vec![
+            row(
+                CurrentSelector::RealmInviteLinkDefinition {
+                    realm_invite_link_id: link.clone(),
+                },
+                serde_json::to_value(arkret::RealmInviteLinkDefinitionValue {
+                    public_key,
+                    expires_at: at + chrono::Duration::hours(1),
+                    max_uses: 2,
+                    create_event_id: event.clone(),
+                    creator_actor_id: creator,
+                })
+                .unwrap(),
+            ),
+            row(
+                CurrentSelector::RealmInviteLinkLifecycle {
+                    realm_invite_link_id: link.clone(),
+                },
+                serde_json::to_value(arkret::RealmInviteLinkLifecycle::Active).unwrap(),
+            ),
+        ];
+        for station in [
+            "ak:did_core:web:member-a.example",
+            "ak:did_core:web:member-b.example",
+        ] {
+            let account = arkret_wire::AccountId::new(
+                arkret_wire::DidCoreId::new("ak:did_core:web:same-principal.example").unwrap(),
+                arkret_wire::DidCoreId::new(station).unwrap(),
+            );
+            expected.push(row(
+                CurrentSelector::RealmInviteLinkUse {
+                    realm_invite_link_id: link.clone(),
+                    subject_account_id: account.clone(),
+                },
+                serde_json::to_value(arkret::RealmInviteLinkUseRecord {
+                    realm_invite_link_id: link.clone(),
+                    subject_account_id: account,
+                    accept_event_id: event.clone(),
+                })
+                .unwrap(),
+            ));
+        }
+        for entry in &expected {
+            save_row(&mut conn, &realm, entry, at).await.unwrap();
+        }
+        let read = async |conn: &mut AsyncPgConnection| {
+            crate::authority_commit::realm_state_snapshot_material_in_connection(conn, &realm)
+                .await
+                .unwrap()
+                .unwrap()
+                .current_state_entries
+        };
+        assert!(
+            read(&mut conn).await.is_empty(),
+            "unverified rows cannot become current material"
+        );
+        let head = arkret_wire::CommitStreamHead {
+            stream_ref: stream.clone(),
+            commit_id: commit.clone(),
+            stream_position: 0,
+        };
+        install_verified_head(&mut conn, &head, at).await.unwrap();
+        let material = read(&mut conn).await;
+        for entry in &expected {
+            assert!(
+                material.contains(entry),
+                "the complete verified invite-link family must be retained: {entry:?}"
+            );
+        }
+        assert_eq!(
+            material.len(),
+            4,
+            "distinct Station bindings keep separate use records"
+        );
+        #[derive(diesel::QueryableByName)]
+        struct Count {
+            #[diesel(sql_type = BigInt)]
+            present: i64,
+        }
+        let count = diesel::sql_query(
+            "SELECT COUNT(*) AS present FROM realm_invite_link_current_states WHERE realm_id=$1",
+        )
+        .bind::<Text, _>(realm.as_str())
+        .get_result::<Count>(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(
+            count.present, 0,
+            "snapshot reads never manufacture governing admission rows"
+        );
+        diesel::sql_query("INSERT INTO realm_commits(commit_id,realm_id,stream_key,stream_ref,stream_position,previous_commit_ref,governance_generation,commit_json,committed_at) VALUES($1,$2,$3,$4,1,$5,0,'{}',$6)")
+            .bind::<Text,_>(later.as_str()).bind::<Text,_>(realm.as_str()).bind::<Text,_>(&key)
+            .bind::<Jsonb,_>(serde_json::to_value(&stream).unwrap()).bind::<Text,_>(commit.as_str()).bind::<Timestamptz,_>(at)
+            .execute(&mut *conn).await.unwrap();
+        assert!(
+            read(&mut conn).await.is_empty(),
+            "an advanced held head invalidates the old proof cut"
+        );
+        let next = arkret_wire::CommitStreamHead {
+            stream_ref: stream,
+            commit_id: later,
+            stream_position: 1,
+        };
+        install_verified_head(&mut conn, &next, at).await.unwrap();
+        let restored = read(&mut conn).await;
+        assert_eq!(
+            restored, material,
+            "refresh preserves original selectors, revisions and values"
+        );
+        let mut fork = next;
+        fork.commit_id = arkret_wire::RealmCommitId::from_digest([65; 32]);
+        assert!(
+            install_verified_head(&mut conn, &fork, at).await.is_err(),
+            "same-position forks cannot replace the installed proof cut"
+        );
+        assert!(
+            snapshot_current_evidence(&mut conn, &realm, &[fork])
+                .await
+                .unwrap()
+                .is_empty(),
+            "same-position forks do not authorize retained rows"
+        );
+        assert_eq!(read(&mut conn).await, restored);
+    }
+}

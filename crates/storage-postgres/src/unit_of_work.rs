@@ -57,6 +57,7 @@ struct ContactMirrorCommitRow {
     target_holder_principal_id: String,
 }
 
+#[cfg(test)]
 #[derive(diesel::QueryableByName)]
 struct CountRow {
     #[diesel(sql_type = BigInt)]

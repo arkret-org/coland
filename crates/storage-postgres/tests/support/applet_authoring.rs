@@ -6548,7 +6548,7 @@ mod realm_native_fixture {
                 {
                     if self
                         .control_plan_skip
-                        .fetch_update(
+                        .try_update(
                             std::sync::atomic::Ordering::SeqCst,
                             std::sync::atomic::Ordering::SeqCst,
                             |count| count.checked_sub(1),

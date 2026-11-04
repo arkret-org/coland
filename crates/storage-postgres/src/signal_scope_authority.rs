@@ -1314,7 +1314,7 @@ async fn read_in_connection(
             .await?
             .ok_or_else(|| unavailable("accepted founding source missing"))?;
         let Some(pair) = profile.pair() else {
-            return Ok(None);
+            return Ok(denied("Direct founding pair is unavailable"));
         };
         if pair.len() != 2
             || !pair.contains(&sender)
@@ -1325,10 +1325,10 @@ async fn read_in_connection(
                 .collect::<BTreeSet<_>>()
                 != pair.iter().map(|a| a.to_string()).collect::<BTreeSet<_>>()
         {
-            return Ok(None);
+            return Ok(denied("Direct pair and current membership differ"));
         }
         if !profile.pair_grants_direct_message_snapshot(conn).await? {
-            return Ok(None);
+            return Ok(denied("Direct current pair authorization is not eligible"));
         }
     }
     let mut recipients = current

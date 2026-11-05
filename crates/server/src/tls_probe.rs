@@ -130,10 +130,17 @@ pub async fn verify_deployment(config: &mut AppConfig) {
     if config.development_mode || config.pq_hybrid_tls_probe.is_some() {
         return;
     }
-    for attempt in 1..=3 {
+    // A newly registered gateway needs both its health check and catalog
+    // polling interval before its SNI policy is visible to the public probe.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    for attempt in 1..=12 {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
         let base = config.public_base_url.clone();
         let result = tokio::time::timeout(
-            Duration::from_secs(15),
+            remaining.min(Duration::from_secs(15)),
             tokio::task::spawn_blocking(move || verify_public_endpoint(&base)),
         )
         .await;
@@ -150,8 +157,9 @@ pub async fn verify_deployment(config: &mut AppConfig) {
                 tracing::warn!(attempt, error = ?result, "public TLS deployment probe failed; readiness remains fail-closed")
             }
         }
-        if attempt < 3 {
-            tokio::time::sleep(Duration::from_secs(3)).await;
+        if attempt < 12 {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            tokio::time::sleep(remaining.min(Duration::from_secs(3))).await;
         }
     }
 }

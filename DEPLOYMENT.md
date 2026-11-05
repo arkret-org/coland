@@ -369,7 +369,7 @@ service-to-service listener, then set `COLAND_PQ_TLS_DEPLOYMENT_PROBE=verified`
 only for a passing deployment. When that variable is unset, Coland probes its
 configured public HTTPS endpoint at startup, validates the certificate, requires
 TLS 1.3 with X25519MLKEM768, and verifies that classical-only TLS 1.3 and TLS 1.2
-clients are rejected. The probe retries briefly while the gateway starts. A
+clients are rejected. The probe retries for up to 60 seconds while the gateway starts. A
 failed or inconclusive probe leaves production `/readyz` at 503. Coland uses a
 PQ-capable crypto provider for its outbound TLS connections as well.
 

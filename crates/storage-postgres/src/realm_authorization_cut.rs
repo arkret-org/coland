@@ -4105,7 +4105,13 @@ pub(crate) async fn lock_realm_authorization_cut(
         .get_result::<LockedAuthorityRow>(&mut *conn)
         .await
         .optional()
-        .map_err(PersistenceError::database)?
+        .map_err(|error| {
+            tracing::warn!(%realm_id, %error, "current Realm authorization cut lock unavailable");
+            PersistenceError::Conflict(
+                "temporarily_unavailable: current Realm authorization cut could not be acquired"
+                    .to_owned(),
+            )
+        })?
         .filter(|row| row.realm_id == realm_id.as_str())
         .map(|_| ())
         .ok_or_else(|| {

@@ -682,6 +682,81 @@ async fn an_admission_waiting_on_the_realm_lock_observes_a_concurrent_revocation
 }
 
 #[tokio::test]
+async fn authority_lock_unavailable_has_no_commit_and_retries_the_exact_original() {
+    let database = TestDatabase::lease().await;
+    let pool = coland_storage_postgres::Db::connect(
+        Some(database.url()),
+        coland_storage_postgres::PoolTuning {
+            max_size: Some(4),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .pool
+    .unwrap();
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let alice = local(&pool, "busy-authority-alice").await;
+    let discussion = discussion(&pool, "busy-authority-realm", &alice).await;
+    let writer = grant(
+        &pool,
+        &discussion,
+        &discussion.head.authority_commit,
+        &alice,
+        &["ak.message.create"],
+        serde_json::json!([]),
+    )
+    .await;
+    uow.commit_event(writer.clone()).await.unwrap();
+    let original = message(
+        &pool,
+        &discussion,
+        &writer.authority_commit,
+        &alice,
+        "retained original",
+    )
+    .await;
+    let event_id = original.authority_commit.event.event_id.clone();
+    let mut holder = pool.get().await.unwrap();
+    #[derive(diesel::QueryableByName)]
+    struct Settings {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        bounded: bool,
+    }
+    let settings: Settings = diesel::sql_query(
+        "SELECT current_setting('lock_timeout')::interval = interval '5 seconds' AS bounded",
+    )
+    .get_result(&mut *holder)
+    .await
+    .unwrap();
+    assert!(
+        settings.bounded,
+        "the production pool supplies the lock budget"
+    );
+    holder.batch_execute("BEGIN").await.unwrap();
+    diesel::sql_query("SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE")
+        .bind::<Text, _>(discussion.realm_id.as_str())
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    // Use the production pool's bounded lock wait, with no synthetic outcome.
+    let failure = uow.commit_event(original.clone()).await.unwrap_err();
+    holder.batch_execute("ROLLBACK").await.unwrap();
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    assert!(store.committed_event(&event_id).await.unwrap().is_none());
+    assert_eq!(
+        failure.conflict_code(),
+        Some(ConflictCode::TemporarilyUnavailable),
+        "{failure}"
+    );
+    uow.commit_event(original.clone()).await.unwrap();
+    assert!(store.committed_event(&event_id).await.unwrap().is_some());
+    // An accepted exact retry is idempotent as well.
+    uow.commit_event(original).await.unwrap();
+    assert!(store.committed_event(&event_id).await.unwrap().is_some());
+}
+
+#[tokio::test]
 async fn grant_admission_requires_the_registered_strand_field_allowance_without_writes() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();

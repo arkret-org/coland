@@ -462,12 +462,18 @@ pub fn describe(
     // an external Account Authority is configured, clients post gate/account
     // requests there directly and the DPoP `htu` aligns with that public base.
     // Personal deployments may co-locate this role at the Principal origin.
-    let account_origin = account_authority_url
+    let account_base_url = account_authority_url
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(public_base_url)
         .trim_end_matches('/')
         .to_owned();
-    let gate_account_base_url = format!("{account_origin}/_arkret/gate/account");
+    // A service URL may have a path prefix; a WebOrigin must not. Keep the
+    // prefix for operations and the issuer, but project the origin separately.
+    let account_origin = url::Url::parse(&account_base_url)
+        .expect("configured Account Authority base is a validated URL")
+        .origin()
+        .ascii_serialization();
+    let gate_account_base_url = format!("{account_base_url}/_arkret/gate/account");
 
     // Authentication methods are pure provider discovery; they do not decide
     // gate/account routing. Advertise OIDC when an Account Authority process is configured;
@@ -934,6 +940,44 @@ mod tests {
             method.openid_configuration_url.as_deref(),
             Some("https://auth.example/.well-known/openid-configuration")
         );
+    }
+
+    #[test]
+    fn service_describe_separates_prefixed_authority_base_from_origin() {
+        for base in [
+            "https://station.example/auth/",
+            "https://station.example:8443/auth/",
+        ] {
+            let description = describe(
+                &fixture_service_resolution(),
+                "memory",
+                &crate::config::AppConfig {
+                    account_authority_url: Some(base.to_owned()),
+                    ..crate::config::AppConfig::test_default()
+                },
+            );
+            let authority = description
+                .authentication_metadata
+                .account_authority
+                .unwrap();
+            assert_eq!(
+                authority.origin.as_str(),
+                url::Url::parse(base)
+                    .unwrap()
+                    .origin()
+                    .ascii_serialization()
+            );
+            assert_eq!(
+                authority.gate_account_base_url,
+                format!("{base}_arkret/gate/account")
+            );
+            let method = &description.authentication_metadata.methods[0];
+            assert_eq!(method.issuer_uri.as_deref(), Some(base));
+            assert_eq!(
+                method.openid_configuration_url,
+                Some(format!("{base}.well-known/openid-configuration"))
+            );
+        }
     }
 
     #[test]

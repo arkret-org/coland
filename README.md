@@ -231,7 +231,7 @@ All settings can be supplied via environment variables (preferred) or a
 | `COLAND_TLS_CERT_PATH` | unset | TLS certificate PEM path; when paired with `COLAND_TLS_KEY_PATH`, coland serves HTTPS via rustls |
 | `COLAND_TLS_KEY_PATH` | unset | TLS private-key PEM path paired with `COLAND_TLS_CERT_PATH` |
 | `COLAND_TLS_TERMINATION_PROXY_IPS` | unset | Exact comma-separated TCP proxy peer IPs allowed to attest HTTPS for WebSocket upgrades; empty trusts no forwarded scheme |
-| `COLAND_PQ_TLS_DEPLOYMENT_PROBE` | unset | Set to `verified` only after an external TLS 1.3 probe proves `X25519MLKEM768` negotiation and fail-closed classical fallback |
+| `COLAND_PQ_TLS_DEPLOYMENT_PROBE` | unset | When unset, startup probes the public HTTPS endpoint and rejects classical fallback. Set to `verified` only after an external TLS 1.3 probe proves `X25519MLKEM768` negotiation and fail-closed classical fallback |
 | `COLAND_FIRST_PROVISIONING` | unset | One-time class-B production authorization to create a new service identity when no stored identity, local registration, or bundle exists |
 | `COLAND_SERVICE_IDENTITY_BUNDLE_DIR` | unset | SDK identity-bundle backend used to recover the same service DID after database loss; contains public evidence and KeyRefs, never private keys |
 | `COLAND_KEYSTORE_BACKEND` | unset | Durable key custody: `platform` for the current user's native credential store, or `encrypted_file`; required for runtime startup together with `DATABASE_URL` |

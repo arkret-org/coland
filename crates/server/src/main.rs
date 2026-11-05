@@ -132,9 +132,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     // The dependency graph includes rustls consumers that enable different
-    // provider features. Select Coland's declared `ring` provider before any
+    // provider features. Select the PQ-capable provider before any
     // listener or outbound client can ask rustls for a process default.
-    rustls::crypto::ring::default_provider()
+    rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("a different rustls CryptoProvider was already installed"))?;
     tokio::runtime::Builder::new_multi_thread()
@@ -229,6 +229,8 @@ async fn prepare_server(raw_args: Vec<String>) -> anyhow::Result<ServingFuture> 
     // flushes pending writes; storing it in `_file_guard` defers that drop
     // until `main` returns.
     let _tracing_guards = init_tracing(&config)?;
+
+    coland::tls_probe::verify_deployment(&mut config).await;
 
     // Connect the database and resolve this deployment's own service identity
     // before anything derived from it is constructed. The DID remains runtime

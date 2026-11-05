@@ -366,8 +366,12 @@ The Arkret v1 transport baseline requires TLS 1.3 connections to negotiate
 `X25519MLKEM768` and fail closed when the peer cannot offer it. Run that
 handshake probe against the externally reachable client-service and
 service-to-service listener, then set `COLAND_PQ_TLS_DEPLOYMENT_PROBE=verified`
-only for a passing deployment. Production `/readyz` returns 503 until that
-machine-verifiable probe evidence is present.
+only for a passing deployment. When that variable is unset, Coland probes its
+configured public HTTPS endpoint at startup, validates the certificate, requires
+TLS 1.3 with X25519MLKEM768, and verifies that classical-only TLS 1.3 and TLS 1.2
+clients are rejected. The probe retries briefly while the gateway starts. A
+failed or inconclusive probe leaves production `/readyz` at 503. Coland uses a
+PQ-capable crypto provider for its outbound TLS connections as well.
 
 Caddy example:
 

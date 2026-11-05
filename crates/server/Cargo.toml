@@ -57,7 +57,9 @@ opentelemetry_sdk = { workspace = true, default-features = false, features = ["t
 # (the dalek stack pins that ecosystem); already in the lock tree via the SDK.
 rand_chacha = "0.10.0"
 reqwest = { workspace = true, default-features = false, features = ["form", "json", "rustls"] }
-rustls = { workspace = true }
+rustls = { workspace = true, features = ["aws_lc_rs"] }
+rustls-native-certs = "=0.8.4"
+webpki-roots = "1"
 salvo = { workspace = true, default-features = false, features = ["cookie", "fix-http1-request-uri", "server", "server-handle", "http1", "http2", "matched-path", "ring", "affix-state", "catch-panic", "cors", "rustls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

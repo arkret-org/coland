@@ -41,15 +41,12 @@ pub(super) async fn anchor_key_backup_auth_data_trust_root(
         .ok_or_else(key_backup_untrusted_signature)?;
     EventId::new(claimed_device_authorize_event_id.to_owned())
         .map_err(|_| key_backup_untrusted_signature())?;
-    let record = state
-        .identities()
-        .find_device(coland_services::identity::FindDeviceQuery {
-            actor_id: actor_id.to_owned(),
-            device_id: device_id.to_owned(),
-        })
-        .await
-        .map_err(|error| AppError::internal(format!("device lookup failed: {error}")))?
-        .ok_or_else(key_backup_untrusted_signature)?;
+    let record = crate::routing::identity::device_signing::current_device_identity(
+        state, actor_id, device_id,
+    )
+    .await
+    .map_err(|error| AppError::internal(format!("device lookup failed: {error}")))?
+    .ok_or_else(key_backup_untrusted_signature)?;
     if record.revoked_at.is_some() || record.verification_state != "verified" {
         return Err(key_backup_untrusted_signature());
     }
@@ -300,15 +297,14 @@ pub(super) async fn verify_key_backup_unlock_proof(
             }
             // Consumption enforces first-use expiry; an exact durable retry may outlive this
             // challenge.
-            let device = state
-                .identities()
-                .find_device(coland_services::identity::FindDeviceQuery {
-                    actor_id: session.actor.clone(),
-                    device_id: session.require_human_device_id().clone(),
-                })
-                .await
-                .map_err(|error| AppError::internal(error.to_string()))?
-                .ok_or_else(|| AppError::capability_denied("current device missing"))?;
+            let device = crate::routing::identity::device_signing::current_device_identity(
+                state,
+                &session.actor,
+                session.require_human_device_id(),
+            )
+            .await
+            .map_err(|error| AppError::internal(error.to_string()))?
+            .ok_or_else(|| AppError::capability_denied("current device missing"))?;
             let key = device
                 .payload
                 .get("device_public_key_did")

@@ -12,7 +12,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use coland_http::error::AppError;
 use coland_http::result::{JsonResult, json_ok};
-use coland_services::identity::{DeviceIdentity, FindDeviceQuery, SaveDeviceCommand};
+use coland_services::identity::{DeviceIdentity, SaveDeviceCommand};
 use ed25519_dalek::Signature;
 use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
@@ -69,14 +69,10 @@ async fn keys_upload(
             "session device does not match upload device",
         ));
     }
-    let current_device = state
-        .identities()
-        .find_device(FindDeviceQuery {
-            actor_id: session.actor.clone(),
-            device_id: device_id.clone(),
-        })
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?;
+    let current_device =
+        super::device_signing::current_device_identity(state, &session.actor, &device_id)
+            .await
+            .map_err(|error| AppError::internal(error.to_string()))?;
     let current_facet =
         crate::routing::identity::device_signing::resolve_device_signing_directory_facet(
             state,
@@ -508,17 +504,6 @@ async fn keys_query(
         }
         let mut actor_keys = BTreeMap::new();
         for device_id in devices {
-            let device_record = state
-                .identities()
-                .find_device(FindDeviceQuery {
-                    actor_id: actor_core.as_str().to_owned(),
-                    device_id: device_id.as_str().to_owned(),
-                })
-                .await
-                .map_err(|error| AppError::internal(error.to_string()))?;
-            if device_record.is_none() {
-                continue;
-            }
             // Carry the opaque uploaded prekey blob under `algorithms`. The demo
             // upload stores one payload object per device, so it is surfaced as a
             // single `algorithms` map (key→value) rather than per-algorithm
@@ -535,10 +520,8 @@ async fn keys_query(
                     .unwrap_or_default(),
                 _ => BTreeMap::new(),
             };
-            // Signing-key directory facet from the authoritative devices-table
-            // `payload.device_public_key_did`: returns the verify key only for a
-            // verified, non-revoked device. Shared with the recovery receipt
-            // predicate via `resolve_device_signing_directory_facet`.
+            // Signing material comes from the exact accepted PCR authorization;
+            // optional inventory metadata cannot hide a recovered device.
             let facet =
                 crate::routing::identity::device_signing::resolve_device_signing_directory_facet(
                     state,

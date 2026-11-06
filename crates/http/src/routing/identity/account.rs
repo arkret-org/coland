@@ -2200,11 +2200,19 @@ async fn account_device_summaries(
     let current_generation = super::device_generation::current_device_generation(state, actor)
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
-    let devices = state
+    let mut devices = state
         .identities()
         .devices_for_actor(actor)
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
+    for accepted in super::device_signing::current_device_identities(state, actor)
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?
+    {
+        devices.retain(|record| record.device_id != accepted.device_id);
+        devices.push(accepted);
+    }
+    devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
     let mut summaries = Vec::with_capacity(devices.len());
     for device in devices {
         summaries

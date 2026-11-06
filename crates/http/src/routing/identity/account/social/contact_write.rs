@@ -881,19 +881,16 @@ async fn contact_authority_realm(
                     "Contact holder account does not belong to this Station",
                 ));
             }
-            let device = state
-                .identities()
-                .find_device(coland_services::identity::FindDeviceQuery {
-                    actor_id: account_id.principal_id.to_string(),
-                    device_id: session.require_human_device_id().clone(),
-                })
-                .await
-                .map_err(|error| {
-                    AppError::internal(format!("Contact holder device lookup: {error}"))
-                })?
-                .ok_or_else(|| {
-                    crate::app_error!(FailedPrecondition, "Contact holder device is unavailable",)
-                })?;
+            let device = crate::routing::identity::device_signing::current_device_identity(
+                state,
+                account_id.principal_id.as_str(),
+                session.require_human_device_id(),
+            )
+            .await
+            .map_err(|error| AppError::internal(format!("Contact holder device lookup: {error}")))?
+            .ok_or_else(|| {
+                crate::app_error!(FailedPrecondition, "Contact holder device is unavailable",)
+            })?;
             if device.revoked_at.is_some() || device.verification_state != "verified" {
                 return Err(crate::app_error!(
                     FailedPrecondition,

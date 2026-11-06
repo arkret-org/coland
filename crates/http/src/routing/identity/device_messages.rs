@@ -456,14 +456,13 @@ async fn send_device_messages(
     // An Agent endpoint is proved by its grant triple against the current
     // accepted key authorization, rechecked in the queue transaction.
     let sender_verified = if has_fresh_targets && sender_agent_guard.is_none() {
-        let sender_device = state
-            .identities()
-            .find_device(coland_services::identity::FindDeviceQuery {
-                actor_id: session.actor.clone(),
-                device_id: session.require_human_device_id().clone(),
-            })
-            .await
-            .map_err(|error| AppError::internal(error.to_string()))?;
+        let sender_device = super::device_signing::current_device_identity(
+            state,
+            &session.actor,
+            session.require_human_device_id(),
+        )
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?;
         device_is_active_verified(sender_device.as_ref())
     } else {
         sender_agent_guard.is_some()
@@ -481,14 +480,13 @@ async fn send_device_messages(
             None
         } else {
             let secret_message = prepared.target.kind.starts_with("ak.secret.");
-            let target_record = state
-                .identities()
-                .find_device(coland_services::identity::FindDeviceQuery {
-                    actor_id: prepared.recipient.clone(),
-                    device_id: prepared.device_id.clone(),
-                })
-                .await
-                .map_err(|error| AppError::internal(error.to_string()))?;
+            let target_record = super::device_signing::current_device_identity(
+                state,
+                &prepared.recipient,
+                &prepared.device_id,
+            )
+            .await
+            .map_err(|error| AppError::internal(error.to_string()))?;
             let target_verified = device_is_active_verified(target_record.as_ref());
             if secret_message && !target_verified {
                 return Err(AppError::capability_denied(

@@ -4222,15 +4222,14 @@ async fn validate_device_keypackage_leaf(
     device_id: &str,
     key_package_bytes: &[u8],
 ) -> Result<(), String> {
-    let device = state
-        .identities()
-        .find_device(coland_services::identity::FindDeviceQuery {
-            actor_id: principal.to_string(),
-            device_id: device_id.to_owned(),
-        })
-        .await
-        .map_err(|_| "claim_generation_mismatch".to_owned())?
-        .ok_or_else(|| "claim_generation_mismatch".to_owned())?;
+    let device = crate::routing::identity::device_signing::current_device_identity(
+        state,
+        principal.as_str(),
+        device_id,
+    )
+    .await
+    .map_err(|_| "claim_generation_mismatch".to_owned())?
+    .ok_or_else(|| "claim_generation_mismatch".to_owned())?;
     if device.verification_state != "verified" || device.revoked_at.is_some() {
         return Err("claim_generation_mismatch".to_owned());
     }
@@ -4260,21 +4259,20 @@ async fn verify_device_keypackage_signature(
     signature: &KeyOperationSignature,
     signing_input: &[u8],
 ) -> Result<(), AppError> {
-    let device = state
-        .identities()
-        .find_device(coland_services::identity::FindDeviceQuery {
-            actor_id: principal.to_string(),
-            device_id: device_id.to_owned(),
-        })
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?
-        .ok_or_else(|| {
-            crate::app_error!(
-                FailedPrecondition,
-                "accepted device authorization is required for KeyPackage signature",
-            )
-            .with_internal_reason("claim_generation_mismatch")
-        })?;
+    let device = crate::routing::identity::device_signing::current_device_identity(
+        state,
+        principal.as_str(),
+        device_id,
+    )
+    .await
+    .map_err(|error| AppError::internal(error.to_string()))?
+    .ok_or_else(|| {
+        crate::app_error!(
+            FailedPrecondition,
+            "accepted device authorization is required for KeyPackage signature",
+        )
+        .with_internal_reason("claim_generation_mismatch")
+    })?;
     if device.verification_state != "verified" || device.revoked_at.is_some() {
         return Err(crate::app_error!(
             FailedPrecondition,
@@ -4547,21 +4545,20 @@ async fn current_keypackage_trust_binding(
     if let Some(binding) = current_agent_keypackage_trust_binding(state, principal).await? {
         return Ok(binding);
     }
-    let device = state
-        .identities()
-        .find_device(coland_services::identity::FindDeviceQuery {
-            actor_id: principal.to_string(),
-            device_id: device_id.to_owned(),
-        })
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?
-        .ok_or_else(|| {
-            crate::app_error!(
-                FailedPrecondition,
-                "accepted device authorization is required for KeyPackage publish",
-            )
-            .with_internal_reason("claim_generation_mismatch")
-        })?;
+    let device = crate::routing::identity::device_signing::current_device_identity(
+        state,
+        principal.as_str(),
+        device_id,
+    )
+    .await
+    .map_err(|error| AppError::internal(error.to_string()))?
+    .ok_or_else(|| {
+        crate::app_error!(
+            FailedPrecondition,
+            "accepted device authorization is required for KeyPackage publish",
+        )
+        .with_internal_reason("claim_generation_mismatch")
+    })?;
     device_authorize_trust_binding(&device).ok_or_else(|| {
         crate::app_error!(
             FailedPrecondition,
@@ -4606,11 +4603,12 @@ async fn current_keypackage_claim_trust_selector(
     }
     let mut bindings = BTreeMap::new();
     if target_device_ids.is_empty() {
-        for device in state
-            .identities()
-            .devices_for_actor(principal.as_str())
-            .await
-            .map_err(|error| AppError::internal(error.to_string()))?
+        for device in crate::routing::identity::device_signing::current_device_identities(
+            state,
+            principal.as_str(),
+        )
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?
         {
             if let Some(binding) = device_authorize_trust_binding(&device) {
                 bindings.insert(device.device_id, binding);
@@ -4618,14 +4616,13 @@ async fn current_keypackage_claim_trust_selector(
         }
     } else {
         for device_id in target_device_ids {
-            if let Some(device) = state
-                .identities()
-                .find_device(coland_services::identity::FindDeviceQuery {
-                    actor_id: principal.to_string(),
-                    device_id: device_id.clone(),
-                })
-                .await
-                .map_err(|error| AppError::internal(error.to_string()))?
+            if let Some(device) = crate::routing::identity::device_signing::current_device_identity(
+                state,
+                principal.as_str(),
+                device_id,
+            )
+            .await
+            .map_err(|error| AppError::internal(error.to_string()))?
                 && let Some(binding) = device_authorize_trust_binding(&device)
             {
                 bindings.insert(device_id.clone(), binding);

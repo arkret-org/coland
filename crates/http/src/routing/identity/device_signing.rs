@@ -5,7 +5,7 @@ use arkret_models_collaboration::events_payloads::device_identity::DeviceAuthori
 use arkret_models_crypto::DeviceStatus;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use coland_services::identity::{FindDeviceQuery, RecoveryPolicyState};
+use coland_services::identity::{DeviceIdentity, FindDeviceQuery, RecoveryPolicyState};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 
 use crate::state::AppState;
@@ -161,6 +161,140 @@ pub(crate) struct ProjectedDevicePayload {
     pub authorized_generation_ref: Option<u64>,
 }
 
+/// Read an accepted current PCR authorization with optional local display
+/// metadata. Native recovery does not create an inventory authorization mirror.
+pub(crate) async fn current_device_identity(
+    state: &AppState,
+    principal_id: &str,
+    device_id: &str,
+) -> Result<Option<DeviceIdentity>, coland_services::ServiceError> {
+    use arkret_wire::{AccountId, ActorId, CommittedEventRef, DeviceId, DidCoreId};
+    use coland_services::ServiceError;
+
+    let principal = DidCoreId::new(principal_id.to_owned())
+        .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+    let device = DeviceId::new(device_id.to_owned())
+        .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+    let account = AccountId::new(principal, state.service_core_id().clone());
+    let Some(history) = super::device_generation::load_confirmed_device_history(state, &account)
+        .await
+        .map_err(ServiceError::Conflict)?
+    else {
+        return Ok(None);
+    };
+    if history.current_authorization(&device).is_none() {
+        return Ok(None);
+    }
+    let admission = state
+        .persistence()
+        .pcr_device_admission(&account, &device, chrono::Utc::now())
+        .await?;
+    if admission != arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow {
+        return Ok(None);
+    }
+    let selector = super::device_generation::active_device_revocation_gate_selector(
+        state,
+        principal_id,
+        device_id,
+    )
+    .await?;
+    let accepted = state
+        .persistence()
+        .committed_event(&selector.authorization_ref.event_id)
+        .await?
+        .ok_or_else(|| ServiceError::SchemaViolation("accepted device Event is missing".into()))?;
+    let reference = CommittedEventRef {
+        event_id: accepted.event.event_id.clone(),
+        commit_id: accepted.commit.commit_id.clone(),
+        stream_ref: accepted.commit.stream_ref.clone(),
+        stream_position: accepted.commit.stream_position,
+    };
+    let payload: DeviceAuthorizePayload = serde_json::from_value(
+        serde_json::to_value(&accepted.event.payload)
+            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?,
+    )
+    .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+    if reference != selector.authorization_ref
+        || accepted.commit.event_ref != accepted.event.event_id
+        || accepted.event.kind != arkret_wire::EventKind::DeviceAuthorize
+        || accepted.event.actor_id != ActorId::account(account)
+        || payload.device_id != device
+    {
+        return Err(ServiceError::SchemaViolation(
+            "accepted device authorization does not bind its exact PCR selector".into(),
+        ));
+    }
+    let metadata = state
+        .identities()
+        .find_device(FindDeviceQuery {
+            actor_id: principal_id.to_owned(),
+            device_id: device_id.to_owned(),
+        })
+        .await?;
+    let mut value = serde_json::to_value(&payload)
+        .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+    let fields = value.as_object_mut().ok_or_else(|| {
+        ServiceError::SchemaViolation("device authorization is not an object".into())
+    })?;
+    fields.insert(
+        "device_authorize_event_id".into(),
+        serde_json::json!(reference.event_id),
+    );
+    fields.insert(
+        "device_authorization_ref".into(),
+        serde_json::json!(reference),
+    );
+    for key in ["last_seen_at", "last_key_upload_at"] {
+        if let Some(item) = metadata.as_ref().and_then(|record| record.payload.get(key)) {
+            fields.insert(key.to_owned(), item.clone());
+        }
+    }
+    Ok(Some(DeviceIdentity {
+        actor_id: principal_id.to_owned(),
+        device_id: device_id.to_owned(),
+        display_name: metadata
+            .as_ref()
+            .and_then(|record| record.display_name.clone()),
+        verification_state: "verified".into(),
+        payload: value,
+        created_at: metadata
+            .as_ref()
+            .map_or(accepted.commit.committed_at, |record| record.created_at),
+        updated_at: metadata
+            .as_ref()
+            .map_or(accepted.commit.committed_at, |record| {
+                record.updated_at.max(accepted.commit.committed_at)
+            }),
+        revoked_at: None,
+    }))
+}
+
+pub(crate) async fn current_device_identities(
+    state: &AppState,
+    principal_id: &str,
+) -> Result<Vec<DeviceIdentity>, coland_services::ServiceError> {
+    let account = arkret_wire::AccountId::new(
+        arkret_wire::DidCoreId::new(principal_id.to_owned())
+            .map_err(|error| coland_services::ServiceError::SchemaViolation(error.to_string()))?,
+        state.service_core_id().clone(),
+    );
+    let Some(history) = super::device_generation::load_confirmed_device_history(state, &account)
+        .await
+        .map_err(coland_services::ServiceError::Conflict)?
+    else {
+        return Ok(Vec::new());
+    };
+    let mut devices = Vec::new();
+    for device_id in history.current_device_ids() {
+        if let Some(device) =
+            current_device_identity(state, principal_id, device_id.as_str()).await?
+        {
+            devices.push(device);
+        }
+    }
+    Ok(devices)
+}
+
 pub(crate) async fn resolve_device_signing_directory_facet(
     state: &AppState,
     principal_id: &str,
@@ -179,14 +313,7 @@ pub(crate) async fn try_resolve_device_signing_directory_facet(
     principal_id: &str,
     device_id: &str,
 ) -> Result<DeviceSigningDirectoryFacet, coland_services::ServiceError> {
-    let record = match state
-        .identities()
-        .find_device(FindDeviceQuery {
-            actor_id: principal_id.to_owned(),
-            device_id: device_id.to_owned(),
-        })
-        .await?
-    {
+    let record = match current_device_identity(state, principal_id, device_id).await? {
         Some(record) => record,
         None => return Ok(revoked_device_signing_directory_facet()),
     };

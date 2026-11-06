@@ -64,6 +64,12 @@ impl ConfirmedDeviceHistory {
             .filter(|authorization| self.is_currently_active(authorization))
     }
 
+    pub(crate) fn current_device_ids(&self) -> impl Iterator<Item = &DeviceId> {
+        self.current_by_device
+            .keys()
+            .filter(|device| self.current_authorization(device).is_some())
+    }
+
     pub(crate) fn is_currently_active(&self, authorization: &ConfirmedDeviceAuthorization) -> bool {
         authorization.generation == self.current_generation
             && self.current_by_device.get(&authorization.device_id) == Some(&authorization.event_id)

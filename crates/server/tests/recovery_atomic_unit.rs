@@ -2,6 +2,9 @@
 //! the real terminal unit. Factor/session HTTP verification is outside this
 //! fixture; no SQL manufactures a generation, device authorization or Commit.
 
+#[path = "http_api/current_common.rs"]
+mod http_common;
+
 use arkret_models_collaboration::events_payloads::{
     DeviceAuthorizationBindingKind, DeviceOrPrincipalRef, DeviceReanchorPayload, SignatureMaterial,
     device_authorize_payload_digest,
@@ -21,7 +24,10 @@ use coland_test_support::pcr_genesis::PcrGenesisFixture;
 use diesel::sql_types::Jsonb;
 use diesel_async::{RunQueryDsl, SimpleAsyncConnection};
 use ed25519_dalek::{Signer, SigningKey};
+use salvo::test::ResponseExt as _;
 use serde_json::{Value, json};
+
+const REPLACEMENT_SIGNING_SEED: [u8; 32] = [96; 32];
 
 struct Fixture {
     state: coland_http::state::AppState,
@@ -43,7 +49,11 @@ fn signature(seed: [u8; 32], bytes: &[u8]) -> Base64UrlString {
 }
 
 async fn fixture() -> Fixture {
-    let (state, pool) = coland_test_support::app_state_with_pool(coland_test_support::app_config());
+    fixture_with_config(coland_test_support::app_config()).await
+}
+
+async fn fixture_with_config(config: coland_http::config::AppConfig) -> Fixture {
+    let (state, pool) = coland_test_support::app_state_with_pool(config);
     // A killed test can leave its DDL in a reused, exclusively leased database.
     let mut conn = pool.get().await.unwrap();
     conn.batch_execute("DROP FUNCTION IF EXISTS fail_policy_boundary() CASCADE; DROP FUNCTION IF EXISTS fail_recovery_boundary() CASCADE;").await.unwrap();
@@ -102,7 +112,7 @@ async fn fixture() -> Fixture {
     let device_id = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
     let session_id =
         RecoverySessionId::new(format!("ak:recovery_session:{}", uuid::Uuid::now_v7())).unwrap();
-    let replacement_seed = [96; 32];
+    let replacement_seed = REPLACEMENT_SIGNING_SEED;
     let replacement_method = DidUrl::new(format!("{}#{device_id}", pcr.history.did)).unwrap();
     let mut authorize_payload = possession_with(
         &account,
@@ -643,7 +653,7 @@ async fn recovery_terminal_unit_fences_old_device_and_replays_after_response_los
 
 #[tokio::test]
 async fn completed_recovery_device_is_admitted_without_inventory_projection() {
-    let fixture = fixture().await;
+    let fixture = fixture_with_config(http_common::test_config()).await;
     let store = fixture.state.test_persistence();
     store
         .security_transactions()
@@ -704,6 +714,233 @@ async fn completed_recovery_device_is_admitted_without_inventory_projection() {
         coland_storage::DeviceRevocationGateStatus::GenerationMismatch
     );
     assert_old_device_fenced(&fixture).await;
+
+    let token = http_common::dev_token_for_device(
+        fixture.state.clone(),
+        fixture.pcr.history.did.as_str(),
+        payload.device_id.as_str(),
+        "Recovered device",
+    )
+    .await;
+    // Development login may create optional display metadata. It must not
+    // become an authorization requirement for a natively accepted recovery.
+    let mut conn = fixture.pool.get().await.unwrap();
+    diesel::sql_query("DELETE FROM devices WHERE actor_id = $1 AND device_id = $2")
+        .bind::<diesel::sql_types::Text, _>(account.principal_id.as_str())
+        .bind::<diesel::sql_types::Text, _>(payload.device_id.as_str())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let unknown = DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
+    let mut device_ids = vec![
+        payload.device_id.clone(),
+        fixture.pcr.history.founding_device_id.clone(),
+        unknown,
+    ];
+    device_ids.sort();
+    let request = KeysQueryRequestBody {
+        device_keys: vec![QueryAccountDeviceSelector {
+            account_id: account.clone(),
+            device_ids,
+        }],
+        timeout_ms: None,
+    };
+    let mut response = http_common::TestClient::post("http://server/_arkret/self/keys/query")
+        .add_header("authorization", format!("Bearer {token}"), true)
+        .json(&request)
+        .send(&http_common::app_from_state(fixture.state.clone()))
+        .await;
+    let response_body: Value = response.take_json().await.unwrap();
+    assert_eq!(
+        response.status_code,
+        Some(salvo::http::StatusCode::OK),
+        "{response_body}"
+    );
+    let keys: KeysQueryResponseBody = serde_json::from_value(response_body).unwrap();
+    let rows = keys
+        .devices_for(account)
+        .expect("the exact account is visible");
+    let row = rows
+        .get(&payload.device_id)
+        .expect("accepted recovery device must have an authoring projection without inventory");
+    assert_eq!(
+        rows.len(),
+        1,
+        "old-generation and unknown devices stay hidden"
+    );
+    assert_eq!(
+        row.device_projection.device_signing_key_did.as_str(),
+        payload.device_public_key_did.as_str(),
+    );
+    assert_eq!(row.device_projection.hpke_key, payload.hpke_key);
+    assert_eq!(
+        row.device_projection.device_authorize_event_id,
+        committed.event.event_id,
+    );
+    assert_eq!(
+        row.device_projection.authorized_generation_ref,
+        payload.authorized_generation_ref,
+    );
+    assert!(row.is_usable_in_generation(keys.generation_for(account)));
+    let retained = store
+        .account_device_signer_evidence()
+        .get(account, &payload.device_id, &row.signer_evidence_ref)
+        .await
+        .unwrap()
+        .expect("the complete signed authoring root is retained");
+    assert_eq!(
+        retained
+            .device_projection_attestation
+            .attestation
+            .device_signing_key_did
+            .as_str(),
+        payload.device_public_key_did.as_str(),
+    );
+    assert!(
+        store
+            .devices()
+            .get(account.principal_id.as_str(), payload.device_id.as_str())
+            .await
+            .unwrap()
+            .is_none(),
+        "directory reads must not manufacture a second authorization mirror"
+    );
+    let recovered_event = &committed.event;
+    let proof = recovered_event.producer_proof.as_ref().unwrap();
+    let envelope = arkret_signatures::proof::EventProofBuilder::new()
+        .envelope_bytes(recovered_event)
+        .unwrap();
+    let verified_key = coland_http::jws_verify::verify_principal_authorized_event_proof_async(
+        proof,
+        &envelope,
+        &recovered_event.actor_id,
+        proof.verification_method.as_str(),
+        account.principal_id.as_str(),
+        &fixture.state,
+    )
+    .await
+    .expect("native recovery authority must verify Event authoring without inventory");
+    assert_eq!(
+        verified_key.as_str(),
+        payload.device_public_key_did.as_str()
+    );
+    let raw_input = b"recovered-device-proof-regression";
+    for (seed, should_verify) in [(REPLACEMENT_SIGNING_SEED, true), ([95; 32], false)] {
+        let proof_result = coland_http::jws_verify::verify_principal_authorized_ed25519_signature_with_account_authority_async(
+            raw_input,
+            signature(seed, raw_input).as_str(),
+            proof.verification_method.as_str(),
+            account,
+            &payload.device_id,
+            &fixture.state,
+        ).await;
+        assert_eq!(proof_result.is_ok(), should_verify, "{proof_result:?}");
+    }
+
+    let mls_identity = arkret_mls::ArkretMlsIdentity::new_human_device(
+        ActorId::account(account.clone()),
+        payload.device_id.clone(),
+        arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(SigningKey::from_bytes(
+            &REPLACEMENT_SIGNING_SEED,
+        )),
+    )
+    .unwrap();
+    let package = mls_identity.key_package_record().unwrap();
+    let package_upload = mls_identity
+        .signed_key_packages_upload_request(&[package], proof.verification_method.as_str())
+        .unwrap();
+    let mut published =
+        http_common::TestClient::post("http://server/_arkret/self/keys/keypackages/upload")
+            .add_header("authorization", format!("Bearer {token}"), true)
+            .add_header("content-type", "application/json", true)
+            .body(arkret_canonical::canonical_json_bytes(&package_upload).unwrap())
+            .send(&http_common::app_from_state(fixture.state.clone()))
+            .await;
+    let published_body: Value = published.take_json().await.unwrap();
+    assert_eq!(
+        published.status_code,
+        Some(salvo::http::StatusCode::OK),
+        "{published_body}"
+    );
+    let published: KeyPackagesUploadResponseBody = serde_json::from_value(published_body).unwrap();
+    assert_eq!(published.accepted_count, 1, "{published:?}");
+    assert!(published.rejections.is_empty(), "{published:?}");
+    let mut viewer_response =
+        http_common::TestClient::get("http://server/_arkret/self/account/viewer")
+            .add_header("authorization", format!("Bearer {token}"), true)
+            .send(&http_common::app_from_state(fixture.state.clone()))
+            .await;
+    assert_eq!(
+        viewer_response.status_code,
+        Some(salvo::http::StatusCode::OK)
+    );
+    let viewer: Value = viewer_response.take_json().await.unwrap();
+    let recovered = viewer["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|device| device["device_id"] == payload.device_id.as_str())
+        .expect("cold-start viewer must include the natively recovered device");
+    assert_eq!(recovered["status"], "active");
+    assert_eq!(recovered["verification_state"], "verified");
+    assert_eq!(recovered["verification_source"], "recovery");
+
+    let unsigned = KeysUploadFields {
+        device_id: payload.device_id.clone(),
+        one_time_keys: Default::default(),
+        fallback_keys: Default::default(),
+    };
+    let signing_input = keys_upload_signing_input(&unsigned).unwrap();
+    for (seed, expected_status) in [
+        ([95; 32], salvo::http::StatusCode::BAD_REQUEST),
+        (REPLACEMENT_SIGNING_SEED, salvo::http::StatusCode::OK),
+    ] {
+        let upload = unsigned.clone().into_signed(KeyOperationSignature {
+            kid: NonEmptyString::new(payload.device_public_key_did.to_string()).unwrap(),
+            signature_algorithm: Some(NonEmptyString::new("Ed25519").unwrap()),
+            signature: signature(seed, &signing_input),
+        });
+        let mut response = http_common::TestClient::post("http://server/_arkret/self/keys/upload")
+            .add_header("authorization", format!("Bearer {token}"), true)
+            .add_header("content-type", "application/json", true)
+            .body(arkret_canonical::canonical_json_bytes(&upload).unwrap())
+            .send(&http_common::app_from_state(fixture.state.clone()))
+            .await;
+        let body: Value = response.take_json().await.unwrap();
+        assert_eq!(response.status_code, Some(expected_status), "{body}");
+        let bundle = store
+            .device_keys()
+            .get(account.principal_id.as_str(), payload.device_id.as_str())
+            .await
+            .unwrap();
+        if expected_status == salvo::http::StatusCode::BAD_REQUEST {
+            assert!(
+                bundle.is_none(),
+                "wrong signer must not persist any key material"
+            );
+        } else {
+            assert_eq!(bundle.unwrap()["device_id"], payload.device_id.as_str());
+        }
+    }
+    // A metadata write by keys/upload must not replace the native authority.
+    let mut reopened = http_common::TestClient::post("http://server/_arkret/self/keys/query")
+        .add_header("authorization", format!("Bearer {token}"), true)
+        .json(&request)
+        .send(&http_common::app_from_state(fixture.state.clone()))
+        .await;
+    assert_eq!(reopened.status_code, Some(salvo::http::StatusCode::OK));
+    let reopened: KeysQueryResponseBody = reopened.take_json().await.unwrap();
+    let reopened_row = reopened
+        .devices_for(account)
+        .unwrap()
+        .get(&payload.device_id)
+        .unwrap();
+    let mut expected_projection = row.device_projection.clone();
+    assert!(reopened_row.device_projection.attested_at >= expected_projection.attested_at);
+    expected_projection.attested_at = reopened_row.device_projection.attested_at;
+    expected_projection.expires_at = reopened_row.device_projection.expires_at;
+    assert_eq!(reopened_row.device_projection, expected_projection);
 }
 
 #[tokio::test]

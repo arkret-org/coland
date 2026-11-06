@@ -93,23 +93,20 @@ pub(crate) async fn validate_device_authorization_binding(
                     "accepted_device authorization must be Event-signed by the declared authorizing device",
                 ));
             }
-            let record = state
-                .identities()
-                .find_device(coland_services::identity::FindDeviceQuery {
-                    actor_id: actor_id.to_owned(),
-                    device_id: authorizer.to_string(),
-                })
-                .await
-                .map_err(|error| {
-                    event_validation_error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "temporarily_unavailable",
-                        format!("authorizing device lookup failed: {error}"),
-                    )
-                })?
-                .ok_or_else(|| {
-                    device_authorization_invalid("authorizing device is not accepted")
-                })?;
+            let record = crate::routing::identity::device_signing::current_device_identity(
+                state,
+                actor_id,
+                authorizer.as_str(),
+            )
+            .await
+            .map_err(|error| {
+                event_validation_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    format!("authorizing device lookup failed: {error}"),
+                )
+            })?
+            .ok_or_else(|| device_authorization_invalid("authorizing device is not accepted"))?;
             let current = crate::routing::identity::device_generation::current_device_generation(
                 state, actor_id,
             )

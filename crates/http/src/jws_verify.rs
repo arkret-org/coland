@@ -377,15 +377,14 @@ async fn principal_authorized_device_binding_with_account_authority_async(
             ))
         })?
         .ok_or_else(|| fail("principal account authority is not durably accepted".to_owned()))?;
-    let device = state
-        .identities()
-        .find_device(coland_services::identity::FindDeviceQuery {
-            actor_id: authority.principal_id.to_string(),
-            device_id: expected_device_id.to_string(),
-        })
-        .await
-        .map_err(|error| fail(format!("principal device state unavailable: {error}")))?
-        .ok_or_else(|| fail("principal signer device is unavailable".to_owned()))?;
+    let device = crate::routing::identity::device_signing::current_device_identity(
+        state,
+        authority.principal_id.as_str(),
+        expected_device_id.as_str(),
+    )
+    .await
+    .map_err(|error| fail(format!("principal device state unavailable: {error}")))?
+    .ok_or_else(|| fail("principal signer device is unavailable".to_owned()))?;
     if device.revoked_at.is_some() || device.verification_state != "verified" {
         return Err(fail("principal signer device is not active".to_owned()));
     }
@@ -722,19 +721,18 @@ pub fn verify_principal_authorized_event_proof_async<'a>(
                 fail("principal account authority is not durably accepted".to_owned())
             })?;
 
-        let device = state
-            .identities()
-            .find_device(coland_services::identity::FindDeviceQuery {
-                actor_id: expected_principal_id.to_string(),
-                device_id: device_id.to_string(),
-            })
-            .await
-            .map_err(|error| {
-                fail(format!(
-                    "principal device signing state unavailable: {error}"
-                ))
-            })?
-            .ok_or_else(|| fail("principal Event signer device is unavailable".to_owned()))?;
+        let device = crate::routing::identity::device_signing::current_device_identity(
+            state,
+            expected_principal_id.as_str(),
+            device_id.as_str(),
+        )
+        .await
+        .map_err(|error| {
+            fail(format!(
+                "principal device signing state unavailable: {error}"
+            ))
+        })?
+        .ok_or_else(|| fail("principal Event signer device is unavailable".to_owned()))?;
         if device.revoked_at.is_some() || device.verification_state != "verified" {
             return Err(fail(
                 "principal Event signer device is not active".to_owned(),

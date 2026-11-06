@@ -423,9 +423,41 @@ async fn current_read_inputs(
 async fn current_delivery(
     state: &AppState,
     credential: &Credential,
-    frame: &mut WebSocketServerFrame,
+    pending: &mut PendingFrame,
     parameters: &WebSocketOpenParameters,
 ) -> Result<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>, ErrorCode> {
+    if let PendingFrame::Signal {
+        channel_id,
+        envelope,
+    } = pending
+    {
+        if !super::subscribe::stream_session_current(
+            state,
+            &credential.session,
+            Some(credential.grant.as_str()),
+        )
+        .await
+        {
+            return Err(ErrorCode::Unauthenticated);
+        }
+        crate::routing::events::require_agent_session_scope(
+            &credential.session,
+            WebSocketOperationId::SignalStreamSubscribe.as_str(),
+        )
+        .map_err(|_| ErrorCode::CapabilityDenied)?;
+        let admitted = super::signal::admitted_signal_frame(
+            state,
+            &credential.session,
+            envelope.as_ref().clone(),
+        )
+        .await
+        .map_err(|_| ErrorCode::CapabilityDenied)?;
+        *pending = PendingFrame::Ready(signal_frame(channel_id, admitted));
+        return Ok(None);
+    }
+    let PendingFrame::Ready(frame) = pending else {
+        unreachable!()
+    };
     if !super::subscribe::stream_session_current(
         state,
         &credential.session,
@@ -596,9 +628,39 @@ struct Channel {
     worker: tokio::task::JoinHandle<()>,
 }
 struct QueuedFrame {
-    frame: WebSocketServerFrame,
+    frame: PendingFrame,
     read_inputs: WebSocketOpenParameters,
     _permit: OwnedSemaphorePermit,
+}
+
+/// A Signal remains an internal envelope until its physical delivery gate.
+/// In particular, a queued candidate never contains a cached authorization.
+enum PendingFrame {
+    Ready(WebSocketServerFrame),
+    Signal {
+        channel_id: String,
+        envelope: Box<arkret_wire::SignalEnvelope>,
+    },
+}
+
+impl PendingFrame {
+    fn length(&self) -> Result<usize, ErrorCode> {
+        let bytes = match self {
+            Self::Ready(frame) => arkret_canonical::canonical_json_bytes(frame),
+            Self::Signal { envelope, .. } => arkret_canonical::canonical_json_bytes(envelope),
+        }
+        .map_err(|_| ErrorCode::InternalError)?;
+        Ok(bytes.len())
+    }
+
+    fn terminal(&self) -> bool {
+        matches!(self, Self::Ready(frame) if terminal(frame))
+    }
+}
+
+enum ChannelInput {
+    Bytes(bytes::Bytes),
+    Signal(super::signal::SignalCandidate),
 }
 impl Drop for Channel {
     fn drop(&mut self) {
@@ -649,14 +711,9 @@ async fn response_for(
             )
             .await
         }
-        WebSocketOpenParameters::Signal(_) => super::signal::signal_response(
-            state.clone(),
-            credential.session.clone(),
-            Some(credential.grant.as_str().to_owned()),
-            &mut response,
-            None,
-            HEARTBEAT_MS as u64,
-        ),
+        // The worker reads internal live candidates directly. Constructing an
+        // HTTP response here would admit every Signal before queueing as well.
+        WebSocketOpenParameters::Signal(_) => {}
     }
     response
 }
@@ -733,7 +790,31 @@ fn start_channel(
                 ready.notify_one();
                 return;
             }
-            let mut body = response.take_body();
+            let mut body: futures_util::stream::BoxStream<'static, Result<ChannelInput, ()>> =
+                if matches!(parameters, WebSocketOpenParameters::Signal(_)) {
+                    super::signal::signal_candidates(
+                        state.clone(),
+                        credential.session.clone(),
+                        Some(credential.grant.as_str().to_owned()),
+                        None,
+                        HEARTBEAT_MS as u64,
+                    )
+                    .map(|candidate| Ok(ChannelInput::Signal(candidate)))
+                    .boxed()
+                } else {
+                    response
+                        .take_body()
+                        .filter_map(|chunk| async move {
+                            match chunk {
+                                Ok(chunk) => chunk
+                                    .into_data()
+                                    .ok()
+                                    .map(|bytes| Ok(ChannelInput::Bytes(bytes))),
+                                Err(_) => Some(Err(())),
+                            }
+                        })
+                        .boxed()
+                };
             loop {
                 let permit = match tokio::time::timeout(
                     Duration::from_secs(3),
@@ -764,41 +845,50 @@ fn start_channel(
                     ready.notify_one();
                     return;
                 };
-                let Ok(bytes) = chunk.into_data() else {
-                    continue;
-                };
-                let converted = match &mut parameters {
-                    WebSocketOpenParameters::Account(p) => {
-                        serde_json::from_slice::<AccountSubscribeFrame>(&bytes).map(|frame| {
+                let converted = match chunk {
+                    ChannelInput::Signal(super::signal::SignalCandidate::Envelope(envelope)) => {
+                        Ok(PendingFrame::Signal {
+                            channel_id: id.clone(),
+                            envelope: Box::new(envelope),
+                        })
+                    }
+                    ChannelInput::Signal(super::signal::SignalCandidate::Control(frame)) => {
+                        Ok(PendingFrame::Ready(signal_frame(&id, frame)))
+                    }
+                    ChannelInput::Bytes(bytes) => match &mut parameters {
+                        WebSocketOpenParameters::Account(p) => {
+                            serde_json::from_slice::<AccountSubscribeFrame>(&bytes).map(|frame| {
+                                if let Some(cursor) = frame.cursor.as_ref() {
+                                    p.after = Some(cursor.clone());
+                                }
+                                account_frame(&id, frame)
+                            })
+                        }
+                        WebSocketOpenParameters::Events(p) => serde_json::from_slice::<
+                            CommittedEventSubscribeFrame,
+                        >(&bytes)
+                        .map(|frame| {
                             if let Some(cursor) = frame.cursor.as_ref() {
                                 p.after = Some(cursor.clone());
                             }
-                            account_frame(&id, frame)
-                        })
+                            events_frame(&id, frame)
+                        }),
+                        WebSocketOpenParameters::Signal(_) => unreachable!(),
                     }
-                    WebSocketOpenParameters::Events(p) => serde_json::from_slice::<
-                        CommittedEventSubscribeFrame,
-                    >(&bytes)
-                    .map(|frame| {
-                        if let Some(cursor) = frame.cursor.as_ref() {
-                            p.after = Some(cursor.clone());
-                        }
-                        events_frame(&id, frame)
-                    }),
-                    WebSocketOpenParameters::Signal(_) => {
-                        serde_json::from_slice::<SignalStreamFrame>(&bytes)
-                            .map(|frame| signal_frame(&id, frame))
-                    }
+                    .map(PendingFrame::Ready),
                 };
                 let Ok(frame) = converted else {
                     let _ = failure.send((id.clone(), ErrorCode::InternalError)).await;
                     ready.notify_one();
                     return;
                 };
-                let ending = terminal(&frame);
-                let bounded = frame.validate().is_ok()
-                    && arkret_canonical::canonical_json_bytes(&frame)
-                        .is_ok_and(|bytes| bytes.len() <= MAX_FRAME as usize);
+                let ending = frame.terminal();
+                let bounded = match &frame {
+                    PendingFrame::Ready(frame) => frame.validate().is_ok(),
+                    PendingFrame::Signal { envelope, .. } => envelope.validate_structural().is_ok(),
+                } && frame
+                    .length()
+                    .is_ok_and(|length| length <= MAX_FRAME as usize);
                 let queued = QueuedFrame {
                     frame,
                     read_inputs: read_inputs.clone(),
@@ -991,8 +1081,9 @@ async fn connection_inner(
                     let Some(channel_id)=schedule.pop_front() else{break;};
                     schedule.push_back(channel_id.clone());
                     let Some(channel)=channels.get_mut(&channel_id) else{continue;};
+                    let operation=channel.operation;
                     let Some(queued)=channel.pending.take().or_else(||channel.queue.try_recv().ok()) else{continue;};
-                    let length=match arkret_canonical::canonical_json_bytes(&queued.frame){Ok(bytes)=>bytes.len(),Err(_)=>return WebSocketCloseCode::InternalError};
+                    let length=match queued.frame.length(){Ok(length)=>length,Err(_)=>return WebSocketCloseCode::InternalError};
                     if channel.operation==WebSocketOperationId::SignalStreamSubscribe && !signal_budget.take(length) {
                         channel.pending=Some(queued);continue;
                     }
@@ -1000,7 +1091,7 @@ async fn connection_inner(
                     let QueuedFrame {mut frame,read_inputs,_permit}=queued;
                     let current=credential.as_ref().unwrap();
                     #[cfg(feature = "conformance-harness")]
-                    if let Err(error)=cursor_emission_probe::pause(&state,&read_inputs,&frame).await {
+                    if let PendingFrame::Ready(ready_frame)=&frame && let Err(error)=cursor_emission_probe::pause(&state,&read_inputs,ready_frame).await {
                         channels.remove(&channel_id);schedule.retain(|id|id!=&channel_id);
                         if let Err(code)=send(socket,&mut outgoing,&channel_error(&channel_id,error)).await{return code;}
                         if let Err(code)=send(socket,&mut outgoing,&WebSocketServerFrame::Closed {channel_id,reason:WebSocketClosedReason::Error}).await{return code;}
@@ -1016,16 +1107,24 @@ async fn connection_inner(
                             ready.notify_one();continue;
                         }
                     };
-                    let actual_length=match arkret_canonical::canonical_json_bytes(&frame){Ok(bytes)=>bytes.len(),Err(_)=>return WebSocketCloseCode::InternalError};
-                    if actual_length>length && !outgoing.add_bytes(actual_length-length) {
+                    let actual_length=match frame.length(){Ok(length)=>length,Err(_)=>return WebSocketCloseCode::InternalError};
+                    let PendingFrame::Ready(ready_frame)=&frame else{return WebSocketCloseCode::InternalError;};
+                    if actual_length>MAX_FRAME as usize || ready_frame.validate().is_err() {
+                        channels.remove(&channel_id);schedule.retain(|id|id!=&channel_id);
+                        if let Err(code)=send(socket,&mut outgoing,&channel_error(&channel_id,ErrorCode::RateLimited)).await{return code;}
+                        if let Err(code)=send(socket,&mut outgoing,&WebSocketServerFrame::Closed {channel_id,reason:WebSocketClosedReason::Error}).await{return code;}
+                        ready.notify_one();continue;
+                    }
+                    if actual_length>length && (!outgoing.add_bytes(actual_length-length)
+                        || (operation==WebSocketOperationId::SignalStreamSubscribe && !signal_budget.add_bytes(actual_length-length))) {
                         if let Some(channel)=channels.get_mut(&channel_id){channel.pending=Some(QueuedFrame {frame,read_inputs,_permit});}
                         continue;
                     }
-                    let ending=terminal(&frame);
+                    let ending=terminal(ready_frame);
                     if delivery.as_ref().is_some_and(|guard| !guard.permits_handoff()) {
                         return WebSocketCloseCode::PolicyViolation;
                     }
-                    if let Err(code)=send_unmetered(socket,&frame).await{return code;}
+                    if let Err(code)=send_unmetered(socket,ready_frame).await{return code;}
                     if let Some(guard) = delivery && guard.finish().await.is_err() {return WebSocketCloseCode::InternalError;}
                     if ending {
                         channels.remove(&channel_id);schedule.retain(|id|id!=&channel_id);

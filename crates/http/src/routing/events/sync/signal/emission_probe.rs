@@ -38,13 +38,6 @@ pub(super) async fn pause(
     {
         return Ok(None);
     }
-    // A WebSocket frame enters this gate once before queueing and again at
-    // physical output. A local one-shot marker selects the latter pass.
-    match tokio::fs::remove_file(path.with_extension("skip")).await {
-        Ok(()) => return Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(signal_rail_unavailable("select physical emission probe")),
-    }
     let bytes = arkret_canonical::canonical_json_bytes(envelope)
         .map_err(|_| signal_rail_unavailable("encode emission scheduling probe"))?;
     tokio::fs::write(path.with_extension("reached.json"), bytes)

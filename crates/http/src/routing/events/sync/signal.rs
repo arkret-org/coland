@@ -942,12 +942,53 @@ pub(super) fn signal_response(
     max_duration_ms: Option<u64>,
     heartbeat_ms: u64,
 ) {
+    let body_stream = signal_candidates(state.clone(), session.clone(), grant, max_duration_ms, heartbeat_ms)
+        .filter_map(move |candidate| {
+            let state = state.clone();
+            let session = session.clone();
+            async move {
+                let frame = match candidate {
+                    SignalCandidate::Control(frame) => frame,
+                    SignalCandidate::Envelope(envelope) => {
+                        match admitted_signal_frame(&state, &session, envelope).await {
+                            Ok(frame) => frame,
+                            Err(error) => {
+                                #[cfg(feature = "conformance-harness")]
+                                tracing::warn!(code=error.wire_code(), %error, "conformance Signal frame refused by the production emission gate");
+                                #[cfg(not(feature = "conformance-harness"))]
+                                let _ = error;
+                                return None;
+                            }
+                        }
+                    }
+                };
+                Some(Ok::<bytes::Bytes, std::io::Error>(ndjson_line(&frame)))
+            }
+        });
+    let _ = res.add_header("content-type", "application/x-ndjson", true);
+    res.stream(body_stream.boxed());
+}
+
+/// Internal live candidates carry no delivery authority. Each transport admits
+/// them once at its own physical output boundary, after any bounded queue.
+pub(super) enum SignalCandidate {
+    Control(SignalStreamFrame),
+    Envelope(SignalEnvelope),
+}
+
+pub(super) fn signal_candidates(
+    state: AppState,
+    session: SessionIdentityState,
+    grant: Option<String>,
+    max_duration_ms: Option<u64>,
+    heartbeat_ms: u64,
+) -> impl futures_util::Stream<Item = SignalCandidate> + Send + 'static {
     let body_stream = async_stream::stream! {
         let Ok(mut live_starts) = signal_subscription_start(&state, &session).await else {
-            yield Ok::<bytes::Bytes,std::io::Error>(ndjson_line(&SignalStreamFrame::Unauthorized { reason:None }));
+            yield SignalCandidate::Control(SignalStreamFrame::Unauthorized { reason:None });
             return;
         };
-        yield Ok::<bytes::Bytes,std::io::Error>(ndjson_line(&SignalStreamFrame::HEARTBEAT));
+        yield SignalCandidate::Control(SignalStreamFrame::HEARTBEAT);
         let deadline = max_duration_ms.map(|ms|tokio::time::Instant::now()+std::time::Duration::from_millis(ms));
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_millis(heartbeat_ms));
         heartbeat.tick().await;
@@ -961,35 +1002,26 @@ pub(super) fn signal_response(
                         reconnect_after_ms: Some(SIGNAL_SUBSCRIBE_RECONNECT_AFTER_MS),
                         reason: None,
                     };
-                    yield Ok::<bytes::Bytes, std::io::Error>(ndjson_line(&frame));
+                    yield SignalCandidate::Control(frame);
                     break;
                 }
                 _ = poll.tick() => {
                     if !super::subscribe::stream_session_current(&state, &session, grant.as_deref()).await {
-                        yield Ok::<bytes::Bytes,std::io::Error>(ndjson_line(&SignalStreamFrame::Unauthorized { reason:None }));
+                        yield SignalCandidate::Control(SignalStreamFrame::Unauthorized { reason:None });
                         break;
                     }
                     for envelope in pending_signals_for_subscriber(&state, &session, &mut live_starts).await {
-                        match admitted_signal_frame(&state, &session, envelope).await {
-                            Ok(frame) => yield Ok(ndjson_line(&frame)),
-                            Err(error) => {
-                                #[cfg(feature = "conformance-harness")]
-                                tracing::warn!(code=error.wire_code(), %error, "conformance Signal frame refused by the production emission gate");
-                                #[cfg(not(feature = "conformance-harness"))]
-                                let _ = error;
-                            }
-                        }
+                        yield SignalCandidate::Envelope(envelope);
                     }
                 }
                 _ = heartbeat.tick() => {
-                    yield Ok(ndjson_line(&SignalStreamFrame::HEARTBEAT));
+                    yield SignalCandidate::Control(SignalStreamFrame::HEARTBEAT);
                 }
             }
         }
     };
 
-    let _ = res.add_header("content-type", "application/x-ndjson", true);
-    res.stream(body_stream.boxed());
+    body_stream
 }
 
 /// Fresh current admission belongs to the recipient authenticated self boundary,
@@ -999,6 +1031,8 @@ pub(crate) async fn admitted_signal_frame(
     session: &SessionIdentityState,
     envelope: SignalEnvelope,
 ) -> Result<SignalStreamFrame, AppError> {
+    #[cfg(feature = "conformance-harness")]
+    let admission_started = std::time::Instant::now();
     use arkret_models_identity::{
         CurrentSignerKeyQuerySender, SignerKeyQuerySelector, SignerKeyResolution,
         SignerKeysQueryRequestBody,
@@ -1192,6 +1226,13 @@ pub(crate) async fn admitted_signal_frame(
         authority.call_invitation.is_some(),
     )?;
     decision?;
+    #[cfg(feature = "conformance-harness")]
+    tracing::debug!(
+        envelope_digest = %envelope.proof.envelope_digest,
+        admission_ms = admission_started.elapsed().as_millis() as u64,
+        envelope_age_ms = chrono::Utc::now().signed_duration_since(envelope.sent_at).num_milliseconds(),
+        "Signal physical delivery admitted"
+    );
     Ok(SignalStreamFrame::signal(envelope, authority))
 }
 

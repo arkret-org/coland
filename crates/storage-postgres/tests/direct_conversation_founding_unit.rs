@@ -3499,7 +3499,7 @@ async fn record_peer_welcome(
     peer: &ActorId,
     state: &str,
     ordinal: i64,
-) {
+) -> (String, String, String) {
     let claim_id = format!("ak:keypackage_claim:{}", uuid::Uuid::now_v7());
     let welcome_id = format!("ak:mls_welcome_delivery:{}", uuid::Uuid::now_v7());
     let request_id = uuid::Uuid::now_v7().simple().to_string();
@@ -3598,6 +3598,7 @@ async fn record_peer_welcome(
     .execute(&mut *conn)
     .await
     .unwrap();
+    (claim_id, welcome_id, request_id)
 }
 
 /// Every row an admitted Direct Conversation Event can leave for `realm_id`.
@@ -5337,6 +5338,165 @@ async fn participant_authority_scenario() {
         );
     })
     .await;
+}
+
+#[tokio::test]
+async fn replicated_peer_welcome_durability_is_independent_of_batch_position() {
+    use arkret_models_collaboration::direct_conversation::DirectConversationPeerMlsAdmission as Admission;
+    let (_database, pool) = contract_pool().await;
+    let pair = pair(&pool).await;
+    let at = now();
+    let unit = founding_unit(&pair, &UnitShape::exact(&pair), key(), at).await;
+    pair.store()
+        .admit_self_direct_conversation_founding_unit(&unit, &pair.guards(), at)
+        .await
+        .unwrap();
+    let realm = realm_of(&unit);
+    let founder = pair.founder_actor();
+    let peer = pair.peer_actor();
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    let genesis = with_group(
+        cited(
+            &unit.transactions[3],
+            EventKind::MlsGenesis,
+            founder.clone(),
+            mls_genesis_payload(&pair, &realm, at),
+            Cites::Nothing,
+        ),
+        None,
+        0,
+        &[&founder],
+    );
+    uow.commit_event(genesis.clone()).await.unwrap();
+    let genesis_ref = genesis.authority_commit.event.event_id.clone();
+    let added = with_group(
+        cited(
+            &genesis.authority_commit,
+            EventKind::MlsCommit,
+            founder.clone(),
+            mls_commit_payload(&realm, &genesis_ref, 0, b"remote-peer-add"),
+            Cites::Bootstrap(&unit.transactions[0].event.event_id),
+        ),
+        Some((&genesis_ref, 0)),
+        1,
+        &[&founder, &peer],
+    );
+    uow.commit_event(added.clone()).await.unwrap();
+    let (claim, welcome, request) =
+        record_peer_welcome(&pool, &pair.station, &added, &peer, "consumed", 0).await;
+    let recipient = peer.fixed_route_service_id().unwrap().as_str();
+    let event = added.authority_commit.event.event_id.as_str();
+    let outbox_id = uuid::Uuid::now_v7().to_string();
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("DELETE FROM keypackage_claim_welcome_bindings WHERE claim_id=$1")
+        .bind::<Text, _>(&claim)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    diesel::sql_query("INSERT INTO federation_outbox (id,peer_id,endpoint,idempotency_key,payload_json,state,next_attempt_at,created_at) VALUES ($1,$2,'/_arkret/peer/events',$1,'{}','delivered',0,0)")
+        .bind::<Text,_>(&outbox_id).bind::<Text,_>(recipient).execute(&mut *conn).await.unwrap();
+    // Only the already verified storage projections are varied here. This is
+    // not a claim-signature or federation HTTP acceptance fixture.
+    for (replication_position, welcome_position, claim_position) in
+        [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1)]
+    {
+        let mut claims = vec![serde_json::json!({"claim_id":"unrelated-claim"}); claim_position];
+        claims.push(serde_json::json!({"claim_id":claim}));
+        let outcome =
+            serde_json::json!({"claims":claims,"claim_receipt":{"destination_id":recipient}});
+        let receipt = serde_json::json!({"recipient_durable_receipt":{"welcome_ref":welcome}});
+        diesel::sql_query("UPDATE peer_keypackage_claims SET outcome=$2,consume_receipt=$3 WHERE claim_request_id=$1")
+            .bind::<Text,_>(&request).bind::<diesel::sql_types::Jsonb,_>(&outcome)
+            .bind::<diesel::sql_types::Jsonb,_>(&receipt).execute(&mut *conn).await.unwrap();
+        let mut welcomes =
+            vec![serde_json::json!({"welcome_id":"unrelated-welcome"}); welcome_position];
+        welcomes.push(serde_json::json!({"welcome_id":welcome,"keypackage_claim_ref":claim}));
+        let mut replications = vec![
+            serde_json::json!({"source_commit":{"event_ref":"unrelated-event"},"welcomes":[]});
+            replication_position
+        ];
+        replications
+            .push(serde_json::json!({"source_commit":{"event_ref":event},"welcomes":welcomes}));
+        let payload = serde_json::json!({"replications":replications}).to_string();
+        diesel::sql_query("UPDATE federation_outbox SET payload_json=$2 WHERE id=$1")
+            .bind::<Text, _>(&outbox_id)
+            .bind::<Text, _>(&payload)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let state = PgEventStore { pool: pool.clone() }
+            .direct_conversation_durable_state_for_realm(realm.as_str())
+            .await
+            .unwrap_or_else(|error| panic!("current peer durable receipt must survive transport batching at ({replication_position},{welcome_position},{claim_position}): {error:?}"))
+            .unwrap();
+        assert_eq!(state.peer_mls_admission, Admission::Durable);
+        assert_eq!(
+            state.group_state_ref,
+            Some(added.authority_commit.event.event_id.clone())
+        );
+    }
+    let exact_welcome = serde_json::json!({"welcome_id":welcome,"keypackage_claim_ref":claim});
+    let exact_replication =
+        serde_json::json!({"source_commit":{"event_ref":event},"welcomes":[exact_welcome]});
+    let exact_payload = serde_json::json!({"replications":[exact_replication]});
+    let exact_receipt = serde_json::json!({"recipient_durable_receipt":{"welcome_ref":welcome}});
+    let exact_outcome = serde_json::json!({"claims":[{"claim_id":claim}],"claim_receipt":{"destination_id":recipient}});
+    for invalid in [
+        "commit",
+        "welcome",
+        "claim_binding",
+        "cross_replication",
+        "destination",
+        "endpoint",
+        "delivery",
+        "receipt",
+        "claim",
+    ] {
+        let mut payload = exact_payload.clone();
+        let mut receipt = exact_receipt.clone();
+        let mut outcome = exact_outcome.clone();
+        let mut destination = recipient;
+        let mut endpoint = "/_arkret/peer/events";
+        let mut delivery_state = "delivered";
+        match invalid {
+            "commit" => {
+                payload["replications"][0]["source_commit"]["event_ref"] = "unrelated-event".into()
+            }
+            "welcome" => {
+                payload["replications"][0]["welcomes"][0]["welcome_id"] = "unrelated-welcome".into()
+            }
+            "claim_binding" => {
+                payload["replications"][0]["welcomes"][0]["keypackage_claim_ref"] =
+                    "unrelated-claim".into()
+            }
+            "cross_replication" => {
+                payload["replications"][0]["welcomes"] = serde_json::json!([]);
+                payload["replications"].as_array_mut().unwrap().push(serde_json::json!({"source_commit":{"event_ref":"unrelated-event"},"welcomes":[exact_welcome]}));
+            }
+            "destination" => destination = "ak:did_core:web:unrelated.example",
+            "endpoint" => endpoint = "/_arkret/peer/keys/keypackages/claim",
+            "delivery" => delivery_state = "pending",
+            "receipt" => {
+                receipt["recipient_durable_receipt"]["welcome_ref"] = "unrelated-welcome".into()
+            }
+            "claim" => outcome["claims"][0]["claim_id"] = "unrelated-claim".into(),
+            _ => unreachable!(),
+        }
+        diesel::sql_query("UPDATE peer_keypackage_claims SET outcome=$2,consume_receipt=$3 WHERE claim_request_id=$1")
+            .bind::<Text,_>(&request).bind::<diesel::sql_types::Jsonb,_>(&outcome)
+            .bind::<diesel::sql_types::Jsonb,_>(&receipt).execute(&mut *conn).await.unwrap();
+        diesel::sql_query("UPDATE federation_outbox SET payload_json=$2,peer_id=$3,endpoint=$4,state=$5 WHERE id=$1")
+            .bind::<Text,_>(&outbox_id).bind::<Text,_>(payload.to_string())
+            .bind::<Text,_>(destination).bind::<Text,_>(endpoint).bind::<Text,_>(delivery_state)
+            .execute(&mut *conn).await.unwrap();
+        let result = PgEventStore { pool: pool.clone() }
+            .direct_conversation_durable_state_for_realm(realm.as_str())
+            .await;
+        assert!(
+            matches!(result, Err(coland_storage::PersistenceError::Internal(ref message)) if message == "current Direct peer admission evidence unavailable"),
+            "unrelated {invalid} evidence must not complete the current peer leaf: {result:?}"
+        );
+    }
 }
 
 #[tokio::test]

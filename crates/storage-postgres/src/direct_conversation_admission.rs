@@ -660,9 +660,13 @@ pub(crate) async fn peer_mls_admission_snapshot(
          claims AS (SELECT a.*,att.welcome_id,att.claim_id,c.state,c.claim_expires_at_unix_ms, \
            (c.state='consumed' AND (b.claim_id IS NOT NULL OR EXISTS( \
              SELECT 1 FROM federation_outbox fan \
+             CROSS JOIN LATERAL jsonb_array_elements(fan.payload_json::jsonb->'replications') replication(value) \
+             CROSS JOIN LATERAL jsonb_array_elements(replication.value->'welcomes') welcome(value) \
              WHERE fan.endpoint='/_arkret/peer/events' AND fan.state='delivered' \
-               AND fan.payload_json::jsonb #>> '{replications,0,source_commit,event_ref}'=a.commit_event_ref \
-               AND fan.payload_json::jsonb #>> '{replications,0,welcomes,0,welcome_id}'=att.welcome_id \
+               AND replication.value #>> '{source_commit,event_ref}'=a.commit_event_ref \
+               AND welcome.value->>'welcome_id'=att.welcome_id \
+               AND welcome.value->>'keypackage_claim_ref'=att.claim_id \
+               AND fan.peer_id=att.recipient_station_id \
                AND fan.peer_id=c.outcome #>> '{claim_receipt,destination_id}' \
                AND c.consume_receipt #>> '{recipient_durable_receipt,welcome_ref}'=att.welcome_id \
            ))) AS durable \
@@ -675,7 +679,9 @@ pub(crate) async fn peer_mls_admission_snapshot(
            AND b.welcome_id=att.welcome_id AND b.commit_event_ref=a.commit_event_ref \
          LEFT JOIN peer_keypackage_claims c ON \
            (b.claim_id IS NOT NULL AND c.source_id=b.source_id AND c.claim_request_id=b.claim_request_id) \
-           OR (b.claim_id IS NULL AND c.outcome #>> '{claims,0,claim_id}'=att.claim_id)) \
+           OR (b.claim_id IS NULL AND EXISTS( \
+             SELECT 1 FROM jsonb_array_elements(c.outcome->'claims') claim(value) \
+             WHERE claim.value->>'claim_id'=att.claim_id))) \
          SELECT EXISTS(SELECT 1 FROM active) AS has_peer, \
            EXISTS(SELECT 1 FROM claims WHERE durable) AS durable, \
            EXISTS(SELECT 1 FROM claims WHERE state IN ('claimed','last_resort_claimed') \

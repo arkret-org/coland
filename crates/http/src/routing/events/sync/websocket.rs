@@ -680,7 +680,7 @@ impl PendingFrame {
 
 enum ChannelInput {
     Bytes(bytes::Bytes),
-    Signal(super::signal::SignalCandidate),
+    Signal(Box<super::signal::SignalCandidate>),
 }
 impl Drop for Channel {
     fn drop(&mut self) {
@@ -819,7 +819,7 @@ fn start_channel(
                         None,
                         HEARTBEAT_MS as u64,
                     )
-                    .map(|candidate| Ok(ChannelInput::Signal(candidate)))
+                    .map(|candidate| Ok(ChannelInput::Signal(Box::new(candidate))))
                     .boxed()
                 } else {
                     response
@@ -866,15 +866,17 @@ fn start_channel(
                     return;
                 };
                 let converted = match chunk {
-                    ChannelInput::Signal(super::signal::SignalCandidate::Envelope(envelope)) => {
-                        Ok(PendingFrame::Signal {
-                            channel_id: id.clone(),
-                            envelope: Box::new(envelope),
-                        })
-                    }
-                    ChannelInput::Signal(super::signal::SignalCandidate::Control(frame)) => {
-                        Ok(PendingFrame::Ready(signal_frame(&id, frame)))
-                    }
+                    ChannelInput::Signal(candidate) => match *candidate {
+                        super::signal::SignalCandidate::Envelope(envelope) => {
+                            Ok(PendingFrame::Signal {
+                                channel_id: id.clone(),
+                                envelope: Box::new(envelope),
+                            })
+                        }
+                        super::signal::SignalCandidate::Control(frame) => {
+                            Ok(PendingFrame::Ready(signal_frame(&id, frame)))
+                        }
+                    },
                     ChannelInput::Bytes(bytes) => match &mut parameters {
                         WebSocketOpenParameters::Account(p) => {
                             serde_json::from_slice::<AccountSubscribeFrame>(&bytes).map(|frame| {

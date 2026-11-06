@@ -420,12 +420,17 @@ async fn current_read_inputs(
 
 /// Queuing is not delivery authorization. A revoke after enqueue must still
 /// suppress the payload at the physical send boundary.
+enum Delivery {
+    Admit(Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>),
+    DiscardSignal,
+}
+
 async fn current_delivery(
     state: &AppState,
     credential: &Credential,
     pending: &mut PendingFrame,
     parameters: &WebSocketOpenParameters,
-) -> Result<Option<Box<dyn coland_storage::AccountContentDeliveryGuard>>, ErrorCode> {
+) -> Result<Delivery, ErrorCode> {
     if let PendingFrame::Signal {
         channel_id,
         envelope,
@@ -440,20 +445,30 @@ async fn current_delivery(
         {
             return Err(ErrorCode::Unauthenticated);
         }
+        crate::routing::identity::session_actor::validated_session_actor(
+            state,
+            &credential.session,
+        )
+        .await
+        .map_err(|_| ErrorCode::Unauthenticated)?;
         crate::routing::events::require_agent_session_scope(
             &credential.session,
             WebSocketOperationId::SignalStreamSubscribe.as_str(),
         )
         .map_err(|_| ErrorCode::CapabilityDenied)?;
-        let admitted = super::signal::admitted_signal_frame(
+        let Ok(admitted) = super::signal::admitted_signal_frame(
             state,
             &credential.session,
             envelope.as_ref().clone(),
         )
         .await
-        .map_err(|_| ErrorCode::CapabilityDenied)?;
+        else {
+            // One expired or revoked envelope cannot retire this Account's
+            // live rail for other scopes. Global credential checks stay above.
+            return Ok(Delivery::DiscardSignal);
+        };
         *pending = PendingFrame::Ready(signal_frame(channel_id, admitted));
-        return Ok(None);
+        return Ok(Delivery::Admit(None));
     }
     let PendingFrame::Ready(frame) = pending else {
         unreachable!()
@@ -502,10 +517,13 @@ async fn current_delivery(
             let SignalStreamFrame::Signal { envelope, .. } = signal.as_ref() else {
                 return Err(ErrorCode::SchemaViolation);
             };
-            **signal =
+            let Ok(admitted) =
                 super::signal::admitted_signal_frame(state, &credential.session, envelope.clone())
                     .await
-                    .map_err(|_| ErrorCode::CapabilityDenied)?;
+            else {
+                return Ok(Delivery::DiscardSignal);
+            };
+            **signal = admitted;
         }
         WebSocketServerFrame::Data {
             payload: WebSocketDataPayload::Events(events),
@@ -615,9 +633,11 @@ async fn current_delivery(
                 .map_err(|_| ErrorCode::CapabilityDenied)
         }));
         let _cancel = CancelDeliveryAcquisition(task.abort_handle());
-        task.await.map_err(|_| ErrorCode::TemporarilyUnavailable)?
+        task.await
+            .map_err(|_| ErrorCode::TemporarilyUnavailable)?
+            .map(Delivery::Admit)
     } else {
-        Ok(None)
+        Ok(Delivery::Admit(None))
     }
 }
 
@@ -1098,7 +1118,8 @@ async fn connection_inner(
                         continue;
                     }
                     let delivery=match current_delivery(&state,current,&mut frame,&read_inputs).await {
-                        Ok(guard)=>guard,
+                        Ok(Delivery::Admit(guard))=>guard,
+                        Ok(Delivery::DiscardSignal)=>{ready.notify_one();continue;},
                         Err(error)=>{
                             if error==ErrorCode::Unauthenticated{return WebSocketCloseCode::PolicyViolation;}
                             channels.remove(&channel_id);schedule.retain(|id|id!=&channel_id);

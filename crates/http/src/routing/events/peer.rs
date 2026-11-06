@@ -84,14 +84,12 @@ pub(super) async fn admit_private_principal_genesis(
             "principal genesis caller is not the configured Account Authority",
         ));
     }
-    if let Some(authority_url) = state.config().account_authority_url.as_deref()
-        && request
-            .identity_creation_control_proof
-            .origin
-            .as_str()
-            .trim_end_matches('/')
-            != authority_url.trim_end_matches('/')
-    {
+    let authority_origin = state.config().account_authority_origin().map_err(|error| {
+        AppError::internal(format!(
+            "configured Account Authority origin is invalid: {error}"
+        ))
+    })?;
+    if request.identity_creation_control_proof.origin != authority_origin {
         return Err(cross_domain_replay(
             "principal genesis creation-proof origin does not match the configured Account Authority",
         ));

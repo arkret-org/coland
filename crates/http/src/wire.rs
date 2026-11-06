@@ -469,10 +469,9 @@ pub fn describe(
         .to_owned();
     // A service URL may have a path prefix; a WebOrigin must not. Keep the
     // prefix for operations and the issuer, but project the origin separately.
-    let account_origin = url::Url::parse(&account_base_url)
-        .expect("configured Account Authority base is a validated URL")
-        .origin()
-        .ascii_serialization();
+    let account_origin = config
+        .account_authority_origin()
+        .expect("configured Account Authority base has a valid Web origin");
     let gate_account_base_url = format!("{account_base_url}/_arkret/gate/account");
 
     // Authentication methods are pure provider discovery; they do not decide
@@ -513,8 +512,7 @@ pub fn describe(
     // this fact; authentication_metadata MUST NOT carry a second unregistered copy.
     let authentication_metadata = AuthenticationMetadata {
         account_authority: Some(AccountAuthority {
-            origin: arkret_wire::WebOrigin::new(account_origin)
-                .expect("configured account authority base has a valid Web origin"),
+            origin: account_origin,
             gate_account_base_url,
             extra: Default::default(),
         }),

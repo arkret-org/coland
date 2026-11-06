@@ -875,6 +875,22 @@ pub enum NotarySigningKeyOrigin {
 }
 
 impl AppConfig {
+    /// Project the configured authority base into the proof's Web origin.
+    /// Operation URLs and OIDC issuers retain their deployment path separately.
+    pub fn account_authority_origin(&self) -> anyhow::Result<arkret_wire::WebOrigin> {
+        let base = self
+            .account_authority_url
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&self.public_base_url);
+        let canonical =
+            arkret_models_identity::service_identity::CanonicalServiceUrl::canonicalize(base)
+                .map_err(|error| anyhow::anyhow!("Account Authority base is invalid: {error}"))?;
+        let parsed = url::Url::parse(canonical.as_str())?;
+        arkret_wire::WebOrigin::new(parsed.origin().ascii_serialization())
+            .map_err(|error| anyhow::anyhow!("Account Authority Web origin is invalid: {error}"))
+    }
+
     /// Single source of truth for test configs. Defaults take the
     /// production posture (`development_mode = false`, per-family
     /// validation on, demo seeding off);
@@ -2230,6 +2246,37 @@ fn lookup(values: &BTreeMap<String, String>, name: &str) -> Result<String, std::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_authority_origin_excludes_mount_but_keeps_scheme_host_and_port() {
+        for (base, expected) in [
+            ("https://auth.example", "https://auth.example"),
+            ("https://auth.example/auth/", "https://auth.example"),
+            ("https://auth.example/tenant/auth/", "https://auth.example"),
+            ("https://auth.example:443/auth", "https://auth.example"),
+            (
+                "https://auth.example:8443/auth",
+                "https://auth.example:8443",
+            ),
+        ] {
+            let config = AppConfig {
+                account_authority_url: Some(base.to_owned()),
+                ..AppConfig::test_default()
+            };
+            assert_eq!(
+                config.account_authority_origin().unwrap().as_str(),
+                expected
+            );
+        }
+        let config = AppConfig {
+            public_base_url: "https://station.example/".to_owned(),
+            ..AppConfig::test_default()
+        };
+        assert_eq!(
+            config.account_authority_origin().unwrap().as_str(),
+            "https://station.example"
+        );
+    }
 
     #[test]
     fn tls_termination_proxies_are_explicit_exact_ip_addresses() {

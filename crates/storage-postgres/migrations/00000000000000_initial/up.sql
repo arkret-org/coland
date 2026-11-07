@@ -1620,12 +1620,13 @@ CREATE TABLE public.device_revocation_gate_receipts (
         'keypackage_claim', 'to_device_write', 'event_write'
     ])),
     intent_digest text NOT NULL,
+    requested_at timestamp with time zone NOT NULL,
     request_json jsonb NOT NULL,
     status_json jsonb NOT NULL,
     linearization_seq bigint NOT NULL CHECK (linearization_seq > 0),
     linearized_at timestamp with time zone NOT NULL,
     expires_at timestamp with time zone NOT NULL,
-    PRIMARY KEY (principal_id, station_id, device_id, action_class, intent_digest),
+    PRIMARY KEY (principal_id, station_id, device_id, action_class, intent_digest, requested_at),
     UNIQUE (principal_id, station_id, device_id,
             linearization_seq),
     CHECK (expires_at > linearized_at AND expires_at <= linearized_at + interval '30 seconds')

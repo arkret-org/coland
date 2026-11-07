@@ -613,12 +613,13 @@ diesel::table! {
 }
 
 diesel::table! {
-    device_revocation_gate_receipts (principal_id, station_id, device_id, action_class, intent_digest) {
+    device_revocation_gate_receipts (principal_id, station_id, device_id, action_class, intent_digest, requested_at) {
         principal_id -> Text,
         station_id -> Text,
         device_id -> Text,
         action_class -> Text,
         intent_digest -> Text,
+        requested_at -> Timestamptz,
         request_json -> Jsonb,
         status_json -> Jsonb,
         linearization_seq -> Int8,

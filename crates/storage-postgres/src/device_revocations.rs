@@ -240,17 +240,31 @@ impl DeviceRevocationStore for PgDeviceRevocationStore {
             .map_err(PersistenceError::database)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            if let Some(selector) = request.origin_current_selector.as_ref() {
+                lock_artifact_devices_in_transaction(conn, &[selector]).await?;
+            }
+            // Serialize receipt lookup and insertion for this exact device.
+            // The artifact lock above also orders the current decision against
+            // accepted revocation of the same authorization instance.
+            sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind::<Text, _>(format!(
+                    "device-revocation-gate\u{1f}{}\u{1f}{}\u{1f}{}",
+                    request.principal_id, request.station_id, request.device_id
+                ))
+                .execute(&mut *conn)
+                .await?;
             if let Some(existing) = sql_query(
                 "SELECT request_json, status_json, linearization_seq, linearized_at, expires_at \
                  FROM device_revocation_gate_receipts \
                  WHERE principal_id=$1 AND station_id=$2 AND device_id=$3 \
-                   AND action_class=$4 AND intent_digest=$5",
+                   AND action_class=$4 AND intent_digest=$5 AND requested_at=$6",
             )
             .bind::<Text, _>(request.principal_id.as_str())
             .bind::<Text, _>(request.station_id.as_str())
             .bind::<Text, _>(&request.device_id)
             .bind::<Text, _>(request.action_class.as_str())
             .bind::<Text, _>(&request.intent_digest)
+            .bind::<Timestamptz, _>(request.requested_at)
             .get_result::<LinearizationRow>(&mut *conn)
             .await
             .optional()?
@@ -309,14 +323,15 @@ impl DeviceRevocationStore for PgDeviceRevocationStore {
             let status_json = serde_json::to_value(&status).map_err(PersistenceError::database)?;
             sql_query(
                 "INSERT INTO device_revocation_gate_receipts \
-                 (principal_id,station_id,device_id,action_class,intent_digest,request_json,status_json,linearization_seq,linearized_at,expires_at) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                 (principal_id,station_id,device_id,action_class,intent_digest,requested_at,request_json,status_json,linearization_seq,linearized_at,expires_at) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             )
             .bind::<Text, _>(request.principal_id.as_str())
             .bind::<Text, _>(request.station_id.as_str())
             .bind::<Text, _>(&request.device_id)
             .bind::<Text, _>(request.action_class.as_str())
             .bind::<Text, _>(&request.intent_digest)
+            .bind::<Timestamptz, _>(request.requested_at)
             .bind::<Jsonb, _>(&request_json)
             .bind::<Jsonb, _>(&status_json)
             .bind::<BigInt, _>(sequence)

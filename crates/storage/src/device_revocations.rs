@@ -99,6 +99,8 @@ pub struct DeviceRevocationGateLinearizationRequest {
     pub origin_current_selector: Option<DeviceRevocationGateSelector>,
     pub action_class: arkret_wire::DeviceRevocationDeniedAction,
     pub intent_digest: String,
+    /// Identifies this current check, not the lifetime of the business intent.
+    /// Exact attempts replay; later attempts must re-evaluate current state.
     pub requested_at: DateTime<Utc>,
 }
 

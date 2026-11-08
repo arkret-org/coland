@@ -218,6 +218,8 @@ DROP TABLE IF EXISTS invite_new_source_ledgers CASCADE;
 DROP TABLE IF EXISTS invite_locators CASCADE;
 DROP TABLE IF EXISTS key_backup_delete_challenges CASCADE;
 DROP TABLE IF EXISTS key_backups CASCADE;
+DROP FUNCTION IF EXISTS retain_deleted_key_backup_identity();
+DROP TABLE IF EXISTS key_backup_identities CASCADE;
 DROP FUNCTION IF EXISTS advance_key_backup_list_revision();
 DROP FUNCTION IF EXISTS reconcile_account_device_interest(TEXT,TEXT);
 DROP FUNCTION IF EXISTS key_backup_list_metadata(jsonb) CASCADE;

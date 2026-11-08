@@ -1976,6 +1976,28 @@ LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
     )
 $$;
 
+-- First admission survives ordinary ciphertext deletion. Only hashes, public
+-- indices and native writer provenance remain; no deleted ciphertext or secret
+-- root is retained here. A deleted identity/series cannot be restarted.
+CREATE TABLE public.key_backup_identities (
+    id uuid PRIMARY KEY,
+    actor_id text NOT NULL,
+    series_id text NOT NULL,
+    series_sequence bigint NOT NULL CHECK (series_sequence >= 0),
+    envelope_digest text NOT NULL CHECK (envelope_digest ~ '^sha256:[0-9a-f]{64}$'),
+    signing_payload_digest text NOT NULL CHECK (signing_payload_digest ~ '^sha256:[0-9a-f]{64}$'),
+    content_index jsonb NOT NULL CHECK (jsonb_typeof(content_index) = 'array'),
+    writer_admission jsonb NOT NULL CHECK (jsonb_typeof(writer_admission) = 'object'),
+    subject_principal_id text,
+    subject_station_id text,
+    admitted_at timestamptz NOT NULL DEFAULT now(),
+    deleted_at timestamptz,
+    CHECK ((subject_principal_id IS NULL) = (subject_station_id IS NULL)),
+    CONSTRAINT key_backup_identities_series_seq_key UNIQUE (actor_id, series_id, series_sequence)
+);
+CREATE INDEX key_backup_identities_root_idx ON public.key_backup_identities
+    USING gin (content_index jsonb_path_ops);
+
 CREATE TABLE public.key_backups (
     id uuid PRIMARY KEY,
     actor_id text,
@@ -1988,9 +2010,6 @@ CREATE TABLE public.key_backups (
     metadata jsonb GENERATED ALWAYS AS (public.key_backup_list_metadata(payload)) STORED NOT NULL,
     last_accessed_at timestamp with time zone,
     account_pk bigint,
-    scheme text,
-    version integer DEFAULT 0 NOT NULL,
-    key_material_encrypted bytea,
     -- SOL-02-004: identity of the backup series this envelope belongs to,
     -- projected out of the JSONB payload as stored generated columns. They
     -- back the UNIQUE(series_actor_id, series_id, series_sequence) constraint below
@@ -2009,6 +2028,17 @@ CREATE TABLE public.key_backups (
         backup_kind IS NOT NULL AND backup_kind = 'secret_storage'
     )
 );
+
+ALTER TABLE ONLY public.key_backups ADD CONSTRAINT key_backups_identity_fkey
+    FOREIGN KEY (id) REFERENCES public.key_backup_identities(id) ON DELETE CASCADE;
+CREATE FUNCTION public.retain_deleted_key_backup_identity() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE public.key_backup_identities SET deleted_at = COALESCE(deleted_at, now()) WHERE id = OLD.id;
+    RETURN OLD;
+END;
+$$;
+CREATE TRIGGER key_backup_identity_deleted AFTER DELETE ON public.key_backups
+    FOR EACH ROW EXECUTE FUNCTION public.retain_deleted_key_backup_identity();
 
 -- SOL-02-004: enforce series_sequence monotonicity at the storage layer. A given
 -- (actor, series) may hold at most one envelope per sequence number; the
@@ -3191,6 +3221,10 @@ CREATE TABLE public.principal_resolutions (
     updated_at timestamptz NOT NULL,
     PRIMARY KEY (principal_id, station_id)
 );
+
+ALTER TABLE ONLY public.key_backup_identities ADD CONSTRAINT key_backup_identities_subject_fkey
+    FOREIGN KEY (subject_principal_id, subject_station_id)
+    REFERENCES public.principal_resolutions(principal_id, station_id) ON DELETE CASCADE;
 
 CREATE TABLE public.principal_resolution_events (
     principal_id text NOT NULL CHECK (principal_id LIKE 'ak:did_core:%'),

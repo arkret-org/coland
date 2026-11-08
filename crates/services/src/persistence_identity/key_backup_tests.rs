@@ -455,3 +455,86 @@ async fn wrong_generation_authorization_or_pcr_cannot_consume_the_successor_slot
     );
     put(&store, &valid).await.unwrap();
 }
+
+#[tokio::test]
+async fn deleted_backup_identity_cannot_be_resurrected_or_rebound_after_reopen() {
+    use coland_storage::ConflictCode;
+    let database = database().await;
+    let store = service(database.pool());
+    let fixture = RootFixture::new(database.pool()).await;
+    let original = fixture.package;
+    put(&store, &original).await.unwrap();
+    // No accepted content references this prepared root package yet.
+    assert!(
+        store
+            .delete_backup(original.backup_id.as_str())
+            .await
+            .unwrap()
+    );
+    let reopened = service(database.pool());
+    assert!(
+        reopened
+            .backup(original.backup_id.as_str())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        put(&reopened, &original).await.unwrap_err().conflict_code(),
+        Some(ConflictCode::FailedPrecondition)
+    );
+    let mut changed = original.clone();
+    changed.series_id =
+        BackupSeriesId::new(format!("ak:backup_series:{}", uuid::Uuid::now_v7())).unwrap();
+    sign(&mut changed);
+    assert_eq!(
+        put(&reopened, &changed).await.unwrap_err().conflict_code(),
+        Some(ConflictCode::DuplicateConflict)
+    );
+    assert!(
+        reopened
+            .backup(original.backup_id.as_str())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn deleting_every_ciphertext_cannot_reset_series_or_append_through_a_deleted_head() {
+    use coland_storage::ConflictCode;
+    let database = database().await;
+    let store = service(database.pool());
+    let fixture = RootFixture::new(database.pool()).await;
+    let original = fixture.package;
+    put(&store, &original).await.unwrap();
+    assert!(
+        store
+            .delete_backup(original.backup_id.as_str())
+            .await
+            .unwrap()
+    );
+    let mut restarted = original.clone();
+    restarted.backup_id = fresh_id();
+    sign(&mut restarted);
+    assert_eq!(
+        put(&store, &restarted).await.unwrap_err().conflict_code(),
+        Some(ConflictCode::SeriesSeqNotMonotonic)
+    );
+    let next = successor(&original);
+    assert_eq!(
+        put(&store, &next).await.unwrap_err().conflict_code(),
+        Some(ConflictCode::SeriesPredecessorNotFound)
+    );
+    restarted.series_id =
+        BackupSeriesId::new(format!("ak:backup_series:{}", uuid::Uuid::now_v7())).unwrap();
+    sign(&mut restarted);
+    put(&store, &restarted).await.unwrap();
+    assert!(
+        store
+            .backup(original.backup_id.as_str())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

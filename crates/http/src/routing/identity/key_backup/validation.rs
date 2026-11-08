@@ -215,7 +215,7 @@ pub(super) fn validate_key_backup_kdf_typed(backup: &KeyBackup) -> Result<(), Ap
         .ok_or_else(|| schema_error("passphrase_kdf key backup requires encryption.kdf"))?;
     match kdf.name {
         KeyBackupKdfName::Argon2id => {
-            let memory_floor = if backup.mixed_secret_storage {
+            let memory_floor = if backup.mixed_secret_storage.unwrap_or(false) {
                 262_144
             } else {
                 65_536

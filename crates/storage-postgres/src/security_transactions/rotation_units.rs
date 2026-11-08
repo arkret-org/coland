@@ -349,7 +349,7 @@ pub(super) async fn commit_rotation_upload_in_connection(
         }
     }
     for (backup, value) in &chain {
-        crate::key_backup_authority::verify_human_backup_signature(
+        let admission = crate::key_backup_authority::verify_human_backup_signature(
             conn,
             backup,
             &cut,
@@ -377,6 +377,7 @@ pub(super) async fn commit_rotation_upload_in_connection(
                     conn,
                     backup.backup_id.as_str(),
                     value,
+                    &admission,
                 )
                 .await?;
             }

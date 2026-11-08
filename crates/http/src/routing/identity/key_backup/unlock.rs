@@ -612,6 +612,7 @@ pub(super) async fn unlock_active_basis(
     if !matches!(pointer,BackupActiveSeriesPointer::Active{active_series_id,..} if active_series_id==&typed.series_id)
         || typed
             .expires_at
+            .flatten()
             .is_some_and(|expires_at| expires_at <= Utc::now())
     {
         return Err(backup_revision_stale(

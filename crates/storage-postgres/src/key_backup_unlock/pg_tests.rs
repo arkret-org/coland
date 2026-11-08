@@ -89,7 +89,7 @@ impl Fixture {
             actor_id: wire::ActorId::account(typed_policy.account_id.clone()),
             device_id: Some(device.clone()),
             backup_kind: crypto::BackupKind::SecretStorage,
-            mixed_secret_storage: false,
+            mixed_secret_storage: None,
             backup_version: "kb_1".into(),
             created_at: now,
             updated_at: None,
@@ -332,6 +332,17 @@ impl Fixture {
             .bind::<Jsonb,_>(serde_json::to_value(&basis_commit).unwrap())
             .bind::<Timestamptz,_>(now)
             .bind::<crate::Binary,_>(basis_token.to_vec())
+            .execute(&mut *conn).await.unwrap();
+        // This storage-only seed assumes prior admission. It deliberately has
+        // no native writer witness and cannot satisfy historical-root access.
+        let packet: crypto::KeyBackup = serde_json::from_value(backup.clone()).unwrap();
+        sql_query("INSERT INTO key_backup_identities(id,actor_id,series_id,series_sequence,envelope_digest,signing_payload_digest,content_index,writer_admission) VALUES($1,$2,$3,$4,$5,$6,$7,'{}'::jsonb)")
+            .bind::<sql_types::Uuid,_>(ids::typed_uuid_part_expect_internal(BACKUP))
+            .bind::<Text,_>(packet.actor_id.to_string()).bind::<Text,_>(packet.series_id.as_str())
+            .bind::<BigInt,_>(packet.series_sequence as i64)
+            .bind::<Text,_>(arkret_canonical::canonical_sha256(&backup).unwrap())
+            .bind::<Text,_>(arkret_canonical::sha256_digest(packet.signing_payload_bytes().unwrap()))
+            .bind::<Jsonb,_>(serde_json::to_value(&packet.contents).unwrap())
             .execute(&mut *conn).await.unwrap();
         sql_query("INSERT INTO key_backups(id,payload,actor_id) VALUES($1,$2,$3)")
             .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(BACKUP))

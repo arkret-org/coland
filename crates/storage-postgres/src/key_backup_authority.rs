@@ -6,10 +6,32 @@ use coland_storage::{ConflictCode, PersistenceError};
 use diesel::sql_types::{BigInt, Nullable, Text};
 use diesel::{QueryableByName, sql_query};
 use horme::{OptionalExtension, RunQueryDsl};
+use serde::Serialize;
 
 use crate::key_backup_current_states::verification_method_device;
 use crate::pcr_device_status_reader::ConfirmedPcrDeviceStatusCut;
 use crate::{AsyncPgConnection, PgTransactionError};
+
+/// Internal first-admission provenance, retained independently of current
+/// device state. It is not a wire authorization or a reusable admission lease.
+#[derive(Serialize)]
+pub(crate) struct DeviceBackupAdmission {
+    envelope_digest: String,
+    signer_actor: arkret_wire::ActorId,
+    signer_device: DeviceId,
+    authorization_event_ref: arkret_wire::EventId,
+    source_head: arkret_wire::RealmCommitId,
+    generation: u64,
+    public_key_did: String,
+    #[serde(with = "arkret_canonical::serde_helpers::canonical_timestamp")]
+    accepted_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl DeviceBackupAdmission {
+    pub(crate) fn matches_envelope(&self, digest: &str) -> bool {
+        self.envelope_digest == digest
+    }
+}
 
 fn rejected(code: impl std::fmt::Display, reason: &str) -> PgTransactionError {
     PersistenceError::Conflict(format!("{code}: {reason}")).into()
@@ -33,7 +55,7 @@ pub(crate) async fn verify_human_backup_signature(
     cut: &ConfirmedPcrDeviceStatusCut,
     account: &AccountId,
     authorizer: &DeviceId,
-) -> Result<(), PgTransactionError> {
+) -> Result<DeviceBackupAdmission, PgTransactionError> {
     let authorization = cut.authority.authorization.as_ref().ok_or_else(|| {
         rejected(
             ConflictCode::FailedPrecondition,
@@ -138,7 +160,34 @@ pub(crate) async fn verify_human_backup_signature(
             "backup signature does not match the authorizing device key",
         ));
     }
-    Ok(())
+    let accepted_at = chrono::Utc::now();
+    if authorization.payload.not_before > accepted_at
+        || authorization
+            .payload
+            .expires_at
+            .flatten()
+            .is_some_and(|expires| expires <= accepted_at)
+    {
+        return Err(rejected(
+            ConflictCode::DeviceUnauthorized,
+            "backup writer authorization expired before admission",
+        ));
+    }
+    Ok(DeviceBackupAdmission {
+        envelope_digest: arkret_canonical::canonical_sha256(backup)
+            .map_err(PersistenceError::database)?,
+        signer_actor: arkret_wire::ActorId::account(account.clone()),
+        signer_device: authorizer.clone(),
+        authorization_event_ref: authorization.event_id.clone(),
+        source_head: cut.authority.authority_commit_id.clone(),
+        generation,
+        public_key_did: authorization
+            .payload
+            .device_public_key_did
+            .as_str()
+            .to_owned(),
+        accepted_at,
+    })
 }
 
 pub(crate) async fn verify_current_backup_recipient(
@@ -146,6 +195,7 @@ pub(crate) async fn verify_current_backup_recipient(
     backup: &KeyBackup,
     at: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), PgTransactionError> {
+    let at = at.max(chrono::Utc::now());
     if backup.encryption.recipient_method != KeyBackupRecipientMethod::RecoveryPublicKey {
         return Ok(());
     }
@@ -185,7 +235,7 @@ pub(crate) async fn verify_current_backup_recipient(
 pub(crate) async fn verify_backup_writer(
     conn: &mut AsyncPgConnection,
     backup: &KeyBackup,
-) -> Result<(), PgTransactionError> {
+) -> Result<DeviceBackupAdmission, PgTransactionError> {
     backup
         .validate()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
@@ -250,6 +300,7 @@ pub(crate) async fn verify_backup_writer(
         };
         return Err(rejected(code, "backup writer is not currently active"));
     }
-    verify_human_backup_signature(conn, backup, &cut, account, device).await?;
-    verify_current_backup_recipient(conn, backup, now).await
+    let admission = verify_human_backup_signature(conn, backup, &cut, account, device).await?;
+    verify_current_backup_recipient(conn, backup, admission.accepted_at).await?;
+    Ok(admission)
 }

@@ -1,9 +1,9 @@
 use diesel_async::AsyncConnection;
 
 use super::{
-    Binary, Integer, JsonPayloadRow, Jsonb, KeyBackupDeleteChallengeRecord, KeyBackupStore,
-    Nullable, OptionalExtension, PersistenceError, PersistenceResult, PgPool, QueryableByName,
-    RunQueryDsl, Text, Timestamptz, Utc, Value, async_trait, ids, pg_conn, sql_query, sql_types,
+    JsonPayloadRow, Jsonb, KeyBackupDeleteChallengeRecord, KeyBackupStore, Nullable,
+    OptionalExtension, PersistenceError, PersistenceResult, PgPool, QueryableByName, RunQueryDsl,
+    Text, Timestamptz, Utc, Value, async_trait, ids, pg_conn, sql_query, sql_types,
 };
 
 #[derive(QueryableByName)]
@@ -58,7 +58,12 @@ fn map_key_backup_put_error(error: horme::Error) -> PersistenceError {
     )) = &error
     {
         let constraint = info.constraint_name().unwrap_or_default();
-        if constraint.is_empty() || constraint == "key_backups_series_seq_key" {
+        if constraint.is_empty()
+            || matches!(
+                constraint,
+                "key_backups_series_seq_key" | "key_backup_identities_series_seq_key"
+            )
+        {
             return PersistenceError::Conflict(format!(
                 "series_seq_not_monotonic: {}",
                 info.message()
@@ -82,11 +87,31 @@ pub(crate) async fn lock_backup_series_in_connection(
     Ok(())
 }
 
-/// Store one validated immutable envelope at its serialized predecessor cut.
+#[derive(QueryableByName)]
+struct BackupIdentityRow {
+    #[diesel(sql_type = Text)]
+    backup_id: String,
+    #[diesel(sql_type = Text)]
+    actor_id: String,
+    #[diesel(sql_type = Text)]
+    envelope_digest: String,
+    #[diesel(sql_type = Text)]
+    signing_payload_digest: String,
+    #[diesel(sql_type = super::BigInt)]
+    series_sequence: i64,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    deleted_at: Option<chrono::DateTime<Utc>>,
+}
+
+const IDENTITY_COLUMNS: &str = "'ak:backup:' || id::text AS backup_id, actor_id, envelope_digest, signing_payload_digest, series_sequence, deleted_at";
+
+/// Store a verified immutable envelope together with its first-admission
+/// record. Ordinary deletion does not make either the identity or series new.
 pub(crate) async fn put_key_backup_in_connection(
     conn: &mut crate::AsyncPgConnection,
     backup_id: &str,
     payload: &Value,
+    admission: &crate::key_backup_authority::DeviceBackupAdmission,
 ) -> PersistenceResult<()> {
     let typed: arkret_models_crypto::KeyBackup =
         serde_json::from_value(payload.clone()).map_err(PersistenceError::database)?;
@@ -98,62 +123,83 @@ pub(crate) async fn put_key_backup_in_connection(
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     if typed.backup_id.as_str() != backup_id {
         return Err(PersistenceError::SchemaViolation(
-            "backup path and immutable envelope identity differ".into(),
+            "backup path and immutable identity differ".into(),
         ));
     }
-    let actor_key = typed.actor_id.to_string();
+    let digest = arkret_canonical::canonical_sha256(payload).map_err(PersistenceError::database)?;
+    if !admission.matches_envelope(&digest) {
+        return Err(PersistenceError::SchemaViolation(
+            "backup differs from its verified native admission".into(),
+        ));
+    }
+    let actor = typed.actor_id.to_string();
+    let uuid = ids::typed_uuid_part_expect_internal(backup_id);
     lock_backup_series_in_connection(conn, &typed.actor_id).await?;
-    let existing = sql_query("SELECT payload FROM key_backups WHERE id=$1 FOR SHARE")
-        .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(backup_id))
-        .get_result::<JsonPayloadRow>(&mut *conn)
-        .await
-        .optional()
-        .map_err(PersistenceError::database)?;
-    if let Some(existing) = existing {
-        if existing.payload == *payload {
-            return Ok(());
-        }
-        return Err(PersistenceError::Conflict(
-            "duplicate_conflict: an immutable backup identity already binds another envelope"
-                .into(),
-        ));
-    }
-    let predecessor = sql_query(
-        "SELECT payload FROM key_backups WHERE actor_id=$1 AND series_id=$2 \
-         ORDER BY series_sequence DESC LIMIT 1 FOR SHARE",
-    )
-    .bind::<Text, _>(&actor_key)
-    .bind::<Text, _>(typed.series_id.as_str())
-    .get_result::<JsonPayloadRow>(&mut *conn)
+    let identity = sql_query(format!(
+        "SELECT {IDENTITY_COLUMNS} FROM key_backup_identities WHERE id=$1 FOR SHARE"
+    ))
+    .bind::<sql_types::Uuid, _>(uuid)
+    .get_result::<BackupIdentityRow>(&mut *conn)
     .await
     .optional()
     .map_err(PersistenceError::database)?;
+    if let Some(identity) = identity {
+        if identity.actor_id != actor || identity.envelope_digest != digest {
+            return Err(PersistenceError::Conflict(
+                "duplicate_conflict: backup identity already binds another immutable envelope"
+                    .into(),
+            ));
+        }
+        if identity.deleted_at.is_some() {
+            return Err(PersistenceError::Conflict(
+                "failed_precondition: deleted backup identity cannot be resurrected".into(),
+            ));
+        }
+        let stored = sql_query("SELECT payload FROM key_backups WHERE id=$1 FOR SHARE")
+            .bind::<sql_types::Uuid, _>(uuid)
+            .get_result::<JsonPayloadRow>(&mut *conn)
+            .await
+            .optional()
+            .map_err(PersistenceError::database)?;
+        return match stored {
+            Some(stored) if stored.payload == *payload => Ok(()),
+            _ => Err(PersistenceError::SchemaViolation(
+                "live backup differs from its immutable admission record".into(),
+            )),
+        };
+    }
+    let predecessor = sql_query(format!("SELECT {IDENTITY_COLUMNS} FROM key_backup_identities WHERE actor_id=$1 AND series_id=$2 ORDER BY series_sequence DESC LIMIT 1 FOR SHARE"))
+        .bind::<Text,_>(&actor).bind::<Text,_>(typed.series_id.as_str())
+        .get_result::<BackupIdentityRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     match predecessor {
         None if typed.series_sequence == 0 => {}
         Some(previous) => {
-            let previous: arkret_models_crypto::KeyBackup =
-                serde_json::from_value(previous.payload).map_err(PersistenceError::database)?;
-            if previous.series_sequence.checked_add(1) != Some(typed.series_sequence) {
+            let sequence =
+                u64::try_from(previous.series_sequence).map_err(PersistenceError::database)?;
+            if sequence.checked_add(1) != Some(typed.series_sequence) {
                 return Err(PersistenceError::Conflict(
-                    "series_seq_not_monotonic: backup successor must follow the locked series head"
+                    "series_seq_not_monotonic: successor must follow the admitted series head"
                         .into(),
                 ));
             }
-            let digest = arkret_canonical::sha256_digest(
-                previous
-                    .signing_payload_bytes()
-                    .map_err(PersistenceError::database)?,
-            );
-            if typed.supersedes_id.as_ref() != Some(&previous.backup_id)
+            if previous.deleted_at.is_some() {
+                return Err(PersistenceError::Conflict(
+                    "series_predecessor_not_found: the admitted predecessor was deleted".into(),
+                ));
+            }
+            if typed
+                .supersedes_id
+                .as_ref()
+                .map(arkret_wire::BackupId::as_str)
+                != Some(previous.backup_id.as_str())
                 || typed
                     .supersedes_digest
                     .as_ref()
                     .map(arkret_wire::Hash::as_str)
-                    != Some(digest.as_str())
+                    != Some(previous.signing_payload_digest.as_str())
             {
                 return Err(PersistenceError::Conflict(
-                    "series_chain_broken: backup successor does not bind the locked predecessor"
-                        .into(),
+                    "series_chain_broken: successor does not bind the admitted predecessor".into(),
                 ));
             }
         }
@@ -163,67 +209,40 @@ pub(crate) async fn put_key_backup_in_connection(
             ));
         }
     }
-    // `metadata` is generated from `payload` by the initial schema's closed
-    // `backup_metadata` projection; no writer supplies it.
-    let extract_str = |key: &str| -> Option<String> {
-        payload
-            .get(key)
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-    };
-    let actor_id = payload
-        .get("actor_id")
-        .cloned()
-        .ok_or_else(|| PersistenceError::database("key backup actor_id is missing"))
-        .and_then(|value| {
-            serde_json::from_value::<arkret_wire::ActorId>(value)
-                .map_err(|_| PersistenceError::database("key backup actor_id is invalid"))
-        })?
-        .to_string();
-    let device_id = extract_str("device_id");
-    let scheme = extract_str("scheme").or_else(|| extract_str("algorithm"));
-    let version: i32 = payload
-        .get("version")
-        .and_then(Value::as_i64)
-        .map(|v| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
-        .unwrap_or(0);
-    // base64-decoded key material lives in `key_material_encrypted` if the
-    // caller already provided raw bytes via a `bytes_b64` field. Otherwise
-    // the encrypted material stays in the JSONB envelope.
-    let key_material: Option<Vec<u8>> = payload
-        .get("key_material_encrypted_b64")
-        .and_then(Value::as_str)
-        .and_then(|s| {
-            use base64::Engine as _;
-            use base64::engine::general_purpose::STANDARD;
-            STANDARD.decode(s).ok()
-        });
-    sql_query(
-        "INSERT INTO key_backups \
-         (id, actor_id, device_id, scheme, version, key_material_encrypted, payload, created_at, last_accessed_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NULL) \
-         ON CONFLICT (id) DO NOTHING",
-    )
-    .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(backup_id))
-    .bind::<Text, _>(&actor_id)
-    .bind::<Nullable<Text>, _>(&device_id)
-    .bind::<Nullable<Text>, _>(&scheme)
-    .bind::<Integer, _>(version)
-    .bind::<Nullable<Binary>, _>(key_material.as_deref())
-    .bind::<Jsonb, _>(payload)
-    .execute(&mut *conn)
+    let signing_digest = arkret_canonical::sha256_digest(
+        typed
+            .signing_payload_bytes()
+            .map_err(PersistenceError::database)?,
+    );
+    let account = typed.actor_id.as_account_id();
+    sql_query("INSERT INTO key_backup_identities(id,actor_id,series_id,series_sequence,envelope_digest,signing_payload_digest,content_index,writer_admission,subject_principal_id,subject_station_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(id) DO NOTHING")
+        .bind::<sql_types::Uuid,_>(uuid).bind::<Text,_>(&actor).bind::<Text,_>(typed.series_id.as_str())
+        .bind::<super::BigInt,_>(i64::try_from(typed.series_sequence).map_err(PersistenceError::database)?)
+        .bind::<Text,_>(&digest).bind::<Text,_>(&signing_digest)
+        .bind::<Jsonb,_>(serde_json::to_value(&typed.contents).map_err(PersistenceError::database)?)
+        .bind::<Jsonb,_>(serde_json::to_value(admission).map_err(PersistenceError::database)?)
+        .bind::<Nullable<Text>,_>(account.map(|account| account.principal_id.as_str()))
+        .bind::<Nullable<Text>,_>(account.map(|account| account.station_id.as_str()))
+        .execute(&mut *conn).await.map_err(map_key_backup_put_error)?;
+    // Different subjects have different actor locks; UUID reservation still
+    // compares the winner after the global identity constraint serializes them.
+    let winner = sql_query(format!(
+        "SELECT {IDENTITY_COLUMNS} FROM key_backup_identities WHERE id=$1 FOR SHARE"
+    ))
+    .bind::<sql_types::Uuid, _>(uuid)
+    .get_result::<BackupIdentityRow>(&mut *conn)
     .await
-    .map_err(map_key_backup_put_error)?;
-    let stored = sql_query("SELECT payload FROM key_backups WHERE id=$1 FOR SHARE")
-        .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(backup_id))
-        .get_result::<JsonPayloadRow>(&mut *conn)
-        .await
-        .map_err(PersistenceError::database)?;
-    if stored.payload != *payload {
+    .map_err(PersistenceError::database)?;
+    if winner.actor_id != actor || winner.envelope_digest != digest || winner.deleted_at.is_some() {
         return Err(PersistenceError::Conflict(
-            "duplicate_conflict: a concurrent writer bound this backup identity".into(),
+            "duplicate_conflict: another subject reserved this backup identity".into(),
         ));
     }
+    sql_query("INSERT INTO key_backups(id,actor_id,device_id,backup_version,payload,created_at,last_accessed_at) VALUES($1,$2,$3,$4,$5,NOW(),NULL)")
+        .bind::<sql_types::Uuid,_>(uuid).bind::<Text,_>(&actor)
+        .bind::<Nullable<Text>,_>(typed.device_id.as_ref().map(arkret_wire::DeviceId::as_str))
+        .bind::<Text,_>(&typed.backup_version).bind::<Jsonb,_>(payload)
+        .execute(&mut *conn).await.map_err(map_key_backup_put_error)?;
     Ok(())
 }
 
@@ -440,8 +459,9 @@ impl KeyBackupStore for PgKeyBackupStore {
         conn.transaction::<_, crate::PgTransactionError, _>(async move |conn| {
             let backup: arkret_models_crypto::KeyBackup =
                 serde_json::from_value(payload.clone()).map_err(PersistenceError::database)?;
-            crate::key_backup_authority::verify_backup_writer(conn, &backup).await?;
-            put_key_backup_in_connection(conn, &backup_id, &payload)
+            let admission =
+                crate::key_backup_authority::verify_backup_writer(conn, &backup).await?;
+            put_key_backup_in_connection(conn, &backup_id, &payload, &admission)
                 .await
                 .map_err(crate::PgTransactionError::from)
         })
@@ -467,13 +487,30 @@ impl KeyBackupStore for PgKeyBackupStore {
     }
 
     async fn delete(&self, backup_id: &str) -> PersistenceResult<bool> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query("DELETE FROM key_backups WHERE id = $1")
-            .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(backup_id))
-            .execute(&mut conn)
-            .await
-            .map(|n| n > 0)
-            .map_err(PersistenceError::database)
+        let mut conn = pg_conn(&self.pool).await?;
+        let uuid = ids::typed_uuid_part_expect_internal(backup_id);
+        conn.transaction::<_, crate::PgTransactionError, _>(async |conn| {
+            let packet = sql_query("SELECT payload FROM key_backups WHERE id=$1")
+                .bind::<sql_types::Uuid, _>(uuid)
+                .get_result::<JsonPayloadRow>(&mut *conn)
+                .await
+                .optional()?;
+            let Some(packet) = packet else {
+                return Ok(false);
+            };
+            let actor: arkret_wire::ActorId =
+                serde_json::from_value(packet.payload["actor_id"].clone())
+                    .map_err(PersistenceError::database)?;
+            lock_backup_series_in_connection(conn, &actor).await?;
+            let deleted = sql_query("DELETE FROM key_backups WHERE id=$1 AND payload=$2")
+                .bind::<sql_types::Uuid, _>(uuid)
+                .bind::<Jsonb, _>(&packet.payload)
+                .execute(&mut *conn)
+                .await?;
+            Ok(deleted > 0)
+        })
+        .await
+        .map_err(crate::PgTransactionError::into_persistence)
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<Value>> {
@@ -611,6 +648,8 @@ impl KeyBackupStore for PgKeyBackupStore {
                     return Err(PersistenceError::Conflict("recovery delete account mismatch".into()).into());
                 }
             }
+            let actor: arkret_wire::ActorId = serde_json::from_value(backup["actor_id"].clone()).map_err(PersistenceError::database)?;
+            lock_backup_series_in_connection(conn, &actor).await?;
             let now=chrono::Utc::now();
             let row=sql_query(format!("SELECT {DELETE_CHALLENGE_COLUMNS} FROM key_backup_delete_challenges WHERE challenge_id=$1 AND consumed_at IS NULL AND expires_at>$2 FOR UPDATE"))
                 .bind::<Text,_>(challenge_id).bind::<Timestamptz,_>(now)

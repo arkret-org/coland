@@ -1028,6 +1028,10 @@ mod tests {
 
     #[test]
     fn member_identity_dispatch_preserves_the_complete_actor() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../arkret-spec/spec/v1/artifacts/fixtures/content-history-fixture.json"
+        ))
+        .unwrap();
         let realm_id = arkret_identifiers::RealmId::new(
             "ak:realm:AXqIXbu56hFXteZXtkBsqJxy_puV4mhSv1U0ZkUldxAL",
         )
@@ -1052,7 +1056,7 @@ mod tests {
                     "realm_id": realm_id,
                     "member_id": actor,
                     "segment": "member_identity",
-                    "identity_payload": { "encrypted_content": {} },
+                    "identity_payload": { "encrypted_payload": fixture["kat"]["envelope"] },
                 }),
             );
             let mut state = super::ProjectionState::default();

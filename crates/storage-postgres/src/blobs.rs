@@ -1,3 +1,5 @@
+use diesel_async::AsyncConnection as _;
+
 use super::{
     BigInt, BlobRecord, BlobStore, Bool, Jsonb, Nullable, OptionalExtension, PersistenceError,
     PersistenceResult, PgPool, QueryableByName, RunQueryDsl, Text, Timestamptz, Value, async_trait,
@@ -134,13 +136,19 @@ impl BlobStore for PgBlobStore {
     }
 
     async fn delete(&self, blob_ref: &str) -> PersistenceResult<()> {
-        let mut conn = crate::pg_db(&self.pool);
-        sql_query("DELETE FROM blobs WHERE id = $1")
-            .bind::<Text, _>(blob_ref)
-            .execute(&mut conn)
-            .await
-            .map(|_| ())
-            .map_err(PersistenceError::database)
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_,crate::PgTransactionError,_>(async |conn| {
+            let live = sql_query("SELECT payload FROM blobs WHERE id=$1 FOR UPDATE")
+                .bind::<Text,_>(blob_ref).get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional()?;
+            if live.is_none() { return Ok(()); }
+            let referenced = sql_query("SELECT '{}'::jsonb AS payload FROM content_original_blobs WHERE blob_ref=$1 LIMIT 1 FOR SHARE")
+                .bind::<Text,_>(blob_ref).get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional()?;
+            if referenced.is_some() {
+                return Err(PersistenceError::Conflict("failed_precondition: Blob is required by retained original content".into()).into());
+            }
+            sql_query("DELETE FROM blobs WHERE id=$1").bind::<Text,_>(blob_ref).execute(&mut *conn).await?;
+            Ok(())
+        }).await.map_err(crate::PgTransactionError::into_persistence)
     }
 
     async fn snapshot_all(&self) -> PersistenceResult<Vec<BlobRecord>> {

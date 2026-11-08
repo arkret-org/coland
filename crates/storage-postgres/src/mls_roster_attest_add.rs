@@ -362,6 +362,7 @@ pub(crate) async fn install_in_connection(
         {
             return Err(refused("replayed Add proof differs from installed history"));
         }
+        crate::content_endpoint_bindings::bind_add_in_connection(conn, attestation).await?;
         return Ok(MlsAttestAddResponseBody {
             status: MlsAttestAddStatus::Duplicate,
             attestation_digest: arkret_wire::Hash::new(digest)
@@ -399,6 +400,7 @@ pub(crate) async fn install_in_connection(
             "Add proof conflicts with an installed historical fact",
         ));
     }
+    crate::content_endpoint_bindings::bind_add_in_connection(conn, attestation).await?;
     Ok(MlsAttestAddResponseBody {
         status: MlsAttestAddStatus::Installed,
         attestation_digest: arkret_wire::Hash::new(digest)

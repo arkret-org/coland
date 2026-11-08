@@ -501,7 +501,16 @@ impl KeyBackupStore for PgKeyBackupStore {
             let actor: arkret_wire::ActorId =
                 serde_json::from_value(packet.payload["actor_id"].clone())
                     .map_err(PersistenceError::database)?;
-            lock_backup_series_in_connection(conn, &actor).await?;
+            let typed: arkret_models_crypto::KeyBackup =
+                serde_json::from_value(packet.payload.clone())
+                    .map_err(PersistenceError::database)?;
+            if typed.actor_id != actor {
+                return Err(PersistenceError::SchemaViolation(
+                    "backup deletion actor mismatch".into(),
+                )
+                .into());
+            }
+            crate::content_dependencies::guard_delete_in_connection(conn, &typed).await?;
             let deleted = sql_query("DELETE FROM key_backups WHERE id=$1 AND payload=$2")
                 .bind::<sql_types::Uuid, _>(uuid)
                 .bind::<Jsonb, _>(&packet.payload)
@@ -649,7 +658,9 @@ impl KeyBackupStore for PgKeyBackupStore {
                 }
             }
             let actor: arkret_wire::ActorId = serde_json::from_value(backup["actor_id"].clone()).map_err(PersistenceError::database)?;
-            lock_backup_series_in_connection(conn, &actor).await?;
+            let typed: arkret_models_crypto::KeyBackup = serde_json::from_value(backup.clone()).map_err(PersistenceError::database)?;
+            if typed.actor_id != actor { return Err(PersistenceError::SchemaViolation("backup deletion actor mismatch".into()).into()); }
+            crate::content_dependencies::guard_delete_in_connection(conn, &typed).await?;
             let now=chrono::Utc::now();
             let row=sql_query(format!("SELECT {DELETE_CHALLENGE_COLUMNS} FROM key_backup_delete_challenges WHERE challenge_id=$1 AND consumed_at IS NULL AND expires_at>$2 FOR UPDATE"))
                 .bind::<Text,_>(challenge_id).bind::<Timestamptz,_>(now)

@@ -6,7 +6,7 @@ use coland_storage::{ConflictCode, PersistenceError};
 use diesel::sql_types::{BigInt, Nullable, Text};
 use diesel::{QueryableByName, sql_query};
 use horme::{OptionalExtension, RunQueryDsl};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::key_backup_current_states::verification_method_device;
 use crate::pcr_device_status_reader::ConfirmedPcrDeviceStatusCut;
@@ -14,7 +14,8 @@ use crate::{AsyncPgConnection, PgTransactionError};
 
 /// Internal first-admission provenance, retained independently of current
 /// device state. It is not a wire authorization or a reusable admission lease.
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DeviceBackupAdmission {
     envelope_digest: String,
     signer_actor: arkret_wire::ActorId,
@@ -30,6 +31,53 @@ pub(crate) struct DeviceBackupAdmission {
 impl DeviceBackupAdmission {
     pub(crate) fn matches_envelope(&self, digest: &str) -> bool {
         self.envelope_digest == digest
+    }
+
+    pub(crate) fn authenticates_metadata(
+        &self,
+        actor: &arkret_wire::ActorId,
+        digest: &str,
+    ) -> bool {
+        &self.signer_actor == actor && self.matches_envelope(digest)
+    }
+
+    /// Verify the exact retained original using its first accepted key. Current
+    /// writer revocation/generation is deliberately not a historical read gate.
+    pub(crate) fn verify_retained_envelope(
+        &self,
+        backup: &KeyBackup,
+    ) -> crate::PersistenceResult<()> {
+        let invalid = || {
+            PersistenceError::SchemaViolation(
+                "backup differs from its first native admission".into(),
+            )
+        };
+        if !self.matches_envelope(
+            &arkret_canonical::canonical_sha256(backup).map_err(PersistenceError::database)?,
+        ) || backup.actor_id != self.signer_actor
+            || backup.signature_proof.device_id.as_ref() != Some(&self.signer_device)
+            || backup.signature_proof.device_authorize_event_id.as_ref()
+                != Some(&self.authorization_event_ref)
+        {
+            return Err(invalid());
+        }
+        let key = self
+            .public_key_did
+            .strip_prefix("did:key:")
+            .ok_or_else(invalid)?;
+        let key =
+            arkret_canonical::multibase::decode_ed25519_multibase(key).map_err(|_| invalid())?;
+        let signed = backup.signing_payload_bytes().map_err(|_| invalid())?;
+        if !arkret_signatures::verify_detached_ed25519_signature(
+            &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                bytes: key.to_vec(),
+            },
+            &signed,
+            backup.signature_proof.signature.as_str(),
+        ) {
+            return Err(invalid());
+        }
+        Ok(())
     }
 }
 
@@ -199,11 +247,43 @@ pub(crate) async fn verify_current_backup_recipient(
     if backup.encryption.recipient_method != KeyBackupRecipientMethod::RecoveryPublicKey {
         return Ok(());
     }
+    backup
+        .validate()
+        .map_err(|error| rejected(ConflictCode::RecoveryPolicyMismatch, &error.to_string()))?;
     let subject = backup
         .custodian_actor_id
         .as_ref()
         .unwrap_or(&backup.actor_id);
-    let account = subject.as_account_id().ok_or_else(|| {
+    let reference = backup.recovery_policy_ref.as_ref().ok_or_else(|| {
+        rejected(
+            ConflictCode::RecoveryPolicyMismatch,
+            "backup has no recipient policy reference",
+        )
+    })?;
+    verify_current_recipient_view(
+        conn,
+        arkret_models_crypto::key_backup::BackupRecoveryRecipient {
+            subject,
+            policy_ref: reference,
+            key_agreement_ref: backup
+                .encryption
+                .recipient_key_ref
+                .as_deref()
+                .unwrap_or_default(),
+            hpke_suite: backup.encryption.hpke_suite.as_deref(),
+        },
+        at,
+    )
+    .await
+}
+
+pub(crate) async fn verify_current_recipient_view(
+    conn: &mut AsyncPgConnection,
+    recipient: arkret_models_crypto::key_backup::BackupRecoveryRecipient<'_>,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), PgTransactionError> {
+    let at = at.max(chrono::Utc::now());
+    let account = recipient.subject.as_account_id().ok_or_else(|| {
         rejected(
             ConflictCode::RecoveryPolicyMismatch,
             "backup recipient has no Account policy",
@@ -220,16 +300,14 @@ pub(crate) async fn verify_current_backup_recipient(
         })?;
     let policy: RecoveryPolicy =
         serde_json::from_value(accepted.raw_payload).map_err(PersistenceError::database)?;
-    backup
-        .validate_recovery_recipient(&policy, at)
-        .map_err(|error| {
-            let code = if error.error_code() == Some(arkret_wire::ErrorCode::UnsupportedHpkeSuite) {
-                ConflictCode::UnsupportedHpkeSuite
-            } else {
-                ConflictCode::RecoveryPolicyMismatch
-            };
-            rejected(code, &error.to_string())
-        })
+    recipient.validate(&policy, at).map_err(|error| {
+        let code = if error.error_code() == Some(arkret_wire::ErrorCode::UnsupportedHpkeSuite) {
+            ConflictCode::UnsupportedHpkeSuite
+        } else {
+            ConflictCode::RecoveryPolicyMismatch
+        };
+        rejected(code, &error.to_string())
+    })
 }
 
 pub(crate) async fn verify_backup_writer(

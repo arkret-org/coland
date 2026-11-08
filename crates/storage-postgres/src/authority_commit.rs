@@ -2293,6 +2293,8 @@ async fn commit_transaction_with_device_guard_inner(
     })
     .await?;
 
+    crate::boxed_future(|| crate::content_dependencies::commit_in_connection(conn, transaction))
+        .await?;
     Ok(AuthorityCommitWriteOutcome::Committed)
 }
 

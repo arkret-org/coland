@@ -2040,6 +2040,61 @@ $$;
 CREATE TRIGGER key_backup_identity_deleted AFTER DELETE ON public.key_backups
     FOR EACH ROW EXECUTE FUNCTION public.retain_deleted_key_backup_identity();
 
+-- Rebuildable coverage and immutable key-use domains are committed with each
+-- original. These public indices contain neither a content root nor a DEK.
+CREATE TABLE public.content_originals (
+    event_id text PRIMARY KEY,
+    event_pk bigint NOT NULL UNIQUE REFERENCES public.canonical_events(pk) ON DELETE RESTRICT,
+    commit_id text NOT NULL UNIQUE REFERENCES public.realm_commits(commit_id) ON DELETE RESTRICT,
+    scope_key text COLLATE "C" NOT NULL,
+    coverage jsonb NOT NULL CHECK (jsonb_typeof(coverage) = 'object'),
+    retain_full_history boolean NOT NULL
+);
+CREATE TABLE public.content_original_blobs (
+    event_id text NOT NULL REFERENCES public.content_originals(event_id) ON DELETE CASCADE,
+    blob_ref text NOT NULL REFERENCES public.blobs(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    PRIMARY KEY(event_id,blob_ref)
+);
+CREATE INDEX content_original_blobs_ref_idx ON public.content_original_blobs(blob_ref);
+CREATE FUNCTION public.enforce_retained_content_blob() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (NEW.sha256,NEW.size_bytes,NEW.media_type,NEW.payload) IS DISTINCT FROM
+       (OLD.sha256,OLD.size_bytes,OLD.media_type,OLD.payload)
+       AND EXISTS(SELECT 1 FROM public.content_original_blobs d WHERE d.blob_ref=OLD.id) THEN
+        RAISE EXCEPTION 'referenced content Blob bytes and encryption metadata are immutable'
+            USING ERRCODE='23514',CONSTRAINT='content_original_blob_immutable';
+    END IF;
+    IF NEW.redacted AND NOT OLD.redacted AND EXISTS(
+       SELECT 1 FROM public.content_original_blobs d JOIN public.content_originals o USING(event_id)
+       WHERE d.blob_ref=OLD.id AND o.retain_full_history) THEN
+        RAISE EXCEPTION 'PCR historical content Blob cannot be redacted'
+            USING ERRCODE='23514',CONSTRAINT='pcr_content_blob_retained';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER retained_content_blob BEFORE UPDATE ON public.blobs
+    FOR EACH ROW EXECUTE FUNCTION public.enforce_retained_content_blob();
+CREATE TABLE public.content_original_roots (
+    event_id text NOT NULL REFERENCES public.content_originals(event_id) ON DELETE CASCADE,
+    root_ref text NOT NULL CHECK (root_ref ~ '^sha256:[0-9a-f]{64}$'),
+    root_context jsonb NOT NULL CHECK (jsonb_typeof(root_context) = 'object'),
+    backup_actor_id text NOT NULL,
+    PRIMARY KEY (event_id, root_ref)
+);
+CREATE INDEX content_original_roots_package_idx ON public.content_original_roots (backup_actor_id, root_ref);
+CREATE TABLE public.content_key_domains (
+    root_ref text NOT NULL CHECK (root_ref ~ '^sha256:[0-9a-f]{64}$'),
+    producer_digest text NOT NULL CHECK (producer_digest ~ '^sha256:[0-9a-f]{64}$'),
+    purpose text NOT NULL CHECK (purpose = 'event_body'),
+    content_key_salt text NOT NULL,
+    event_id text NOT NULL REFERENCES public.content_originals(event_id) ON DELETE RESTRICT,
+    content_path text NOT NULL,
+    content_context jsonb NOT NULL CHECK (jsonb_typeof(content_context) = 'object'),
+    PRIMARY KEY (root_ref, producer_digest, purpose, content_key_salt),
+    UNIQUE (event_id, content_path)
+);
+
 -- SOL-02-004: enforce series_sequence monotonicity at the storage layer. A given
 -- (actor, series) may hold at most one envelope per sequence number; the
 -- receive path depends on this constraint so concurrent successor PUTs cannot
@@ -4483,6 +4538,21 @@ CREATE TABLE mls_group_current_states (
  CHECK((value->>'covered_key_access_revision')::numeric <= (value->>'current_key_access_revision')::numeric)
 );
 CREATE INDEX mls_group_current_states_realm ON mls_group_current_states(realm_id,scope_key);
+
+-- A remote Add remains unbound until its native original proof is installed.
+CREATE TABLE mls_endpoint_current_bindings (
+ scope_key TEXT COLLATE "C" NOT NULL,
+ leaf_index BIGINT NOT NULL CHECK(leaf_index>=0),
+ actor_id JSONB NOT NULL CHECK(jsonb_typeof(actor_id)='object'),
+ leaf_signature_key TEXT NOT NULL CHECK(length(leaf_signature_key)=43),
+ binding JSONB CHECK(binding IS NULL OR jsonb_typeof(binding)='object'),
+ origin_event_ref TEXT NOT NULL,
+ origin_signature_key TEXT NOT NULL CHECK(length(origin_signature_key)=43),
+ current_event_ref TEXT NOT NULL,
+ epoch BIGINT NOT NULL CHECK(epoch>=0),
+ PRIMARY KEY(scope_key,leaf_index),
+ UNIQUE(scope_key,leaf_signature_key)
+);
 
 -- Historical, Station-private facts from the exact signed PublicMessage of
 -- each accepted MLS Commit. The row identity includes the creating Commit and

@@ -14,7 +14,9 @@
 //! Realm and Circle groups use their exact membership and authority cut. Sidecar
 //! groups need their own scope membership basis and stay closed.
 
-use arkret_event_draft::{EventMetadataSendGateExt as _, EventPayloadExt as _};
+use arkret_event_draft::{
+    EventContentEnvelopesExt as _, EventMetadataSendGateExt as _, EventPayloadExt as _,
+};
 use arkret_models_collaboration::events_payloads::MlsGenesisPayload;
 use arkret_models_collaboration::mls_roster_authority::MlsAttestAddRequestBody;
 use arkret_models_crypto::MlsCommitPayload;
@@ -367,6 +369,7 @@ pub(crate) async fn commit_mls_group_current_state_in_connection(
             .map_err(crate::PgTransactionError::into_persistence)?;
     }
     store_public_blobs(conn, event, &installation.public_blobs, commit).await?;
+    crate::content_endpoint_bindings::install_in_connection(conn, transaction).await?;
     crate::direct_conversation_admission::record_group_state_in_connection(
         conn,
         event,
@@ -1364,6 +1367,12 @@ pub(crate) async fn require_mls_send_gate_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
 ) -> PersistenceResult<()> {
+    let registered = event
+        .event_content_envelopes()
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
+        .into_iter()
+        .map(|carrier| carrier.envelope)
+        .collect::<Vec<_>>();
     let envelopes = if let Some(metadata) = event
         .event_metadata_send_gate()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
@@ -1373,13 +1382,13 @@ pub(crate) async fn require_mls_send_gate_in_connection(
                 "metadata must not carry both plaintext fields and encrypted_metadata".to_owned(),
             ));
         }
-        if !metadata.user_metadata_present && metadata.encrypted_metadata.is_empty() {
+        if !metadata.user_metadata_present && registered.is_empty() {
             return Ok(());
         }
-        if metadata.encrypted_metadata.is_empty() {
+        if registered.is_empty() {
             None
         } else {
-            Some(metadata.encrypted_metadata)
+            Some(registered.clone())
         }
     } else {
         match event.kind {
@@ -1411,6 +1420,7 @@ pub(crate) async fn require_mls_send_gate_in_connection(
                     .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
                     .encrypted_payload,
             ]),
+            _ if !registered.is_empty() => Some(registered),
             _ => return Ok(()),
         }
     };

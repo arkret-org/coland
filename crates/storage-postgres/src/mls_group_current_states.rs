@@ -203,13 +203,15 @@ pub(crate) async fn commit_mls_group_current_state_in_connection(
             "the MLS effective scope has no supported authority cut".to_owned(),
         ));
     }
-    if !crate::scope_access::scope_member_in_connection(
-        conn,
-        &event.realm_id,
-        &event.scope_ref,
-        &event.actor_id,
-    )
-    .await?
+    let own_pcr_genesis = qualified_own_human_pcr_genesis(conn, transaction).await?;
+    if !own_pcr_genesis
+        && !crate::scope_access::scope_member_in_connection(
+            conn,
+            &event.realm_id,
+            &event.scope_ref,
+            &event.actor_id,
+        )
+        .await?
     {
         return Err(refused(
             ConflictCode::CapabilityDenied,
@@ -223,7 +225,7 @@ pub(crate) async fn commit_mls_group_current_state_in_connection(
     } else {
         false
     };
-    if !controller_reconciliation {
+    if !controller_reconciliation && !own_pcr_genesis {
         crate::realm_authorization_cut::authorize_capability_gated_event_with_source(
             conn, event, commit, prepared,
         )
@@ -487,6 +489,69 @@ pub(crate) async fn commit_mls_group_current_state_in_connection(
         .await?;
     }
     Ok(())
+}
+
+/// A Human PCR's first real Device creates its own private MLS scope. It has
+/// no collaboration member row or Realm administrator grant. The exception is
+/// derived from the accepted creation unit and current native Device proof,
+/// and applies only to this exact scope's single-leaf Genesis.
+async fn qualified_own_human_pcr_genesis(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+) -> PersistenceResult<bool> {
+    let event = &transaction.event;
+    if event.kind != EventKind::MlsGenesis
+        || event.scope_ref
+            != (ScopeRef::Realm {
+                realm_id: event.realm_id.clone(),
+            })
+    {
+        return Ok(false);
+    }
+    if !matches!(
+        crate::pcr_private_authority::accepted_governance(conn, &event.realm_id).await?,
+        arkret_wire::GenesisGovernance::Human(_)
+    ) {
+        return Ok(false);
+    }
+    let (actor, endpoint, authorization) =
+        crate::content_endpoint_bindings::own_human_pcr_producer(conn, transaction).await?;
+    let payload: MlsGenesisPayload = serde_json::from_value(
+        serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
+    )
+    .map_err(PersistenceError::database)?;
+    let installation = transaction
+        .mls_state
+        .as_ref()
+        .ok_or_else(|| failed_precondition("PCR Genesis has no verified public state"))?;
+    let tracker = arkret_mls::MlsPublicGroupTracker::restore(
+        &installation.public_state,
+        event
+            .scope_ref
+            .canonical_mls_group_id()
+            .map_err(PersistenceError::database)?
+            .as_str(),
+        0,
+    )
+    .map_err(PersistenceError::database)?;
+    let leaves = tracker.leaves().map_err(PersistenceError::database)?;
+    if event.executed_by.is_some()
+        || payload.created_at != event.created_at
+        || payload.creator_leaf_authority.endpoint != endpoint
+        || payload.creator_leaf_authority.authorization_event_ref != authorization
+        || leaves.len() != 1
+        || leaves[0].actor_id != actor
+        || leaves[0].signature_key != payload.creator_leaf_authority.leaf_signature_key_base64url
+        || installation.member_principals.len() != 1
+        || !installation.member_principals.contains(&actor)
+        || !transaction.welcomes.is_empty()
+        || !installation.consumed_proposals.is_empty()
+    {
+        return Err(failed_precondition(
+            "PCR Genesis differs from its native Human creator endpoint",
+        ));
+    }
+    Ok(true)
 }
 
 async fn freeze_consumed_proposals(

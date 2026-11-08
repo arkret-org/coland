@@ -3932,6 +3932,9 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     }
                 }
                 commit_realm_authority_root_current_state_in_connection(conn, &transaction.event, &transaction.commit).await?;
+                crate::realm_bootstrap_current_states::commit_ordinary_bootstrap_singleton_current_state_in_connection(
+                    conn, &transaction.event, &transaction.commit,
+                ).await?;
                 commit_capability_grant_current_state_in_connection(conn, &transaction.event, &transaction.commit, None).await?;
                 crate::pcr_device_current_states::project_pcr_device_current_in_connection(
                     conn,

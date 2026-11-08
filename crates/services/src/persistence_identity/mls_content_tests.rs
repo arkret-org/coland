@@ -547,6 +547,381 @@ fn sealed_root_package(
     .unwrap()
 }
 
+async fn prepared_own_pcr_group(
+    fixture: &RootFixture,
+    wrong_creator: Option<&str>,
+) -> (EventCommitRequest, ArkretMlsGroup, ContentEndpoint) {
+    let realm = fixture.pcr.history.events[0].realm_id.clone();
+    let scope = arkret_wire::ScopeRef::Realm {
+        realm_id: realm.clone(),
+    };
+    let binding = MlsGovernanceBindingPayload::realm(realm.clone(), None, 0, 0, 0).unwrap();
+    let actor = ActorId::account(fixture.pcr.history.account.clone());
+    let identity = ArkretMlsIdentity::new_human_device(
+        actor.clone(),
+        fixture.pcr.history.founding_device_id.clone(),
+        ArkretMlsSigner::from_ed25519_signing_key(ed25519_dalek::SigningKey::from_bytes(
+            &[118; 32],
+        )),
+    )
+    .unwrap();
+    let group = identity
+        .create_group_with_governance_binding(&scope, &binding)
+        .unwrap();
+    let (info, tree) = group.public_group_state_bytes().unwrap();
+    let tracker =
+        MlsPublicGroupTracker::from_external(&info, &tree, group.group_id().as_str(), 0).unwrap();
+    let leaf = tracker.leaves().unwrap().remove(0);
+    let endpoint = ContentEndpoint {
+        actor_id: actor,
+        endpoint: MlsWelcomeRecipientEndpoint::Device {
+            device_id: fixture.pcr.history.founding_device_id.clone(),
+        },
+        authorization_event_ref: fixture.pcr.history.events[1].event_id.clone(),
+        signature_key_base64url: leaf.signature_key.to_string(),
+    };
+    let blobs = vec![public_blob(&info), public_blob(&tree)];
+    let mut declared = endpoint.clone();
+    match wrong_creator {
+        None => {}
+        Some("authorization") => {
+            declared.authorization_event_ref = fixture.pcr.history.events[0].event_id.clone()
+        }
+        Some("device") => {
+            declared.endpoint = MlsWelcomeRecipientEndpoint::Device {
+                device_id: arkret_wire::DeviceId::new(format!(
+                    "ak:device:{}",
+                    uuid::Uuid::now_v7()
+                ))
+                .unwrap(),
+            }
+        }
+        _ => panic!("unknown negative creator case"),
+    }
+    let event=fixture.pcr.history.event(EventKind::MlsGenesis,json!({
+        "cipher_suite":"MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+        "group_info_ref":blobs[0].blob_ref,"ratchet_tree_ref":blobs[1].blob_ref,
+        "creator_leaf_authority":{"leaf_signature_key_base64url":declared.signature_key_base64url,
+            "endpoint":declared.endpoint,"authorization_event_ref":declared.authorization_event_ref},
+        "governance_binding":binding,
+        "created_at":arkret_canonical::format_timestamp_canonical(fixture.pcr.history.events[0].created_at)
+    }));
+    let previous = coland_storage::AuthorityCommitTransaction {
+        expected_authority: fixture.pcr.unit.transactions[1].expected_authority.clone(),
+        event: fixture.pcr.history.events.last().unwrap().clone(),
+        commit: fixture.pcr.history.commits.last().unwrap().clone(),
+        producer_signer_fact: None,
+        mls_state: None,
+        welcomes: vec![],
+        recipient_queue_capacity: 0,
+    };
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let mut request = ordinary_realm::request_for_event(&previous, event, at);
+    ordinary_realm::seal_final_commit(&mut request.authority_commit.commit);
+    let source = &fixture.pcr.history.commits[1];
+    request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
+        coland_storage::DeviceRevocationGateSelector {
+            principal_id: fixture.pcr.history.account.principal_id.clone(),
+            station_id: fixture.pcr.history.account.station_id.clone(),
+            device_id: fixture.pcr.history.founding_device_id.to_string(),
+            authorization_ref: arkret_wire::CommittedEventRef {
+                event_id: fixture.pcr.history.events[1].event_id.clone(),
+                commit_id: source.commit_id.clone(),
+                stream_ref: source.stream_ref.clone(),
+                stream_position: source.stream_position,
+            },
+        },
+    ));
+    request.authority_commit.mls_state = Some(MlsStateInstallation {
+        effective_scope: scope,
+        base: None,
+        epoch: 0,
+        public_state: tracker.export_state().unwrap(),
+        member_principals: [endpoint.actor_id.clone()].into_iter().collect(),
+        consumed_proposals: vec![],
+        public_blobs: blobs,
+    });
+    (request, group, endpoint)
+}
+
+async fn own_pcr_group(
+    pool: &PgPool,
+    fixture: &RootFixture,
+) -> (
+    coland_storage::AuthorityCommitTransaction,
+    ArkretMlsGroup,
+    ContentEndpoint,
+) {
+    let (request, mut group, endpoint) = Box::pin(prepared_own_pcr_group(fixture, None)).await;
+    PgEventCommitUnitOfWork::new(pool.clone())
+        .commit_event(request.clone())
+        .await
+        .unwrap();
+    group
+        .install_local_creator_binding(
+            endpoint.actor_id.clone(),
+            Some(endpoint.authorization_event_ref.clone()),
+        )
+        .unwrap();
+    (request.authority_commit, group, endpoint)
+}
+
+#[tokio::test]
+async fn own_pcr_mls_genesis_refuses_mismatched_current_creator_without_membership_fallback() {
+    let database = TestDatabase::lease().await;
+    database.bind_device_inventory_station("ak:did_core:web:backup-test.example");
+    let pool = database.pool();
+    let fixture = Box::pin(RootFixture::new(pool.clone())).await;
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    for case in ["device", "authorization"] {
+        let (request, ..) = Box::pin(prepared_own_pcr_group(&fixture, Some(case))).await;
+        let before = store
+            .stream_head(&request.authority_commit.commit.stream_ref)
+            .await
+            .unwrap();
+        let error = uow.commit_event(request.clone()).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("PCR Genesis differs from its native Human creator endpoint"),
+            "{case}: {error}"
+        );
+        assert_eq!(
+            store
+                .stream_head(&request.authority_commit.commit.stream_ref)
+                .await
+                .unwrap(),
+            before
+        );
+        assert!(
+            PgMlsGroupCurrentStore { pool: pool.clone() }
+                .current(&request.authority_commit.event.scope_ref)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut conn = pool.get().await.unwrap();
+        let count=diesel::sql_query("SELECT to_jsonb(count(*)) AS payload FROM canonical_events WHERE envelope->>'event_id'=$1")
+            .bind::<Text,_>(request.authority_commit.event.event_id.as_str()).get_result::<BindingRow>(&mut *conn).await.unwrap();
+        assert_eq!(count.payload, json!(0));
+    }
+}
+
+#[tokio::test]
+async fn own_pcr_private_profile_requires_native_root_before_accepting_exact_encrypted_original() {
+    use arkret_crypto::content_history::*;
+    use arkret_models_crypto::*;
+    use coland_storage::{ActorProfileAdmissionOutcome, ActorProfileAdmissionWrite};
+    let database = TestDatabase::lease().await;
+    database.bind_device_inventory_station("ak:did_core:web:backup-test.example");
+    let pool = database.pool();
+    let fixture = Box::pin(RootFixture::new(pool.clone())).await;
+    let mut conn = pool.get().await.unwrap();
+    let history=diesel::sql_query("SELECT value AS payload FROM realm_bootstrap_current_states WHERE realm_id=$1 AND state_family='realm_history_access'")
+        .bind::<Text,_>(fixture.pcr.history.events[0].realm_id.as_str()).get_result::<BindingRow>(&mut *conn).await.unwrap();
+    assert_eq!(history.payload, json!("since_join"));
+    drop(conn);
+    let (genesis, group, endpoint) = Box::pin(own_pcr_group(&pool, &fixture)).await;
+    assert!(genesis.producer_signer_fact.is_none());
+    assert_ne!(
+        endpoint.signature_key_base64url,
+        arkret_canonical::base64url_encode(
+            ed25519_dalek::SigningKey::from_bytes(
+                &fixture.pcr.history.founding_device_signing_seed
+            )
+            .verifying_key()
+            .to_bytes()
+        )
+    );
+    let context = ContentRootContext {
+        effective_scope: genesis.event.scope_ref.clone(),
+        genesis_event_ref: genesis.event.event_id.clone(),
+        epoch: 0,
+        group_state_ref: genesis.event.event_id.clone(),
+        cipher_suite: "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519".into(),
+        encryption_backup_strategy: arkret_wire::EncryptionBackupStrategy::EpochContentRoots,
+        backup_strategy_ref: fixture.pcr.history.events[0].event_id.clone(),
+    };
+    let root = group.export_content_root(&context).unwrap();
+    let package = sealed_root_package(&fixture, &context, &root);
+    let content = ContentContext {
+        root_context: context.clone(),
+        root_ref: content_root_ref(&root, &context).unwrap(),
+        purpose: ContentPurpose::EventBody,
+        encryption_scheme: arkret_wire::EncryptedPayloadScheme::EpochContentAead,
+        encryption_algorithm: ContentEncryptionAlgorithm::Aes128Gcm,
+        producer: endpoint.clone(),
+        content_key_salt: fresh_content_key_salt().unwrap(),
+    };
+    let key = derive_content_key(&root, &content).unwrap();
+    let commitment = content_key_commitment(&content, &key).unwrap();
+    let protection = ContentProtection {
+        root_refs: vec![content.root_ref.clone()],
+        blob_refs: vec![],
+        backup_refs: vec![package.backup_id.clone()],
+    };
+    let mut public = json!({"principal_id":fixture.pcr.history.account.principal_id,
+        "actor_kind":"user","display_name":"Public control profile"});
+    let raw = fixture
+        .pcr
+        .history
+        .event(EventKind::ProfileCreate, json!({"object":public}));
+    let mut outer = serde_json::to_value(&raw).unwrap();
+    for field in ["event_id", "payload", "producer_proof", "unsigned"] {
+        outer.as_object_mut().unwrap().remove(field);
+    }
+    let header = EventContentPreEncryptionHeader::reconstruct(
+        "1.0",
+        "application/json",
+        content.encryption_scheme.clone(),
+        context.effective_scope.clone(),
+        raw.kind.as_str(),
+        0,
+        context.group_state_ref.clone(),
+        arkret_canonical::canonical_json_string(&endpoint.actor_id).unwrap(),
+        EventContentRoutingContext::None,
+        EventContentMaterial {
+            content_context: content.clone(),
+            outer_event: outer,
+            protection: protection.clone(),
+            key_commitment: commitment.clone(),
+        },
+    )
+    .unwrap();
+    let plaintext = arkret_canonical::canonical_json_bytes(
+        &json!({"profile_fields":{"biography":"private PCR original"}}),
+    )
+    .unwrap();
+    let ciphertext = seal_content(&root, &header, &plaintext).unwrap();
+    let envelope = EncryptedEnvelope {
+        version: "1.0".into(),
+        content_type: "application/json".into(),
+        encryption_scheme: content.encryption_scheme.clone(),
+        encryption_context: EncryptedEnvelopeEncryptionContext::EpochContent {
+            epoch: 0,
+            group_state_ref: context.group_state_ref.clone(),
+            content_key_salt: content.content_key_salt.clone(),
+            root_ref: content.root_ref.clone(),
+            key_commitment: commitment,
+            protection,
+            routing_context: None,
+        },
+        ciphertext,
+    };
+    public["encrypted_private_fields"] = serde_json::to_value(&envelope).unwrap();
+    let event = fixture
+        .pcr
+        .history
+        .event(EventKind::ProfileCreate, json!({"object":public}));
+    let persistence = std::sync::Arc::new(coland_storage_postgres::PgPersistenceStore::new(
+        pool.clone(),
+    ));
+    let app = crate::authority_commit::AuthorityCommitApplication::new(
+        crate::persistence::PersistenceHandle::new(persistence.clone()),
+        64,
+    );
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let transaction = app
+        .prepare_self_event_transaction(
+            &event,
+            &fixture.pcr.history.account.station_id,
+            fixture.pcr.history.authority_method(),
+            &ed25519_dalek::SigningKey::from_bytes(&[83; 32]),
+            at,
+        )
+        .await
+        .unwrap();
+    assert!(transaction.producer_signer_fact.is_none());
+    let write = ActorProfileAdmissionWrite {
+        commit: transaction.clone(),
+        queued_at: at,
+    };
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let before = store
+        .stream_head(&transaction.commit.stream_ref)
+        .await
+        .unwrap();
+    let missing = persistence
+        .actor_profiles()
+        .admit_profile(write.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        missing.to_string().contains("missing durable root package"),
+        "{missing}"
+    );
+    assert!(
+        store
+            .committed_event(&event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .stream_head(&transaction.commit.stream_ref)
+            .await
+            .unwrap(),
+        before
+    );
+    let backups = key_backup_tests::service(pool.clone());
+    key_backup_tests::put(&backups, &package).await.unwrap();
+    let accepted = persistence
+        .actor_profiles()
+        .admit_profile(write.clone())
+        .await
+        .unwrap();
+    let ActorProfileAdmissionOutcome::Committed(original) = accepted else {
+        panic!("first original must commit")
+    };
+    assert_eq!(original.event, event);
+    assert_eq!(
+        original.profile.encrypted_private_fields.as_ref(),
+        Some(&envelope)
+    );
+    assert!(matches!(
+        persistence
+            .actor_profiles()
+            .admit_profile(write)
+            .await
+            .unwrap(),
+        ActorProfileAdmissionOutcome::Duplicate(_)
+    ));
+    let mut conn = pool.get().await.unwrap();
+    let recorded=diesel::sql_query("SELECT content_context AS payload FROM content_key_domains WHERE event_id=$1 AND content_path='/payload/object/encrypted_private_fields'")
+        .bind::<Text,_>(event.event_id.as_str()).get_result::<BindingRow>(&mut *conn).await.unwrap();
+    assert_eq!(
+        serde_json::from_value::<ContentContext>(recorded.payload).unwrap(),
+        content
+    );
+    drop(conn);
+    assert_eq!(
+        open_content(&root, &header, &envelope.ciphertext).unwrap(),
+        plaintext
+    );
+    let mut conn = pool.get().await.unwrap();
+    let count = diesel::sql_query(
+        "SELECT to_jsonb(count(*)) AS payload FROM member_state_current_states WHERE realm_id=$1",
+    )
+    .bind::<Text, _>(event.realm_id.as_str())
+    .get_result::<BindingRow>(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(count.payload, json!(0));
+    drop(conn);
+    let invalid = backups
+        .delete_backup(package.backup_id.as_str())
+        .await
+        .unwrap_err();
+    assert!(
+        invalid
+            .to_string()
+            .contains("last sufficient current-recipient content root package"),
+        "{invalid}"
+    );
+}
+
 fn encrypted_message(
     prepared: &PreparedGroup,
     previous: &coland_storage::AuthorityCommitTransaction,

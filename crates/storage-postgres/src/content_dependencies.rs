@@ -177,8 +177,17 @@ pub(crate) async fn commit_in_connection(
     let realm = declaration
         .as_realm_create()
         .map_err(|error| invalid(error.to_string()))?;
-    // Agent controller bootstrap is a separate native qualification; never
-    // reinterpret it as a Human subject before its formal contract is closed.
+    if matches!(
+        event.kind,
+        EventKind::ProfileCreate | EventKind::ProfileUpdate
+    ) && !matches!(
+        realm.object.purpose,
+        RealmPurpose::PrincipalControl | RealmPurpose::AgentControl
+    ) {
+        return Err(invalid("private Profile envelope requires its original Account PCR").into());
+    }
+    // Agent controller bootstrap requires its separate native qualification;
+    // never reinterpret it as a Human subject while that adapter is absent.
     if realm.object.purpose == RealmPurpose::AgentControl {
         return Err(missing("Agent PCR root dependency admission is not yet qualified").into());
     }

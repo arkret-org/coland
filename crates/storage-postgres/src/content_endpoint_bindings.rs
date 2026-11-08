@@ -210,37 +210,36 @@ pub(crate) async fn current_producer_in_connection(
     transaction: &AuthorityCommitTransaction,
     group: &MlsGroupValue,
 ) -> PersistenceResult<ContentEndpoint> {
-    let fact = transaction
-        .producer_signer_fact
-        .as_ref()
-        .ok_or_else(|| unavailable("current endpoint requires its native producer signer fact"))?;
-    let (actor, endpoint, authorization) = match fact {
-        HistoricalProducerSignerFact::AccountDevice(fact) => (
-            fact.actor.clone(),
-            MlsWelcomeRecipientEndpoint::Device {
-                device_id: fact.device_id.clone(),
-            },
-            fact.key.authorization_ref.event_id.clone(),
-        ),
-        HistoricalProducerSignerFact::AgentRuntime(fact) => (
-            fact.actor_id.clone(),
-            MlsWelcomeRecipientEndpoint::AgentRuntime {
-                verification_method: fact.verification_method.clone(),
-            },
-            fact.authorization_event_ref.clone(),
-        ),
-        HistoricalProducerSignerFact::RealmDevice(fact) => (
-            fact.actor_id.clone(),
-            MlsWelcomeRecipientEndpoint::Device {
-                device_id: fact.device_id.clone(),
-            },
-            fact.authorization_event_id.clone(),
-        ),
-        _ => {
-            return Err(unavailable(
-                "producer has no registered application-content endpoint",
-            ));
-        }
+    let (actor, endpoint, authorization) = match transaction.producer_signer_fact.as_ref() {
+        None => own_human_pcr_producer(conn, transaction).await?,
+        Some(fact) => match fact {
+            HistoricalProducerSignerFact::AccountDevice(fact) => (
+                fact.actor.clone(),
+                MlsWelcomeRecipientEndpoint::Device {
+                    device_id: fact.device_id.clone(),
+                },
+                fact.key.authorization_ref.event_id.clone(),
+            ),
+            HistoricalProducerSignerFact::AgentRuntime(fact) => (
+                fact.actor_id.clone(),
+                MlsWelcomeRecipientEndpoint::AgentRuntime {
+                    verification_method: fact.verification_method.clone(),
+                },
+                fact.authorization_event_ref.clone(),
+            ),
+            HistoricalProducerSignerFact::RealmDevice(fact) => (
+                fact.actor_id.clone(),
+                MlsWelcomeRecipientEndpoint::Device {
+                    device_id: fact.device_id.clone(),
+                },
+                fact.authorization_event_id.clone(),
+            ),
+            _ => {
+                return Err(unavailable(
+                    "producer has no registered application-content endpoint",
+                ));
+            }
+        },
     };
     if actor != *transaction.event.actual_signer() {
         return Err(invalid(
@@ -279,4 +278,77 @@ pub(crate) async fn current_producer_in_connection(
         .validate()
         .map_err(|error| invalid(error.to_string()))?;
     Ok(binding)
+}
+
+/// Own-PCR originals use the separately registered self-admission contract,
+/// rather than an ordinary collaboration historical-signer fact. Independently
+/// verify the accepted Human inception and its current real Device proof; an
+/// absent ordinary fact never becomes an authority fallback for another scope.
+pub(crate) async fn own_human_pcr_producer(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+) -> PersistenceResult<(
+    arkret_wire::ActorId,
+    MlsWelcomeRecipientEndpoint,
+    arkret_wire::EventId,
+)> {
+    let event = &transaction.event;
+    if event.executed_by.is_some()
+        || event.authorization_ref.is_some()
+        || event.scope_ref
+            != (arkret_wire::ScopeRef::Realm {
+                realm_id: event.realm_id.clone(),
+            })
+    {
+        return Err(unavailable(
+            "content producer has no qualified own-Human PCR role",
+        ));
+    }
+    let origin = crate::pcr_private_authority::accepted_governance(conn, &event.realm_id).await?;
+    let arkret_wire::GenesisGovernance::Human(account) = origin else {
+        return Err(unavailable(
+            "content producer requires its native signer fact",
+        ));
+    };
+    if event.actor_id.as_account_id() != Some(&account) {
+        return Err(unavailable(
+            "own-PCR producer differs from the accepted full Account",
+        ));
+    }
+    arkret_wire::GenesisGovernance::Human(account.clone())
+        .validate_current(
+            &transaction.expected_authority.service_id,
+            transaction.expected_authority.generation,
+        )
+        .map_err(|error| unavailable(error.to_string()))?;
+    let producer = event
+        .account_device_producer()
+        .map_err(|error| unavailable(error.to_string()))?
+        .ok_or_else(|| unavailable("own-PCR content has no real Human Device producer"))?;
+    if producer.account_id != account {
+        return Err(unavailable("own-PCR Device producer has another Account"));
+    }
+    let (cut, _) = crate::actor_profiles::verify_device_signer_in_connection(
+        conn,
+        event,
+        &account,
+        &producer.device_id,
+        &event.realm_id,
+        chrono::Utc::now(),
+        event.realm_id.digest_suite_code().digest_suite(),
+        "PCR encrypted original",
+    )
+    .await
+    .map_err(crate::PgTransactionError::into_persistence)?;
+    let accepted = cut
+        .authority
+        .authorization
+        .ok_or_else(|| unavailable("own-PCR Device has no current accepted authorization"))?;
+    Ok((
+        event.actor_id.clone(),
+        MlsWelcomeRecipientEndpoint::Device {
+            device_id: producer.device_id,
+        },
+        accepted.event_id,
+    ))
 }

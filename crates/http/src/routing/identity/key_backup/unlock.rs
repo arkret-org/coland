@@ -404,6 +404,13 @@ pub(super) async fn issue_key_backup_unlock_challenge(
 ) -> JsonResult<arkret_models_crypto::KeysBackupsUnlockChallenge> {
     use rand::RngExt as _;
     let state = depot.get_typed::<AppState>().expect("state injected");
+    let request = body.into_inner();
+    request
+        .validate()
+        .map_err(|error| schema_error(error.to_string()))?;
+    if request.subject_actor_id.is_some() || request.content_history.is_some() {
+        return Err(AppError::not_found("key backup history source unavailable"));
+    }
     let session = aa.authenticated_session(state, req).await?;
     if session.session_grant.as_ref().is_some_and(|grant| {
         grant.credential_class
@@ -439,7 +446,7 @@ pub(super) async fn issue_key_backup_unlock_challenge(
         arkret_wire::Base64UrlString::new(URL_SAFE_NO_PAD.encode(bytes)).expect("base64url")
     };
     let now = Utc::now();
-    let request_id = body.into_inner().request_id;
+    let request_id = request.request_id;
     if !(22..=128).contains(&request_id.as_str().len()) {
         return Err(AppError::param_invalid("invalid unlock request_id"));
     }
@@ -462,6 +469,9 @@ pub(super) async fn issue_key_backup_unlock_challenge(
             .map_err(|error| AppError::internal(error.to_string()))?,
         service_id: state.service_core_id(),
         request_id,
+        subject_actor_id: request.subject_actor_id,
+        custody_authorization_ref: request.custody_authorization_ref,
+        content_history: request.content_history,
         issued_at: now,
         expires_at: now + chrono::Duration::seconds(300),
     };

@@ -938,8 +938,8 @@ pub struct MlsStateInstallation {
     /// signed PublicMessage wire order. Empty for Genesis or self-update.
     /// The accepting PG transaction freezes these with the winning Commit.
     pub consumed_proposals: Vec<MlsConsumedProposalInstallation>,
-    /// The public Blobs published atomically with this transition: two
-    /// carried Genesis artifacts, or one post-Commit ratchet tree. A local
+    /// The public Blobs published atomically with this transition: exact
+    /// GroupInfo and ratchet tree for every Commit. A local
     /// Genesis may use its already published Blobs.
     pub public_blobs: Vec<MlsPublicBlob>,
 }
@@ -1300,7 +1300,12 @@ fn validate_mls_installation(
             let Some(base) = &state.base else {
                 return Err(mismatch());
             };
-            if state.public_blobs.len() != 1 {
+            let published = state
+                .public_blobs
+                .iter()
+                .map(|blob| &blob.blob_ref)
+                .collect::<Vec<_>>();
+            if published != [payload.group_info_ref(), payload.ratchet_tree_ref()] {
                 return Err(mismatch());
             }
             for (ordinal, proposal) in state.consumed_proposals.iter().enumerate() {
@@ -1517,7 +1522,7 @@ pub enum MlsMemberGroupStateMaterialRead {
     NotFound,
     RevisionUnavailable,
     Authorized {
-        genesis: Option<Box<arkret_wire::CommittedEventFullView>>,
+        group_state_event: Option<Box<arkret_wire::CommittedEventFullView>>,
     },
 }
 
@@ -3550,7 +3555,25 @@ mod mls_installation_tests {
             commit_digest: Hash::new(arkret_canonical::sha256_digest(commit_bytes)).unwrap(),
             ratchet_tree: None,
         };
-        let payload = MlsCommitPayload::new(base.clone(), 7, &envelope, binding).unwrap();
+        let public_blob = |digit: &str| MlsPublicBlob {
+            blob_ref: arkret_wire::BlobRef::new(format!("ak:blob:sha256:{}", digit.repeat(64)))
+                .unwrap(),
+            sha256: digit.repeat(64),
+            size_bytes: 11,
+            storage_backend: "local".to_owned(),
+            storage_key: format!("sha256/{}", digit.repeat(64)),
+        };
+        let info = public_blob("4");
+        let tree = public_blob("5");
+        let payload = MlsCommitPayload::new(
+            base.clone(),
+            7,
+            &envelope,
+            binding,
+            info.blob_ref.clone(),
+            tree.blob_ref.clone(),
+        )
+        .unwrap();
         let scope = ScopeRef::Realm { realm_id };
         let event = commit_event(&scope, &payload);
         let installed = MlsStateInstallation {
@@ -3563,16 +3586,19 @@ mod mls_installation_tests {
             public_state: vec![1],
             member_principals: Default::default(),
             consumed_proposals: Vec::new(),
-            public_blobs: vec![MlsPublicBlob {
-                blob_ref: arkret_wire::BlobRef::new(format!("ak:blob:sha256:{}", "5".repeat(64)))
-                    .unwrap(),
-                sha256: "5".repeat(64),
-                size_bytes: 11,
-                storage_backend: "local".to_owned(),
-                storage_key: format!("sha256/{}", "5".repeat(64)),
-            }],
+            public_blobs: vec![info, tree],
         };
         assert!(validate_mls_installation(&event, &installed).is_ok());
+
+        let mut missing_info = installed.clone();
+        missing_info.public_blobs.remove(0);
+        assert!(validate_mls_installation(&event, &missing_info).is_err());
+        let mut swapped_refs = installed.clone();
+        swapped_refs.public_blobs.swap(0, 1);
+        assert!(validate_mls_installation(&event, &swapped_refs).is_err());
+        let mut wrong_info = installed.clone();
+        wrong_info.public_blobs[0] = public_blob("6");
+        assert!(validate_mls_installation(&event, &wrong_info).is_err());
 
         let mut no_tree = installed.clone();
         no_tree.public_blobs.clear();

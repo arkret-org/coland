@@ -118,6 +118,7 @@ mod invite_locators;
 mod invite_new_source_ledger;
 mod issued_realm_snapshots;
 mod key_backup;
+mod key_backup_authority;
 mod key_backup_current_states;
 mod key_backup_unlock;
 mod managed_forward_admission;

@@ -102,7 +102,7 @@ async fn peer_forwarded_destroy_reaches_the_shared_cut_and_leaves_zero_writes() 
                 .clone(),
         ),
         producer_agent_evidence: None,
-        mls_genesis_material: None,
+        mls_group_state_material: None,
     };
     request.validate().unwrap();
     let peer = coland_services::authority_commit::AuthenticatedPeerContext {

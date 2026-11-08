@@ -427,10 +427,10 @@ pub(crate) async fn read_member_group_state_material(
         .map_err(|error| {
             AppError::internal(format!("member MLS material authorization: {error}"))
         })?;
-    let genesis = match local_read {
+    let published = match local_read {
         Read::NotFound => return Err(mls_group_state_material_not_found()),
         Read::RevisionUnavailable => return Err(mls_group_state_material_revision_unavailable()),
-        Read::Authorized { genesis } => genesis,
+        Read::Authorized { group_state_event } => group_state_event,
     };
     let authority = state
         .authority_commits()
@@ -439,7 +439,7 @@ pub(crate) async fn read_member_group_state_material(
         .map_err(|error| AppError::internal(format!("MLS material authority lookup: {error}")))?
         .ok_or_else(mls_group_state_material_not_found)?;
     if authority.service_id == state.service_core_id() {
-        let event = genesis.ok_or_else(mls_group_state_material_revision_unavailable)?;
+        let event = published.ok_or_else(mls_group_state_material_revision_unavailable)?;
         return serve_group_state_material(state, &peer_request, &event.event).await;
     }
 
@@ -509,7 +509,7 @@ async fn resolve_peer_mls_group_state_material(
         .validate()
         .map_err(|error| mls_group_state_material_schema_violation(error.to_string()))?;
 
-    // federation.md §4.1.1: the Genesis is served only to a peer whose
+    // federation.md §4.1.1: public state is served only to a peer whose
     // replication right on the Realm stream covers its Commit at this
     // governing cut, the rule a peer stream scan applies.
     let source = arkret_wire::DidCoreId::new(source_id.clone())
@@ -532,9 +532,11 @@ async fn resolve_peer_mls_group_state_material(
                 return Err(mls_group_state_material_revision_unavailable());
             }
             Read::Authorized {
-                genesis: Some(genesis),
-            } => genesis.event,
-            Read::Authorized { genesis: None } => {
+                group_state_event: Some(published),
+            } => published.event,
+            Read::Authorized {
+                group_state_event: None,
+            } => {
                 return Err(mls_group_state_material_revision_unavailable());
             }
         }
@@ -547,14 +549,14 @@ async fn resolve_peer_mls_group_state_material(
                 &state.service_core_id(),
             )
             .await
-            .map_err(|error| AppError::internal(format!("peer MLS Genesis read: {error}")))?
+            .map_err(|error| AppError::internal(format!("peer MLS public-state read: {error}")))?
             .ok_or_else(mls_group_state_material_not_found)?
             .event
     };
     json_ok(serve_group_state_material(state, &request, &event).await?)
 }
 
-/// The accepted Genesis selector and raw public bytes are checked identically
+/// The accepted group-state selector and public bytes are checked identically
 /// for the original peer replication read and the member-authorized path.
 pub(crate) async fn serve_group_state_material(
     state: &AppState,
@@ -575,21 +577,46 @@ pub(crate) async fn serve_group_state_material(
             mls_group_state_material_not_found()
         }
     };
-    if event.kind != arkret_wire::EventKind::MlsGenesis
-        || event.event_id != request.group_state_event_id
+    if event.event_id != request.group_state_event_id
         || event.realm_id != request.realm_id
+        || event.scope_ref != request.effective_scope
     {
         return Err(mls_group_state_material_not_found());
     }
-    let payload: arkret_models_collaboration::events_payloads::MlsGenesisPayload =
-        serde_json::to_value(&event.payload)
-            .ok()
-            .and_then(|payload| serde_json::from_value(payload).ok())
-            .ok_or_else(mls_group_state_material_not_found)?;
-    if payload.effective_scope() != &request.effective_scope
-        || payload.mls_group_id().ok().as_ref() != Some(&request.mls_group_id)
-        || payload.group_info_ref != request.group_info_ref
-        || payload.ratchet_tree_ref != request.ratchet_tree_ref
+    let value =
+        serde_json::to_value(&event.payload).map_err(|_| mls_group_state_material_not_found())?;
+    let (binding, info_ref, tree_ref) = match event.kind {
+        arkret_wire::EventKind::MlsGenesis => {
+            let payload: arkret_models_collaboration::events_payloads::MlsGenesisPayload =
+                serde_json::from_value(value).map_err(|_| mls_group_state_material_not_found())?;
+            payload
+                .validate()
+                .map_err(|_| mls_group_state_material_not_found())?;
+            (
+                payload.governance_binding,
+                payload.group_info_ref,
+                payload.ratchet_tree_ref,
+            )
+        }
+        arkret_wire::EventKind::MlsCommit => {
+            let payload: arkret_models_crypto::MlsCommitPayload =
+                serde_json::from_value(value).map_err(|_| mls_group_state_material_not_found())?;
+            payload
+                .validate()
+                .map_err(|_| mls_group_state_material_not_found())?;
+            (
+                payload.governance_binding().clone(),
+                payload.group_info_ref().clone(),
+                payload.ratchet_tree_ref().clone(),
+            )
+        }
+        _ => return Err(mls_group_state_material_not_found()),
+    };
+    if binding.effective_scope() != &request.effective_scope
+        || binding.mls_group_id().ok().as_ref() != Some(&request.mls_group_id)
+        || binding.next_epoch() != request.epoch
+        || info_ref != request.group_info_ref
+        || tree_ref != request.ratchet_tree_ref
     {
         return Err(mls_group_state_material_not_found());
     }
@@ -647,17 +674,20 @@ pub(crate) async fn serve_group_state_material(
     // Selector echo, raw-byte content addresses and the response bound are
     // checked by the same validator the consumer runs; the RFC 9420 check then
     // proves GroupInfo and the ratchet tree describe the requested group at
-    // epoch zero. Stored material failing either is not served.
+    // the exact accepted epoch. Stored material failing either is not served.
     let validated = outcome
         .validate_for_request(request)
         .map_err(|_| unavailable_material())?;
-    arkret_mls::validate_public_group_state(
+    let tracker = arkret_mls::MlsPublicGroupTracker::from_external(
         &validated.group_info_bytes,
         &validated.ratchet_tree_bytes,
         request.mls_group_id.as_str(),
-        0,
+        request.epoch,
     )
     .map_err(|_| unavailable_material())?;
+    tracker
+        .verify_publication(&validated.group_info_bytes, &validated.ratchet_tree_bytes)
+        .map_err(|_| unavailable_material())?;
     Ok(outcome)
 }
 

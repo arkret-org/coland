@@ -457,6 +457,27 @@ const EFFECT_MANIFEST: &[EffectRegistration] = &[
         slot: CacheSlot::Shared(apply_durable_fact_dispatch),
     },
     EffectRegistration {
+        kind: arkret_wire::event_kind_str::MLS_HISTORY_GRANT,
+        owner: EventEffectOwnership::DurableFactNoCurrentProjection,
+        scope: EventWireScope::DurableEvent,
+        reducer_input: false,
+        slot: CacheSlot::FailClosed,
+    },
+    EffectRegistration {
+        kind: arkret_wire::event_kind_str::MLS_HISTORY_RECOVERY,
+        owner: EventEffectOwnership::DurableFactNoCurrentProjection,
+        scope: EventWireScope::DurableEvent,
+        reducer_input: false,
+        slot: CacheSlot::FailClosed,
+    },
+    EffectRegistration {
+        kind: arkret_wire::event_kind_str::MLS_HISTORY_REQUEST,
+        owner: EventEffectOwnership::DurableFactNoCurrentProjection,
+        scope: EventWireScope::DurableEvent,
+        reducer_input: false,
+        slot: CacheSlot::FailClosed,
+    },
+    EffectRegistration {
         kind: arkret_wire::CapabilityActionId::MODERATION_DECISION,
         owner: EventEffectOwnership::TypedStateWriter,
         scope: EventWireScope::DurableEvent,

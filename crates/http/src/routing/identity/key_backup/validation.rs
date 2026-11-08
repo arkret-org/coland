@@ -69,17 +69,26 @@ pub(super) fn validate_key_backup_body_typed(
 pub(super) fn validate_key_backup_ciphertext_digest_typed(
     backup: &KeyBackup,
 ) -> Result<(), AppError> {
-    let ciphertext = arkret_canonical::base64url_decode(backup.ciphertext.as_str())
-        .map_err(|_| schema_error("key backup ciphertext must be canonical base64url"))?;
-    arkret_canonical::verify_digest(&ciphertext, backup.ciphertext_digest.as_str())
-        .map_err(|_| schema_error("key backup ciphertext_digest does not match ciphertext"))
+    backup
+        .validate_ciphertext_digest()
+        .map_err(|error| schema_error(error.to_string()))
 }
 
 pub(super) fn validate_key_backup_session_device(
     backup: &KeyBackup,
     session_device_id: &str,
 ) -> Result<(), AppError> {
-    if backup.signature_proof.device_id.as_str() != session_device_id {
+    if backup
+        .signature_proof
+        .device_id
+        .as_ref()
+        .map(arkret_wire::DeviceId::as_str)
+        != Some(session_device_id)
+        || backup
+            .signature_proof
+            .agent_authorization_event_ref
+            .is_some()
+    {
         return Err(AppError::capability_denied(
             "key backup signer device must match the authenticated session device",
         ));
@@ -354,112 +363,19 @@ pub(super) async fn validate_current_recovery_recipient(
             "accepted recovery policy failed validation: {error}"
         ))
     })?;
-    let recipient = backup
-        .encryption
-        .recipient_key_ref
-        .as_deref()
-        .unwrap_or_default();
-    let suite_id = backup
-        .encryption
-        .hpke_suite
-        .as_deref()
-        .unwrap_or(arkret_wire::HPKE_SUITE_X25519_CHACHA20POLY1305_V1);
-    let suite: arkret_models_crypto::recovery_policy::RecoveryBackupHpkeSuite =
-        serde_json::from_value(Value::String(suite_id.to_owned())).map_err(|_| {
-            crate::app_error!(
-                UnsupportedHpkeSuite,
-                format!("key backup HPKE suite is unsupported: {suite_id}"),
-            )
-        })?;
-    let policy_ref = backup.recovery_policy_ref.as_ref().ok_or_else(|| {
-        failed_precondition(
-            "recovery_public_key backup has no recovery policy ref",
-            "recovery_policy_mismatch",
-        )
-    })?;
-    if policy.account_id != *account_id
-        || policy.policy_id != policy_ref.policy_id
-        || policy.version != policy_ref.policy_version
-    {
-        return Err(failed_precondition(
-            "backup recovery_policy_ref does not identify the accepted policy",
-            "recovery_policy_mismatch",
-        ));
-    }
-    let matching_recipient = policy.methods.iter().find_map(|method| {
-        let arkret_models_crypto::recovery_policy::RecoveryMethod::RecoveryUnlock { keys } = method
-        else {
-            return None;
-        };
-        keys.iter()
-            .map(|key| &key.backup_hpke)
-            .find(|entry| current_backup_hpke_agreement(entry, recipient, evaluated_at))
-    });
-    let Some(agreement) = matching_recipient else {
-        return Err(failed_precondition(
-            "recipient_key_ref is not a current non-revoked backup HPKE key agreement in the accepted recovery policy",
-            "recovery_policy_mismatch",
-        ));
-    };
-    if !agreement.hpke_suites.contains(&suite) {
-        return Err(crate::app_error!(
-            UnsupportedHpkeSuite,
-            format!(
-                "key backup HPKE suite {suite_id} is not allowed by recovery key agreement {recipient}"
-            ),
-        ));
-    }
-    Ok(())
-}
-
-fn current_backup_hpke_agreement(
-    entry: &RecoveryKeyAgreementEntry,
-    recipient: &str,
-    evaluated_at: DateTime<Utc>,
-) -> bool {
-    entry.key_agreement_ref.as_str() == recipient
-        && entry.r#use == RecoveryKeyAgreementUse::BackupHpke
-        && entry.revoked_at.is_none()
-        && entry.not_before <= evaluated_at
-        && entry.expires_at > evaluated_at
+    backup
+        .validate_recovery_recipient(&policy, evaluated_at)
+        .map_err(|error| {
+            if error.error_code() == Some(arkret_wire::ErrorCode::UnsupportedHpkeSuite) {
+                return crate::app_error!(UnsupportedHpkeSuite, error.to_string());
+            }
+            crate::app_error!(RecoveryPolicyMismatch, error.to_string())
+        })
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Utc};
-
     use super::*;
-
-    const RECOVERY_CONTROLLER_DID: &str = "did:webvh:z6mkcontroller:controller.example";
-    #[test]
-    fn a_recovery_signing_key_is_not_a_backup_hpke_recipient() {
-        let now: DateTime<Utc> = "2026-07-15T00:00:00.000Z".parse().unwrap();
-        let agreement = RecoveryKeyAgreementEntry {
-            key_agreement_ref: arkret_wire::DidUrl::new(format!(
-                "{RECOVERY_CONTROLLER_DID}#backup-hpke-1"
-            ))
-            .unwrap(),
-            key_agreement_algorithm:
-                arkret_models_crypto::recovery_policy::RecoveryKeyAgreementAlgorithm::X25519,
-            public_key_multibase: "z6LSriWhVBzW9Vz2PvqbieSz7Aa2hPLzTKJuDwXTMKFeomeW".to_owned(),
-            hpke_suites: vec![arkret_models_crypto::recovery_policy::RecoveryBackupHpkeSuite::X25519AeadChacha20Poly1305V1],
-            r#use: RecoveryKeyAgreementUse::BackupHpke,
-            not_before: now - chrono::TimeDelta::minutes(1),
-            expires_at: now + chrono::TimeDelta::days(1),
-            revoked_at: None,
-        };
-
-        assert!(current_backup_hpke_agreement(
-            &agreement,
-            agreement.key_agreement_ref.as_str(),
-            now
-        ));
-        assert!(!current_backup_hpke_agreement(
-            &agreement,
-            &format!("{RECOVERY_CONTROLLER_DID}#recovery-proof-1"),
-            now
-        ));
-    }
 
     fn secret_storage_encryption(
         name: arkret_models_crypto::key_backup::KeyBackupAeadName,

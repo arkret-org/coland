@@ -90,8 +90,23 @@ fn commit_payload(
             .unwrap(),
         ratchet_tree: None,
     };
-    serde_json::to_value(MlsCommitPayload::new(base.clone(), revision, &envelope, binding).unwrap())
-        .unwrap()
+    serde_json::to_value(
+        MlsCommitPayload::new(
+            base.clone(),
+            revision,
+            &envelope,
+            binding,
+            arkret_wire::BlobRef::new(format!("ak:blob:sha256:{:064x}", 2 * (previous_epoch + 1)))
+                .unwrap(),
+            arkret_wire::BlobRef::new(format!(
+                "ak:blob:sha256:{:064x}",
+                2 * (previous_epoch + 1) + 1
+            ))
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap()
 }
 
 fn with_installation(
@@ -116,14 +131,27 @@ fn with_installation(
         member_principals: Default::default(),
         consumed_proposals: Vec::new(),
         public_blobs: if base.is_some() {
-            let sha256 = format!("{epoch:064x}");
-            vec![coland_storage::MlsPublicBlob {
-                blob_ref: arkret_wire::BlobRef::new(format!("ak:blob:sha256:{sha256}")).unwrap(),
-                sha256: sha256.clone(),
-                size_bytes: 11,
-                storage_backend: "local".to_owned(),
-                storage_key: format!("sha256/{sha256}"),
-            }]
+            let payload: MlsCommitPayload = serde_json::from_value(
+                serde_json::to_value(&request.authority_commit.event.payload).unwrap(),
+            )
+            .unwrap();
+            [payload.group_info_ref(), payload.ratchet_tree_ref()]
+                .into_iter()
+                .map(|reference| {
+                    let sha256 = reference
+                        .as_str()
+                        .strip_prefix("ak:blob:sha256:")
+                        .unwrap()
+                        .to_owned();
+                    coland_storage::MlsPublicBlob {
+                        blob_ref: reference.clone(),
+                        sha256: sha256.clone(),
+                        size_bytes: 11,
+                        storage_backend: "local".to_owned(),
+                        storage_key: format!("sha256/{sha256}"),
+                    }
+                })
+                .collect()
         } else {
             Vec::new()
         },
@@ -490,7 +518,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
         .mls_state
         .as_ref()
         .unwrap()
-        .public_blobs[0];
+        .public_blobs[1];
     assert_eq!(advanced.value.public_tree_ref, tree.blob_ref);
     assert_ne!(
         advanced.value.public_tree_ref,
@@ -843,14 +871,18 @@ async fn realm_mls_material_read_authorizes_exact_member_and_target_cut() {
             .mls_member_group_state_material_read(&request, &station, None)
             .await
             .unwrap(),
-        Read::Authorized { genesis: Some(_) }
+        Read::Authorized {
+            group_state_event: Some(_)
+        }
     ));
     assert!(matches!(
         store
             .mls_member_group_state_material_read(&request, &station, Some(&station))
             .await
             .unwrap(),
-        Read::Authorized { genesis: Some(_) }
+        Read::Authorized {
+            group_state_event: Some(_)
+        }
     ));
     let outsider =
         arkret_wire::DidCoreId::new("ak:did_core:web:mls-material-outsider.example").unwrap();
@@ -992,7 +1024,9 @@ async fn realm_mls_material_peer_uses_joined_target_cut_not_prejoin_genesis_cut(
             .mls_member_group_state_material_read(&request, &station, Some(&remote_station))
             .await
             .unwrap(),
-        Read::Authorized { genesis: Some(_) }
+        Read::Authorized {
+            group_state_event: Some(_)
+        }
     ));
     let mut wrong_genesis = request.clone();
     wrong_genesis.group_state_event_id =
@@ -1039,7 +1073,9 @@ async fn realm_mls_material_peer_uses_joined_target_cut_not_prejoin_genesis_cut(
             .mls_member_group_state_material_read(&wrong_genesis, &remote_station, None)
             .await
             .unwrap(),
-        Read::Authorized { genesis: None }
+        Read::Authorized {
+            group_state_event: None
+        }
     ));
     use arkret_models_collaboration::mls_roster_authority::MlsMemberRosterAuthorityReadRequestBody;
     use coland_storage::MlsMemberRosterSelectorRead as Selected;
@@ -1221,7 +1257,9 @@ async fn realm_mls_material_read_rejects_wrong_genesis_ref() {
             .mls_member_group_state_material_read(&request, &station, None)
             .await
             .unwrap(),
-        Read::Authorized { genesis: Some(_) }
+        Read::Authorized {
+            group_state_event: Some(_)
+        }
     ));
     request.group_state_event_id =
         arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0x7b; 32]);
@@ -1288,7 +1326,9 @@ async fn realm_mls_material_read_rejects_target_retention_and_redaction() {
             .mls_member_group_state_material_read(&request, &station, None)
             .await
             .unwrap(),
-        Read::Authorized { genesis: Some(_) }
+        Read::Authorized {
+            group_state_event: Some(_)
+        }
     ));
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(

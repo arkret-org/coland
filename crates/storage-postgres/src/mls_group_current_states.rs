@@ -263,7 +263,7 @@ pub(crate) async fn commit_mls_group_current_state_in_connection(
                     "the scope's MLS Genesis is already accepted",
                 ));
             }
-            require_since_join_history(conn, &event.scope_ref).await?;
+            require_registered_history_access(conn, &event.scope_ref).await?;
             let payload: MlsGenesisPayload = serde_json::from_value(payload)
                 .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
             let binding = &payload.governance_binding;
@@ -310,13 +310,7 @@ pub(crate) async fn commit_mls_group_current_state_in_connection(
                 current_mls_commit_event_ref: event.event_id.clone(),
                 epoch: payload.next_epoch(),
                 covered_key_access_revision: payload.covers_key_access_revision(),
-                public_tree_ref: installation
-                    .public_blobs
-                    .as_slice()
-                    .first()
-                    .ok_or_else(|| binding_mismatch("the Commit has no post-transition tree"))?
-                    .blob_ref
-                    .clone(),
+                public_tree_ref: payload.ratchet_tree_ref().clone(),
                 ..group.clone()
             }
         }
@@ -949,9 +943,9 @@ async fn store_public_blobs(
     Ok(())
 }
 
-/// realm-and-space.md §2.3.A: the first `ak.mls.genesis` of a Realm scope is
-/// accepted only while its current `history_access` is `since_join`.
-async fn require_since_join_history(
+/// realm-and-space.md §2.3.A: both registered history policies permit Genesis.
+/// Content history delivery and root durability remain independent gates.
+async fn require_registered_history_access(
     conn: &mut AsyncPgConnection,
     scope: &ScopeRef,
 ) -> PersistenceResult<()> {
@@ -967,9 +961,12 @@ async fn require_since_join_history(
             .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(circle_id.as_str()).get_result::<HistoryAccessRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?,
         _ => None,
     };
-    if history.as_ref().and_then(|row| row.value.as_str()) != Some("since_join") {
+    if !matches!(
+        history.as_ref().and_then(|row| row.value.as_str()),
+        Some("since_join" | "all_history_for_current_members")
+    ) {
         return Err(failed_precondition(
-            "MLS activation requires the scope history_access since_join",
+            "MLS activation requires a registered scope history_access policy",
         ));
     }
     Ok(())

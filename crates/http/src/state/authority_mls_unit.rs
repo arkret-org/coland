@@ -29,7 +29,7 @@
 use std::collections::BTreeMap;
 
 use arkret_mls::{MlsPublicEndpointLeaf, MlsPublicGroupTracker, MlsPublicHandshakeTransition};
-use arkret_models_collaboration::authority_commit::MlsGenesisMaterial;
+use arkret_models_collaboration::authority_commit::MlsGroupStateMaterial;
 use arkret_models_collaboration::events_payloads::MlsGenesisPayload;
 use arkret_models_collaboration::events_payloads::mls_proposal_admission::MlsProposalSenderClass;
 use arkret_models_collaboration::mls_roster_authority::{
@@ -84,14 +84,13 @@ fn payload<T: serde::de::DeserializeOwned>(event: &Event) -> ServiceResult<T> {
 /// `producer_key` is the key the Event producer proof verified under; every
 /// Welcome must be sealed by the same method (§2.6.1).
 ///
-/// `genesis_material` is the raw GroupInfo and ratchet tree an
-/// `authority_forward` of a cross-Station Genesis carried (§5.1.2); a
-/// same-Station Genesis reads its local Blobs and passes `None`.
+/// `group_state_material` carries the exact signed GroupInfo and ratchet tree
+/// for a forwarded Genesis or Commit. Local submissions read their Blobs.
 pub(super) fn admit_mls_event<'a>(
     state: &'a AppState,
     event: &'a Event,
     welcomes: &'a [MlsWelcomeDelivery],
-    genesis_material: Option<&'a MlsGenesisMaterial>,
+    group_state_material: Option<&'a MlsGroupStateMaterial>,
     producer: AdmittedProducer,
     producer_key: &'a arkret_signatures::PublicKeyMaterial,
 ) -> std::pin::Pin<
@@ -102,7 +101,7 @@ pub(super) fn admit_mls_event<'a>(
         state,
         event,
         welcomes,
-        genesis_material,
+        group_state_material,
         producer,
         producer_key,
         None,
@@ -114,7 +113,7 @@ pub(super) fn admit_native_mls_event<'a>(
     state: &'a AppState,
     event: &'a Event,
     welcomes: &'a [MlsWelcomeDelivery],
-    genesis_material: Option<&'a MlsGenesisMaterial>,
+    group_state_material: Option<&'a MlsGroupStateMaterial>,
     producer: AdmittedProducer,
     producer_key: &'a arkret_signatures::PublicKeyMaterial,
     native_request: Option<super::authority_managed_device::mls::NativeMlsRequest>,
@@ -124,7 +123,7 @@ pub(super) fn admit_native_mls_event<'a>(
             state,
             event,
             welcomes,
-            genesis_material,
+            group_state_material,
             producer,
             producer_key,
             native_request,
@@ -136,7 +135,7 @@ async fn admit_mls_event_inner(
     state: &AppState,
     event: &Event,
     welcomes: &[MlsWelcomeDelivery],
-    genesis_material: Option<&MlsGenesisMaterial>,
+    group_state_material: Option<&MlsGroupStateMaterial>,
     producer: AdmittedProducer,
     producer_key: &arkret_signatures::PublicKeyMaterial,
     native_request: Option<super::authority_managed_device::mls::NativeMlsRequest>,
@@ -181,12 +180,12 @@ async fn admit_mls_event_inner(
                 return Err(schema("an MLS Genesis carries no Welcome"));
             }
             (
-                verify_genesis(state, event, genesis_material).await?,
+                verify_genesis(state, event, group_state_material).await?,
                 Vec::new(),
             )
         }
-        EventKind::MlsCommit if genesis_material.is_none() => {
-            match prepare_commit(state, event).await? {
+        EventKind::MlsCommit => {
+            match prepare_commit(state, event, group_state_material).await? {
                 PreparedCommit::Ready(installation, added_leaves) => (installation, added_leaves),
                 PreparedCommit::KeyAccessRefused(added_leaves) => {
                     // A malformed or unsealed Welcome is a request refusal,
@@ -535,7 +534,7 @@ async fn sign_local_roster_witnesses(
 async fn verify_genesis(
     state: &AppState,
     event: &Event,
-    genesis_material: Option<&MlsGenesisMaterial>,
+    genesis_material: Option<&MlsGroupStateMaterial>,
 ) -> ServiceResult<MlsStateInstallation> {
     let payload: MlsGenesisPayload = payload(event)?;
     payload.validate().map_err(schema)?;
@@ -578,6 +577,9 @@ async fn verify_genesis(
     };
     let tracker = MlsPublicGroupTracker::from_external(&group_info, &tree, group_id.as_str(), 0)
         .map_err(|error| schema(format!("MLS Genesis public state is invalid: {error}")))?;
+    tracker
+        .verify_publication(&group_info, &tree)
+        .map_err(schema)?;
     let suite = tracker
         .ciphersuite_canonical_id()
         .map_err(|error| schema(error.to_string()))?;
@@ -627,7 +629,7 @@ async fn verify_genesis(
     })
 }
 
-/// §5.1.2: carried bytes address the Genesis ref under the ref's own digest
+/// §5.1.2: public bytes address their signed ref under the ref's own digest
 /// suite, or the forward is `digest_mismatch`.
 fn carried_blob_addresses(blob_ref: &arkret_wire::BlobRef, bytes: &[u8]) -> ServiceResult<()> {
     let digest = blob_ref
@@ -637,7 +639,7 @@ fn carried_blob_addresses(blob_ref: &arkret_wire::BlobRef, bytes: &[u8]) -> Serv
     arkret_canonical::verify_digest(bytes, digest).map_err(|_| {
         ServiceError::protocol(
             arkret_wire::ErrorCode::DigestMismatch,
-            format!("carried Genesis material does not address {blob_ref}"),
+            format!("MLS public material does not address {blob_ref}"),
         )
     })
 }
@@ -649,6 +651,7 @@ async fn stage_mls_public_blob(
     blob_ref: &arkret_wire::BlobRef,
     bytes: Vec<u8>,
 ) -> ServiceResult<MlsPublicBlob> {
+    carried_blob_addresses(blob_ref, &bytes)?;
     let sha256 = arkret_canonical::sha256_digest(&bytes)
         .strip_prefix("sha256:")
         .map(ToOwned::to_owned)
@@ -688,7 +691,7 @@ async fn verify_commit(
     state: &AppState,
     event: &Event,
 ) -> ServiceResult<(MlsStateInstallation, Vec<MlsPublicEndpointLeaf>)> {
-    match prepare_commit(state, event).await? {
+    match prepare_commit(state, event, None).await? {
         PreparedCommit::Ready(installation, leaves) => Ok((installation, leaves)),
         PreparedCommit::KeyAccessRefused(_) => Err(binding_mismatch(
             "the Commit does not cover the current key-access revision",
@@ -696,7 +699,11 @@ async fn verify_commit(
     }
 }
 
-async fn prepare_commit(state: &AppState, event: &Event) -> ServiceResult<PreparedCommit> {
+async fn prepare_commit(
+    state: &AppState,
+    event: &Event,
+    material: Option<&MlsGroupStateMaterial>,
+) -> ServiceResult<PreparedCommit> {
     let payload: MlsCommitPayload = payload(event)?;
     let binding = payload.governance_binding();
     if binding.effective_scope() != &event.scope_ref {
@@ -824,20 +831,25 @@ async fn prepare_commit(state: &AppState, event: &Event) -> ServiceResult<Prepar
             target_after: proposal.target_after.map(installed_leaf),
         })
         .collect();
-    let tree = tracker.ratchet_tree_bytes().map_err(schema)?;
-    let tree_digest_suite =
-        arkret_models_collaboration::mls_group_state_material::material_digest_from_ref(
-            &group.public_tree_ref,
-        )
-        .map_err(schema)?
-        .digest_suite()
-        .map_err(schema)?;
-    let tree_ref = arkret_wire::BlobRef::new(format!(
-        "ak:blob:{}",
-        arkret_canonical::digest(tree_digest_suite, &tree)
-    ))
-    .map_err(schema)?;
-    let public_blobs = vec![stage_mls_public_blob(state, &tree_ref, tree).await?];
+    let (info, tree) = match material {
+        Some(material) => material.decode_for_event(event).map_err(|error| {
+            ServiceError::protocol(
+                error
+                    .error_code()
+                    .unwrap_or(arkret_wire::ErrorCode::SchemaViolation),
+                error.to_string(),
+            )
+        })?,
+        None => (
+            public_blob(state, payload.group_info_ref().as_str()).await?,
+            public_blob(state, payload.ratchet_tree_ref().as_str()).await?,
+        ),
+    };
+    tracker.verify_publication(&info, &tree).map_err(schema)?;
+    let public_blobs = vec![
+        stage_mls_public_blob(state, payload.group_info_ref(), info).await?,
+        stage_mls_public_blob(state, payload.ratchet_tree_ref(), tree).await?,
+    ];
     Ok(PreparedCommit::Ready(
         MlsStateInstallation {
             effective_scope: event.scope_ref.clone(),
@@ -1184,8 +1196,7 @@ async fn public_blob(state: &AppState, blob_ref: &str) -> ServiceResult<Vec<u8>>
     let bytes = crate::routing::mls::load_mls_public_blob(
         state,
         blob_ref,
-        arkret_models_collaboration::mls_group_state_material::MLS_GROUP_STATE_MATERIAL_MAX_RESPONSE_BYTES
-            as usize,
+        arkret_models_collaboration::authority_commit::MLS_GROUP_STATE_MATERIAL_MAX_BLOB_BYTES,
     )
     .await
     .map_err(|_| failed_precondition(format!("MLS public Blob {blob_ref} is unavailable")))?;
@@ -1324,7 +1335,8 @@ mod tests {
 
     /// The creator adds the member under `binding`; the returned payload is
     /// the exact `ak.mls.commit` payload a client submits.
-    fn add_member(
+    async fn add_member(
+        state: &AppState,
         group: &mut ArkretMlsGroup,
         base: &EventId,
         binding: &MlsGovernanceBindingPayload,
@@ -1338,11 +1350,57 @@ mod tests {
         let added = group
             .add_member_with_governance_binding(&keypackage, binding)
             .unwrap();
+        let (info, tree) = group
+            .pending_public_group_state_bytes(&added.commit, binding)
+            .unwrap();
+        for bytes in [&info, &tree] {
+            let sha256 = arkret_canonical::sha256_hex(bytes);
+            let reference = format!("ak:blob:sha256:{sha256}");
+            let storage_key = state.deliveries().object_key_for_sha256(&sha256);
+            state
+                .deliveries()
+                .put_object(&storage_key, bytes.to_vec())
+                .await
+                .unwrap();
+            state
+                .deliveries()
+                .store_blob(
+                    &reference,
+                    coland_services::delivery::BlobState {
+                        sha256,
+                        size_bytes: bytes.len() as i64,
+                        storage_backend: state.deliveries().object_storage_backend_name(),
+                        storage_key,
+                        media_type: "application/octet-stream".into(),
+                        filename: None,
+                        realm_id: None,
+                        encryption: None,
+                        legal_hold: false,
+                        redacted: false,
+                        visibility:
+                            arkret_models_collaboration::objects::blob::BlobVisibility::Public,
+                        uploaded_by: CREATOR.into(),
+                        created_at: chrono::Utc::now(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
         MlsCommitPayload::new(
             base.clone(),
             binding.key_access_revision(),
             &added.commit,
             binding.clone(),
+            arkret_wire::BlobRef::new(format!(
+                "ak:blob:{}",
+                arkret_canonical::sha256_digest(&info)
+            ))
+            .unwrap(),
+            arkret_wire::BlobRef::new(format!(
+                "ak:blob:{}",
+                arkret_canonical::sha256_digest(&tree)
+            ))
+            .unwrap(),
         )
         .unwrap()
     }
@@ -1359,7 +1417,7 @@ mod tests {
             0,
         )
         .unwrap();
-        let payload = add_member(&mut group, &genesis, &binding);
+        let payload = add_member(&state, &mut group, &genesis, &binding).await;
         let (installation, added) = verify_commit(&state, &commit_event(actor(CREATOR), &payload))
             .await
             .unwrap();
@@ -1380,8 +1438,13 @@ mod tests {
         )
         .expect("the installed public state is the tracker at the new epoch");
         let tree = tracker.ratchet_tree_bytes().unwrap();
-        assert_eq!(installation.public_blobs.len(), 1);
-        let blob = &installation.public_blobs[0];
+        assert_eq!(installation.public_blobs.len(), 2);
+        assert_eq!(
+            &installation.public_blobs[0].blob_ref,
+            payload.group_info_ref()
+        );
+        let blob = &installation.public_blobs[1];
+        assert_eq!(&blob.blob_ref, payload.ratchet_tree_ref());
         carried_blob_addresses(&blob.blob_ref, &tree).unwrap();
         assert_eq!(blob.size_bytes, tree.len() as i64);
         assert_eq!(
@@ -1428,7 +1491,7 @@ mod tests {
         let (mut group, genesis) =
             accepted_genesis_in_scope(&state, scope.clone(), binding_for(None, 0, 0)).await;
         let binding = binding_for(Some(genesis.clone()), 0, 1);
-        let payload = add_member(&mut group, &genesis, &binding);
+        let payload = add_member(&state, &mut group, &genesis, &binding).await;
         let event = commit_event(actor(CREATOR), &payload);
         let (installation, added) = verify_commit(&state, &event).await.unwrap();
         assert_eq!(installation.effective_scope, scope);
@@ -1485,9 +1548,9 @@ mod tests {
             3,
         )
         .unwrap();
-        let payload = add_member(&mut group, &genesis, &stale_revision);
+        let payload = add_member(&state, &mut group, &genesis, &stale_revision).await;
         let event = commit_event(actor(CREATOR), &payload);
-        let prepared = prepare_commit(&state, &event).await.unwrap();
+        let prepared = prepare_commit(&state, &event, None).await.unwrap();
         let PreparedCommit::KeyAccessRefused(leaves) = prepared else {
             panic!("a revision mismatch must not produce an installable state");
         };
@@ -1506,7 +1569,11 @@ mod tests {
             .payload
             .get_mut("governance_binding")
             .unwrap()["key_access_revision"] = serde_json::json!(4);
-        assert!(prepare_commit(&state, &inconsistent_payload).await.is_err());
+        assert!(
+            prepare_commit(&state, &inconsistent_payload, None)
+                .await
+                .is_err()
+        );
         let error = verify_commit(&state, &event).await.unwrap_err();
         assert_eq!(
             error.conflict_code(),

@@ -40,7 +40,7 @@ pub(crate) async fn admit_forwarded(
         || event.actor_id.as_account_id() != Some(&origin.account_id)
         || event.executed_by.is_some()
         || request.event_submission.approval_signatures.is_some()
-        || request.mls_genesis_material.is_some()
+        || request.mls_group_state_material.is_some()
     {
         return Err(ServiceError::SchemaViolation(
             "native PCR forward does not bind the independently accepted holder inception".into(),

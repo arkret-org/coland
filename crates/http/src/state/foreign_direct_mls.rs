@@ -67,7 +67,7 @@ pub(crate) async fn refresh(
                     realm_id: realm.clone(),
                 },
                 mls_group_id: payload.mls_group_id().map_err(|error| error.to_string())?,
-                epoch: arkret_models_collaboration::events_payloads::mls::MlsGenesisEpoch,
+                epoch: 0,
                 group_state_event_id: genesis.event_id.clone(),
                 caller_actor_id: caller.clone(),
                 target_commit_event_ref: current.current_mls_commit_event_ref.clone(),

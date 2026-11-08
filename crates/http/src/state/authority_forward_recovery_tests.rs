@@ -163,7 +163,7 @@ async fn foreign_request(
         event_submission: EventAdmissionSubmission::new(request.authority_commit.event.clone()),
         producer_device_evidence: None,
         producer_agent_evidence: None,
-        mls_genesis_material: None,
+        mls_group_state_material: None,
     };
     let mut forward = PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(unsigned);
     super::fresh_device_request(

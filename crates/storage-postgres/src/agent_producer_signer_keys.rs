@@ -815,6 +815,10 @@ fn producer_fact_outcome(
             "not_found: private control signer facts are unavailable through public signer queries"
                 .into(),
         )),
+        Fact::AgentRuntime(_) => Err(PersistenceError::Conflict(
+            "not_found: minimal recovery signer facts are disclosed only with the recovery roster"
+                .into(),
+        )),
     }
 }
 

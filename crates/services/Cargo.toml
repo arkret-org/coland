@@ -47,6 +47,8 @@ tracing.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
+arkret-bootstrap.workspace = true
+arkret-wire = { workspace = true, features = ["test-support"] }
 arkret-schema-conformance = { workspace = true }
 arkret-event-draft = { workspace = true, features = ["test-support"] }
 coland-storage-postgres = { workspace = true, features = ["test-support"] }

@@ -69,7 +69,7 @@ fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequestBody {
         branch:
             arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
         event_submission: EventAdmissionSubmission::new(event.clone()),
-        mls_genesis_material: None,
+        mls_group_state_material: None,
         producer_device_evidence: None,
         producer_agent_evidence: None,
     };
@@ -348,7 +348,7 @@ async fn store_blob(state: &AppState, blob_ref: &str, bytes: &[u8]) {
 }
 
 /// encryption-and-audit.md §5.1.2: the forwarding Station reads the two
-/// Genesis Blobs from its own store and carries them only when it holds both
+/// group-state Blobs from its own store and carries them only when it holds both
 /// and each addresses its ref; otherwise a bare `failed_precondition` stops
 /// the forward. Any other kind carries nothing.
 #[tokio::test]
@@ -375,7 +375,7 @@ async fn a_forwarded_genesis_carries_its_local_blobs_only_when_they_address_thei
         arkret_wire::DeviceId::new("ak:device:01904100-0000-7000-8000-000000000085").unwrap();
     let binding =
         arkret_models_crypto::MlsGovernanceBindingPayload::realm(realm_id, None, 0, 0, 0).unwrap();
-    let group =
+    let mut group =
         arkret_mls::ArkretMlsIdentity::new_test_human_device(creator.clone(), device.clone())
             .unwrap()
             .create_group_with_governance_binding(&scope, &binding)
@@ -410,33 +410,86 @@ async fn a_forwarded_genesis_carries_its_local_blobs_only_when_they_address_thei
     payload.validate().unwrap();
     let genesis = arkret_wire::test_support::raw_event_for_actor_at(
         arkret_wire::EventKind::MlsGenesis.as_str(),
+        scope.clone(),
+        creator.clone(),
+        serde_json::to_value(payload).unwrap(),
+        at,
+    )
+    .unwrap();
+    let refused = |result: ServiceResult<Option<MlsGroupStateMaterial>>| {
+        result.unwrap_err().conflict_code() == Some(ConflictCode::FailedPrecondition)
+    };
+
+    let mut ordinary = genesis.clone();
+    ordinary.kind = arkret_wire::EventKind::RealmProfile;
+    assert!(
+        forwarded_mls_public_material(&state, &ordinary)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(refused(
+        forwarded_mls_public_material(&state, &genesis).await
+    ));
+    store_blob(&state, &blob_ref(&group_info), &group_info).await;
+    assert!(refused(
+        forwarded_mls_public_material(&state, &genesis).await
+    ));
+    store_blob(&state, &blob_ref(&tree), b"bytes another ref addresses").await;
+    assert!(refused(
+        forwarded_mls_public_material(&state, &genesis).await
+    ));
+    store_blob(&state, &blob_ref(&tree), &tree).await;
+    let material = forwarded_mls_public_material(&state, &genesis)
+        .await
+        .unwrap()
+        .expect("both Blobs address their refs");
+    assert_eq!(material.decode().unwrap(), (group_info, tree));
+
+    let next_binding = arkret_models_crypto::MlsGovernanceBindingPayload::realm(
+        genesis.realm_id.clone(),
+        Some(genesis.event_id.clone()),
+        0,
+        1,
+        0,
+    )
+    .unwrap();
+    let update = group
+        .self_update_commit_with_governance_binding(&next_binding)
+        .unwrap();
+    let (next_info, next_tree) = group
+        .pending_public_group_state_bytes(&update, &next_binding)
+        .unwrap();
+    let payload = arkret_models_crypto::MlsCommitPayload::new(
+        genesis.event_id.clone(),
+        0,
+        &update,
+        next_binding,
+        arkret_wire::BlobRef::new(blob_ref(&next_info)).unwrap(),
+        arkret_wire::BlobRef::new(blob_ref(&next_tree)).unwrap(),
+    )
+    .unwrap();
+    let update_event = arkret_wire::test_support::raw_event_for_actor_at(
+        arkret_wire::EventKind::MlsCommit.as_str(),
         scope,
         creator,
         serde_json::to_value(payload).unwrap(),
         at,
     )
     .unwrap();
-    let refused = |result: ServiceResult<Option<MlsGenesisMaterial>>| {
-        result.unwrap_err().conflict_code() == Some(ConflictCode::FailedPrecondition)
-    };
-
-    assert!(
-        forwarded_genesis_material(&state, &commit_event(&forwarded_request(0x5b)))
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(refused(forwarded_genesis_material(&state, &genesis).await));
-    store_blob(&state, &blob_ref(&group_info), &group_info).await;
-    assert!(refused(forwarded_genesis_material(&state, &genesis).await));
-    store_blob(&state, &blob_ref(&tree), b"bytes another ref addresses").await;
-    assert!(refused(forwarded_genesis_material(&state, &genesis).await));
-    store_blob(&state, &blob_ref(&tree), &tree).await;
-    let material = forwarded_genesis_material(&state, &genesis)
+    assert!(refused(
+        forwarded_mls_public_material(&state, &update_event).await
+    ));
+    store_blob(&state, &blob_ref(&next_info), &next_info).await;
+    assert!(refused(
+        forwarded_mls_public_material(&state, &update_event).await
+    ));
+    store_blob(&state, &blob_ref(&next_tree), &next_tree).await;
+    let material = forwarded_mls_public_material(&state, &update_event)
         .await
         .unwrap()
-        .expect("both Blobs address their refs");
-    assert_eq!(material.decode().unwrap(), (group_info, tree));
+        .unwrap();
+    assert_eq!(material.decode().unwrap(), (next_info, next_tree));
 }
 
 /// Exercise the actual Origin internal HTTP client. HTTP acceptance is never

@@ -256,6 +256,7 @@ fn bootstrap_unit_with_join_rule_for_station(
             "governance_station_id":station,
             "initial_join_rule":join_rule,
             "initial_history_access":history_access,
+            "initial_encryption_backup_strategy":"ak.encryption_backup.epoch_content_roots.v1",
             "initial_discoverability":"invite_only"
         }}),
         at,

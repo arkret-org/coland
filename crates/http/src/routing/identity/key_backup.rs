@@ -3,8 +3,7 @@
 use arkret_identifiers::{BackupId, EventId};
 use arkret_models_crypto::{
     BackupKind, KeyBackup, KeyBackupKdfName, KeyBackupRecipientMethod, KeyBackupUnlockProof,
-    KeysBackupsDeleteRequestBody, KeysBackupsUnlockRequestBody, RecoveryKeyAgreementEntry,
-    RecoveryKeyAgreementUse, RecoveryPolicy,
+    KeysBackupsDeleteRequestBody, KeysBackupsUnlockRequestBody, RecoveryPolicy,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};

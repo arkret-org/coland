@@ -309,6 +309,10 @@ pub enum ConflictCode {
     RealmAlreadyExists,
     /// A recovery-policy write violates a non-specific policy invariant.
     RecoveryPolicyConflict,
+    /// A backup does not bind its subject's accepted recovery policy.
+    RecoveryPolicyMismatch,
+    /// The selected HPKE suite is unsupported by its recipient.
+    UnsupportedHpkeSuite,
     /// A recovery-policy version does not advance the active version.
     RecoveryPolicyVersionNotMonotonic,
     /// A recovery policy does not supersede the active policy exactly.
@@ -331,6 +335,10 @@ pub enum ConflictCode {
     SignatureInvalid,
     /// A key-backup series sequence went backwards.
     SeriesSeqNotMonotonic,
+    /// The successor does not bind the exact durable predecessor.
+    SeriesChainBroken,
+    /// No predecessor exists for a non-genesis envelope.
+    SeriesPredecessorNotFound,
     /// A time-bounded workflow was acted on after its deadline.
     TtlExpired,
     /// A read dependency is momentarily unavailable; nothing was committed and
@@ -393,7 +401,7 @@ pub enum ConflictCode {
 
 impl ConflictCode {
     /// Every registered code, in the order the variants are declared.
-    pub const ALL: [Self; 87] = [
+    pub const ALL: [Self; 91] = [
         Self::ApprovalNonceReused,
         Self::ApprovalRequired,
         Self::AppletRevoked,
@@ -445,6 +453,8 @@ impl ConflictCode {
         Self::ForkQuarantine,
         Self::RealmAlreadyExists,
         Self::RecoveryPolicyConflict,
+        Self::RecoveryPolicyMismatch,
+        Self::UnsupportedHpkeSuite,
         Self::RecoveryPolicyVersionNotMonotonic,
         Self::RecoveryPolicySupersedesInvalid,
         Self::RecoveryPolicyGenesisNotV1,
@@ -456,6 +466,8 @@ impl ConflictCode {
         Self::SchemaViolation,
         Self::SignatureInvalid,
         Self::SeriesSeqNotMonotonic,
+        Self::SeriesChainBroken,
+        Self::SeriesPredecessorNotFound,
         Self::TtlExpired,
         Self::TemporarilyUnavailable,
         Self::UnsupportedFeature,
@@ -555,6 +567,8 @@ impl ConflictCode {
             Self::ForkQuarantine => "fork_quarantine",
             Self::RealmAlreadyExists => "realm_already_exists",
             Self::RecoveryPolicyConflict => "recovery_policy_conflict",
+            Self::RecoveryPolicyMismatch => arkret_wire::ErrorCode::RECOVERY_POLICY_MISMATCH,
+            Self::UnsupportedHpkeSuite => arkret_wire::ErrorCode::UNSUPPORTED_HPKE_SUITE,
             Self::RecoveryPolicyVersionNotMonotonic => "recovery_policy_version_not_monotonic",
             Self::RecoveryPolicySupersedesInvalid => "recovery_policy_supersedes_invalid",
             Self::RecoveryPolicyGenesisNotV1 => "recovery_policy_genesis_not_v1",
@@ -568,6 +582,10 @@ impl ConflictCode {
             Self::SchemaViolation => "schema_violation",
             Self::SignatureInvalid => "signature_invalid",
             Self::SeriesSeqNotMonotonic => "series_seq_not_monotonic",
+            Self::SeriesChainBroken => arkret_wire::ReasonCode::SERIES_CHAIN_BROKEN,
+            Self::SeriesPredecessorNotFound => {
+                arkret_wire::ReasonCode::SERIES_PREDECESSOR_NOT_FOUND
+            }
             Self::TtlExpired => "ttl_expired",
             Self::TemporarilyUnavailable => arkret_wire::ErrorCode::TEMPORARILY_UNAVAILABLE,
             Self::UnsupportedFeature => "unsupported_feature",

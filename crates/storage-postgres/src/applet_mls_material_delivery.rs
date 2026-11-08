@@ -31,12 +31,13 @@ pub(super) async fn group_state(
         effective_scope: request.effective_scope.clone(),
         mls_group_id: request.mls_group_id.clone(),
         group_state_event_id: Some(request.group_state_event_id.clone()),
+        group_state_epoch: Some(request.epoch),
         caller_actor_id: request.caller_actor_id.clone(),
         target_commit_event_ref: request.target_commit_event_ref.clone(),
         target_epoch: request.target_epoch,
     };
     let MlsMemberGroupStateMaterialRead::Authorized {
-        genesis: Some(genesis),
+        group_state_event: Some(published),
     } = crate::mls_group_state_material_read::read_in_connection(conn, &selector, station, None)
         .await?
     else {
@@ -44,17 +45,34 @@ pub(super) async fn group_state(
             "native MLS material has no actual member history cut",
         ));
     };
-    let payload: arkret_models_collaboration::events_payloads::MlsGenesisPayload =
-        serde_json::from_value(
-            serde_json::to_value(&genesis.event.payload).map_err(PersistenceError::database)?,
-        )
-        .map_err(PersistenceError::database)?;
-    if payload.group_info_ref != request.group_info_ref
-        || payload.ratchet_tree_ref != request.ratchet_tree_ref
-        || genesis.event.scope_ref != endpoint.effective_scope
+    let value =
+        serde_json::to_value(&published.event.payload).map_err(PersistenceError::database)?;
+    let (info_ref, tree_ref) = match published.event.kind {
+        arkret_wire::EventKind::MlsGenesis => {
+            let payload: arkret_models_collaboration::events_payloads::MlsGenesisPayload =
+                serde_json::from_value(value).map_err(PersistenceError::database)?;
+            (payload.group_info_ref, payload.ratchet_tree_ref)
+        }
+        arkret_wire::EventKind::MlsCommit => {
+            let payload: arkret_models_crypto::MlsCommitPayload =
+                serde_json::from_value(value).map_err(PersistenceError::database)?;
+            (
+                payload.group_info_ref().clone(),
+                payload.ratchet_tree_ref().clone(),
+            )
+        }
+        _ => {
+            return Err(refused(
+                "native MLS material is not an accepted group state",
+            ));
+        }
+    };
+    if info_ref != request.group_info_ref
+        || tree_ref != request.ratchet_tree_ref
+        || published.event.scope_ref != endpoint.effective_scope
     {
         return Err(refused(
-            "native MLS material differs from the accepted Genesis",
+            "native MLS material differs from the accepted group state",
         ));
     }
     super::mls_scope_read_proof(conn, endpoint, expiry, None).await

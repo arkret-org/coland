@@ -267,7 +267,7 @@ pub async fn test_fresh_producer_forward_request(
         PeerAuthorityForwardEventRequestBody {
             branch: AuthorityForwardBranch::AuthorityForward,
             event_submission: arkret_wire::EventAdmissionSubmission::new(event.clone()),
-            mls_genesis_material: None,
+            mls_group_state_material: None,
             producer_device_evidence: None,
             producer_agent_evidence: None,
         },

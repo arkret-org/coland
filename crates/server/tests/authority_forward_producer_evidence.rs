@@ -8,7 +8,7 @@
 //! an accepted PCR genesis.
 
 use arkret_models_collaboration::authority_commit::{
-    AuthorityForwardBranch, MlsGenesisMaterial, PeerAuthorityForwardEventRequestBody,
+    AuthorityForwardBranch, MlsGroupStateMaterial, PeerAuthorityForwardEventRequestBody,
 };
 use arkret_models_crypto::{
     DeviceAuthorizationWindow, DeviceStatus, ForwardDeviceProjectionAttestation,
@@ -253,12 +253,12 @@ fn forward_with_material(
     evidence: Option<ForwardAccountDeviceSignerEvidence>,
     destination: &DidCoreId,
     signers: &[&Station],
-    material: Option<MlsGenesisMaterial>,
+    material: Option<MlsGroupStateMaterial>,
 ) -> PeerAuthorityForwardEventRequestBody {
     let mut request = PeerAuthorityForwardEventRequestBody {
         branch: AuthorityForwardBranch::AuthorityForward,
         event_submission: EventAdmissionSubmission::new(event.clone()),
-        mls_genesis_material: material,
+        mls_group_state_material: material,
         producer_device_evidence: None,
         producer_agent_evidence: None,
     };
@@ -849,7 +849,7 @@ fn protocol_code(result: Result<AuthoritySubmitResponseBody, ServiceError>) -> S
 /// that are no RFC 9420 epoch-0 public state are `schema_violation` -- and
 /// stores neither the Event nor a Blob.
 #[test]
-fn forwarded_genesis_material_is_checked_before_any_write() {
+fn forwarded_mls_public_material_is_checked_before_any_write() {
     runtime().block_on(async {
         let (state, realm_id) = governance_station().await;
         let at = now();
@@ -865,7 +865,7 @@ fn forwarded_genesis_material_is_checked_before_any_write() {
                 Some(evidence(&a, core(&a, at), at)),
                 &state.service_core_id(),
                 &[&a],
-                Some(MlsGenesisMaterial::from_bytes(group_info, tree)),
+                Some(MlsGroupStateMaterial::from_bytes(group_info, tree)),
             )
         };
         let profile = producer_event(&a, &realm_id, DEVICE, created_at, "no material here");

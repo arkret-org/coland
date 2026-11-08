@@ -90,6 +90,7 @@ pub(crate) async fn member_selector_in_connection(
         effective_scope: request.effective_scope.clone(),
         mls_group_id: request.mls_group_id.clone(),
         group_state_event_id: None,
+        group_state_epoch: None,
         caller_actor_id: request.caller_actor_id.clone(),
         target_commit_event_ref: request.target_commit_event_ref.clone(),
         target_epoch: request.target_epoch,
@@ -262,6 +263,7 @@ async fn read_in_connection(
         effective_scope: request.effective_scope.clone(),
         mls_group_id: request.mls_group_id.clone(),
         group_state_event_id: Some(request.genesis_event_ref.clone()),
+        group_state_epoch: Some(0),
         caller_actor_id: request.caller_actor_id.clone(),
         target_commit_event_ref: request.target_commit_event_ref.clone(),
         target_epoch: request.target_epoch,
@@ -269,11 +271,13 @@ async fn read_in_connection(
     let genesis = match read_in_connection(conn, &selector, issuer, source_peer).await? {
         MlsMemberGroupStateMaterialRead::NotFound => return Ok(MlsRosterAuthorityRead::NotFound),
         MlsMemberGroupStateMaterialRead::RevisionUnavailable => return Ok(unavailable()),
-        MlsMemberGroupStateMaterialRead::Authorized { genesis: None } => {
+        MlsMemberGroupStateMaterialRead::Authorized {
+            group_state_event: None,
+        } => {
             return Ok(MlsRosterAuthorityRead::Authorized { facts: None });
         }
         MlsMemberGroupStateMaterialRead::Authorized {
-            genesis: Some(full),
+            group_state_event: Some(full),
         } => full,
     };
     let payload: MlsGenesisPayload = serde_json::to_value(&genesis.event.payload)

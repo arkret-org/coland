@@ -64,6 +64,7 @@ pub(crate) struct MemberMlsTargetSelector {
     pub effective_scope: ScopeRef,
     pub mls_group_id: MlsGroupId,
     pub group_state_event_id: Option<EventId>,
+    pub group_state_epoch: Option<u64>,
     pub caller_actor_id: ActorId,
     pub target_commit_event_ref: EventId,
     pub target_epoch: u64,
@@ -417,7 +418,9 @@ pub(crate) async fn read_in_connection(
         // A since-join Account replica has no prejoin Genesis or governance
         // mls_group current. The governing peer validates the exact Genesis
         // before returning signed public material.
-        return Ok(Read::Authorized { genesis: None });
+        return Ok(Read::Authorized {
+            group_state_event: None,
+        });
     }
     // One scope has one irreversible Genesis. The governing Station binds
     // the selected target to its exact accepted Genesis in the same read cut.
@@ -441,43 +444,70 @@ pub(crate) async fn read_in_connection(
     })?;
     if group_row.mls_group_id != request.mls_group_id.as_str()
         || group.effective_scope != request.effective_scope
+    {
+        return Ok(Read::NotFound);
+    }
+    let selected_ref = request
+        .group_state_event_id
+        .as_ref()
+        .unwrap_or(&group.genesis_event_ref);
+    let Some(published_row) = accepted_row(conn, selected_ref).await? else {
+        return Ok(if selected_ref == &group.genesis_event_ref {
+            Read::RevisionUnavailable
+        } else {
+            Read::NotFound
+        });
+    };
+    let published_commit = decode_commit(&published_row)?;
+    let Some(published_event) = decode_event(&published_row)? else {
+        return Ok(Read::RevisionUnavailable);
+    };
+    if published_commit.stream_ref != expected_stream
+        || &published_commit.event_ref != selected_ref
+        || &published_event.event_id != selected_ref
+        || published_commit.stream_position > target.stream_position
+        || published_event.scope_ref != request.effective_scope
+        || published_event.realm_id != *realm_id
+    {
+        return Ok(Read::NotFound);
+    }
+    let value =
+        serde_json::to_value(&published_event.payload).map_err(PersistenceError::database)?;
+    let (published_group, published_epoch) = match published_event.kind {
+        EventKind::MlsGenesis if published_event.event_id == group.genesis_event_ref => {
+            let payload: MlsGenesisPayload = serde_json::from_value(value).map_err(|error| {
+                PersistenceError::Internal(format!("stored MLS Genesis invalid: {error}"))
+            })?;
+            payload
+                .validate()
+                .map_err(|error| PersistenceError::Internal(error.to_string()))?;
+            (payload.mls_group_id(), 0)
+        }
+        EventKind::MlsCommit => {
+            let payload: arkret_models_crypto::MlsCommitPayload = serde_json::from_value(value)
+                .map_err(|error| {
+                    PersistenceError::Internal(format!("stored MLS Commit invalid: {error}"))
+                })?;
+            payload
+                .validate()
+                .map_err(|error| PersistenceError::Internal(error.to_string()))?;
+            (payload.mls_group_id(), payload.next_epoch())
+        }
+        _ => return Ok(Read::NotFound),
+    };
+    if published_group.map_err(|error| PersistenceError::Internal(error.to_string()))?
+        != request.mls_group_id
+        || published_epoch > target_epoch
         || request
-            .group_state_event_id
-            .as_ref()
-            .is_some_and(|selected| selected != &group.genesis_event_ref)
-    {
-        return Ok(Read::NotFound);
-    }
-    let Some(genesis_row) = accepted_row(conn, &group.genesis_event_ref).await? else {
-        return Ok(Read::RevisionUnavailable);
-    };
-    let genesis_commit = decode_commit(&genesis_row)?;
-    let Some(genesis_event) = decode_event(&genesis_row)? else {
-        return Ok(Read::RevisionUnavailable);
-    };
-    if genesis_commit.stream_ref != expected_stream
-        || genesis_commit.event_ref != group.genesis_event_ref
-        || genesis_event.kind != EventKind::MlsGenesis
-        || genesis_event.event_id != group.genesis_event_ref
-        || genesis_event.scope_ref != request.effective_scope
-        || genesis_event.realm_id != *realm_id
-    {
-        return Ok(Read::NotFound);
-    }
-    let genesis_payload: MlsGenesisPayload = serde_json::to_value(&genesis_event.payload)
-        .ok()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .ok_or_else(|| PersistenceError::Internal("stored MLS Genesis invalid".into()))?;
-    if genesis_payload.mls_group_id().map_err(|error| {
-        PersistenceError::Internal(format!("stored MLS group id invalid: {error}"))
-    })? != request.mls_group_id
+            .group_state_epoch
+            .is_some_and(|epoch| epoch != published_epoch)
     {
         return Ok(Read::NotFound);
     }
     Ok(Read::Authorized {
-        genesis: Some(Box::new(arkret_wire::CommittedEventFullView {
-            commit: genesis_commit,
-            event: genesis_event,
+        group_state_event: Some(Box::new(arkret_wire::CommittedEventFullView {
+            commit: published_commit,
+            event: published_event,
         })),
     })
 }
@@ -503,6 +533,7 @@ pub(crate) async fn read(
         effective_scope: request.effective_scope.clone(),
         mls_group_id: request.mls_group_id.clone(),
         group_state_event_id: Some(request.group_state_event_id.clone()),
+        group_state_epoch: Some(request.epoch),
         caller_actor_id,
         target_commit_event_ref,
         target_epoch,

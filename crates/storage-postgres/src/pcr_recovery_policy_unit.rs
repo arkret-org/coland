@@ -91,7 +91,7 @@ async fn policy_accepted_by(
 /// verification, backup unlock/delete and recovery completion take before
 /// reading the accepted policy (§8.1 shared lock order), then read the policy
 /// every successor must supersede.
-async fn current_policy(
+pub(crate) async fn current_policy(
     conn: &mut AsyncPgConnection,
     account: &arkret_wire::AccountId,
 ) -> Result<Option<RecoveryPolicyRecord>, PgTransactionError> {

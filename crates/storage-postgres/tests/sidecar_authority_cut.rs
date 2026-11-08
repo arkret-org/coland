@@ -695,7 +695,7 @@ async fn pending_agent_handshake_reads(
                 };
             assert!(
                 matches!(store.mls_member_group_state_material_read(&material, &controller.station_id, None).await.unwrap(),
-                MlsMemberGroupStateMaterialRead::Authorized {genesis:Some(row)} if row.event == genesis.authority_commit.event)
+                MlsMemberGroupStateMaterialRead::Authorized {group_state_event:Some(row)} if row.event == genesis.authority_commit.event)
             );
             let snapshot = store
                 .realm_state_snapshot_material_for_account(realm, agent)

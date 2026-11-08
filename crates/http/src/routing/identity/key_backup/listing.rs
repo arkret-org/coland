@@ -15,6 +15,7 @@ struct PagePosition {
 #[salvo::oapi::endpoint(operation_id = "ak.self.keys.backups.read.list", tags("identity"))]
 pub(crate) async fn list_key_backups(
     aa: AuthArgs,
+    agent_id: QueryParam<String, false>,
     cursor: QueryParam<String, false>,
     series_id: QueryParam<String, false>,
     backup_kind: QueryParam<String, false>,
@@ -22,6 +23,9 @@ pub(crate) async fn list_key_backups(
     depot: &mut Depot,
     req: &mut Request,
 ) -> JsonResult<KeysBackupsPage> {
+    if agent_id.into_inner().is_some() {
+        return Err(AppError::not_found("account backups unavailable"));
+    }
     let session = {
         let state = depot.get_typed::<AppState>().expect("state injected");
         aa.authenticated_session(state, req).await?
@@ -90,6 +94,7 @@ async fn list(
         return Err(AppError::param_invalid("backup page limit must be 1..200"));
     }
     let query = KeyBackupsListQuery {
+        agent_id: None,
         series_id: series_id
             .into_inner()
             .map(arkret_wire::BackupSeriesId::new)

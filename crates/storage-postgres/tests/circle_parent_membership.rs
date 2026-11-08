@@ -625,7 +625,7 @@ async fn parent_revision_matrix(history: &str, branch: Option<&str>) {
                     )
                     .await
                     .unwrap(),
-                coland_storage::MlsMemberGroupStateMaterialRead::Authorized { genesis: Some(_) }
+                coland_storage::MlsMemberGroupStateMaterialRead::Authorized { group_state_event: Some(_) }
             ));
             let signal_at =
                 genesis.authority_commit.commit.committed_at + chrono::TimeDelta::seconds(1);

@@ -16,9 +16,10 @@
 //! Every refusal writes nothing.
 
 use arkret_models_collaboration::authority_commit::{
-    MLS_GENESIS_MATERIAL_MAX_BLOB_BYTES, MlsGenesisMaterial, PeerAuthorityForwardEventRequestBody,
-    PeerAuthorityForwardMlsRequestBody, PeerAuthoritySubmitRequestBody,
-    PeerAuthoritySubmitResponseBody, SelfAuthoritySubmitRequestBody,
+    MLS_GROUP_STATE_MATERIAL_MAX_BLOB_BYTES, MlsGroupStateMaterial,
+    PeerAuthorityForwardEventRequestBody, PeerAuthorityForwardMlsRequestBody,
+    PeerAuthoritySubmitRequestBody, PeerAuthoritySubmitResponseBody,
+    SelfAuthoritySubmitRequestBody,
 };
 use arkret_models_identity::{AccountDeviceSignerEvidence, ForwardAccountDeviceSignerEvidence};
 use arkret_wire::{
@@ -253,6 +254,15 @@ pub(crate) async fn admit_forwarded_event(
 ) -> ServiceResult<AuthoritySubmitResponseBody> {
     let event = &request.event_submission.event;
     require_native_origin(peer, event)?;
+    request.validate().map_err(wire_refusal)?;
+    if let Some(material) = &request.mls_group_state_material {
+        material.decode_for_event(event).map_err(|error| {
+            ServiceError::protocol(
+                error.error_code().unwrap_or(ErrorCode::SchemaViolation),
+                error.to_string(),
+            )
+        })?;
+    }
     refuse_bare_native_mls(event)?;
     super::authority_port::refuse_actor_private_event(&event.kind)?;
     if request.is_native_pcr_candidate()
@@ -267,7 +277,6 @@ pub(crate) async fn admit_forwarded_event(
     if let Some(outcome) = super::authority_self_event_unit::exact_replay(state, event).await? {
         return Ok(outcome);
     }
-    request.validate().map_err(wire_refusal)?;
     let (producer, key) = resolve_forwarded_producer(
         state,
         peer,
@@ -295,7 +304,7 @@ pub(crate) async fn admit_forwarded_event(
             state,
             event,
             &[],
-            request.mls_genesis_material.as_ref(),
+            request.mls_group_state_material.as_ref(),
             producer,
             &key,
         )
@@ -322,12 +331,27 @@ pub(crate) async fn admit_forwarded_mls(
 ) -> ServiceResult<AuthoritySubmitResponseBody> {
     let event = &request.mls_submission.commit_event;
     require_native_origin(peer, event)?;
+    request.validate().map_err(wire_refusal)?;
+    request
+        .mls_group_state_material
+        .decode_for_event(event)
+        .map_err(|error| {
+            ServiceError::protocol(
+                error.error_code().unwrap_or(ErrorCode::SchemaViolation),
+                error.to_string(),
+            )
+        })?;
     let native = event.applet_id.is_some()
         && event.executed_by.is_none()
         && event.actor_id.as_account_id().is_some();
     let native_request = if native {
         super::authority_managed_device::mls::NativeMlsRequest::from_request(
-            &SelfAuthoritySubmitRequestBody::MlsCommit(request.mls_submission.clone()),
+            &SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
+                commit_event: request.mls_submission.commit_event.clone(),
+                welcomes: request.mls_submission.welcomes.clone(),
+                idempotency_key: request.mls_submission.idempotency_key,
+                recovery_source: None,
+            }),
         )?
     } else {
         None
@@ -353,7 +377,6 @@ pub(crate) async fn admit_forwarded_mls(
         }
         return Ok(outcome);
     }
-    request.validate().map_err(wire_refusal)?;
     let (producer, key) = resolve_forwarded_producer(
         state,
         peer,
@@ -370,7 +393,7 @@ pub(crate) async fn admit_forwarded_mls(
             state,
             event,
             &request.mls_submission.welcomes,
-            None,
+            Some(&request.mls_group_state_material),
             producer,
             &key,
             native_request,
@@ -381,7 +404,7 @@ pub(crate) async fn admit_forwarded_mls(
             state,
             event,
             &request.mls_submission.welcomes,
-            None,
+            Some(&request.mls_group_state_material),
             producer,
             &key,
         )
@@ -805,35 +828,50 @@ pub(crate) async fn fresh_producer_agent_evidence(
     Ok(Some(verified.evidence().clone()))
 }
 
-/// A: the raw GroupInfo and ratchet tree an `ak.mls.genesis` forward
+/// A: the raw GroupInfo and ratchet tree an MLS Genesis or Commit forward
 /// carries (encryption-and-audit.md §5.1.2), read from this Station's Blob
-/// store and proven to address the Genesis refs; `None` for every other kind.
+/// store and proven to address the original signed refs; `None` for other kinds.
 /// A Blob that is missing, larger than one carrier member holds or does not
 /// address its ref is a bare `failed_precondition` before anything is
 /// forwarded.
-async fn forwarded_genesis_material(
+async fn forwarded_mls_public_material(
     state: &AppState,
     event: &Event,
-) -> ServiceResult<Option<MlsGenesisMaterial>> {
-    if event.kind != arkret_wire::EventKind::MlsGenesis {
-        return Ok(None);
-    }
-    let payload: arkret_models_collaboration::events_payloads::MlsGenesisPayload =
-        serde_json::to_value(&event.payload)
-            .and_then(serde_json::from_value)
-            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+) -> ServiceResult<Option<MlsGroupStateMaterial>> {
+    let value = serde_json::to_value(&event.payload)
+        .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+    let (info_ref, tree_ref, epoch) = match event.kind {
+        arkret_wire::EventKind::MlsGenesis => {
+            let payload: arkret_models_collaboration::events_payloads::MlsGenesisPayload =
+                serde_json::from_value(value)
+                    .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+            payload.validate().map_err(wire_refusal)?;
+            (payload.group_info_ref, payload.ratchet_tree_ref, 0)
+        }
+        arkret_wire::EventKind::MlsCommit => {
+            let payload: arkret_models_crypto::MlsCommitPayload = serde_json::from_value(value)
+                .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+            payload.validate().map_err(wire_refusal)?;
+            (
+                payload.group_info_ref().clone(),
+                payload.ratchet_tree_ref().clone(),
+                payload.next_epoch(),
+            )
+        }
+        _ => return Ok(None),
+    };
     let mut blobs = Vec::with_capacity(2);
-    for blob_ref in [&payload.group_info_ref, &payload.ratchet_tree_ref] {
+    for blob_ref in [&info_ref, &tree_ref] {
         let unavailable = || {
             ServiceError::Conflict(format!(
-                "{}: Genesis Blob {blob_ref} is not a local Blob addressing its bytes",
+                "{}: MLS publication Blob {blob_ref} is not a local Blob addressing its bytes",
                 ConflictCode::FailedPrecondition
             ))
         };
         let bytes = crate::routing::mls::load_mls_public_blob(
             state,
             blob_ref.as_str(),
-            MLS_GENESIS_MATERIAL_MAX_BLOB_BYTES,
+            MLS_GROUP_STATE_MATERIAL_MAX_BLOB_BYTES,
         )
         .await
         .map_err(|_| unavailable())?;
@@ -844,7 +882,23 @@ async fn forwarded_genesis_material(
         arkret_canonical::verify_digest(&bytes, digest).map_err(|_| unavailable())?;
         blobs.push(bytes);
     }
-    Ok(Some(MlsGenesisMaterial::from_bytes(&blobs[0], &blobs[1])))
+    let group_id = event
+        .scope_ref
+        .canonical_mls_group_id()
+        .map_err(wire_refusal)?;
+    let public = arkret_mls::MlsPublicGroupTracker::from_external(
+        &blobs[0],
+        &blobs[1],
+        group_id.as_str(),
+        epoch,
+    )
+    .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+    public
+        .verify_publication(&blobs[0], &blobs[1])
+        .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+    Ok(Some(MlsGroupStateMaterial::from_bytes(
+        &blobs[0], &blobs[1],
+    )))
 }
 
 /// A: forward one self-submitted Event to its current governance Station and
@@ -929,12 +983,12 @@ async fn forward_self_event_inner(
     // Device admission and Genesis material are preflight gates.  In
     // particular, a revoked/pending/fenced producer must leave no queued
     // Event behind at the forwarding Station.
-    let material = forwarded_genesis_material(state, &submission.event).await?;
+    let material = forwarded_mls_public_material(state, &submission.event).await?;
     let mut request = PeerAuthorityForwardEventRequestBody {
         branch:
             arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
         event_submission: submission.clone(),
-        mls_genesis_material: material,
+        mls_group_state_material: material,
         producer_device_evidence: None,
         producer_agent_evidence: None,
     };
@@ -983,7 +1037,12 @@ pub(super) async fn forward_self_mls(
     let mut request = PeerAuthorityForwardMlsRequestBody {
         branch:
             arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
-        mls_submission: submission.clone(),
+        mls_submission: submission.clone().for_origin_forward(None),
+        mls_group_state_material: forwarded_mls_public_material(state, &submission.commit_event)
+            .await?
+            .ok_or_else(|| {
+                ServiceError::SchemaViolation("MLS Commit requires exact public material".into())
+            })?,
         producer_device_evidence: None,
         producer_agent_evidence: None,
     };
@@ -1039,10 +1098,11 @@ async fn prepare_native_forward_request_inner(
     let mut request=match submission {
         SelfAuthoritySubmitRequestBody::Event(v)=>PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(PeerAuthorityForwardEventRequestBody{
             branch:arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,event_submission:v.clone(),
-            mls_genesis_material:forwarded_genesis_material(state,event).await?,producer_device_evidence:None,producer_agent_evidence:None,
+            mls_group_state_material:forwarded_mls_public_material(state,event).await?,producer_device_evidence:None,producer_agent_evidence:None,
         }),
         SelfAuthoritySubmitRequestBody::MlsCommit(v)=>PeerAuthoritySubmitRequestBody::AuthorityForwardMls(PeerAuthorityForwardMlsRequestBody{
-            branch:arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,mls_submission:v.clone(),
+            branch:arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,mls_submission:v.clone().for_origin_forward(None),
+            mls_group_state_material:forwarded_mls_public_material(state,event).await?.ok_or_else(|| ServiceError::SchemaViolation("MLS Commit requires exact public material".into()))?,
             producer_device_evidence:None,producer_agent_evidence:None,
         }),_=>unreachable!("checked native forward branch"),
     };

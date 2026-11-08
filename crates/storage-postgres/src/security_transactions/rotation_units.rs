@@ -15,7 +15,7 @@ use coland_storage::{
     PersistenceError, RotationLocalCommitWrite, RotationPointerSwitchWrite,
     RotationUploadCommitWrite, SecurityTransactionRecord,
 };
-use diesel::sql_types::{BigInt, Jsonb, Nullable, Text};
+use diesel::sql_types::{BigInt, Jsonb, Text};
 use diesel::{QueryableByName, sql_query};
 use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
@@ -62,16 +62,6 @@ struct StoredBackupRow {
     id: String,
     #[diesel(sql_type = Jsonb)]
     payload: Value,
-}
-
-#[derive(QueryableByName)]
-struct SourceCheckpointRow {
-    #[diesel(sql_type = Nullable<BigInt>)]
-    source_position: Option<i64>,
-    #[diesel(sql_type = Nullable<BigInt>)]
-    generation_position: Option<i64>,
-    #[diesel(sql_type = Nullable<BigInt>)]
-    authorization_position: Option<i64>,
 }
 
 #[derive(QueryableByName)]
@@ -212,118 +202,6 @@ async fn active_authorizer_cut(
     Ok(cut)
 }
 
-/// Verify one planned replacement envelope against the authorizing device's
-/// current accepted authorization at the locked cut.
-async fn verify_replacement_envelope(
-    conn: &mut AsyncPgConnection,
-    backup: &KeyBackup,
-    cut: &ConfirmedPcrDeviceStatusCut,
-    account: &AccountId,
-    authorizer: &DeviceId,
-) -> Result<(), PgTransactionError> {
-    let authorization = cut.authority.authorization.as_ref().ok_or_else(|| {
-        rejected(
-            ConflictCode::FailedPrecondition,
-            "rotation authorizing device has no authorization",
-        )
-    })?;
-    let generation = cut.authority.current_generation.ok_or_else(|| {
-        rejected(
-            ConflictCode::TemporarilyUnavailable,
-            "rotation PCR has no current generation",
-        )
-    })?;
-    if &backup.signature_proof.device_id != authorizer
-        || backup
-            .device_id
-            .as_ref()
-            .is_some_and(|device| device != authorizer)
-        || verification_method_device(&backup.signature_proof.verification_method, account).as_ref()
-            != Some(authorizer)
-    {
-        return Err(rejected(
-            ConflictCode::SignatureInvalid,
-            "replacement backup is not signed by the rotation's authorizing device",
-        ));
-    }
-    if backup.signature_proof.device_authorize_event_id != authorization.event_id {
-        return Err(rejected(
-            ConflictCode::SignatureInvalid,
-            "replacement backup names a device authorization that is not current",
-        ));
-    }
-    if let Some(source) = &backup.source_commit_ref {
-        if source.device_generation_ref != generation {
-            return Err(rejected(
-                "backup_revision_stale",
-                "replacement backup generation is not current",
-            ));
-        }
-        let checkpoint = sql_query(
-            "SELECT \
-               (SELECT c.stream_position FROM realm_commits c WHERE c.commit_id=$2 AND c.realm_id=$1 \
-                  AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',$1::text)) AS source_position, \
-               (SELECT g.current_stream_position FROM pcr_device_generation_current_states g \
-                  WHERE g.realm_id=$1) AS generation_position, \
-               (SELECT c.stream_position FROM realm_commits c WHERE c.commit_id=$3 AND c.realm_id=$1) \
-                  AS authorization_position",
-        )
-        .bind::<Text, _>(cut.authority.realm_id.as_str())
-        .bind::<Text, _>(source.realm_commit_id.as_str())
-        .bind::<Text, _>(authorization.source_commit_id.as_str())
-        .get_result::<SourceCheckpointRow>(&mut *conn)
-        .await?;
-        match (
-            checkpoint.source_position,
-            checkpoint.generation_position,
-            checkpoint.authorization_position,
-        ) {
-            (Some(source), Some(generation_at), Some(authorized_at))
-                if source >= generation_at && source >= authorized_at => {}
-            _ => {
-                return Err(rejected(
-                    "backup_revision_stale",
-                    "replacement backup source is not an accepted PCR Commit under the current generation and device",
-                ));
-            }
-        }
-    }
-    let did_key = authorization
-        .payload
-        .device_public_key_did
-        .as_str()
-        .strip_prefix("did:key:")
-        .ok_or_else(|| {
-            rejected(
-                ConflictCode::FailedPrecondition,
-                "current device authorization has no did:key key",
-            )
-        })?;
-    let public_key =
-        arkret_canonical::multibase::decode_ed25519_multibase(did_key).map_err(|_| {
-            rejected(
-                ConflictCode::FailedPrecondition,
-                "current device authorization key is invalid",
-            )
-        })?;
-    let signed = backup
-        .signing_payload_bytes()
-        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    if !arkret_signatures::verify_detached_ed25519_signature(
-        &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
-            bytes: public_key.to_vec(),
-        },
-        &signed,
-        backup.signature_proof.signature.as_str(),
-    ) {
-        return Err(rejected(
-            ConflictCode::SignatureInvalid,
-            "replacement backup signature does not match the authorizing device key",
-        ));
-    }
-    Ok(())
-}
-
 /// The planned envelopes, typed, bound to their reserved refs and ordered as
 /// one complete fresh series chain.
 fn planned_replacement_chain(
@@ -444,11 +322,18 @@ pub(super) async fn commit_rotation_upload_in_connection(
     let realm_id = pcr_realm(conn, account).await?;
     lock_pcr(conn, &realm_id, false).await?;
     let cut = active_authorizer_cut(conn, account, &authorizer, &realm_id, accepted_at).await?;
+    for (backup, _) in &chain {
+        crate::key_backup_authority::verify_current_backup_recipient(conn, backup, accepted_at)
+            .await?;
+    }
 
+    let actor = ActorId::account(account.clone());
+    crate::key_backup::lock_backup_series_in_connection(conn, &actor).await?;
     let series_id = chain[0].0.series_id.clone();
     let existing =
-        sql_query("SELECT id::text AS id, payload FROM key_backups WHERE series_id=$1 FOR UPDATE")
+        sql_query("SELECT id::text AS id, payload FROM key_backups WHERE series_id=$1 AND actor_id=$2 FOR UPDATE")
             .bind::<Text, _>(series_id.as_str())
+            .bind::<Text, _>(actor.to_string())
             .load::<StoredBackupRow>(&mut *conn)
             .await?;
     for row in &existing {
@@ -464,7 +349,14 @@ pub(super) async fn commit_rotation_upload_in_connection(
         }
     }
     for (backup, value) in &chain {
-        verify_replacement_envelope(conn, backup, &cut, account, &authorizer).await?;
+        crate::key_backup_authority::verify_human_backup_signature(
+            conn,
+            backup,
+            &cut,
+            account,
+            &authorizer,
+        )
+        .await?;
         let uuid = crate::ids::typed_uuid_part_expect_internal(backup.backup_id.as_str());
         let stored =
             sql_query("SELECT id::text AS id, payload FROM key_backups WHERE id=$1 FOR UPDATE")

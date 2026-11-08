@@ -1966,6 +1966,19 @@ async fn commit_transaction_with_device_guard_inner(
     verified_unit: VerifiedPcrUnit,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    if matches!(
+        transaction.event.kind,
+        arkret_wire::EventKind::MlsHistoryGrant
+            | arkret_wire::EventKind::MlsHistoryRequest
+            | arkret_wire::EventKind::MlsHistoryRecovery
+    ) {
+        // These facts need their native current-reader, grant or replacement
+        // unit. A generic capability check must never install them unchecked.
+        return Err(PersistenceError::Conflict(
+            "failed_precondition: native content-history admission is unavailable".into(),
+        )
+        .into());
+    }
     if transaction.event.kind == arkret_wire::EventKind::RealmActorCreate
         && verified_unit != VerifiedPcrUnit::RealmActorCreation
     {
@@ -5117,7 +5130,12 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 S::Event(v.event_submission.clone())
             }
             P::AuthorityForwardMls(v) if &v.mls_submission.commit_event == event => {
-                S::MlsCommit(v.mls_submission.clone())
+                S::MlsCommit(arkret_wire::MlsCommitSubmission {
+                    commit_event: v.mls_submission.commit_event.clone(),
+                    welcomes: v.mls_submission.welcomes.clone(),
+                    idempotency_key: v.mls_submission.idempotency_key,
+                    recovery_source: None,
+                })
             }
             _ => {
                 return Err(invalid(

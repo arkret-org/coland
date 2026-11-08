@@ -4,15 +4,13 @@ const REALM_ID: &str = "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb";
 const STRAND_ID: &str = "ak:strand:AWZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZm";
 
 fn encrypted_payload() -> Value {
-    serde_json::json!({
-        "version": "1.0",
-        "content_type": "application/json",
-        "encryption_context": {
-            "epoch": (7u64).to_string(),
-            "group_state_ref": "ak:event:AZEvldDJcWI9IRHqP2BMibDDfc59Ax_LwrbsrQmeD6Ml"
-        },
-        "ciphertext": "Y2lwaGVydGV4dA",
-    })
+    // Projection-only envelope shape. Original Event/AEAD binding belongs
+    // to admission and end-to-end verification, not this discardable cache.
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../../../arkret-spec/spec/v1/artifacts/fixtures/content-history-fixture.json"
+    ))
+    .unwrap();
+    fixture["kat"]["envelope"].clone()
 }
 
 fn seed_pin_target(state: &mut ProjectionState, hlc: &ServerHlc) {
@@ -183,12 +181,12 @@ fn pin_note_accepts_encrypted_projection_payload() {
 }
 
 #[test]
-fn pin_note_rejects_envelope_committed_to_another_scope() {
+fn pin_note_rejects_envelope_without_backup_dependency() {
     let mut state = ProjectionState::new();
     let hlc = ServerHlc::new("test");
     seed_pin_target(&mut state, &hlc);
     let mut note = encrypted_payload();
-    note["aad"]["scope_digest"] = serde_json::json!(format!("sha256:{}", "f".repeat(64)));
+    note["encryption_context"]["protection"]["backup_refs"] = serde_json::json!([]);
 
     let effect = state.apply(
         &make_operation(arkret_wire::EventKind::PinAdd, REALM_ID, pin_payload(note)),
@@ -204,12 +202,12 @@ fn pin_note_rejects_envelope_committed_to_another_scope() {
 }
 
 #[test]
-fn pin_note_rejects_unregistered_encryption_context_counter() {
+fn pin_note_rejects_unregistered_encryption_scheme() {
     let mut state = ProjectionState::new();
     let hlc = ServerHlc::new("test");
     seed_pin_target(&mut state, &hlc);
     let mut note = encrypted_payload();
-    note["encryption_context"]["counter"] = Value::from(4u64);
+    note["encryption_scheme"] = serde_json::json!("ak.encryption.unregistered.v1");
 
     let effect = state.apply(
         &make_operation(

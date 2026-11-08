@@ -246,7 +246,7 @@ async fn require_imported_mls_public_material(
     state: &AppState,
     originals: &[arkret_wire::CommittedEventFullView],
 ) -> ServiceResult<()> {
-    use arkret_models_collaboration::events_payloads::{MlsGenesisEpoch, MlsGenesisPayload};
+    use arkret_models_collaboration::events_payloads::MlsGenesisPayload;
     use arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody;
 
     for full in originals {
@@ -262,7 +262,7 @@ async fn require_imported_mls_public_material(
             realm_id: event.realm_id.clone(),
             effective_scope: payload.effective_scope().clone(),
             mls_group_id: payload.mls_group_id().map_err(refused)?,
-            epoch: MlsGenesisEpoch::try_from(0).map_err(refused)?,
+            epoch: 0,
             group_state_event_id: event.event_id.clone(),
             caller_actor_id: None,
             target_commit_event_ref: None,

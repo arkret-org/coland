@@ -312,19 +312,87 @@ pub(super) async fn put_key_backup(
         .store_backup(backup_id.clone(), backup_value)
         .await
         .map_err(|error| {
-            // SOL-02-004 — the UNIQUE(series_actor_id, series_id, series_sequence)
-            // constraint rejected a concurrent successor double-write. The
-            // storage layer is now the authoritative race guard for §7.6
-            // monotonicity; the loser is told the sequence is already taken.
-            if error.is_conflict_kind() {
-                crate::app_error!(
-                    SchemaViolation,
-                    format!("series_seq_not_monotonic: {}", error.detail()),
-                )
-                .with_reason_code("series_seq_not_monotonic")
-            } else {
-                AppError::internal(error.to_string())
+            use coland_storage::ConflictCode;
+            match error.conflict_code() {
+                Some(ConflictCode::BackupRevisionStale) => {
+                    return crate::app_error!(Conflict, "backup authoring checkpoint changed")
+                        .with_reason_code(arkret_wire::ReasonCode::BACKUP_REVISION_STALE);
+                }
+                Some(ConflictCode::SchemaViolation) => {
+                    return crate::app_error!(SchemaViolation, "backup envelope validation failed");
+                }
+                Some(ConflictCode::DeviceGenerationFenced) => {
+                    return crate::app_error!(
+                        DeviceGenerationFenced,
+                        "backup writer generation was fenced"
+                    );
+                }
+                Some(ConflictCode::DeviceRevoked) => {
+                    return crate::app_error!(DeviceRevoked, "backup writer was revoked");
+                }
+                Some(ConflictCode::DeviceRevocationPending) => {
+                    return crate::app_error!(
+                        DeviceRevocationPending,
+                        "backup writer revocation is pending"
+                    );
+                }
+                Some(ConflictCode::DeviceUnauthorized) => {
+                    return crate::app_error!(
+                        DeviceUnauthorized,
+                        "backup writer is not authorized"
+                    );
+                }
+                Some(ConflictCode::SignatureInvalid) => {
+                    return crate::app_error!(
+                        SignatureInvalid,
+                        "backup writer signature is invalid"
+                    );
+                }
+                Some(ConflictCode::RecoveryPolicyMismatch) => {
+                    return crate::app_error!(
+                        RecoveryPolicyMismatch,
+                        "backup recipient policy changed"
+                    );
+                }
+                Some(ConflictCode::UnsupportedHpkeSuite) => {
+                    return crate::app_error!(
+                        UnsupportedHpkeSuite,
+                        "backup recipient suite is unsupported"
+                    );
+                }
+                Some(ConflictCode::SeriesChainBroken) => {
+                    return crate::app_error!(Conflict, "backup predecessor binding differs")
+                        .with_reason_code(arkret_wire::ReasonCode::SERIES_CHAIN_BROKEN);
+                }
+                Some(ConflictCode::SeriesPredecessorNotFound) => {
+                    return crate::app_error!(Conflict, "backup predecessor is missing")
+                        .with_reason_code(arkret_wire::ReasonCode::SERIES_PREDECESSOR_NOT_FOUND);
+                }
+                Some(ConflictCode::SeriesSeqNotMonotonic) => {
+                    return crate::app_error!(Conflict, "backup successor sequence is not current")
+                        .with_reason_code(arkret_wire::ReasonCode::SERIES_SEQ_NOT_MONOTONIC);
+                }
+                Some(ConflictCode::FailedPrecondition) => {
+                    return crate::app_error!(
+                        FailedPrecondition,
+                        "backup authority precondition failed"
+                    );
+                }
+                Some(ConflictCode::TemporarilyUnavailable) => {
+                    return crate::app_error!(
+                        TemporarilyUnavailable,
+                        "backup authority is unavailable"
+                    );
+                }
+                _ => {}
             }
+            if error.conflict_code() == Some(coland_storage::ConflictCode::DuplicateConflict) {
+                return crate::app_error!(
+                    DuplicateConflict,
+                    "backup identity already binds another immutable envelope",
+                );
+            }
+            AppError::internal(error.to_string())
         })?;
     let outcome = KeysBackupsReplaceResponseBody {
         status: KeyBackupPutStatus::Accepted,

@@ -719,7 +719,7 @@ async fn own_pcr_private_profile_requires_native_root_before_accepting_exact_enc
     let database = TestDatabase::lease().await;
     database.bind_device_inventory_station("ak:did_core:web:backup-test.example");
     let pool = database.pool();
-    let mut fixture = Box::pin(RootFixture::new(pool.clone())).await;
+    let mut fixture = Box::pin(RootFixture::new_with_recovery_words(pool.clone())).await;
     let mut conn = pool.get().await.unwrap();
     let history=diesel::sql_query("SELECT value AS payload FROM realm_bootstrap_current_states WHERE realm_id=$1 AND state_family='realm_history_access'")
         .bind::<Text,_>(fixture.pcr.history.events[0].realm_id.as_str()).get_result::<BindingRow>(&mut *conn).await.unwrap();

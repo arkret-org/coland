@@ -12,6 +12,9 @@ use ed25519_dalek::Signer as _;
 use super::super::pcr_history_tests;
 use super::RootFixture;
 
+#[path = "history_identity_recovery_tests.rs"]
+mod identity_recovery;
+
 fn random() -> arkret_wire::Base64UrlString {
     arkret_wire::Base64UrlString::new(
         arkret_crypto::content_history::fresh_content_key_salt().unwrap(),
@@ -337,12 +340,82 @@ pub(super) async fn exercise(
             .await
             .is_err()
     );
-    let vector: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../arkret-spec/spec/v1/artifacts/fixtures/content-history-fixture.json"
-    ))
-    .unwrap();
+    let (replacement, authorization, method, seed, _session_id) =
+        Box::pin(identity_recovery::recover(pool, fixture)).await;
+    assert!(consume(pool, &reader, &valid, package).await.is_err());
+    assert!(
+        consume(pool, &new_reader, &new_proof, package)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .human_pcr_history_unlock_delivery(&new_reader, &new_proof, "authenticated-session:jkt")
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .issue_human_pcr_history_unlock_challenge(&new_reader, &new_challenge)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .put(
+                package.backup_id.to_string(),
+                serde_json::to_value(package).unwrap()
+            )
+            .await
+            .is_err()
+    );
+    let mut replacement_reader = new_reader;
+    replacement_reader.device_id = replacement.clone();
+    replacement_reader.credential_device_binding = Some(
+        arkret_models_identity::session_credential::SessionGrantDeviceBinding {
+            device_id: replacement.clone(),
+            authorization_event_id: authorization,
+            model_generation_ref: 2,
+        },
+    );
+    let mut replacement_challenge = new_challenge;
+    replacement_challenge.requesting_device_id = replacement;
+    replacement_challenge.request_id = random();
+    replacement_challenge.challenge_id = random();
+    replacement_challenge.challenge = random();
+    replacement_challenge.nonce = random();
+    replacement_challenge.issued_at =
+        arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    replacement_challenge.expires_at =
+        replacement_challenge.issued_at + chrono::Duration::seconds(300);
+    let replacement_challenge = store
+        .issue_human_pcr_history_unlock_challenge(&replacement_reader, &replacement_challenge)
+        .await
+        .unwrap();
+    let mut replacement_proof = proof(&replacement_challenge, fixture);
+    replacement_proof.signature_proof.verification_method = method;
+    sign_with(&mut replacement_proof, &seed);
+    assert_eq!(
+        consume(pool, &replacement_reader, &replacement_proof, package)
+            .await
+            .unwrap(),
+        serde_json::to_value(package).unwrap()
+    );
+    let (after_recovery, guard) = store
+        .human_pcr_history_unlock_delivery(
+            &replacement_reader,
+            &replacement_proof,
+            "authenticated-session:jkt",
+        )
+        .await
+        .unwrap();
+    assert_eq!(after_recovery, new_device_original);
+    guard.finish().await.unwrap();
     let recovered = arkret_crypto::identity_root::derive_identity_recovery_key_material_from_bip39(
-        vector["hpke_grant"]["mnemonic"].as_str().unwrap(),
+        fixture
+            .recovery_words
+            .as_deref()
+            .expect("fresh same-bundle recovery words"),
         "",
         1,
     )
@@ -358,7 +431,7 @@ pub(super) async fn exercise(
     )
     .unwrap();
     let bag = arkret_crypto::content_history::open_content_root_backup(
-        &new_device_original,
+        &after_recovery,
         &recovered.backup_hpke_serialized_private_key,
         |bytes, signature| {
             if arkret_signatures::verify_detached_ed25519_signature(

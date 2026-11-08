@@ -16,7 +16,7 @@ use serde_json::json;
 
 #[path = "../../../test-support/src/device_authorization_history.rs"]
 #[expect(dead_code, reason = "Only the native PCR fixture subset is used.")]
-mod device_authorization_history;
+pub(super) mod device_authorization_history;
 #[path = "../../../test-support/src/pcr_genesis.rs"]
 #[expect(dead_code, reason = "Only the native PCR fixture subset is used.")]
 mod pcr_genesis;
@@ -45,10 +45,27 @@ pub(super) struct RootFixture {
     pub(super) package: KeyBackup,
     pub(super) pcr: pcr_genesis::PcrGenesisFixture,
     pub(super) policy: RecoveryPolicy,
+    pub(super) recovery_words: Option<String>,
 }
 
 impl RootFixture {
     pub(super) async fn new(pool: PgPool) -> Self {
+        Box::pin(Self::with_recovery_words(pool, None)).await
+    }
+
+    pub(super) async fn new_with_recovery_words(pool: PgPool) -> Self {
+        let words =
+            arkret_crypto::identity_root::generate_bip39_identity_recovery_mnemonic().unwrap();
+        Box::pin(Self::with_recovery_words(pool, Some(words))).await
+    }
+
+    async fn with_recovery_words(pool: PgPool, recovery_words: Option<String>) -> Self {
+        let material = recovery_words.as_ref().map(|words| {
+            arkret_crypto::identity_root::derive_identity_recovery_key_material_from_bip39(
+                words, "", 1,
+            )
+            .unwrap()
+        });
         let persistence = PgPersistenceStore::new(pool);
         let mut pcr = pcr_genesis::PcrGenesisFixture::new_with(
             arkret_wire::Did::new("did:web:backup-test.example").unwrap(),
@@ -64,6 +81,10 @@ impl RootFixture {
         );
         pcr.admit_into(&persistence).await.unwrap();
         let mut package = root_package();
+        if let Some(material) = &material {
+            let key = &material.backup_hpke_public_key_multikey;
+            package.encryption.recipient_key_ref = Some(format!("did:key:{key}#{key}"));
+        }
         package.actor_id = arkret_wire::ActorId::account(pcr.history.account.clone());
         package.signature_proof.device_id = Some(pcr.history.founding_device_id.clone());
         package.signature_proof.verification_method =
@@ -79,8 +100,13 @@ impl RootFixture {
         let policy_id =
             arkret_wire::PolicyId::new(format!("ak:policy:{}", uuid::Uuid::now_v7())).unwrap();
         package.recovery_policy_ref.as_mut().unwrap().policy_id = policy_id.clone();
-        let proof_key = arkret_canonical::ed25519_pubkey_to_did_key_multibase(
-            &SigningKey::from_bytes(&[92; 32]).verifying_key().to_bytes(),
+        let proof_key = material.as_ref().map_or_else(
+            || {
+                arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+                    &SigningKey::from_bytes(&[92; 32]).verifying_key().to_bytes(),
+                )
+            },
+            |material| material.recovery_proof_public_key_multikey.clone(),
         );
         let backup_key = package
             .encryption
@@ -118,6 +144,7 @@ impl RootFixture {
             package,
             pcr,
             policy,
+            recovery_words,
         }
     }
 

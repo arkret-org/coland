@@ -666,13 +666,15 @@ pub(crate) async fn guard_delete_in_connection(
                 {
                     continue;
                 }
-                match replacement.require_current_recipient(conn).await {
-                    Ok(()) => {
+                let retained =
+                    crate::content_root_packages::read_retained_envelope(conn, &id).await?;
+                match crate::key_backup_history::recipient(conn, &retained).await {
+                    Ok(_) => {
                         sufficient = true;
                         break;
                     }
-                    Err(PgTransactionError::Storage(PersistenceError::Conflict(_))) => {}
-                    Err(error) => return Err(error),
+                    Err(PersistenceError::Conflict(_)) => {}
+                    Err(error) => return Err(error.into()),
                 }
             }
             if sufficient || final_page {

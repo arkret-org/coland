@@ -120,6 +120,8 @@ pub(crate) async fn current_policy(
     .map_err(Into::into)
 }
 
+mod root_coverage;
+
 pub(crate) async fn commit_recovery_policy_unit_in_connection(
     conn: &mut AsyncPgConnection,
     write: &RecoveryPolicyPublicationWrite,
@@ -371,6 +373,7 @@ pub(crate) async fn commit_recovery_policy_unit_in_connection(
         )
     })?;
 
+    root_coverage::require_human_coverage(conn, policy).await?;
     crate::authority_commit::queue_event_in_connection(conn, event, write.queued_at).await?;
     match crate::authority_commit::commit_verified_recovery_policy_in_connection(
         conn,

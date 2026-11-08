@@ -45,24 +45,41 @@ async fn current_reader(
 /// The current policy may advance while retaining the same backup agreement.
 /// Verify the old accepted policy independently, then bind the original public
 /// key to an active agreement in the current accepted policy.
-async fn recipient(
+pub(crate) async fn recipient(
     conn: &mut AsyncPgConnection,
     backup: &KeyBackup,
 ) -> PersistenceResult<chrono::DateTime<chrono::Utc>> {
     let account = backup
-        .actor_id
+        .custodian_actor_id
+        .as_ref()
+        .unwrap_or(&backup.actor_id)
         .as_account_id()
         .ok_or_else(|| denied("subject"))?;
-    let reference = backup
-        .recovery_policy_ref
-        .as_ref()
-        .ok_or_else(|| denied("policy reference"))?;
     let current = crate::pcr_recovery_policy_unit::current_policy(conn, account)
         .await
         .map_err(crate::PgTransactionError::into_persistence)?
         .ok_or_else(|| denied("current policy unavailable"))?;
     let current: RecoveryPolicy =
         serde_json::from_value(current.raw_payload).map_err(PersistenceError::database)?;
+    recipient_for_policy(conn, backup, &current).await
+}
+
+pub(crate) async fn recipient_for_policy(
+    conn: &mut AsyncPgConnection,
+    backup: &KeyBackup,
+    current: &RecoveryPolicy,
+) -> PersistenceResult<chrono::DateTime<chrono::Utc>> {
+    let subject = backup
+        .custodian_actor_id
+        .as_ref()
+        .unwrap_or(&backup.actor_id);
+    let account = subject
+        .as_account_id()
+        .ok_or_else(|| denied("recipient subject"))?;
+    let reference = backup
+        .recovery_policy_ref
+        .as_ref()
+        .ok_or_else(|| denied("policy reference"))?;
     let old = sql_query("SELECT p.raw_payload AS payload FROM recovery_policies p JOIN policy_current_states c ON c.policy_id=('ak:policy:' || p.id::text) AND c.current_commit_id=(p.acceptance_basis #>> '{}') AND c.value=p.raw_payload WHERE p.raw_payload->>'policy_id'=$1 AND p.version=$2 AND p.principal_id=$3 AND p.station_id=$4 FOR SHARE OF p")
         .bind::<Text,_>(reference.policy_id.as_str())
         .bind::<crate::Integer,_>(i32::try_from(reference.policy_version).map_err(PersistenceError::database)?)
@@ -84,12 +101,12 @@ async fn recipient(
         policy_version: current.version,
     };
     arkret_models_crypto::key_backup::BackupRecoveryRecipient {
-        subject: &backup.actor_id,
+        subject,
         policy_ref: &current_ref,
         key_agreement_ref: key_ref,
         hpke_suite: backup.encryption.hpke_suite.as_deref(),
     }
-    .validate(&current, chrono::Utc::now())
+    .validate(current, chrono::Utc::now())
     .map_err(denied)?;
     let key = |policy: &RecoveryPolicy| {
         policy
@@ -109,7 +126,7 @@ async fn recipient(
             })
     };
     let old_key = key(&old).ok_or_else(|| denied("original recipient key"))?;
-    let current_key = key(&current).ok_or_else(|| denied("current recipient key"))?;
+    let current_key = key(current).ok_or_else(|| denied("current recipient key"))?;
     if old_key.0 != current_key.0 {
         return Err(denied("recipient key changed"));
     }
@@ -168,14 +185,13 @@ pub(crate) async fn qualify(
                     let EncryptedEnvelopeEncryptionContext::EpochContent { protection, .. } =
                         &carrier.envelope.encryption_context;
                     protection.root_refs.contains(root)
-                        && protection.backup_refs.contains(backup_id)
                 })
         })
     {
         return Err(denied("selection is outside original signed protection"));
     }
-    // Original packages are supported here. A replacement package must first
-    // acquire a separate durable, accepted same-root mapping, never a guessed ref.
+    // Mapping is derived from both immutable signed indices and the original
+    // Event protection. The caller's alternate backup ID alone grants nothing.
     let actor = ActorId::account(reader.account_id.clone());
     crate::pcr_recovery_policy_unit::current_policy(conn, &reader.account_id)
         .await
@@ -207,17 +223,28 @@ pub(crate) async fn qualify(
         if accepted.payload != serde_json::to_value(context).map_err(PersistenceError::database)? {
             return Err(denied("original root context changed"));
         }
+        let original_ids = carriers
+            .iter()
+            .filter_map(|carrier| {
+                let EncryptedEnvelopeEncryptionContext::EpochContent { protection, .. } =
+                    &carrier.envelope.encryption_context;
+                protection
+                    .root_refs
+                    .contains(root)
+                    .then_some(protection.backup_refs.iter().cloned())
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        crate::content_root_packages::require_original_binding(
+            conn,
+            &original_ids,
+            &actor,
+            root,
+            context,
+        )
+        .await?;
     }
-    let body = sql_query("SELECT jsonb_build_object('body',b.payload,'admission',i.writer_admission) AS payload FROM key_backups b JOIN key_backup_identities i USING(id) WHERE b.id=$1 AND i.deleted_at IS NULL FOR SHARE OF b,i")
-        .bind::<crate::sql_types::Uuid,_>(crate::ids::typed_uuid_part_expect_internal(backup_id.as_str()))
-        .get_result::<JsonPayloadRow>(&mut *conn).await.map_err(PersistenceError::database)?.payload;
-    let backup: KeyBackup =
-        serde_json::from_value(body["body"].clone()).map_err(PersistenceError::database)?;
-    let admission: crate::key_backup_authority::DeviceBackupAdmission =
-        serde_json::from_value(body["admission"].clone()).map_err(PersistenceError::database)?;
-    backup.validate().map_err(denied)?;
-    backup.validate_ciphertext_digest().map_err(denied)?;
-    admission.verify_retained_envelope(&backup)?;
+    let backup = crate::content_root_packages::read_retained_envelope(conn, backup_id).await?;
     if backup.backup_id != *backup_id
         || backup.custodian_actor_id.is_some()
         || backup.custody_authorization_ref.is_some()

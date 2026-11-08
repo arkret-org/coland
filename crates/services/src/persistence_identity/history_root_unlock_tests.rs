@@ -15,6 +15,9 @@ use super::RootFixture;
 #[path = "history_identity_recovery_tests.rs"]
 mod identity_recovery;
 
+#[path = "history_root_rotation_tests.rs"]
+mod root_rotation;
+
 fn random() -> arkret_wire::Base64UrlString {
     arkret_wire::Base64UrlString::new(
         arkret_crypto::content_history::fresh_content_key_salt().unwrap(),
@@ -107,7 +110,7 @@ pub(super) async fn exercise(
     fixture: &mut RootFixture,
     package: &KeyBackup,
     original: &coland_storage::AuthorityCommitTransaction,
-) -> ContentRootBackupEntry {
+) -> (ContentRootBackupEntry, arkret_wire::BackupId) {
     let record = pcr_history_tests::status(pool, fixture, None).await;
     let reader = pcr_history_tests::reader(fixture, Some(record));
     let persistence = PgPersistenceStore::new(pool.clone());
@@ -451,8 +454,14 @@ pub(super) async fn exercise(
     )
     .unwrap();
     assert_eq!(bag.items.len(), 1);
-    let SecretStorageEntry::ContentRoot(restored) = bag.items.into_iter().next().unwrap() else {
-        panic!("history-only root expected")
-    };
-    restored
+    Box::pin(root_rotation::exercise(
+        pool,
+        fixture,
+        &replacement_reader,
+        &replacement_proof,
+        &seed,
+        &after_recovery,
+        &bag,
+    ))
+    .await
 }

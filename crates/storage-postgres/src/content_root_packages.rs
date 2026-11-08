@@ -110,3 +110,68 @@ pub(crate) async fn read_in_connection(
         roots,
     })
 }
+
+/// Verify the retained signed body and the immutable index together. Historical
+/// callers do not require the original writer to remain a current endpoint.
+pub(crate) async fn read_retained_envelope(
+    conn: &mut AsyncPgConnection,
+    id: &BackupId,
+) -> crate::PersistenceResult<arkret_models_crypto::KeyBackup> {
+    let invalid = || {
+        PersistenceError::Conflict("failed_precondition: retained root package unavailable".into())
+    };
+    let row = sql_query("SELECT jsonb_build_object('body',b.payload,'index',i.content_index,'admission',i.writer_admission) AS payload FROM key_backups b JOIN key_backup_identities i USING(id) WHERE b.id=$1 AND b.actor_id=i.actor_id AND i.deleted_at IS NULL FOR SHARE OF b,i")
+        .bind::<diesel::sql_types::Uuid,_>(crate::ids::typed_uuid_part_expect_internal(id.as_str()))
+        .get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+        .ok_or_else(invalid)?.payload;
+    let backup: arkret_models_crypto::KeyBackup =
+        serde_json::from_value(row["body"].clone()).map_err(PersistenceError::database)?;
+    let admission: crate::key_backup_authority::DeviceBackupAdmission =
+        serde_json::from_value(row["admission"].clone()).map_err(PersistenceError::database)?;
+    backup.validate().map_err(PersistenceError::database)?;
+    backup
+        .validate_ciphertext_digest()
+        .map_err(PersistenceError::database)?;
+    admission.verify_retained_envelope(&backup)?;
+    if backup.backup_id != *id
+        || serde_json::to_value(&backup.contents).map_err(PersistenceError::database)?
+            != row["index"]
+    {
+        return Err(invalid());
+    }
+    Ok(backup)
+}
+
+/// The original signed backup ref still anchors its first-admitted root index
+/// after its live body was replaced and deleted. A matching new signed package
+/// is only a mapping for this exact Actor/root/context, never another scope.
+pub(crate) async fn require_original_binding(
+    conn: &mut AsyncPgConnection,
+    ids: &[BackupId],
+    actor: &ActorId,
+    root: &Hash,
+    context: &ContentRootContext,
+) -> crate::PersistenceResult<()> {
+    let selector = serde_json::json!([{"item_kind":"content_epoch_root","root_ref":root,"root_context":context}]);
+    let ids = ids
+        .iter()
+        .map(|id| crate::ids::typed_uuid_part_expect_internal(id.as_str()))
+        .collect::<Vec<_>>();
+    let rows = sql_query("SELECT jsonb_build_object('digest',envelope_digest,'admission',writer_admission) AS payload FROM key_backup_identities WHERE id=ANY($1) AND actor_id=$2 AND content_index @> $3 FOR SHARE")
+        .bind::<Array<diesel::sql_types::Uuid>,_>(&ids).bind::<Text,_>(actor.to_string()).bind::<Jsonb,_>(&selector)
+        .get_results::<crate::JsonPayloadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    for row in rows {
+        let admission: crate::key_backup_authority::DeviceBackupAdmission =
+            serde_json::from_value(row.payload["admission"].clone())
+                .map_err(PersistenceError::database)?;
+        if row.payload["digest"]
+            .as_str()
+            .is_some_and(|digest| admission.authenticates_metadata(actor, digest))
+        {
+            return Ok(());
+        }
+    }
+    Err(PersistenceError::Conflict(
+        "failed_precondition: root replacement has no original signed native binding".into(),
+    ))
+}

@@ -221,7 +221,7 @@ fn fresh_id() -> BackupId {
     BackupId::new(format!("ak:backup:{}", uuid::Uuid::now_v7())).unwrap()
 }
 
-fn successor(previous: &KeyBackup) -> KeyBackup {
+pub(super) fn successor(previous: &KeyBackup) -> KeyBackup {
     let mut next = previous.clone();
     next.backup_id = fresh_id();
     next.series_sequence = previous.series_sequence + 1;

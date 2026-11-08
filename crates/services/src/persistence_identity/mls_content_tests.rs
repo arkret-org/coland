@@ -907,7 +907,7 @@ async fn own_pcr_private_profile_requires_native_root_before_accepting_exact_enc
     fixture.pcr.history.commits.push(genesis.commit.clone());
     fixture.pcr.history.events.push(transaction.event.clone());
     fixture.pcr.history.commits.push(transaction.commit.clone());
-    let restored = Box::pin(history_root_unlock_tests::exercise(
+    let (restored, protected_backup_id) = Box::pin(history_root_unlock_tests::exercise(
         &pool,
         &mut fixture,
         &package,
@@ -930,7 +930,7 @@ async fn own_pcr_private_profile_requires_native_root_before_accepting_exact_enc
     assert_eq!(count.payload, json!(0));
     drop(conn);
     let invalid = backups
-        .delete_backup(package.backup_id.as_str())
+        .delete_backup(protected_backup_id.as_str())
         .await
         .unwrap_err();
     assert!(

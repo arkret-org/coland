@@ -287,6 +287,9 @@ pub(super) async fn verify_key_backup_unlock_proof(
                 || &challenge.nonce != nonce
                 || challenge.service_id != typed.service_id
                 || challenge.audience != typed.audience
+                || challenge.subject_actor_id != typed.subject_actor_id
+                || challenge.custody_authorization_ref != typed.custody_authorization_ref
+                || challenge.content_history != typed.content_history
                 || typed.issued_at < challenge.issued_at
                 || typed.issued_at >= challenge.expires_at
                 || typed.expires_at != challenge.expires_at
@@ -401,14 +404,16 @@ pub(super) async fn issue_key_backup_unlock_challenge(
     body: JsonBody<arkret_models_crypto::KeysBackupsIssueUnlockChallengeRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
+    res: &mut Response,
 ) -> JsonResult<arkret_models_crypto::KeysBackupsUnlockChallenge> {
+    crate::routing::authority_commit::no_store(res);
     use rand::RngExt as _;
     let state = depot.get_typed::<AppState>().expect("state injected");
     let request = body.into_inner();
     request
         .validate()
         .map_err(|error| schema_error(error.to_string()))?;
-    if request.subject_actor_id.is_some() || request.content_history.is_some() {
+    if request.subject_actor_id.is_some() {
         return Err(AppError::not_found("key backup history source unavailable"));
     }
     let session = aa.authenticated_session(state, req).await?;
@@ -475,6 +480,15 @@ pub(super) async fn issue_key_backup_unlock_challenge(
         issued_at: now,
         expires_at: now + chrono::Duration::seconds(300),
     };
+    if challenge.content_history.is_some() {
+        let reader = crate::routing::events::pcr_history::current_reader(state, &session).await?;
+        let stored = state
+            .key_backups()
+            .issue_human_pcr_history_unlock_challenge(&reader, &challenge)
+            .await
+            .map_err(history_unlock_error)?;
+        return json_ok(stored);
+    }
     let stored = state
         .key_backups()
         .issue_unlock_challenge(
@@ -485,6 +499,18 @@ pub(super) async fn issue_key_backup_unlock_challenge(
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
     json_ok(serde_json::from_value(stored).map_err(|error| AppError::internal(error.to_string()))?)
+}
+
+pub(super) fn history_unlock_error(error: coland_services::ServiceError) -> AppError {
+    match error.conflict_code() {
+        Some(coland_storage::ConflictCode::DuplicateConflict) => {
+            crate::app_error!(DuplicateConflict, "unlock issuance request changed")
+        }
+        _ if error.to_string().contains("rate_limited") => {
+            crate::app_error!(RateLimited, "backup unlock rate limit")
+        }
+        _ => AppError::not_found("key backup history source unavailable"),
+    }
 }
 
 #[cfg(test)]

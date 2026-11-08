@@ -1158,6 +1158,32 @@ impl crate::identity::KeyBackupPort for PersistenceKeyBackups {
     ) -> crate::ServiceResult<Value> {
         Ok(self.0.key_backups().consume_unlock(command).await?)
     }
+    async fn issue_human_pcr_history_unlock_challenge(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        challenge: &arkret_models_crypto::KeysBackupsUnlockChallenge,
+    ) -> crate::ServiceResult<arkret_models_crypto::KeysBackupsUnlockChallenge> {
+        Ok(self
+            .0
+            .key_backups()
+            .issue_human_pcr_history_unlock_challenge(reader, challenge)
+            .await?)
+    }
+    async fn human_pcr_history_unlock_delivery(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        proof: &arkret_models_crypto::KeyBackupUnlockProof,
+        holder: &str,
+    ) -> crate::ServiceResult<(
+        arkret_models_crypto::KeyBackup,
+        Box<dyn coland_storage::AccountContentDeliveryGuard>,
+    )> {
+        Ok(self
+            .0
+            .key_backups()
+            .human_pcr_history_unlock_delivery(reader, proof, holder)
+            .await?)
+    }
     async fn backup(&self, backup_id: &str) -> crate::ServiceResult<Option<serde_json::Value>> {
         Ok(self.0.key_backups().get(backup_id).await?)
     }

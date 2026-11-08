@@ -29,6 +29,10 @@ impl AccountContentDeliveryGuard for HistoryGuard {
         self.checked_at <= now && now < self.expires_at
     }
 
+    async fn prepare_handoff(&mut self) -> bool {
+        self.held.probe().await.is_ok() && self.permits_handoff()
+    }
+
     async fn finish(self: Box<Self>) -> PersistenceResult<()> {
         self.held.finish().await
     }
@@ -65,7 +69,7 @@ async fn own_control_origin(
     Ok(origin.is_principal_control() && event.actor_id.as_account_id() == Some(&reader.account_id))
 }
 
-async fn qualify(
+pub(crate) async fn qualify(
     conn: &mut AsyncPgConnection,
     reader: &HumanPcrHistoryReader,
     realm: &arkret_wire::RealmId,
@@ -132,13 +136,20 @@ async fn qualify(
             "PCR archive credential device binding is no longer current",
         ));
     }
-    let expiry = authorization
+    let mut expiry = authorization
         .payload
         .expires_at
         .flatten()
         .map_or(reader.credential_expires_at, |expiry| {
             expiry.min(reader.credential_expires_at)
         });
+    if let Some(status_expiry) = reader
+        .account_status_observation
+        .as_ref()
+        .and_then(|observation| observation.record().expires_at)
+    {
+        expiry = expiry.min(status_expiry);
+    }
     if expiry <= now {
         return Err(unavailable("PCR archive reader credential expired"));
     }

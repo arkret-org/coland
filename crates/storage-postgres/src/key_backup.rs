@@ -443,6 +443,24 @@ impl KeyBackupStore for PgKeyBackupStore {
         self.reserve_recovery_attempt(authority_id, holder, request_digest, now)
             .await
     }
+    async fn issue_human_pcr_history_unlock_challenge(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        challenge: &arkret_models_crypto::KeysBackupsUnlockChallenge,
+    ) -> PersistenceResult<arkret_models_crypto::KeysBackupsUnlockChallenge> {
+        crate::key_backup_history::issue(&self.pool, reader, challenge).await
+    }
+    async fn human_pcr_history_unlock_delivery(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        proof: &arkret_models_crypto::KeyBackupUnlockProof,
+        holder: &str,
+    ) -> PersistenceResult<(
+        arkret_models_crypto::KeyBackup,
+        Box<dyn coland_storage::AccountContentDeliveryGuard>,
+    )> {
+        crate::key_backup_history::delivery(&self.pool, reader, proof, holder).await
+    }
     async fn unlock_challenge(&self, authority_id: &str) -> PersistenceResult<Option<Value>> {
         self.read_unlock(authority_id).await
     }

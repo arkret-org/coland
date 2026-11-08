@@ -124,6 +124,7 @@ mod issued_realm_snapshots;
 mod key_backup;
 mod key_backup_authority;
 mod key_backup_current_states;
+mod key_backup_history;
 mod key_backup_unlock;
 mod managed_forward_admission;
 mod managed_forward_source;

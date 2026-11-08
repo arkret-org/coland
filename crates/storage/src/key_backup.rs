@@ -96,7 +96,7 @@ pub struct ConfirmedKeyBackupAuthorityBasis {
 
 /// The authority a backup unlock consumes, rechecked in the consuming
 /// transaction.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum KeyBackupUnlockBasis {
     /// An ordinary unlock by the requesting device: the pointer must be
     /// unchanged, the device active, and the envelope in the active series
@@ -104,6 +104,12 @@ pub enum KeyBackupUnlockBasis {
     CurrentDevice {
         basis: KeyBackupPointerBasis,
         device_id: arkret_wire::DeviceId,
+    },
+    /// History-only root delivery. The consuming transaction independently
+    /// checks the original PCR, current authenticated Device and exact PoP.
+    CurrentHumanPcrHistory {
+        reader: Box<crate::HumanPcrHistoryReader>,
+        proof: Box<arkret_models_crypto::KeyBackupUnlockProof>,
     },
     /// A verified recovery session: the manifest frozen at verification is
     /// the basis, and the session and its policy are rechecked.
@@ -201,6 +207,28 @@ pub trait KeyBackupStore: Send + Sync {
         challenge: Value,
         now: chrono::DateTime<Utc>,
     ) -> PersistenceResult<Value>;
+    async fn issue_human_pcr_history_unlock_challenge(
+        &self,
+        _reader: &crate::HumanPcrHistoryReader,
+        _challenge: &arkret_models_crypto::KeysBackupsUnlockChallenge,
+    ) -> PersistenceResult<arkret_models_crypto::KeysBackupsUnlockChallenge> {
+        Err(crate::PersistenceError::Conflict(
+            "PCR history unlock unavailable".into(),
+        ))
+    }
+    async fn human_pcr_history_unlock_delivery(
+        &self,
+        _reader: &crate::HumanPcrHistoryReader,
+        _proof: &arkret_models_crypto::KeyBackupUnlockProof,
+        _holder: &str,
+    ) -> PersistenceResult<(
+        arkret_models_crypto::KeyBackup,
+        Box<dyn crate::AccountContentDeliveryGuard>,
+    )> {
+        Err(crate::PersistenceError::Conflict(
+            "PCR history unlock unavailable".into(),
+        ))
+    }
     async fn reserve_recovery_unlock_attempt(
         &self,
         authority_id: &str,

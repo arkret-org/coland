@@ -44,7 +44,7 @@ async fn database() -> TestDatabase {
 pub(super) struct RootFixture {
     pub(super) package: KeyBackup,
     pub(super) pcr: pcr_genesis::PcrGenesisFixture,
-    policy: RecoveryPolicy,
+    pub(super) policy: RecoveryPolicy,
 }
 
 impl RootFixture {
@@ -121,7 +121,7 @@ impl RootFixture {
         }
     }
 
-    async fn publish(
+    pub(super) async fn publish(
         persistence: &PgPersistenceStore,
         pcr: &mut pcr_genesis::PcrGenesisFixture,
         mut policy: RecoveryPolicy,

@@ -54,6 +54,15 @@ async fn resolve_current_status(
     Ok(())
 }
 
+pub(crate) async fn current_reader(
+    state: &AppState,
+    session: &SessionIdentityState,
+) -> Result<HumanPcrHistoryReader, AppError> {
+    let mut reader = reader(state, session).await?.ok_or_else(unavailable)?;
+    resolve_current_status(state, session, &mut reader).await?;
+    Ok(reader)
+}
+
 pub(crate) async fn page(
     state: &AppState,
     session: &SessionIdentityState,

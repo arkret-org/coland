@@ -451,7 +451,9 @@ pub(super) async fn unlock_key_backup(
     body: JsonBody<KeysBackupsUnlockRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeyBackup> {
+    res: &mut Response,
+) -> coland_http::result::GuardedJsonResult<KeyBackup> {
+    crate::routing::authority_commit::no_store(res);
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
     let backup_id = backup_id.into_inner();
@@ -517,13 +519,29 @@ pub(super) async fn unlock_key_backup(
         tracing::warn!(actor=%session.actor, device=%session.require_human_device_id(), %backup_id, %request_digest, %error, "key backup unlock proof rejected");
         return Err(error);
     }
-    // key-management.md §7.4.1 - anchor the released envelope's signature_proof.signature
-    // to the actor's current device trust root before returning the full ciphertext.
-    // Without this, a malicious/compromised server could substitute an envelope
-    // signed by a revoked old device key; such envelopes MUST be rejected as
-    // `untrusted_backup_signature` even when series chain / ciphertext_digest match.
-    anchor_key_backup_auth_data_trust_root(state, &session.actor, &backup).await?;
+    // Ordinary active reads require the current writer trust root. The narrow
+    // history-only branch independently verifies the retained first-admission
+    // signer and the caller's current Device at the native PCR cut.
+    let history_reader = if body.proof.content_history.is_some() {
+        Some(crate::routing::events::pcr_history::current_reader(state, &session).await?)
+    } else {
+        anchor_key_backup_auth_data_trust_root(state, &session.actor, &backup).await?;
+        None
+    };
     let basis = match &body.proof.authority {
+        arkret_models_crypto::KeyBackupUnlockAuthority::CurrentDevice { .. }
+            if history_reader.is_some() =>
+        {
+            coland_storage::KeyBackupUnlockBasis::CurrentHumanPcrHistory {
+                reader: Box::new(
+                    history_reader
+                        .as_ref()
+                        .expect("history reader selected")
+                        .clone(),
+                ),
+                proof: Box::new(body.proof.clone()),
+            }
+        }
         arkret_models_crypto::KeyBackupUnlockAuthority::CurrentDevice { .. } => {
             coland_storage::KeyBackupUnlockBasis::CurrentDevice {
                 basis: unlock_active_basis(state, &body.proof.account_id, &backup).await?,
@@ -556,9 +574,19 @@ pub(super) async fn unlock_key_backup(
         })
         .await
         .map_err(unlock_consumption_error)?;
+    if let Some(reader) = &history_reader {
+        // Consumption is durable before a body can be published. Reacquire and
+        // recheck the current cut after that commit, holding it through handoff.
+        let (value, guard) = state
+            .key_backups()
+            .human_pcr_history_unlock_delivery(reader, &body.proof, &holder)
+            .await
+            .map_err(|_| AppError::not_found("key backup history source unavailable"))?;
+        return coland_http::result::guarded_json_ok(value, Some(guard));
+    }
     let backup = serde_json::from_value(backup)
         .map_err(|error| AppError::internal(format!("stored key backup invalid: {error}")))?;
-    json_ok(backup)
+    coland_http::result::guarded_json_ok(backup, None)
 }
 
 #[salvo::oapi::endpoint(

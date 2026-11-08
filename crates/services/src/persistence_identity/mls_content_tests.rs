@@ -27,6 +27,9 @@ use serde_json::{Value, json};
 
 use super::key_backup_tests::{self, RootFixture};
 
+#[path = "history_root_unlock_tests.rs"]
+mod history_root_unlock_tests;
+
 fn public_blob(bytes: &[u8]) -> MlsPublicBlob {
     let digest = arkret_canonical::sha256_digest(bytes);
     let hex = digest.strip_prefix("sha256:").unwrap();
@@ -716,7 +719,7 @@ async fn own_pcr_private_profile_requires_native_root_before_accepting_exact_enc
     let database = TestDatabase::lease().await;
     database.bind_device_inventory_station("ak:did_core:web:backup-test.example");
     let pool = database.pool();
-    let fixture = Box::pin(RootFixture::new(pool.clone())).await;
+    let mut fixture = Box::pin(RootFixture::new(pool.clone())).await;
     let mut conn = pool.get().await.unwrap();
     let history=diesel::sql_query("SELECT value AS payload FROM realm_bootstrap_current_states WHERE realm_id=$1 AND state_family='realm_history_access'")
         .bind::<Text,_>(fixture.pcr.history.events[0].realm_id.as_str()).get_result::<BindingRow>(&mut *conn).await.unwrap();
@@ -898,6 +901,22 @@ async fn own_pcr_private_profile_requires_native_root_before_accepting_exact_enc
     drop(conn);
     assert_eq!(
         open_content(&root, &header, &envelope.ciphertext).unwrap(),
+        plaintext
+    );
+    fixture.pcr.history.events.push(genesis.event.clone());
+    fixture.pcr.history.commits.push(genesis.commit.clone());
+    fixture.pcr.history.events.push(transaction.event.clone());
+    fixture.pcr.history.commits.push(transaction.commit.clone());
+    let restored = Box::pin(history_root_unlock_tests::exercise(
+        &pool,
+        &mut fixture,
+        &package,
+        &transaction,
+    ))
+    .await;
+    assert_eq!(restored.root_context, context);
+    assert_eq!(
+        open_content(&restored.root_base64url, &header, &envelope.ciphertext).unwrap(),
         plaintext
     );
     let mut conn = pool.get().await.unwrap();

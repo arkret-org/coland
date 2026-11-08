@@ -23,7 +23,9 @@ async fn get_committed_event(
     event_id: PathParam<String>,
     depot: &mut Depot,
     req: &mut Request,
+    res: &mut Response,
 ) -> coland_http::result::GuardedJsonResult<CommittedEventView> {
+    crate::routing::authority_commit::no_store(res);
     let state = depot.get_typed::<AppState>().expect("state injected");
     let event_id = EventId::new(event_id.into_inner())
         .map_err(|_| AppError::not_found("committed event not found"))?;

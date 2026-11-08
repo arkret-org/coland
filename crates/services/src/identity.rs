@@ -1683,6 +1683,30 @@ pub trait KeyBackupPort: Send + Sync {
         &self,
         command: coland_storage::KeyBackupUnlockCommand<'_>,
     ) -> ServiceResult<Value>;
+    async fn issue_human_pcr_history_unlock_challenge(
+        &self,
+        _reader: &coland_storage::HumanPcrHistoryReader,
+        _challenge: &arkret_models_crypto::KeysBackupsUnlockChallenge,
+    ) -> ServiceResult<arkret_models_crypto::KeysBackupsUnlockChallenge> {
+        Err(
+            coland_storage::PersistenceError::Conflict("PCR history unlock unavailable".into())
+                .into(),
+        )
+    }
+    async fn human_pcr_history_unlock_delivery(
+        &self,
+        _reader: &coland_storage::HumanPcrHistoryReader,
+        _proof: &arkret_models_crypto::KeyBackupUnlockProof,
+        _holder: &str,
+    ) -> ServiceResult<(
+        arkret_models_crypto::KeyBackup,
+        Box<dyn coland_storage::AccountContentDeliveryGuard>,
+    )> {
+        Err(
+            coland_storage::PersistenceError::Conflict("PCR history unlock unavailable".into())
+                .into(),
+        )
+    }
     async fn backup(&self, backup_id: &str) -> ServiceResult<Option<Value>>;
     async fn backups_for_actor(&self, actor_id: &str) -> ServiceResult<Vec<Value>>;
     async fn list_page(&self, query: &KeyBackupListQuery) -> ServiceResult<KeyBackupListPage>;
@@ -1969,6 +1993,28 @@ impl KeyBackupService {
         command: coland_storage::KeyBackupUnlockCommand<'_>,
     ) -> ServiceResult<Value> {
         self.backups.consume_unlock(command).await
+    }
+    pub async fn issue_human_pcr_history_unlock_challenge(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        challenge: &arkret_models_crypto::KeysBackupsUnlockChallenge,
+    ) -> ServiceResult<arkret_models_crypto::KeysBackupsUnlockChallenge> {
+        self.backups
+            .issue_human_pcr_history_unlock_challenge(reader, challenge)
+            .await
+    }
+    pub async fn human_pcr_history_unlock_delivery(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        proof: &arkret_models_crypto::KeyBackupUnlockProof,
+        holder: &str,
+    ) -> ServiceResult<(
+        arkret_models_crypto::KeyBackup,
+        Box<dyn coland_storage::AccountContentDeliveryGuard>,
+    )> {
+        self.backups
+            .human_pcr_history_unlock_delivery(reader, proof, holder)
+            .await
     }
     pub async fn issue_delete_challenge(
         &self,

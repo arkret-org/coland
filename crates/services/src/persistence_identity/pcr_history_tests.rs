@@ -41,7 +41,7 @@ fn request(fixture: &RootFixture, after: Option<u64>) -> StreamScanRequestBody {
     }
 }
 
-async fn status(
+pub(super) async fn status(
     pool: &PgPool,
     fixture: &RootFixture,
     previous: Option<&AccountStatusRecord>,
@@ -103,7 +103,10 @@ async fn status(
     record
 }
 
-fn reader(fixture: &RootFixture, status: Option<AccountStatusRecord>) -> HumanPcrHistoryReader {
+pub(super) fn reader(
+    fixture: &RootFixture,
+    status: Option<AccountStatusRecord>,
+) -> HumanPcrHistoryReader {
     HumanPcrHistoryReader {
         account_id: fixture.pcr.history.account.clone(),
         device_id: fixture.pcr.history.founding_device_id.clone(),

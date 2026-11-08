@@ -41,14 +41,14 @@ async fn database() -> TestDatabase {
     database
 }
 
-struct RootFixture {
-    package: KeyBackup,
-    pcr: pcr_genesis::PcrGenesisFixture,
+pub(super) struct RootFixture {
+    pub(super) package: KeyBackup,
+    pub(super) pcr: pcr_genesis::PcrGenesisFixture,
     policy: RecoveryPolicy,
 }
 
 impl RootFixture {
-    async fn new(pool: PgPool) -> Self {
+    pub(super) async fn new(pool: PgPool) -> Self {
         let persistence = PgPersistenceStore::new(pool);
         let mut pcr = pcr_genesis::PcrGenesisFixture::new_with(
             arkret_wire::Did::new("did:web:backup-test.example").unwrap(),
@@ -170,7 +170,7 @@ impl RootFixture {
 
 use super::{Arc, KeyBackupService, PersistenceKeyBackups, Value};
 
-fn service(pool: PgPool) -> KeyBackupService {
+pub(super) fn service(pool: PgPool) -> KeyBackupService {
     KeyBackupService::new(Arc::new(PersistenceKeyBackups(Arc::new(
         PgPersistenceStore::new(pool),
     ))))
@@ -210,7 +210,10 @@ fn successor(previous: &KeyBackup) -> KeyBackup {
     next
 }
 
-async fn put(service: &KeyBackupService, package: &KeyBackup) -> crate::ServiceResult<()> {
+pub(super) async fn put(
+    service: &KeyBackupService,
+    package: &KeyBackup,
+) -> crate::ServiceResult<()> {
     service
         .store_backup(
             package.backup_id.to_string(),

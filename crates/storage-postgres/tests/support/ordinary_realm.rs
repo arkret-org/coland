@@ -754,7 +754,10 @@ pub async fn open_human_discussion(pool: &PgPool, seed: &str) -> Discussion {
     Box::pin(open_discussion_unit(pool, unit)).await
 }
 
-async fn open_discussion_unit(pool: &PgPool, unit: OrdinaryRealmBootstrapCommitUnit) -> Discussion {
+pub async fn open_discussion_unit(
+    pool: &PgPool,
+    unit: OrdinaryRealmBootstrapCommitUnit,
+) -> Discussion {
     // The fixture owns separate transactions, not a suspended production
     // transaction. An immediately awaited, cancellation-bound task removes
     // the large scenario's poll frame from those real admission calls.

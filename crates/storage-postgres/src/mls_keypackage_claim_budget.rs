@@ -27,6 +27,14 @@ struct Count {
     count: i64,
 }
 
+// Keep the original intent independently from its short-lived budget counter.
+// A still-valid signed intent retains its first decision even if retention
+// metadata is damaged; an expired intent cannot become valid by replay.
+const PRUNE_ATTEMPTS_SQL: &str = "DELETE FROM keypackage_claim_attempts t WHERE expires_at<=clock_timestamp() \
+     AND NOT EXISTS(SELECT 1 FROM keypackage_claim_sources s \
+       WHERE s.source_id=t.source_id AND s.claim_request_id=t.claim_request_id \
+         AND (s.request_body->>'expires_at')::timestamptz>clock_timestamp())";
+
 // The handler has already authenticated both layers. Only the SDK command
 // reaches this boundary; callers cannot choose a reduced identity or digest.
 pub(crate) async fn record_attempt(
@@ -129,7 +137,10 @@ pub(crate) async fn record_attempt(
             || body.expires_at <= signed_at || body.expires_at - signed_at > chrono::Duration::seconds(300) {
             return Ok(PeerKeyPackageClaimRateDecision::Unavailable);
         }
-        if body.target_actor_id.is_some() || body.requester_actor_id.is_some() {
+        // Every authenticated branch leaves an exact pre-allocation intent,
+        // including Human and Agent claims with no allocated package yet.
+        // This records an obligation to reconcile, not accepted membership or
+        // permission to install any endpoint in the recovery inventory.
         sql_query("INSERT INTO keypackage_claim_sources(source_id,claim_request_id,request_digest,request_body,governing_realm_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING")
             .bind::<Text,_>(source).bind::<Text,_>(identity).bind::<Text,_>(&digest)
             .bind::<Jsonb,_>(serde_json::to_value(body).map_err(PersistenceError::database)?)
@@ -138,9 +149,8 @@ pub(crate) async fn record_attempt(
         let original=sql_query("SELECT request_digest,NULL::text AS rejection_reason FROM keypackage_claim_sources WHERE source_id=$1 AND claim_request_id=$2")
             .bind::<Text,_>(source).bind::<Text,_>(identity).get_result::<Attempt>(&mut *conn).await?;
         if original.request_digest != digest { return Ok(PeerKeyPackageClaimRateDecision::DuplicateConflict); }
-        }
-        sql_query("DELETE FROM keypackage_claim_attempts t WHERE expires_at<=$1 AND NOT EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.source_id=t.source_id AND s.claim_request_id=t.claim_request_id)")
-            .bind::<Timestamptz,_>(now).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+        sql_query(PRUNE_ATTEMPTS_SQL)
+            .execute(&mut *conn).await.map_err(PersistenceError::database)?;
         if let Some(existing) = sql_query("SELECT request_digest,rejection_reason FROM keypackage_claim_attempts WHERE source_id=$1 AND claim_request_id=$2")
             .bind::<Text,_>(source).bind::<Text,_>(identity).get_result::<Attempt>(&mut *conn).await.optional().map_err(PersistenceError::database)? {
             return Ok(if existing.request_digest != digest { PeerKeyPackageClaimRateDecision::DuplicateConflict }
@@ -165,7 +175,7 @@ pub(crate) async fn record_attempt(
 
 pub(crate) async fn prune(pool: &PgPool) -> PersistenceResult<usize> {
     let mut conn = crate::pg_db(pool);
-    sql_query("DELETE FROM keypackage_claim_attempts t WHERE expires_at<=clock_timestamp() AND NOT EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.source_id=t.source_id AND s.claim_request_id=t.claim_request_id)")
+    sql_query(PRUNE_ATTEMPTS_SQL)
         .execute(&mut conn)
         .await
         .map_err(PersistenceError::database)

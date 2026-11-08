@@ -34,6 +34,11 @@ mod mls_content_tests;
 #[cfg(test)]
 #[path = "persistence_identity/pcr_history_tests.rs"]
 mod pcr_history_tests;
+// Exercise the same PostgreSQL adapter contracts in the core harness, without
+// the standalone adapter target's HTTP/Bridge development dependencies.
+#[cfg(test)]
+#[path = "../../storage-postgres/tests/keypackage_claim_budget.rs"]
+mod keypackage_claim_budget_tests;
 #[async_trait::async_trait]
 impl crate::identity::AccountLookupPort for PersistenceAccountLookup {
     async fn find_account_by_actor(

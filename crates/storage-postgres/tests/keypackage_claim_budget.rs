@@ -145,6 +145,65 @@ async fn limited_attempts(pool: &PgPool) -> i64 {
 }
 
 #[tokio::test]
+async fn human_and_agent_preallocation_intents_keep_exact_originals_without_claim_facts() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    let pool = database.pool();
+    let worker = PgMlsKeyPackageStore { pool: pool.clone() };
+    let bodies = [
+        (
+            request(
+                account("intent-requester", "source"),
+                account("intent-target", "destination"),
+            ),
+            [171; 32],
+        ),
+        (
+            agent_request(73, "intent-agent-target", "intent-agent-requester"),
+            [74; 32],
+        ),
+    ];
+    for (body, signing_seed) in bodies {
+        assert_eq!(
+            worker.record_peer_claim_attempt(&body).await.unwrap(),
+            Decision::Allowed
+        );
+        let digest = arkret_canonical::canonical_sha256(&body).unwrap();
+        let original = worker
+            .peer_claim_original(body.claim_request_id.as_str(), &digest)
+            .await
+            .unwrap()
+            .expect("pre-allocation original must be durable");
+        assert_eq!(
+            arkret_canonical::canonical_json_bytes(&original).unwrap(),
+            arkret_canonical::canonical_json_bytes(&body).unwrap()
+        );
+        assert!(
+            worker
+                .get_peer_claim(
+                    body.service_binding.source_id.as_str(),
+                    body.claim_request_id.as_str()
+                )
+                .await
+                .unwrap()
+                .is_none(),
+            "retained intent is not a fabricated claim outcome"
+        );
+        let mut changed = body.clone();
+        changed.timeout_ms = Some(1);
+        resign(&mut changed, &SigningKey::from_bytes(&signing_seed));
+        assert_eq!(
+            worker.record_peer_claim_attempt(&changed).await.unwrap(),
+            Decision::DuplicateConflict
+        );
+        assert_eq!(
+            worker.record_peer_claim_attempt(&body).await.unwrap(),
+            Decision::Allowed
+        );
+    }
+    assert!(worker.snapshot_all().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn realm_requester_retains_exact_original_even_without_an_allocated_package() {
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
@@ -581,7 +640,32 @@ async fn database_clock_controls_attempt_window_and_expired_rows_are_pruned() {
     // Account/PCR/claim/KeyPackage fact is manufactured or rewritten.
     diesel::sql_query("UPDATE keypackage_claim_attempts SET attempted_at=clock_timestamp()-interval '20 minutes',expires_at=clock_timestamp()-interval '1 second'").execute(&mut *conn).await.unwrap();
     drop(conn);
+    assert_eq!(
+        worker.prune_peer_claim_attempts().await.unwrap(),
+        0,
+        "a still-valid exact intent preserves its first decision despite damaged counter metadata"
+    );
+    assert_eq!(attempts(&pool).await, 6);
+    assert_eq!(
+        worker.record_peer_claim_attempt(&old_signed).await.unwrap(),
+        Decision::RateLimited
+    );
+    let digest = arkret_canonical::canonical_sha256(&old_signed).unwrap();
+    assert!(
+        worker
+            .peer_claim_original(old_signed.claim_request_id.as_str(), &digest)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // Counter-only rows carry no admission fact. Their expired private retention
+    // is independently reclaimable; no signed original is rewritten for time.
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("INSERT INTO keypackage_claim_attempts(source_id,claim_request_id,request_digest,requester_identity,target_identity,source_target_identity,rejection_reason,attempted_at,expires_at) SELECT 'expired-counter-only',claim_request_id,request_digest,requester_identity,target_identity,source_target_identity,rejection_reason,attempted_at,expires_at FROM keypackage_claim_attempts")
+        .execute(&mut *conn).await.unwrap();
+    drop(conn);
+    assert_eq!(attempts(&pool).await, 12);
     assert_eq!(worker.prune_peer_claim_attempts().await.unwrap(), 6);
-    assert_eq!(attempts(&pool).await, 0);
+    assert_eq!(attempts(&pool).await, 6);
     assert!(worker.snapshot_all().await.unwrap().is_empty());
 }

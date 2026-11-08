@@ -1556,6 +1556,30 @@ impl AccountStatusCurrentObservation {
     }
 }
 
+/// Process-local authenticated Human endpoint for its own PCR archive.
+/// No MLS leaf or ordinary membership is an authorization input.
+#[derive(Clone, Debug)]
+pub struct HumanPcrHistoryReader {
+    pub account_id: arkret_wire::AccountId,
+    pub device_id: arkret_wire::DeviceId,
+    pub credential_device_binding:
+        Option<arkret_models_identity::session_credential::SessionGrantDeviceBinding>,
+    pub credential_expires_at: DateTime<Utc>,
+    pub account_status_observation: Option<AccountStatusCurrentObservation>,
+}
+
+/// A request-local read result, never serialized or used as an authority token.
+pub enum HumanPcrHistoryRead<T> {
+    NotApplicable,
+    /// The caller fetches the registered authenticated Account-status resolve,
+    /// then retries; this branch grants no access and retains no lease.
+    CurrentStatusRequired,
+    Ready {
+        value: T,
+        guard: Box<dyn AccountContentDeliveryGuard>,
+    },
+}
+
 /// Process-local publication inputs using the original SDK content models.
 /// This is not a wire object or a reusable authorization assertion.
 #[derive(Clone, Debug, Default)]
@@ -3343,6 +3367,30 @@ pub trait AuthorityCommitStore: Send + Sync {
         account: &arkret_wire::AccountId,
         issuer: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<AccountStreamScan>;
+
+    /// Exact originals on the authenticated Human's immutable inception PCR.
+    /// Every successful result owns a current-device authorization read cut.
+    async fn read_human_pcr_history_page(
+        &self,
+        _reader: &HumanPcrHistoryReader,
+        _request: &arkret_wire::StreamScanRequestBody,
+        _station: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<HumanPcrHistoryRead<arkret_wire::StreamScanResponseBody>> {
+        Err(PersistenceError::Internal(
+            "Human PCR archive reader is not configured".into(),
+        ))
+    }
+
+    async fn read_human_pcr_history_event(
+        &self,
+        _reader: &HumanPcrHistoryReader,
+        _event_id: &arkret_wire::EventId,
+        _station: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<HumanPcrHistoryRead<arkret_wire::CommittedEventView>> {
+        Err(PersistenceError::Internal(
+            "Human PCR archive reader is not configured".into(),
+        ))
+    }
 
     /// `ak.peer.committed_event.read.scan.v1` for one authenticated peer
     /// Station (`service-http-binding.md` §3.1.3: the calling Station must

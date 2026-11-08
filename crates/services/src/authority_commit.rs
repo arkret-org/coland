@@ -2717,6 +2717,51 @@ impl AuthorityCommitApplication {
         Ok(scan)
     }
 
+    /// Own-PCR history uses current Human-device authority rather than an MLS join.
+    pub async fn read_human_pcr_history_page(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        request: &StreamScanRequestBody,
+        station: &DidCoreId,
+    ) -> ServiceResult<coland_storage::HumanPcrHistoryRead<StreamScanResponseBody>> {
+        request
+            .validate()
+            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+        let result = self
+            .store()
+            .read_human_pcr_history_page(reader, request, station)
+            .await?;
+        if let coland_storage::HumanPcrHistoryRead::Ready { value, .. } = &result {
+            value
+                .validate_for_request(request)
+                .map_err(|error| ServiceError::Internal(error.to_string()))?;
+        }
+        Ok(result)
+    }
+
+    pub async fn read_human_pcr_history_event(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        event_id: &arkret_wire::EventId,
+        station: &DidCoreId,
+    ) -> ServiceResult<coland_storage::HumanPcrHistoryRead<arkret_wire::CommittedEventView>> {
+        let result = self
+            .store()
+            .read_human_pcr_history_event(reader, event_id, station)
+            .await?;
+        if let coland_storage::HumanPcrHistoryRead::Ready { value, .. } = &result {
+            value
+                .validate_shape()
+                .map_err(|error| ServiceError::Internal(error.to_string()))?;
+            if value.commit().event_ref != *event_id {
+                return Err(ServiceError::Internal(
+                    "PCR original differs from the requested Event".into(),
+                ));
+            }
+        }
+        Ok(result)
+    }
+
     /// `ak.peer.committed_event.read.scan.v1`: the authenticated peer's
     /// replication right, interval, and page at one governing read cut. See
     /// [`coland_storage::AuthorityCommitStore::scan_stream_for_peer`].

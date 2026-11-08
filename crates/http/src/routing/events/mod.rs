@@ -3,6 +3,7 @@ use salvo::prelude::*;
 
 mod account_authority_private;
 pub(crate) mod event_log;
+pub(crate) mod pcr_history;
 pub(crate) mod peer;
 mod peer_device_revocations;
 // Strand + projection helpers are `pub(crate)` so the MIMI interop

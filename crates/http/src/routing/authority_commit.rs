@@ -1209,6 +1209,23 @@ async fn scan_stream(req: &mut Request, depot: &Depot, res: &mut Response) {
             "the stream is not readable by this caller",
         );
     };
+    if let Some(outcome) =
+        crate::routing::events::pcr_history::page(app_state, &session, &request).await
+    {
+        match outcome {
+            Ok(outcome) => {
+                no_store(res);
+                salvo::Scribe::render(outcome, res);
+            }
+            Err(error) => crate::routing::render_error(
+                res,
+                error.http_status(),
+                error.wire_code(),
+                &error.message,
+            ),
+        }
+        return;
+    }
     let result = app_state
         .authority()
         .scan_stream_for_account(account, request.clone())

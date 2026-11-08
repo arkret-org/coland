@@ -36,6 +36,9 @@ async fn get_committed_event(
     let caller =
         crate::routing::identity::session_actor::session_actor_from_credential(state, &session)
             .map_err(|_| AppError::not_found("committed event not found"))?;
+    if let Some(outcome) = super::super::pcr_history::event(state, &session, &event_id).await {
+        return outcome;
+    }
     // An ordinary Realm's Realm stream is read from this Station's typed
     // current, governing or held as an anchored replica (`federation.md`
     // §4.1.1, `history-visibility.md` §3.1).

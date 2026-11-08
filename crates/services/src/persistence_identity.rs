@@ -31,6 +31,9 @@ mod key_backup_tests;
 #[cfg(test)]
 #[path = "persistence_identity/mls_content_tests.rs"]
 mod mls_content_tests;
+#[cfg(test)]
+#[path = "persistence_identity/pcr_history_tests.rs"]
+mod pcr_history_tests;
 #[async_trait::async_trait]
 impl crate::identity::AccountLookupPort for PersistenceAccountLookup {
     async fn find_account_by_actor(

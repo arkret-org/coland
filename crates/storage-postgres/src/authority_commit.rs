@@ -6263,6 +6263,26 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             .await
     }
 
+    async fn read_human_pcr_history_page(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        request: &arkret_wire::StreamScanRequestBody,
+        station: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<coland_storage::HumanPcrHistoryRead<arkret_wire::StreamScanResponseBody>>
+    {
+        crate::pcr_history_read::page(&self.pool, reader, request, station).await
+    }
+
+    async fn read_human_pcr_history_event(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        event_id: &arkret_wire::EventId,
+        station: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<coland_storage::HumanPcrHistoryRead<arkret_wire::CommittedEventView>>
+    {
+        crate::pcr_history_read::event(&self.pool, reader, event_id, station).await
+    }
+
     async fn committed_event_for_peer(
         &self,
         event_id: &arkret_wire::EventId,

@@ -162,6 +162,7 @@ mod pcr_device_status_reader;
 #[path = "../../test-support/src/pcr_genesis.rs"]
 #[allow(dead_code)]
 mod pcr_genesis;
+mod pcr_history_read;
 mod pcr_private_archive;
 mod pcr_private_authority;
 mod pcr_recovery_policy_unit;

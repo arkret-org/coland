@@ -41,6 +41,18 @@ async fn own_control_origin(
     reader: &HumanPcrHistoryReader,
     realm: &arkret_wire::RealmId,
 ) -> PersistenceResult<bool> {
+    // The accepted Account binding still identifies a PCR whose inception
+    // original is damaged. Route it into native qualification so a missing
+    // original can never reopen the ordinary author/membership fallback.
+    let bound = sql_query("SELECT to_jsonb(p) AS payload FROM principal_resolutions p WHERE p.pcr_realm_id=$1 AND p.principal_id=$2 AND p.station_id=$3 LIMIT 1")
+        .bind::<Text, _>(realm.as_str())
+        .bind::<Text, _>(reader.account_id.principal_id.as_str())
+        .bind::<Text, _>(reader.account_id.station_id.as_str())
+        .get_result::<crate::JsonPayloadRow>(&mut *conn)
+        .await.optional().map_err(PersistenceError::database)?;
+    if bound.is_some() {
+        return Ok(true);
+    }
     let original = sql_query("SELECT e.envelope AS payload FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.realm_id=$1 AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',$1::text) AND c.stream_position=0 AND e.kind='ak.realm.create' AND e.state='committed'")
         .bind::<Text,_>(realm.as_str()).get_result::<crate::JsonPayloadRow>(&mut *conn)
         .await.optional().map_err(PersistenceError::database)?;

@@ -392,3 +392,40 @@ async fn own_pcr_archive_does_not_trust_actor_fields_without_the_accepted_creati
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn missing_pcr_inception_never_reopens_ordinary_author_read_fallback() {
+    let (database, fixture) = Box::pin(fixture()).await;
+    let pool = database.pool();
+    let current = reader(&fixture, Some(status(&pool, &fixture, None).await));
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query(
+        "UPDATE realm_commits SET event_pk=NULL WHERE realm_id=$1 AND stream_position=0",
+    )
+    .bind::<Text, _>(fixture.pcr.history.events[0].realm_id.as_str())
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let store = PgAuthorityCommitStore { pool };
+    assert!(
+        store
+            .read_human_pcr_history_page(
+                &current,
+                &request(&fixture, None),
+                &current.account_id.station_id,
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .read_human_pcr_history_event(
+                &current,
+                &fixture.pcr.history.events[1].event_id,
+                &current.account_id.station_id,
+            )
+            .await
+            .is_err()
+    );
+}

@@ -591,6 +591,19 @@ pub trait RecoverySessionStore: Send + Sync {
 
 #[async_trait]
 pub trait SecurityTransactionStore: Send + Sync {
+    /// Reconstruct the original completed Human recovery unit for the exact
+    /// current credential-bound replacement. This is a planning read, not an
+    /// MLS admission token: a later write must repeat qualification under its
+    /// own locks and verify inventory, leaf possession and exact scope/base.
+    /// Completed identity evidence outlives the factor/session validity window.
+    async fn human_content_recovery_source(
+        &self,
+        _reader: &crate::HumanPcrHistoryReader,
+    ) -> PersistenceResult<arkret_wire::RecoveryCompletionAttestation> {
+        Err(PersistenceError::Conflict(
+            "failed_precondition: native content recovery source unavailable".to_owned(),
+        ))
+    }
     async fn commit_revoke_command_terminal(
         &self,
         write: RevokeCommandTerminalWrite,

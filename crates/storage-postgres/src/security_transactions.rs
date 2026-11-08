@@ -12,6 +12,7 @@ use super::{
     sql_types,
 };
 
+mod content_recovery_source;
 mod recovery_unit;
 mod revoke_unit;
 mod rotation_units;
@@ -609,6 +610,20 @@ async fn insert_step_attempt(
 
 #[async_trait]
 impl SecurityTransactionStore for PgSecurityTransactionStore {
+    async fn human_content_recovery_source(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+    ) -> PersistenceResult<arkret_wire::RecoveryCompletionAttestation> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            content_recovery_source::qualify_in_connection(conn, reader)
+                .await
+                .map_err(Into::into)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn commit_revoke_command_terminal(
         &self,
         write: RevokeCommandTerminalWrite,

@@ -191,6 +191,20 @@ pub(crate) async fn commit_mls_group_current_state_in_connection(
     if !matches!(event.kind, EventKind::MlsGenesis | EventKind::MlsCommit) {
         return Ok(());
     }
+    if event.kind == EventKind::MlsCommit
+        && event
+            .as_mls_commit()
+            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
+            .recovery_binding()
+            .is_some()
+    {
+        // Ordinary capability admission cannot establish a recovery episode.
+        // Keep both ExternalInit and recovery Member cleanup closed until the
+        // dedicated unit verifies the native source, frozen inventory and cut.
+        return Err(failed_precondition(
+            "native content recovery inventory admission is unavailable",
+        ));
+    }
     let commit = &transaction.commit;
     let installation = transaction.mls_state.as_ref().ok_or_else(|| {
         PersistenceError::SchemaViolation(

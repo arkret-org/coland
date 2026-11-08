@@ -18,6 +18,9 @@ mod identity_recovery;
 #[path = "history_root_rotation_tests.rs"]
 mod root_rotation;
 
+#[path = "history_recovery_source_tests.rs"]
+mod recovery_source;
+
 fn random() -> arkret_wire::Base64UrlString {
     arkret_wire::Base64UrlString::new(
         arkret_crypto::content_history::fresh_content_key_salt().unwrap(),
@@ -115,6 +118,7 @@ pub(super) async fn exercise(
     let reader = pcr_history_tests::reader(fixture, Some(record));
     let persistence = PgPersistenceStore::new(pool.clone());
     let store = persistence.key_backups();
+    recovery_source::refuse_ordinary(pool, &reader).await;
     let now = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let challenge = KeysBackupsUnlockChallenge {
         challenge_id: random(),
@@ -381,6 +385,7 @@ pub(super) async fn exercise(
             model_generation_ref: 2,
         },
     );
+    recovery_source::exercise(pool, &replacement_reader, &reader).await;
     let mut replacement_challenge = new_challenge;
     replacement_challenge.requesting_device_id = replacement;
     replacement_challenge.request_id = random();
@@ -454,7 +459,7 @@ pub(super) async fn exercise(
     )
     .unwrap();
     assert_eq!(bag.items.len(), 1);
-    Box::pin(root_rotation::exercise(
+    let result = Box::pin(root_rotation::exercise(
         pool,
         fixture,
         &replacement_reader,
@@ -463,5 +468,9 @@ pub(super) async fn exercise(
         &after_recovery,
         &bag,
     ))
-    .await
+    .await;
+    // Current factor revocation and recipient rotation do not invalidate the
+    // original completed identity unit used for this replacement episode.
+    recovery_source::require_source(pool, &replacement_reader).await;
+    result
 }

@@ -2998,6 +2998,9 @@ ALTER TABLE ONLY public.recovery_sessions
     ADD CONSTRAINT recovery_sessions_transaction_id_fkey FOREIGN KEY (transaction_id) REFERENCES public.security_transactions(id);
 
 CREATE INDEX security_transactions_principal_created_idx ON public.security_transactions USING btree (principal_id, created_at DESC);
+CREATE INDEX security_transactions_content_recovery_source_idx
+ ON public.security_transactions (principal_id, station_id, (prepared_plan->'binding'->>'authorize_event_id'))
+ WHERE kind='recovery' AND terminal_outcome->>'outcome'='completed';
 CREATE UNIQUE INDEX security_transactions_revoke_proposal_event_unique
  ON public.security_transactions ((revoke_proposal->>'proposal_event_id'))
  WHERE revoke_proposal IS NOT NULL;

@@ -401,7 +401,7 @@ async fn independent_mls_leaf_key_binds_to_native_device_and_survives_member_upd
         &prepared.request.authority_commit,
         EventKind::MlsCommit,
         prepared.endpoint.actor_id.signing_principal_id(),
-        serde_json::to_value(payload).unwrap(),
+        serde_json::to_value(&payload).unwrap(),
         prepared.request.authority_commit.commit.committed_at,
     );
     update.authority_commit.mls_state = Some(MlsStateInstallation {
@@ -417,6 +417,53 @@ async fn independent_mls_leaf_key_binds_to_native_device_and_survives_member_upd
         public_blobs: blobs,
     });
     let update = ordinary_realm::source_request(&pool, update).await;
+    let forged = payload
+        .with_recovery_binding(arkret_models_crypto::ContentRecoveryBinding {
+            replacement: prepared.endpoint.clone(),
+            authorization_event_ref: prepared.endpoint.authorization_event_ref.clone(),
+            base_group_state_ref: prepared.request.authority_commit.event.event_id.clone(),
+            expected_epoch: 0,
+            inventory_digest: arkret_wire::Hash::new(format!("sha256:{}", "77".repeat(32)))
+                .unwrap(),
+        })
+        .unwrap();
+    let mut forged = ordinary_realm::next_request(
+        &prepared.request.authority_commit,
+        EventKind::MlsCommit,
+        prepared.endpoint.actor_id.signing_principal_id(),
+        serde_json::to_value(forged).unwrap(),
+        prepared.request.authority_commit.commit.committed_at,
+    );
+    forged.authority_commit.mls_state = update.authority_commit.mls_state.clone();
+    let forged = ordinary_realm::source_request(&pool, forged).await;
+    let error = uow.commit_event(forged.clone()).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("native content recovery inventory"),
+        "{error}"
+    );
+    let authority = PgAuthorityCommitStore { pool: pool.clone() };
+    assert!(
+        authority
+            .queued_event(&forged.authority_commit.event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        authority
+            .stream_head(&prepared.request.authority_commit.commit.stream_ref)
+            .await
+            .unwrap()
+            .unwrap()
+            .commit_id,
+        prepared.request.authority_commit.commit.commit_id
+    );
+    assert_eq!(
+        current_binding(&pool, &prepared.request).await,
+        prepared.endpoint
+    );
     uow.commit_event(update.clone()).await.unwrap();
     assert_eq!(current_binding(&pool, &update).await, prepared.endpoint);
 }

@@ -367,3 +367,157 @@ async fn a_revoked_recipient_copy_is_not_a_sufficient_retention_substitute() {
         );
     }
 }
+
+// These issuance-ledger cases do not authorize content-history delivery.
+// Native reader/custody/PoP admission remains a separate required boundary.
+fn unlock_issuance(
+    fixture: &RootFixture,
+    package: &KeyBackup,
+    at: chrono::DateTime<chrono::Utc>,
+    history: Option<arkret_models_crypto::ContentHistoryBackupAccess>,
+) -> Value {
+    let random = || {
+        arkret_wire::Base64UrlString::new(
+            arkret_crypto::content_history::fresh_content_key_salt().unwrap(),
+        )
+        .unwrap()
+    };
+    let challenge = arkret_models_crypto::KeysBackupsUnlockChallenge {
+        challenge_id: random(),
+        challenge: random(),
+        nonce: random(),
+        operation: arkret_wire::ServiceOperationId::SELF_KEYS_BACKUPS_COMMAND_UNLOCK_V1.into(),
+        account_id: fixture.pcr.history.account.clone(),
+        requesting_device_id: fixture.pcr.history.founding_device_id.clone(),
+        backup_id: package.backup_id.clone(),
+        series_id: package.series_id.clone(),
+        ciphertext_digest: package.ciphertext_digest.clone(),
+        audience: arkret_wire::NonEmptyString::new("https://backup-test.example").unwrap(),
+        service_id: fixture.pcr.history.account.station_id.clone(),
+        request_id: arkret_wire::Base64UrlString::new("AAAAAAAAAAAAAAAAAAAAAA").unwrap(),
+        issued_at: at,
+        expires_at: at + chrono::Duration::seconds(300),
+        subject_actor_id: None,
+        custody_authorization_ref: None,
+        content_history: history,
+    };
+    challenge
+        .validate_for_request(&challenge.request_body(), &challenge.backup_id)
+        .unwrap();
+    serde_json::to_value(challenge).unwrap()
+}
+
+fn history_selection(
+    fixture: &RootFixture,
+    package: &KeyBackup,
+) -> arkret_models_crypto::ContentHistoryBackupAccess {
+    let source = &fixture.pcr.history.commits[0];
+    arkret_models_crypto::ContentHistoryBackupAccess {
+        source: arkret_wire::CommittedEventRef {
+            event_id: source.event_ref.clone(),
+            commit_id: source.commit_id.clone(),
+            stream_ref: source.stream_ref.clone(),
+            stream_position: source.stream_position,
+        },
+        root_refs: vec![package.contents[0].root_ref.clone().unwrap()],
+    }
+}
+
+#[tokio::test]
+async fn unlock_issuance_freezes_complete_request_across_retry_and_reopen() {
+    let database = database().await;
+    let fixture = RootFixture::new(database.pool()).await;
+    let store = service(database.pool());
+    let package = sealed(fixture.package.clone());
+    put(&store, &package).await.unwrap();
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let history = history_selection(&fixture, &package);
+    let first = unlock_issuance(&fixture, &package, at, Some(history.clone()));
+    assert_eq!(
+        store
+            .issue_unlock_challenge(first.clone(), at)
+            .await
+            .unwrap(),
+        first
+    );
+    let replay = unlock_issuance(&fixture, &package, at, Some(history.clone()));
+    assert_ne!(replay["challenge_id"], first["challenge_id"]);
+    let reopened = service(database.pool());
+    assert_eq!(
+        reopened
+            .issue_unlock_challenge(replay.clone(), at)
+            .await
+            .unwrap(),
+        first
+    );
+    let mut changed = Vec::new();
+    let mut plain = replay.clone();
+    plain.as_object_mut().unwrap().remove("content_history");
+    changed.push(plain);
+    let mut root = replay.clone();
+    root["content_history"]["root_refs"][0] = json!(format!("sha256:{}", "ab".repeat(32)));
+    changed.push(root);
+    let mut source = replay.clone();
+    source["content_history"]["source"]["stream_position"] = json!(1);
+    changed.push(source);
+    let mut custody = replay;
+    custody["subject_actor_id"] =
+        json!(arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+            arkret_wire::DidCoreId::new("ak:did_core:web:another-subject.example").unwrap(),
+            fixture.pcr.history.account.station_id.clone(),
+        )));
+    custody["custody_authorization_ref"] = json!(fixture.pcr.history.events[0].event_id);
+    changed.push(custody);
+    for changed in changed {
+        let error = reopened
+            .issue_unlock_challenge(changed, at)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate_conflict"),
+            "{error:?}"
+        );
+    }
+    assert_eq!(
+        reopened
+            .issue_unlock_challenge(first.clone(), at)
+            .await
+            .unwrap(),
+        first
+    );
+}
+
+#[tokio::test]
+async fn unlock_issuance_cannot_rebind_history_after_old_challenge_expires() {
+    let database = database().await;
+    let fixture = RootFixture::new(database.pool()).await;
+    let store = service(database.pool());
+    let package = sealed(fixture.package.clone());
+    put(&store, &package).await.unwrap();
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let history = history_selection(&fixture, &package);
+    let first = unlock_issuance(&fixture, &package, at, Some(history.clone()));
+    store
+        .issue_unlock_challenge(first.clone(), at)
+        .await
+        .unwrap();
+    let later = at + chrono::Duration::seconds(301);
+    let changed = unlock_issuance(&fixture, &package, later, None);
+    let error = store
+        .issue_unlock_challenge(changed, later)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("duplicate_conflict"),
+        "{error:?}"
+    );
+    let renewed = unlock_issuance(&fixture, &package, later, Some(history));
+    assert_eq!(
+        store
+            .issue_unlock_challenge(renewed.clone(), later)
+            .await
+            .unwrap(),
+        renewed
+    );
+    assert_ne!(renewed["challenge_id"], first["challenge_id"]);
+}

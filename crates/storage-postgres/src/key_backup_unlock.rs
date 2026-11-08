@@ -45,6 +45,18 @@ fn field<'a>(value: &'a Value, name: &str) -> PersistenceResult<&'a str> {
         .and_then(Value::as_str)
         .ok_or_else(|| rejected("unlock ledger binding incomplete"))
 }
+fn issuance_request(
+    value: &Value,
+) -> PersistenceResult<arkret_models_crypto::KeysBackupsIssueUnlockChallengeRequestBody> {
+    let challenge: arkret_models_crypto::KeysBackupsUnlockChallenge =
+        serde_json::from_value(value.clone())
+            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    let request = challenge.request_body();
+    challenge
+        .validate_for_request(&request, &challenge.backup_id)
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    Ok(request)
+}
 pub(crate) fn object_charge(value: &Value) -> PersistenceResult<(String, i64)> {
     let bytes =
         arkret_canonical::canonical_json_bytes(value).map_err(PersistenceError::database)?;
@@ -58,6 +70,7 @@ impl crate::key_backup::PgKeyBackupStore {
         challenge: Value,
         now: chrono::DateTime<Utc>,
     ) -> PersistenceResult<Value> {
+        let request = issuance_request(&challenge)?;
         let id = field(&challenge, "challenge_id")?.to_owned();
         let backup_id = field(&challenge, "backup_id")?.to_owned();
         let device = field(&challenge, "requesting_device_id")?.to_owned();
@@ -73,11 +86,34 @@ impl crate::key_backup::PgKeyBackupStore {
         let expires = chrono::DateTime::parse_from_rfc3339(field(&challenge, "expires_at")?)
             .map_err(PersistenceError::database)?
             .with_timezone(&Utc);
+        let issued = chrono::DateTime::parse_from_rfc3339(field(&challenge, "issued_at")?)
+            .map_err(PersistenceError::database)?
+            .with_timezone(&Utc);
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_,PgTransactionError,_>(async move |conn| {
             sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))").bind::<Text,_>(format!("backup-unlock:{account}")).execute(&mut *conn).await.map_err(PersistenceError::database)?;
+            let now=Utc::now().max(now);
+            if issued>now || expires<=now {
+                return Err(rejected("failed_precondition: unlock issuance is outside its validity window").into());
+            }
+            // The idempotency key never drops subject, custody or history
+            // bindings, including after an earlier challenge expires or is consumed.
+            let known=sql_query("SELECT challenge AS payload FROM key_backup_unlock_authorities WHERE account_id=$1 AND device_id=$2 AND kind='current_device' AND challenge->>'backup_id'=$3 AND challenge->>'request_id'=$4 ORDER BY verified_at DESC,authority_id DESC LIMIT 1")
+                .bind::<Text,_>(&account).bind::<Text,_>(&device).bind::<Text,_>(&backup_id)
+                .bind::<Text,_>(request.request_id.as_str()).get_result::<JsonPayloadRow>(&mut *conn).await.optional()?;
+            if let Some(known)=known
+                && issuance_request(&known.payload)? != request {
+                return Err(rejected("duplicate_conflict: unlock issuance request changed").into());
+            }
+            let frontier=sql_query("SELECT jsonb_build_object('series_id',payload->'series_id','ciphertext_digest',payload->'ciphertext_digest') AS payload FROM key_backups WHERE id=$1 FOR SHARE")
+                .bind::<sql_types::Uuid,_>(ids::typed_uuid_part_expect_internal(&backup_id))
+                .get_result::<JsonPayloadRow>(&mut *conn).await.optional()?
+                .ok_or_else(||rejected("failed_precondition: unlock backup is unavailable"))?.payload;
+            if frontier["series_id"]!=challenge["series_id"] || frontier["ciphertext_digest"]!=challenge["ciphertext_digest"] {
+                return Err(rejected("backup_frontier_stale").into());
+            }
             let existing=sql_query("SELECT challenge AS payload FROM key_backup_unlock_authorities WHERE identity_key=$1 AND expires_at>$2 AND NOT EXISTS (SELECT 1 FROM key_backup_unlock_entries e WHERE e.authority_id=key_backup_unlock_authorities.authority_id AND consumed_at IS NOT NULL)")
                 .bind::<Text,_>(&identity).bind::<Timestamptz,_>(now).get_result::<JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
             if let Some(row)=existing { return Ok(row.payload); }

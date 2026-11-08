@@ -5104,6 +5104,9 @@ CREATE TABLE public.key_backup_unlock_entries (
  request_digest TEXT, holder TEXT, consumed_at TIMESTAMPTZ, ip TEXT,
  PRIMARY KEY (authority_id, backup_id)
 );
+CREATE INDEX key_backup_unlock_issuance_request_idx ON public.key_backup_unlock_authorities
+    (account_id,device_id,(challenge->>'backup_id'),(challenge->>'request_id'))
+    WHERE kind='current_device';
 CREATE INDEX key_backup_unlock_consumption_idx ON public.key_backup_unlock_entries(consumed_at);
 
 -- Exact Agent authorize command outcomes survive handle renewal and restarts.

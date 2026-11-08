@@ -4,6 +4,8 @@ use arkret_wire::{ActorId, ScopeRef};
 
 use super::*;
 
+mod ordinary_endpoints;
+
 fn denied(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!("capability_denied: {detail}"))
 }
@@ -369,10 +371,7 @@ pub(crate) async fn require_admission(
     attempt: &PeerKeyPackageClaimAttempt<'_>,
 ) -> PersistenceResult<()> {
     let Some(admission) = &attempt.admission else {
-        if attempt.applet_device_scope_guard.is_some() {
-            return Err(denied("native claim needs its original signed command"));
-        }
-        return Ok(());
+        return Err(denied("new claim needs its original signed command"));
     };
     let request = &admission.request;
     request.validate_shape().map_err(denied)?;
@@ -406,7 +405,7 @@ pub(crate) async fn require_admission(
         endpoints.push(target);
     }
     if endpoints.is_empty() {
-        return Ok(());
+        return crate::boxed_future(|| ordinary_endpoints::require_current(conn, attempt)).await;
     }
     let outcome: arkret_models_crypto::KeyPackagesClaimResponseBody = serde_json::from_value(
         attempt

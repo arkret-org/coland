@@ -21,6 +21,9 @@ mod root_rotation;
 #[path = "history_recovery_source_tests.rs"]
 mod recovery_source;
 
+#[path = "history_claim_fence_tests.rs"]
+mod claim_fence;
+
 fn random() -> arkret_wire::Base64UrlString {
     arkret_wire::Base64UrlString::new(
         arkret_crypto::content_history::fresh_content_key_salt().unwrap(),
@@ -348,7 +351,7 @@ pub(super) async fn exercise(
             .is_err()
     );
     let (replacement, authorization, method, seed, _session_id) =
-        Box::pin(identity_recovery::recover(pool, fixture)).await;
+        Box::pin(claim_fence::recover(pool, fixture)).await;
     assert!(consume(pool, &reader, &valid, package).await.is_err());
     assert!(
         consume(pool, &new_reader, &new_proof, package)

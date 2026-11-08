@@ -3006,6 +3006,13 @@ async fn commit_prepared_event_inner(
             event_approvals,
         )
         .await?
+    } else if event.kind == arkret_wire::EventKind::MlsHistoryRequest {
+        crate::authority_commit::commit_content_history_request_in_connection(
+            conn,
+            &request.authority_commit,
+            event_approvals,
+        )
+        .await?
     } else {
         crate::authority_commit::commit_transaction_with_approvals_in_connection(
             conn,

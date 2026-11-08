@@ -29,6 +29,7 @@ arkret-bootstrap = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 anyhow = { workspace = true }
 arkret-canonical.workspace = true
+arkret-crypto = { workspace = true, features = ["hpke"] }
 arkret-event-draft.workspace = true
 arkret-identifiers = { workspace = true, features = ["diesel"] }
 arkret-identity.workspace = true

@@ -155,6 +155,201 @@ async fn current_binding(pool: &PgPool, request: &EventCommitRequest) -> Content
     serde_json::from_value(row.payload).unwrap()
 }
 
+fn history_request_payload(prepared: &PreparedGroup) -> Value {
+    let base = &prepared.request.authority_commit;
+    json!({
+        "recipient":prepared.endpoint,
+        "recipient_hpke_key_base64url":arkret_canonical::base64url_encode(
+            arkret_crypto::hpke::generate_x25519_keypair().unwrap().public_key()),
+        "history_cut":{
+            "event_id":base.event.event_id,"commit_id":base.commit.commit_id,
+            "stream_ref":base.commit.stream_ref,"stream_position":base.commit.stream_position
+        },
+        "expires_at":arkret_canonical::format_timestamp_canonical(
+            base.event.created_at + chrono::Duration::seconds(600))
+    })
+}
+
+#[tokio::test]
+async fn native_history_request_accepts_exact_current_endpoint_with_independent_event_and_leaf_keys()
+ {
+    let database = TestDatabase::lease().await;
+    database.bind_device_inventory_station(ordinary_realm::station().as_str());
+    let pool = database.pool();
+    let prepared = Box::pin(prepared_group(&pool, "native-history-request", false)).await;
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    uow.commit_event(prepared.request.clone()).await.unwrap();
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let genesis = store
+        .committed_event(&prepared.strategy_event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(genesis.event.scope_ref, arkret_wire::ScopeRef::RealmGenesis);
+    let mut previous = prepared.request.authority_commit.clone();
+    for use_genesis_cut in [false, true] {
+        let mut payload = history_request_payload(&prepared);
+        if use_genesis_cut {
+            payload["history_cut"] = json!({
+                "event_id":genesis.event.event_id,"commit_id":genesis.commit.commit_id,
+                "stream_ref":genesis.commit.stream_ref,"stream_position":genesis.commit.stream_position
+            });
+        }
+        let request = ordinary_realm::next_request(
+            &previous,
+            EventKind::MlsHistoryRequest,
+            previous.event.actor_id.signing_principal_id(),
+            payload,
+            previous.event.created_at + chrono::Duration::milliseconds(1),
+        );
+        let request = ordinary_realm::source_request(&pool, request).await;
+        let key = &request
+            .authority_commit
+            .producer_signer_fact
+            .as_ref()
+            .unwrap()
+            .as_account_device()
+            .unwrap()
+            .key
+            .public_key_base64url;
+        assert_ne!(key.as_str(), prepared.endpoint.signature_key_base64url);
+        let id = &request.authority_commit.event.event_id;
+        let error = store
+            .admit_event_transaction(&request.authority_commit, request.event.received_at)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("native content-history admission is unavailable"),
+            "{error}"
+        );
+        assert!(store.queued_event(id).await.unwrap().is_none());
+        assert!(store.committed_event(id).await.unwrap().is_none());
+        uow.commit_event(request.clone()).await.unwrap();
+        uow.commit_event(request.clone()).await.unwrap();
+        let accepted = store.committed_event(id).await.unwrap().unwrap();
+        assert_eq!(accepted.event, request.authority_commit.event);
+        assert_eq!(accepted.commit, request.authority_commit.commit);
+        previous = request.authority_commit;
+    }
+    assert_eq!(
+        current_binding(&pool, &prepared.request).await,
+        prepared.endpoint
+    );
+}
+
+#[tokio::test]
+async fn native_history_request_refuses_wrong_leaf_cut_low_order_and_invalid_window_atomically() {
+    let database = TestDatabase::lease().await;
+    database.bind_device_inventory_station(ordinary_realm::station().as_str());
+    let pool = database.pool();
+    let prepared = Box::pin(prepared_group(
+        &pool,
+        "native-history-request-refusals",
+        false,
+    ))
+    .await;
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    uow.commit_event(prepared.request.clone()).await.unwrap();
+    let base = &prepared.request.authority_commit;
+    for case in [
+        "leaf",
+        "endpoint",
+        "authorization",
+        "actor",
+        "cut",
+        "low_order",
+        "ttl",
+        "expired",
+    ] {
+        let mut payload = history_request_payload(&prepared);
+        let mut created_at = base.event.created_at + chrono::Duration::milliseconds(1);
+        match case {
+            "leaf" => {
+                payload["recipient"]["signature_key_base64url"] = json!(
+                    base.producer_signer_fact
+                        .as_ref()
+                        .unwrap()
+                        .as_account_device()
+                        .unwrap()
+                        .key
+                        .public_key_base64url
+                )
+            }
+            "endpoint" => {
+                payload["recipient"]["endpoint"]["device_id"] =
+                    json!("ak:device:019a0000-0000-7000-8000-000000000099")
+            }
+            "authorization" => {
+                payload["recipient"]["authorization_event_ref"] = json!(base.event.event_id)
+            }
+            "actor" => {
+                payload["recipient"]["actor_id"]["account_id"]["principal_id"] =
+                    json!("ak:did_core:web:another-recipient.example")
+            }
+            "cut" => payload["history_cut"]["stream_position"] = json!(0),
+            "low_order" => {
+                payload["recipient_hpke_key_base64url"] =
+                    json!(arkret_canonical::base64url_encode([0; 32]))
+            }
+            "ttl" => {
+                payload["expires_at"] = json!(arkret_canonical::format_timestamp_canonical(
+                    base.event.created_at + chrono::Duration::seconds(901)
+                ))
+            }
+            "expired" => {
+                created_at = base.event.created_at;
+                let expiry = created_at + chrono::Duration::milliseconds(1);
+                assert!(chrono::Utc::now() >= expiry);
+                payload["expires_at"] = json!(arkret_canonical::format_timestamp_canonical(expiry))
+            }
+            _ => unreachable!(),
+        }
+        let request = ordinary_realm::next_request(
+            base,
+            EventKind::MlsHistoryRequest,
+            base.event.actor_id.signing_principal_id(),
+            payload,
+            created_at,
+        );
+        let request = ordinary_realm::source_request(&pool, request).await;
+        let error = uow
+            .commit_event(request.clone())
+            .await
+            .unwrap_err()
+            .to_string();
+        let expected = match case {
+            "leaf" | "endpoint" | "authorization" | "actor" => {
+                "differs from its native current endpoint"
+            }
+            "cut" => "history cut differs",
+            "low_order" => "noncontributory X25519 recipient",
+            _ => "bounded validity window",
+        };
+        assert!(error.contains(expected), "{case}: {error}");
+        assert!(
+            PgAuthorityCommitStore { pool: pool.clone() }
+                .committed_event(&request.authority_commit.event.event_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            PgAuthorityCommitStore { pool: pool.clone() }
+                .queued_event(&request.authority_commit.event.event_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let head = PgAuthorityCommitStore { pool: pool.clone() }
+            .stream_head(&base.commit.stream_ref)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(head.commit_id, base.commit.commit_id);
+    }
+}
+
 #[tokio::test]
 async fn independent_mls_leaf_key_binds_to_native_device_and_survives_member_update() {
     let database = TestDatabase::lease().await;

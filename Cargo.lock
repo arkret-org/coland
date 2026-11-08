@@ -2009,6 +2009,7 @@ dependencies = [
  "arkret-bootstrap",
  "arkret-bridge-runtime",
  "arkret-canonical",
+ "arkret-crypto",
  "arkret-event-draft",
  "arkret-http-client",
  "arkret-identifiers",

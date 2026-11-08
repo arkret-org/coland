@@ -4,15 +4,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use arkret_event_draft::{EventContentEnvelopesExt as _, EventPayloadExt as _};
-use arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact;
 use arkret_models_collaboration::events_payloads::RealmPurpose;
 use arkret_models_crypto::{
-    ContentContext, ContentCoverageEntry, ContentEndpoint, ContentRootContext,
-    EncryptedEnvelopeEncryptionContext, KeyBackup, SecretStorageItemKind,
+    ContentContext, ContentCoverageEntry, ContentRootContext, EncryptedEnvelopeEncryptionContext,
+    KeyBackup, SecretStorageItemKind,
 };
-use arkret_wire::{
-    CommittedEventRef, Event, EventKind, MlsGroupValue, MlsWelcomeRecipientEndpoint,
-};
+use arkret_wire::{CommittedEventRef, Event, EventKind, MlsGroupValue};
 use coland_storage::{AuthorityCommitTransaction, PersistenceError, PersistenceResult};
 use diesel::sql_types::{Binary, Jsonb, Text};
 use diesel::{QueryableByName, sql_query};
@@ -53,82 +50,6 @@ struct DomainRow {
     content_path: String,
     #[diesel(sql_type = Jsonb)]
     content_context: Value,
-}
-
-async fn producer(
-    conn: &mut AsyncPgConnection,
-    transaction: &AuthorityCommitTransaction,
-    group: &MlsGroupValue,
-) -> PersistenceResult<ContentEndpoint> {
-    let fact = transaction
-        .producer_signer_fact
-        .as_ref()
-        .ok_or_else(|| missing("encrypted original requires its native producer signer fact"))?;
-    let (actor, endpoint, authorization) = match fact {
-        HistoricalProducerSignerFact::AccountDevice(fact) => (
-            fact.actor.clone(),
-            MlsWelcomeRecipientEndpoint::Device {
-                device_id: fact.device_id.clone(),
-            },
-            fact.key.authorization_ref.event_id.clone(),
-        ),
-        HistoricalProducerSignerFact::AgentRuntime(fact) => (
-            fact.actor_id.clone(),
-            MlsWelcomeRecipientEndpoint::AgentRuntime {
-                verification_method: fact.verification_method.clone(),
-            },
-            fact.authorization_event_ref.clone(),
-        ),
-        HistoricalProducerSignerFact::RealmDevice(fact) => (
-            fact.actor_id.clone(),
-            MlsWelcomeRecipientEndpoint::Device {
-                device_id: fact.device_id.clone(),
-            },
-            fact.authorization_event_id.clone(),
-        ),
-        _ => {
-            return Err(missing(
-                "producer has no registered application-content endpoint",
-            ));
-        }
-    };
-    if actor != *transaction.event.actual_signer() {
-        return Err(invalid(
-            "content endpoint differs from the original actual signer",
-        ));
-    }
-    let rows = sql_query("SELECT binding AS payload FROM mls_endpoint_current_bindings WHERE scope_key=$1 AND epoch=$2 AND current_event_ref=$3 AND actor_id=$4 AND binding->'endpoint'=$5 AND binding->>'authorization_event_ref'=$6 LIMIT 2 FOR SHARE")
-        .bind::<Text,_>(crate::mls_group_current_states::scope_key(&group.effective_scope)?)
-        .bind::<diesel::sql_types::BigInt,_>(i64::try_from(group.epoch).map_err(PersistenceError::database)?)
-        .bind::<Text,_>(group.current_mls_commit_event_ref.as_str())
-        .bind::<Jsonb,_>(serde_json::to_value(&actor).map_err(PersistenceError::database)?)
-        .bind::<Jsonb,_>(serde_json::to_value(&endpoint).map_err(PersistenceError::database)?)
-        .bind::<Text,_>(authorization.as_str()).get_results::<crate::JsonPayloadRow>(&mut *conn)
-        .await.map_err(PersistenceError::database)?;
-    if rows.len() != 1 {
-        return Err(missing(
-            "producer has no unique current native MLS endpoint binding",
-        ));
-    }
-    let binding: ContentEndpoint = serde_json::from_value(
-        rows.into_iter()
-            .next()
-            .ok_or_else(|| missing("producer binding disappeared"))?
-            .payload,
-    )
-    .map_err(PersistenceError::database)?;
-    if binding.actor_id != actor
-        || binding.endpoint != endpoint
-        || binding.authorization_event_ref != authorization
-    {
-        return Err(invalid(
-            "retained producer binding differs from its exact native source",
-        ));
-    }
-    binding
-        .validate()
-        .map_err(|error| invalid(error.to_string()))?;
-    Ok(binding)
 }
 
 async fn original_event(
@@ -222,7 +143,9 @@ pub(crate) async fn commit_in_connection(
     .ok_or_else(|| missing("encrypted original has no accepted MLS group"))?;
     let group: MlsGroupValue =
         serde_json::from_value(row.value).map_err(PersistenceError::database)?;
-    let endpoint = producer(conn, transaction, &group).await?;
+    let endpoint =
+        crate::content_endpoint_bindings::current_producer_in_connection(conn, transaction, &group)
+            .await?;
     let tracker = arkret_mls::MlsPublicGroupTracker::restore(
         &row.public_state,
         event

@@ -25,6 +25,22 @@ const TABLES: &[(&str, &str)] = &[
         "t.realm_id=$1 AND t.stream_ref->>'kind'='realm_control'",
     ),
     (
+        "content_originals",
+        "EXISTS(SELECT 1 FROM canonical_events e WHERE e.pk=t.event_pk AND e.realm_id=$1 AND e.state='committed')",
+    ),
+    (
+        "content_original_roots",
+        "EXISTS(SELECT 1 FROM content_originals o JOIN canonical_events e ON e.pk=o.event_pk WHERE o.event_id=t.event_id AND e.realm_id=$1 AND e.state='committed')",
+    ),
+    (
+        "content_original_blobs",
+        "EXISTS(SELECT 1 FROM content_originals o JOIN canonical_events e ON e.pk=o.event_pk WHERE o.event_id=t.event_id AND e.realm_id=$1 AND e.state='committed')",
+    ),
+    (
+        "content_key_domains",
+        "EXISTS(SELECT 1 FROM content_originals o JOIN canonical_events e ON e.pk=o.event_pk WHERE o.event_id=t.event_id AND e.realm_id=$1 AND e.state='committed')",
+    ),
+    (
         "agent_producer_signer_keys",
         "EXISTS(SELECT 1 FROM realm_commits c WHERE c.realm_id=$1 AND c.stream_ref->>'kind'='realm_control' AND c.commit_id=t.commit_id)",
     ),
@@ -307,6 +323,13 @@ async fn state(conn: &mut AsyncPgConnection, realm: &RealmId) -> PersistenceResu
         let mut normalized = Vec::with_capacity(rows.len());
         for row in rows {
             let mut value = row.value;
+            if *table == "content_originals" {
+                // Recomputed from the complete retained source on import.
+                value
+                    .as_object_mut()
+                    .ok_or_else(|| invalid("invalid content original"))?
+                    .remove("source_backed");
+            }
             if *table == "canonical_events" {
                 let object = value
                     .as_object_mut()
@@ -319,10 +342,11 @@ async fn state(conn: &mut AsyncPgConnection, realm: &RealmId) -> PersistenceResu
             if matches!(
                 *table,
                 "realm_commits"
+                    | "content_originals"
                     | "mls_welcome_deliveries"
                     | "applet_managed_creation_service_sources"
             ) {
-                let field = if *table == "realm_commits" {
+                let field = if matches!(*table, "realm_commits" | "content_originals") {
                     "event_pk"
                 } else if *table == "mls_welcome_deliveries" {
                     "commit_event_pk"
@@ -522,8 +546,8 @@ impl PgAuthorityCommitStore {
                 for source in tables[*table].as_array().ok_or_else(|| invalid("private domain is not rows"))? {
                     let mut row=source.clone();
                     if *table=="canonical_events" { row["realm_pk"]=json!(realm_pk); }
-                    if matches!(*table,"realm_commits"|"mls_welcome_deliveries"|"applet_managed_creation_service_sources") {
-                        let field=if *table=="realm_commits" {"event_pk"} else if *table=="mls_welcome_deliveries" {"commit_event_pk"} else {"provision_event_pk"};
+                    if matches!(*table,"realm_commits"|"content_originals"|"mls_welcome_deliveries"|"applet_managed_creation_service_sources") {
+                        let field=if matches!(*table,"realm_commits"|"content_originals") {"event_pk"} else if *table=="mls_welcome_deliveries" {"commit_event_pk"} else {"provision_event_pk"};
                         let id=row[field].as_str().ok_or_else(|| invalid("private Commit Event identity missing"))?;
                         let pk=sql_query("SELECT pk FROM canonical_events WHERE envelope->>'event_id'=$1 AND realm_id=$2")
                             .bind::<Text,_>(id).bind::<Text,_>(manifest.realm_id.as_str()).get_result::<Pk>(&mut *conn).await?.pk;

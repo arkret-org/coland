@@ -121,8 +121,10 @@ pub(crate) struct NativeContentGroup {
     public_state: Vec<u8>,
 }
 
+type RootDependencies = BTreeMap<String, (Option<ContentRootContext>, Option<String>)>;
+
 pub(crate) struct LocalOriginalDependencies {
-    pub roots: BTreeMap<String, (ContentRootContext, String)>,
+    pub roots: RootDependencies,
     pub required_roots: BTreeMap<String, arkret_wire::Hash>,
     pub blob_refs: BTreeMap<String, arkret_wire::BlobRef>,
     pub retain_full_history: bool,
@@ -294,7 +296,7 @@ pub(crate) async fn local_original_dependencies_in_connection(
         crate::key_backup::lock_backup_series_in_connection(conn, actor).await?;
     }
     let mut source_valid_until = chrono::DateTime::<chrono::Utc>::MAX_UTC;
-    let mut roots: BTreeMap<String, (ContentRootContext, String)> = BTreeMap::new();
+    let mut roots = RootDependencies::new();
     let mut packet_roots = BTreeMap::new();
     let wanted = required_roots.keys().cloned().collect::<Vec<_>>();
     for id in &backup_ids {
@@ -324,7 +326,7 @@ pub(crate) async fn local_original_dependencies_in_connection(
             selected.insert(root_ref.as_str().to_owned());
             validate_root_basis(conn, context, group, &declaration).await?;
             if let Some((previous, _)) = roots.get(root_ref.as_str()) {
-                if previous != context {
+                if previous.as_ref() != Some(context) {
                     return Err(
                         invalid("one root reference binds different accepted contexts").into(),
                     );
@@ -332,7 +334,7 @@ pub(crate) async fn local_original_dependencies_in_connection(
             } else {
                 roots.insert(
                     root_ref.as_str().to_owned(),
-                    (context.clone(), original.actor.to_string()),
+                    (Some(context.clone()), Some(original.actor.to_string())),
                 );
             }
         }
@@ -387,6 +389,131 @@ pub(crate) async fn local_original_dependencies_in_connection(
     })
 }
 
+/// A foreign keeper proves physical root custody; this governor independently
+/// binds current scope, actual RFC leaf, original bytes and every typed slot.
+async fn foreign_original_dependencies_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+    current: &NativeContentGroup,
+    endpoint: &arkret_models_crypto::ContentEndpoint,
+) -> Result<LocalOriginalDependencies, PgTransactionError> {
+    let event = &transaction.event;
+    let source = transaction.content_backup_source.as_ref().ok_or_else(|| {
+        missing("foreign encrypted original requires its native owning-Station root source")
+    })?;
+    let now = chrono::Utc::now();
+    source
+        .attestation
+        .validate_at(now)
+        .map_err(|e| invalid(e.to_string()))?;
+    source
+        .attestation
+        .validate_at(transaction.commit.committed_at)
+        .map_err(|e| invalid(e.to_string()))?;
+    source
+        .validate_submission_binding(
+            event,
+            endpoint,
+            &transaction.expected_authority.service_id,
+            &event
+                .event_content_protections_digest()
+                .map_err(|e| invalid(e.to_string()))?,
+        )
+        .map_err(|e| invalid(e.to_string()))?;
+    arkret::verify_content_backup_source_signature(source).map_err(|e| invalid(e.to_string()))?;
+    let group = &current.group;
+    let tracker = arkret_mls::MlsPublicGroupTracker::restore(
+        &current.public_state,
+        event
+            .scope_ref
+            .canonical_mls_group_id()
+            .map_err(|e| invalid(e.to_string()))?
+            .as_str(),
+        group.epoch,
+    )
+    .map_err(|e| invalid(e.to_string()))?;
+    if tracker
+        .leaves()
+        .map_err(|e| invalid(e.to_string()))?
+        .iter()
+        .filter(|leaf| {
+            leaf.actor_id == endpoint.actor_id
+                && leaf.signature_key.as_str() == endpoint.signature_key_base64url
+        })
+        .count()
+        != 1
+    {
+        return Err(invalid("foreign original producer is not one exact current RFC leaf").into());
+    }
+    let declaration = sql_query("SELECT e.envelope AS payload FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.realm_id=$1 AND e.kind='ak.realm.create' AND e.state='committed' ORDER BY c.stream_position LIMIT 1")
+        .bind::<Text,_>(event.realm_id.as_str()).get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional()?
+        .ok_or_else(|| missing("foreign original has no accepted strategy declaration"))?;
+    let declaration: Event =
+        serde_json::from_value(declaration.payload).map_err(PersistenceError::database)?;
+    let realm = declaration
+        .as_realm_create()
+        .map_err(|e| invalid(e.to_string()))?;
+    if matches!(
+        realm.object.purpose,
+        RealmPurpose::PrincipalControl | RealmPurpose::AgentControl
+    ) {
+        return Err(invalid(
+            "an Account PCR cannot use a foreign keeper to change its logical Station",
+        )
+        .into());
+    }
+    let context = ContentRootContext {
+        effective_scope: event.scope_ref.clone(),
+        genesis_event_ref: group.genesis_event_ref.clone(),
+        epoch: group.epoch,
+        group_state_ref: group.current_mls_commit_event_ref.clone(),
+        cipher_suite: group.cipher_suite.as_str().to_owned(),
+        encryption_backup_strategy: realm.object.initial_encryption_backup_strategy,
+        backup_strategy_ref: declaration.event_id.clone(),
+    };
+    validate_root_basis(conn, &context, group, &declaration).await?;
+    let mut roots = BTreeMap::new();
+    let mut required_roots = BTreeMap::new();
+    let mut blob_refs = BTreeMap::new();
+    for carrier in event
+        .event_content_envelopes()
+        .map_err(|e| invalid(e.to_string()))?
+    {
+        let EncryptedEnvelopeEncryptionContext::EpochContent {
+            epoch,
+            group_state_ref,
+            root_ref,
+            protection,
+            ..
+        } = carrier.envelope.encryption_context;
+        if epoch != group.epoch || group_state_ref != group.current_mls_commit_event_ref {
+            return Err(
+                invalid("foreign original differs from current accepted MLS result").into(),
+            );
+        }
+        for root in protection.root_refs {
+            // The primary context is independently known from the current RFC
+            // result. Secondary authenticated dependencies can name older
+            // roots; only their keeper knows the original root contexts.
+            roots
+                .entry(root.as_str().to_owned())
+                .or_insert((None, None));
+            required_roots.insert(root.as_str().to_owned(), root);
+        }
+        roots.insert(root_ref.as_str().to_owned(), (Some(context.clone()), None));
+        for blob in protection.blob_refs {
+            blob_refs.insert(blob.as_str().to_owned(), blob);
+        }
+    }
+    Ok(LocalOriginalDependencies {
+        roots,
+        required_roots,
+        blob_refs,
+        retain_full_history: false,
+        source_valid_until: source.attestation.expires_at,
+    })
+}
+
 async fn require_blobs_in_connection(
     conn: &mut AsyncPgConnection,
     blob_refs: &BTreeMap<String, arkret_wire::BlobRef>,
@@ -416,6 +543,9 @@ pub(crate) async fn commit_in_connection(
         .event_content_envelopes()
         .map_err(|error| invalid(error.to_string()))?;
     if carriers.is_empty() {
+        if transaction.content_backup_source.is_some() {
+            return Err(invalid("clear original cannot carry a root custody source").into());
+        }
         return commit_plain_pcr_coverage(conn, transaction).await;
     }
     let current = current_group_in_connection(conn, event).await?;
@@ -423,13 +553,25 @@ pub(crate) async fn commit_in_connection(
     let endpoint =
         crate::content_endpoint_bindings::current_producer_in_connection(conn, transaction, group)
             .await?;
+    let foreign = endpoint
+        .actor_id
+        .as_account_id()
+        .is_some_and(|account| account.station_id != transaction.expected_authority.service_id);
+    let dependencies = if foreign {
+        foreign_original_dependencies_in_connection(conn, transaction, &current, &endpoint).await?
+    } else {
+        if transaction.content_backup_source.is_some() {
+            return Err(invalid("same-Station original requires native local root checks").into());
+        }
+        local_original_dependencies_in_connection(conn, event, &current, &endpoint).await?
+    };
     let LocalOriginalDependencies {
         roots,
         required_roots,
         blob_refs,
         retain_full_history,
         source_valid_until: _,
-    } = local_original_dependencies_in_connection(conn, event, &current, &endpoint).await?;
+    } = dependencies;
     require_blobs_in_connection(conn, &blob_refs).await?;
     let source = CommittedEventRef {
         event_id: event.event_id.clone(),
@@ -444,10 +586,15 @@ pub(crate) async fn commit_in_connection(
     };
     freeze_coverage(conn, transaction, &coverage, retain_full_history).await?;
     for (root, (context, actor)) in &roots {
-        sql_query("INSERT INTO content_original_roots(event_id,root_ref,root_context,backup_actor_id) VALUES($1,$2,$3,$4)")
+        let context = context
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(PersistenceError::database)?;
+        sql_query("INSERT INTO content_original_roots(event_id,root_ref,root_context,backup_actor_id,source_backed) VALUES($1,$2,$3,$4,$5)")
             .bind::<Text,_>(event.event_id.as_str()).bind::<Text,_>(root)
-            .bind::<Jsonb,_>(serde_json::to_value(context).map_err(PersistenceError::database)?).bind::<Text,_>(actor)
-            .execute(&mut *conn).await?;
+            .bind::<diesel::sql_types::Nullable<Jsonb>,_>(context).bind::<diesel::sql_types::Nullable<Text>,_>(actor.as_deref())
+            .bind::<diesel::sql_types::Bool,_>(foreign).execute(&mut *conn).await?;
     }
     let producer_digest =
         arkret_canonical::canonical_sha256(&endpoint).map_err(PersistenceError::database)?;
@@ -460,6 +607,9 @@ pub(crate) async fn commit_in_connection(
         let (root, _) = roots
             .get(root_ref.as_str())
             .ok_or_else(|| missing("primary root is missing"))?;
+        let root = root
+            .as_ref()
+            .ok_or_else(|| missing("primary root has no native current context"))?;
         if root.epoch != group.epoch || root.group_state_ref != group.current_mls_commit_event_ref {
             return Err(
                 invalid("primary content root is not the current accepted MLS result").into(),
@@ -505,11 +655,17 @@ async fn freeze_coverage(
     retain_full_history: bool,
 ) -> Result<(), PgTransactionError> {
     let event = &transaction.event;
-    let inserted = sql_query("INSERT INTO content_originals(event_id,event_pk,commit_id,scope_key,coverage,retain_full_history) SELECT $1,e.pk,c.commit_id,$3,$4,$5 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.envelope->>'event_id'=$1 AND c.commit_id=$2 AND e.state='committed'")
+    let backup_source = transaction
+        .content_backup_source
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(PersistenceError::database)?;
+    let inserted = sql_query("INSERT INTO content_originals(event_id,event_pk,commit_id,scope_key,coverage,retain_full_history,backup_source) SELECT $1,e.pk,c.commit_id,$3,$4,$5,$6 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.envelope->>'event_id'=$1 AND c.commit_id=$2 AND e.state='committed'")
         .bind::<Text,_>(event.event_id.as_str()).bind::<Text,_>(transaction.commit.commit_id.as_str())
         .bind::<Text,_>(crate::mls_group_current_states::scope_key(&event.scope_ref)?)
         .bind::<Jsonb,_>(serde_json::to_value(coverage).map_err(PersistenceError::database)?)
-        .bind::<diesel::sql_types::Bool,_>(retain_full_history).execute(&mut *conn).await?;
+        .bind::<diesel::sql_types::Bool,_>(retain_full_history).bind::<diesel::sql_types::Nullable<Jsonb>,_>(backup_source).execute(&mut *conn).await?;
     if inserted != 1 {
         return Err(missing("coverage has no same-transaction original Commit").into());
     }

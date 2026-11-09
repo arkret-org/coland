@@ -41,6 +41,7 @@ pub(crate) async fn admit_forwarded(
         || event.executed_by.is_some()
         || request.event_submission.approval_signatures.is_some()
         || request.mls_group_state_material.is_some()
+        || request.content_backup_sources.is_some()
     {
         return Err(ServiceError::SchemaViolation(
             "native PCR forward does not bind the independently accepted holder inception".into(),

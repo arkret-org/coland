@@ -2048,7 +2048,11 @@ CREATE TABLE public.content_originals (
     commit_id text NOT NULL UNIQUE REFERENCES public.realm_commits(commit_id) ON DELETE RESTRICT,
     scope_key text COLLATE "C" NOT NULL,
     coverage jsonb NOT NULL CHECK (jsonb_typeof(coverage) = 'object'),
-    retain_full_history boolean NOT NULL
+    retain_full_history boolean NOT NULL,
+    -- Private original-time audit; never included in public replication.
+    backup_source jsonb CHECK (backup_source IS NULL OR jsonb_typeof(backup_source) = 'object'),
+    source_backed boolean GENERATED ALWAYS AS (backup_source IS NOT NULL) STORED,
+    UNIQUE (event_id, source_backed)
 );
 CREATE TABLE public.content_original_blobs (
     event_id text NOT NULL REFERENCES public.content_originals(event_id) ON DELETE CASCADE,
@@ -2078,8 +2082,12 @@ CREATE TRIGGER retained_content_blob BEFORE UPDATE ON public.blobs
 CREATE TABLE public.content_original_roots (
     event_id text NOT NULL REFERENCES public.content_originals(event_id) ON DELETE CASCADE,
     root_ref text NOT NULL CHECK (root_ref ~ '^sha256:[0-9a-f]{64}$'),
-    root_context jsonb NOT NULL CHECK (jsonb_typeof(root_context) = 'object'),
-    backup_actor_id text NOT NULL,
+    root_context jsonb CHECK (root_context IS NULL OR jsonb_typeof(root_context) = 'object'),
+    backup_actor_id text,
+    source_backed boolean NOT NULL DEFAULT false,
+    CHECK ((backup_actor_id IS NULL) = source_backed),
+    CHECK (root_context IS NOT NULL OR source_backed),
+    FOREIGN KEY (event_id, source_backed) REFERENCES public.content_originals(event_id, source_backed),
     PRIMARY KEY (event_id, root_ref)
 );
 CREATE INDEX content_original_roots_package_idx ON public.content_original_roots (backup_actor_id, root_ref);

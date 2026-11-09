@@ -52,7 +52,7 @@ pub(crate) async fn commit_mimi_event(
         state,
         &EventAdmissionSubmission::new(event),
         AdmittedProducer::Local(Box::new(guard)),
-        SelfEventUnitEffects { mls: None },
+        SelfEventUnitEffects::default(),
         idempotency,
     )
     .await

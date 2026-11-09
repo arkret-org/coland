@@ -299,6 +299,7 @@ pub(super) async fn submit_peer_direct_conversation_founding(
             event: item.event_submission.event.clone(),
             commit: item.source_commit.clone(),
             producer_signer_fact: item.producer_signer_fact.clone(),
+            content_backup_source: None,
             mls_state: None,
             welcomes: Vec::new(),
             recipient_queue_capacity: 0,

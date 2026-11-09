@@ -88,6 +88,7 @@ async fn pcr_profile_blob_dependency_is_atomic_and_cannot_be_purged_or_rebound()
         event: event.clone(),
         commit: commit.clone(),
         producer_signer_fact: fact,
+        content_backup_source: None,
         mls_state: None,
         welcomes: vec![],
         recipient_queue_capacity: 0,

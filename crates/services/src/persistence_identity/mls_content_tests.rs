@@ -33,6 +33,9 @@ mod history_root_unlock_tests;
 #[path = "history_forward_intent_tests.rs"]
 mod history_forward_intent_tests;
 
+#[path = "content_backup_source_tests.rs"]
+mod content_backup_source_tests;
+
 fn public_blob(bytes: &[u8]) -> MlsPublicBlob {
     let digest = arkret_canonical::sha256_digest(bytes);
     let hex = digest.strip_prefix("sha256:").unwrap();
@@ -548,6 +551,19 @@ async fn another_rfc_leaf_actor_refuses_genesis_without_installing_any_original_
 }
 
 async fn owner_discussion(pool: &PgPool, fixture: &RootFixture) -> ordinary_realm::Discussion {
+    admit_owner_profile(pool, fixture).await;
+    let unit = ordinary_realm::bootstrap_unit_for_account(
+        "native-root-dependent-original",
+        &fixture.pcr.history.account,
+        &fixture.pcr.history.station_did,
+    );
+    Box::pin(ordinary_realm::open_discussion_unit(pool, unit)).await
+}
+
+async fn admit_owner_profile(
+    pool: &PgPool,
+    fixture: &RootFixture,
+) -> coland_storage::AuthorityCommitTransaction {
     let persistence = std::sync::Arc::new(coland_storage_postgres::PgPersistenceStore::new(
         pool.clone(),
     ));
@@ -576,7 +592,7 @@ async fn owner_discussion(pool: &PgPool, fixture: &RootFixture) -> ordinary_real
     persistence
         .actor_profiles()
         .admit_profile(coland_storage::ActorProfileAdmissionWrite {
-            commit: transaction,
+            commit: transaction.clone(),
             queued_at: at,
         })
         .await
@@ -586,12 +602,7 @@ async fn owner_discussion(pool: &PgPool, fixture: &RootFixture) -> ordinary_real
         fixture.pcr.history.device_verification_method.clone(),
         fixture.pcr.history.founding_device_signing_seed,
     );
-    let unit = ordinary_realm::bootstrap_unit_for_account(
-        "native-root-dependent-original",
-        &fixture.pcr.history.account,
-        &fixture.pcr.history.station_did,
-    );
-    Box::pin(ordinary_realm::open_discussion_unit(pool, unit)).await
+    transaction
 }
 
 fn sealed_root_package(
@@ -711,6 +722,7 @@ async fn prepared_own_pcr_group(
         event: fixture.pcr.history.events.last().unwrap().clone(),
         commit: fixture.pcr.history.commits.last().unwrap().clone(),
         producer_signer_fact: None,
+        content_backup_source: None,
         mls_state: None,
         welcomes: vec![],
         recipient_queue_capacity: 0,
@@ -1048,8 +1060,29 @@ fn encrypted_message(
     salt: &str,
     text: &str,
 ) -> arkret_wire::Event {
+    encrypted_message_with_blob_refs(
+        prepared,
+        previous,
+        context,
+        root,
+        package,
+        (salt, text),
+        vec![],
+    )
+}
+
+fn encrypted_message_with_blob_refs(
+    prepared: &PreparedGroup,
+    previous: &coland_storage::AuthorityCommitTransaction,
+    context: &arkret_models_crypto::ContentRootContext,
+    root: &arkret_models_crypto::ContentRootSecret,
+    package: &arkret_models_crypto::KeyBackup,
+    plaintext: (&str, &str),
+    blob_refs: Vec<BlobRef>,
+) -> arkret_wire::Event {
     use arkret_crypto::content_history::*;
     use arkret_models_crypto::*;
+    let (salt, text) = plaintext;
     let mut event = ordinary_realm::next_request(
         previous,
         EventKind::MessageCreate,
@@ -1072,7 +1105,7 @@ fn encrypted_message(
     let commitment = content_key_commitment(&content, &key).unwrap();
     let protection = ContentProtection {
         root_refs: vec![content.root_ref.clone()],
-        blob_refs: vec![],
+        blob_refs,
         backup_refs: vec![package.backup_id.clone()],
     };
     let mut outer = serde_json::to_value(&event).unwrap();

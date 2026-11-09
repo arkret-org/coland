@@ -109,6 +109,8 @@ pub(super) struct SelfEventUnitEffects {
     /// The verified public MLS transition and Welcomes of an `ak.mls.genesis`
     /// or `ak.mls.commit` (`authority_mls_unit`).
     pub(super) mls: Option<super::authority_mls_unit::MlsUnitInstallation>,
+    pub(super) content_backup_source:
+        Option<arkret_models_collaboration::content_history::ContentBackupSource>,
 }
 
 /// Kinds whose authorization and domain pre-state are decided only at the
@@ -455,7 +457,10 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             ),
         )
         .map_err(|error| ServiceError::Internal(error.to_string()))?;
-        let SelfEventUnitEffects { mls } = effects;
+        let SelfEventUnitEffects {
+            mls,
+            content_backup_source,
+        } = effects;
         let is_mls = matches!(
             event.kind,
             arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit
@@ -515,6 +520,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
                 ));
             }
         };
+        transaction.content_backup_source = content_backup_source;
         Box::pin(super::authority_forward::stage_control_source(
             state,
             &transaction,

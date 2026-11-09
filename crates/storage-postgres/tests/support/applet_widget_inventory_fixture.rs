@@ -301,6 +301,7 @@ pub(super) async fn run_widget_inventory() {
             event: previous.event,
             commit: previous.commit,
             producer_signer_fact: None,
+            content_backup_source: None,
             mls_state: None,
             welcomes: vec![],
             recipient_queue_capacity: 0,

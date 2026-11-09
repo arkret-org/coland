@@ -363,6 +363,9 @@ pub struct AuthorityCommitTransaction {
     pub commit: RealmCommit,
     pub producer_signer_fact:
         Option<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
+    /// Original keeper source, privately retained with this winning original.
+    pub content_backup_source:
+        Option<arkret_models_collaboration::content_history::ContentBackupSource>,
     pub mls_state: Option<MlsStateInstallation>,
     pub welcomes: Vec<VerifiedMlsWelcome>,
     /// Service-configured maximum outstanding deliveries for each exact

@@ -53,6 +53,10 @@ impl RootFixture {
         Box::pin(Self::with_recovery_words(pool, None)).await
     }
 
+    pub(super) async fn new_for_station(pool: PgPool, station: arkret_wire::Did) -> Self {
+        Box::pin(Self::with_station(pool, None, station)).await
+    }
+
     pub(super) async fn new_with_recovery_words(pool: PgPool) -> Self {
         let words =
             arkret_crypto::identity_root::generate_bip39_identity_recovery_mnemonic().unwrap();
@@ -60,6 +64,19 @@ impl RootFixture {
     }
 
     async fn with_recovery_words(pool: PgPool, recovery_words: Option<String>) -> Self {
+        Box::pin(Self::with_station(
+            pool,
+            recovery_words,
+            arkret_wire::Did::new("did:web:backup-test.example").unwrap(),
+        ))
+        .await
+    }
+
+    async fn with_station(
+        pool: PgPool,
+        recovery_words: Option<String>,
+        station: arkret_wire::Did,
+    ) -> Self {
         let material = recovery_words.as_ref().map(|words| {
             arkret_crypto::identity_root::derive_identity_recovery_key_material_from_bip39(
                 words, "", 1,
@@ -68,7 +85,7 @@ impl RootFixture {
         });
         let persistence = PgPersistenceStore::new(pool);
         let mut pcr = pcr_genesis::PcrGenesisFixture::new_with(
-            arkret_wire::Did::new("did:web:backup-test.example").unwrap(),
+            station,
             device_authorization_history::DeviceHistoryFixtureOptions {
                 local_id: format!("backup-{}", uuid::Uuid::now_v7().simple()),
                 founding_device_id: arkret_wire::DeviceId::new(format!(
@@ -173,6 +190,7 @@ impl RootFixture {
                     event,
                     commit: pcr.history.commits.last().unwrap().clone(),
                     producer_signer_fact: None,
+                    content_backup_source: None,
                     mls_state: None,
                     welcomes: vec![],
                     recipient_queue_capacity: 0,

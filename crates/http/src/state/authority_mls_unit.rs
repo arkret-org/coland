@@ -223,6 +223,7 @@ async fn admit_mls_event_inner(
                 welcomes,
                 native_request,
             }),
+            content_backup_source: None,
         },
     )
     .await;

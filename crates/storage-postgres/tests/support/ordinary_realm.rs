@@ -200,8 +200,8 @@ pub fn bootstrap_unit_for_account(
         seed,
         "public",
         "since_join",
-        Some(&account.principal_id),
-        &account.station_id,
+        Some(account),
+        &arkret_wire::project_did_to_core_id(governing_did).unwrap(),
         Some(governing_did),
     )
 }
@@ -217,8 +217,8 @@ pub fn bootstrap_unit_with_history_for_account(
         seed,
         join_rule,
         history_access,
-        Some(&account.principal_id),
-        &account.station_id,
+        Some(account),
+        &arkret_wire::project_did_to_core_id(governing_did).unwrap(),
         Some(governing_did),
     )
 }
@@ -227,7 +227,7 @@ fn bootstrap_unit_with_join_rule_for_station(
     seed: &str,
     join_rule: &str,
     history_access: &str,
-    founding_principal: Option<&arkret_wire::DidCoreId>,
+    founding_account: Option<&arkret_wire::AccountId>,
     governing_station: &arkret_wire::DidCoreId,
     governing_did: Option<&arkret_wire::Did>,
 ) -> OrdinaryRealmBootstrapCommitUnit {
@@ -238,15 +238,22 @@ fn bootstrap_unit_with_join_rule_for_station(
 
     let at =
         chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis()).unwrap();
-    let actor = founding_principal.cloned().unwrap_or_else(founder);
     let station = governing_station.clone();
+    let actor = arkret_wire::ActorId::account(
+        founding_account
+            .cloned()
+            .unwrap_or_else(|| arkret_wire::AccountId::new(founder(), station.clone())),
+    );
+    let make_event = |kind, scope, payload| {
+        let mut event = event_for_actor(kind, scope, actor.clone(), payload, at);
+        bind_structural_human_device(&mut event);
+        event
+    };
     let genesis_salt =
         arkret_canonical::base64url_encode(arkret_canonical::sha256_bytes(seed.as_bytes()));
-    let genesis = event(
+    let genesis = make_event(
         arkret_wire::EventKind::RealmCreate,
         arkret_wire::ScopeRef::RealmGenesis,
-        &actor,
-        &station,
         serde_json::json!({"object":{
             "schema":"ak.schema.realm_genesis.v1",
             "purpose":"collaboration",
@@ -259,7 +266,6 @@ fn bootstrap_unit_with_join_rule_for_station(
             "initial_encryption_backup_strategy":"ak.encryption_backup.epoch_content_roots.v1",
             "initial_discoverability":"invite_only"
         }}),
-        at,
     );
     let realm_id = genesis.realm_id.clone();
     let creator = genesis.actor_id.clone();
@@ -304,7 +310,7 @@ fn bootstrap_unit_with_join_rule_for_station(
         ),
     ];
     for (kind, payload) in kinds {
-        events.push(event(kind, realm_scope(), &actor, &station, payload, at));
+        events.push(make_event(kind, realm_scope(), payload));
     }
     let authority = CurrentRealmAuthority {
         realm_id: realm_id.clone(),
@@ -343,6 +349,7 @@ fn bootstrap_unit_with_join_rule_for_station(
                         .map_or_else(|| signature(&station, at), |did| signature_for_did(did, at)),
                 },
                 producer_signer_fact: None,
+                content_backup_source: None,
                 mls_state: None,
                 welcomes: Vec::new(),
                 recipient_queue_capacity: 0,
@@ -383,6 +390,15 @@ pub fn next_request(
     payload: serde_json::Value,
     at: chrono::DateTime<chrono::Utc>,
 ) -> EventCommitRequest {
+    if previous.event.actor_id.signing_principal_id() == actor {
+        return next_request_for_actor(
+            previous,
+            kind,
+            previous.event.actor_id.clone(),
+            payload,
+            at,
+        );
+    }
     let event = event(
         kind,
         arkret_wire::ScopeRef::Realm {
@@ -550,6 +566,7 @@ pub fn request_for_event(
             event,
             commit,
             producer_signer_fact: fact,
+            content_backup_source: None,
             mls_state: None,
             welcomes: Vec::new(),
             recipient_queue_capacity: 0,
@@ -644,6 +661,15 @@ pub async fn source_request(pool: &PgPool, mut request: EventCommitRequest) -> E
         request.authority_commit.event = event;
     }
     let tx = &mut request.authority_commit;
+    if tx
+        .event
+        .actual_signer()
+        .as_account_id()
+        .is_some_and(|account| account.station_id != tx.expected_authority.service_id)
+    {
+        request.realm_fanout_source =
+            Some(arkret_wire::EventAdmissionSubmission::new(tx.event.clone()));
+    }
     tx.producer_signer_fact = PgAuthorityCommitStore { pool: pool.clone() }
         .prepare_account_device_signer_fact(&tx.event, tx.commit.committed_at)
         .await

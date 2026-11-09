@@ -104,6 +104,7 @@ fn write(
             event,
             commit,
             producer_signer_fact: None,
+            content_backup_source: None,
             mls_state: None,
             welcomes: Vec::new(),
             recipient_queue_capacity: 0,

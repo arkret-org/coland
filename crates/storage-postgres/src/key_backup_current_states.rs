@@ -846,6 +846,7 @@ mod tests {
                 event: event.clone(),
                 commit: successor.clone(),
                 producer_signer_fact: None,
+                content_backup_source: None,
                 mls_state: None,
                 welcomes: Vec::new(),
                 recipient_queue_capacity: 0,

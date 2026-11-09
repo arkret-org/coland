@@ -135,6 +135,7 @@ async fn commit(
     producers: Vec<AdmittedProducer>,
     read: Option<&WatchAuditReadRequestBody>,
     pair: Option<&AuditPairedEventUnitSubmission>,
+    backup_sources: Option<&[arkret_models_collaboration::content_history::ContentBackupSource]>,
 ) -> ServiceResult<RegisteredAuditOutcome> {
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let events = submissions
@@ -173,8 +174,15 @@ async fn commit(
         .await?;
     let mut commands = Vec::with_capacity(submissions.len());
     let mut approvals = Vec::with_capacity(submissions.len());
-    for ((slot, producer), transaction) in submissions.iter().zip(producers).zip(transactions) {
+    for ((slot, producer), mut transaction) in submissions.iter().zip(producers).zip(transactions) {
         let event = &slot.event;
+        transaction.content_backup_source = backup_sources
+            .and_then(|sources| {
+                sources
+                    .iter()
+                    .find(|source| source.attestation.event_ref == event.event_id)
+            })
+            .cloned();
         let (
             self_producer_guard,
             forwarded_producer_evidence,
@@ -321,7 +329,16 @@ pub(super) async fn submit_self_pair(
         .await?;
         producers.push(AdmittedProducer::Local(Box::new(guard)));
     }
-    match commit(state, &request.events, producers, None, Some(&request)).await? {
+    match commit(
+        state,
+        &request.events,
+        producers,
+        None,
+        Some(&request),
+        None,
+    )
+    .await?
+    {
         RegisteredAuditOutcome::Pair(outcome) => Ok(outcome),
         _ => Err(ServiceError::internal("audit pair returned a read outcome")),
     }
@@ -344,6 +361,13 @@ pub(super) async fn submit_peer_pair(
         return Ok(outcome);
     }
     request.validate().map_err(refusal)?;
+    super::authority_forward::require_content_backup_source_presence(
+        &[
+            &request.atomic_submission.events[0].event,
+            &request.atomic_submission.events[1].event,
+        ],
+        request.content_backup_sources.as_deref(),
+    )?;
     let digest =
         arkret_models_collaboration::authority_commit::authority_forward_body_digest(&request)
             .map_err(refusal)?;
@@ -371,6 +395,7 @@ pub(super) async fn submit_peer_pair(
         producers,
         None,
         Some(&request.atomic_submission),
+        request.content_backup_sources.as_deref(),
     )
     .await?
     {
@@ -648,6 +673,7 @@ pub(crate) async fn submit_self_read(
         vec![AdmittedProducer::Local(Box::new(guard))],
         Some(request),
         None,
+        None,
     )
     .await?
     {
@@ -725,6 +751,7 @@ pub(crate) async fn submit_peer_read(
         std::slice::from_ref(&request.audit_submission),
         vec![producer],
         Some(&request.logical_request()),
+        None,
         None,
     )
     .await?

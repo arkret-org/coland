@@ -681,6 +681,7 @@ async fn racing_realm_commit_accepts_only_one_event_and_rolls_back_the_loser() {
                 },
                 event,
                 producer_signer_fact: None,
+                content_backup_source: None,
                 mls_state: None,
                 welcomes: Vec::new(),
                 recipient_queue_capacity: 0,

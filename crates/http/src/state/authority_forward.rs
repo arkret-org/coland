@@ -245,7 +245,41 @@ fn refuse_bare_native_mls(event: &arkret_wire::Event) -> ServiceResult<()> {
     Ok(())
 }
 
-/// B: admit one forwarded ordinary Event at `now`.
+/// Match every registered encrypted original to one ordered keeper source.
+pub(super) fn require_content_backup_source_presence(
+    events: &[&Event],
+    sources: Option<&[arkret_models_collaboration::content_history::ContentBackupSource]>,
+) -> ServiceResult<()> {
+    use arkret_event_draft::EventContentEnvelopesExt as _;
+    let mut required = Vec::new();
+    for event in events {
+        if !event
+            .event_content_envelopes()
+            .map_err(wire_refusal)?
+            .is_empty()
+        {
+            required.push(&event.event_id);
+        }
+    }
+    let valid = match sources {
+        None => required.is_empty(),
+        Some(sources) => {
+            !sources.is_empty()
+                && sources.len() == required.len()
+                && sources
+                    .iter()
+                    .zip(required)
+                    .all(|(source, event)| &source.attestation.event_ref == event)
+        }
+    };
+    if !valid {
+        return Err(ServiceError::SchemaViolation(
+            "missing, extra or unordered original root custody sources".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn admit_forwarded_event(
     state: &AppState,
     peer: &AuthenticatedPeerContext,
@@ -277,6 +311,7 @@ pub(crate) async fn admit_forwarded_event(
     if let Some(outcome) = super::authority_self_event_unit::exact_replay(state, event).await? {
         return Ok(outcome);
     }
+    require_content_backup_source_presence(&[event], request.content_backup_sources.as_deref())?;
     let (producer, key) = resolve_forwarded_producer(
         state,
         peer,
@@ -315,7 +350,14 @@ pub(crate) async fn admit_forwarded_event(
         state,
         &request.event_submission,
         producer,
-        super::authority_self_event_unit::SelfEventUnitEffects::default(),
+        super::authority_self_event_unit::SelfEventUnitEffects {
+            content_backup_source: request
+                .content_backup_sources
+                .as_ref()
+                .and_then(|sources| sources.first())
+                .cloned(),
+            ..Default::default()
+        },
     )
     .await
 }
@@ -377,6 +419,7 @@ pub(crate) async fn admit_forwarded_mls(
         }
         return Ok(outcome);
     }
+    require_content_backup_source_presence(&[event], request.content_backup_sources.as_deref())?;
     let (producer, key) = resolve_forwarded_producer(
         state,
         peer,

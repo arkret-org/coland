@@ -506,6 +506,7 @@ async fn admit_in_connection(
             event: event.clone(),
             commit: commit.clone(),
             producer_signer_fact: candidate,
+            content_backup_source: None,
             mls_state: None,
             welcomes: vec![],
             recipient_queue_capacity: 0,

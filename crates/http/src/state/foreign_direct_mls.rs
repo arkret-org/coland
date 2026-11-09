@@ -589,7 +589,14 @@ mod tests {
             let add = group
                 .add_member_with_governance_binding(&package, &binding)
                 .unwrap();
-            let payload = MlsCommitPayload::new(base, 0, &add.commit, binding).unwrap();
+            let payload = coland_test_support::mls_content::commit_payload(
+                &group,
+                base,
+                0,
+                &add.commit,
+                binding,
+            )
+            .unwrap();
             let event = arkret_wire::test_support::raw_event_for_actor_at(
                 "ak.mls.commit",
                 scope.clone(),

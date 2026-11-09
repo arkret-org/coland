@@ -8020,16 +8020,31 @@ mod realm_native_fixture {
         .value;
         let context = descriptor.content_key_context(
             content_scope.clone(),
-            current.genesis_event_ref,
+            current.genesis_event_ref.clone(),
             human_group.epoch(),
         );
-        let secret = arkret_mls::derive_attachment_content_key(&human_group, &context).unwrap();
+        let root_context = super::realm_actor_mls_fixture::retained_root_context(
+            &factory.fixture,
+            &content_scope,
+            &current.current_mls_commit_event_ref,
+            human_group.epoch(),
+        )
+        .await;
+        let secret =
+            arkret_mls::derive_attachment_content_key(&human_group, &root_context, &context)
+                .unwrap();
         let resolver = |reference: &arkret::EncryptedAttachmentGroupStateRef| {
             reference
                 .event_id()
                 .ok()
                 .filter(|id| id == &current.current_mls_commit_event_ref)
-                .map(|_| human_group.epoch())
+                .map(
+                    |_| arkret::crypto::blob_aead::ResolvedAttachmentGroupState {
+                        effective_scope: content_scope.clone(),
+                        genesis_event_ref: current.genesis_event_ref.clone(),
+                        epoch: human_group.epoch(),
+                    },
+                )
         };
         assert_eq!(
             arkret::crypto::blob_aead::decrypt_stream(&ciphertext, &descriptor, &secret, &resolver)

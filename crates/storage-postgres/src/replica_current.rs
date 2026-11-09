@@ -2636,12 +2636,12 @@ mod tests {
         let commit = RealmCommitId::from_digest([0x42; 32]);
         let set = PinCurrentValue::new(vec![PinAssertionEntry {
             tag_id: CanonicalEventDot::new(event.clone(), 0).unwrap(),
-            value: PinAssertionPayload::Add(PinAddPayload {
+            value: PinAssertionPayload::Add(Box::new(PinAddPayload {
                 pin_scope: home.clone(),
                 target_ref: arkret_wire::MessageId::from_event_id(&event).to_string(),
                 rank: "a0".into(),
                 note: None,
-            }),
+            })),
         }])
         .unwrap();
         let value = serde_json::to_value(set).unwrap();

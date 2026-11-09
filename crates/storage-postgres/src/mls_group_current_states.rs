@@ -1875,15 +1875,12 @@ mod typed_application_envelope_tests {
     use super::*;
 
     fn envelope(content_type: &str) -> arkret_models_crypto::EncryptedEnvelope {
-        arkret_models_crypto::EncryptedEnvelope {
-            version: "1.0".to_owned(),
-            content_type: content_type.to_owned(),
-            encryption_context: arkret_models_crypto::EncryptedEnvelopeEncryptionContext::standard(
-                7,
-                arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [7; 32]),
-            ),
-            ciphertext: "Y2lwaGVydGV4dA".to_owned(),
-        }
+        let mut envelope = coland_test_support::mls_content::envelope_shape(
+            7,
+            &arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [7; 32]),
+        );
+        envelope.content_type = content_type.to_owned();
+        envelope
     }
 
     fn metadata_event(

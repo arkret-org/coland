@@ -401,6 +401,7 @@ dependencies = [
  "arkret-event-draft",
  "arkret-identifiers",
  "arkret-models-collaboration",
+ "arkret-models-crypto",
  "arkret-models-discovery",
  "arkret-models-integration",
  "arkret-retry",
@@ -2071,6 +2072,7 @@ dependencies = [
 name = "coland-test-support"
 version = "0.3.0"
 dependencies = [
+ "anyhow",
  "arkret",
  "arkret-bootstrap",
  "arkret-canonical",
@@ -2082,6 +2084,7 @@ dependencies = [
  "arkret-models-identity",
  "arkret-policy",
  "arkret-schema",
+ "arkret-schema-conformance",
  "arkret-signatures",
  "arkret-state",
  "arkret-test-kit",
@@ -3695,6 +3698,7 @@ version = "0.3.0"
 dependencies = [
  "arkret-auth",
  "arkret-canonical",
+ "arkret-crypto",
  "arkret-event-draft",
  "arkret-hlc",
  "arkret-http-client",

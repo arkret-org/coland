@@ -85,6 +85,9 @@ impl Fixture {
             serde_json::from_value(proof_payload.clone()).unwrap();
         let device = wire::DeviceId::new("ak:device:01904100-0000-7000-8000-000000000023").unwrap();
         let backup = crypto::KeyBackup {
+            custodian_actor_id: None,
+            custody_authorization_ref: None,
+
             backup_id: wire::BackupId::new(BACKUP).unwrap(),
             actor_id: wire::ActorId::account(typed_policy.account_id.clone()),
             device_id: Some(device.clone()),
@@ -118,6 +121,9 @@ impl Fixture {
                 aead_aad_extensions: Default::default(),
             },
             contents: vec![crypto::SecretStorageContentIndex {
+                root_context: None,
+                root_ref: None,
+
                 item_kind: crypto::SecretStorageItemKind::RecoveryKeyShare,
                 secret_id: "share".into(),
             }],
@@ -126,14 +132,16 @@ impl Fixture {
             ciphertext_digest: wire::Hash::new(arkret_canonical::sha256_digest([0u8; 24])).unwrap(),
             plaintext_commitment: None,
             signature_proof: crypto::KeyBackupSignatureProof {
-                device_id: device.clone(),
+                agent_authorization_event_ref: None,
+
+                device_id: Some(device.clone()),
                 verification_method: wire::DidUrl::new("did:web:unlock-test.example#root").unwrap(),
                 signature_algorithm: crypto::KeyBackupSignatureAlgorithm::Ed25519,
                 signature: wire::Base64UrlString::new(signature.clone()).unwrap(),
-                device_authorize_event_id: wire::EventId::from_digest(
+                device_authorize_event_id: Some(wire::EventId::from_digest(
                     arkret_canonical::DigestSuite::Sha256,
                     [80u8; 32],
-                ),
+                )),
             },
             retention: None,
             series_id: wire::BackupSeriesId::new(

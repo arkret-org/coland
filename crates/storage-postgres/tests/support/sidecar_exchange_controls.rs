@@ -56,30 +56,58 @@ pub(super) async fn assert_current(
         .unwrap()
         .unwrap()
         .value;
-    let mut encrypt =
-        |kind: EventKind, content_type: &str, plaintext: &[u8]| -> EncryptedEnvelope {
-            let header = arkret_models_crypto::EventContentPreEncryptionHeader::reconstruct(
-                "1.0",
-                content_type,
-                EncryptedPayloadScheme::MlsRfc9420,
-                scope.clone(),
-                kind.as_str(),
-                group.epoch(),
-                current.current_mls_commit_event_ref.clone(),
-                group.local_content_sender_domain().unwrap(),
-                arkret_models_crypto::EventContentRoutingContext::None,
-            )
-            .unwrap();
-            group
-                .encrypt_payload(header, plaintext)
-                .unwrap()
-                .to_envelope()
-                .unwrap()
-        };
+    use coland_storage::KeyBackupStore as _;
+    let backups = coland_storage_postgres::PgKeyBackupStore { pool: pool.clone() }
+        .snapshot_all()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|wire| serde_json::from_value(wire).ok())
+        .collect::<Vec<_>>();
+    let mut encrypt = |kind: EventKind,
+                       content_type: &str,
+                       plaintext: &[u8],
+                       after: Vec<SemanticRef>|
+     -> EncryptedEnvelope {
+        let mut original = ordinary_realm::event_for_actor(
+            kind.clone(),
+            scope.clone(),
+            ActorId::account(controller.clone()),
+            serde_json::json!({}),
+            head.commit.committed_at,
+        );
+        original.semantic_refs = after;
+        let material = coland_test_support::mls_content::retained_material(
+            group,
+            &original,
+            &current.current_mls_commit_event_ref,
+            &backups,
+        )
+        .expect("Sidecar control waits for its native root publication");
+        let header = arkret_models_crypto::EventContentPreEncryptionHeader::reconstruct(
+            "1.0",
+            content_type,
+            EncryptedPayloadScheme::EpochContentAead,
+            scope.clone(),
+            kind.as_str(),
+            group.epoch(),
+            current.current_mls_commit_event_ref.clone(),
+            group.local_content_sender_domain().unwrap(),
+            arkret_models_crypto::EventContentRoutingContext::None,
+            material,
+        )
+        .unwrap();
+        group
+            .encrypt_payload(header, plaintext)
+            .unwrap()
+            .to_envelope()
+            .unwrap()
+    };
     let content = encrypt(
         EventKind::MessageCreate,
         arkret_models_collaboration::events_payloads::message::MESSAGE_CONTENT_BLOCK_MLS_CONTENT_TYPE,
         b"{\"kind\":\"ak.content.text\",\"body\":\"private request\",\"format\":\"plain\"}",
+        Vec::new(),
     );
     let metadata = serde_json::json!({"sidecar_exchange_binding":{
         "schema":"ak.schema.agent_sidecar_event_exchange_binding.v1","exchange_id":"pg-sidecar-current-000001","role":"request",
@@ -90,6 +118,7 @@ pub(super) async fn assert_current(
         EventKind::MessageCreate,
         arkret_models_collaboration::events_payloads::message::MESSAGE_METADATA_MLS_CONTENT_TYPE,
         &serde_json::to_vec(&metadata).unwrap(),
+        Vec::new(),
     );
     let make = async |previous: &coland_storage::AuthorityCommitTransaction,
                       kind,
@@ -185,6 +214,10 @@ pub(super) async fn assert_current(
         EventKind::AgentSidecarExchangeControl,
         "application/vnd.arkret.agent-sidecar-exchange-control+json",
         &serde_json::to_vec(&control).unwrap(),
+        vec![SemanticRef::new(
+            control.request_event_id.to_string(),
+            "after",
+        )],
     );
     let payload =
         arkret_models_collaboration::events_payloads::sidecar::AgentSidecarExchangeControlPayload {

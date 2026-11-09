@@ -38,7 +38,7 @@ use arkret_models_collaboration::device_messages::{
 use arkret_models_collaboration::governance::membership_invite::MembershipPayload;
 use arkret_models_crypto::{
     KeyPackagesClaimQueryRequestBody, KeyPackagesClaimRequestBody, KeyPackagesClaimResponseBody,
-    KeyPackagesUploadResponseBody, MlsCommitPayload, MlsGovernanceBindingPayload,
+    KeyPackagesUploadResponseBody, MlsGovernanceBindingPayload,
 };
 use arkret_wire::{AccountId, ActorId, EventKind, MlsWelcomeDelivery, RealmId, ScopeRef};
 use base64::Engine as _;
@@ -1000,8 +1000,14 @@ async fn mls_lifecycle_body() {
         .await
         .unwrap()
         .expect("the HTTP claim wrote its ledger row");
-    let commit_payload =
-        MlsCommitPayload::new(genesis_ref.clone(), 0, &add.commit, add_binding).unwrap();
+    let commit_payload = coland_test_support::mls_content::commit_payload(
+        &alice_group,
+        genesis_ref.clone(),
+        0,
+        &add.commit,
+        add_binding,
+    )
+    .unwrap();
     let mut commit_request = ordinary_realm::next_request_for_actor(
         &genesis.authority_commit,
         EventKind::MlsCommit,
@@ -1133,16 +1139,30 @@ async fn mls_lifecycle_body() {
             .unwrap(),
         1
     );
+    let endpoints = vec![
+        alice_group.identity().endpoint_identity(),
+        bob_group.identity().endpoint_identity(),
+    ];
+    alice_group
+        .install_test_leaf_bindings(endpoints.clone())
+        .unwrap();
+    bob_group.install_test_leaf_bindings(endpoints).unwrap();
     let header = arkret_models_crypto::EventContentPreEncryptionHeader::reconstruct(
         "1.0",
         "application/vnd.arkret.message+json",
-        arkret_wire::EncryptedPayloadScheme::MlsRfc9420,
+        arkret_wire::EncryptedPayloadScheme::EpochContentAead,
         scope.clone(),
         EventKind::MessageCreate.as_str(),
         1,
         commit_event.event_id.clone(),
         alice_group.local_content_sender_domain().unwrap(),
         arkret_models_crypto::EventContentRoutingContext::None,
+        coland_test_support::mls_content::local_material(
+            &alice_group,
+            EventKind::MessageCreate.as_str(),
+            &commit_event.event_id.clone(),
+        )
+        .unwrap(),
     )
     .unwrap();
     let sealed =

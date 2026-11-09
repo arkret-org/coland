@@ -1212,18 +1212,27 @@ mod encrypted_calendar_tests {
                 .unwrap(),
         )
         .unwrap();
+        group
+            .install_test_leaf_bindings(vec![group.identity().endpoint_identity()])
+            .unwrap();
         let source =
             arkret_wire::EventId::from_digest(realm.digest_suite_code().digest_suite(), [4; 32]);
         let header = arkret_models_crypto::EventContentPreEncryptionHeader::reconstruct(
             "1.0",
             "application/json",
-            arkret_wire::EncryptedPayloadScheme::MlsRfc9420,
-            scope,
+            arkret_wire::EncryptedPayloadScheme::EpochContentAead,
+            scope.clone(),
             arkret_wire::EventKind::StrandUpdate.as_str(),
             group.epoch(),
             source.clone(),
             group.local_content_sender_domain().unwrap(),
             arkret_models_crypto::EventContentRoutingContext::None,
+            coland_test_support::mls_content::local_material(
+                &group,
+                arkret_wire::EventKind::StrandUpdate.as_str(),
+                &source.clone(),
+            )
+            .unwrap(),
         )
         .unwrap();
         let envelope = group.encrypt_payload(header, br#"{"title":"Private schedule","fields":{"calendar":{"start":"2026-06-22","end":"2026-06-23","timezone":"UTC","tzdb_version":"2025b","all_day":true,"status":"confirmed"}}}"#)

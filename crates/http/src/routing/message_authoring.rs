@@ -107,6 +107,7 @@ mod tests {
     fn envelope(context: EncryptedEnvelopeEncryptionContext) -> EncryptedEnvelope {
         EncryptedEnvelope {
             version: "1.0".to_owned(),
+            encryption_scheme: arkret_wire::EncryptedPayloadScheme::EpochContentAead,
             content_type: "application/vnd.arkret.message+json".to_owned(),
             encryption_context: context,
             ciphertext: "Y2lwaGVydGV4dA".to_owned(),
@@ -114,10 +115,10 @@ mod tests {
     }
 
     fn standard(epoch: u64, group_state_ref: EventId) -> EncryptedEnvelope {
-        envelope(EncryptedEnvelopeEncryptionContext::standard(
-            epoch,
-            group_state_ref,
-        ))
+        envelope(
+            coland_test_support::mls_content::envelope_shape(epoch, &group_state_ref)
+                .encryption_context,
+        )
     }
 
     fn blob(seed: u8) -> arkret_wire::BlobRef {

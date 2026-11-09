@@ -1858,16 +1858,7 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
             serde_json::json!({
                 "strand_id": discussion.strand_id,
                 "track_name": "discussion",
-                "encrypted_content": arkret_models_crypto::EncryptedEnvelope {
-                    version: "1.0".to_owned(),
-                    content_type: "application/vnd.arkret.message+json".to_owned(),
-                    encryption_context:
-                        arkret_models_crypto::EncryptedEnvelopeEncryptionContext::standard(
-                            7,
-                            genesis.authority_commit.event.event_id.clone(),
-                        ),
-                    ciphertext: "Y2lwaGVydGV4dA".to_owned(),
-                },
+                "encrypted_content": coland_test_support::mls_content::envelope_shape(7,&(genesis.authority_commit.event.event_id.clone())),
             }),
             at,
         );
@@ -1910,16 +1901,7 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
             serde_json::json!({
                 "strand_id": discussion.strand_id,
                 "track_name": "discussion",
-                "encrypted_content": arkret_models_crypto::EncryptedEnvelope {
-                    version: "1.0".to_owned(),
-                    content_type: "application/vnd.arkret.message+json".to_owned(),
-                    encryption_context:
-                        arkret_models_crypto::EncryptedEnvelopeEncryptionContext::standard(
-                            0,
-                            genesis.authority_commit.event.event_id.clone(),
-                        ),
-                    ciphertext: "Y2lwaGVydGV4dA".to_owned(),
-                },
+                "encrypted_content": coland_test_support::mls_content::envelope_shape(0,&(genesis.authority_commit.event.event_id.clone())),
             }),
             at,
         );

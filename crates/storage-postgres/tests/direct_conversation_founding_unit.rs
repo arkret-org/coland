@@ -3449,7 +3449,23 @@ fn mls_commit_payload(
         ratchet_tree: None,
     };
     serde_json::to_value(
-        arkret_models_crypto::MlsCommitPayload::new(base.clone(), 0, &envelope, binding).unwrap(),
+        arkret_models_crypto::MlsCommitPayload::new(
+            base.clone(),
+            0,
+            &envelope,
+            binding,
+            arkret_wire::BlobRef::new(format!(
+                "ak:blob:{}",
+                arkret_canonical::sha256_digest(commit_bytes)
+            ))
+            .unwrap(),
+            arkret_wire::BlobRef::new(format!(
+                "ak:blob:{}",
+                arkret_canonical::sha256_digest(commit_bytes)
+            ))
+            .unwrap(),
+        )
+        .unwrap(),
     )
     .unwrap()
 }
@@ -3463,15 +3479,7 @@ fn ciphertext(
     serde_json::json!({
         "strand_id": strand_id,
         "track_name": "discussion",
-        "encrypted_content": arkret_models_crypto::EncryptedEnvelope {
-            version: "1.0".to_owned(),
-            content_type: "application/vnd.arkret.message+json".to_owned(),
-            encryption_context: arkret_models_crypto::EncryptedEnvelopeEncryptionContext::standard(
-                epoch,
-                group_state_ref.clone(),
-            ),
-            ciphertext: "Y2lwaGVydGV4dA".to_owned(),
-        },
+        "encrypted_content": coland_test_support::mls_content::envelope_shape(epoch,&(group_state_ref.clone())),
     })
 }
 
@@ -4476,7 +4484,8 @@ async fn participant_authority_scenario() {
                     EventKind::MlsCommit,
                     founder.clone(),
                     serde_json::to_value(
-                        arkret_models_crypto::MlsCommitPayload::new(
+                        coland_test_support::mls_content::commit_payload(
+                            &encryption_group,
                             genesis_ref.clone(),
                             accepted_base.current_key_access_revision,
                             &real_add.commit,
@@ -4578,59 +4587,35 @@ async fn participant_authority_scenario() {
         );
         // Distinct real RFC 9420 messages use the actual accepted pair Add above,
         // rather than merging a staged transition or manufacturing a receipt.
-        let mut encrypted_payload = |plaintext: &[u8]| {
+        let mut encrypted_request = async |body:&str| {
+            use coland_storage::KeyBackupStore as _;
+            let content = arkret::ContentBlock::text(body);
+            let plaintext_payload = serde_json::json!({"strand_id":facts.main_strand_id,
+                "track_name":"discussion","content":content});
+            let original = cited(&add.authority_commit,EventKind::MessageCreate,founder.clone(),
+                plaintext_payload,Cites::Bootstrap(&create_ref)).authority_commit.event;
+            let backups = coland_storage_postgres::PgKeyBackupStore {pool:pool.clone()}.snapshot_all().await.unwrap()
+                .into_iter().filter_map(|wire|serde_json::from_value(wire).ok()).collect::<Vec<_>>();
+            let material = coland_test_support::mls_content::retained_material(
+                &encryption_group,&original,&add_ref,&backups).expect("Direct content requires its native root publication");
+            let outer = material.outer_event.clone();
             let header = arkret_models_crypto::EventContentPreEncryptionHeader::reconstruct(
-                "1.0",
-                "application/vnd.arkret.message+json",
-                arkret_wire::EncryptedPayloadScheme::MlsRfc9420,
-                scope.clone(),
-                EventKind::MessageCreate.as_str(),
-                encryption_group.epoch(),
-                add_ref.clone(),
+                "1.0","application/vnd.arkret.message+json",arkret::EncryptedPayloadScheme::EpochContentAead,
+                scope.clone(),EventKind::MessageCreate.as_str(),encryption_group.epoch(),add_ref.clone(),
                 encryption_group.local_content_sender_domain().unwrap(),
-                arkret_models_crypto::EventContentRoutingContext::None,
-            )
-            .unwrap();
-            let envelope = encryption_group
-                .encrypt_payload(header, plaintext)
-                .unwrap()
-                .to_envelope()
-                .unwrap();
-            serde_json::json!({ "strand_id": facts.main_strand_id,
-            "track_name": "discussion", "encrypted_content": envelope })
+                arkret_models_crypto::EventContentRoutingContext::None,material,
+            ).unwrap();
+            let envelope = encryption_group.encrypt_payload(header,&arkret_canonical::canonical_json_bytes(&content).unwrap())
+                .unwrap().to_envelope().unwrap();
+            let request = sourced_cited_at(&pair,&add.authority_commit,EventKind::MessageCreate,founder.clone(),
+                serde_json::json!({"strand_id":facts.main_strand_id,"track_name":"discussion","encrypted_content":envelope}),
+                Cites::Bootstrap(&create_ref),original.created_at).await;
+            assert_eq!(arkret_models_crypto::EventContentMaterial::outer_event_for(&request.authority_commit.event).unwrap(),outer);
+            request
         };
-        let stale_payload = encrypted_payload(b"{\"content\":\"older provisional\"}");
-        let later_payload = encrypted_payload(b"{\"content\":\"later provisional\"}");
-        assert_ne!(
-            stale_payload["encrypted_content"]["ciphertext"],
-            later_payload["encrypted_content"]["ciphertext"]
-        );
-        let stale_provisional = boxed_source(|| {
-            sourced_cited(
-                &pair,
-                &add.authority_commit,
-                EventKind::MessageCreate,
-                founder.clone(),
-                stale_payload,
-                Cites::Bootstrap(&create_ref),
-            )
-        })
-        .await;
-        let later_provisional = boxed_source(|| {
-            sourced_cited(
-                &pair,
-                &add.authority_commit,
-                EventKind::MessageCreate,
-                founder.clone(),
-                later_payload,
-                Cites::Bootstrap(&create_ref),
-            )
-        })
-        .await;
-        assert_ne!(
-            stale_provisional.authority_commit.event.event_id,
-            later_provisional.authority_commit.event.event_id
-        );
+        let stale_provisional = encrypted_request("older provisional").await;
+        let later_provisional = encrypted_request("later provisional").await;
+        assert_ne!(stale_provisional.authority_commit.event.event_id,later_provisional.authority_commit.event.event_id);
         uow.commit_event(later_provisional.clone()).await.unwrap();
 
         (stale_provisional, later_provisional)

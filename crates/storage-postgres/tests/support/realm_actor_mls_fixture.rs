@@ -462,6 +462,67 @@ async fn device_post(
     .await
 }
 
+pub(super) async fn commit_payload(
+    fixture: &Fixture,
+    group: &arkret_mls::ArkretMlsGroup,
+    base: arkret_wire::EventId,
+    revision: u64,
+    commit: &MlsCommitEnvelope,
+    binding: MlsGovernanceBindingPayload,
+) -> arkret_wire::Result<MlsCommitPayload> {
+    let (info, tree) = group
+        .pending_public_group_state_bytes(commit, &binding)
+        .map_err(|error| arkret_wire::WireError::Protocol(error.to_string()))?;
+    let info = public_material(fixture, info).await;
+    let tree = public_material(fixture, tree).await;
+    MlsCommitPayload::new(base, revision, commit, binding, info, tree)
+}
+
+pub(super) async fn retained_backups(fixture: &Fixture) -> Vec<KeyBackup> {
+    fixture
+        .state
+        .test_persistence()
+        .key_backups()
+        .snapshot_all()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect()
+}
+
+pub(super) async fn content_material(
+    fixture: &Fixture,
+    group: &arkret_mls::ArkretMlsGroup,
+    event: &Event,
+    reference: &arkret::EventId,
+) -> EventContentMaterial {
+    coland_test_support::mls_content::retained_material(
+        group,
+        event,
+        reference,
+        &retained_backups(fixture).await,
+    )
+    .expect("native content requires its published durable root before sealing")
+}
+
+pub(super) async fn retained_root_context(
+    fixture: &Fixture,
+    scope: &ScopeRef,
+    reference: &arkret::EventId,
+    epoch: u64,
+) -> ContentRootContext {
+    retained_backups(fixture)
+        .await
+        .into_iter()
+        .flat_map(|b| b.contents)
+        .filter_map(|item| item.root_context)
+        .find(|ctx| {
+            &ctx.effective_scope == scope && &ctx.group_state_ref == reference && ctx.epoch == epoch
+        })
+        .expect("content requires its original durable root context")
+}
+
 async fn public_material(fixture: &Fixture, bytes: Vec<u8>) -> arkret_wire::BlobRef {
     let digest = arkret_canonical::sha256_digest(&bytes);
     let sha256 = digest.strip_prefix("sha256:").unwrap();
@@ -927,19 +988,28 @@ async fn submit_human_message_content(
     .unwrap()
     .unwrap()
     .value;
+    let mut original =
+        fixture.admin_event(EventKind::MessageCreate, scope.clone(), json!(plaintext));
     let mut encrypted = plaintext.clone();
     let content = encrypted.content.take().unwrap();
     let content = arkret_canonical::canonical_json_bytes(&content).unwrap();
     let header = arkret::EventContentPreEncryptionHeader::reconstruct(
         "1.0",
         arkret::MESSAGE_CONTENT_BLOCK_MLS_CONTENT_TYPE,
-        arkret::EncryptedPayloadScheme::MlsRfc9420,
+        arkret::EncryptedPayloadScheme::EpochContentAead,
         scope.clone(),
         EventKind::MessageCreate.as_str(),
         group.epoch(),
         current.current_mls_commit_event_ref.clone(),
         group.local_content_sender_domain().unwrap(),
         arkret::EventContentRoutingContext::None,
+        content_material(
+            fixture,
+            group,
+            &original,
+            &current.current_mls_commit_event_ref,
+        )
+        .await,
     )
     .unwrap();
     encrypted.encrypted_content = Some(
@@ -954,13 +1024,20 @@ async fn submit_human_message_content(
         let header = arkret::EventContentPreEncryptionHeader::reconstruct(
             "1.0",
             arkret::MESSAGE_METADATA_MLS_CONTENT_TYPE,
-            arkret::EncryptedPayloadScheme::MlsRfc9420,
+            arkret::EncryptedPayloadScheme::EpochContentAead,
             scope.clone(),
             EventKind::MessageCreate.as_str(),
             group.epoch(),
-            current.current_mls_commit_event_ref,
+            current.current_mls_commit_event_ref.clone(),
             group.local_content_sender_domain().unwrap(),
             arkret::EventContentRoutingContext::None,
+            content_material(
+                fixture,
+                group,
+                &original,
+                &current.current_mls_commit_event_ref,
+            )
+            .await,
         )
         .unwrap();
         encrypted.encrypted_metadata = Some(
@@ -970,7 +1047,8 @@ async fn submit_human_message_content(
             .unwrap(),
         );
     }
-    let event = fixture.admin_event(EventKind::MessageCreate, scope.clone(), json!(encrypted));
+    original.payload = serde_json::from_value(json!(encrypted)).unwrap();
+    let event = fixture.sign_admin(original);
     submit_human_event(fixture, event.clone()).await;
     event
 }
@@ -1019,15 +1097,20 @@ pub(super) async fn human_updates_group(
     let commit = group
         .self_update_commit_with_governance_binding(&binding)
         .unwrap();
-    let payload = MlsCommitPayload::new(
+    let payload = super::realm_actor_mls_fixture::commit_payload(
+        fixture,
+        &group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &commit,
         binding,
     )
+    .await
     .unwrap();
     let event = fixture.admin_event(EventKind::MlsCommit, scope.clone(), json!(payload));
     let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
+        recovery_source: None,
+
         commit_event: event.clone(),
         welcomes: Vec::new(),
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -1151,11 +1234,18 @@ pub(super) async fn verify_runtime_message(
     let sender = String::from_utf8(arkret::mls_basic_credential_identity(actor).unwrap()).unwrap();
     let header = envelope
         .reconstruct_pre_encryption_header(
-            arkret::EncryptedPayloadScheme::MlsRfc9420,
-            original.event.scope_ref,
+            arkret::EncryptedPayloadScheme::EpochContentAead,
+            original.event.scope_ref.clone(),
             EventKind::MessageCreate.as_str(),
             &sender,
             None,
+            coland_test_support::mls_content::original_material(
+                group,
+                &original.event,
+                &envelope,
+                &retained_backups(fixture).await,
+            )
+            .unwrap(),
         )
         .unwrap();
     let encrypted =
@@ -1464,12 +1554,15 @@ async fn commit_add(
     let added = group
         .add_member_with_governance_binding(&package_record, &binding)
         .unwrap();
-    let payload = MlsCommitPayload::new(
+    let payload = super::realm_actor_mls_fixture::commit_payload(
+        fixture,
+        &group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &added.commit,
         binding,
     )
+    .await
     .unwrap();
     let event = signed_event(
         package,
@@ -1514,6 +1607,8 @@ async fn commit_add(
     )
     .unwrap();
     let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
+        recovery_source: None,
+
         commit_event: event.clone(),
         welcomes: vec![welcome.clone()],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -2197,12 +2292,15 @@ async fn human_adds_runtime_to_group_in_authority(
         EventKind::MlsCommit,
         scope.clone(),
         json!(
-            MlsCommitPayload::new(
+            super::realm_actor_mls_fixture::commit_payload(
+                fixture,
+                &group,
                 current.current_mls_commit_event_ref.clone(),
                 current.current_key_access_revision,
                 &added.commit,
                 binding
             )
+            .await
             .unwrap()
         ),
     );
@@ -2240,6 +2338,8 @@ async fn human_adds_runtime_to_group_in_authority(
     )
     .unwrap();
     let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
+        recovery_source: None,
+
         commit_event: event.clone(),
         welcomes: vec![welcome],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -2357,16 +2457,21 @@ pub(super) async fn human_rotates_out_runtime(
         EventKind::MlsCommit,
         scope,
         json!(
-            MlsCommitPayload::new(
+            super::realm_actor_mls_fixture::commit_payload(
+                fixture,
+                &group,
                 current.current_mls_commit_event_ref.clone(),
                 current.current_key_access_revision,
                 &removed.commit,
                 binding
             )
+            .await
             .unwrap()
         ),
     );
     let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
+        recovery_source: None,
+
         commit_event: event.clone(),
         welcomes: vec![],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),

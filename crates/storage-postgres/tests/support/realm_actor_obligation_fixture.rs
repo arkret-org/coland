@@ -817,12 +817,12 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
         .add_members_with_governance_binding(&package_records, &binding)
         .unwrap();
     assert_eq!(added.welcomes.len(), 2);
-    let payload = MlsCommitPayload::new(
+    let payload = super::realm_actor_mls_fixture::commit_payload(fixture,&group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &added.commit,
         binding,
-    )
+    ).await
     .unwrap();
     let event = signed_event(
         package,
@@ -876,6 +876,8 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
         welcomes.push(welcome);
     }
     let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
+    recovery_source: None,
+
         commit_event: event.clone(),
         welcomes,
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -1602,12 +1604,12 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
     let added = group
         .add_member_with_governance_binding(&package_record, &binding)
         .unwrap();
-    let payload = MlsCommitPayload::new(
+    let payload = super::realm_actor_mls_fixture::commit_payload(fixture,&group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &added.commit,
         binding,
-    )
+    ).await
     .unwrap();
     let event = signed_event(
         package,
@@ -1652,6 +1654,8 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
     )
     .unwrap();
     let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
+    recovery_source: None,
+
         commit_event: event.clone(),
         welcomes: vec![welcome.clone()],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),

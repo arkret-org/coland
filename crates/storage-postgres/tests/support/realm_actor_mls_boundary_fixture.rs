@@ -759,6 +759,10 @@ async fn boundary_encrypted_message(
             "Real native encrypted bytes before independent E2EE consent expiry",
         ),
     );
+    let signer = Ed25519PayloadSigner::new(SigningKey::from_bytes(&[79;32]),authority.native_did.clone(),
+        DidUrl::new(format!("{}#{}",authority.native_did,authority.device_id)).unwrap());
+    let mut original = signed_event(package,candidate.actor_id.clone(),scope.clone(),EventKind::MessageCreate,
+        json!(payload),Some(child),&signer);
     let content = arkret_canonical::canonical_json_bytes(&payload.content.take().unwrap()).unwrap();
     let current = coland_storage_postgres::PgMlsGroupCurrentStore {
         pool: fixture.pool.clone(),
@@ -771,13 +775,14 @@ async fn boundary_encrypted_message(
     let header = arkret::EventContentPreEncryptionHeader::reconstruct(
         "1.0",
         arkret::MESSAGE_CONTENT_BLOCK_MLS_CONTENT_TYPE,
-        arkret::EncryptedPayloadScheme::MlsRfc9420,
+        arkret::EncryptedPayloadScheme::EpochContentAead,
         scope.clone(),
         EventKind::MessageCreate.as_str(),
         group.epoch(),
-        current.current_mls_commit_event_ref,
+        current.current_mls_commit_event_ref.clone(),
         group.local_content_sender_domain().unwrap(),
         arkret::EventContentRoutingContext::None,
+        super::realm_actor_mls_fixture::content_material(fixture,group,&original,&current.current_mls_commit_event_ref).await,
     )
     .unwrap();
     payload.encrypted_content = Some(
@@ -786,20 +791,9 @@ async fn boundary_encrypted_message(
         )
         .unwrap(),
     );
-    let signer = Ed25519PayloadSigner::new(
-        SigningKey::from_bytes(&[79; 32]),
-        authority.native_did.clone(),
-        DidUrl::new(format!("{}#{}", authority.native_did, authority.device_id)).unwrap(),
-    );
-    let event = signed_event(
-        package,
-        candidate.actor_id.clone(),
-        scope,
-        EventKind::MessageCreate,
-        json!(payload),
-        Some(child),
-        &signer,
-    );
+    original.payload = serde_json::from_value(json!(payload)).unwrap();
+    coland_test_support::mls_content::resign(&mut original,[79;32]).unwrap();
+    let event = original;
     let (status, value) = boxed_step(|| {
         device_post(
             fixture,

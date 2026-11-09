@@ -696,12 +696,12 @@ async fn admission_native_last_resort(
             &binding,
         )
         .unwrap();
-    let payload = MlsCommitPayload::new(
+    let payload = super::realm_actor_mls_fixture::commit_payload(fixture,&group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &added.commit,
         binding,
-    )
+    ).await
     .unwrap();
     let signer = Ed25519PayloadSigner::new(
         SigningKey::from_bytes(&[79; 32]),
@@ -752,6 +752,8 @@ async fn admission_native_last_resort(
     )
     .unwrap();
     let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
+    recovery_source: None,
+
         commit_event: event.clone(),
         welcomes: vec![welcome.clone()],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -1092,12 +1094,12 @@ async fn admission_current_mls_policy(
     let update = prepared
         .self_update_commit_with_governance_binding(&binding)
         .unwrap();
-    let payload = MlsCommitPayload::new(
+    let payload = super::realm_actor_mls_fixture::commit_payload(fixture,&prepared,
         state.current_mls_commit_event_ref.clone(),
         state.current_key_access_revision,
         &update,
         binding,
-    )
+    ).await
     .unwrap();
     let signer = Ed25519PayloadSigner::new(
         SigningKey::from_bytes(&[79; 32]),
@@ -1114,6 +1116,8 @@ async fn admission_current_mls_policy(
         &signer,
     );
     let request = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
+    recovery_source: None,
+
         commit_event: event.clone(),
         welcomes: vec![],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -1193,12 +1197,12 @@ async fn admission_accepted_self_update(
     let update = group
         .self_update_commit_with_governance_binding(&binding)
         .unwrap();
-    let payload = MlsCommitPayload::new(
+    let payload = super::realm_actor_mls_fixture::commit_payload(fixture,&group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &update,
         binding,
-    )
+    ).await
     .unwrap();
     let signer = Ed25519PayloadSigner::new(
         SigningKey::from_bytes(&[79; 32]),
@@ -1215,6 +1219,8 @@ async fn admission_accepted_self_update(
         &signer,
     );
     let request = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
+    recovery_source: None,
+
         commit_event: event.clone(),
         welcomes: vec![],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -1398,12 +1404,12 @@ async fn admission_claimed_target_fence(
             &binding,
         )
         .unwrap();
-    let payload = MlsCommitPayload::new(
+    let payload = super::realm_actor_mls_fixture::commit_payload(fixture,&prepared,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &added.commit,
         binding,
-    )
+    ).await
     .unwrap();
     let source_method = DidUrl::new(format!("{}#{}", source.native_did, source.device_id)).unwrap();
     let event = signed_event(
@@ -1452,6 +1458,8 @@ async fn admission_claimed_target_fence(
     )
     .unwrap();
     let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
+    recovery_source: None,
+
         commit_event: event.clone(),
         welcomes: vec![welcome],
         idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),

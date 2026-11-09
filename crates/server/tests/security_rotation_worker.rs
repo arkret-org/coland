@@ -336,9 +336,9 @@ async fn propose_authorizer_revocation(fixture: &mut EraseFixture) -> SecurityTr
         &authorize_event_id,
         "revocation-replacement",
     );
-    replacement.signature_proof.device_id = fixture.revoker_id.clone();
+    replacement.signature_proof.device_id = Some(fixture.revoker_id.clone());
     replacement.signature_proof.verification_method = fixture.revoker_verification_method.clone();
-    replacement.signature_proof.device_authorize_event_id = authorize_event_id.clone();
+    replacement.signature_proof.device_authorize_event_id = Some(authorize_event_id.clone());
     replacement.signature_proof.signature =
         arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
             ed25519_dalek::SigningKey::from_bytes(&fixture.revoker_signing_seed)

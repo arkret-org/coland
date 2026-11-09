@@ -393,7 +393,7 @@ async fn pending_agent_handshake_reads(
         let sidecar = &sidecar;
         let sidecar_genesis = &sidecar_genesis;
         let agent = &agent;
-        use arkret_models_crypto::{MlsCommitPayload, MlsGovernanceBindingPayload};
+        use arkret_models_crypto::MlsGovernanceBindingPayload;
         use arkret_wire::{ActorId, CommitStreamRef, CommittedEventView, ScopeRef};
         use coland_storage::{
             AccountStreamScan, MlsMemberGroupStateMaterialRead, MlsStateInstallation,
@@ -541,7 +541,7 @@ async fn pending_agent_handshake_reads(
                 .unwrap();
             let wire = arkret_canonical::base64url_decode(&envelope.commit).unwrap();
             tracker.process_public_handshake(&wire).unwrap();
-            let payload = MlsCommitPayload::new(
+            let payload = coland_test_support::mls_content::commit_payload(&group,
                 genesis.authority_commit.event.event_id.clone(),
                 0,
                 &envelope,
@@ -2163,7 +2163,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
                 scope.clone(),
                 ActorId::account(controller.clone()),
                 serde_json::to_value(
-                    arkret_models_crypto::MlsCommitPayload::new(
+                    coland_test_support::mls_content::commit_payload(&group,
                         base.current_mls_commit_event_ref.clone(),
                         base.current_key_access_revision,
                         &add.commit,
@@ -2302,6 +2302,8 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
                 pool: origin_pool.clone(),
             };
             let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
+    recovery_source: None,
+
                 commit_event: accepted.event.clone(),
                 welcomes: vec![delivery.clone()],
                 idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
@@ -4809,7 +4811,7 @@ async fn sidecar_post_tree_rejects_stale_endpoint_and_paused_self_update(
     group: &mut arkret_mls::ArkretMlsGroup,
     paused_group: &mut arkret_mls::ArkretMlsGroup,
 ) {
-    use arkret_models_crypto::{MlsCommitPayload, MlsGovernanceBindingPayload};
+    use arkret_models_crypto::MlsGovernanceBindingPayload;
     use arkret_wire::{ActorId, ScopeRef};
     use coland_storage::{AgentControlAdmissionWrite, MlsGroupCurrentStore};
     use diesel::sql_types::BigInt;
@@ -4928,9 +4930,14 @@ async fn sidecar_post_tree_rejects_stale_endpoint_and_paused_self_update(
     let make = |binding: MlsGovernanceBindingPayload,
                 envelope: &arkret_models_crypto::MlsCommitEnvelope,
                 tracker: &arkret_mls::MlsPublicGroupTracker,
+                private: &arkret_mls::ArkretMlsGroup,
                 proposals: Vec<arkret_mls::MlsVerifiedConsumedProposal>| {
         let base = binding.base_group_state_ref().unwrap().clone();
-        let payload = MlsCommitPayload::new(
+        let (group_info, pending_tree) = private
+            .pending_public_group_state_bytes(envelope, &binding)
+            .unwrap();
+        let payload = coland_test_support::mls_content::commit_payload(
+            private,
             base.clone(),
             binding.key_access_revision(),
             envelope,
@@ -4959,8 +4966,21 @@ async fn sidecar_post_tree_rejects_stale_endpoint_and_paused_self_update(
                 signature_key: l.signature_key,
             };
         let tree = tracker.ratchet_tree_bytes().unwrap();
-        let digest = arkret_canonical::sha256_digest(&tree);
-        let sha256 = digest.strip_prefix("sha256:").unwrap().to_owned();
+        assert_eq!(tree, pending_tree);
+        let public_blobs = [group_info, tree]
+            .into_iter()
+            .map(|bytes| {
+                let digest = arkret_canonical::sha256_digest(&bytes);
+                let sha256 = digest.strip_prefix("sha256:").unwrap().to_owned();
+                coland_storage::MlsPublicBlob {
+                    blob_ref: arkret_wire::BlobRef::new(format!("ak:blob:{digest}")).unwrap(),
+                    sha256: sha256.clone(),
+                    size_bytes: bytes.len() as i64,
+                    storage_backend: "local".into(),
+                    storage_key: format!("sha256/{sha256}"),
+                }
+            })
+            .collect();
         request.authority_commit.mls_state = Some(coland_storage::MlsStateInstallation {
             effective_scope: scope.clone(),
             base: Some(coland_storage::MlsInstalledBase {
@@ -4987,13 +5007,7 @@ async fn sidecar_post_tree_rejects_stale_endpoint_and_paused_self_update(
                     target_after: p.target_after.map(leaf),
                 })
                 .collect(),
-            public_blobs: vec![coland_storage::MlsPublicBlob {
-                blob_ref: arkret_wire::BlobRef::new(format!("ak:blob:{digest}")).unwrap(),
-                sha256: sha256.clone(),
-                size_bytes: tree.len() as i64,
-                storage_backend: "local".into(),
-                storage_key: format!("sha256/{sha256}"),
-            }],
+            public_blobs,
         });
         request
     };
@@ -5038,6 +5052,7 @@ async fn sidecar_post_tree_rejects_stale_endpoint_and_paused_self_update(
         binding(&renewed_cut),
         &envelope,
         &tracker,
+        &stale,
         consumed_proposals,
     );
     let request = ordinary_realm::source_request(pool, request).await;
@@ -5128,6 +5143,7 @@ async fn sidecar_post_tree_rejects_stale_endpoint_and_paused_self_update(
         binding(&paused_cut),
         &envelope,
         &tracker,
+        &malicious,
         consumed_proposals,
     );
     let request = ordinary_realm::source_request(pool, request).await;
@@ -5179,6 +5195,7 @@ async fn sidecar_post_tree_rejects_stale_endpoint_and_paused_self_update(
         binding(&paused_cut),
         &remove.commit,
         &tracker,
+        &group,
         consumed_proposals,
     );
     let request = ordinary_realm::source_request(&pool, request).await;
@@ -5226,13 +5243,19 @@ async fn sidecar_post_tree_rejects_stale_endpoint_and_paused_self_update(
     let header = arkret_models_crypto::EventContentPreEncryptionHeader::reconstruct(
         "1.0",
         "text/plain",
-        arkret_wire::EncryptedPayloadScheme::MlsRfc9420,
+        arkret_wire::EncryptedPayloadScheme::EpochContentAead,
         scope.clone(),
         EventKind::MessageCreate.as_str(),
         group.epoch(),
-        current.value.current_mls_commit_event_ref,
+        current.value.current_mls_commit_event_ref.clone(),
         group.local_content_sender_domain().unwrap(),
         arkret_models_crypto::EventContentRoutingContext::None,
+        coland_test_support::mls_content::local_material(
+            &group,
+            EventKind::MessageCreate.as_str(),
+            &current.value.current_mls_commit_event_ref.clone(),
+        )
+        .unwrap(),
     )
     .unwrap();
     let encrypted = group.encrypt_payload(header, b"after removal").unwrap();
@@ -11797,7 +11820,8 @@ async fn owned_consumer_queue_later_welcome(
             scope.clone(),
             ActorId::account(controller.clone()),
             serde_json::to_value(
-                arkret_models_crypto::MlsCommitPayload::new(
+                coland_test_support::mls_content::commit_payload(
+                    &group,
                     base.current_mls_commit_event_ref.clone(),
                     base.current_key_access_revision,
                     &add.commit,

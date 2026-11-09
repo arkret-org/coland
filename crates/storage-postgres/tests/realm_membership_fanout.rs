@@ -5419,7 +5419,23 @@ fn mls_commit_payload(
         ratchet_tree: None,
     };
     serde_json::to_value(
-        arkret_models_crypto::MlsCommitPayload::new(base.clone(), 0, &envelope, binding).unwrap(),
+        arkret_models_crypto::MlsCommitPayload::new(
+            base.clone(),
+            0,
+            &envelope,
+            binding,
+            arkret_wire::BlobRef::new(format!(
+                "ak:blob:{}",
+                arkret_canonical::sha256_digest(commit_bytes)
+            ))
+            .unwrap(),
+            arkret_wire::BlobRef::new(format!(
+                "ak:blob:{}",
+                arkret_canonical::sha256_digest(commit_bytes)
+            ))
+            .unwrap(),
+        )
+        .unwrap(),
     )
     .unwrap()
 }

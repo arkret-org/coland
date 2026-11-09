@@ -13,7 +13,8 @@ publish = false
 [dependencies]
 diesel = { workspace = true, features = ["postgres", "serde_json"] }
 diesel-async = { workspace = true, features = ["postgres", "deadpool"] }
-arkret.workspace = true
+arkret = { workspace = true, features = ["mls-test-utils", "signer"] }
+anyhow.workspace = true
 arkret-bootstrap.workspace = true
 arkret-canonical.workspace = true
 arkret-event-draft = { workspace = true, features = ["test-support"] }
@@ -24,6 +25,7 @@ arkret-models-crypto.workspace = true
 arkret-models-identity.workspace = true
 arkret-policy.workspace = true
 arkret-schema.workspace = true
+arkret-schema-conformance.workspace = true
 arkret-signatures.workspace = true
 arkret-state.workspace = true
 arkret-test-kit.workspace = true

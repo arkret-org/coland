@@ -1607,15 +1607,7 @@ fn ciphertext_message(
     serde_json::json!({
         "strand_id": strand_id,
         "track_name": "discussion",
-        "encrypted_content": arkret_models_crypto::EncryptedEnvelope {
-            version: "1.0".to_owned(),
-            content_type: "application/vnd.arkret.message+json".to_owned(),
-            encryption_context: arkret_models_crypto::EncryptedEnvelopeEncryptionContext::standard(
-                epoch,
-                group_state_ref.clone(),
-            ),
-            ciphertext: "Y2lwaGVydGV4dA".to_owned(),
-        },
+        "encrypted_content": coland_test_support::mls_content::envelope_shape(epoch,&(group_state_ref.clone())),
     })
 }
 

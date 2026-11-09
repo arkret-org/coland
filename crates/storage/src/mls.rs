@@ -881,6 +881,18 @@ pub trait MlsKeyPackageStore: Send + Sync {
         source: &crate::AppletManagedDeviceScopeGuard,
         transport_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<bool>;
+    /// Retain an ordinary Human/Agent's exact outbound command on its home
+    /// Station under the same PCR fence as recovery, before network dispatch.
+    /// False denotes the same durable original, never accepted membership.
+    async fn prepare_ordinary_claim_source(
+        &self,
+        _request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
+        _transport_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<bool> {
+        Err(crate::PersistenceError::Conflict(
+            "failed_precondition: ordinary claim origin retention unavailable".into(),
+        ))
+    }
     async fn realm_claim_source(
         &self,
         source_id: &str,

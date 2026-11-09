@@ -2548,6 +2548,14 @@ async fn claim_keypackage_session(
             |error| AppError::internal(format!("remote claim canonical body: {error}")),
         )?)
         .map_err(|error| AppError::internal(format!("remote claim body utf8: {error}")))?;
+        // Recheck the real requester under its home PCR lock and preserve the
+        // exact command before any transport can leave this Station. The
+        // destination's allocation ledger cannot close our recovery census.
+        state
+            .mls_key_packages()
+            .prepare_ordinary_claim_source(&body, session.expires_at)
+            .await
+            .map_err(mls_keypackage_native::claim_error)?;
         crate::routing::federation::outbox::enqueue_outbound(
             state,
             &target.base_url,

@@ -1382,6 +1382,15 @@ pub trait MlsKeyPackageMaintenancePort: Send + Sync {
         source: &coland_storage::AppletManagedDeviceScopeGuard,
         transport_expires_at: chrono::DateTime<chrono::Utc>,
     ) -> ServiceResult<bool>;
+    async fn prepare_ordinary_claim_source(
+        &self,
+        _request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
+        _transport_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> ServiceResult<bool> {
+        Err(crate::ServiceError::Conflict(
+            "failed_precondition: ordinary claim origin retention unavailable".into(),
+        ))
+    }
     async fn peer_claim_by_claim_id(
         &self,
         claim_id: &str,
@@ -1558,6 +1567,15 @@ impl MlsKeyPackageService {
     ) -> ServiceResult<bool> {
         self.key_packages
             .prepare_realm_claim_source(request, source, transport_expires_at)
+            .await
+    }
+    pub async fn prepare_ordinary_claim_source(
+        &self,
+        request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
+        transport_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> ServiceResult<bool> {
+        self.key_packages
+            .prepare_ordinary_claim_source(request, transport_expires_at)
             .await
     }
     pub async fn peer_claim_original(

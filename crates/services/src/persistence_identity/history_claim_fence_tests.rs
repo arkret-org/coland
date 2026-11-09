@@ -27,6 +27,23 @@ struct PreparedClaim {
 }
 
 impl PreparedClaim {
+    fn remote_intent(&self) -> KeyPackagesClaimRequestBody {
+        let mut request = self.admission.request.clone();
+        request.claim_request_id = random();
+        let destination = DidCoreId::new("ak:did_core:web:remote-claim-target.example").unwrap();
+        request.service_binding.destination_id = destination.clone();
+        request.target_account_id = Some(AccountId::new(
+            DidCoreId::new("ak:did_core:web:remote-claim-member.example").unwrap(),
+            destination,
+        ));
+        request.target_device_ids =
+            vec![DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap()];
+        request.target_keypackage_ref = None;
+        sign_request(&mut request, 81);
+        request.validate_shape().unwrap();
+        request
+    }
+
     fn without_local_realm_guard(&self) -> Self {
         // A real Human signing key does not make its caller-declared Realm
         // Actor a native managed requester. This is only a negative request.
@@ -113,6 +130,156 @@ fn operation_signature(method: &str, seed: [u8; 32], bytes: &[u8]) -> KeyOperati
         &SigningKey::from_bytes(&seed).sign(bytes).to_bytes(),
     )
     .unwrap()
+}
+
+fn sign_request(request: &mut KeyPackagesClaimRequestBody, seed: u8) {
+    let input = keypackage_claim_authorization_signing_bytes(
+        &request.unsigned_request(),
+        &request.service_binding,
+        &request.requester_authorization,
+    )
+    .unwrap();
+    let PeerKeyPackageRequesterAuthorization::Device {
+        verification_method,
+        signature,
+        ..
+    } = &mut request.requester_authorization
+    else {
+        unreachable!()
+    };
+    *signature = operation_signature(verification_method.as_str(), [seed; 32], &input);
+}
+
+async fn exercise_origin(pool: &PgPool, request: &KeyPackagesClaimRequestBody) {
+    let store = PgMlsKeyPackageStore { pool: pool.clone() };
+    let deadline = chrono::Utc::now() + chrono::Duration::minutes(5);
+    let digest = arkret_canonical::canonical_sha256(request).unwrap();
+    assert!(
+        store
+            .peer_claim_original(request.claim_request_id.as_str(), &digest)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut bad = request.clone();
+    sign_request(&mut bad, 82);
+    assert!(
+        store
+            .prepare_ordinary_claim_source(&bad, deadline)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .peer_claim_original(request.claim_request_id.as_str(), &digest)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut other_subject = request.clone();
+    other_subject
+        .requester_account_id
+        .as_mut()
+        .unwrap()
+        .principal_id = DidCoreId::new("ak:did_core:web:another-origin-subject.example").unwrap();
+    sign_request(&mut other_subject, 81);
+    assert!(
+        store
+            .prepare_ordinary_claim_source(&other_subject, deadline)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .peer_claim_original(request.claim_request_id.as_str(), &digest)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .prepare_ordinary_claim_source(
+                request,
+                chrono::Utc::now() - chrono::Duration::seconds(1)
+            )
+            .await
+            .is_err()
+    );
+    // This proves only the real local requester's signed intent. No remote
+    // membership, KeyPackage, outcome or network delivery is fabricated.
+    assert!(
+        store
+            .prepare_ordinary_claim_source(request, deadline)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .prepare_ordinary_claim_source(request, deadline)
+            .await
+            .unwrap()
+    );
+    let archived = store
+        .peer_claim_original(request.claim_request_id.as_str(), &digest)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        arkret_canonical::canonical_json_bytes(&archived).unwrap(),
+        arkret_canonical::canonical_json_bytes(request).unwrap()
+    );
+    let mut conflict = request.clone();
+    conflict.expires_at -= chrono::Duration::seconds(1);
+    sign_request(&mut conflict, 81);
+    let error = store
+        .prepare_ordinary_claim_source(&conflict, deadline)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("duplicate_conflict"), "{error}");
+    assert!(
+        store
+            .get_peer_claim(
+                request.service_binding.source_id.as_str(),
+                request.claim_request_id.as_str()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    #[derive(diesel::QueryableByName)]
+    struct NativeRow {
+        #[diesel(sql_type = diesel::sql_types::Jsonb)]
+        payload: serde_json::Value,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let row = diesel::sql_query("SELECT jsonb_build_object('actor',s.actor_id,'authorization',e.envelope->>'event_id','authorization_state',e.state,'commit',c.commit_json->>'event_ref','counter_count',(SELECT count(*) FROM keypackage_claim_attempts t WHERE t.source_id=s.source_id AND t.claim_request_id=s.claim_request_id)) AS payload FROM ordinary_keypackage_claim_sources s JOIN canonical_events e ON e.pk=s.authorization_event_pk JOIN realm_commits c ON c.commit_id=s.authorization_commit_id WHERE s.source_id=$1 AND s.claim_request_id=$2")
+        .bind::<diesel::sql_types::Text, _>(request.service_binding.source_id.as_str())
+        .bind::<diesel::sql_types::Text, _>(request.claim_request_id.as_str())
+        .get_result::<NativeRow>(&mut *conn).await.unwrap();
+    let PeerKeyPackageRequesterAuthorization::Device {
+        device_authorize_event_id,
+        ..
+    } = &request.requester_authorization
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        row.payload["actor"],
+        serde_json::to_value(ActorId::account(
+            request.requester_account_id.clone().unwrap()
+        ))
+        .unwrap()
+    );
+    assert_eq!(
+        row.payload["authorization"],
+        serde_json::json!(device_authorize_event_id)
+    );
+    assert_eq!(
+        row.payload["commit"],
+        serde_json::json!(device_authorize_event_id)
+    );
+    assert_eq!(row.payload["authorization_state"], "committed");
+    assert_eq!(row.payload["counter_count"], 0);
 }
 
 async fn prepare(pool: &PgPool, fixture: &RootFixture, seed: u8) -> PreparedClaim {
@@ -321,14 +488,29 @@ struct Pid {
     pid: i32,
 }
 
-async fn waiting_on(pool: &PgPool, blocker: i32, query: &str) -> Option<i32> {
-    let mut conn = pool.get().await.unwrap();
+async fn waiting_on(
+    conn: &mut diesel_async::AsyncPgConnection,
+    blocker: i32,
+    query: &str,
+    minimum: usize,
+) -> Option<i32> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
-        let rows = diesel::sql_query("SELECT a.pid FROM pg_stat_activity a WHERE a.datname=current_database() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.query ILIKE $2")
+        // Use the already held monitor connection: the leased pool has four
+        // slots, exactly enough for the holder, recovery and both writers.
+        // Its transaction stays open, so explicitly refresh activity stats.
+        diesel::sql_query("SELECT pg_stat_clear_snapshot()")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        // PostgreSQL may queue one row waiter behind another. Follow the
+        // actual blocker chain rather than requiring two direct blockers.
+        let rows = diesel::sql_query("WITH RECURSIVE blocked(pid,path) AS (SELECT a.pid,ARRAY[$1,a.pid] FROM pg_stat_activity a WHERE a.datname=current_database() AND $1=ANY(pg_blocking_pids(a.pid)) UNION ALL SELECT a.pid,b.path||a.pid FROM pg_stat_activity a JOIN blocked b ON b.pid=ANY(pg_blocking_pids(a.pid)) WHERE a.datname=current_database() AND NOT a.pid=ANY(b.path)) SELECT DISTINCT a.pid FROM blocked b JOIN pg_stat_activity a ON a.pid=b.pid WHERE a.query ILIKE $2")
             .bind::<Integer, _>(blocker).bind::<diesel::sql_types::Text, _>(query)
             .get_results::<Pid>(&mut *conn).await.unwrap();
-        if let Some(row) = rows.first() {
+        if rows.len() >= minimum
+            && let Some(row) = rows.first()
+        {
             return Some(row.pid);
         }
         if tokio::time::Instant::now() >= deadline {
@@ -358,7 +540,10 @@ pub(super) async fn recover(
         positive.allocate(pool, true).await.unwrap(),
         PeerKeyPackageClaimAttemptResult::Claimed(_)
     ));
+    let retained_origin = positive.remote_intent();
+    Box::pin(exercise_origin(pool, &retained_origin)).await;
     let candidate = prepare(pool, fixture, 131).await;
+    let racing_origin = candidate.remote_intent();
     let id = candidate.row.id.clone();
     let request_id = candidate.ledger.claim_request_id.clone();
     let request_digest = candidate.ledger.request_digest.clone();
@@ -376,22 +561,44 @@ pub(super) async fn recover(
         .unwrap()
         .pid;
     let race = async {
-        let recovery_pid =
-            waiting_on(pool, holder_pid, "%pcr_device_generation_current_states%").await;
+        let recovery_pid = waiting_on(
+            &mut holder,
+            holder_pid,
+            "%pcr_device_generation_current_states%",
+            1,
+        )
+        .await;
         let claim_pool = pool.clone();
         let claim = tokio::spawn(async move { candidate.allocate(&claim_pool, true).await });
+        let origin_pool = pool.clone();
+        let original = racing_origin.clone();
+        let origin = tokio::spawn(async move {
+            PgMlsKeyPackageStore { pool: origin_pool }
+                .prepare_ordinary_claim_source(
+                    &original,
+                    chrono::Utc::now() + chrono::Duration::minutes(5),
+                )
+                .await
+        });
         let blocked = if let Some(pid) = recovery_pid {
-            waiting_on(pool, pid, "%realm_authorities%").await.is_some()
+            waiting_on(&mut holder, pid, "%realm_authorities%", 2)
+                .await
+                .is_some()
         } else {
             false
         };
         holder.batch_execute("ROLLBACK").await.unwrap();
-        (recovery_pid.is_some(), blocked, claim.await.unwrap())
+        (
+            recovery_pid.is_some(),
+            blocked,
+            claim.await.unwrap(),
+            origin.await.unwrap(),
+        )
     };
     let recovery =
         std::panic::AssertUnwindSafe(Box::pin(identity_recovery::recover(pool, fixture)))
             .catch_unwind();
-    let (recovered, (paused, blocked, claim)) = tokio::join!(recovery, race);
+    let (recovered, (paused, blocked, claim, origin)) = tokio::join!(recovery, race);
     holder.batch_execute("DROP TRIGGER test_recovery_generation_claim_wait ON pcr_device_generation_current_states; DROP FUNCTION test_recovery_generation_claim_wait();").await.unwrap();
     drop(holder);
     let recovered = recovered.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
@@ -401,11 +608,51 @@ pub(super) async fn recover(
     );
     assert!(
         blocked,
-        "allocation must wait on that recovery's native PCR authority cut"
+        "allocation and outbound origin retention must both wait on the real recovery cut; allocation={:?}, origin={origin:?}",
+        claim
+            .as_ref()
+            .map(|_| "accepted")
+            .map_err(ToString::to_string),
     );
     assert!(
         claim.is_err(),
         "old authorization must not allocate after recovery commits"
+    );
+    assert!(
+        origin.is_err(),
+        "fenced old Device cannot register a new outbound intent"
+    );
+    assert!(
+        store
+            .peer_claim_original(
+                racing_origin.claim_request_id.as_str(),
+                &arkret_canonical::canonical_sha256(&racing_origin).unwrap()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .prepare_ordinary_claim_source(
+                &retained_origin,
+                chrono::Utc::now() + chrono::Duration::minutes(5)
+            )
+            .await
+            .is_err(),
+        "archived intent is not permission for a fenced Device to dispatch again"
+    );
+    let archived = store
+        .peer_claim_original(
+            retained_origin.claim_request_id.as_str(),
+            &arkret_canonical::canonical_sha256(&retained_origin).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        arkret_canonical::canonical_json_bytes(&archived).unwrap(),
+        arkret_canonical::canonical_json_bytes(&retained_origin).unwrap()
     );
     assert_eq!(
         store

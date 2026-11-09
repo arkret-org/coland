@@ -9,6 +9,7 @@ use arkret_wire::{Did, DidUrl, EventAdmissionSubmission};
 use coland_storage::AccountDeviceSignerEvidenceStore as _;
 use coland_storage_postgres::PgAccountDeviceSignerEvidenceArchive;
 use diesel::sql_types::{Binary, Text};
+use diesel_async::SimpleAsyncConnection as _;
 use serde_json::json;
 
 use super::*;
@@ -125,6 +126,34 @@ async fn signed_forward_source_retains_exact_unaccepted_original_atomically() {
             queued(&pool, event).await,
             None,
             "invalid source leaves no intent"
+        );
+
+        let mut writer = pool.get().await.unwrap();
+        writer.batch_execute("CREATE FUNCTION test_forward_source_writer_abort() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NOT EXISTS(SELECT 1 FROM canonical_events e WHERE (e.envelope->>'event_id')=(NEW.evidence_json #>> '{device_projection_attestation,attestation,event_authorization,event_id}') AND e.state='queued') THEN RAISE EXCEPTION 'test source lacks queued original'; END IF; RAISE EXCEPTION 'test injected source writer failure'; END $$; CREATE TRIGGER test_forward_source_writer_abort BEFORE INSERT ON account_device_signer_evidence FOR EACH ROW EXECUTE FUNCTION test_forward_source_writer_abort();")
+            .await.unwrap();
+        let failed = if full_request {
+            archive
+                .retain_forward_request(&PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(
+                    request.clone(),
+                ))
+                .await
+        } else {
+            archive.retain_forward_current(event, evidence).await
+        };
+        writer.batch_execute("DROP TRIGGER test_forward_source_writer_abort ON account_device_signer_evidence; DROP FUNCTION test_forward_source_writer_abort();")
+            .await.unwrap();
+        drop(writer);
+        let error = failed.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("test injected source writer failure"),
+            "{error}"
+        );
+        assert_eq!(
+            queued(&pool, event).await,
+            None,
+            "post-queue failure rolls the exact original back"
         );
 
         // No caller queue/transport write occurs: a crash immediately after

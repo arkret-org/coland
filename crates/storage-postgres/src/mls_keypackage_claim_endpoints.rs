@@ -413,6 +413,68 @@ async fn agent(
     })
 }
 
+/// Resolve only the ordinary local requester's accepted authorization. The
+/// caller must subsequently lock its PCR and repeat current qualification.
+pub(crate) async fn ordinary_requester(
+    conn: &mut AsyncPgConnection,
+    request: &KeyPackagesClaimRequestBody,
+    station: &DidCoreId,
+) -> PersistenceResult<(ClaimEndpoint, ActorId, CommittedEventRef)> {
+    if &request.service_binding.source_id != station || request.requester_actor_id.is_some() {
+        return Err(denied("ordinary requester is not owned by this Station"));
+    }
+    let (endpoint, account) = match &request.requester_authorization {
+        PeerKeyPackageRequesterAuthorization::Device {
+            requester_device_id,
+            device_authorize_event_id,
+            ..
+        } => {
+            let account = request
+                .requester_account_id
+                .as_ref()
+                .filter(|account| &account.station_id == station)
+                .ok_or_else(|| denied("ordinary requester omits its exact local Account"))?;
+            (
+                device(
+                    conn,
+                    account,
+                    requester_device_id,
+                    device_authorize_event_id,
+                )
+                .await?,
+                account.clone(),
+            )
+        }
+        PeerKeyPackageRequesterAuthorization::Agent {
+            requester_agent_id,
+            verification_method,
+            agent_key_authorize_event_id,
+            ..
+        } => (
+            agent(
+                conn,
+                requester_agent_id,
+                verification_method,
+                agent_key_authorize_event_id,
+            )
+            .await?,
+            AccountId::new(requester_agent_id.clone(), station.clone()),
+        ),
+        _ => return Err(denied("ordinary source cannot mint Realm Device authority")),
+    };
+    let authorization = match &endpoint.endpoint {
+        Endpoint::Device { original, .. } | Endpoint::Agent { original, .. } => original.clone(),
+        _ => return Err(denied("ordinary source has no native endpoint")),
+    };
+    let source = original(conn, &authorization.event_id).await?;
+    if source.event.actor_id != ActorId::account(account.clone()) {
+        return Err(denied(
+            "ordinary source original belongs to another full Account",
+        ));
+    }
+    Ok((endpoint, ActorId::account(account), authorization))
+}
+
 /// Remote participant authority belongs to its authenticated origin Station.
 /// Every local source and target is instead re-read under the real local PCR.
 pub(crate) async fn prepare(

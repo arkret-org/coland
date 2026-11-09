@@ -862,6 +862,17 @@ impl crate::events::MlsKeyPackageMaintenancePort for PersistenceMlsKeyPackageMai
             .prepare_realm_claim_source(request, source, transport_expires_at)
             .await?)
     }
+    async fn prepare_ordinary_claim_source(
+        &self,
+        request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
+        transport_expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::ServiceResult<bool> {
+        Ok(self
+            .0
+            .mls_key_packages()
+            .prepare_ordinary_claim_source(request, transport_expires_at)
+            .await?)
+    }
     async fn peer_claim_original(
         &self,
         claim_request_id: &str,

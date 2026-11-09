@@ -2236,6 +2236,23 @@ CREATE TABLE public.keypackage_claim_sources (
     PRIMARY KEY (source_id, claim_request_id)
 );
 
+-- Home Account/Agent intents outlive dispatch and destination governance.
+-- They belong to the requester's fixed Station, not the target Realm archive.
+CREATE TABLE ordinary_keypackage_claim_sources (
+ source_id TEXT NOT NULL,
+ claim_request_id TEXT NOT NULL,
+ actor_id JSONB NOT NULL CHECK(actor_id->>'kind'='account'),
+ request_digest TEXT NOT NULL CHECK(request_digest ~ '^sha256:[0-9a-f]{64}$'),
+ request_body JSONB NOT NULL CHECK(jsonb_typeof(request_body)='object'),
+ authorization_event_pk BIGINT NOT NULL REFERENCES canonical_events(pk),
+ authorization_commit_id TEXT NOT NULL REFERENCES realm_commits(commit_id),
+ PRIMARY KEY(source_id,claim_request_id)
+);
+CREATE INDEX ordinary_keypackage_claim_sources_actor
+ ON ordinary_keypackage_claim_sources(actor_id);
+CREATE INDEX ordinary_keypackage_claim_sources_authorization
+ ON ordinary_keypackage_claim_sources(authorization_event_pk);
+
 -- Source progress follows the requester Realm even when an ordinary recipient
 -- remains on the outgoing Station. It never owns or consumes a KeyPackage.
 CREATE TABLE public.realm_keypackage_claim_sources (
@@ -4571,6 +4588,8 @@ CREATE TABLE content_endpoint_admission_history (
 );
 CREATE INDEX content_endpoint_admission_history_actor
  ON content_endpoint_admission_history ((binding->'actor_id'));
+CREATE INDEX content_endpoint_admission_history_source
+ ON content_endpoint_admission_history(source_event_pk);
 
 -- Historical, Station-private facts from the exact signed PublicMessage of
 -- each accepted MLS Commit. The row identity includes the creating Commit and
@@ -5205,6 +5224,8 @@ CREATE TABLE account_device_signer_evidence (
 );
 CREATE INDEX account_device_signer_evidence_subject_idx
  ON account_device_signer_evidence(principal_id,station_id,device_id,attested_at);
+CREATE INDEX account_device_signer_evidence_forward_event
+ ON account_device_signer_evidence(forward_event_pk) WHERE forward_event_pk IS NOT NULL;
 
 -- Private exact first-forward bytes for a managed Device. The existing signed
 -- evidence content address binds this complete request, including its source.
@@ -5316,6 +5337,8 @@ CREATE TABLE agent_origin_forward_evidence (
  evidence_json JSONB NOT NULL, event_pk BIGINT NOT NULL REFERENCES canonical_events(pk),
  PRIMARY KEY(event_id,carrier_digest)
 );
+CREATE INDEX agent_origin_forward_evidence_event
+ ON agent_origin_forward_evidence(event_pk);
 CREATE TABLE agent_origin_control_sources (
  event_id TEXT NOT NULL, commit_id TEXT NOT NULL, source_json JSONB NOT NULL,
  PRIMARY KEY(event_id,commit_id)

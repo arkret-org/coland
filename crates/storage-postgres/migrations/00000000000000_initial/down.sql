@@ -1,4 +1,5 @@
 DROP TABLE IF EXISTS content_endpoint_admission_history;
+DROP TABLE IF EXISTS ordinary_keypackage_claim_sources;
 DROP FUNCTION IF EXISTS circle_current_row_proved(TEXT, JSONB, JSONB, TEXT, BIGINT, JSONB);
 DROP TABLE IF EXISTS realm_invite_link_current_states;
 DROP TABLE IF EXISTS public.service_registration_receipts;

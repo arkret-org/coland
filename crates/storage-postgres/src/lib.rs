@@ -153,6 +153,7 @@ mod morph_projection_reads;
 mod notifications;
 mod object_projection_reads;
 mod object_redaction_current_states;
+mod ordinary_claim_source;
 mod organization_moderation_gate;
 mod organization_registration;
 mod pcr_accepted_device_unit;

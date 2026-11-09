@@ -28,6 +28,7 @@ async fn source(
             group_info_base64url: arkret_canonical::base64url_encode(info),
             ratchet_tree_base64url: arkret_canonical::base64url_encode(tree),
         }),
+        content_backup_sources: None,
         producer_device_evidence: None,
         producer_agent_evidence: None,
     };

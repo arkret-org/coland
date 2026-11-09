@@ -1,4 +1,4 @@
-//! A normal recipient rotation cannot strand retained Human PCR roots.
+//! A normal recipient rotation cannot strand Human roots from their first PUT.
 //! Explicitly disabling recovery remains the separate policy-revocation path.
 
 use std::collections::BTreeMap;
@@ -43,12 +43,12 @@ pub(super) async fn require_human_coverage(
         return Ok(());
     }
     let actor = arkret_wire::ActorId::account(policy.account_id.clone());
-    let roots = sql_query("SELECT DISTINCT r.root_ref,r.root_context FROM content_original_roots r JOIN content_originals o USING(event_id) WHERE r.backup_actor_id=$1 AND o.retain_full_history=true ORDER BY r.root_ref")
+    crate::key_backup::lock_backup_series_in_connection(conn, &actor).await?;
+    let roots = sql_query("SELECT DISTINCT item->>'root_ref' AS root_ref,item->'root_context' AS root_context FROM key_backup_identities i CROSS JOIN LATERAL jsonb_array_elements(i.content_index) item WHERE i.actor_id=$1 AND item->>'item_kind'='content_epoch_root' ORDER BY root_ref")
         .bind::<Text,_>(actor.to_string()).get_results::<Root>(&mut *conn).await?;
     if roots.is_empty() {
         return Ok(());
     }
-    crate::key_backup::lock_backup_series_in_connection(conn, &actor).await?;
     let mut verified = BTreeMap::new();
     for root in roots {
         let selector = serde_json::json!([{"item_kind":"content_epoch_root","root_ref":root.root_ref,"root_context":root.root_context}]);

@@ -497,7 +497,8 @@ async fn deleted_backup_identity_cannot_be_resurrected_or_rebound_after_reopen()
     let fixture = RootFixture::new(database.pool()).await;
     let original = fixture.package;
     put(&store, &original).await.unwrap();
-    // No accepted content references this prepared root package yet.
+    let replacement = successor(&original);
+    put(&store, &replacement).await.unwrap();
     assert!(
         store
             .delete_backup(original.backup_id.as_str())
@@ -534,18 +535,20 @@ async fn deleted_backup_identity_cannot_be_resurrected_or_rebound_after_reopen()
 }
 
 #[tokio::test]
-async fn deleting_every_ciphertext_cannot_reset_series_or_append_through_a_deleted_head() {
+async fn retained_root_prevents_series_erasure_and_deleted_identity_reuse() {
     use coland_storage::ConflictCode;
     let database = database().await;
     let store = service(database.pool());
     let fixture = RootFixture::new(database.pool()).await;
     let original = fixture.package;
     put(&store, &original).await.unwrap();
-    assert!(
+    assert_eq!(
         store
             .delete_backup(original.backup_id.as_str())
             .await
-            .unwrap()
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::FailedPrecondition),
     );
     let mut restarted = original.clone();
     restarted.backup_id = fresh_id();
@@ -555,9 +558,24 @@ async fn deleting_every_ciphertext_cannot_reset_series_or_append_through_a_delet
         Some(ConflictCode::SeriesSeqNotMonotonic)
     );
     let next = successor(&original);
+    put(&store, &next).await.unwrap();
+    assert!(
+        store
+            .delete_backup(original.backup_id.as_str())
+            .await
+            .unwrap()
+    );
     assert_eq!(
-        put(&store, &next).await.unwrap_err().conflict_code(),
-        Some(ConflictCode::SeriesPredecessorNotFound)
+        store
+            .delete_backup(next.backup_id.as_str())
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::FailedPrecondition),
+    );
+    assert_eq!(
+        put(&store, &original).await.unwrap_err().conflict_code(),
+        Some(ConflictCode::FailedPrecondition),
     );
     restarted.series_id =
         BackupSeriesId::new(format!("ak:backup_series:{}", uuid::Uuid::now_v7())).unwrap();

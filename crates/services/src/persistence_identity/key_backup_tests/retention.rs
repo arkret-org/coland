@@ -1,6 +1,6 @@
-//! Storage retention fixtures seed a preexisting coverage relationship. They
-//! exercise production delete/PUT ports with real PCR/policy admission and
-//! correctly sealed root blocks, not the original-to-coverage admission unit.
+//! Native root PUT/retention, including roots not yet used by an original.
+//! Production delete/PUT ports use real PCR/policy admission and correctly
+//! sealed root blocks; coverage admission is tested independently.
 
 use coland_storage::{ConflictCode, IdentityStoreRegistry as _, PersistenceStore as _};
 use diesel::sql_types::{Jsonb, Text};
@@ -244,6 +244,46 @@ async fn seed_retained_original(pool: &PgPool, fixture: &RootFixture, package: &
         .bind::<Text,_>(source.event_ref.as_str()).bind::<Text,_>(root.root_ref.as_ref().unwrap().as_str())
         .bind::<Jsonb,_>(serde_json::to_value(root.root_context.as_ref().unwrap()).unwrap())
         .bind::<Text,_>(package.actor_id.to_string()).execute(&mut *conn).await.unwrap();
+}
+
+#[tokio::test]
+async fn first_put_root_cannot_be_deleted_before_any_content_or_forwarding() {
+    let database = database().await;
+    let store = service(database.pool());
+    let fixture = RootFixture::new(database.pool()).await;
+    let original = sealed(fixture.package.clone());
+    put(&store, &original).await.unwrap();
+    assert_eq!(
+        store
+            .delete_backup(original.backup_id.as_str())
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::FailedPrecondition),
+    );
+    assert!(
+        store
+            .backup(original.backup_id.as_str())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let replacement = sealed(successor(&original));
+    put(&store, &replacement).await.unwrap();
+    assert!(
+        store
+            .delete_backup(original.backup_id.as_str())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .delete_backup(replacement.backup_id.as_str())
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::FailedPrecondition),
+    );
 }
 
 #[tokio::test]

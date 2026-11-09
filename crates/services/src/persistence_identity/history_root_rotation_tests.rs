@@ -408,3 +408,146 @@ pub(super) async fn exercise(
     };
     (root, delivered.backup_id)
 }
+
+#[tokio::test]
+async fn first_put_root_requires_recipient_overlap_before_any_encrypted_original() {
+    use coland_storage_postgres::TestDatabase;
+
+    use crate::persistence_identity::key_backup_tests::{put, service};
+
+    let database = TestDatabase::lease().await;
+    let station = arkret_wire::project_did_to_core_id(
+        &arkret_wire::Did::new("did:web:backup-test.example").unwrap(),
+    )
+    .unwrap();
+    database.bind_device_inventory_station(station.as_str());
+    let pool = database.pool();
+    let mut fixture = RootFixture::new_with_recovery_words(pool.clone()).await;
+    let store = service(pool.clone());
+    put(&store, &fixture.package).await.unwrap();
+    let replacement = fresh_recovery_factor(&fixture);
+    let method = fixture.package.signature_proof.verification_method.clone();
+    let mut premature = next_policy(&fixture);
+    premature.methods = vec![RecoveryMethod::RecoveryUnlock {
+        keys: vec![replacement.clone()],
+    }];
+    let persistence = PgPersistenceStore::new(pool.clone());
+    let (_, write) = prepare_policy(&pool, &fixture, premature, &method, &[81; 32]).await;
+    let head = persistence
+        .authority_commits()
+        .stream_head(&write.commit.commit.stream_ref)
+        .await
+        .unwrap();
+    let error = persistence
+        .recovery_policies()
+        .commit_publication(write.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("would strand a retained PCR content root"),
+        "{error}"
+    );
+    assert_eq!(
+        persistence
+            .authority_commits()
+            .stream_head(&write.commit.commit.stream_ref)
+            .await
+            .unwrap(),
+        head
+    );
+    assert!(
+        persistence
+            .authority_commits()
+            .committed_event(&write.commit.event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut overlap = next_policy(&fixture);
+    let RecoveryMethod::RecoveryUnlock { keys } = &mut overlap.methods[0] else {
+        unreachable!()
+    };
+    keys.push(replacement);
+    publish(&pool, &mut fixture, overlap, &method, &[81; 32]).await;
+    assert!(
+        store
+            .backup(fixture.package.backup_id.as_str())
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+fn fresh_recovery_factor(fixture: &RootFixture) -> RecoveryKeyEntry {
+    let words = arkret_crypto::identity_root::generate_bip39_identity_recovery_mnemonic().unwrap();
+    let material = arkret_crypto::identity_root::derive_identity_recovery_key_material_from_bip39(
+        &words, "", 1,
+    )
+    .unwrap();
+    let RecoveryMethod::RecoveryUnlock { keys } = &fixture.policy.methods[0] else {
+        panic!("recovery factor expected")
+    };
+    let mut replacement = keys[0].clone();
+    let proof = &material.recovery_proof_public_key_multikey;
+    replacement.verification_method =
+        arkret_wire::DidUrl::new(format!("did:key:{proof}#{proof}")).unwrap();
+    replacement.public_key_multibase = proof.clone();
+    let recipient = &material.backup_hpke_public_key_multikey;
+    replacement.backup_hpke.key_agreement_ref =
+        arkret_wire::DidUrl::new(format!("did:key:{recipient}#{recipient}")).unwrap();
+    replacement.backup_hpke.public_key_multibase = recipient.clone();
+    replacement
+}
+
+#[tokio::test]
+async fn first_put_racing_recipient_rotation_cannot_strand_a_new_root() {
+    use coland_storage_postgres::TestDatabase;
+
+    use crate::persistence_identity::key_backup_tests::{put, service};
+
+    let database = TestDatabase::lease().await;
+    let station = arkret_wire::project_did_to_core_id(
+        &arkret_wire::Did::new("did:web:backup-test.example").unwrap(),
+    )
+    .unwrap();
+    database.bind_device_inventory_station(station.as_str());
+    let pool = database.pool();
+    let fixture = RootFixture::new_with_recovery_words(pool.clone()).await;
+    let store = service(pool.clone());
+    let mut rotation = next_policy(&fixture);
+    rotation.methods = vec![RecoveryMethod::RecoveryUnlock {
+        keys: vec![fresh_recovery_factor(&fixture)],
+    }];
+    let method = fixture.package.signature_proof.verification_method.clone();
+    let (_, write) = prepare_policy(&pool, &fixture, rotation, &method, &[81; 32]).await;
+    let persistence = PgPersistenceStore::new(pool.clone());
+    let policies = persistence.recovery_policies();
+    let (root, rotation) = tokio::join!(
+        put(&store, &fixture.package),
+        policies.commit_publication(write.clone()),
+    );
+    assert_eq!(
+        usize::from(root.is_ok()) + usize::from(rotation.is_ok()),
+        1,
+        "only the root admission or the disjoint factor rotation may win: root={root:?}, rotation={rotation:?}"
+    );
+    assert_eq!(
+        store
+            .backup(fixture.package.backup_id.as_str())
+            .await
+            .unwrap()
+            .is_some(),
+        root.is_ok()
+    );
+    assert_eq!(
+        persistence
+            .authority_commits()
+            .committed_event(&write.commit.event.event_id)
+            .await
+            .unwrap()
+            .is_some(),
+        rotation.is_ok()
+    );
+}

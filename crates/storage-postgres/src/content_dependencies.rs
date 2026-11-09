@@ -585,8 +585,8 @@ async fn lock_recipient_policy(
     Ok(())
 }
 
-/// Ordinary delete/series erase must leave a previously admitted sufficient
-/// package for every original root. The immutable original reference itself is
+/// From first native PUT, delete/series erase must leave an admitted sufficient
+/// package for every root. The immutable original reference itself is
 /// never rewritten; matching retained R/context is the replacement mapping.
 pub(crate) async fn guard_delete_in_connection(
     conn: &mut AsyncPgConnection,
@@ -619,13 +619,6 @@ pub(crate) async fn guard_delete_in_connection(
         let (Some(root), Some(context)) = (&item.root_ref, &item.root_context) else {
             return Err(invalid("root package has an incomplete public index").into());
         };
-        let context_json = serde_json::to_value(context).map_err(PersistenceError::database)?;
-        let dependent = sql_query("SELECT root_context AS payload FROM content_original_roots WHERE backup_actor_id=$1 AND root_ref=$2 AND root_context=$3 LIMIT 1")
-            .bind::<Text,_>(backup.actor_id.to_string()).bind::<Text,_>(root.as_str()).bind::<Jsonb,_>(&context_json)
-            .get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional()?;
-        if dependent.is_none() {
-            continue;
-        }
         let selector = serde_json::json!([{"item_kind":"content_epoch_root","root_ref":root,"root_context":context}]);
         let mut after = uuid::Uuid::nil();
         let mut sufficient = false;

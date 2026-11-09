@@ -973,6 +973,62 @@ async fn require_live_forward(state: &AppState, event: &arkret_wire::Event) -> S
     Ok(())
 }
 
+/// Freeze root custody sources before computing any producer body evidence.
+pub(crate) async fn content_backup_sources(
+    state: &AppState,
+    destination: &DidCoreId,
+    events: &[&Event],
+) -> ServiceResult<Option<Vec<arkret_models_collaboration::content_history::ContentBackupSource>>> {
+    use arkret_event_draft::EventContentEnvelopesExt as _;
+    use ed25519_dalek::Signer as _;
+    if events.is_empty() || events.len() > 2 {
+        return Err(ServiceError::SchemaViolation(
+            "content sources require one original or an audit pair".into(),
+        ));
+    }
+    let mut sources = Vec::new();
+    for event in events {
+        if event
+            .event_content_envelopes()
+            .map_err(wire_refusal)?
+            .is_empty()
+        {
+            continue;
+        }
+        let method = state
+            .service_verification_method("notary-key")
+            .map_err(ServiceError::internal)?;
+        let draft = state
+            .authority_commits()
+            .prepare_content_backup_source(event, &state.service_core_id(), destination, &method)
+            .await?;
+        let bytes = draft.signing_payload_bytes().map_err(wire_refusal)?;
+        let signature = arkret_models_crypto::KeyOperationSignature {
+            kid: arkret_wire::NonEmptyString::new(method.as_str())
+                .map_err(temporarily_unavailable)?,
+            signature_algorithm: Some(
+                arkret_wire::NonEmptyString::new("Ed25519").map_err(temporarily_unavailable)?,
+            ),
+            signature: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
+                state.notary_signing_key().as_ref().sign(&bytes).to_bytes(),
+            ))
+            .map_err(temporarily_unavailable)?,
+        };
+        let source = arkret_models_collaboration::content_history::ContentBackupSource {
+            attestation:draft.into_attestation(signature).map_err(wire_refusal)?,
+            origin_resolution:crate::routing::system::service_resolution::current_authenticated_service_resolution(state)
+                .await.map_err(|error| temporarily_unavailable(error.message))?,
+        };
+        arkret::verify_content_backup_source_signature(&source).map_err(wire_refusal)?;
+        source
+            .attestation
+            .validate_at(crate::wire::now())
+            .map_err(wire_refusal)?;
+        sources.push(source);
+    }
+    Ok((!sources.is_empty()).then_some(sources))
+}
+
 async fn forward_self_event_inner(
     state: &AppState,
     governance: &DidCoreId,
@@ -989,6 +1045,8 @@ async fn forward_self_event_inner(
             arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
         event_submission: submission.clone(),
         mls_group_state_material: material,
+        content_backup_sources: content_backup_sources(state, governance, &[&submission.event])
+            .await?,
         producer_device_evidence: None,
         producer_agent_evidence: None,
     };
@@ -1043,6 +1101,12 @@ pub(super) async fn forward_self_mls(
             .ok_or_else(|| {
                 ServiceError::SchemaViolation("MLS Commit requires exact public material".into())
             })?,
+        content_backup_sources: content_backup_sources(
+            state,
+            governance,
+            &[&submission.commit_event],
+        )
+        .await?,
         producer_device_evidence: None,
         producer_agent_evidence: None,
     };
@@ -1095,15 +1159,16 @@ async fn prepare_native_forward_request_inner(
     if matches!(submission, SelfAuthoritySubmitRequestBody::Event(_)) {
         refuse_bare_native_mls(event)?;
     }
+    let content_sources = content_backup_sources(state, governance, &[event]).await?;
     let mut request=match submission {
         SelfAuthoritySubmitRequestBody::Event(v)=>PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(PeerAuthorityForwardEventRequestBody{
             branch:arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,event_submission:v.clone(),
-            mls_group_state_material:forwarded_mls_public_material(state,event).await?,producer_device_evidence:None,producer_agent_evidence:None,
+            mls_group_state_material:forwarded_mls_public_material(state,event).await?,content_backup_sources:content_sources,producer_device_evidence:None,producer_agent_evidence:None,
         }),
         SelfAuthoritySubmitRequestBody::MlsCommit(v)=>PeerAuthoritySubmitRequestBody::AuthorityForwardMls(PeerAuthorityForwardMlsRequestBody{
             branch:arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,mls_submission:v.clone().for_origin_forward(None),
             mls_group_state_material:forwarded_mls_public_material(state,event).await?.ok_or_else(|| ServiceError::SchemaViolation("MLS Commit requires exact public material".into()))?,
-            producer_device_evidence:None,producer_agent_evidence:None,
+            content_backup_sources:content_sources,producer_device_evidence:None,producer_agent_evidence:None,
         }),_=>unreachable!("checked native forward branch"),
     };
     fresh_device_request(state, governance, &mut request).await?;

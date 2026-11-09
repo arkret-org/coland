@@ -541,7 +541,7 @@ async fn accepted_agent_pcr_rejects_every_independent_handoff_entry_without_effe
         source_service_id: f.agent.station_id.clone(),
         replay_receipt: None,
     };
-    let forward = PeerAuthorityForwardEventRequestBody::new(submission, None, None).unwrap();
+    let forward = PeerAuthorityForwardEventRequestBody::new(submission, None, None, None).unwrap();
     let error = super::super::authority_pcr::admit_forwarded(&f.state, &peer, &forward)
         .await
         .unwrap_err();

@@ -2539,6 +2539,7 @@ mod tests {
                     arkret_wire::EventAdmissionSubmission::new(event),
                     None,
                     None,
+                    None,
                 )
                 .unwrap(),
             ),

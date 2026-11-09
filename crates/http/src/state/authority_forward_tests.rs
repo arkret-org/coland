@@ -70,6 +70,7 @@ fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequestBody {
             arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
         event_submission: EventAdmissionSubmission::new(event.clone()),
         mls_group_state_material: None,
+        content_backup_sources: None,
         producer_device_evidence: None,
         producer_agent_evidence: None,
     };
@@ -143,6 +144,7 @@ fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequestBody {
     PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(
         PeerAuthorityForwardEventRequestBody::new(
             EventAdmissionSubmission::new(event),
+            None,
             None,
             Some(evidence),
         )

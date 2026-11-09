@@ -161,6 +161,7 @@ async fn foreign_request(
     let unsigned = arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequestBody {
         branch: arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,
         event_submission: EventAdmissionSubmission::new(request.authority_commit.event.clone()),
+        content_backup_sources: None,
         producer_device_evidence: None,
         producer_agent_evidence: None,
         mls_group_state_material: None,

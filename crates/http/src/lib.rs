@@ -268,6 +268,12 @@ pub async fn test_fresh_producer_forward_request(
             branch: AuthorityForwardBranch::AuthorityForward,
             event_submission: arkret_wire::EventAdmissionSubmission::new(event.clone()),
             mls_group_state_material: None,
+            content_backup_sources: crate::state::content_backup_sources(
+                state,
+                destination,
+                &[event],
+            )
+            .await?,
             producer_device_evidence: None,
             producer_agent_evidence: None,
         },

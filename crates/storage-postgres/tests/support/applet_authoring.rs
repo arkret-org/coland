@@ -1770,6 +1770,7 @@ pub async fn registered_service_pair(pool: PgPool) {
     let request = PeerAuthoritySubmitRequestBody::AuthorityForwardAtomic(
         PeerAuthorityForwardAtomicRequestBody {
             branch: AuthorityForwardBranch::AuthorityForward,
+            content_backup_sources: None,
             atomic_submission: AuditPairedEventUnitSubmission {
                 unit_kind: AuditPairedEventUnitKind::AuditPairedEvent,
                 events: [

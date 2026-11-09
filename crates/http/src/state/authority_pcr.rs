@@ -225,8 +225,13 @@ pub(crate) async fn submit_from_host(
         )
         .await?;
     let forward = PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(
-        PeerAuthorityForwardEventRequestBody::new(request.clone(), None, None)
-            .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?,
+        PeerAuthorityForwardEventRequestBody::new(
+            request.clone(),
+            None,
+            super::authority_forward::content_backup_sources(state, &service, &[event]).await?,
+            None,
+        )
+        .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?,
     );
     let bytes = arkret_canonical::canonical_json_bytes(&forward)
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;

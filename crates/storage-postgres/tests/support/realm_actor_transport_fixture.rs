@@ -823,6 +823,7 @@ async fn retired_managed_forward_carrier_is_rejected(
             branch: AuthorityForwardBranch::AuthorityForward,
             event_submission: arkret_wire::EventAdmissionSubmission::new(original.event.clone()),
             mls_group_state_material: None,
+            content_backup_sources: None,
             producer_device_evidence: None,
             producer_agent_evidence: None,
         });

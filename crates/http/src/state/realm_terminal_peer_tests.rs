@@ -93,6 +93,7 @@ async fn peer_forwarded_destroy_reaches_the_shared_cut_and_leaves_zero_writes() 
     let request = PeerAuthorityForwardEventRequestBody {
         branch: AuthorityForwardBranch::AuthorityForward,
         event_submission: EventAdmissionSubmission::new(candidate.authority_commit.event.clone()),
+        content_backup_sources: None,
         producer_device_evidence: Some(
             candidate
                 .forwarded_producer_evidence

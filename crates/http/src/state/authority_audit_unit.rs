@@ -391,6 +391,12 @@ async fn forward_pair(
         .await?;
     let mut request = PeerAuthorityForwardAtomicRequestBody {
         branch: AuthorityForwardBranch::AuthorityForward,
+        content_backup_sources: super::authority_forward::content_backup_sources(
+            state,
+            &authority.service_id,
+            &[&unit.events[0].event, &unit.events[1].event],
+        )
+        .await?,
         atomic_submission: unit,
         atomic_producer_evidence: [
             AtomicSlotProducerEvidence::Service {},

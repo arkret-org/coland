@@ -386,6 +386,7 @@ diesel::table! {
         authorization_commit_id -> Text,
         attested_at -> Timestamptz,
         evidence_json -> Jsonb,
+        forward_event_pk -> Nullable<Int8>,
     }
 }
 

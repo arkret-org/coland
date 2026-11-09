@@ -30,6 +30,9 @@ use super::key_backup_tests::{self, RootFixture};
 #[path = "history_root_unlock_tests.rs"]
 mod history_root_unlock_tests;
 
+#[path = "history_forward_intent_tests.rs"]
+mod history_forward_intent_tests;
+
 fn public_blob(bytes: &[u8]) -> MlsPublicBlob {
     let digest = arkret_canonical::sha256_digest(bytes);
     let hex = digest.strip_prefix("sha256:").unwrap();

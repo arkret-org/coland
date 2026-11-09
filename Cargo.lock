@@ -1959,6 +1959,7 @@ dependencies = [
  "hex",
  "horme",
  "parking_lot 0.12.5",
+ "rand 0.10.2",
  "serde",
  "serde_json",
  "sha2 0.11.1",

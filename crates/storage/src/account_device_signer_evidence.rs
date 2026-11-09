@@ -71,6 +71,9 @@ pub trait AccountDeviceSignerEvidenceStore: Send + Sync {
         destination: &arkret_wire::DidCoreId,
     ) -> PersistenceResult<Option<PreparedAccountDeviceForwardSource>>;
 
+    /// Publish the signed source together with its exact queued original under
+    /// the producer lock. A missing transport wrapper remains a pending intent,
+    /// never an absence proof for content recovery or an accepted target Event.
     async fn retain_forward_request(
         &self,
         request: &arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody,
@@ -93,6 +96,7 @@ pub trait AccountDeviceSignerEvidenceStore: Send + Sync {
         device: &DeviceId,
         reference: &SignerEvidenceRef,
     ) -> PersistenceResult<Option<arkret_models_identity::ForwardAccountDeviceSignerEvidence>>;
+    /// Retain the source and exact original in the same producer-cut transaction.
     async fn retain_forward_current(
         &self,
         event: &arkret_wire::Event,

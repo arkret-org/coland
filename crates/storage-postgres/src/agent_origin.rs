@@ -184,9 +184,13 @@ pub(crate) async fn retain_in_connection(
     .await?;
     let full = serde_json::to_value(verified.evidence()).map_err(invalid)?;
     let digest = arkret_canonical::canonical_sha256(&full).map_err(invalid)?;
-    sql_query("INSERT INTO agent_origin_forward_evidence(event_id,carrier_digest,evidence_ref,evidence_json) VALUES($1,$2,$3,$4) ON CONFLICT(event_id,carrier_digest) DO NOTHING")
+    crate::authority_commit::queue_event_in_connection(conn, event, at)
+        .await
+        .map_err(crate::PgTransactionError::into_persistence)?;
+    sql_query("INSERT INTO agent_origin_forward_evidence(event_id,carrier_digest,evidence_ref,evidence_json,event_pk) SELECT $1,$2,$3,$4,e.pk FROM canonical_events e WHERE e.id=$5 ON CONFLICT(event_id,carrier_digest) DO NOTHING")
         .bind::<Text,_>(event.event_id.as_str()).bind::<Text,_>(&digest)
         .bind::<Text,_>(verified.reference().as_ref()).bind::<Jsonb,_>(full.clone())
+        .bind::<Binary,_>(event.event_id.token_bytes().to_vec())
         .execute(&mut *conn).await.map_err(PersistenceError::database)?;
     let retained = sql_query("SELECT evidence_json AS value FROM agent_origin_forward_evidence WHERE event_id=$1 AND carrier_digest=$2 FOR SHARE")
         .bind::<Text,_>(event.event_id.as_str()).bind::<Text,_>(&digest)

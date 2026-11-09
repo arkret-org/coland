@@ -47,6 +47,7 @@ tracing.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
+rand.workspace = true
 arkret-mls.workspace = true
 arkret-crypto = { workspace = true, features = ["backup", "content-history"] }
 arkret-bootstrap.workspace = true

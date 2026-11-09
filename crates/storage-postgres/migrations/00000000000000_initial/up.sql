@@ -5198,7 +5198,10 @@ CREATE TABLE account_device_signer_evidence (
  authorization_event_id TEXT NOT NULL,
  authorization_commit_id TEXT NOT NULL REFERENCES realm_commits(commit_id),
  attested_at TIMESTAMPTZ NOT NULL,
- evidence_json JSONB NOT NULL CHECK(jsonb_typeof(evidence_json)='object')
+ evidence_json JSONB NOT NULL CHECK(jsonb_typeof(evidence_json)='object'),
+ -- Forward roots retain their exact unaccepted original before publication.
+ -- Ordinary directory roots have no Event-specific forward binding.
+ forward_event_pk BIGINT REFERENCES canonical_events(pk)
 );
 CREATE INDEX account_device_signer_evidence_subject_idx
  ON account_device_signer_evidence(principal_id,station_id,device_id,attested_at);
@@ -5310,7 +5313,8 @@ CREATE TABLE agent_origin_gate_intents (
 );
 CREATE TABLE agent_origin_forward_evidence (
  event_id TEXT NOT NULL, carrier_digest TEXT NOT NULL, evidence_ref TEXT NOT NULL,
- evidence_json JSONB NOT NULL, PRIMARY KEY(event_id,carrier_digest)
+ evidence_json JSONB NOT NULL, event_pk BIGINT NOT NULL REFERENCES canonical_events(pk),
+ PRIMARY KEY(event_id,carrier_digest)
 );
 CREATE TABLE agent_origin_control_sources (
  event_id TEXT NOT NULL, commit_id TEXT NOT NULL, source_json JSONB NOT NULL,

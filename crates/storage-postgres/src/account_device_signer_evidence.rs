@@ -187,6 +187,7 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
                     return Err(PersistenceError::Conflict("device_unauthorized: origin Device or managed current changed before durable publication".into()).into());
                 }
                 if !final_check {
+                    crate::authority_commit::queue_event_in_connection(conn, event, core.attested_at).await?;
                     sql_query("INSERT INTO account_device_signer_evidence(evidence_ref,principal_id,station_id,device_id,authorization_event_id,authorization_commit_id,attested_at,evidence_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(evidence_ref) DO NOTHING")
                         .bind::<Text,_>(reference.as_ref()).bind::<Text,_>(core.account_id.principal_id.as_str()).bind::<Text,_>(core.account_id.station_id.as_str())
                         .bind::<Text,_>(core.device_id.as_str()).bind::<Text,_>(fact.key.authorization_ref.event_id.as_str()).bind::<Text,_>(fact.key.authorization_ref.commit_id.as_str())
@@ -198,6 +199,7 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
                     if stored.value!=body {
                         return Err(PersistenceError::Conflict("duplicate_conflict: origin forward source archive collision".into()).into());
                     }
+                    bind_forward_original(conn, &reference, event).await?;
                 }
             }
             Ok(())
@@ -347,6 +349,10 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
             if prepared.as_ref() != Some(core) {
                 return Err(PersistenceError::Conflict("forward origin source changed before issuance".into()).into());
             }
+            // Source publication and its discoverable exact intent share the
+            // producer's PCR lock. Recovery must see both or neither, even if
+            // the caller crashes before retaining its transport wrapper.
+            crate::authority_commit::queue_event_in_connection(conn, event, core.attested_at).await?;
             sql_query("INSERT INTO account_device_signer_evidence(evidence_ref,principal_id,station_id,device_id,authorization_event_id,authorization_commit_id,attested_at,evidence_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(evidence_ref) DO NOTHING")
                 .bind::<Text,_>(reference.as_ref()).bind::<Text,_>(core.account_id.principal_id.as_str())
                 .bind::<Text,_>(core.account_id.station_id.as_str()).bind::<Text,_>(core.device_id.as_str())
@@ -357,6 +363,7 @@ impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
             if stored.evidence_json != body || stored.authorization_commit_id != fact.key.authorization_ref.commit_id.as_str() {
                 return Err(PersistenceError::Conflict("forward origin immutable root collision".into()).into());
             }
+            bind_forward_original(conn, &reference, event).await?;
             // Writer waits and physical expiry cannot publish a stale source.
             let final_source = forward_source::prepare_in_connection(
                 conn, event, &source.destination_service_id, &source.forward_body_digest, core.attested_at,
@@ -394,6 +401,23 @@ struct ArchiveRow {
     evidence_json: Value,
     #[diesel(sql_type = Text)]
     authorization_commit_id: String,
+}
+
+async fn bind_forward_original(
+    conn: &mut AsyncPgConnection,
+    reference: &SignerEvidenceRef,
+    event: &arkret_wire::Event,
+) -> PersistenceResult<()> {
+    let written = sql_query("UPDATE account_device_signer_evidence s SET forward_event_pk=e.pk FROM canonical_events e WHERE s.evidence_ref=$1 AND e.id=$2 AND (s.forward_event_pk IS NULL OR s.forward_event_pk=e.pk)")
+        .bind::<Text, _>(reference.as_ref())
+        .bind::<diesel::sql_types::Binary, _>(event.event_id.token_bytes().to_vec())
+        .execute(conn).await.map_err(PersistenceError::database)?;
+    if written != 1 {
+        return Err(PersistenceError::Conflict(
+            "duplicate_conflict: forward source differs from its exact original".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(QueryableByName)]

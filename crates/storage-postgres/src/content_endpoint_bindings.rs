@@ -222,38 +222,70 @@ pub(crate) async fn current_producer_in_connection(
     transaction: &AuthorityCommitTransaction,
     group: &MlsGroupValue,
 ) -> PersistenceResult<ContentEndpoint> {
-    let (actor, endpoint, authorization) = match transaction.producer_signer_fact.as_ref() {
-        None => own_human_pcr_producer(conn, transaction).await?,
-        Some(fact) => match fact {
-            HistoricalProducerSignerFact::AccountDevice(fact) => (
-                fact.actor.clone(),
-                MlsWelcomeRecipientEndpoint::Device {
-                    device_id: fact.device_id.clone(),
-                },
-                fact.key.authorization_ref.event_id.clone(),
-            ),
-            HistoricalProducerSignerFact::AgentRuntime(fact) => (
-                fact.actor_id.clone(),
-                MlsWelcomeRecipientEndpoint::AgentRuntime {
-                    verification_method: fact.verification_method.clone(),
-                },
-                fact.authorization_event_ref.clone(),
-            ),
-            HistoricalProducerSignerFact::RealmDevice(fact) => (
-                fact.actor_id.clone(),
-                MlsWelcomeRecipientEndpoint::Device {
-                    device_id: fact.device_id.clone(),
-                },
-                fact.authorization_event_id.clone(),
-            ),
-            _ => {
-                return Err(unavailable(
-                    "producer has no registered application-content endpoint",
-                ));
-            }
-        },
+    if let Some(fact) = transaction.producer_signer_fact.as_ref() {
+        return current_producer_from_fact_in_connection(conn, &transaction.event, fact, group)
+            .await;
+    }
+    let (actor, endpoint, authorization) = own_human_pcr_producer(conn, transaction).await?;
+    current_endpoint_in_connection(
+        conn,
+        &transaction.event,
+        group,
+        actor,
+        endpoint,
+        authorization,
+    )
+    .await
+}
+
+/// The caller independently qualified this original producer at its native
+/// source cut. No target Commit or synthetic governance transaction is needed.
+pub(crate) async fn current_producer_from_fact_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    fact: &HistoricalProducerSignerFact,
+    group: &MlsGroupValue,
+) -> PersistenceResult<ContentEndpoint> {
+    let (actor, endpoint, authorization) = match fact {
+        HistoricalProducerSignerFact::AccountDevice(fact) => (
+            fact.actor.clone(),
+            MlsWelcomeRecipientEndpoint::Device {
+                device_id: fact.device_id.clone(),
+            },
+            fact.key.authorization_ref.event_id.clone(),
+        ),
+        HistoricalProducerSignerFact::AgentRuntime(fact) => (
+            fact.actor_id.clone(),
+            MlsWelcomeRecipientEndpoint::AgentRuntime {
+                verification_method: fact.verification_method.clone(),
+            },
+            fact.authorization_event_ref.clone(),
+        ),
+        HistoricalProducerSignerFact::RealmDevice(fact) => (
+            fact.actor_id.clone(),
+            MlsWelcomeRecipientEndpoint::Device {
+                device_id: fact.device_id.clone(),
+            },
+            fact.authorization_event_id.clone(),
+        ),
+        _ => {
+            return Err(unavailable(
+                "producer has no registered application-content endpoint",
+            ));
+        }
     };
-    if actor != *transaction.event.actual_signer() {
+    current_endpoint_in_connection(conn, event, group, actor, endpoint, authorization).await
+}
+
+async fn current_endpoint_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    group: &MlsGroupValue,
+    actor: arkret_wire::ActorId,
+    endpoint: MlsWelcomeRecipientEndpoint,
+    authorization: arkret_wire::EventId,
+) -> PersistenceResult<ContentEndpoint> {
+    if actor != *event.actual_signer() {
         return Err(invalid(
             "content endpoint differs from the original actual signer",
         ));

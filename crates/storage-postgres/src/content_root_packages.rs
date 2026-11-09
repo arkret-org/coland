@@ -25,8 +25,16 @@ impl RootPacket {
     ) -> crate::PersistenceResult<()> {
         // Historical policy acceptance and the continuing current agreement
         // are distinct checks. A retained original need not claim a new PUT.
-        crate::key_backup_history::recipient(conn, &self.backup).await?;
+        self.current_recipient_valid_until(conn).await?;
         Ok(())
+    }
+
+    pub(crate) async fn current_recipient_valid_until(
+        &self,
+        conn: &mut AsyncPgConnection,
+    ) -> crate::PersistenceResult<chrono::DateTime<chrono::Utc>> {
+        let until = crate::key_backup_history::recipient(conn, &self.backup).await?;
+        Ok(self.expires_at.map_or(until, |expiry| expiry.min(until)))
     }
 }
 
@@ -122,7 +130,7 @@ pub(crate) async fn current_root_in_connection(
     actor: &ActorId,
     root: &Hash,
     context: &ContentRootContext,
-) -> Result<RootPacket, PgTransactionError> {
+) -> Result<(RootPacket, chrono::DateTime<chrono::Utc>), PgTransactionError> {
     #[derive(QueryableByName)]
     struct Candidate {
         #[diesel(sql_type=diesel::sql_types::Uuid)]
@@ -154,8 +162,8 @@ pub(crate) async fn current_root_in_connection(
             {
                 continue;
             }
-            match packet.require_current_recipient(conn).await {
-                Ok(()) => return Ok(packet),
+            match packet.current_recipient_valid_until(conn).await {
+                Ok(until) => return Ok((packet, until)),
                 Err(PersistenceError::Conflict(_)) => {}
                 Err(error) => return Err(error.into()),
             }

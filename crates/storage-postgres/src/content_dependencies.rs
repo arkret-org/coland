@@ -116,19 +116,23 @@ async fn validate_root_basis(
     Ok(())
 }
 
-/// Called only inside the same native transaction that verified the producer,
-/// serialized the effective scope and is installing this original Commit.
-pub(crate) async fn commit_in_connection(
+pub(crate) struct NativeContentGroup {
+    pub group: MlsGroupValue,
+    public_state: Vec<u8>,
+}
+
+pub(crate) struct LocalOriginalDependencies {
+    pub roots: BTreeMap<String, (ContentRootContext, String)>,
+    pub required_roots: BTreeMap<String, arkret_wire::Hash>,
+    pub blob_refs: BTreeMap<String, arkret_wire::BlobRef>,
+    pub retain_full_history: bool,
+    pub source_valid_until: chrono::DateTime<chrono::Utc>,
+}
+
+pub(crate) async fn current_group_in_connection(
     conn: &mut AsyncPgConnection,
-    transaction: &AuthorityCommitTransaction,
-) -> Result<(), PgTransactionError> {
-    let event = &transaction.event;
-    let carriers = event
-        .event_content_envelopes()
-        .map_err(|error| invalid(error.to_string()))?;
-    if carriers.is_empty() {
-        return commit_plain_pcr_coverage(conn, transaction).await;
-    }
+    event: &Event,
+) -> Result<NativeContentGroup, PgTransactionError> {
     crate::mls_group_current_states::require_mls_send_gate_in_connection(conn, event).await?;
     let scope_key = crate::mls_group_current_states::scope_key(&event.scope_ref)?;
     let row = sql_query(
@@ -141,11 +145,29 @@ pub(crate) async fn commit_in_connection(
     .ok_or_else(|| missing("encrypted original has no accepted MLS group"))?;
     let group: MlsGroupValue =
         serde_json::from_value(row.value).map_err(PersistenceError::database)?;
-    let endpoint =
-        crate::content_endpoint_bindings::current_producer_in_connection(conn, transaction, &group)
-            .await?;
+    Ok(NativeContentGroup {
+        group,
+        public_state: row.public_state,
+    })
+}
+
+/// Verify physical root custody without admitting a target Event or reserving
+/// its nonce domain. The caller separately qualifies the actual producer.
+pub(crate) async fn local_original_dependencies_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    current: &NativeContentGroup,
+    endpoint: &arkret_models_crypto::ContentEndpoint,
+) -> Result<LocalOriginalDependencies, PgTransactionError> {
+    let group = &current.group;
+    let carriers = event
+        .event_content_envelopes()
+        .map_err(|error| invalid(error.to_string()))?;
+    if carriers.is_empty() {
+        return Err(invalid("root custody requires registered encrypted content").into());
+    }
     let tracker = arkret_mls::MlsPublicGroupTracker::restore(
-        &row.public_state,
+        &current.public_state,
         event
             .scope_ref
             .canonical_mls_group_id()
@@ -271,6 +293,7 @@ pub(crate) async fn commit_in_connection(
     for actor in actors.values() {
         crate::key_backup::lock_backup_series_in_connection(conn, actor).await?;
     }
+    let mut source_valid_until = chrono::DateTime::<chrono::Utc>::MAX_UTC;
     let mut roots: BTreeMap<String, (ContentRootContext, String)> = BTreeMap::new();
     let mut packet_roots = BTreeMap::new();
     let wanted = required_roots.keys().cloned().collect::<Vec<_>>();
@@ -289,16 +312,17 @@ pub(crate) async fn commit_in_connection(
             .iter()
             .filter(|(root, _)| wanted.iter().any(|wanted| wanted == root.as_str()))
         {
-            crate::content_root_packages::current_root_in_connection(
+            let (_, until) = crate::content_root_packages::current_root_in_connection(
                 conn,
                 &original.actor,
                 root_ref,
                 context,
             )
             .await?;
+            source_valid_until = source_valid_until.min(until);
             used = true;
             selected.insert(root_ref.as_str().to_owned());
-            validate_root_basis(conn, context, &group, &declaration).await?;
+            validate_root_basis(conn, context, group, &declaration).await?;
             if let Some((previous, _)) = roots.get(root_ref.as_str()) {
                 if previous != context {
                     return Err(
@@ -351,6 +375,22 @@ pub(crate) async fn commit_in_connection(
             }
         }
     }
+    Ok(LocalOriginalDependencies {
+        roots,
+        required_roots,
+        blob_refs,
+        source_valid_until,
+        retain_full_history: matches!(
+            realm.object.purpose,
+            RealmPurpose::PrincipalControl | RealmPurpose::AgentControl
+        ),
+    })
+}
+
+async fn require_blobs_in_connection(
+    conn: &mut AsyncPgConnection,
+    blob_refs: &BTreeMap<String, arkret_wire::BlobRef>,
+) -> Result<(), PgTransactionError> {
     for blob in blob_refs.values() {
         let exists =
             sql_query("SELECT payload FROM blobs WHERE id=$1 AND redacted=false FOR SHARE")
@@ -362,6 +402,35 @@ pub(crate) async fn commit_in_connection(
             return Err(missing("original references a missing durable ciphertext blob").into());
         }
     }
+    Ok(())
+}
+
+/// Called only inside the same native transaction that verified the producer,
+/// serialized the effective scope and is installing this original Commit.
+pub(crate) async fn commit_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+) -> Result<(), PgTransactionError> {
+    let event = &transaction.event;
+    let carriers = event
+        .event_content_envelopes()
+        .map_err(|error| invalid(error.to_string()))?;
+    if carriers.is_empty() {
+        return commit_plain_pcr_coverage(conn, transaction).await;
+    }
+    let current = current_group_in_connection(conn, event).await?;
+    let group = &current.group;
+    let endpoint =
+        crate::content_endpoint_bindings::current_producer_in_connection(conn, transaction, group)
+            .await?;
+    let LocalOriginalDependencies {
+        roots,
+        required_roots,
+        blob_refs,
+        retain_full_history,
+        source_valid_until: _,
+    } = local_original_dependencies_in_connection(conn, event, &current, &endpoint).await?;
+    require_blobs_in_connection(conn, &blob_refs).await?;
     let source = CommittedEventRef {
         event_id: event.event_id.clone(),
         commit_id: transaction.commit.commit_id.clone(),
@@ -373,16 +442,7 @@ pub(crate) async fn commit_in_connection(
         root_refs: required_roots.into_values().collect(),
         blob_refs: blob_refs.into_values().collect(),
     };
-    freeze_coverage(
-        conn,
-        transaction,
-        &coverage,
-        matches!(
-            realm.object.purpose,
-            RealmPurpose::PrincipalControl | RealmPurpose::AgentControl
-        ),
-    )
-    .await?;
+    freeze_coverage(conn, transaction, &coverage, retain_full_history).await?;
     for (root, (context, actor)) in &roots {
         sql_query("INSERT INTO content_original_roots(event_id,root_ref,root_context,backup_actor_id) VALUES($1,$2,$3,$4)")
             .bind::<Text,_>(event.event_id.as_str()).bind::<Text,_>(root)

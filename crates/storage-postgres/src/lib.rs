@@ -77,6 +77,7 @@ mod realm_actor_control_transport;
 mod realm_actor_material;
 pub use consent_current::PgConsentCurrentStore;
 mod contacts;
+mod content_backup_source;
 mod content_dependencies;
 mod content_endpoint_bindings;
 mod content_endpoint_history;

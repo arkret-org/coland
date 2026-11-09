@@ -2488,6 +2488,20 @@ pub trait AuthorityCommitStore: Send + Sync {
 
     async fn queue_event(&self, event: &Event, queued_at: DateTime<Utc>) -> PersistenceResult<()>;
 
+    /// Native same-cut root custody and original retention before Service signing.
+    async fn prepare_content_backup_source(
+        &self,
+        event: &Event,
+        issuer: &arkret_wire::DidCoreId,
+        destination: &arkret_wire::DidCoreId,
+        verification_method: &arkret_wire::DidUrl,
+    ) -> PersistenceResult<arkret_models_crypto::ContentBackupSourceDraft> {
+        let _ = (event, issuer, destination, verification_method);
+        Err(crate::PersistenceError::Conflict(
+            "dependency_missing: native content backup source issuance is unavailable".into(),
+        ))
+    }
+
     /// Freeze the complete original Event or MLS submission without admitting it.
     async fn retain_forwarded_submission(
         &self,

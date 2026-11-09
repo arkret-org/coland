@@ -16,7 +16,7 @@ fn denied(detail: &str) -> PersistenceError {
     PersistenceError::Conflict(format!("device_unauthorized: {detail}"))
 }
 
-pub(super) struct PreparedForwardDeviceSource {
+pub(crate) struct PreparedForwardDeviceSource {
     pub account: arkret_wire::AccountId,
     pub device: arkret_wire::DeviceId,
     pub payload: DeviceAuthorizePayload,
@@ -40,7 +40,7 @@ pub(crate) async fn current_cut(
 
 /// Caller holds the actual PCR authority writer lock. The complete original
 /// source verifier proves role, lineage, Event bytes and the real Device key.
-pub(super) async fn prepare_context_in_connection(
+pub(crate) async fn prepare_context_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
     attested_at: chrono::DateTime<chrono::Utc>,

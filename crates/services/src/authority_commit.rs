@@ -703,6 +703,19 @@ impl AuthorityCommitApplication {
         Ok(())
     }
 
+    pub async fn prepare_content_backup_source(
+        &self,
+        event: &Event,
+        issuer: &DidCoreId,
+        destination: &DidCoreId,
+        verification_method: &DidUrl,
+    ) -> ServiceResult<arkret_models_crypto::ContentBackupSourceDraft> {
+        Ok(self
+            .store()
+            .prepare_content_backup_source(event, issuer, destination, verification_method)
+            .await?)
+    }
+
     pub async fn retain_forwarded_submission(
         &self,
         event: &Event,

@@ -5065,6 +5065,23 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
+    async fn prepare_content_backup_source(
+        &self,
+        event: &arkret_wire::Event,
+        issuer: &arkret_wire::DidCoreId,
+        destination: &arkret_wire::DidCoreId,
+        verification_method: &arkret_wire::DidUrl,
+    ) -> PersistenceResult<arkret_models_crypto::ContentBackupSourceDraft> {
+        crate::content_backup_source::prepare(
+            &self.pool,
+            event,
+            issuer,
+            destination,
+            verification_method,
+        )
+        .await
+    }
+
     async fn retain_forwarded_submission(
         &self,
         event: &arkret_wire::Event,

@@ -1143,6 +1143,9 @@ async fn encrypted_original_requires_real_root_backup_and_binds_one_immutable_ke
         backup_strategy_ref: prepared.strategy_event.event_id.clone(),
     };
     let root = prepared.group.export_content_root(&context).unwrap();
+    let package_expires = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now())
+        + chrono::Duration::seconds(90);
+    fixture.package.expires_at = Some(Some(package_expires));
     let package = sealed_root_package(&fixture, &context, &root);
     let salt = arkret_crypto::content_history::fresh_content_key_salt().unwrap();
     let event = encrypted_message(
@@ -1165,6 +1168,16 @@ async fn encrypted_original_requires_real_root_backup_and_binds_one_immutable_ke
         .stream_head(&request.authority_commit.commit.stream_ref)
         .await
         .unwrap();
+    let issuer = fixture.pcr.history.account.station_id.clone();
+    let destination = arkret_wire::DidCoreId::new("ak:did_core:web:governor.example").unwrap();
+    let service_method = arkret_wire::DidUrl::new("did:web:backup-test.example#authority").unwrap();
+    assert!(
+        store
+            .prepare_content_backup_source(&event, &issuer, &destination, &service_method)
+            .await
+            .is_err()
+    );
+    assert!(store.queued_event(&event.event_id).await.unwrap().is_none());
     let absent_root = uow.commit_event(request.clone()).await.unwrap_err();
     assert!(
         absent_root
@@ -1213,6 +1226,19 @@ async fn encrypted_original_requires_real_root_backup_and_binds_one_immutable_ke
         ),
     )
     .await;
+    assert!(
+        store
+            .prepare_content_backup_source(&unknown_event, &issuer, &destination, &service_method)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .queued_event(&unknown_event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let error = uow.commit_event(unknown_request).await.unwrap_err();
     assert!(
         error.to_string().contains("first-admission index"),
@@ -1245,6 +1271,39 @@ async fn encrypted_original_requires_real_root_backup_and_binds_one_immutable_ke
             .await
             .unwrap()
             .is_none()
+    );
+    let source = store
+        .prepare_content_backup_source(&event, &issuer, &destination, &service_method)
+        .await
+        .unwrap();
+    assert_eq!(source.event_ref, event.event_id);
+    assert_eq!(source.producer, prepared.endpoint);
+    assert_eq!(
+        source.event_original_digest.as_str(),
+        arkret_canonical::canonical_sha256(&event).unwrap()
+    );
+    assert!(source.expires_at <= package_expires);
+    assert!(source.expires_at > source.attested_at);
+    assert!(store.queued_event(&event.event_id).await.unwrap().is_some());
+    assert!(
+        store
+            .committed_event(&event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .stream_head(&request.authority_commit.commit.stream_ref)
+            .await
+            .unwrap(),
+        before
+    );
+    assert!(
+        store
+            .prepare_content_backup_source(&event, &issuer, &issuer, &service_method)
+            .await
+            .is_err()
     );
     // The frozen original still names the deleted first package. The current
     // sufficient package is a native mapping, never a rewritten Event.

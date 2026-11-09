@@ -75,7 +75,7 @@ pub(super) fn claim_outcome(
     };
     record.validate_shape().unwrap();
     let request:PeerKeyPackagesClaimFields=serde_json::from_value(serde_json::json!({
-        "claim_request_id":request_id,"requester_account_id":controller,"intended_realm_id":scope.realm_id(),
+        "claim_request_id":request_id,"requester_account_id":controller,"intended_realm_id":scope.realm_id(),"effective_scope":scope,
         "mls_group_id":scope.canonical_mls_group_id().unwrap(),"claim_purpose":"realm_membership",
         "required_capabilities":package.capabilities,"expires_at":arkret_canonical::format_timestamp_canonical(expires_at),
         "target_agent_id":agent.principal_id,"target_agent_verification_method":method,"target_agent_key_authorize_event_id":authorization,

@@ -1115,6 +1115,7 @@ async fn realm_device_owned_query_prepared_guard_crosses_deadline(
         requester_account_id: Some(history.account.clone()),
         requester_actor_id: None,
         intended_realm_id: fixture.realm.clone(),
+        effective_scope: scope.clone(),
         mls_group_id: scope.canonical_mls_group_id().unwrap(),
         claim_purpose: PeerKeyPackageClaimPurpose::RealmMembership,
         required_capabilities: vec![arkret_wire::NonEmptyString::new("ak.content.v1").unwrap()],

@@ -543,8 +543,9 @@ pub(crate) async fn acquire(
         .await?;
         let mut proofs = Vec::new();
         for endpoint in endpoints {
-            if endpoint.effective_scope.realm_id()
-                != &outcome.claim_receipt.request.intended_realm_id
+            if endpoint.effective_scope != outcome.claim_receipt.request.effective_scope
+                || endpoint.effective_scope.realm_id()
+                    != &outcome.claim_receipt.request.intended_realm_id
                 || endpoint
                     .effective_scope
                     .canonical_mls_group_id()

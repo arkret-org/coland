@@ -57,7 +57,8 @@ fn matches_scope(
     request: &arkret_models_crypto::KeyPackagesClaimRequestBody,
     scope: &ScopeRef,
 ) -> PersistenceResult<()> {
-    if request.intended_realm_id != *scope.realm_id()
+    if request.effective_scope != *scope
+        || request.intended_realm_id != *scope.realm_id()
         || request.mls_group_id != scope.canonical_mls_group_id().map_err(denied)?
     {
         return Err(denied(

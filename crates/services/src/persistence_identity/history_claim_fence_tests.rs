@@ -161,6 +161,49 @@ async fn exercise_origin(pool: &PgPool, request: &KeyPackagesClaimRequestBody) {
             .unwrap()
             .is_none()
     );
+    // Scope is part of the original participant signature, even when both
+    // the redirected scope and its group ID are internally consistent.
+    let redirected_realm = RealmId::from_event_id(&EventId::from_digest(
+        arkret_canonical::DigestSuite::Sha256,
+        arkret_canonical::sha256_bytes(b"claim-scope-redirection"),
+    ));
+    for coherent in [false, true] {
+        let mut redirected = request.clone();
+        redirected.effective_scope = ScopeRef::Realm {
+            realm_id: redirected_realm.clone(),
+        };
+        if coherent {
+            redirected.intended_realm_id = redirected_realm.clone();
+            redirected.mls_group_id = redirected.effective_scope.canonical_mls_group_id().unwrap();
+            redirected.validate_shape().unwrap();
+        } else {
+            assert!(redirected.validate_shape().is_err());
+        }
+        assert!(
+            store
+                .prepare_ordinary_claim_source(&redirected, deadline)
+                .await
+                .is_err()
+        );
+        let redirected_digest = arkret_canonical::canonical_sha256(&redirected).unwrap();
+        assert!(
+            store
+                .peer_claim_original(redirected.claim_request_id.as_str(), &redirected_digest)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .get_peer_claim(
+                    redirected.service_binding.source_id.as_str(),
+                    redirected.claim_request_id.as_str()
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
     let mut bad = request.clone();
     sign_request(&mut bad, 82);
     assert!(
@@ -224,6 +267,11 @@ async fn exercise_origin(pool: &PgPool, request: &KeyPackagesClaimRequestBody) {
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(archived.effective_scope, request.effective_scope);
+    assert_eq!(
+        serde_json::to_value(&archived).unwrap()["effective_scope"],
+        serde_json::to_value(&request.effective_scope).unwrap()
+    );
     assert_eq!(
         arkret_canonical::canonical_json_bytes(&archived).unwrap(),
         arkret_canonical::canonical_json_bytes(request).unwrap()
@@ -358,6 +406,7 @@ async fn prepare(pool: &PgPool, fixture: &RootFixture, seed: u8) -> PreparedClai
         requester_account_id: Some(account.clone()),
         requester_actor_id: None,
         intended_realm_id: scope.realm_id().clone(),
+        effective_scope: scope.clone(),
         mls_group_id: scope.canonical_mls_group_id().unwrap(),
         claim_purpose: PeerKeyPackageClaimPurpose::RealmMembership,
         required_capabilities: package

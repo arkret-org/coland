@@ -576,6 +576,7 @@ mod tests {
                 "target_agent_verification_method": method,
                 "target_agent_key_authorize_event_id": event(14),
                 "intended_realm_id": realm_id,
+        "effective_scope": scope,
                 "mls_group_id": group,
                 "claim_purpose": "realm_membership",
                 "required_capabilities": [arkret_models_crypto::ARKRET_CONTENT_V1],

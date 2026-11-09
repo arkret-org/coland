@@ -502,6 +502,7 @@ fn admission_signed_claim(
         requester_account_id: None,
         requester_actor_id: Some(source.actor_id.clone()),
         intended_realm_id: source.realm_id.clone(),
+        effective_scope: scope.clone(),
         mls_group_id: scope.canonical_mls_group_id().unwrap(),
         claim_purpose: PeerKeyPackageClaimPurpose::RealmMembership,
         required_capabilities: vec![arkret_wire::NonEmptyString::new("ak.content.v1").unwrap()],

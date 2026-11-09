@@ -55,6 +55,7 @@ fn request(
         requester_account_id: Some(requester),
         requester_actor_id: None,
         intended_realm_id: realm,
+        effective_scope: scope.clone(),
         mls_group_id: scope.canonical_mls_group_id().unwrap(),
         claim_purpose: arkret_models_crypto::PeerKeyPackageClaimPurpose::RealmMembership,
         required_capabilities: vec![arkret_wire::NonEmptyString::new("ak.content.v1").unwrap()],

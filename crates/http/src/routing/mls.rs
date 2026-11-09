@@ -2741,6 +2741,7 @@ async fn query_own_keypackage_claim(
             .ok_or_else(keypackage_claim_unknown)?;
         if record.device_authorize_event_id.as_ref()
             != Some(&native.authority.authorization_ref.event_id)
+            || outcome.claim_receipt.request.effective_scope != native.metadata.effective_scope
             || outcome.claim_receipt.request.intended_realm_id
                 != *native.metadata.effective_scope.realm_id()
             || native
@@ -5005,6 +5006,11 @@ mod trust_binding_tests {
         key: &ed25519_dalek::SigningKey,
     ) -> KeyPackagesClaimRequestBody {
         let signed_at = arkret_canonical::normalize_timestamp_canonical(now());
+        let scope = arkret_wire::ScopeRef::Realm {
+            realm_id: "ak:realm:ARaz6Z8HFGLoPkpji4ac9NxCUjXT81HDezufw7yJGiju"
+                .parse()
+                .unwrap(),
+        };
         let mut body: KeyPackagesClaimRequestBody = serde_json::from_value(serde_json::json!({
             "claim_request_id": URL_SAFE_NO_PAD.encode([71_u8; 16]),
             "target_account_id": {
@@ -5016,8 +5022,9 @@ mod trust_binding_tests {
                 "principal_id": requester.principal_id,
                 "station_id": source.clone()
             },
-            "intended_realm_id": "ak:realm:ARaz6Z8HFGLoPkpji4ac9NxCUjXT81HDezufw7yJGiju",
-            "mls_group_id": URL_SAFE_NO_PAD.encode([73_u8; 32]),
+            "intended_realm_id": scope.realm_id(),
+            "effective_scope": scope,
+            "mls_group_id": scope.canonical_mls_group_id().unwrap(),
             "claim_purpose": "realm_membership",
             "required_capabilities": ["ak.content.v1"],
             "expires_at": arkret_canonical::format_timestamp_canonical(signed_at + chrono::Duration::minutes(4)),

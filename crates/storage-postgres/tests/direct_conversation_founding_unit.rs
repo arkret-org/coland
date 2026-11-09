@@ -6154,7 +6154,7 @@ async fn claim_human_peer_package(
     };
     let mut request: KeyPackagesClaimRequestBody = serde_json::from_value(serde_json::json!({
         "claim_request_id":request_id, "target_account_id":pair.peer, "requester_account_id":pair.founder,
-        "intended_realm_id":scope.realm_id(), "mls_group_id":scope.canonical_mls_group_id().unwrap(),
+        "intended_realm_id":scope.realm_id(),"effective_scope":scope, "mls_group_id":scope.canonical_mls_group_id().unwrap(),
         "claim_purpose":"direct_conversation", "required_capabilities":package.capabilities,
         "expires_at":arkret_canonical::format_timestamp_canonical(expires), "target_device_ids":[device],
         "pair_key":pair_key, "strand_id":strand_id, "service_binding":{"source_id":pair.station,"destination_id":pair.station},

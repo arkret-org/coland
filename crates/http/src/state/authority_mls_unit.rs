@@ -1139,7 +1139,8 @@ pub(super) async fn resolve_claim(
             original.service_binding.source_id.clone(),
         ))),
     };
-    if request.intended_realm_id != event.realm_id
+    if request.effective_scope != event.scope_ref
+        || request.intended_realm_id != event.realm_id
         || request.mls_group_id != group_id
         || requester.as_ref() != Some(&event.actor_id)
         || !target_matches

@@ -357,6 +357,7 @@ async fn group_scope(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
     group: &arkret_wire::MlsGroupId,
+    expected_scope: &arkret_wire::ScopeRef,
 ) -> PersistenceResult<arkret_wire::ScopeRef> {
     #[derive(QueryableByName)]
     struct Row {
@@ -369,7 +370,8 @@ async fn group_scope(
         .ok_or_else(|| denied("accepted MLS group scope unavailable"))?;
     let current: arkret_wire::MlsGroupValue = serde_json::from_value(row.value).map_err(denied)?;
     let scope = current.effective_scope;
-    if scope.realm_id() != realm
+    if &scope != expected_scope
+        || scope.realm_id() != realm
         || !matches!(
             scope,
             arkret_wire::ScopeRef::Realm { .. } | arkret_wire::ScopeRef::Circle { .. }
@@ -521,9 +523,13 @@ pub(crate) async fn prepare(
                     device_authorize_event_id,
                     ..
                 } => {
-                    let scope =
-                        group_scope(conn, &command.intended_realm_id, &command.mls_group_id)
-                            .await?;
+                    let scope = group_scope(
+                        conn,
+                        &command.intended_realm_id,
+                        &command.mls_group_id,
+                        &command.effective_scope,
+                    )
+                    .await?;
                     result.push(
                         realm_device(
                             conn,
@@ -559,8 +565,13 @@ pub(crate) async fn prepare(
     for claim in &outcome.claims {
         if claim.actor_id.as_realm_actor_id().is_some() {
             let request = &outcome.claim_receipt.request;
-            let scope =
-                group_scope(conn, &request.intended_realm_id, &request.mls_group_id).await?;
+            let scope = group_scope(
+                conn,
+                &request.intended_realm_id,
+                &request.mls_group_id,
+                &request.effective_scope,
+            )
+            .await?;
             result.push(
                 realm_device(
                     conn,

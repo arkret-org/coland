@@ -519,6 +519,7 @@ fn claim_request(
         "target_device_ids": [target.device],
         "requester_account_id": requester.account,
         "intended_realm_id": realm_id,
+        "effective_scope": ScopeRef::Realm { realm_id: realm_id.clone() },
         "mls_group_id": mls_group_id,
         "claim_purpose": "realm_membership",
         "required_capabilities": ["ak.content.v1"],

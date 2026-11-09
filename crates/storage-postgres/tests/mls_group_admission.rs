@@ -2025,6 +2025,7 @@ fn signed_remote_add_attestation(
     let claim_request: PeerKeyPackagesClaimFields = serde_json::from_value(serde_json::json!({
         "claim_request_id": uuid::Uuid::now_v7().simple().to_string(),
         "intended_realm_id": delivery.realm_id,
+        "effective_scope": delivery.effective_scope,
         "mls_group_id": delivery.effective_scope.canonical_mls_group_id().unwrap(),
         "claim_purpose": "realm_membership",
         "requester_account_id": commit.authority_commit.event.actor_id.as_account_id().unwrap(),

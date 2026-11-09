@@ -5306,6 +5306,7 @@ fn recipient_roster_witness(
     let request: PeerKeyPackagesClaimFields = serde_json::from_value(serde_json::json!({
         "claim_request_id": claim_key.claim_request_id,
         "intended_realm_id": delivery.realm_id,
+        "effective_scope": delivery.effective_scope,
         "mls_group_id": delivery.effective_scope.canonical_mls_group_id().unwrap(),
         "claim_purpose": "realm_membership",
         "requester_account_id": commit.authority_commit.event.actor_id.as_account_id().unwrap(),

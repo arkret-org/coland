@@ -29,6 +29,7 @@ pub(super) async fn requester(
         || device_authorize_event_id != &authority.authorization_ref.event_id
         || verification_method.as_str()
             != format!("{}#{}", authority.native_did, authority.device_id)
+        || body.effective_scope != native.metadata.effective_scope
         || body.intended_realm_id != *native.metadata.effective_scope.realm_id()
         || body.mls_group_id
             != native
@@ -466,8 +467,7 @@ async fn target(
     state: &AppState,
     actor: &arkret_wire::ActorId,
     device: &arkret_wire::DeviceId,
-    realm: &RealmId,
-    group: &arkret_wire::MlsGroupId,
+    effective_scope: &arkret_wire::ScopeRef,
 ) -> Result<Option<AppletManagedDeviceScopeGuard>, AppError> {
     let Some(authority) = state
         .persistence()
@@ -477,10 +477,11 @@ async fn target(
     else {
         return Ok(None);
     };
-    let mut scopes = authority.scopes.entries().iter().filter(|pair| {
-        pair.effective_scope.realm_id() == realm
-            && pair.effective_scope.canonical_mls_group_id().ok().as_ref() == Some(group)
-    });
+    let mut scopes = authority
+        .scopes
+        .entries()
+        .iter()
+        .filter(|pair| &pair.effective_scope == effective_scope);
     let scope = scopes
         .next()
         .ok_or_else(peer_claim_failed)?
@@ -526,15 +527,7 @@ pub(super) async fn targets(
     }
     let mut result = BTreeMap::new();
     for device in devices {
-        if let Some(guard) = target(
-            state,
-            actor,
-            &device,
-            &body.intended_realm_id,
-            &body.mls_group_id,
-        )
-        .await?
-        {
+        if let Some(guard) = target(state, actor, &device, &body.effective_scope).await? {
             result.insert(device.to_string(), guard);
         }
     }
@@ -559,8 +552,7 @@ pub(super) async fn delivery_guard(
                 state,
                 &claim.actor_id,
                 device,
-                &outcome.claim_receipt.request.intended_realm_id,
-                &outcome.claim_receipt.request.mls_group_id,
+                &outcome.claim_receipt.request.effective_scope,
             )
             .await?
             {

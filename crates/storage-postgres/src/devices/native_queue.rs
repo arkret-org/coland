@@ -346,6 +346,7 @@ async fn material_deadline(
         || claim.capabilities != package.capabilities
         || claim.last_resort.unwrap_or(false) != package.last_resort
         || request.target_actor_id.as_ref() != Some(&authority.actor_id)
+        || request.effective_scope != endpoint.effective_scope
         || request.intended_realm_id != welcome.realm_id
         || request.mls_group_id
             != endpoint

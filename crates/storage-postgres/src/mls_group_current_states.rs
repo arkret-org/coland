@@ -1298,6 +1298,7 @@ async fn require_realm_source_claim(
         .result
         .ok_or_else(|| failed_precondition("Realm Add has no original claim result"))?;
     if result.state != arkret_models_crypto::PeerKeyPackagesClaimQueryState::Claimed
+        || original.request.effective_scope != event.scope_ref
         || original.request.intended_realm_id != event.realm_id
         || original.request.mls_group_id
             != event

@@ -2762,6 +2762,25 @@ impl AuthorityCommitApplication {
         Ok(result)
     }
 
+    /// Public MLS material for the authenticated current Human on its own PCR.
+    /// The native store retains the authorization guard through byte delivery.
+    pub async fn read_human_pcr_group_state_material(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        request: &arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody,
+        station: &DidCoreId,
+    ) -> ServiceResult<
+        coland_storage::HumanPcrHistoryRead<coland_storage::MlsMemberGroupStateMaterialRead>,
+    > {
+        request
+            .validate()
+            .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+        Ok(self
+            .store()
+            .read_human_pcr_group_state_material(reader, request, station)
+            .await?)
+    }
+
     /// `ak.peer.committed_event.read.scan.v1`: the authenticated peer's
     /// replication right, interval, and page at one governing read cut. See
     /// [`coland_storage::AuthorityCommitStore::scan_stream_for_peer`].

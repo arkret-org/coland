@@ -156,6 +156,41 @@ pub(crate) async fn qualify(
     Ok(expiry)
 }
 
+pub(crate) async fn mls_material(
+    pool: &PgPool,
+    reader: &HumanPcrHistoryReader,
+    request: &arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody,
+    station: &arkret_wire::DidCoreId,
+) -> PersistenceResult<HumanPcrHistoryRead<coland_storage::MlsMemberGroupStateMaterialRead>> {
+    request.validate().map_err(unavailable)?;
+    let mut held = DeliveryGuard::begin(pool).await?;
+    if !own_control_origin(held.connection(), reader, &request.realm_id).await? {
+        held.finish().await?;
+        return Ok(HumanPcrHistoryRead::NotApplicable);
+    }
+    if reader.account_status_observation.is_none() {
+        held.finish().await?;
+        return Ok(HumanPcrHistoryRead::CurrentStatusRequired);
+    }
+    let (value, expires_at) =
+        crate::mls_group_state_material_read::read_current_human_pcr_in_connection(
+            held.connection(),
+            request,
+            reader,
+            station,
+        )
+        .await?;
+    held.probe().await?;
+    Ok(HumanPcrHistoryRead::Ready {
+        value,
+        guard: Box::new(HistoryGuard {
+            held,
+            checked_at: chrono::Utc::now(),
+            expires_at,
+        }),
+    })
+}
+
 pub(crate) async fn page(
     pool: &PgPool,
     reader: &HumanPcrHistoryReader,

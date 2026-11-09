@@ -21,6 +21,9 @@ mod root_rotation;
 #[path = "history_recovery_source_tests.rs"]
 mod recovery_source;
 
+#[path = "history_material_read_tests.rs"]
+mod history_material;
+
 #[path = "history_claim_fence_tests.rs"]
 mod claim_fence;
 
@@ -116,6 +119,7 @@ pub(super) async fn exercise(
     fixture: &mut RootFixture,
     package: &KeyBackup,
     original: &coland_storage::AuthorityCommitTransaction,
+    genesis: &coland_storage::AuthorityCommitTransaction,
 ) -> (ContentRootBackupEntry, arkret_wire::BackupId) {
     let record = pcr_history_tests::status(pool, fixture, None).await;
     let reader = pcr_history_tests::reader(fixture, Some(record));
@@ -389,6 +393,7 @@ pub(super) async fn exercise(
         },
     );
     recovery_source::exercise(pool, &replacement_reader, &reader).await;
+    history_material::exercise(pool, &replacement_reader, &reader, genesis).await;
     let mut replacement_challenge = new_challenge;
     replacement_challenge.requesting_device_id = replacement;
     replacement_challenge.request_id = random();

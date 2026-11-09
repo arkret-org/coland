@@ -6286,6 +6286,17 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         crate::pcr_history_read::event(&self.pool, reader, event_id, station).await
     }
 
+    async fn read_human_pcr_group_state_material(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        request: &arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody,
+        station: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<
+        coland_storage::HumanPcrHistoryRead<coland_storage::MlsMemberGroupStateMaterialRead>,
+    > {
+        crate::pcr_history_read::mls_material(&self.pool, reader, request, station).await
+    }
+
     async fn committed_event_for_peer(
         &self,
         event_id: &arkret_wire::EventId,

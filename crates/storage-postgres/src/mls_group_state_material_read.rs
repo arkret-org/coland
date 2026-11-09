@@ -1,4 +1,4 @@
-//! Member MLS public-material authorization at one PostgreSQL read cut.
+//! MLS public-material authorization at one PostgreSQL read cut.
 //!
 //! Circle reads require the same parent Realm join generation at the current
 //! and historical Circle cuts. Positions are compared within one stream only.
@@ -136,11 +136,80 @@ async fn founding_join(
     .present)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScopeReadAuthority {
+    Member,
+    OwnHumanPcr,
+}
+
 pub(crate) async fn read_in_connection(
     conn: &mut AsyncPgConnection,
     request: &MemberMlsTargetSelector,
     issuer: &DidCoreId,
     source_peer: Option<&DidCoreId>,
+) -> PersistenceResult<Read> {
+    read_with_authority(
+        conn,
+        request,
+        issuer,
+        source_peer,
+        ScopeReadAuthority::Member,
+    )
+    .await
+}
+
+/// This entry cannot be selected by a wire field or a peer request.
+pub(crate) async fn read_current_human_pcr_in_connection(
+    conn: &mut AsyncPgConnection,
+    request: &MlsGroupStateMaterialRequestBody,
+    reader: &coland_storage::HumanPcrHistoryReader,
+    issuer: &DidCoreId,
+) -> PersistenceResult<(Read, chrono::DateTime<chrono::Utc>)> {
+    if request.effective_scope
+        != (ScopeRef::Realm {
+            realm_id: request.realm_id.clone(),
+        })
+        || request.caller_actor_id.as_ref() != Some(&ActorId::account(reader.account_id.clone()))
+    {
+        return Err(PersistenceError::Conflict(
+            "own PCR material reader scope differs".into(),
+        ));
+    }
+    let expiry = crate::pcr_history_read::qualify(conn, reader, &request.realm_id, issuer).await?;
+    let (Some(caller_actor_id), Some(target_commit_event_ref), Some(target_epoch)) = (
+        request.caller_actor_id.clone(),
+        request.target_commit_event_ref.clone(),
+        request.target_epoch,
+    ) else {
+        return Ok((Read::NotFound, expiry));
+    };
+    let selector = MemberMlsTargetSelector {
+        realm_id: request.realm_id.clone(),
+        effective_scope: request.effective_scope.clone(),
+        mls_group_id: request.mls_group_id.clone(),
+        group_state_event_id: Some(request.group_state_event_id.clone()),
+        group_state_epoch: Some(request.epoch),
+        caller_actor_id,
+        target_commit_event_ref,
+        target_epoch,
+    };
+    let value = read_with_authority(
+        conn,
+        &selector,
+        issuer,
+        None,
+        ScopeReadAuthority::OwnHumanPcr,
+    )
+    .await?;
+    Ok((value, expiry))
+}
+
+async fn read_with_authority(
+    conn: &mut AsyncPgConnection,
+    request: &MemberMlsTargetSelector,
+    issuer: &DidCoreId,
+    source_peer: Option<&DidCoreId>,
+    authority: ScopeReadAuthority,
 ) -> PersistenceResult<Read> {
     let caller = &request.caller_actor_id;
     let target_ref = &request.target_commit_event_ref;
@@ -222,8 +291,10 @@ pub(crate) async fn read_in_connection(
             return Ok(Read::NotFound);
         }
     }
-    let (joined_at_target, floor) =
-        if let ScopeRef::Sidecar { sidecar_id, .. } = &request.effective_scope {
+    if authority == ScopeReadAuthority::Member {
+        let (joined_at_target, floor) = if let ScopeRef::Sidecar { sidecar_id, .. } =
+            &request.effective_scope
+        {
             let floor = crate::sidecar_authority_cut::public_material_floor_in_connection(
                 conn, realm_id, sidecar_id, caller,
             )
@@ -237,9 +308,9 @@ pub(crate) async fn read_in_connection(
         } else if let ScopeRef::Circle { circle_id, .. } = &request.effective_scope {
             let Some(join) = sql_query(
                 "SELECT membership,current_stream_position,current_commit_id \
-             FROM circle_member_state_current_states WHERE realm_id=$1 AND circle_id=$2 \
-             AND member_id=$3 AND membership='join' AND source_stream_ref=$4 \
-             AND circle_member_parent_join_current(realm_id,member_id,value)",
+                 FROM circle_member_state_current_states WHERE realm_id=$1 AND circle_id=$2 \
+                 AND member_id=$3 AND membership='join' AND source_stream_ref=$4 \
+                 AND circle_member_parent_join_current(realm_id,member_id,value)",
             )
             .bind::<Text, _>(realm_id.as_str())
             .bind::<Text, _>(circle_id.as_str())
@@ -263,12 +334,12 @@ pub(crate) async fn read_in_connection(
                 // joined and bind the parent's still-current exact revision.
                 let historical = sql_query(
                     "SELECT circle_member_parent_join_current($1,$2,h.payload) AS present \
-                 FROM (SELECT e.envelope->'payload' AS payload \
-                 FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
-                 WHERE c.realm_id=$1 AND c.stream_ref=$3 AND c.stream_position <= $4 \
-                 AND e.state='committed' AND e.envelope->>'kind'='ak.circle.member.state' \
-                 AND e.envelope->'payload'->'member_id'=$5 \
-                 ORDER BY c.stream_position DESC LIMIT 1) h",
+                     FROM (SELECT e.envelope->'payload' AS payload \
+                     FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk \
+                     WHERE c.realm_id=$1 AND c.stream_ref=$3 AND c.stream_position <= $4 \
+                     AND e.state='committed' AND e.envelope->>'kind'='ak.circle.member.state' \
+                     AND e.envelope->'payload'->'member_id'=$5 \
+                     ORDER BY c.stream_position DESC LIMIT 1) h",
                 )
                 .bind::<Text, _>(realm_id.as_str())
                 .bind::<Text, _>(caller.to_string())
@@ -304,7 +375,7 @@ pub(crate) async fn read_in_connection(
         } else {
             let Some(join) = sql_query(
                 "SELECT membership,current_stream_position,current_commit_id \
-         FROM member_state_current_states WHERE realm_id=$1 AND member_id=$2",
+             FROM member_state_current_states WHERE realm_id=$1 AND member_id=$2",
             )
             .bind::<Text, _>(realm_id.as_str())
             .bind::<Text, _>(caller.to_string())
@@ -339,20 +410,22 @@ pub(crate) async fn read_in_connection(
             };
             (joined_at_target, floor)
         };
-    if !joined_at_target || floor.is_none_or(|floor| target.stream_position < floor.oldest_position)
-    {
-        return Ok(Read::NotFound);
-    }
-    if let Some(peer) = source_peer
-        && !crate::account_stream_scan::peer_replication_right_at_in_connection(
-            conn,
-            &expected_stream,
-            peer,
-            target.stream_position,
-        )
-        .await?
-    {
-        return Ok(Read::NotFound);
+        if !joined_at_target
+            || floor.is_none_or(|floor| target.stream_position < floor.oldest_position)
+        {
+            return Ok(Read::NotFound);
+        }
+        if let Some(peer) = source_peer
+            && !crate::account_stream_scan::peer_replication_right_at_in_connection(
+                conn,
+                &expected_stream,
+                peer,
+                target.stream_position,
+            )
+            .await?
+        {
+            return Ok(Read::NotFound);
+        }
     }
     let Some(target_event) = decode_event(&target_row)? else {
         return Ok(Read::RevisionUnavailable);
@@ -396,22 +469,24 @@ pub(crate) async fn read_in_connection(
     if target_group != request.mls_group_id {
         return Ok(Read::NotFound);
     }
-    // The target Event must itself be disclosed at this exact member cut;
+    // Ordinary members must disclose the target Event at this exact member cut;
     // this does not disclose a prejoin Genesis Event to a later member.
     let target_full = CommittedEventFullView {
         commit: target.clone(),
         event: target_event,
     };
-    if !matches!(
-        crate::committed_disclosure::disclose_to_member_in_connection(
-            conn,
-            vec![target_full],
-            caller,
+    if authority == ScopeReadAuthority::Member
+        && !matches!(
+            crate::committed_disclosure::disclose_to_member_in_connection(
+                conn,
+                vec![target_full],
+                caller,
+            )
+            .await?
+            .as_slice(),
+            [CommittedEventView::Full(_)]
         )
-        .await?
-        .as_slice(),
-        [CommittedEventView::Full(_)]
-    ) {
+    {
         return Ok(Read::NotFound);
     }
     if source_peer.is_none() && tenure.service_id != issuer.as_str() {

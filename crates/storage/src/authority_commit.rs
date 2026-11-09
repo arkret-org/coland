@@ -3392,6 +3392,19 @@ pub trait AuthorityCommitStore: Send + Sync {
         ))
     }
 
+    /// Exact public MLS material for the native current Human on its own PCR.
+    /// This is not an External Commit or ordinary membership authorization.
+    async fn read_human_pcr_group_state_material(
+        &self,
+        _reader: &HumanPcrHistoryReader,
+        _request: &arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialRequestBody,
+        _station: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<HumanPcrHistoryRead<MlsMemberGroupStateMaterialRead>> {
+        Err(PersistenceError::Internal(
+            "Human PCR MLS material reader is not configured".into(),
+        ))
+    }
+
     /// `ak.peer.committed_event.read.scan.v1` for one authenticated peer
     /// Station (`service-http-binding.md` §3.1.3: the calling Station must
     /// hold the replication right for the exact stream).

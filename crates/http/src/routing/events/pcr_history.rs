@@ -63,6 +63,70 @@ pub(crate) async fn current_reader(
     Ok(reader)
 }
 
+pub(crate) async fn mls_material(
+    state: &AppState,
+    session: &SessionIdentityState,
+    request: &arkret_models_collaboration::mls_group_state_material::MlsMemberGroupStateMaterialReadRequestBody,
+) -> Option<
+    GuardedJsonResult<
+        arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialResponseBody,
+    >,
+> {
+    use coland_storage::MlsMemberGroupStateMaterialRead as Material;
+    let mut reader = match reader(state, session).await {
+        Ok(Some(reader)) => reader,
+        Ok(None) => return None,
+        Err(error) => return Some(Err(error)),
+    };
+    let peer = request.as_peer_request();
+    let mut result = state
+        .authority_commits()
+        .read_human_pcr_group_state_material(&reader, &peer, &state.service_core_id())
+        .await;
+    let matched = matches!(result, Ok(HumanPcrHistoryRead::CurrentStatusRequired));
+    if matched {
+        if let Err(error) = resolve_current_status(state, session, &mut reader).await {
+            return Some(Err(error));
+        }
+        result = state
+            .authority_commits()
+            .read_human_pcr_group_state_material(&reader, &peer, &state.service_core_id())
+            .await;
+    }
+    match result {
+        Ok(HumanPcrHistoryRead::NotApplicable) if !matched => None,
+        Ok(HumanPcrHistoryRead::Ready {
+            value:
+                Material::Authorized {
+                    group_state_event: Some(original),
+                },
+            guard,
+        }) => {
+            let response =
+                crate::routing::mls::serve_group_state_material(state, &peer, &original.event)
+                    .await;
+            Some(match response {
+                Ok(response) => coland_http::result::guarded_json_ok(response, Some(guard)),
+                Err(error) => {
+                    let _ = guard.finish().await;
+                    Err(error)
+                }
+            })
+        }
+        Ok(HumanPcrHistoryRead::Ready { value, guard }) => {
+            let _ = guard.finish().await;
+            Some(Err(match value {
+                Material::RevisionUnavailable | Material::Authorized { .. } => {
+                    crate::routing::mls::mls_group_state_material_revision_unavailable()
+                }
+                Material::NotFound => crate::routing::mls::mls_group_state_material_not_found(),
+            }))
+        }
+        Ok(HumanPcrHistoryRead::NotApplicable | HumanPcrHistoryRead::CurrentStatusRequired)
+        | Err(_) => Some(Err(unavailable())),
+    }
+}
+
 pub(crate) async fn page(
     state: &AppState,
     session: &SessionIdentityState,

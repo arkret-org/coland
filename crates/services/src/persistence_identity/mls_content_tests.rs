@@ -1009,6 +1009,7 @@ async fn own_pcr_private_profile_requires_native_root_before_accepting_exact_enc
         &mut fixture,
         &package,
         &transaction,
+        &genesis,
     ))
     .await;
     assert_eq!(restored.root_context, context);

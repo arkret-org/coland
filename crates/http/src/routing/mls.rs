@@ -348,11 +348,11 @@ async fn peer_mls_attest_add(
     json_ok(outcome)
 }
 
-fn mls_group_state_material_not_found() -> AppError {
+pub(crate) fn mls_group_state_material_not_found() -> AppError {
     AppError::not_found("MLS group-state material not found")
 }
 
-fn mls_group_state_material_revision_unavailable() -> AppError {
+pub(crate) fn mls_group_state_material_revision_unavailable() -> AppError {
     crate::app_error!(
         RevisionUnavailable,
         "authorized MLS group-state material is unavailable at the requested cut",
@@ -402,6 +402,9 @@ async fn resolve_self_mls_group_state_material(
         let caller = crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
         if request.caller_actor_id != caller || caller.as_account_id().map(|account| &account.station_id) != Some(&state.service_core_id()) {
             return Err(mls_group_state_material_not_found());
+        }
+        if let Some(outcome) = crate::routing::events::pcr_history::mls_material(state, &session, &request).await {
+            return outcome;
         }
         None
     };

@@ -158,6 +158,14 @@ async fn current_binding(pool: &PgPool, request: &EventCommitRequest) -> Content
     serde_json::from_value(row.payload).unwrap()
 }
 
+async fn endpoint_history(pool: &PgPool, actor: &ActorId) -> Vec<Value> {
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("SELECT jsonb_build_object('effective_scope',effective_scope,'genesis_event_ref',genesis_event_ref,'binding',binding,'first_source',first_source) AS payload FROM content_endpoint_admission_history WHERE binding->'actor_id'=$1 ORDER BY admission_key")
+        .bind::<Jsonb, _>(serde_json::to_value(actor).unwrap())
+        .get_results::<BindingRow>(&mut *conn).await.unwrap()
+        .into_iter().map(|row| row.payload).collect()
+}
+
 fn history_request_payload(prepared: &PreparedGroup) -> Value {
     let base = &prepared.request.authority_commit;
     json!({
@@ -365,6 +373,24 @@ async fn independent_mls_leaf_key_binds_to_native_device_and_survives_member_upd
         current_binding(&pool, &prepared.request).await,
         prepared.endpoint
     );
+    let history = endpoint_history(&pool, &prepared.endpoint.actor_id).await;
+    assert_eq!(
+        history.len(),
+        1,
+        "empty activated groups need an admission origin"
+    );
+    assert_eq!(
+        history[0]["binding"],
+        serde_json::to_value(&prepared.endpoint).unwrap()
+    );
+    assert_eq!(
+        history[0]["genesis_event_ref"],
+        json!(prepared.request.authority_commit.event.event_id)
+    );
+    assert_eq!(
+        history[0]["first_source"]["commit_id"],
+        json!(prepared.request.authority_commit.commit.commit_id)
+    );
     prepared
         .group
         .install_local_creator_binding(
@@ -466,6 +492,27 @@ async fn independent_mls_leaf_key_binds_to_native_device_and_survives_member_upd
     );
     uow.commit_event(update.clone()).await.unwrap();
     assert_eq!(current_binding(&pool, &update).await, prepared.endpoint);
+    assert_eq!(
+        endpoint_history(&pool, &prepared.endpoint.actor_id).await,
+        history,
+        "same endpoint epochs preserve the exact first admission without duplication"
+    );
+    // A missing derived current row is not an absence proof for the inventory.
+    // This is a negative projection-loss fixture, not a fabricated MLS Remove.
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("DELETE FROM mls_endpoint_current_bindings WHERE scope_key=$1")
+        .bind::<Text, _>(
+            arkret_canonical::canonical_json_string(&update.authority_commit.event.scope_ref)
+                .unwrap(),
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    assert_eq!(
+        endpoint_history(&pool, &prepared.endpoint.actor_id).await,
+        history
+    );
 }
 
 #[tokio::test]

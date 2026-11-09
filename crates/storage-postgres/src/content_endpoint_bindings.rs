@@ -46,6 +46,9 @@ pub(crate) async fn install_in_connection(
         .as_ref()
         .ok_or_else(|| invalid("MLS endpoint install has no verified RFC result"))?;
     let key = crate::mls_group_current_states::scope_key(&event.scope_ref)?;
+    let group = crate::mls_group_current_states::locked_group(conn, &key)
+        .await?
+        .ok_or_else(|| invalid("endpoint install has no accepted group current"))?;
     let old = sql_query("SELECT leaf_index,actor_id,binding,origin_event_ref,origin_signature_key,leaf_signature_key FROM mls_endpoint_current_bindings WHERE scope_key=$1 FOR UPDATE")
         .bind::<Text,_>(&key).get_results::<BindingRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut old: BTreeMap<_, _> = old.into_iter().map(|row| (row.leaf_index, row)).collect();
@@ -156,6 +159,14 @@ pub(crate) async fn install_in_connection(
             binding
                 .validate()
                 .map_err(|error| invalid(error.to_string()))?;
+            crate::content_endpoint_history::record(
+                conn,
+                &event.scope_ref,
+                &group.value.genesis_event_ref,
+                binding,
+                &event.event_id,
+            )
+            .await?;
         }
         sql_query("INSERT INTO mls_endpoint_current_bindings(scope_key,leaf_index,actor_id,leaf_signature_key,binding,origin_event_ref,origin_signature_key,current_event_ref,epoch) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
             .bind::<Text,_>(&key).bind::<BigInt,_>(index).bind::<Jsonb,_>(actor).bind::<Text,_>(leaf.signature_key.as_str())
@@ -172,6 +183,7 @@ pub(crate) async fn bind_add_in_connection(
     conn: &mut AsyncPgConnection,
     attestation: &MlsAddAuthorityAttestation,
 ) -> PersistenceResult<()> {
+    crate::content_endpoint_history::record_add(conn, attestation).await?;
     let key = crate::mls_group_current_states::scope_key(&attestation.effective_scope)?;
     let rows = sql_query("SELECT leaf_index,actor_id,binding,origin_event_ref,origin_signature_key,leaf_signature_key FROM mls_endpoint_current_bindings WHERE scope_key=$1 AND origin_event_ref=$2 AND origin_signature_key=$3 FOR UPDATE")
         .bind::<Text,_>(&key).bind::<Text,_>(attestation.commit_event_ref.as_str()).bind::<Text,_>(attestation.leaf_signature_key_base64url.as_str())

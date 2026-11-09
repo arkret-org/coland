@@ -218,6 +218,7 @@ pub(super) async fn bind_mls_replica_genesis_in_connection(
             "MLS replica changed its immutable Genesis selector",
         ));
     }
+    crate::content_endpoint_history::record_genesis(conn, event).await?;
     Ok(())
 }
 

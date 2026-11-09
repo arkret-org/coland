@@ -79,6 +79,7 @@ pub use consent_current::PgConsentCurrentStore;
 mod contacts;
 mod content_dependencies;
 mod content_endpoint_bindings;
+mod content_endpoint_history;
 mod content_history_admission;
 mod content_root_packages;
 pub use consent_request_quarantine::PgConsentRequestQuarantineStore;

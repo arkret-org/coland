@@ -4557,6 +4557,21 @@ CREATE TABLE mls_endpoint_current_bindings (
  UNIQUE(scope_key,leaf_signature_key)
 );
 
+-- Home-Station endpoint admissions survive current-leaf removal and Realm
+-- handoff. This is a private index of native originals, not inventory proof.
+CREATE TABLE content_endpoint_admission_history (
+ admission_key TEXT NOT NULL PRIMARY KEY CHECK(admission_key ~ '^sha256:[0-9a-f]{64}$'),
+ effective_scope JSONB NOT NULL CHECK(jsonb_typeof(effective_scope)='object'),
+ genesis_event_ref TEXT NOT NULL,
+ binding JSONB NOT NULL CHECK(jsonb_typeof(binding)='object'),
+ first_source JSONB NOT NULL CHECK(jsonb_typeof(first_source)='object'),
+ source_event_pk BIGINT NOT NULL REFERENCES canonical_events(pk),
+ admitted_at TIMESTAMPTZ NOT NULL,
+ CHECK(binding->'actor_id'->>'kind'='account')
+);
+CREATE INDEX content_endpoint_admission_history_actor
+ ON content_endpoint_admission_history ((binding->'actor_id'));
+
 -- Historical, Station-private facts from the exact signed PublicMessage of
 -- each accepted MLS Commit. The row identity includes the creating Commit and
 -- original Proposal ordinal, so Remove+Add cannot reuse an old leaf tuple.

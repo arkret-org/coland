@@ -874,6 +874,7 @@ async fn store_recipient_roster_outbox(
             "MLS Add attestation outcome differs from original claim",
         ));
     }
+    crate::content_endpoint_history::record_add(conn, attestation).await?;
     let inserted = sql_query(
         "INSERT INTO mls_add_authority_attestation_outbox \
          (attestor_station_id,realm_id,scope_key,mls_group_id,genesis_event_ref, \

@@ -1128,7 +1128,7 @@ async fn encrypted_original_requires_real_root_backup_and_binds_one_immutable_ke
     let database = TestDatabase::lease().await;
     database.bind_device_inventory_station("ak:did_core:web:backup-test.example");
     let pool = database.pool();
-    let fixture = Box::pin(RootFixture::new(pool.clone())).await;
+    let mut fixture = Box::pin(RootFixture::new(pool.clone())).await;
     let discussion = Box::pin(owner_discussion(&pool, &fixture)).await;
     let prepared = Box::pin(prepared_group_from_discussion(&pool, discussion, false)).await;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
@@ -1188,8 +1188,79 @@ async fn encrypted_original_requires_real_root_backup_and_binds_one_immutable_ke
     );
     let backups = key_backup_tests::service(pool.clone());
     key_backup_tests::put(&backups, &package).await.unwrap();
+    fixture.package = key_backup_tests::successor(&package);
+    let replacement = sealed_root_package(&fixture, &context, &root);
+    assert_ne!(replacement.encryption.aead.enc, package.encryption.aead.enc);
+    key_backup_tests::put(&backups, &replacement).await.unwrap();
+    let mut unknown = package.clone();
+    unknown.backup_id =
+        arkret_wire::BackupId::new(format!("ak:backup:{}", uuid::Uuid::now_v7())).unwrap();
+    let unknown_event = encrypted_message(
+        &prepared,
+        &prepared.request.authority_commit,
+        &context,
+        &root,
+        &unknown,
+        &arkret_crypto::content_history::fresh_content_key_salt().unwrap(),
+        "unadmitted backup reference cannot borrow a matching replacement",
+    );
+    let unknown_request = ordinary_realm::source_request(
+        &pool,
+        ordinary_realm::request_for_event(
+            &prepared.request.authority_commit,
+            unknown_event.clone(),
+            prepared.request.authority_commit.commit.committed_at,
+        ),
+    )
+    .await;
+    let error = uow.commit_event(unknown_request).await.unwrap_err();
+    assert!(
+        error.to_string().contains("first-admission index"),
+        "{error}"
+    );
+    assert!(
+        store
+            .committed_event(&unknown_event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .stream_head(&request.authority_commit.commit.stream_ref)
+            .await
+            .unwrap(),
+        before
+    );
+
+    assert!(
+        backups
+            .delete_backup(package.backup_id.as_str())
+            .await
+            .unwrap()
+    );
+    assert!(
+        backups
+            .backup(package.backup_id.as_str())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // The frozen original still names the deleted first package. The current
+    // sufficient package is a native mapping, never a rewritten Event.
+
     uow.commit_event(request.clone()).await.unwrap();
     uow.commit_event(request.clone()).await.unwrap();
+    assert_eq!(
+        store
+            .committed_event(&event.event_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .event,
+        event
+    );
+
     let mut conn = pool.get().await.unwrap();
     let row = diesel::sql_query("SELECT content_context AS payload FROM content_key_domains WHERE event_id=$1 AND content_path='/payload/encrypted_content'")
         .bind::<Text,_>(event.event_id.as_str()).get_result::<BindingRow>(&mut *conn).await.unwrap();
@@ -1199,7 +1270,7 @@ async fn encrypted_original_requires_real_root_backup_and_binds_one_immutable_ke
     assert_eq!(recorded.root_context, context);
     drop(conn);
     let last_root = backups
-        .delete_backup(package.backup_id.as_str())
+        .delete_backup(replacement.backup_id.as_str())
         .await
         .unwrap_err();
     assert!(

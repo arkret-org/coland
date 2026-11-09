@@ -38,8 +38,6 @@ struct GroupRow {
 struct RootSubjectRow {
     #[diesel(sql_type = Text)]
     actor_id: String,
-    #[diesel(sql_type = diesel::sql_types::Nullable<Jsonb>)]
-    custodian_actor: Option<Value>,
 }
 
 #[derive(QueryableByName)]
@@ -246,18 +244,21 @@ pub(crate) async fn commit_in_connection(
     let mut actors = BTreeMap::new();
     let mut recipients = BTreeMap::new();
     for id in &backup_ids {
-        let row = sql_query("SELECT actor_id,payload->'custodian_actor_id' AS custodian_actor FROM key_backups WHERE id=$1")
-            .bind::<diesel::sql_types::Uuid,_>(crate::ids::typed_uuid_part_expect_internal(id.as_str()))
-            .get_result::<RootSubjectRow>(&mut *conn).await.optional()?
-            .ok_or_else(|| missing("original references a missing durable root package"))?;
+        let row = sql_query("SELECT actor_id FROM key_backup_identities WHERE id=$1")
+            .bind::<diesel::sql_types::Uuid, _>(crate::ids::typed_uuid_part_expect_internal(
+                id.as_str(),
+            ))
+            .get_result::<RootSubjectRow>(&mut *conn)
+            .await
+            .optional()?
+            .ok_or_else(|| {
+                missing("original references a missing durable root package first-admission index")
+            })?;
         let actor: arkret_wire::ActorId =
             serde_json::from_str(&row.actor_id).map_err(PersistenceError::database)?;
-        let recipient = row
-            .custodian_actor
-            .map(serde_json::from_value::<arkret_wire::ActorId>)
-            .transpose()
-            .map_err(PersistenceError::database)?
-            .unwrap_or_else(|| actor.clone());
+        // Native managed-Agent custody is a separate admission adapter; only
+        // admitted Human Device packages can reach this metadata path today.
+        let recipient = actor.clone();
         recipients.insert(recipient.to_string(), recipient);
         actors.insert(actor.to_string(), actor);
     }
@@ -274,22 +275,27 @@ pub(crate) async fn commit_in_connection(
     let mut packet_roots = BTreeMap::new();
     let wanted = required_roots.keys().cloned().collect::<Vec<_>>();
     for id in &backup_ids {
-        let packet = crate::content_root_packages::read_in_connection(conn, id, &wanted).await?;
+        let original = crate::content_root_packages::original_index_in_connection(conn, id).await?;
         if pcr_actor
             .as_ref()
-            .is_some_and(|actor| actor != &packet.actor.to_string())
-            || packet
-                .expires_at
-                .is_some_and(|expiry| expiry <= chrono::Utc::now())
+            .is_some_and(|actor| actor != &original.actor.to_string())
         {
-            return Err(
-                invalid("root package subject or validity does not cover this original").into(),
-            );
+            return Err(invalid("root package subject does not cover this original").into());
         }
-        packet.require_current_recipient(conn).await?;
         let mut used = false;
         let mut selected = BTreeSet::new();
-        for (root_ref, context) in &packet.roots {
+        for (root_ref, context) in original
+            .roots
+            .iter()
+            .filter(|(root, _)| wanted.iter().any(|wanted| wanted == root.as_str()))
+        {
+            crate::content_root_packages::current_root_in_connection(
+                conn,
+                &original.actor,
+                root_ref,
+                context,
+            )
+            .await?;
             used = true;
             selected.insert(root_ref.as_str().to_owned());
             validate_root_basis(conn, context, &group, &declaration).await?;
@@ -302,13 +308,13 @@ pub(crate) async fn commit_in_connection(
             } else {
                 roots.insert(
                     root_ref.as_str().to_owned(),
-                    (context.clone(), packet.actor.to_string()),
+                    (context.clone(), original.actor.to_string()),
                 );
             }
         }
         if !used {
             return Err(
-                invalid("protection names a backup package with no selected content root").into(),
+                invalid("an original backup reference has no matching selected root").into(),
             );
         }
         packet_roots.insert(id.clone(), selected);
@@ -659,9 +665,7 @@ pub(crate) async fn guard_delete_in_connection(
                 {
                     continue;
                 }
-                let retained =
-                    crate::content_root_packages::read_retained_envelope(conn, &id).await?;
-                match crate::key_backup_history::recipient(conn, &retained).await {
+                match replacement.require_current_recipient(conn).await {
                     Ok(_) => {
                         sufficient = true;
                         break;

@@ -611,7 +611,7 @@ fn sealed_root_package(
     root: &arkret_models_crypto::ContentRootSecret,
 ) -> arkret_models_crypto::KeyBackup {
     use arkret_models_crypto::*;
-    let mut package = fixture.package.clone();
+    let package = &fixture.package;
     let entry = ContentRootBackupEntry {
         item_kind: ContentRootItemKind::ContentEpochRoot,
         secret_id: "native_root_0".into(),
@@ -619,20 +619,6 @@ fn sealed_root_package(
         root_ref: arkret_crypto::content_history::content_root_ref(root, context).unwrap(),
         root_base64url: root.clone(),
     };
-    let bag = KeyBackupPlaintext {
-        schema: arkret_wire::SchemaId::KeyBackupPlaintextV1,
-        backup_id: package.backup_id.clone(),
-        backup_kind: package.backup_kind,
-        series_id: package.series_id.clone(),
-        series_sequence: package.series_sequence,
-        items: vec![entry.into()],
-        extra: Default::default(),
-    };
-    package.contents = bag
-        .items
-        .iter()
-        .map(SecretStorageEntry::content_index)
-        .collect();
     let key = package
         .encryption
         .recipient_key_ref
@@ -645,17 +631,48 @@ fn sealed_root_package(
         .unwrap();
     let key = arkret_canonical::decode_multibase_base58btc(key).unwrap();
     assert_eq!(&key[..2], &[0xec, 0x01]);
-    arkret_crypto::content_history::seal_content_root_backup(package, &bag, &key[2..], |bytes| {
-        Ok(
-            ed25519_dalek::SigningKey::from_bytes(
+    let draft = arkret_crypto::content_history::ContentRootBackupDraft {
+        backup_id: package.backup_id.clone(),
+        actor_id: package.actor_id.clone(),
+        created_at: package.created_at,
+        expires_at: package.expires_at.flatten(),
+        author: arkret_crypto::content_history::ContentRootBackupAuthor::Device {
+            binding: arkret_crypto::backup::KeyBackupAuthBinding {
+                device_id: package.signature_proof.device_id.clone().unwrap(),
+                verification_method: package.signature_proof.verification_method.clone(),
+                signature_algorithm: package.signature_proof.signature_algorithm,
+                device_authorize_event_id: package
+                    .signature_proof
+                    .device_authorize_event_id
+                    .clone()
+                    .unwrap(),
+            },
+            source: package.source_commit_ref.clone().unwrap(),
+        },
+        recipient_key_ref: package.encryption.recipient_key_ref.clone().unwrap(),
+        recovery_policy_ref: package.recovery_policy_ref.clone().unwrap(),
+        domain_separation: package.domain_separation.clone(),
+        series_id: package.series_id.clone(),
+        series_sequence: package.series_sequence,
+        supersedes: package
+            .supersedes_id
+            .clone()
+            .zip(package.supersedes_digest.clone()),
+        custody: package
+            .custodian_actor_id
+            .clone()
+            .zip(package.custody_authorization_ref.clone()),
+    };
+    draft
+        .seal(vec![entry], &key[2..], |bytes| {
+            Ok(ed25519_dalek::SigningKey::from_bytes(
                 &fixture.pcr.history.founding_device_signing_seed,
             )
             .sign(bytes)
             .to_bytes()
-            .to_vec(),
-        )
-    })
-    .unwrap()
+            .to_vec())
+        })
+        .unwrap()
 }
 
 async fn prepared_own_pcr_group(

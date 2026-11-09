@@ -204,6 +204,7 @@ pub(super) async fn exercise(
         policy_id: fixture.policy.policy_id.clone(),
         policy_version: fixture.policy.version,
     });
+    replacement.device_id = Some(reader.device_id.clone());
     replacement.signature_proof.device_id = Some(reader.device_id.clone());
     replacement.signature_proof.device_authorize_event_id = Some(
         reader

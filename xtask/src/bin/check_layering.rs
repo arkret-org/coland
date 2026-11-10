@@ -77,7 +77,13 @@ const BANNED: &[(&str, &[&str])] = &[
 
 fn main() {
     let output = Command::new(env!("CARGO"))
-        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .args([
+            "metadata",
+            "--locked",
+            "--all-features",
+            "--format-version",
+            "1",
+        ])
         .output()
         .expect("failed to run cargo metadata");
     if !output.status.success() {
@@ -106,6 +112,13 @@ fn main() {
         let name = package["name"]
             .as_str()
             .expect("package name must be a string");
+        // Full metadata includes direct and transitive test/build dependencies.
+        // Product runtimes belong in the joint suite, outside this workspace.
+        if name == "savfox" || name.starts_with("savfox-") {
+            errors.push(format!(
+                "external Agent runtime in Coland dependency graph: {name}"
+            ));
+        }
         if !guarded.contains(name) {
             continue;
         }

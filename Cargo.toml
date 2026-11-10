@@ -131,32 +131,3 @@ tracing-opentelemetry = { version = "0.33.0", default-features = false }
 tracing-subscriber = "0.3.23"
 uuid = "1.26.0"
 zeroize = "1.9.0"
-
-savfox-gateway-server = { version = "0.3.1", path = "../../savfox-ai/savfox/crates/gateway-server", default-features = false, features = ["arkret"] }
-
-# Dependency-workspace patches are not inherited by this embedding root.
-# Match Savfox's pinned OpenTelemetry 0.31 source identity; keep this root's 0.32 telemetry requirements unchanged.
-[patch.crates-io]
-opentelemetry = { git = "https://github.com/open-telemetry/opentelemetry-rust.git", rev = "67e7dffc" }
-opentelemetry_sdk = { git = "https://github.com/open-telemetry/opentelemetry-rust.git", rev = "67e7dffc" }
-opentelemetry-http = { git = "https://github.com/open-telemetry/opentelemetry-rust.git", rev = "67e7dffc" }
-opentelemetry-otlp = { git = "https://github.com/open-telemetry/opentelemetry-rust.git", rev = "67e7dffc" }
-opentelemetry-appender-tracing = { git = "https://github.com/open-telemetry/opentelemetry-rust.git", rev = "67e7dffc" }
-opentelemetry-semantic-conventions = { git = "https://github.com/open-telemetry/opentelemetry-rust.git", rev = "67e7dffc" }
-
-# Embedded Savfox has portable Git dependencies. Coland owns the checked-out
-# sibling workspace and must share one SDK/type universe across every consumer.
-[patch."https://github.com/arkret-org/arkret-rust-sdk.git"]
-arkret = { version = "0.3.0", path = "../arkret-rust-sdk/crates/sdk" }
-arkret-schema = { version = "0.3.0", path = "../arkret-rust-sdk/crates/schema" }
-arkret-crypto = { version = "0.3.0", path = "../arkret-rust-sdk/crates/crypto" }
-arkret-models-collaboration = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-collaboration" }
-arkret-models-crypto = { version = "0.3.0", path = "../arkret-rust-sdk/crates/models-crypto" }
-arkret-signatures = { version = "0.3.0", path = "../arkret-rust-sdk/crates/signatures" }
-arkret-wire = { version = "0.3.0", path = "../arkret-rust-sdk/crates/wire" }
-
-[patch."https://github.com/arkret-org/garth.git"]
-garth = { version = "0.3.0", path = "../garth" }
-
-[patch."https://github.com/arkret-org/bridges.git"]
-arkret-bridge-runtime = { version = "0.3.0", path = "../bridges/crates/runtime" }

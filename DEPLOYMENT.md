@@ -200,7 +200,6 @@ and rollout-only switches that should be managed deliberately.
 | `COLAND_ADMIN_MAX_PAGE_LIMIT` | `1000` | Maximum admin API page size; clamped above the default. |
 | `COLAND_AGENT_PARTICIPATION_CEILING` | all five bits `true` | Closed JSON object with required boolean fields `message_creation_allowed`, `reaction_addition_allowed`, `reaction_removal_allowed`, `third_party_mention_delivery_allowed`, and `acting_on_behalf_allowed`. This deployment ceiling only narrows participation; it does not grant permissions or override management restrictions. Invalid JSON or unknown fields fail startup. |
 | `COLAND_APPLET_TRANSACTION_INFLIGHT_CAPACITY` | `64` | Maximum concurrent applet transactions retained in memory. |
-| `COLAND_ARKRET_RUNTIME_HOME` | unset | Absolute path to an existing normally paired native Agent runtime home. Enables the embedded Savfox public reply consumer; unset leaves the consumer inactive. Empty or relative paths fail startup. |
 | `COLAND_CONFORMANCE_CURSOR_EMISSION_PAUSE_FILE` | unset | Development-only Account WebSocket cursor delivery probe path for builds with `conformance-harness`. The file selects input cursor digests; a sibling `.pause` file pauses delivery for at most 15 seconds and `.reached.json` records the pending frame. Unset disables the probe; production mode ignores it. |
 | `COLAND_CONFORMANCE_SIGNAL_EMISSION_PAUSE_FILE` | unset | Development-only Signal frame scheduling probe path for builds with `conformance-harness`. Unset disables the probe; production mode ignores it. |
 | `COLAND_CONFORMANCE_INVITE_DELIVERY_PAUSE_FILE` | unset | Development-only final invite delivery probe. A JSON file selects the holder Account and Invite; `.reached` marks arrival. Removing the file resumes delivery; a 15-second deadline fails the probe. Production mode ignores it. |
@@ -556,25 +555,20 @@ guard, but it is not a distributed budget.
 ## 8. Local supply-chain artifacts
 
 The CI, release and local image builds use the same dependency layout:
-`arkret-org/{coland,arkret-rust-sdk,arkret-spec,floria,garth,bridges}` alongside
-`savfox-ai/savfox`. Cargo paths are checked out in that layout; image builds
-provide all six dependency repositories as named BuildKit contexts.
+`arkret-org/{coland,arkret-rust-sdk,arkret-spec,floria,garth,bridges}`.
+Cargo paths are checked out in that layout; image builds provide the five
+dependency repositories as named BuildKit contexts.
 
 The supply-chain gate rejects reported vulnerabilities. `deny.toml` records
-four reviewed INFO Unmaintained notices retained by upstream dependencies:
+one reviewed INFO Unmaintained notice retained by an upstream dependency:
 
 | Advisory | Dependency | Review scope |
 | --- | --- | --- |
-| [RUSTSEC-2024-0388](https://rustsec.org/advisories/RUSTSEC-2024-0388.html) | `derivative` via Starlark | Compile-time derive macro; no patched upstream release. |
-| [RUSTSEC-2024-0436](https://rustsec.org/advisories/RUSTSEC-2024-0436.html) | `paste` via Starlark | Compile-time token macro; no patched upstream release. |
-| [RUSTSEC-2025-0057](https://rustsec.org/advisories/RUSTSEC-2025-0057.html) | `fxhash` via Starlark | Internal evaluator maps; the notice reports maintenance status. |
-| [RUSTSEC-2026-0173](https://rustsec.org/advisories/RUSTSEC-2026-0173.html) | `proc-macro-error2` via Teloxide/Aquamarine | Documentation macro diagnostics; no patched upstream release. |
+| [RUSTSEC-2026-0173](https://rustsec.org/advisories/RUSTSEC-2026-0173.html) | `proc-macro-error2` via `hax-lib-macros` | Reviewed informational macro dependency notice. |
 
 These dependencies remain in the reviewed graph. Other advisories, including
 future vulnerability reports for these crates, remain subject to the gate.
-Revisit the exceptions when the owning upstream dependencies change. Starlark
-0.14.2 pins BLAKE3 1.8.2 and cannot resolve alongside the SDK's BLAKE3 1.8.7
-requirement; the compatible Starlark/allocative family stays pinned.
+Revisit the exception when the owning upstream dependencies change.
 
 Generate local image metadata and an SPDX JSON SBOM without pushing an image or
 creating a release tag:

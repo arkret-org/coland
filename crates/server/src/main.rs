@@ -348,11 +348,6 @@ async fn prepare_server(raw_args: Vec<String>) -> anyhow::Result<ServingFuture> 
     // Finish boot: seed demo data + hydrate the Realm directory and
     // projections from the (now async) persistence store.
     state.hydrate().await?;
-    let _native_public_replies = crate::runtime::start_native_arkret_public_replies(
-        state.clone(),
-        values.get("COLAND_ARKRET_RUNTIME_HOME").map(String::as_str),
-    )
-    .await?;
     spawn_federation_peer_discovery(state.clone());
 
     // Sovereign enclave security invariants. When
@@ -462,7 +457,7 @@ async fn prepare_server(raw_args: Vec<String>) -> anyhow::Result<ServingFuture> 
     Ok(Box::pin(async move {
         // Keep exactly the original runtime guards alive until serving ends.
         // Tuple fields drop in order, so reverse the original independent
-        // local declarations: metrics first, native runtime then tracing last.
+        // local declarations: metrics first, then tracing last.
         let _runtime_guards = (
             _metrics_server,
             _applet_completion_sweeper,
@@ -476,7 +471,6 @@ async fn prepare_server(raw_args: Vec<String>) -> anyhow::Result<ServingFuture> 
             _security_rotation_worker,
             _account_erasure_worker,
             _consent_effect_publication_worker,
-            _native_public_replies,
             _tracing_guards,
         );
         tracing::info!(

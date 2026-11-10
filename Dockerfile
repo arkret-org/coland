@@ -16,7 +16,6 @@ COPY --from=arkret-spec . ./arkret-spec
 COPY --from=floria . ./floria
 COPY --from=garth . ./garth
 COPY --from=bridges . ./bridges
-COPY --from=savfox . /workspace/savfox-ai/savfox
 COPY . ./coland
 
 WORKDIR /workspace/arkret-org/coland

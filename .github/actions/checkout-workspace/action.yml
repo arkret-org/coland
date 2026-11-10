@@ -1,5 +1,5 @@
 name: Checkout Coland workspace dependencies
-description: Preserve the cross-repository Cargo path layout used by Coland and Savfox.
+description: Preserve the cross-repository Cargo path layout used by Coland.
 inputs:
   token:
     description: Token for dependency repositories.
@@ -20,7 +20,7 @@ runs:
         node <<'JS'
         const fs = require('node:fs');
         const revisions = JSON.parse(fs.readFileSync(process.env.SOURCE_FILE, 'utf8'));
-        const names = ['sdk', 'floria', 'spec', 'garth', 'bridges', 'savfox'];
+        const names = ['sdk', 'floria', 'spec', 'garth', 'bridges'];
         if (Object.keys(revisions).length !== names.length ||
             names.some(name => !/^[0-9a-f]{40}$/.test(revisions[name]))) {
           throw new Error('Invalid release dependency source set');
@@ -64,11 +64,4 @@ runs:
         repository: ${{ github.repository_owner }}/bridges
         path: arkret-org/bridges
         ref: ${{ steps.revisions.outputs.bridges }}
-        token: ${{ inputs.token }}
-    - name: Checkout Savfox gateway workspace
-      uses: actions/checkout@v6
-      with:
-        repository: savfox-ai/savfox
-        path: savfox-ai/savfox
-        ref: ${{ steps.revisions.outputs.savfox }}
         token: ${{ inputs.token }}

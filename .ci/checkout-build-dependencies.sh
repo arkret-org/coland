@@ -31,4 +31,3 @@ clone_missing() {
 for repository in arkret-rust-sdk floria arkret-spec garth bridges; do
   clone_missing "$owner/$repository" "$workspace/$repository" "${SIBLING_REF:-main}"
 done
-clone_missing savfox-ai/savfox "$(dirname -- "$workspace")/savfox-ai/savfox" main

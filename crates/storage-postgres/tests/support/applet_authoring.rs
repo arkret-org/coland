@@ -49,6 +49,46 @@ use url::Url;
 
 use super::ordinary_realm;
 
+/// A product consumer supplies its own reply and restart assertions.
+#[async_trait::async_trait(?Send)]
+pub trait RealmBotConsumer {
+    async fn verify(&self, scenario: RealmBotScenario<'_>);
+}
+
+/// Native admission and transport material shared with joint consumer suites.
+pub struct RealmBotScenario<'a> {
+    pub edge: Arc<arkret_bridge_runtime::ArkretEdge>,
+    pub devices: &'a arkret_bridge_runtime::managed_device::ManagedDeviceRuntime,
+    pub device: &'a arkret_bridge_runtime::managed_device::ManagedDevice,
+    pub actor: &'a ActorId,
+    pub scope: &'a ScopeRef,
+    pub rotate_during_reply: bool,
+    fixture: &'a Fixture,
+    human_group: &'a mut arkret_mls::ArkretMlsGroup,
+}
+
+impl RealmBotScenario<'_> {
+    pub fn pool(&self) -> &PgPool {
+        &self.fixture.pool
+    }
+
+    pub async fn update_human_epoch(&mut self) {
+        realm_actor_mls_fixture::human_updates_group(self.fixture, self.scope, self.human_group)
+            .await;
+    }
+
+    pub async fn verify_reply(&mut self, event_id: &str, expected: &arkret::ContentBlock) {
+        realm_actor_mls_fixture::verify_runtime_message(
+            self.fixture,
+            self.human_group,
+            event_id,
+            self.actor,
+            expected,
+        )
+        .await;
+    }
+}
+
 struct Fixture {
     state: AppState,
     pool: PgPool,
@@ -2018,7 +2058,6 @@ pub async fn registered_service_pair(pool: PgPool) {
 
 mod realm_native_fixture {
     include!("applet_configuration_fixture.rs");
-    include!("realm_bot_consumer_fixture.rs");
     include!("realm_actor_transport_fixture.rs");
     include!("realm_actor_queue_boundary_fixture.rs");
     include!("realm_actor_runtime_recovery_fixture.rs");
@@ -6464,7 +6503,7 @@ mod realm_native_fixture {
         clippy::too_many_arguments,
         reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
     )]
-    pub(super) async fn run_bridge_case(
+    pub(super) fn run_bridge_case(
         pool: PgPool,
         circle: bool,
         bot: bool,
@@ -6473,6 +6512,34 @@ mod realm_native_fixture {
         governance_handoff: bool,
         recipient_mode: u8,
         manager_transfer: bool,
+    ) -> impl std::future::Future<Output = ()> {
+        run_bridge_case_with_consumer(
+            pool,
+            circle,
+            bot,
+            rotate_during_reply,
+            recovery_scenario,
+            governance_handoff,
+            recipient_mode,
+            manager_transfer,
+            None,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Independent scenario coordinates and consumer assertions remain explicit."
+    )]
+    pub(super) async fn run_bridge_case_with_consumer(
+        pool: PgPool,
+        circle: bool,
+        bot: bool,
+        rotate_during_reply: bool,
+        recovery_scenario: Option<RecoveryScenario>,
+        governance_handoff: bool,
+        recipient_mode: u8,
+        manager_transfer: bool,
+        consumer: Option<&dyn RealmBotConsumer>,
     ) {
         use arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService;
         use arkret_bridge_runtime::managed_device::ManagedDeviceRuntime;
@@ -8051,19 +8118,18 @@ mod realm_native_fixture {
                 .unwrap(),
             attachment_plaintext
         );
-        if bot {
+        if bot && let Some(consumer) = consumer {
             boxed_step(|| {
-                verify_bot_consumer(
-                    &factory.fixture,
-                    edge.clone(),
-                    &devices,
-                    &device,
-                    &reader,
-                    &mut human_group,
-                    &actor,
-                    &content_scope,
+                consumer.verify(RealmBotScenario {
+                    fixture: &factory.fixture,
+                    edge: edge.clone(),
+                    devices: &devices,
+                    device: &device,
+                    human_group: &mut human_group,
+                    actor: &actor,
+                    scope: &content_scope,
                     rotate_during_reply,
-                )
+                })
             })
             .await;
             return;
@@ -8850,8 +8916,23 @@ pub async fn realm_applet_configuration(pool: PgPool) {
     realm_native_fixture::run_configuration(pool).await;
 }
 
-pub async fn realm_bot_runtime(pool: PgPool, rotate_during_reply: bool) {
-    realm_native_fixture::run_bridge(pool, false, true, rotate_during_reply, None).await;
+pub async fn realm_bot_consumer(
+    pool: PgPool,
+    rotate_during_reply: bool,
+    consumer: &dyn RealmBotConsumer,
+) {
+    realm_native_fixture::run_bridge_case_with_consumer(
+        pool,
+        false,
+        true,
+        rotate_during_reply,
+        None,
+        false,
+        0,
+        false,
+        Some(consumer),
+    )
+    .await;
 }
 
 pub async fn realm_runtime_key_loss_recovery(pool: PgPool, bot: bool) {

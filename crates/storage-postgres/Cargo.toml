@@ -66,7 +66,6 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 chacha20poly1305 = { workspace = true }
-savfox-gateway-server.workspace = true
 arkret-http-client.workspace = true
 arkret-bridge-runtime = { version = "0.3.0", path = "../../../bridges/crates/runtime", default-features = false, features = ["full", "postgres"] }
 arkret = { workspace = true, features = ["mls"] }

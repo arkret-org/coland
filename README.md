@@ -4,6 +4,11 @@ Reference Arkret v1 Station, built with Salvo, Diesel, and
 PostgreSQL. The HTTP surface mirrors `arkret-spec/spec/v1/artifacts/openapi/arkret-service-api.openapi.yaml`;
 in-memory mode keeps the same API for fast local iteration.
 
+Agent product runtimes execute outside the Station. Coland owns protocol
+admission, delivery and persistence; cross-product consumer regressions live
+in the sibling Cotest repository. The dependency layering gate checks the
+complete graph, including test and build dependencies.
+
 > See [DEPLOYMENT.md](DEPLOYMENT.md) for production guidance, [SECURITY.md](SECURITY.md)
 > for vulnerability disclosure. Operator-facing internals:
 >

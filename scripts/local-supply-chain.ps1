@@ -28,7 +28,6 @@ docker buildx build `
     --build-context floria=../floria `
     --build-context garth=../garth `
     --build-context bridges=../bridges `
-    --build-context savfox=../../savfox-ai/savfox `
     .
 
 syft $ImageTag -o "spdx-json=$sbomPath"

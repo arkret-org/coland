@@ -100,8 +100,10 @@ def main():
                 if path.is_file():
                     copy(path, stage / path.name)
         repositories = {}
-        # Include sibling path dependencies and the adjacent Savfox workspace.
-        for directory in [root, *root.parent.iterdir(), root.parent.parent / 'savfox-ai' / 'savfox']:
+        # Include only this repository and its declared sibling dependencies.
+        directories = [root, *(root.parent / name for name in
+                       ('arkret-rust-sdk', 'arkret-spec', 'floria', 'garth', 'bridges'))]
+        for directory in directories:
             if (directory / '.git').exists():
                 repositories[directory.name] = run('git', '-C', str(directory), 'rev-parse', 'HEAD')
         provenance = {'repository': project, 'ref': os.environ.get('GITHUB_REF'),

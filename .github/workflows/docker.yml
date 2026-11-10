@@ -62,7 +62,6 @@ jobs:
             floria=arkret-org/floria
             garth=arkret-org/garth
             bridges=arkret-org/bridges
-            savfox=savfox-ai/savfox
           platforms: linux/${{ matrix.arch }}
           pull: true
           load: true
@@ -105,7 +104,6 @@ jobs:
             floria=arkret-org/floria
             garth=arkret-org/garth
             bridges=arkret-org/bridges
-            savfox=savfox-ai/savfox
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           labels: |

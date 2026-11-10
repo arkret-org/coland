@@ -75,6 +75,7 @@ pub(super) async fn commit_recovery_unit_in_connection(
         )
         .await?;
     }
+    crate::agent_producer_signer_keys::retain_recovery_unit_in_connection(conn, &write).await?;
     accept_step_in_transaction(
         conn,
         write.transaction,

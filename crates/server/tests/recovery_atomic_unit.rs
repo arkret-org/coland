@@ -10,6 +10,9 @@ use arkret_models_collaboration::events_payloads::{
     device_authorize_payload_digest,
 };
 use arkret_models_crypto::*;
+use arkret_models_identity::{
+    HistoricalSignerKeyQuerySender, SignerKeyQuerySelector, SignerKeyResolution,
+};
 use arkret_wire::*;
 use coland_storage::{
     RecoveryAuthorityContext, RecoveryPolicyPublicationWrite, RecoverySessionLifecycle,
@@ -28,6 +31,13 @@ use salvo::test::ResponseExt as _;
 use serde_json::{Value, json};
 
 const REPLACEMENT_SIGNING_SEED: [u8; 32] = [96; 32];
+
+#[derive(Clone, Copy)]
+enum RecoveryProofDamage {
+    Possession,
+    Reanchor,
+    Authorize,
+}
 
 struct Fixture {
     state: coland_http::state::AppState,
@@ -53,6 +63,13 @@ async fn fixture() -> Fixture {
 }
 
 async fn fixture_with_config(config: coland_http::config::AppConfig) -> Fixture {
+    fixture_with_damage(config, None).await
+}
+
+async fn fixture_with_damage(
+    config: coland_http::config::AppConfig,
+    damage: Option<RecoveryProofDamage>,
+) -> Fixture {
     let (state, pool) = coland_test_support::app_state_with_pool(config);
     // A killed test can leave its DDL in a reused, exclusively leased database.
     let mut conn = pool.get().await.unwrap();
@@ -143,6 +160,11 @@ async fn fixture_with_config(config: coland_http::config::AppConfig) -> Fixture 
         )
         .unwrap(),
     );
+    if matches!(damage, Some(RecoveryProofDamage::Possession)) {
+        authorize_payload.device_signature = SignatureMaterial::NonEmptyString(
+            NonEmptyString::new(arkret_canonical::base64url_encode([0; 64])).unwrap(),
+        );
+    }
     let authorize_value = serde_json::to_value(&authorize_payload).unwrap();
     let root_key = arkret_canonical::ed25519_pubkey_to_did_key_multibase(
         &SigningKey::from_bytes(&[70; 32]).verifying_key().to_bytes(),
@@ -252,7 +274,7 @@ async fn fixture_with_config(config: coland_http::config::AppConfig) -> Fixture 
         )
         .unwrap(),
     };
-    let reanchor = sign_event(
+    let mut reanchor = sign_event(
         pcr.history.raw_event(
             EventKind::DeviceReanchor,
             serde_json::to_value(reanchor_payload).unwrap(),
@@ -261,12 +283,22 @@ async fn fixture_with_config(config: coland_http::config::AppConfig) -> Fixture 
         replacement_method.clone(),
         replacement_seed,
     );
-    let authorize = sign_event(
+    let mut authorize = sign_event(
         pcr.history
             .raw_event(EventKind::DeviceAuthorize, authorize_value, &realm),
         replacement_method.clone(),
         replacement_seed,
     );
+    let damaged = match damage {
+        Some(RecoveryProofDamage::Reanchor) => Some(&mut reanchor),
+        Some(RecoveryProofDamage::Authorize) => Some(&mut authorize),
+        None | Some(RecoveryProofDamage::Possession) => None,
+    };
+    if let Some(event) = damaged {
+        let proof = event.producer_proof.as_mut().unwrap();
+        let (header, _) = proof.jws.split_once("..").unwrap();
+        proof.jws = format!("{header}..{}", arkret_canonical::base64url_encode([0; 64]));
+    }
     let unit = PreparedEventUnit::new(
         arkret_canonical::DigestSuite::Sha256,
         arkret_wire::EventsSubmitBatchRequestBody {
@@ -513,6 +545,7 @@ async fn footprint(fixture: &Fixture) -> Value {
         "realm_authorities",
         "recovery_policies",
         "policy_current_states",
+        "agent_producer_signer_keys",
         "devices",
         "pcr_device_generation_current_states",
         "pcr_device_authorization_current_states",
@@ -652,6 +685,187 @@ async fn recovery_terminal_unit_fences_old_device_and_replays_after_response_los
     assert_eq!(footprint(&fixture).await, before);
 }
 
+async fn assert_recovery_original_has_immutable_signer(slot: usize) {
+    use coland_storage::AuthorityCommitStore as _;
+
+    let fixture = fixture().await;
+    let account = &fixture.pcr.history.account;
+    let target = &fixture.write.commits[slot];
+    let authorization = &fixture.write.commits[1];
+    let payload: arkret_models_collaboration::events_payloads::DeviceAuthorizePayload =
+        serde_json::from_value(serde_json::to_value(&authorization.event.payload).unwrap())
+            .unwrap();
+    let coordinate = |transaction: &coland_storage::AuthorityCommitTransaction| CommittedEventRef {
+        event_id: transaction.event.event_id.clone(),
+        commit_id: transaction.commit.commit_id.clone(),
+        stream_ref: transaction.commit.stream_ref.clone(),
+        stream_position: transaction.commit.stream_position,
+    };
+    let proof = target.event.producer_proof.as_ref().unwrap();
+    let selector = SignerKeyQuerySelector::HistoricalEvent {
+        sender: HistoricalSignerKeyQuerySender::AccountDevice {
+            actor: target.event.actual_signer().clone(),
+            device_id: payload.device_id.clone(),
+            verification_method: proof.verification_method.clone(),
+            committed_event_ref: coordinate(target),
+        },
+    };
+    let reader = coland_storage_postgres::PgAuthorityCommitStore {
+        pool: fixture.pool.clone(),
+    };
+    assert!(
+        reader
+            .historical_self_pcr_producer_signer_key(&target.event.realm_id, &selector, account)
+            .await
+            .unwrap()
+            .is_none(),
+        "a prepared recovery is not an accepted historical source"
+    );
+    fixture
+        .state
+        .test_persistence()
+        .security_transactions()
+        .commit_recovery_unit(fixture.write.clone())
+        .await
+        .unwrap();
+    // A fresh adapter must consume the original acceptance, not a process cache
+    // or the replacement Device's optional display/authorization mirror.
+    let restarted = coland_storage_postgres::PgAuthorityCommitStore {
+        pool: fixture.pool.clone(),
+    };
+    let outcome = restarted
+        .historical_self_pcr_producer_signer_key(&target.event.realm_id, &selector, account)
+        .await
+        .unwrap();
+    let Some(SignerKeyResolution::HistoricalResolved {
+        selector: returned,
+        key,
+        accepted_at,
+    }) = outcome
+    else {
+        panic!("accepted recovery original {slot} lacks its immutable historical signer");
+    };
+    assert_eq!(returned, selector);
+    assert_eq!(key.authorization_ref, coordinate(authorization));
+    assert_eq!(key.revision.commit_id, authorization.commit.commit_id);
+    assert_eq!(
+        key.revision.stream_position,
+        authorization.commit.stream_position
+    );
+    assert_eq!(key.governance_generation, 0);
+    assert_eq!(accepted_at, authorization.commit.committed_at);
+    let expected_key = SigningKey::from_bytes(&REPLACEMENT_SIGNING_SEED).verifying_key();
+    let bytes = arkret_canonical::base64url_decode(key.public_key_base64url.as_str()).unwrap();
+    assert_eq!(bytes, expected_key.to_bytes());
+    arkret_signatures::verify_ed25519_detached_jws_proof_with_digest_suite(
+        proof,
+        &arkret_signatures::EventProofBuilder::new()
+            .envelope_bytes(&target.event)
+            .unwrap(),
+        &target.event.actor_id,
+        &arkret_signatures::PublicKeyMaterial::Ed25519Raw { bytes },
+        target.event.realm_id.digest_suite_code().digest_suite(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn recovery_reanchor_retains_its_immutable_historical_signer() {
+    assert_recovery_original_has_immutable_signer(0).await;
+}
+
+#[tokio::test]
+async fn recovery_authorize_retains_its_immutable_historical_signer() {
+    assert_recovery_original_has_immutable_signer(1).await;
+}
+
+#[tokio::test]
+async fn recovery_policy_retains_its_immutable_historical_signer_after_replacement() {
+    use coland_storage::AuthorityCommitStore as _;
+
+    let fixture = fixture().await;
+    let policy_event = fixture.pcr.history.events.last().unwrap();
+    let policy_commit = fixture.pcr.history.commits.last().unwrap();
+    assert_eq!(policy_event.kind, EventKind::PolicySet);
+    let account = &fixture.pcr.history.account;
+    let selector = SignerKeyQuerySelector::HistoricalEvent {
+        sender: HistoricalSignerKeyQuerySender::AccountDevice {
+            actor: policy_event.actual_signer().clone(),
+            device_id: fixture.pcr.history.founding_device_id.clone(),
+            verification_method: policy_event
+                .producer_proof
+                .as_ref()
+                .unwrap()
+                .verification_method
+                .clone(),
+            committed_event_ref: CommittedEventRef {
+                event_id: policy_event.event_id.clone(),
+                commit_id: policy_commit.commit_id.clone(),
+                stream_ref: policy_commit.stream_ref.clone(),
+                stream_position: policy_commit.stream_position,
+            },
+        },
+    };
+    fixture
+        .state
+        .test_persistence()
+        .security_transactions()
+        .commit_recovery_unit(fixture.write.clone())
+        .await
+        .unwrap();
+    assert_old_device_fenced(&fixture).await;
+    let reader = coland_storage_postgres::PgAuthorityCommitStore {
+        pool: fixture.pool.clone(),
+    };
+    let outcome = reader
+        .historical_self_pcr_producer_signer_key(&policy_event.realm_id, &selector, account)
+        .await
+        .unwrap();
+    let Some(SignerKeyResolution::HistoricalResolved {
+        selector: returned,
+        key,
+        accepted_at,
+    }) = outcome
+    else {
+        panic!("accepted recovery policy lost its original signer after the old Device was fenced");
+    };
+    assert_eq!(returned, selector);
+    let founding = &fixture.pcr.unit.transactions[1];
+    assert_eq!(key.authorization_ref.event_id, founding.event.event_id);
+    assert_eq!(key.authorization_ref.commit_id, founding.commit.commit_id);
+    assert_eq!(accepted_at, founding.commit.committed_at);
+}
+
+async fn assert_bad_recovery_proof_rolls_back(damage: RecoveryProofDamage) {
+    let fixture = fixture_with_damage(coland_test_support::app_config(), Some(damage)).await;
+    let before = footprint(&fixture).await;
+    assert!(
+        fixture
+            .state
+            .test_persistence()
+            .security_transactions()
+            .commit_recovery_unit(fixture.write.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(footprint(&fixture).await, before);
+}
+
+#[tokio::test]
+async fn recovery_unit_rejects_invalid_reanchor_signature_without_history_residue() {
+    assert_bad_recovery_proof_rolls_back(RecoveryProofDamage::Reanchor).await;
+}
+
+#[tokio::test]
+async fn recovery_unit_rejects_invalid_authorize_signature_without_history_residue() {
+    assert_bad_recovery_proof_rolls_back(RecoveryProofDamage::Authorize).await;
+}
+
+#[tokio::test]
+async fn recovery_unit_rejects_invalid_possession_without_history_residue() {
+    assert_bad_recovery_proof_rolls_back(RecoveryProofDamage::Possession).await;
+}
+
 #[tokio::test]
 async fn completed_recovery_device_is_admitted_without_inventory_projection() {
     let fixture = fixture_with_config(http_common::test_config()).await;
@@ -757,6 +971,70 @@ async fn completed_recovery_device_is_admitted_without_inventory_projection() {
         response.status_code,
         Some(salvo::http::StatusCode::OK),
         "{response_body}"
+    );
+    let historical_selector = |event: &Event, commit: &RealmCommit| {
+        let producer = event.account_device_producer().unwrap().unwrap();
+        SignerKeyQuerySelector::HistoricalEvent {
+            sender: HistoricalSignerKeyQuerySender::AccountDevice {
+                actor: event.actual_signer().clone(),
+                device_id: producer.device_id,
+                verification_method: event
+                    .producer_proof
+                    .as_ref()
+                    .unwrap()
+                    .verification_method
+                    .clone(),
+                committed_event_ref: CommittedEventRef {
+                    event_id: event.event_id.clone(),
+                    commit_id: commit.commit_id.clone(),
+                    stream_ref: commit.stream_ref.clone(),
+                    stream_position: commit.stream_position,
+                },
+            },
+        }
+    };
+    let mut queries: Vec<_> = fixture
+        .write
+        .commits
+        .iter()
+        .map(|transaction| historical_selector(&transaction.event, &transaction.commit))
+        .collect();
+    queries.push(historical_selector(
+        fixture.pcr.history.events.last().unwrap(),
+        fixture.pcr.history.commits.last().unwrap(),
+    ));
+    let historical_request = arkret_models_identity::SignerKeysQueryRequestBody {
+        request_id: format!("ak:request:{}", uuid::Uuid::now_v7())
+            .parse()
+            .unwrap(),
+        realm_id: committed.event.realm_id.clone(),
+        recipient_account_id: Some(account.clone()),
+        recipient_actor_id: None,
+        queries,
+    };
+    let mut historical_response =
+        http_common::TestClient::post("http://server/_arkret/self/signer-keys/query")
+            .add_header("authorization", format!("Bearer {token}"), true)
+            .add_header("content-type", "application/json", true)
+            .body(arkret_canonical::canonical_json_bytes(&historical_request).unwrap())
+            .send(&http_common::app_from_state(fixture.state.clone()))
+            .await;
+    let historical_body: Value = historical_response.take_json().await.unwrap();
+    assert_eq!(
+        historical_response.status_code,
+        Some(salvo::http::StatusCode::OK),
+        "{historical_body}"
+    );
+    let historical: arkret_models_identity::SignerKeyQueryResponseBody =
+        serde_json::from_value(historical_body).unwrap();
+    historical
+        .validate_for_request(&historical_request)
+        .unwrap();
+    assert!(
+        historical
+            .resolutions
+            .iter()
+            .all(|resolution| matches!(resolution, SignerKeyResolution::HistoricalResolved { .. }))
     );
     let keys: KeysQueryResponseBody = serde_json::from_value(response_body).unwrap();
     let rows = keys

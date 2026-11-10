@@ -292,6 +292,7 @@ pub fn realm_genesis_payload(
             "governance_station_id": governance_station_id,
             "initial_join_rule": "invite",
             "initial_history_access": "all_history_for_current_members",
+            "initial_encryption_backup_strategy": arkret_wire::EncryptionBackupStrategy::EpochContentRoots,
             "initial_discoverability": "listed"
         }
     })

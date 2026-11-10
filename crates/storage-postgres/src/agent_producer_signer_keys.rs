@@ -10,6 +10,9 @@ use arkret_models_identity::{
 
 use super::*;
 
+mod recovery_unit;
+pub(crate) use recovery_unit::retain_recovery_unit_in_connection;
+
 fn historical_fact_diagnostic(stage: &'static str, branch: &'static str) {
     #[cfg(feature = "conformance-harness")]
     tracing::warn!(target: "conformance_harness", stage, diag_branch = branch,

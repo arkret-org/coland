@@ -374,6 +374,11 @@ pub(crate) async fn commit_recovery_policy_unit_in_connection(
     })?;
 
     root_coverage::require_human_coverage(conn, policy).await?;
+    let historical =
+        crate::agent_producer_signer_keys::prepare_confirmed_human_outcome_in_connection(
+            conn, event, commit, &status, account, &signer,
+        )
+        .await?;
     crate::authority_commit::queue_event_in_connection(conn, event, write.queued_at).await?;
     match crate::authority_commit::commit_verified_recovery_policy_in_connection(
         conn,
@@ -395,6 +400,10 @@ pub(crate) async fn commit_recovery_policy_unit_in_connection(
             ));
         }
     }
+    crate::agent_producer_signer_keys::retain_self_outcome_in_connection(
+        conn, event, commit, historical,
+    )
+    .await?;
     let record = RecoveryPolicyRecord {
         policy_id: policy.policy_id.as_str().to_owned(),
         account_id: account.clone(),

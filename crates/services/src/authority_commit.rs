@@ -326,6 +326,27 @@ fn build_signed_event_commit(
     Ok(commit)
 }
 
+/// Sign the covering Commit for a native Consent Event at the store's locked cut.
+pub fn sign_native_consent_commit(
+    event: &Event,
+    authority: &CurrentRealmAuthority,
+    head: &CommitStreamHead,
+    verification_method: DidUrl,
+    signing_key: &SigningKey,
+    committed_at: DateTime<Utc>,
+) -> coland_storage::PersistenceResult<RealmCommit> {
+    build_signed_event_commit(
+        event,
+        authority,
+        Some(head),
+        verification_method,
+        signing_key,
+        committed_at,
+        None,
+    )
+    .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))
+}
+
 /// Durable queued-to-committed lifecycle used by the governance Station.
 ///
 /// Signature verification, policy evaluation, MLS installation, and commit

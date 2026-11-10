@@ -4,10 +4,13 @@ use arkret_models_collaboration::consent_operations::ConsentValue;
 use arkret_models_collaboration::events_payloads::consent::{
     ConsentExpectedCurrent, ConsentPeer, ConsentReplacePayload,
 };
-use arkret_wire::{AccountId, ActorId, Event, EventKind, RealmCommit};
+use arkret_wire::{
+    AccountId, ActorId, CommitStreamHead, CommitStreamRef, Event, EventKind, RealmCommit,
+};
 use coland_storage::{
-    AuthorityCommitWriteOutcome, ConflictCode, ConsentAdmissionOutcome, ConsentAdmissionWrite,
-    ConsentCurrentRecord, ConsentCurrentStore, PersistenceError, PersistenceResult,
+    AuthorityCommitTransaction, AuthorityCommitWriteOutcome, ConflictCode, ConsentAdmissionOutcome,
+    ConsentAdmissionWrite, ConsentCurrentRecord, ConsentCurrentStore, PersistenceError,
+    PersistenceResult,
 };
 use diesel::sql_types::{BigInt, Jsonb, Text, Timestamptz};
 use diesel::{QueryableByName, sql_query};
@@ -15,9 +18,7 @@ use diesel_async::AsyncConnection;
 use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::Value;
 
-use crate::actor_profiles::{
-    PcrSelfEventCut, corrupt, rejected, verify_pcr_self_event_before_current_guard,
-};
+use crate::actor_profiles::{PcrSelfEventCut, corrupt, rejected, verify_locked_pcr_self_event};
 use crate::{AsyncPgConnection, PgPool, PgTransactionError, pg_conn};
 
 pub struct PgConsentCurrentStore {
@@ -120,10 +121,9 @@ pub(crate) async fn records_in_connection(
 
 async fn admit(
     conn: &mut AsyncPgConnection,
-    write: &ConsentAdmissionWrite,
+    write: &ConsentAdmissionWrite<'_>,
 ) -> Result<ConsentAdmissionOutcome, PgTransactionError> {
-    let tx = &write.transaction;
-    let event = &tx.event;
+    let event = &write.event;
     if !matches!(event.kind, EventKind::ConsentReplace) {
         return Err(rejected(
             ConflictCode::SchemaViolation,
@@ -139,10 +139,19 @@ async fn admit(
             "Consent requires current holder root authorization",
         )
     })?;
-    // The shared verifier takes the PCR lock and checks the accepted device
-    // signature and the exact Account-to-PCR binding before any new write.
+    let authority = crate::authority_commit::locked_authority(conn, &event.realm_id)
+        .await?
+        .filter(|authority| authority.service_id == write.service_id)
+        .ok_or_else(|| {
+            rejected(
+                ConflictCode::TemporarilyUnavailable,
+                "Consent PCR authority is not local",
+            )
+        })?;
+    let committed_at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let confirmed_head =
-        match verify_pcr_self_event_before_current_guard(conn, tx, Some(auth), "Consent").await? {
+        match verify_locked_pcr_self_event(conn, event, Some(auth), "Consent", committed_at).await?
+        {
             PcrSelfEventCut::Known(commit) => {
                 return Ok(ConsentAdmissionOutcome::Duplicate(
                     version(conn, commit.commit_id.as_str()).await?,
@@ -178,7 +187,6 @@ async fn admit(
         .map_err(|e| rejected(ConflictCode::SchemaViolation, &e.to_string()))?;
     let ConsentPeer::Actor { actor_id: peer_id } = &replacement.peer;
     let peer_json = serde_json::to_value(peer_id).map_err(corrupt)?;
-    records_in_connection(conn, holder, &event.realm_id).await?;
     let existing = sql_query("SELECT r.value,e.envelope,c.commit_json FROM consent_current_states r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.holder_account_id=$1 AND r.peer_id=$2 FOR UPDATE OF r")
         .bind::<Jsonb,_>(&holder_json).bind::<Jsonb,_>(&peer_json).get_result::<Row>(&mut *conn).await.optional()?;
     let previous = existing.map(record).transpose()?;
@@ -196,12 +204,36 @@ async fn admit(
             "Consent peer revision changed",
         ));
     }
-    if tx.commit.previous_commit_ref.as_ref() != Some(&confirmed_head) {
-        return Err(rejected(
-            ConflictCode::TemporarilyUnavailable,
-            "Consent Commit does not extend the confirmed PCR head",
-        ));
+    // Bind the server signature only after the holder's original Event passed
+    // its peer CAS. Other PCR writes can move the stream without changing it.
+    #[derive(QueryableByName)]
+    struct HeadPosition {
+        #[diesel(sql_type = BigInt)]
+        stream_position: i64,
     }
+    let position = sql_query("SELECT stream_position FROM realm_commits WHERE commit_id=$1")
+        .bind::<Text, _>(confirmed_head.as_str())
+        .get_result::<HeadPosition>(&mut *conn)
+        .await?;
+    let head = CommitStreamHead {
+        stream_ref: CommitStreamRef::Realm {
+            realm_id: event.realm_id.clone(),
+        },
+        commit_id: confirmed_head,
+        stream_position: u64::try_from(position.stream_position).map_err(corrupt)?,
+    };
+    let tx = AuthorityCommitTransaction {
+        commit: (write.sign_commit)(event, &authority, &head, committed_at)?,
+        expected_authority: authority,
+        event: event.clone(),
+        producer_signer_fact: None,
+        content_backup_source: None,
+        mls_state: None,
+        welcomes: Vec::new(),
+        recipient_queue_capacity: 0,
+    };
+    tx.validate()
+        .map_err(|error| PersistenceError::Internal(error.to_string()))?;
     let next = ConsentValue {
         permissions: replacement.permissions,
     };
@@ -210,7 +242,7 @@ async fn admit(
     )
     .await?;
     crate::authority_commit::queue_event_in_connection(conn, event, tx.commit.committed_at).await?;
-    match crate::authority_commit::commit_verified_consent_in_connection(conn, tx).await? {
+    match crate::authority_commit::commit_verified_consent_in_connection(conn, &tx).await? {
         AuthorityCommitWriteOutcome::Committed => {
             crate::agent_producer_signer_keys::retain_self_outcome_in_connection(
                 conn, event, &tx.commit, historical,
@@ -537,12 +569,8 @@ impl ConsentCurrentStore for PgConsentCurrentStore {
     }
     async fn admit(
         &self,
-        write: ConsentAdmissionWrite,
+        write: ConsentAdmissionWrite<'_>,
     ) -> PersistenceResult<ConsentAdmissionOutcome> {
-        write
-            .transaction
-            .validate()
-            .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;

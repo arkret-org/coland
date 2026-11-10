@@ -192,24 +192,25 @@ async fn admit_consent_fixture(
     event: arkret_wire::Event,
 ) -> Value {
     let store = state.test_persistence();
-    let application = coland_services::authority_commit::AuthorityCommitApplication::new(
-        coland_services::persistence::PersistenceHandle::from_shared(store.clone()),
-        0,
-    );
-    let transaction = application
-        .prepare_self_event_transaction(
-            &event,
-            &state.service_core_id(),
-            arkret_wire::DidUrl::new(format!("{}#federation-fanout-key", state.service_did()))
-                .unwrap(),
-            state.notary_signing_key().as_ref(),
-            chrono::Utc::now(),
-        )
-        .await
-        .unwrap();
+    let method =
+        arkret_wire::DidUrl::new(format!("{}#federation-fanout-key", state.service_did())).unwrap();
+    let signing_key = state.notary_signing_key();
     let outcome = store
         .consent_current()
-        .admit(coland_storage::ConsentAdmissionWrite { transaction })
+        .admit(coland_storage::ConsentAdmissionWrite {
+            event,
+            service_id: state.service_core_id(),
+            sign_commit: &|event, authority, head, at| {
+                coland_services::authority_commit::sign_native_consent_commit(
+                    event,
+                    authority,
+                    head,
+                    method.clone(),
+                    signing_key.as_ref(),
+                    at,
+                )
+            },
+        })
         .await
         .unwrap();
     let record = match outcome {

@@ -167,19 +167,23 @@ pub(super) async fn commit(
         ),
     )
     .map_err(|e| ServiceError::Internal(e.to_string()))?;
-    let transaction = state
-        .authority_commits()
-        .prepare_self_event_transaction(
-            &request.event,
-            &state.service_core_id(),
-            method,
-            state.notary_signing_key().as_ref(),
-            Utc::now(),
-        )
-        .await?;
+    let signing_key = state.notary_signing_key();
     let outcome = state
         .persistence()
-        .admit_consent(ConsentAdmissionWrite { transaction })
+        .admit_consent(ConsentAdmissionWrite {
+            event: request.event.clone(),
+            service_id: state.service_core_id(),
+            sign_commit: &|event, authority, head, at| {
+                coland_services::authority_commit::sign_native_consent_commit(
+                    event,
+                    authority,
+                    head,
+                    method.clone(),
+                    signing_key.as_ref(),
+                    at,
+                )
+            },
+        })
         .await?;
     Ok(outcome)
 }

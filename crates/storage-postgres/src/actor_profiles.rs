@@ -251,41 +251,31 @@ pub(crate) async fn verify_pcr_self_event(
     authorization_ref: Option<&str>,
     what: &str,
 ) -> Result<PcrSelfEventCut, PgTransactionError> {
-    verify_pcr_self_event_at_cut(conn, transaction, authorization_ref, what, true).await
+    let cut =
+        verify_pcr_self_event_before_current_guard(conn, transaction, authorization_ref, what)
+            .await?;
+    if let PcrSelfEventCut::Fresh(signer) = &cut
+        && transaction.commit.previous_commit_ref.as_ref() != Some(&signer.confirmed_head)
+    {
+        return Err(rejected(
+            ConflictCode::TemporarilyUnavailable,
+            &format!("{what} Commit does not extend the confirmed PCR head"),
+        ));
+    }
+    Ok(cut)
 }
 
-/// Consent evaluates its signed peer revision before rejecting a stale proposed
-/// Commit. Its caller checks `confirmed_head` after that CAS, under this lock.
+/// A typed current writer may check its signed CAS before checking the proposed head.
 pub(crate) async fn verify_pcr_self_event_before_current_guard(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
     authorization_ref: Option<&str>,
     what: &str,
 ) -> Result<PcrSelfEventCut, PgTransactionError> {
-    verify_pcr_self_event_at_cut(conn, transaction, authorization_ref, what, false).await
-}
-
-async fn verify_pcr_self_event_at_cut(
-    conn: &mut AsyncPgConnection,
-    transaction: &AuthorityCommitTransaction,
-    authorization_ref: Option<&str>,
-    what: &str,
-    require_extending_commit: bool,
-) -> Result<PcrSelfEventCut, PgTransactionError> {
     let event = &transaction.event;
     let commit = &transaction.commit;
-    if event.executed_by.is_some()
-        || event
-            .authorization_ref
-            .as_deref()
-            .is_some_and(|reference| Some(reference) != authorization_ref)
-        || event.applet_id.is_some()
-        || commit.event_ref != event.event_id
+    if commit.event_ref != event.event_id
         || commit.realm_id != event.realm_id
-        || event.scope_ref
-            != (ScopeRef::Realm {
-                realm_id: event.realm_id.clone(),
-            })
         || commit.stream_ref
             != (CommitStreamRef::Realm {
                 realm_id: event.realm_id.clone(),
@@ -294,6 +284,52 @@ async fn verify_pcr_self_event_at_cut(
         return Err(rejected(
             ConflictCode::SchemaViolation,
             &format!("{what} Event and Commit are not one direct PCR Realm-stream write"),
+        ));
+    }
+    // All PCR writers acquire this same lock before changing the accepted head.
+    let lock = sql_query("SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE")
+        .bind::<Text, _>(event.realm_id.as_str())
+        .get_result::<RealmLockRow>(&mut *conn)
+        .await
+        .optional()?
+        .ok_or_else(|| {
+            rejected(
+                ConflictCode::FailedPrecondition,
+                &format!("{what} PCR authority is absent"),
+            )
+        })?;
+    if lock.realm_id != event.realm_id.as_str() {
+        return Err(rejected(
+            ConflictCode::FailedPrecondition,
+            &format!("{what} PCR lock differs from the Event Realm"),
+        ));
+    }
+    verify_locked_pcr_self_event(conn, event, authorization_ref, what, commit.committed_at).await
+}
+
+/// The caller holds the PCR authority lock. The original Event can be checked
+/// before constructing its covering Commit at this cut.
+pub(crate) async fn verify_locked_pcr_self_event(
+    conn: &mut AsyncPgConnection,
+    event: &Event,
+    authorization_ref: Option<&str>,
+    what: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<PcrSelfEventCut, PgTransactionError> {
+    if event.executed_by.is_some()
+        || event
+            .authorization_ref
+            .as_deref()
+            .is_some_and(|reference| Some(reference) != authorization_ref)
+        || event.applet_id.is_some()
+        || event.scope_ref
+            != (ScopeRef::Realm {
+                realm_id: event.realm_id.clone(),
+            })
+    {
+        return Err(rejected(
+            ConflictCode::SchemaViolation,
+            &format!("{what} Event is not a direct PCR Realm-stream write"),
         ));
     }
     let suite =
@@ -330,25 +366,6 @@ async fn verify_pcr_self_event_at_cut(
         )
     })?;
 
-    // Every accepted PCR writer takes this row lock before changing its head,
-    // so the status cut read below cannot move before this unit commits.
-    let lock = sql_query("SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE")
-        .bind::<Text, _>(event.realm_id.as_str())
-        .get_result::<RealmLockRow>(&mut *conn)
-        .await
-        .optional()?
-        .ok_or_else(|| {
-            rejected(
-                ConflictCode::FailedPrecondition,
-                &format!("{what} PCR authority is absent"),
-            )
-        })?;
-    if lock.realm_id != event.realm_id.as_str() {
-        return Err(rejected(
-            ConflictCode::FailedPrecondition,
-            &format!("{what} PCR lock differs from the Event Realm"),
-        ));
-    }
     let token = ids::parse_event_id(event.event_id.as_str()).ok_or_else(|| {
         rejected(
             ConflictCode::SchemaViolation,
@@ -381,19 +398,11 @@ async fn verify_pcr_self_event_at_cut(
         &account,
         &signer,
         &event.realm_id,
-        commit.committed_at,
+        at,
         suite,
         what,
     )
     .await?;
-    if require_extending_commit
-        && commit.previous_commit_ref.as_ref() != Some(&status.authority.authority_commit_id)
-    {
-        return Err(rejected(
-            ConflictCode::TemporarilyUnavailable,
-            &format!("{what} Commit does not extend the confirmed PCR head"),
-        ));
-    }
     Ok(PcrSelfEventCut::Fresh(PcrSigner {
         account,
         device_key,

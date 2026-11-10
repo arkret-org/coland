@@ -1,8 +1,6 @@
 use arkret_models_collaboration::call_invitation::*;
-use arkret_wire::{
-    ActorId, DetachedSignatureContext, Did, DidUrl, EventKind, RealmCommit, RealmCommitId,
-};
-use coland_storage::{AuthorityCommitTransaction, ConsentAdmissionWrite};
+use arkret_wire::{ActorId, Did, DidUrl, EventKind, RealmCommit};
+use coland_storage::ConsentAdmissionWrite;
 use coland_storage_postgres::{PgPersistenceStore, PgPool};
 use diesel::sql_types::Text;
 use diesel_async::RunQueryDsl;
@@ -28,7 +26,7 @@ pub fn write(
     previous: &RealmCommit,
     kind: EventKind,
     payload: serde_json::Value,
-) -> ConsentAdmissionWrite {
+) -> ConsentAdmissionWrite<'static> {
     let at = previous.committed_at + chrono::TimeDelta::seconds(1);
     let mut event = arkret_wire::test_support::raw_event_at(
         kind.as_str(),
@@ -47,35 +45,18 @@ pub fn write(
         f.history.device_verification_method.clone(),
         f.history.founding_device_signing_seed,
     );
-    let mut commit = previous.clone();
-    commit.event_ref = event.event_id.clone();
-    commit.stream_position += 1;
-    commit.previous_commit_ref = Some(previous.commit_id.clone());
-    commit.committed_at = at;
-    let identity =
-        arkret_canonical::canonical::unsigned_value(&commit, &["commit_id", "signature"]).unwrap();
-    commit.commit_id = RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-        &arkret_canonical::canonical_json_bytes(&identity).unwrap(),
-    ));
-    let unsigned = arkret_canonical::canonical::unsigned_value(&commit, &["signature"]).unwrap();
-    commit.signature = arkret_signatures::detached_object::sign_detached_object(
-        &unsigned,
-        DetachedSignatureContext::RealmCommit,
-        DidUrl::new("did:web:coland.example#authority").unwrap(),
-        at,
-        &SigningKey::from_bytes(&device_authorization_history::STATION_AUTHORITY_SEED),
-    )
-    .unwrap();
     ConsentAdmissionWrite {
-        transaction: AuthorityCommitTransaction {
-            expected_authority: f.unit.transactions[1].expected_authority.clone(),
-            event,
-            commit,
-            producer_signer_fact: None,
-            content_backup_source: None,
-            mls_state: None,
-            welcomes: Vec::new(),
-            recipient_queue_capacity: 0,
+        event,
+        service_id: f.history.account.station_id.clone(),
+        sign_commit: &|event, authority, head, at| {
+            coland_services::authority_commit::sign_native_consent_commit(
+                event,
+                authority,
+                head,
+                DidUrl::new("did:web:coland.example#authority").unwrap(),
+                &SigningKey::from_bytes(&device_authorization_history::STATION_AUTHORITY_SEED),
+                at,
+            )
         },
     }
 }

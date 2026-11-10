@@ -13,12 +13,9 @@ mod device_authorization_history;
 )]
 mod pcr_genesis;
 
-use arkret_wire::{
-    ActorId, DetachedSignatureContext, Did, DidUrl, EventKind, RealmCommit, RealmCommitId,
-};
+use arkret_wire::{ActorId, DetachedSignatureContext, Did, DidUrl, Event, EventKind, RealmCommit};
 use coland_storage::{
-    AuthorityCommitStore, AuthorityCommitTransaction, ConsentAdmissionOutcome,
-    ConsentAdmissionWrite, ConsentCurrentStore,
+    AuthorityCommitStore, ConsentAdmissionOutcome, ConsentAdmissionWrite, ConsentCurrentStore,
 };
 use coland_storage_postgres::test_database::TestDatabase;
 use coland_storage_postgres::{
@@ -55,12 +52,12 @@ async fn fixture(pool: &PgPool) -> pcr_genesis::PcrGenesisFixture {
     fixture
 }
 
-fn write(
+fn signed_event(
     f: &pcr_genesis::PcrGenesisFixture,
     previous: &RealmCommit,
     kind: EventKind,
     payload: serde_json::Value,
-) -> ConsentAdmissionWrite {
+) -> Event {
     let at = previous.committed_at + chrono::TimeDelta::seconds(1);
     let mut event = arkret_wire::test_support::raw_event_at(
         kind.as_str(),
@@ -74,40 +71,31 @@ fn write(
     )
     .unwrap();
     event.authorization_ref = Some(f.unit.transactions[0].event.event_id.clone().into());
-    event = device_authorization_history::sign_event(
+    device_authorization_history::sign_event(
         event,
         f.history.device_verification_method.clone(),
         f.history.founding_device_signing_seed,
-    );
-    let mut commit = previous.clone();
-    commit.event_ref = event.event_id.clone();
-    commit.stream_position += 1;
-    commit.previous_commit_ref = Some(previous.commit_id.clone());
-    commit.committed_at = at;
-    let identity =
-        arkret_canonical::canonical::unsigned_value(&commit, &["commit_id", "signature"]).unwrap();
-    commit.commit_id = RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-        &arkret_canonical::canonical_json_bytes(&identity).unwrap(),
-    ));
-    let unsigned = arkret_canonical::canonical::unsigned_value(&commit, &["signature"]).unwrap();
-    commit.signature = arkret_signatures::detached_object::sign_detached_object(
-        &unsigned,
-        DetachedSignatureContext::RealmCommit,
-        DidUrl::new("did:web:coland.example#authority").unwrap(),
-        at,
-        &SigningKey::from_bytes(&device_authorization_history::STATION_AUTHORITY_SEED),
     )
-    .unwrap();
+}
+
+fn write(
+    f: &pcr_genesis::PcrGenesisFixture,
+    previous: &RealmCommit,
+    kind: EventKind,
+    payload: serde_json::Value,
+) -> ConsentAdmissionWrite<'static> {
     ConsentAdmissionWrite {
-        transaction: AuthorityCommitTransaction {
-            expected_authority: f.unit.transactions[1].expected_authority.clone(),
-            event,
-            commit,
-            producer_signer_fact: None,
-            content_backup_source: None,
-            mls_state: None,
-            welcomes: Vec::new(),
-            recipient_queue_capacity: 0,
+        event: signed_event(f, previous, kind, payload),
+        service_id: f.history.account.station_id.clone(),
+        sign_commit: &|event, authority, head, at| {
+            coland_services::authority_commit::sign_native_consent_commit(
+                event,
+                authority,
+                head,
+                DidUrl::new("did:web:coland.example#authority").unwrap(),
+                &SigningKey::from_bytes(&device_authorization_history::STATION_AUTHORITY_SEED),
+                at,
+            )
         },
     }
 }
@@ -312,8 +300,8 @@ async fn consent_current_rejects_wrong_root_and_concurrent_head_loser_without_wr
     );
     let before = footprint(&pool).await;
     let mut bad_signature = a.clone();
-    bad_signature.transaction.event = device_authorization_history::sign_event(
-        bad_signature.transaction.event,
+    bad_signature.event = device_authorization_history::sign_event(
+        bad_signature.event,
         f.history.device_verification_method.clone(),
         [7; 32],
     );
@@ -327,25 +315,12 @@ async fn consent_current_rejects_wrong_root_and_concurrent_head_loser_without_wr
     );
     assert_eq!(footprint(&pool).await, before);
     let mut wrong = a.clone();
-    wrong.transaction.event.authorization_ref =
-        Some(f.unit.transactions[1].event.event_id.clone().into());
-    wrong.transaction.event = device_authorization_history::sign_event(
-        wrong.transaction.event,
+    wrong.event.authorization_ref = Some(f.unit.transactions[1].event.event_id.clone().into());
+    wrong.event = device_authorization_history::sign_event(
+        wrong.event,
         f.history.device_verification_method.clone(),
         f.history.founding_device_signing_seed,
     );
-    wrong.transaction.commit.event_ref = wrong.transaction.event.event_id.clone();
-    let unsigned =
-        arkret_canonical::canonical::unsigned_value(&wrong.transaction.commit, &["signature"])
-            .unwrap();
-    wrong.transaction.commit.signature = arkret_signatures::detached_object::sign_detached_object(
-        &unsigned,
-        DetachedSignatureContext::RealmCommit,
-        DidUrl::new("did:web:coland.example#authority").unwrap(),
-        wrong.transaction.commit.committed_at,
-        &SigningKey::from_bytes(&device_authorization_history::STATION_AUTHORITY_SEED),
-    )
-    .unwrap();
     assert!(
         store
             .admit(wrong)
@@ -383,6 +358,53 @@ async fn consent_current_rejects_wrong_root_and_concurrent_head_loser_without_wr
         head.stream_position,
         f.unit.transactions[1].commit.stream_position + 1
     );
+}
+
+#[tokio::test]
+async fn consent_current_serializes_distinct_peers_against_the_locked_head() {
+    let db = TestDatabase::lease().await;
+    let pool = db.pool();
+    let f = fixture(&pool).await;
+    let store = PgConsentCurrentStore { pool };
+    let initial = &f.unit.transactions[1].commit;
+    let mut other = f.history.account.clone();
+    other.principal_id = "ak:did_core:web:other.example".parse().unwrap();
+    let first = write(
+        &f,
+        initial,
+        EventKind::ConsentReplace,
+        replacement(
+            &ActorId::account(f.history.account.clone()),
+            None,
+            &["invite"],
+        ),
+    );
+    let second = write(
+        &f,
+        initial,
+        EventKind::ConsentReplace,
+        replacement(&ActorId::account(other), None, &["invite"]),
+    );
+    let (left, right) = tokio::join!(store.admit(first.clone()), store.admit(second.clone()));
+    let ConsentAdmissionOutcome::Committed(left) = left.unwrap() else {
+        panic!("first Consent must commit")
+    };
+    let ConsentAdmissionOutcome::Committed(right) = right.unwrap() else {
+        panic!("second Consent must commit")
+    };
+    assert_eq!(left.event, first.event);
+    assert_eq!(right.event, second.event);
+    let mut commits = [&left.commit, &right.commit];
+    commits.sort_by_key(|commit| commit.stream_position);
+    assert_eq!(
+        commits[0].previous_commit_ref.as_ref(),
+        Some(&initial.commit_id)
+    );
+    assert_eq!(
+        commits[1].previous_commit_ref.as_ref(),
+        Some(&commits[0].commit_id)
+    );
+    assert_eq!(commits[1].stream_position, initial.stream_position + 2);
 }
 
 #[tokio::test]
@@ -741,14 +763,30 @@ async fn human_pcr_rejects_change_export_proxy_import_and_activation_without_any
         .await
         .unwrap()
         .unwrap();
-    let change = write(
+    let change_event = signed_event(
         &f,
         tail,
         EventKind::RealmGovernanceStationChange,
         serde_json::json!({"expected_governance_generation":"0","expected_realm_stream_commit_id":tail.commit_id,"new_governance_station_id":"ak:did_core:web:other.example"}),
     );
+    let application = coland_services::authority_commit::AuthorityCommitApplication::new(
+        coland_services::persistence::PersistenceHandle::from_shared(std::sync::Arc::new(
+            PgPersistenceStore::new(pool.clone()),
+        )),
+        0,
+    );
+    let change = application
+        .prepare_self_event_transaction(
+            &change_event,
+            &account.station_id,
+            DidUrl::new("did:web:coland.example#authority").unwrap(),
+            &SigningKey::from_bytes(&device_authorization_history::STATION_AUTHORITY_SEED),
+            tail.committed_at + chrono::TimeDelta::seconds(1),
+        )
+        .await
+        .unwrap();
     let error = store
-        .admit_pcr_governance_change(&change.transaction)
+        .admit_pcr_governance_change(&change)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("Human PCR"), "{error}");
@@ -909,8 +947,8 @@ async fn human_pcr_rejects_change_export_proxy_import_and_activation_without_any
         to_generation: 1,
         from_service_id: account.station_id.clone(),
         to_service_id: "ak:did_core:web:other.example".parse().unwrap(),
-        change_event_ref: change.transaction.event.event_id.clone(),
-        change_commit_id: change.transaction.commit.commit_id.clone(),
+        change_event_ref: change.event.event_id.clone(),
+        change_commit_id: change.commit.commit_id.clone(),
         final_stream_heads_digest: arkret_wire::Hash::new(
             arkret_canonical::canonical_sha256(&heads).unwrap(),
         )

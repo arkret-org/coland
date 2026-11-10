@@ -350,7 +350,7 @@ impl PersistenceHandle {
 
     pub async fn admit_consent(
         &self,
-        write: coland_storage::ConsentAdmissionWrite,
+        write: coland_storage::ConsentAdmissionWrite<'_>,
     ) -> PersistenceResult<coland_storage::ConsentAdmissionOutcome> {
         self.persistence.consent_current().admit(write).await
     }

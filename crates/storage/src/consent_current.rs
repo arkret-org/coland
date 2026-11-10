@@ -1,14 +1,28 @@
 //! Holder-private PCR Consent current, never a process-local authority cache.
 
 use arkret_models_collaboration::consent_operations::{ConsentValue, ConsentView};
-use arkret_wire::{AccountId, CurrentRevision, Event, RealmCommit};
+use arkret_wire::{AccountId, CommitStreamHead, CurrentRevision, DidCoreId, Event, RealmCommit};
 use async_trait::async_trait;
 
-use crate::{AuthorityCommitTransaction, PersistenceResult};
+use crate::{CurrentRealmAuthority, PersistenceResult};
 
-#[derive(Clone, Debug)]
-pub struct ConsentAdmissionWrite {
-    pub transaction: AuthorityCommitTransaction,
+pub type ConsentCommitSigner<'a> = &'a (
+        dyn Fn(
+    &Event,
+    &CurrentRealmAuthority,
+    &CommitStreamHead,
+    chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<RealmCommit>
+            + Send
+            + Sync
+    );
+
+#[derive(Clone)]
+pub struct ConsentAdmissionWrite<'a> {
+    pub event: Event,
+    pub service_id: DidCoreId,
+    /// Invoked only for a fresh write whose signed peer CAS passed at the locked cut.
+    pub sign_commit: ConsentCommitSigner<'a>,
 }
 
 #[derive(Clone, Debug)]
@@ -207,7 +221,7 @@ pub trait ConsentCurrentStore: Send + Sync {
     ) -> PersistenceResult<ConsentCurrentCut>;
     async fn admit(
         &self,
-        write: ConsentAdmissionWrite,
+        write: ConsentAdmissionWrite<'_>,
     ) -> PersistenceResult<ConsentAdmissionOutcome>;
     /// `None` refuses a no-longer-valid proof without any private write.
     async fn admit_invite_delivery(

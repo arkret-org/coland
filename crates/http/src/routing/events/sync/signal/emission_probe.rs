@@ -63,14 +63,13 @@ pub(super) async fn pause(
 pub(super) fn record(
     path: Option<&Path>,
     envelope: &SignalEnvelope,
-    decision: &Result<(), AppError>,
-    call_invitation: bool,
+    decision: &Result<arkret_models_collaboration::SignalDeliveryAuthority, AppError>,
 ) -> Result<(), AppError> {
     let Some(path) = path else { return Ok(()) };
     let observed = serde_json::json!({
         "envelope_digest": envelope.proof.envelope_digest,
         "admitted": decision.is_ok(),
-        "call_invitation": call_invitation,
+        "call_invitation": decision.as_ref().is_ok_and(|authority| authority.call_invitation.is_some()),
         "error_code": decision.as_ref().err().map(|error| error.wire_code()),
         "observed_at": arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),
     });

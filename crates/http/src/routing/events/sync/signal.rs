@@ -732,13 +732,12 @@ pub(crate) async fn accept_peer_signal(
     source_id: &str,
     envelope: &SignalEnvelope,
 ) -> Result<(), AppError> {
-    admit_signal_outer(state, source_id, envelope).await?;
+    let authority = signal_outer_authority(state, source_id, envelope).await?;
     // The authenticated source Station owns current ordinary-device admission.
     // Destination transport admission cannot authenticate a foreign producer
     // using a local same-principal directory or an MLS public-tree lookup.
     // Recipients still authenticate the original proof before consuming it.
     let sender_actor = &envelope.sender_actor_id;
-    let authority = verify_signal_scope_authority(state, envelope, sender_actor).await?;
     let has_local_recipient = authority.recipient_actors.iter().any(|actor| {
         actor != sender_actor
             && actor
@@ -786,8 +785,7 @@ pub(crate) async fn admit_outbound_signal(
     envelope: &SignalEnvelope,
 ) -> Result<(), AppError> {
     let actor = &envelope.sender_actor_id;
-    admit_signal_outer(state, state.service_id(), envelope).await?;
-    let authority = verify_signal_scope_authority(state, envelope, actor).await?;
+    let authority = signal_outer_authority(state, state.service_id(), envelope).await?;
     if !remote_recipient_services(state, &authority.recipient_actors)
         .await?
         .contains(destination_id)
@@ -820,6 +818,24 @@ pub(crate) async fn admit_signal_outer(
     source_id: &str,
     envelope: &SignalEnvelope,
 ) -> Result<(), AppError> {
+    signal_outer_authority(state, source_id, envelope)
+        .await
+        .map(|_| ())
+}
+
+async fn signal_outer_authority(
+    state: &AppState,
+    source_id: &str,
+    envelope: &SignalEnvelope,
+) -> Result<coland_storage::SignalScopeAuthority, AppError> {
+    let sender = validate_signal_outer(source_id, envelope)?;
+    verify_signal_scope_authority(state, envelope, sender).await
+}
+
+fn validate_signal_outer<'a>(
+    source_id: &str,
+    envelope: &'a SignalEnvelope,
+) -> Result<&'a arkret_wire::ActorId, AppError> {
     envelope.validate_structural().map_err(structural_error)?;
     if envelope.sender_actor_id.as_account_id().is_none() {
         return Err(signal_proof_invalid(
@@ -831,7 +847,7 @@ pub(crate) async fn admit_signal_outer(
     if envelope.expires_at <= chrono::Utc::now() {
         return Err(signal_invalid("signal envelope is already expired"));
     }
-    let sender_actor = envelope.sender_actor_id.clone();
+    let sender_actor = &envelope.sender_actor_id;
     if sender_actor
         .as_account_id()
         .map(|account| account.station_id.as_str())
@@ -841,8 +857,7 @@ pub(crate) async fn admit_signal_outer(
             "Signal sender route does not match the authenticated source Station",
         ));
     }
-    verify_signal_scope_authority(state, envelope, &sender_actor).await?;
-    Ok(())
+    Ok(sender_actor)
 }
 
 fn mls_ciphersuite_is_active(canonical_id: &str) -> bool {
@@ -1043,19 +1058,15 @@ pub(crate) async fn admitted_signal_frame(
         .as_account_id()
         .cloned()
         .ok_or_else(|| signal_invalid("recipient is not an account"))?;
-    admit_signal_outer(
-        state,
-        envelope
-            .sender_actor_id
-            .as_account_id()
-            .ok_or_else(|| signal_invalid("Signal requires an Account sender"))?
-            .station_id
-            .as_str(),
-        &envelope,
-    )
-    .await?;
+    let source_id = envelope
+        .sender_actor_id
+        .as_account_id()
+        .ok_or_else(|| signal_invalid("Signal requires an Account sender"))?
+        .station_id
+        .as_str();
     // Agent and ordinary devices retain their distinct current authority gates.
     let agent_key = if envelope.sender_device_id.is_none() {
+        admit_signal_outer(state, source_id, &envelope).await?;
         let selector = SignerKeyQuerySelector::CurrentAdmission {
             sender: CurrentSignerKeyQuerySender::Agent {
                 actor: envelope.sender_actor_id.clone(),
@@ -1092,27 +1103,44 @@ pub(crate) async fn admitted_signal_frame(
     } else {
         None
     };
-    // Re-check time/scope after a possible remote round trip and before emitting this frame.
-    admit_signal_outer(
-        state,
-        envelope
-            .sender_actor_id
-            .as_account_id()
-            .ok_or_else(|| signal_invalid("Signal requires an Account sender"))?
-            .station_id
-            .as_str(),
-        &envelope,
-    )
-    .await?;
-    crate::routing::identity::session_actor::validated_session_actor(state, session).await?;
+    // Only the Agent branch has crossed a signer lookup since checking the
+    // session. In either branch, use one verified governance cut for the
+    // initial recipient check before entering the device directory. The fresh
+    // physical emission gates below still re-read authority after any wait.
+    if agent_key.is_some() {
+        crate::routing::identity::session_actor::validated_session_actor(state, session).await?;
+    }
+    let scope_authority = signal_outer_authority(state, source_id, &envelope).await?;
     let recipient_actor = arkret_wire::ActorId::account(recipient.clone());
-    let scope_authority =
-        verify_signal_scope_authority(state, &envelope, &envelope.sender_actor_id).await?;
     if !scope_authority.recipient_actors.contains(&recipient_actor) {
         return Err(signal_rail_unavailable("verify current recipient scope"));
     }
-    let key = match agent_key {
-        Some(key) => {
+    if let Some(key) = &agent_key {
+        verify_signal_agent_current_authority(
+            state,
+            &envelope,
+            &envelope.sender_actor_id,
+            Some((&key.authorization_ref, &key.verification_method)),
+        )
+        .await?;
+    }
+    // Resolve ordinary devices at the final gate. A preliminary lookup
+    // would repeat the same signed remote directory read before this fence.
+    #[cfg(feature = "conformance-harness")]
+    let probe = emission_probe::pause(state, &envelope, &recipient).await?;
+    require_signal_content_mapping(state, session, &envelope.realm_id).await?;
+    let decision = async {
+        let current_actor =
+            crate::routing::identity::session_actor::validated_session_actor(state, session)
+                .await?;
+        let sender_actor = validate_signal_outer(source_id, &envelope)?;
+        if current_actor.as_account_id() != Some(&recipient) {
+            return Err(crate::app_error!(
+                SignalClassDenied,
+                "Signal recipient is no longer eligible"
+            ));
+        }
+        let key = if let Some(key) = agent_key {
             verify_signal_agent_current_authority(
                 state,
                 &envelope,
@@ -1120,91 +1148,51 @@ pub(crate) async fn admitted_signal_frame(
                 Some((&key.authorization_ref, &key.verification_method)),
             )
             .await?;
-            key
-        }
-        None => resolve_signal_delivery_device_key(state, &recipient, &envelope).await?,
-    };
-    let mut authority = arkret_models_collaboration::SignalDeliveryAuthority {
-        product_authority: None,
-        call_invitation: None,
-        recipient_account_id: recipient,
-        key,
-    };
-    authority
-        .validate_for_envelope(&envelope)
-        .map_err(structural_error)?;
-    // A remote directory lookup may have crossed a membership or TTL change.
-    // Repeat the session and governance gates at the actual frame boundary.
-    #[cfg(feature = "conformance-harness")]
-    let probe = emission_probe::pause(state, &envelope, &authority.recipient_account_id).await?;
-    require_signal_content_mapping(state, session, &envelope.realm_id).await?;
-    let decision = async {
-        let current_actor =
-            crate::routing::identity::session_actor::validated_session_actor(state, session)
-                .await?;
-        admit_signal_outer(
-            state,
-            envelope
-                .sender_actor_id
-                .as_account_id()
-                .ok_or_else(|| signal_invalid("Signal requires an Account sender"))?
-                .station_id
-                .as_str(),
-            &envelope,
-        )
-        .await?;
-        if envelope.sender_device_id.is_none() {
-            verify_signal_agent_current_authority(
-                state,
-                &envelope,
-                &envelope.sender_actor_id,
-                Some((
-                    &authority.key.authorization_ref,
-                    &authority.key.verification_method,
-                )),
-            )
-            .await?;
+            Ok(key)
         } else {
-            let current_key = resolve_signal_delivery_device_key(
-                state,
-                &authority.recipient_account_id,
-                &envelope,
-            )
-            .await?;
-            if current_key != authority.key {
-                return Err(signal_proof_invalid(
-                    "Signal signer authorization changed before emission",
+            // A remote lookup may issue durable signer evidence. Require a
+            // fresh eligible cut before requesting it after the emission wait.
+            let current = verify_signal_scope_authority(state, &envelope, sender_actor).await?;
+            if !current.recipient_actors.contains(&current_actor) {
+                return Err(crate::app_error!(
+                    SignalClassDenied,
+                    "Signal recipient is no longer eligible"
                 ));
             }
-        }
-        let product_agent = signal_product_agent(state, &envelope, &authority.key).await?;
+            resolve_signal_delivery_device_key(state, &recipient, &envelope).await
+        };
+        let product_agent = match &key {
+            Ok(key) => signal_product_agent(state, &envelope, key).await?,
+            Err(_) => None,
+        };
+        // The final product read already validates both governance cuts. Keep
+        // it after the signer lookup. A revoked recipient can also lose
+        // directory access, so qualify the scope before returning a key error.
         let current = verify_signal_scope_authority_with_product(
             state,
             &envelope,
-            &envelope.sender_actor_id,
+            sender_actor,
             true,
             product_agent
                 .as_ref()
                 .map(|(controller, scope)| (controller, scope)),
         )
         .await?;
-        if current_actor.as_account_id() != Some(&authority.recipient_account_id)
-            || !current.recipient_actors.contains(&current_actor)
-        {
+        if !current.recipient_actors.contains(&current_actor) {
             return Err(crate::app_error!(
                 SignalClassDenied,
                 "Signal recipient is no longer eligible"
             ));
         }
+        let key = key?;
         if envelope.expires_at <= chrono::Utc::now() {
             return Err(signal_invalid("Signal expired before emission"));
         }
-        authority.product_authority = current.product_authority;
-        authority.call_invitation = if let Some(device) = session.human_device_id() {
+        let call_invitation = if let Some(device) = session.human_device_id() {
             crate::routing::call_admission::delivery_for_device(
                 state,
                 &envelope,
-                &authority.recipient_account_id,
+                &recipient,
                 &arkret_wire::DeviceId::new(device)
                     .map_err(|e| AppError::param_invalid(e.to_string()))?,
             )
@@ -1212,20 +1200,21 @@ pub(crate) async fn admitted_signal_frame(
         } else {
             None
         };
+        let authority = arkret_models_collaboration::SignalDeliveryAuthority {
+            product_authority: current.product_authority,
+            call_invitation,
+            recipient_account_id: recipient,
+            key,
+        };
         authority
             .validate_for_envelope(&envelope)
             .map_err(structural_error)?;
-        Ok(())
+        Ok(authority)
     }
     .await;
     #[cfg(feature = "conformance-harness")]
-    emission_probe::record(
-        probe.as_deref(),
-        &envelope,
-        &decision,
-        authority.call_invitation.is_some(),
-    )?;
-    decision?;
+    emission_probe::record(probe.as_deref(), &envelope, &decision)?;
+    let authority = decision?;
     #[cfg(feature = "conformance-harness")]
     tracing::debug!(
         envelope_digest = %envelope.proof.envelope_digest,

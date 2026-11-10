@@ -1156,7 +1156,7 @@ pub struct DirectConversationMemberCurrent {
 }
 
 /// Resolver inputs read from accepted typed-current facts in one database
-/// statement.  The HTTP resolver derives its closed state from this value;
+/// transaction. The HTTP resolver derives its closed state from this value;
 /// it never consults the process-local binding/reducer projection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DirectConversationDurableState {
@@ -1165,7 +1165,8 @@ pub struct DirectConversationDurableState {
     pub group_state_ref: Option<arkret_wire::EventId>,
     pub group_current_exact_pair: Option<bool>,
     pub initial_exact_pair_group_state_ref: Option<arkret_wire::EventId>,
-    pub peer_mls_admission: arkret_models_collaboration::direct_conversation::DirectConversationPeerMlsAdmission,
+    /// Founding supply is only read until the immutable binding is accepted.
+    pub provisional_peer_mls_admission: Option<arkret_models_collaboration::direct_conversation::DirectConversationPeerMlsAdmission>,
     pub members: Vec<DirectConversationMemberCurrent>,
 }
 

@@ -5416,7 +5416,10 @@ async fn replicated_peer_welcome_durability_is_independent_of_batch_position() {
             .await
             .unwrap_or_else(|error| panic!("current peer durable receipt must survive transport batching at ({replication_position},{welcome_position},{claim_position}): {error:?}"))
             .unwrap();
-        assert_eq!(state.peer_mls_admission, Admission::Durable);
+        assert_eq!(
+            state.provisional_peer_mls_admission,
+            Some(Admission::Durable)
+        );
         assert_eq!(
             state.group_state_ref,
             Some(added.authority_commit.event.event_id.clone())
@@ -5541,7 +5544,10 @@ async fn terminal_founding_claim_repairs_the_same_group_and_keeps_the_first_bind
             .unwrap()
     };
     let first = read().await;
-    assert_eq!(first.peer_mls_admission, Admission::RepairRequired);
+    assert_eq!(
+        first.provisional_peer_mls_admission,
+        Some(Admission::RepairRequired)
+    );
     assert_eq!(
         first.initial_exact_pair_group_state_ref,
         Some(initial_ref.clone())
@@ -5562,7 +5568,10 @@ async fn terminal_founding_claim_repairs_the_same_group_and_keeps_the_first_bind
     seed_peer_remove(&pool, &repaired, &peer).await;
     record_peer_welcome(&pool, &pair.station, &repaired, &peer, "claimed", 0).await;
     let repaired_ref = repaired.authority_commit.event.event_id.clone();
-    assert_eq!(read().await.peer_mls_admission, Admission::Pending);
+    assert_eq!(
+        read().await.provisional_peer_mls_admission,
+        Some(Admission::Pending)
+    );
     let payload = |reference: &arkret_wire::EventId| {
         serde_json::json!({
             "pair_key": facts.pair_key, "unordered_participant_ids":[founder,peer],
@@ -5592,7 +5601,10 @@ async fn terminal_founding_claim_repairs_the_same_group_and_keeps_the_first_bind
         .bind::<Text,_>(repaired_ref.as_str()).execute(&mut *conn).await.unwrap();
     drop(conn);
     let current = read().await;
-    assert_eq!(current.peer_mls_admission, Admission::Durable);
+    assert_eq!(
+        current.provisional_peer_mls_admission,
+        Some(Admission::Durable)
+    );
     assert_eq!(current.group_state_ref, Some(repaired_ref.clone()));
     assert_eq!(
         current.initial_exact_pair_group_state_ref,
@@ -5638,8 +5650,8 @@ async fn terminal_founding_claim_repairs_the_same_group_and_keeps_the_first_bind
         ConflictCode::FailedPrecondition
     );
     assert_eq!(dc_footprint(&pool, &realm).await, before);
-    // A later replacement must not inherit the prior occupied leaf's consumed
-    // receipt, even though actor, leaf index and signature key are identical.
+    // A participant read after binding uses the new winning state. A local
+    // ledger for a later Welcome is not a precondition to reading that state.
     let later = with_group(
         cited(
             &bound.authority_commit,
@@ -5654,12 +5666,42 @@ async fn terminal_founding_claim_repairs_the_same_group_and_keeps_the_first_bind
     );
     uow.commit_event(later.clone()).await.unwrap();
     seed_peer_remove(&pool, &later, &peer).await;
-    record_peer_welcome(&pool, &pair.station, &later, &peer, "claimed", 0).await;
-    assert_eq!(read().await.peer_mls_admission, Admission::Pending);
+    let (_, _, request_id) =
+        record_peer_welcome(&pool, &pair.station, &later, &peer, "claimed", 0).await;
+    let mut conn = pool.get().await.unwrap();
+    let removed = diesel::sql_query(
+        "DELETE FROM peer_keypackage_claims WHERE source_id=$1 AND claim_request_id=$2",
+    )
+    .bind::<Text, _>(pair.station.as_str())
+    .bind::<Text, _>(&request_id)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(removed, 1);
+    drop(conn);
+    let after_binding = read().await;
     assert_eq!(
-        read().await.initial_exact_pair_group_state_ref,
+        after_binding.initial_exact_pair_group_state_ref,
         Some(initial_ref)
     );
+    assert_eq!(
+        after_binding.group_state_ref.as_ref(),
+        Some(&later.authority_commit.event.event_id)
+    );
+    assert_eq!(after_binding.group_current_exact_pair, Some(true));
+    assert_eq!(
+        after_binding
+            .binding
+            .as_ref()
+            .map(|binding| &binding.binding_event_ref),
+        Some(&binding_ref)
+    );
+    let by_pair = PgEventStore { pool: pool.clone() }
+        .direct_conversation_durable_state(TRUST_DOMAIN, facts.pair_key.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_pair, after_binding);
 }
 
 async fn seed_peer_remove(

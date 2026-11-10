@@ -393,7 +393,15 @@ async fn admit_agent_control_in_connection(
         )
     })?;
 
-    // Every writer of the Agent PCR takes this lock first.
+    // Sidecar admission can already hold the controller PCR while reading
+    // the Agent PCR. Take the controller lock required by the historical
+    // signer check before taking the Agent write lock.
+    let controller_realm = pcr_of(conn, &controller).await?;
+    let controller_authority_held = if let Some(realm) = &controller_realm {
+        lock_realm(conn, realm, "UPDATE").await?
+    } else {
+        false
+    };
     if !lock_realm(conn, &event.realm_id, "UPDATE").await? {
         return Err(precondition("the Agent PCR authority is absent"));
     }
@@ -435,9 +443,11 @@ async fn admit_agent_control_in_connection(
             "the Event Realm is not the Agent account's Principal Control Realm",
         ));
     }
-    let controller_realm = pcr_of(conn, &controller)
-        .await?
+    let controller_realm = controller_realm
         .ok_or_else(|| precondition("the controller account has no Principal Control Realm"))?;
+    if !controller_authority_held {
+        return Err(precondition("the controller PCR authority is absent"));
+    }
     let provisioning = sql_query(
         "SELECT value FROM agent_provisioning_current_states \
          WHERE realm_id=$1 AND agent_id=$2 FOR SHARE",
@@ -457,9 +467,6 @@ async fn admit_agent_control_in_connection(
         return Err(precondition(
             "the Event differs from the controller delegation its provision recorded",
         ));
-    }
-    if !lock_realm(conn, &controller_realm, "SHARE").await? {
-        return Err(precondition("the controller PCR authority is absent"));
     }
     let (controller_status, _) = verify_device_signer_in_connection(
         conn,
@@ -693,7 +700,15 @@ async fn admit_agent_control_in_connection(
             ));
         }
     }
-    crate::sidecar_authority_change_guard::after_current_writes_in_connection(conn, event).await?;
+    // Lifecycle transitions replace one distinct accepted status ref. They
+    // cannot grow the Sidecar cut. MLS admissions still lock the Agent PCR.
+    if !matches!(
+        event.kind,
+        EventKind::SelfAgentPause | EventKind::SelfAgentResume | EventKind::SelfAgentDeactivate
+    ) {
+        crate::sidecar_authority_change_guard::after_current_writes_in_connection(conn, event)
+            .await?;
+    }
     crate::agent_producer_signer_keys::retain_self_outcome_in_connection(
         conn, event, commit, historical,
     )

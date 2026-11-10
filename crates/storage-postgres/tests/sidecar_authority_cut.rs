@@ -4813,7 +4813,7 @@ async fn sidecar_post_tree_rejects_stale_endpoint_and_paused_self_update(
 ) {
     use arkret_models_crypto::MlsGovernanceBindingPayload;
     use arkret_wire::{ActorId, ScopeRef};
-    use coland_storage::{AgentControlAdmissionWrite, MlsGroupCurrentStore};
+    use coland_storage::{ActorProfileStore, AgentControlAdmissionWrite, MlsGroupCurrentStore};
     use diesel::sql_types::BigInt;
     use diesel_async::RunQueryDsl;
     let controller = &principal.history.account;
@@ -5090,30 +5090,113 @@ async fn sidecar_post_tree_rejects_stale_endpoint_and_paused_self_update(
         &principal.history.station_did,
         1,
     );
-    historical_control_source::admit_control(
-        &profiles,
-        &pool,
-        AgentControlAdmissionWrite {
-            commit: coland_storage::AuthorityCommitTransaction {
-                expected_authority: agent_genesis.expected_authority.clone(),
-                event: pause,
-                commit: pause_commit.clone(),
-                producer_signer_fact: None,
-                content_backup_source: None,
-                mls_state: None,
-                welcomes: Vec::new(),
-                recipient_queue_capacity: 0,
-            },
-            queued_at: pause_commit.committed_at,
+    let pause_write = AgentControlAdmissionWrite {
+        commit: coland_storage::AuthorityCommitTransaction {
+            expected_authority: agent_genesis.expected_authority.clone(),
+            event: pause,
+            commit: pause_commit.clone(),
+            producer_signer_fact: None,
+            content_backup_source: None,
+            mls_state: None,
+            welcomes: Vec::new(),
+            recipient_queue_capacity: 0,
         },
+        queued_at: pause_commit.committed_at,
+    };
+    historical_control_source::stage_registered(pool, &pause_write.commit).await;
+    let mut parent_writer = pool.get().await.unwrap();
+    diesel::sql_query("BEGIN")
+        .execute(&mut *parent_writer)
+        .await
+        .unwrap();
+    diesel::sql_query("SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE")
+        .bind::<diesel::sql_types::Text, _>(realm.as_str())
+        .execute(&mut *parent_writer)
+        .await
+        .unwrap();
+    // Model a Sidecar writer that also holds the controller PCR and needs to
+    // read the Agent PCR before it can finish.
+    diesel::sql_query("SAVEPOINT controller_cut")
+        .execute(&mut *parent_writer)
+        .await
+        .unwrap();
+    diesel::sql_query("SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE")
+        .bind::<diesel::sql_types::Text, _>(principal.unit.transactions[0].event.realm_id.as_str())
+        .execute(&mut *parent_writer)
+        .await
+        .unwrap();
+    #[derive(diesel::QueryableByName)]
+    struct LockObservation {
+        #[diesel(sql_type = BigInt)]
+        number: i64,
+    }
+    let writer_pid = diesel::sql_query("SELECT pg_backend_pid()::bigint AS number")
+        .get_result::<LockObservation>(&mut *parent_writer)
+        .await
+        .unwrap()
+        .number;
+    let pause_admission = profiles.admit_agent_control_event(pause_write);
+    tokio::pin!(pause_admission);
+    let mut probe = pool.get().await.unwrap();
+    let wait_for_pause = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting = diesel::sql_query(
+                "SELECT COUNT(*) AS number FROM pg_stat_activity \
+                 WHERE $1::bigint::integer=ANY(pg_blocking_pids(pid)) AND wait_event_type='Lock'",
+            )
+            .bind::<BigInt, _>(writer_pid)
+            .get_result::<LockObservation>(&mut *probe)
+            .await
+            .unwrap()
+            .number;
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+    tokio::select! {
+        _ = &mut pause_admission => panic!("Agent pause must wait for the controller PCR writer"),
+        waiting = wait_for_pause => waiting.expect("PostgreSQL did not observe the blocked pause"),
+    }
+    drop(probe);
+    let agent_cut = diesel::sql_query(
+        "SELECT realm_id FROM realm_authorities WHERE realm_id=$1 FOR SHARE NOWAIT",
     )
-    .await
-    .unwrap();
+    .bind::<diesel::sql_types::Text, _>(agent_genesis.event.realm_id.as_str())
+    .execute(&mut *parent_writer)
+    .await;
+    diesel::sql_query("ROLLBACK TO SAVEPOINT controller_cut")
+        .execute(&mut *parent_writer)
+        .await
+        .unwrap();
+    let paused = tokio::time::timeout(std::time::Duration::from_secs(10), pause_admission).await;
+    diesel::sql_query("ROLLBACK")
+        .execute(&mut *parent_writer)
+        .await
+        .unwrap();
+    drop(parent_writer);
+    assert!(
+        agent_cut.is_ok(),
+        "pause must wait for the controller before locking the Agent PCR: {agent_cut:?}"
+    );
+    paused
+        .expect("Agent lifecycle admission must not wait for a Sidecar parent writer")
+        .unwrap();
     let paused_cut = read(pool, realm, sidecar, controller)
         .await
         .unwrap()
         .unwrap();
     assert!(paused_cut.desired_agent_ids.is_empty());
+    assert_eq!(
+        paused_cut.authority_stream_head.len(),
+        renewed_cut.authority_stream_head.len()
+    );
+    assert!(
+        paused_cut
+            .authority_stream_head
+            .contains(&pause_commit.event_ref)
+    );
     let mut malicious = arkret_mls::ArkretMlsGroup::restore_from_state_record(&frozen).unwrap();
     let envelope = malicious
         .self_update_commit_with_governance_binding(&binding(&paused_cut))

@@ -8,7 +8,7 @@ use super::{
     RealmEventStats, RunQueryDsl, Text, Timestamptz, Value, async_trait, ids, pg_conn, sql_query,
 };
 use crate::federation::{FederationOutboxRow, qualified_outbox_columns};
-use crate::{AsyncConnection, PgTransactionError};
+use crate::{AsyncConnection, AsyncPgConnection, PgTransactionError};
 
 fn contact_durable_diagnostic(branch: &'static str) {
     #[cfg(feature = "conformance-harness")]
@@ -138,13 +138,38 @@ impl TryFrom<DirectConversationDurableStateRow> for DirectConversationDurableSta
                 .transpose()
                 .map_err(|error| PersistenceError::Database(error.to_string()))?,
             group_current_exact_pair: row.group_current_exact_pair,
-            initial_exact_pair_group_state_ref: row.initial_exact_pair_group_state_ref
-                .map(arkret_wire::EventId::new).transpose()
+            initial_exact_pair_group_state_ref: row
+                .initial_exact_pair_group_state_ref
+                .map(arkret_wire::EventId::new)
+                .transpose()
                 .map_err(|error| PersistenceError::Database(error.to_string()))?,
-            peer_mls_admission: arkret_models_collaboration::direct_conversation::DirectConversationPeerMlsAdmission::Missing,
+            provisional_peer_mls_admission: None,
             members,
         })
     }
+}
+
+async fn complete_direct_conversation_read(
+    conn: &mut AsyncPgConnection,
+    row: Option<DirectConversationDurableStateRow>,
+) -> PersistenceResult<Option<DirectConversationDurableState>> {
+    let mut facts = row
+        .map(DirectConversationDurableState::try_from)
+        .transpose()?;
+    if let Some(facts) = &mut facts {
+        crate::replica_direct_mls::apply_in_connection(conn, facts).await?;
+        // The accepted binding retired the founding phases. A member Station
+        // can verify the winning public state without the private claim ledger.
+        if facts.binding.is_none() {
+            let realm = arkret_wire::RealmId::new(facts.founding_slot.realm_id.clone())
+                .map_err(|error| PersistenceError::Database(error.to_string()))?;
+            facts.provisional_peer_mls_admission = Some(
+                crate::direct_conversation_admission::peer_mls_admission_snapshot(conn, &realm)
+                    .await?,
+            );
+        }
+    }
+    Ok(facts)
 }
 
 impl TryFrom<CanonicalEventRow> for CanonicalEventRecord {
@@ -356,15 +381,7 @@ impl EventStore for PgEventStore {
         .await
         .optional()
         .map_err(PersistenceError::database)?;
-        let mut facts = row.map(DirectConversationDurableState::try_from).transpose()?;
-        if let Some(facts) = &mut facts {
-            crate::replica_direct_mls::apply_in_connection(conn, facts).await?;
-            facts.peer_mls_admission = crate::direct_conversation_admission::peer_mls_admission_snapshot(
-                conn, &arkret_wire::RealmId::new(facts.founding_slot.realm_id.clone())
-                    .map_err(|error| PersistenceError::Database(error.to_string()))?,
-            ).await?;
-        }
-        Ok(facts)
+        Ok(complete_direct_conversation_read(conn, row).await?)
         }).await.map_err(PgTransactionError::into_persistence);
         // Log only after the snapshot transaction completed successfully.
         match &result {
@@ -409,15 +426,7 @@ impl EventStore for PgEventStore {
         .await
         .optional()
         .map_err(PersistenceError::database)?;
-        let mut facts = row.map(DirectConversationDurableState::try_from).transpose()?;
-        if let Some(facts) = &mut facts {
-            crate::replica_direct_mls::apply_in_connection(conn, facts).await?;
-            facts.peer_mls_admission = crate::direct_conversation_admission::peer_mls_admission_snapshot(
-                conn, &arkret_wire::RealmId::new(facts.founding_slot.realm_id.clone())
-                    .map_err(|error| PersistenceError::Database(error.to_string()))?,
-            ).await?;
-        }
-        Ok(facts)
+        Ok(complete_direct_conversation_read(conn, row).await?)
         }).await.map_err(PgTransactionError::into_persistence)
     }
 

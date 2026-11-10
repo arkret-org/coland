@@ -1703,8 +1703,8 @@ async fn direct_conversation_resolve(
             AppError::internal(format!("direct durable-state lookup failed: {error}"))
         })?;
     if let Some(facts) = &durable
-        && facts.peer_mls_admission
-            == arkret_models_collaboration::direct_conversation::DirectConversationPeerMlsAdmission::Pending
+        && facts.provisional_peer_mls_admission
+            == Some(arkret_models_collaboration::direct_conversation::DirectConversationPeerMlsAdmission::Pending)
     {
         let realm_id = RealmId::new(facts.founding_slot.realm_id.clone())
             .map_err(|error| AppError::internal(format!("Direct Realm id: {error}")))?;
@@ -1924,7 +1924,9 @@ async fn direct_conversation_resolve(
             authorization_basis: facts.founding_slot.authorization_basis.clone(),
             group_state_ref: facts.group_state_ref.clone(),
             initial_exact_pair_group_state_ref: facts.initial_exact_pair_group_state_ref.clone(),
-            peer_mls_admission: facts.peer_mls_admission,
+            peer_mls_admission: facts.provisional_peer_mls_admission.ok_or_else(|| {
+                AppError::internal("provisional Direct Conversation has no peer admission state")
+            })?,
         });
     }
 

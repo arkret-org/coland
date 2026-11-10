@@ -355,6 +355,7 @@ fn bootstrap(
             "governance_station_id":station,
             "initial_join_rule":"public",
             "initial_history_access":"since_join",
+            "initial_encryption_backup_strategy":"ak.encryption_backup.epoch_content_roots.v1",
             "initial_discoverability":"invite_only"
         }}),
         at,
@@ -499,6 +500,96 @@ fn blob_ref(bytes: &[u8]) -> arkret_wire::BlobRef {
         arkret_canonical::sha256_digest(bytes)
     ))
     .expect("content-addressed Blob ref")
+}
+
+async fn retain_public_blob(state: &AppState, bytes: &[u8]) -> coland_storage::MlsPublicBlob {
+    let sha256 = arkret_canonical::sha256_hex(bytes);
+    let storage_key = state.test_object_key_for_sha256(&sha256);
+    state
+        .test_put_object(&storage_key, bytes.to_vec())
+        .await
+        .unwrap();
+    coland_storage::MlsPublicBlob {
+        blob_ref: blob_ref(bytes),
+        sha256,
+        size_bytes: bytes.len() as i64,
+        storage_backend: "memory".to_owned(),
+        storage_key,
+    }
+}
+
+async fn native_add_witness(
+    state: &AppState,
+    outcome: &KeyPackagesClaimResponseBody,
+    welcome: &MlsWelcomeDelivery,
+    genesis: &arkret_wire::EventId,
+    position: u64,
+    leaf_key: arkret_wire::Base64UrlString,
+) -> coland_storage::VerifiedMlsRecipientRosterWitness {
+    use arkret_models_collaboration::mls_roster_authority::{
+        MlsAddAuthorityAttestation, MlsAttestAddRequestBody,
+    };
+    let mut response = TestClient::get(format!(
+        "http://localhost/_arkret/open/services/{}/resolution",
+        state.service_core_id()
+    ))
+    .add_header(
+        "arkret-operation",
+        arkret_wire::ServiceOperationId::OPEN_SERVICE_READ_RESOLUTION_V1,
+        true,
+    )
+    .send(&service(state.clone()))
+    .await;
+    let body = response.take_string().await.unwrap();
+    assert_eq!(response.status_code, Some(StatusCode::OK), "{body}");
+    let resolution: arkret_models_identity::AuthenticatedServiceResolution =
+        serde_json::from_str(&body).unwrap();
+    let record = &outcome.claims[0];
+    let mut attestation = MlsAddAuthorityAttestation {
+        attestor_station_id: state.service_core_id(),
+        realm_id: welcome.realm_id.clone(),
+        effective_scope: welcome.effective_scope.clone(),
+        mls_group_id: welcome.effective_scope.canonical_mls_group_id().unwrap(),
+        genesis_event_ref: genesis.clone(),
+        commit_event_ref: welcome.commit_event_ref.clone(),
+        commit_stream_position: position,
+        epoch: 1,
+        welcome_id: welcome.welcome_id.clone(),
+        claim_id: welcome.keypackage_claim_ref.clone(),
+        actor_id: welcome.recipient_actor_id.clone(),
+        endpoint: welcome.recipient_endpoint.clone(),
+        authorization_event_ref: record.device_authorize_event_id.clone().unwrap(),
+        leaf_signature_key_base64url: leaf_key,
+        claim_record_digest: arkret_wire::Hash::new(
+            arkret_canonical::canonical_sha256(record).unwrap(),
+        )
+        .unwrap(),
+        claim_receipt: outcome.claim_receipt.clone(),
+        claim_authority_ref: None,
+        attested_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
+        signature: outcome.claim_receipt.signature.clone(),
+    };
+    attestation.signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
+        &state.notary_signing_key().to_bytes(),
+        state
+            .service_verification_method("notary-key")
+            .unwrap()
+            .as_str(),
+        &attestation.signing_bytes().unwrap(),
+    )
+    .unwrap();
+    let request = MlsAttestAddRequestBody {
+        attestation,
+        claim_outcome: outcome.clone(),
+    };
+    request.validate_claim_binding().unwrap();
+    coland_storage::VerifiedMlsRecipientRosterWitness {
+        accepted_genesis_event_ref: genesis.clone(),
+        signed_attest_add_request_canonical_json: arkret_canonical::canonical_json_bytes(&request)
+            .unwrap(),
+        local_attestor_resolution: Some(resolution),
+        claim_issuer_resolution: None,
+    }
 }
 
 /// A self claim for Bob's device package, signed by Alice's device over the
@@ -939,6 +1030,10 @@ async fn mls_lifecycle_body() {
     let tracker = MlsPublicGroupTracker::from_external(&group_info, &tree, group_id.as_str(), 0)
         .expect("Genesis public state");
     let genesis_state = tracker.export_state().unwrap();
+    let genesis_blobs = vec![
+        retain_public_blob(&state, &group_info).await,
+        retain_public_blob(&state, &tree).await,
+    ];
     let genesis = commit_next(
         &pool,
         &join.authority_commit,
@@ -970,7 +1065,7 @@ async fn mls_lifecycle_body() {
                 &group_info, &tree, group_id.as_str(), 0,
             ).unwrap().into_iter().map(|leaf| leaf.actor_id).collect(),
             consumed_proposals: Vec::new(),
-            public_blobs: Vec::new(),
+            public_blobs: genesis_blobs,
         }),
     )
     .await;
@@ -989,11 +1084,16 @@ async fn mls_lifecycle_body() {
         .add_member_with_governance_binding(&claimed_record, &add_binding)
         .unwrap();
     let mut public = MlsPublicGroupTracker::restore(&genesis_state, group_id.as_str(), 0).unwrap();
-    public
+    let arkret_mls::MlsPublicHandshakeTransition::Commit {
+        consumed_proposals, ..
+    } = public
         .process_public_handshake(
             &arkret_canonical::base64url_decode(add.commit.commit.as_str()).unwrap(),
         )
-        .expect("the Add Commit is a valid public transition");
+        .expect("the Add Commit is a valid public transition")
+    else {
+        panic!("the inline Add must produce a Commit")
+    };
     let ledger = persistence
         .mls_key_packages()
         .get_peer_claim_by_claim_id(&claim.claim_id)
@@ -1005,7 +1105,7 @@ async fn mls_lifecycle_body() {
         genesis_ref.clone(),
         0,
         &add.commit,
-        add_binding,
+        add_binding.clone(),
     )
     .unwrap();
     let mut commit_request = ordinary_realm::next_request_for_actor(
@@ -1061,11 +1161,22 @@ async fn mls_lifecycle_body() {
     commit_request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
         commit_event.clone(),
     ));
-    let current_tree = public.ratchet_tree_bytes().unwrap();
-    let current_tree_sha256 = arkret_canonical::sha256_digest(&current_tree)
-        .strip_prefix("sha256:")
-        .unwrap()
-        .to_owned();
+    let (current_info, current_tree) = alice_group
+        .pending_public_group_state_bytes(&add.commit, &add_binding)
+        .unwrap();
+    public
+        .verify_publication(&current_info, &current_tree)
+        .unwrap();
+    let public_blobs = vec![
+        retain_public_blob(&state, &current_info).await,
+        retain_public_blob(&state, &current_tree).await,
+    ];
+    let leaf =
+        |leaf: arkret_mls::MlsPublicEndpointLeaf| coland_storage::MlsProposalLeafProvenance {
+            leaf_index: leaf.leaf_index,
+            actor_id: leaf.actor_id,
+            signature_key: leaf.signature_key,
+        };
     commit_request.authority_commit.mls_state = Some(MlsStateInstallation {
         effective_scope: scope.clone(),
         base: Some(MlsInstalledBase {
@@ -1074,16 +1185,41 @@ async fn mls_lifecycle_body() {
         }),
         epoch: 1,
         public_state: public.export_state().unwrap(),
-        member_principals: Default::default(),
-        consumed_proposals: Vec::new(),
-        public_blobs: vec![coland_storage::MlsPublicBlob {
-            blob_ref: blob_ref(&current_tree),
-            sha256: current_tree_sha256.clone(),
-            size_bytes: current_tree.len() as i64,
-            storage_backend: "local".to_owned(),
-            storage_key: format!("sha256/{current_tree_sha256}"),
-        }],
+        member_principals: public
+            .leaves()
+            .unwrap()
+            .into_iter()
+            .map(|leaf| leaf.actor_id)
+            .collect(),
+        consumed_proposals: consumed_proposals
+            .into_iter()
+            .map(|proposal| coland_storage::MlsConsumedProposalInstallation {
+                ordinal: proposal.ordinal,
+                proposal_ref: proposal.proposal_ref,
+                proposal_type: proposal.proposal_type,
+                proposal_wire: proposal.proposal_wire,
+                sender_leaf: leaf(proposal.sender_leaf),
+                target_before: proposal.target_before.map(leaf),
+                target_after: proposal.target_after.map(leaf),
+            })
+            .collect(),
+        public_blobs,
     });
+    let recipient_leaf = public
+        .leaves()
+        .unwrap()
+        .into_iter()
+        .find(|leaf| leaf.actor_id == bob.actor)
+        .unwrap();
+    let roster_witness = native_add_witness(
+        &state,
+        &outcome,
+        &welcome,
+        &genesis_ref,
+        commit_request.authority_commit.commit.stream_position,
+        recipient_leaf.signature_key,
+    )
+    .await;
     commit_request.authority_commit.welcomes = vec![VerifiedMlsWelcome {
         delivery: welcome.clone(),
         claim: Some(MlsWelcomeClaimLedgerKey {
@@ -1092,7 +1228,7 @@ async fn mls_lifecycle_body() {
             request_digest: ledger.request_digest.clone(),
         }),
         applet_device_scope_guard: None,
-        roster_witness: None,
+        roster_witness: Some(roster_witness),
     }];
     commit_request.authority_commit.recipient_queue_capacity = 16;
     let mut commit_request = Box::pin(ordinary_realm::source_request(&pool, commit_request)).await;

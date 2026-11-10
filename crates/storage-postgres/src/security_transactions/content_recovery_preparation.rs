@@ -89,8 +89,8 @@ pub(super) async fn retain_in_connection(
         .bind::<Jsonb,_>(serde_json::to_value(&value.replacement).map_err(unavailable)?)
         .bind::<Jsonb,_>(serde_json::to_value(&value.pcr_cut).map_err(unavailable)?)
         .bind::<Timestamptz,_>(authorize.commit.committed_at)
-        .execute(conn).await.map_err(PersistenceError::database)?;
-    Ok(())
+        .execute(&mut *conn).await.map_err(PersistenceError::database)?;
+    super::recovery_census_cut::retain(conn, &value).await
 }
 
 pub(super) async fn read(

@@ -59,6 +59,20 @@ pub(crate) async fn prepare_context_in_connection(
         ))
         .into());
     }
+    if matches!(
+        event.kind,
+        arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit
+    ) {
+        // Source issuance precedes remote admission. A recovered Device must
+        // not create a new membership obligation behind the inventory cut.
+        // Recovery cleanup needs its own qualified native path; a caller's
+        // recovery_binding alone cannot bypass this fence.
+        crate::content_recovery_fence::require_unfenced(
+            conn,
+            &arkret_wire::ActorId::account(producer.account_id.clone()),
+        )
+        .await?;
+    }
     let Some(fact) =
         crate::agent_producer_signer_keys::prepare_local_account_device_source_in_connection(
             conn,

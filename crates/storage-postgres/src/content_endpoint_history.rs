@@ -82,6 +82,20 @@ pub(crate) async fn record(
         .map_err(PersistenceError::database)?;
     let scope = serde_json::to_value(scope).map_err(PersistenceError::database)?;
     let binding = serde_json::to_value(endpoint).map_err(PersistenceError::database)?;
+    let previous = sql_query("SELECT effective_scope,genesis_event_ref,binding FROM content_endpoint_admission_history WHERE admission_key=$1")
+        .bind::<Text, _>(&key).get_result::<Stored>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    if let Some(previous) = previous {
+        if previous.effective_scope != scope
+            || previous.genesis_event_ref != genesis.as_str()
+            || previous.binding != binding
+        {
+            return Err(invalid("native index digest collision"));
+        }
+        // Reconciliation may revisit the same accepted admission after the
+        // episode cut. It must not create a previously undiscoverable source.
+        return Ok(());
+    }
+    crate::content_recovery_fence::require_unfenced(conn, &endpoint.actor_id).await?;
     sql_query("INSERT INTO content_endpoint_admission_history(admission_key,effective_scope,genesis_event_ref,binding,first_source,source_event_pk,admitted_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(admission_key) DO NOTHING")
         .bind::<Text, _>(&key).bind::<Jsonb, _>(&scope).bind::<Text, _>(genesis.as_str())
         .bind::<Jsonb, _>(&binding).bind::<Jsonb, _>(serde_json::to_value(first_source).map_err(PersistenceError::database)?)

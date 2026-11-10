@@ -33,6 +33,272 @@ use serde_json::{Value, json};
 
 const REPLACEMENT_SIGNING_SEED: [u8; 32] = [96; 32];
 
+fn own_claim_intent(fixture: &Fixture) -> KeyPackagesClaimRequestBody {
+    let history = &fixture.pcr.history;
+    let original = history
+        .events
+        .iter()
+        .find(|event| event.kind == EventKind::DeviceAuthorize)
+        .unwrap();
+    let realm = RealmId::from_event_id(&EventId::from_digest(
+        arkret_canonical::DigestSuite::Sha256,
+        arkret_canonical::sha256_bytes(uuid::Uuid::now_v7().as_bytes()),
+    ));
+    let scope = ScopeRef::Realm {
+        realm_id: realm.clone(),
+    };
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let mut request: KeyPackagesClaimRequestBody = serde_json::from_value(json!({
+        "claim_request_id": arkret_canonical::base64url_encode(uuid::Uuid::now_v7().as_bytes()),
+        "target_account_id": history.account,
+        "target_device_ids": [history.founding_device_id],
+        "requester_account_id": history.account,
+        "intended_realm_id": realm,
+        "effective_scope": scope,
+        "mls_group_id": scope.canonical_mls_group_id().unwrap(),
+        "claim_purpose": "realm_membership",
+        "required_capabilities": ["ak.content.v1"],
+        "expires_at": arkret_canonical::format_timestamp_canonical(at + chrono::Duration::minutes(4)),
+        "service_binding": {"source_id": history.account.station_id, "destination_id": history.account.station_id},
+        "requester_authorization": {
+            "kind": "device",
+            "verification_method": history.device_verification_method,
+            "requester_device_id": history.founding_device_id,
+            "device_authorize_event_id": original.event_id,
+            "signed_at": arkret_canonical::format_timestamp_canonical(at),
+            "signature": {"kid": history.device_verification_method, "signature_algorithm": "Ed25519", "signature": "AA"},
+        },
+    })).unwrap();
+    let bytes = keypackage_claim_authorization_signing_bytes(
+        &request.unsigned_request(),
+        &request.service_binding,
+        &request.requester_authorization,
+    )
+    .unwrap();
+    let PeerKeyPackageRequesterAuthorization::Device {
+        signature: proof, ..
+    } = &mut request.requester_authorization
+    else {
+        unreachable!()
+    };
+    proof.signature = signature(history.founding_device_signing_seed, &bytes);
+    request.validate_shape().unwrap();
+    request
+}
+
+async fn retain_own_claim_intent(fixture: &Fixture) -> KeyPackagesClaimRequestBody {
+    let request = own_claim_intent(fixture);
+    let store = fixture.state.test_persistence();
+    assert!(
+        store
+            .mls_key_packages()
+            .prepare_ordinary_claim_source(&request, request.expires_at)
+            .await
+            .unwrap()
+    );
+    // The destination budget port accepts an already authenticated original;
+    // it does not allocate a package or manufacture accepted membership.
+    assert_eq!(
+        store
+            .mls_key_packages()
+            .record_peer_claim_attempt(&request)
+            .await
+            .unwrap(),
+        coland_storage::PeerKeyPackageClaimRateDecision::Allowed
+    );
+    request
+}
+
+#[tokio::test]
+async fn recovery_freezes_unresolved_claims_without_fabricating_prepared_inventory() {
+    let fixture = fixture().await;
+    let request = retain_own_claim_intent(&fixture).await;
+    let store = fixture.state.test_persistence();
+    store
+        .security_transactions()
+        .commit_recovery_unit(fixture.write.clone())
+        .await
+        .unwrap();
+    let before = footprint(&fixture).await;
+    let rows = &before["content_recovery_census_sources"];
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+    for (row, kind) in rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(["incoming_claim", "outgoing_claim"])
+    {
+        assert_eq!(row["source_kind"], kind);
+        assert_eq!(
+            row["authorization_event_ref"],
+            json!(fixture.write.commits[1].event.event_id)
+        );
+        assert_eq!(row["effective_scope"], json!(request.effective_scope));
+        assert_eq!(
+            row["source"]["request_digest"],
+            json!(arkret_canonical::canonical_sha256(&request).unwrap())
+        );
+        assert!(row["source"].get("request_body").is_none());
+    }
+    assert_eq!(
+        before["peer_keypackage_claims"],
+        json!([]),
+        "an intent is not an accepted claim or absence proof"
+    );
+    let episode = &before["content_recovery_episodes"][0];
+    assert_eq!(episode["state"], "pending");
+    assert!(episode["inventory_blob_ref"].is_null());
+    assert!(episode["security_completed_at"].is_null());
+    store
+        .security_transactions()
+        .commit_recovery_unit(fixture.write.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        footprint(&fixture).await,
+        before,
+        "exact recovery retry cannot extend or replace its cut"
+    );
+    let next = own_claim_intent(&fixture);
+    assert!(
+        store
+            .mls_key_packages()
+            .prepare_ordinary_claim_source(&next, next.expires_at)
+            .await
+            .is_err()
+    );
+    assert_eq!(footprint(&fixture).await, before);
+}
+
+#[tokio::test]
+async fn damaged_native_claim_original_rolls_back_the_entire_recovery_unit() {
+    let fixture = fixture().await;
+    retain_own_claim_intent(&fixture).await;
+    let mut conn = fixture.pool.get().await.unwrap();
+    diesel::sql_query("UPDATE ordinary_keypackage_claim_sources SET request_digest=$1")
+        .bind::<diesel::sql_types::Text, _>(format!("sha256:{}", "0".repeat(64)))
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let before = footprint(&fixture).await;
+    let error = fixture
+        .state
+        .test_persistence()
+        .security_transactions()
+        .commit_recovery_unit(fixture.write.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("revision_unavailable: recovery census cut claim original differs"),
+        "{error}"
+    );
+    assert_eq!(footprint(&fixture).await, before);
+}
+
+fn forward_genesis(fixture: &Fixture, replacement: bool) -> Event {
+    let history = &fixture.pcr.history;
+    let (device, method, seed, authorization) = if replacement {
+        let event = &fixture.write.commits[1].event;
+        let payload: arkret_models_collaboration::events_payloads::DeviceAuthorizePayload =
+            serde_json::from_value(serde_json::to_value(&event.payload).unwrap()).unwrap();
+        (
+            payload.device_id,
+            event
+                .producer_proof
+                .as_ref()
+                .unwrap()
+                .verification_method
+                .clone(),
+            REPLACEMENT_SIGNING_SEED,
+            event.event_id.clone(),
+        )
+    } else {
+        (
+            history.founding_device_id.clone(),
+            history.device_verification_method.clone(),
+            history.founding_device_signing_seed,
+            history
+                .events
+                .iter()
+                .find(|event| event.kind == EventKind::DeviceAuthorize)
+                .unwrap()
+                .event_id
+                .clone(),
+        )
+    };
+    let realm = RealmId::from_event_id(&EventId::from_digest(
+        arkret_canonical::DigestSuite::Sha256,
+        arkret_canonical::sha256_bytes(uuid::Uuid::now_v7().as_bytes()),
+    ));
+    let scope = ScopeRef::Realm {
+        realm_id: realm.clone(),
+    };
+    let binding = MlsGovernanceBindingPayload::new(scope.clone(), None, 0, 0, 0).unwrap();
+    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
+        ActorId::account(history.account.clone()),
+        device.clone(),
+        arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(SigningKey::from_bytes(&seed)),
+    )
+    .unwrap();
+    let group = identity
+        .create_group_with_governance_binding(&scope, &binding)
+        .unwrap();
+    let (info, tree) = group.public_group_state_bytes().unwrap();
+    let mut event = history.raw_event(EventKind::MlsGenesis, json!({
+        "cipher_suite": "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+        "group_info_ref": format!("ak:blob:{}", arkret_canonical::sha256_digest(&info)),
+        "ratchet_tree_ref": format!("ak:blob:{}", arkret_canonical::sha256_digest(&tree)),
+        "creator_leaf_authority": {
+            "leaf_signature_key_base64url": arkret_canonical::base64url_encode(SigningKey::from_bytes(&seed).verifying_key().as_bytes()),
+            "endpoint": {"kind": "device", "device_id": device},
+            "authorization_event_ref": authorization,
+        },
+        "governance_binding": binding,
+        "created_at": arkret_canonical::format_timestamp_canonical(arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now())),
+    }), &realm);
+    event.created_at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let event = sign_event(event, method, seed);
+    event.as_mls_genesis().unwrap();
+    event
+}
+
+#[tokio::test]
+async fn replacement_cannot_issue_remote_mls_membership_sources_behind_the_census_cut() {
+    let fixture = fixture().await;
+    let store = fixture.state.test_persistence();
+    let destination = DidCoreId::new("ak:did_core:web:remote.example").unwrap();
+    let digest = hash("native forward fence");
+    let before = forward_genesis(&fixture, false);
+    assert!(
+        store
+            .account_device_signer_evidence()
+            .prepare_non_managed_forward_current(&before, &destination, &digest)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    store
+        .security_transactions()
+        .commit_recovery_unit(fixture.write.clone())
+        .await
+        .unwrap();
+    let cut = footprint(&fixture).await;
+    let event = forward_genesis(&fixture, true);
+    let error = store
+        .account_device_signer_evidence()
+        .prepare_non_managed_forward_current(&event, &destination, &digest)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("membership fence is active"),
+        "{error}"
+    );
+    assert_eq!(footprint(&fixture).await, cut);
+}
+
 #[derive(Clone, Copy)]
 enum RecoveryProofDamage {
     Possession,
@@ -927,7 +1193,14 @@ async fn footprint(fixture: &Fixture) -> Value {
         "policy_current_states",
         "agent_producer_signer_keys",
         "content_recovery_episodes",
+        "content_recovery_census_sources",
         "content_keypackage_signature_history",
+        "content_endpoint_admission_history",
+        "ordinary_keypackage_claim_sources",
+        "keypackage_claim_sources",
+        "keypackage_claim_attempts",
+        "peer_keypackage_claims",
+        "account_device_signer_evidence",
         "mls_key_packages",
         "devices",
         "pcr_device_generation_current_states",
@@ -1892,6 +2165,7 @@ async fn policy_revocation_boundaries_roll_back_and_response_loss_replays_withou
 #[tokio::test]
 async fn every_recovery_durable_boundary_rolls_back_both_commits_and_terminal_ledger() {
     let fixture = fixture().await;
+    retain_own_claim_intent(&fixture).await;
     let before = footprint(&fixture).await;
     let first = fixture.write.commits[0].commit.stream_position;
     let second = fixture.write.commits[1].commit.stream_position;
@@ -1917,6 +2191,7 @@ async fn every_recovery_durable_boundary_rolls_back_both_commits_and_terminal_le
         ),
         ("pcr_device_authorization_current_states", "TRUE".to_owned()),
         ("content_recovery_episodes", "TRUE".to_owned()),
+        ("content_recovery_census_sources", "TRUE".to_owned()),
         ("account_global_versions", "TRUE".to_owned()),
         ("account_global_clock", "TRUE".to_owned()),
         ("account_global_channel_clocks", "TRUE".to_owned()),

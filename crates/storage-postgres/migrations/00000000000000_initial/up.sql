@@ -3057,6 +3057,20 @@ CREATE INDEX content_recovery_episodes_active_actor
  ON content_recovery_episodes (actor_id)
  WHERE security_completed_at IS NULL;
 
+-- Episode-local discovery cut, not a prepared inventory or an absence proof.
+-- Pending claims/forwards and unfinished predecessor episodes remain native
+-- reconciliation obligations even without a current leaf, root or Welcome.
+CREATE TABLE content_recovery_census_sources (
+ authorization_event_ref TEXT NOT NULL REFERENCES content_recovery_episodes(authorization_event_ref),
+ source_kind TEXT NOT NULL CHECK(source_kind IN ('admission','outgoing_claim','incoming_claim','outgoing_event','predecessor')),
+ source_key TEXT NOT NULL CHECK(source_key ~ '^sha256:[0-9a-f]{64}$'),
+ effective_scope JSONB,
+ source JSONB NOT NULL CHECK(jsonb_typeof(source)='object'),
+ PRIMARY KEY(authorization_event_ref,source_kind,source_key),
+ CHECK((source_kind='predecessor' AND effective_scope IS NULL)
+    OR (source_kind<>'predecessor' AND effective_scope IS NOT NULL AND jsonb_typeof(effective_scope)='object'))
+);
+
 CREATE UNIQUE INDEX security_transactions_revoke_proposal_event_unique
  ON public.security_transactions ((revoke_proposal->>'proposal_event_id'))
  WHERE revoke_proposal IS NOT NULL;

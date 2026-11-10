@@ -14,6 +14,7 @@ use super::{
 
 mod content_recovery_preparation;
 mod content_recovery_source;
+mod recovery_census_cut;
 mod recovery_unit;
 mod replacement_freshness;
 mod revoke_unit;

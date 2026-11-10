@@ -5,6 +5,7 @@
 #[path = "http_api/current_common.rs"]
 mod http_common;
 
+use arkret_event_draft::EventPayloadExt as _;
 use arkret_models_collaboration::events_payloads::{
     DeviceAuthorizationBindingKind, DeviceOrPrincipalRef, DeviceReanchorPayload, SignatureMaterial,
     device_authorize_payload_digest,
@@ -62,8 +63,387 @@ async fn fixture() -> Fixture {
     fixture_with_config(coland_test_support::app_config()).await
 }
 
+fn old_device_package(fixture: &Fixture, seed: [u8; 32]) -> coland_storage::MlsKeyPackageRow {
+    let actor = ActorId::account(fixture.pcr.history.account.clone());
+    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
+        actor.clone(),
+        fixture.pcr.history.founding_device_id.clone(),
+        arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(SigningKey::from_bytes(&seed)),
+    )
+    .unwrap();
+    let package = identity.key_package_record().unwrap();
+    let bytes = arkret_canonical::base64url_decode(package.keypackage.as_bytes()).unwrap();
+    let authorization = fixture
+        .pcr
+        .history
+        .events
+        .iter()
+        .find(|event| event.kind.as_str() == "ak.device.authorize")
+        .unwrap();
+    let now = chrono::Utc::now().timestamp();
+    coland_storage::MlsKeyPackageRow {
+        id: package.keypackage_id,
+        keypackage_ref: package.keypackage_ref.to_string(),
+        keypackage_digest: arkret_canonical::sha256_digest(&bytes),
+        owner_actor_id: actor,
+        effective_scope: None,
+        actor_id: fixture.pcr.history.account.principal_id.to_string(),
+        device_id: Some(fixture.pcr.history.founding_device_id.to_string()),
+        endpoint_verification_method: None,
+        key_package_bytes: bytes,
+        capabilities_digest: arkret_canonical::canonical_sha256(&package.capabilities).unwrap(),
+        capabilities: package.capabilities,
+        last_resort: false,
+        last_resort_realm_id: None,
+        lifetime_not_before: now - 60,
+        lifetime_not_after: now + 3600,
+        claimed_by_mls_group_id: None,
+        device_authorize_event_id: Some(authorization.event_id.to_string()),
+        agent_key_authorize_event_id: None,
+        claimed_at: None,
+        claim_expires_at_unix_ms: None,
+        consumed_at: None,
+        created_at: now,
+    }
+}
+
+#[tokio::test]
+async fn replacement_cannot_reuse_a_verified_old_keypackage_signing_key() {
+    let fixture = fixture_with_config(http_common::test_config()).await;
+    http_common::dev_token_for_device(
+        fixture.state.clone(),
+        fixture.pcr.history.did.as_str(),
+        fixture.pcr.history.founding_device_id.as_str(),
+        "Publishing device",
+    )
+    .await;
+    let store = fixture.state.test_persistence();
+    let package = old_device_package(&fixture, REPLACEMENT_SIGNING_SEED);
+    assert!(store.mls_key_packages().put(&package).await.unwrap());
+    let before = footprint(&fixture).await;
+    let error = store
+        .security_transactions()
+        .commit_recovery_unit(fixture.write.clone())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("already used"), "{error}");
+    assert_eq!(footprint(&fixture).await, before);
+}
+
+#[tokio::test]
+async fn invalid_keypackage_cannot_pollute_recovery_exclusion_and_episode_fences_publication() {
+    let fixture = fixture_with_config(http_common::test_config()).await;
+    http_common::dev_token_for_device(
+        fixture.state.clone(),
+        fixture.pcr.history.did.as_str(),
+        fixture.pcr.history.founding_device_id.as_str(),
+        "Publishing device",
+    )
+    .await;
+    let store = fixture.state.test_persistence();
+    let control = old_device_package(&fixture, [97; 32]);
+    assert!(store.mls_key_packages().put(&control).await.unwrap());
+    let mut package = old_device_package(&fixture, [98; 32]);
+    let last = package.key_package_bytes.len() - 1;
+    package.key_package_bytes[last] ^= 1;
+    package.keypackage_digest = arkret_canonical::sha256_digest(&package.key_package_bytes);
+    let before = footprint(&fixture).await;
+    let error = store.mls_key_packages().put(&package).await.unwrap_err();
+    assert!(
+        error.to_string().contains("KeyPackage signing history"),
+        "{error}"
+    );
+    assert_eq!(footprint(&fixture).await, before);
+    store
+        .security_transactions()
+        .commit_recovery_unit(fixture.write.clone())
+        .await
+        .unwrap();
+    let valid = old_device_package(&fixture, [99; 32]);
+    let before = footprint(&fixture).await;
+    let error = store.mls_key_packages().put(&valid).await.unwrap_err();
+    assert!(
+        error.to_string().contains("membership fence is active"),
+        "{error}"
+    );
+    assert_eq!(footprint(&fixture).await, before);
+}
+
+#[tokio::test]
+async fn pending_episode_fences_new_pairing_by_the_actual_replacement_device() {
+    let fixture = fixture().await;
+    let store = fixture.state.test_persistence();
+    store
+        .security_transactions()
+        .commit_recovery_unit(fixture.write.clone())
+        .await
+        .unwrap();
+    let replacement = fixture.write.commits[1]
+        .event
+        .as_device_authorize()
+        .unwrap();
+    let at = fixture.write.commits[1].commit.committed_at + chrono::Duration::milliseconds(1);
+    let payload = possession_with(
+        &fixture.pcr.history.account,
+        DeviceAuthorizationSpec {
+            device_id: DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap(),
+            signing_seed: [101; 32],
+            hpke_seed: [102; 32],
+            authorized_by: DeviceOrPrincipalRef::DeviceId(replacement.device_id.clone()),
+            not_before: at,
+            expires_at: None,
+            binding: DeviceAuthorizationBindingKind::AcceptedDevice,
+            authorized_generation_ref: replacement.authorized_generation_ref,
+            applet_id: None,
+        },
+    );
+    let mut event = fixture.pcr.history.raw_event(
+        EventKind::DeviceAuthorize,
+        serde_json::to_value(payload).unwrap(),
+        &fixture.write.commits[1].event.realm_id,
+    );
+    event.created_at = at;
+    let event = sign_event(
+        event,
+        fixture.write.commits[1]
+            .event
+            .producer_proof
+            .as_ref()
+            .unwrap()
+            .verification_method
+            .clone(),
+        REPLACEMENT_SIGNING_SEED,
+    );
+    let mut commit = fixture.write.commits[1].commit.clone();
+    commit.event_ref = event.event_id.clone();
+    commit.previous_commit_ref = Some(commit.commit_id.clone());
+    commit.stream_position += 1;
+    commit.committed_at = at;
+    let identity =
+        arkret_canonical::canonical::unsigned_value(&commit, &["commit_id", "signature"]).unwrap();
+    commit.commit_id = RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
+        arkret_canonical::canonical_json_bytes(&identity).unwrap(),
+    ));
+    commit.signature = arkret_signatures::detached_object::sign_detached_object(
+        &arkret_canonical::canonical::unsigned_value(&commit, &["signature"]).unwrap(),
+        DetachedSignatureContext::RealmCommit,
+        commit.signature.verification_method.clone(),
+        at,
+        &SigningKey::from_bytes(
+            &coland_test_support::device_authorization_history::STATION_AUTHORITY_SEED,
+        ),
+    )
+    .unwrap();
+    commit.verify_commit_id_matches_content().unwrap();
+    let queued_at = commit.committed_at;
+    let write = coland_storage::AuthorityCommitTransaction {
+        expected_authority: fixture.write.commits[1].expected_authority.clone(),
+        event,
+        commit,
+        producer_signer_fact: None,
+        content_backup_source: None,
+        mls_state: None,
+        welcomes: vec![],
+        recipient_queue_capacity: 0,
+    };
+    let before = footprint(&fixture).await;
+    let error = store
+        .authority_commits()
+        .admit_accepted_device_authorization(&write, queued_at)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("membership fence is active"),
+        "{error}"
+    );
+    assert_eq!(footprint(&fixture).await, before);
+}
+
 async fn fixture_with_config(config: coland_http::config::AppConfig) -> Fixture {
     fixture_with_damage(config, None).await
+}
+
+// Signed, verified status is an input at this storage boundary. The account
+// authority's HTTP resolve and Standard-grant issuance are outside this fixture.
+async fn observed_reader(fixture: &Fixture) -> coland_storage::HumanPcrHistoryReader {
+    use arkret_models_collaboration::account_status::{
+        UnsignedAccountStatusReceipt, UnsignedAccountStatusRecord,
+    };
+    use arkret_signatures::account_status::*;
+    let account = &fixture.pcr.history.account;
+    let key = SigningKey::from_bytes(&[94; 32]);
+    let method = DidUrl::new(format!("{}#status", fixture.pcr.history.station_did)).unwrap();
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let record = sign_account_status_record(
+        UnsignedAccountStatusRecord {
+            schema: SchemaId::ACCOUNT_STATUS_RECORD_V1.to_owned(),
+            account_authority_id: account.station_id.clone(),
+            account_id: account.clone(),
+            principal_control_realm_id: fixture.pcr.history.events[0].realm_id.clone(),
+            binding_version: 1,
+            status_sequence: 1,
+            previous_account_status_record_id: None,
+            status: arkret_models_collaboration::objects::account_status::AccountStatus::Active,
+            reason_code: None,
+            reason: None,
+            issued_at: at,
+            expires_at: None,
+        },
+        method.clone(),
+        &key,
+    )
+    .unwrap();
+    let receipt = sign_account_status_receipt(
+        UnsignedAccountStatusReceipt {
+            receipt_id: ReceiptId::new(format!("ak:receipt:{}", uuid::Uuid::now_v7())).unwrap(),
+            account_status_record_id: record.account_status_record_id.clone(),
+            record_digest: record.payload_digest().unwrap(),
+            account_authority_id: account.station_id.clone(),
+            account_id: account.clone(),
+            status_sequence: 1,
+            receiver_id: account.station_id.clone(),
+            accepted_at: at,
+            verification_method: method,
+        },
+        &key,
+    )
+    .unwrap();
+    let public = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+        bytes: key.verifying_key().to_bytes().to_vec(),
+    };
+    verify_account_status_record(&record, &public).unwrap();
+    verify_account_status_receipt(&receipt, &public).unwrap();
+    fixture
+        .state
+        .test_persistence()
+        .account_status_replicas()
+        .append(&record, &receipt)
+        .await
+        .unwrap();
+    let authorize = &fixture.write.commits[1].event;
+    let payload = authorize.as_device_authorize().unwrap();
+    coland_storage::HumanPcrHistoryReader {
+        account_id: account.clone(),
+        device_id: payload.device_id.clone(),
+        credential_device_binding: Some(
+            arkret_models_identity::session_credential::SessionGrantDeviceBinding {
+                device_id: payload.device_id.clone(),
+                authorization_event_id: authorize.event_id.clone(),
+                model_generation_ref: payload.authorized_generation_ref,
+            },
+        ),
+        credential_expires_at: at + chrono::Duration::minutes(5),
+        account_status_observation: Some(
+            coland_storage::AccountStatusCurrentObservation::after_authenticated_resolve(record),
+        ),
+    }
+}
+
+#[tokio::test]
+async fn native_preparation_is_read_only_fixed_and_current_device_bound() {
+    use coland_storage::HumanPcrHistoryRead;
+    let fixture = fixture().await;
+    let store = fixture.state.test_persistence();
+    store
+        .security_transactions()
+        .commit_recovery_unit(fixture.write.clone())
+        .await
+        .unwrap();
+    let reader = observed_reader(&fixture).await;
+    let authorize = &fixture.write.commits[1];
+    let before = footprint(&fixture).await;
+    let mut no_status = reader.clone();
+    no_status.account_status_observation = None;
+    assert!(matches!(
+        store
+            .security_transactions()
+            .human_content_recovery_preparation(&no_status, &authorize.event.event_id)
+            .await
+            .unwrap(),
+        HumanPcrHistoryRead::CurrentStatusRequired
+    ));
+    let mut wrong_device = reader.clone();
+    wrong_device.device_id = fixture.pcr.history.founding_device_id.clone();
+    assert!(matches!(
+        store
+            .security_transactions()
+            .human_content_recovery_preparation(&wrong_device, &authorize.event.event_id)
+            .await
+            .unwrap(),
+        HumanPcrHistoryRead::NotApplicable
+    ));
+    for _ in 0..2 {
+        let HumanPcrHistoryRead::Ready { value, guard } = store
+            .security_transactions()
+            .human_content_recovery_preparation(&reader, &authorize.event.event_id)
+            .await
+            .unwrap()
+        else {
+            panic!("current replacement must observe its native episode");
+        };
+        assert_eq!(value.state, ContentRecoveryPreparationState::Pending);
+        assert!(value.inventory_blob_ref.is_none());
+        assert_eq!(
+            value.pcr_cut,
+            CommittedEventRef {
+                event_id: authorize.event.event_id.clone(),
+                commit_id: authorize.commit.commit_id.clone(),
+                stream_ref: authorize.commit.stream_ref.clone(),
+                stream_position: authorize.commit.stream_position,
+            }
+        );
+        assert_eq!(
+            value.replacement.actor_id,
+            ActorId::account(reader.account_id.clone())
+        );
+        assert_eq!(
+            value.replacement.authorization_event_ref,
+            authorize.event.event_id
+        );
+        assert_eq!(
+            value.replacement.signature_key_base64url,
+            arkret_canonical::base64url_encode(
+                SigningKey::from_bytes(&REPLACEMENT_SIGNING_SEED)
+                    .verifying_key()
+                    .to_bytes()
+            )
+        );
+        guard.finish().await.unwrap();
+    }
+    assert_eq!(
+        footprint(&fixture).await,
+        before,
+        "reads must not create or advance episodes"
+    );
+    let mut conn = fixture.pool.get().await.unwrap();
+    diesel::sql_query(
+        "UPDATE content_recovery_episodes SET pcr_cut=$1 WHERE authorization_event_ref=$2",
+    )
+    .bind::<Jsonb, _>(
+        serde_json::to_value(CommittedEventRef {
+            event_id: fixture.write.commits[0].event.event_id.clone(),
+            commit_id: fixture.write.commits[0].commit.commit_id.clone(),
+            stream_ref: fixture.write.commits[0].commit.stream_ref.clone(),
+            stream_position: fixture.write.commits[0].commit.stream_position,
+        })
+        .unwrap(),
+    )
+    .bind::<diesel::sql_types::Text, _>(authorize.event.event_id.as_str())
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let result = store
+        .security_transactions()
+        .human_content_recovery_preparation(&reader, &authorize.event.event_id)
+        .await;
+    let Err(error) = result else {
+        panic!("damaged fixed cut must fail");
+    };
+    assert!(
+        error.to_string().contains("revision_unavailable"),
+        "{error}"
+    );
 }
 
 async fn fixture_with_damage(
@@ -546,6 +926,9 @@ async fn footprint(fixture: &Fixture) -> Value {
         "recovery_policies",
         "policy_current_states",
         "agent_producer_signer_keys",
+        "content_recovery_episodes",
+        "content_keypackage_signature_history",
+        "mls_key_packages",
         "devices",
         "pcr_device_generation_current_states",
         "pcr_device_authorization_current_states",
@@ -869,6 +1252,13 @@ async fn recovery_unit_rejects_invalid_possession_without_history_residue() {
 #[tokio::test]
 async fn completed_recovery_device_is_admitted_without_inventory_projection() {
     let fixture = fixture_with_config(http_common::test_config()).await;
+    let old_token = http_common::dev_token_for_device(
+        fixture.state.clone(),
+        fixture.pcr.history.did.as_str(),
+        fixture.pcr.history.founding_device_id.as_str(),
+        "Old device",
+    )
+    .await;
     let store = fixture.state.test_persistence();
     store
         .security_transactions()
@@ -937,6 +1327,48 @@ async fn completed_recovery_device_is_admitted_without_inventory_projection() {
         "Recovered device",
     )
     .await;
+    let preparation_url = format!(
+        "http://server/_arkret/self/mls/content-recoveries/{}",
+        fixture.write.commits[1].event.event_id
+    );
+    let before_read = footprint(&fixture).await;
+    let mut denied = Vec::new();
+    for token in [None, Some(&old_token), Some(&token)] {
+        let mut request = http_common::TestClient::get(&preparation_url);
+        if let Some(token) = token {
+            request = request.add_header("authorization", format!("Bearer {token}"), true);
+        }
+        let mut response = request
+            .send(&http_common::app_from_state(fixture.state.clone()))
+            .await;
+        assert_eq!(
+            response.status_code,
+            Some(salvo::http::StatusCode::NOT_FOUND)
+        );
+        let body: Value = response.take_json().await.unwrap();
+        assert_eq!(http_common::problem_code(&body), "not_found");
+        assert_eq!(body["detail"], "content recovery preparation not found");
+        assert!(body.get("instance").is_none(), "{body}");
+        denied.push(body);
+    }
+    assert!(denied.windows(2).all(|pair| pair[0] == pair[1]));
+    assert_eq!(
+        footprint(&fixture).await,
+        before_read,
+        "GET must not create or advance an episode"
+    );
+    let unknown_episode = format!(
+        "http://server/_arkret/self/mls/content-recoveries/{}",
+        fixture.write.commits[0].event.event_id
+    );
+    let response = http_common::TestClient::get(&unknown_episode)
+        .add_header("authorization", format!("Bearer {token}"), true)
+        .send(&http_common::app_from_state(fixture.state.clone()))
+        .await;
+    assert_eq!(
+        response.status_code,
+        Some(salvo::http::StatusCode::NOT_FOUND)
+    );
     // Development login may create optional display metadata. It must not
     // become an authorization requirement for a natively accepted recovery.
     let mut conn = fixture.pool.get().await.unwrap();
@@ -1139,12 +1571,13 @@ async fn completed_recovery_device_is_admitted_without_inventory_projection() {
     let published_body: Value = published.take_json().await.unwrap();
     assert_eq!(
         published.status_code,
-        Some(salvo::http::StatusCode::OK),
+        Some(salvo::http::StatusCode::CONFLICT),
         "{published_body}"
     );
-    let published: KeyPackagesUploadResponseBody = serde_json::from_value(published_body).unwrap();
-    assert_eq!(published.accepted_count, 1, "{published:?}");
-    assert!(published.rejections.is_empty(), "{published:?}");
+    assert_eq!(
+        http_common::problem_code(&published_body),
+        "failed_precondition"
+    );
     let mut viewer_response =
         http_common::TestClient::get("http://server/_arkret/self/account/viewer")
             .add_header("authorization", format!("Bearer {token}"), true)
@@ -1483,6 +1916,7 @@ async fn every_recovery_durable_boundary_rolls_back_both_commits_and_terminal_le
             "NEW.kind='ak.device.authorize'".to_owned(),
         ),
         ("pcr_device_authorization_current_states", "TRUE".to_owned()),
+        ("content_recovery_episodes", "TRUE".to_owned()),
         ("account_global_versions", "TRUE".to_owned()),
         ("account_global_clock", "TRUE".to_owned()),
         ("account_global_channel_clocks", "TRUE".to_owned()),

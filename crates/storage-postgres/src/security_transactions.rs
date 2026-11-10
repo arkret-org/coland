@@ -12,8 +12,10 @@ use super::{
     sql_types,
 };
 
+mod content_recovery_preparation;
 mod content_recovery_source;
 mod recovery_unit;
+mod replacement_freshness;
 mod revoke_unit;
 mod rotation_units;
 
@@ -610,6 +612,15 @@ async fn insert_step_attempt(
 
 #[async_trait]
 impl SecurityTransactionStore for PgSecurityTransactionStore {
+    async fn human_content_recovery_preparation(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        authorization: &arkret_wire::EventId,
+    ) -> PersistenceResult<
+        coland_storage::HumanPcrHistoryRead<arkret_models_crypto::ContentRecoveryPreparation>,
+    > {
+        content_recovery_preparation::read(&self.pool, reader, authorization).await
+    }
     async fn human_content_recovery_source(
         &self,
         reader: &coland_storage::HumanPcrHistoryReader,

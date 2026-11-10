@@ -50,6 +50,7 @@ pub(super) async fn commit_recovery_unit_in_connection(
         )
         .into());
     }
+    super::replacement_freshness::require_fresh(conn, &write).await?;
     for commit in &write.commits {
         queue_event_in_connection(conn, &commit.event, write.queued_at).await?;
         match commit_verified_pcr_device_transaction_in_connection(conn, commit).await? {
@@ -76,6 +77,7 @@ pub(super) async fn commit_recovery_unit_in_connection(
         .await?;
     }
     crate::agent_producer_signer_keys::retain_recovery_unit_in_connection(conn, &write).await?;
+    super::content_recovery_preparation::retain_in_connection(conn, &write).await?;
     accept_step_in_transaction(
         conn,
         write.transaction,

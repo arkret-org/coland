@@ -970,6 +970,7 @@ fn method_path_requires_fresh_introspection(method: &salvo::http::Method, path: 
         "/keys",
         "/members",
         "/moderation",
+        "/mls/content-recoveries",
         "/morphs",
         "/spaces",
         "/strands",
@@ -1390,6 +1391,7 @@ mod tests {
             "/_arkret/self/keys/backups",
             "/_arkret/self/keys/query",
             "/_arkret/self/realms/r1/strands",
+            "/_arkret/self/mls/content-recoveries/authorization",
         ] {
             assert!(
                 method_path_requires_fresh_introspection(&Method::GET, path),
@@ -1454,6 +1456,7 @@ mod tests {
             ("QUERY", "/_arkret/self/events/frontier"),
             ("GET", "/_arkret/self/events"),
             ("GET", "/_arkret/self/keys/query"),
+            ("GET", "/_arkret/self/mls/content-recoveries/authorization"),
             ("POST", "/_arkret/root/identity/recovery-policy"),
             ("GET", "/_arkret/root/identity/recovery-sessions"),
             ("POST", "/_arkret/self/security-transactions/1/cancel"),

@@ -111,6 +111,7 @@ impl PgMlsKeyPackageStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_,PgTransactionError,_>(async move |conn| {
+        crate::content_recovery_fence::require_unfenced(conn, &record.owner_actor_id).await?;
         if let Some((guard, expires_at, body)) = native {
             crate::mls_keypackage_publication::require_native_publication(conn, record, guard, expires_at, body).await?;
         } else if record.effective_scope.is_some() {
@@ -177,6 +178,9 @@ impl PgMlsKeyPackageStore {
         .bind::<Nullable<Jsonb>, _>(record.effective_scope.as_ref().map(serde_json::to_value).transpose().map_err(PersistenceError::database)?)
         .execute(&mut *conn)
         .await.map_err(PersistenceError::database)?;
+        if inserted > 0 {
+            crate::content_keypackage_history::retain(conn, record).await?;
+        }
         Ok(inserted > 0)
         }).await.map_err(PgTransactionError::into_persistence)
     }

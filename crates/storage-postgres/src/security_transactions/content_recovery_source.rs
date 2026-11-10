@@ -37,7 +37,7 @@ struct SourceRow {
 /// Load a native original, checking its stored canonical preimage as well as
 /// the complete suite-tagged Event ID. Neither a current row nor an envelope
 /// with copied coordinates is original recovery evidence.
-async fn original(
+pub(super) async fn original(
     conn: &mut AsyncPgConnection,
     event_id: &EventId,
     realm: &RealmId,

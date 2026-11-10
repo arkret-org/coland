@@ -1508,6 +1508,19 @@ impl crate::identity::RecoverySessionPort for PersistenceRecoverySessions {
 
 #[async_trait::async_trait]
 impl crate::identity::SecurityTransactionPort for PersistenceSecurityTransactions {
+    async fn human_content_recovery_preparation(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        authorization: &arkret_wire::EventId,
+    ) -> crate::ServiceResult<
+        coland_storage::HumanPcrHistoryRead<arkret_models_crypto::ContentRecoveryPreparation>,
+    > {
+        Ok(self
+            .0
+            .security_transactions()
+            .human_content_recovery_preparation(reader, authorization)
+            .await?)
+    }
     async fn commit_revoke_proposal(
         &self,
         write: crate::identity::RevokeProposalCommitWrite,

@@ -591,6 +591,19 @@ pub trait RecoverySessionStore: Send + Sync {
 
 #[async_trait]
 pub trait SecurityTransactionStore: Send + Sync {
+    /// Observe an existing, current-holder-bound native episode. This read
+    /// never creates an episode or accepts caller-provided inventory material.
+    async fn human_content_recovery_preparation(
+        &self,
+        _reader: &crate::HumanPcrHistoryReader,
+        _authorization: &arkret_wire::EventId,
+    ) -> PersistenceResult<
+        crate::HumanPcrHistoryRead<arkret_models_crypto::ContentRecoveryPreparation>,
+    > {
+        Err(PersistenceError::Conflict(
+            "revision_unavailable: native recovery preparation unavailable".into(),
+        ))
+    }
     /// Reconstruct the original completed Human recovery unit for the exact
     /// current credential-bound replacement. This is a planning read, not an
     /// MLS admission token: a later write must repeat qualification under its

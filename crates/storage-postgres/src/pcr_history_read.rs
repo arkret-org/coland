@@ -22,6 +22,21 @@ struct HistoryGuard {
     expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+pub(crate) fn guarded<T>(
+    held: Box<DeliveryGuard>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    value: T,
+) -> HumanPcrHistoryRead<T> {
+    HumanPcrHistoryRead::Ready {
+        value,
+        guard: Box::new(HistoryGuard {
+            held,
+            checked_at: chrono::Utc::now(),
+            expires_at,
+        }),
+    }
+}
+
 #[async_trait::async_trait]
 impl AccountContentDeliveryGuard for HistoryGuard {
     fn permits_handoff(&self) -> bool {

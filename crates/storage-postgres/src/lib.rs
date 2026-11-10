@@ -82,6 +82,8 @@ mod content_dependencies;
 mod content_endpoint_bindings;
 mod content_endpoint_history;
 mod content_history_admission;
+mod content_keypackage_history;
+mod content_recovery_fence;
 mod content_root_packages;
 pub use consent_request_quarantine::PgConsentRequestQuarantineStore;
 #[cfg(test)]

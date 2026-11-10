@@ -206,6 +206,7 @@ pub(crate) async fn admit_accepted_device_unit_in_connection(
         };
     }
 
+    crate::content_recovery_fence::require_unfenced(conn, &event.actor_id).await?;
     let status = crate::pcr_device_status_reader::confirmed_pcr_device_status_cut_in_connection(
         conn,
         account,

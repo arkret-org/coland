@@ -86,6 +86,11 @@ impl ClaimEndpoint {
                 device,
                 original,
             } => {
+                crate::content_recovery_fence::require_unfenced(
+                    conn,
+                    &arkret_wire::ActorId::account(account.clone()),
+                )
+                .await?;
                 let cut =
                     crate::pcr_device_status_reader::confirmed_pcr_device_status_cut_in_connection(
                         conn, account, device, at,

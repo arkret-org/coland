@@ -34,10 +34,9 @@ async fn reader(
     }))
 }
 
-async fn resolve_current_status(
-    state: &AppState,
+fn require_standard_device(
     session: &SessionIdentityState,
-    reader: &mut HumanPcrHistoryReader,
+    reader: &HumanPcrHistoryReader,
 ) -> Result<(), AppError> {
     if !session.session_grant.as_ref().is_some_and(|grant| {
         grant.credential_class == arkret_models_identity::SessionGrantCredentialClass::Standard
@@ -49,6 +48,24 @@ async fn resolve_current_status(
     }) {
         return Err(unavailable());
     }
+    Ok(())
+}
+
+pub(crate) async fn standard_reader(
+    state: &AppState,
+    session: &SessionIdentityState,
+) -> Result<HumanPcrHistoryReader, AppError> {
+    let reader = reader(state, session).await?.ok_or_else(unavailable)?;
+    require_standard_device(session, &reader)?;
+    Ok(reader)
+}
+
+pub(crate) async fn resolve_current_status(
+    state: &AppState,
+    session: &SessionIdentityState,
+    reader: &mut HumanPcrHistoryReader,
+) -> Result<(), AppError> {
+    require_standard_device(session, reader)?;
     reader.account_status_observation =
         Some(super::peer::refresh_current_account_status(state, &reader.account_id).await?);
     Ok(())
@@ -58,7 +75,7 @@ pub(crate) async fn current_reader(
     state: &AppState,
     session: &SessionIdentityState,
 ) -> Result<HumanPcrHistoryReader, AppError> {
-    let mut reader = reader(state, session).await?.ok_or_else(unavailable)?;
+    let mut reader = standard_reader(state, session).await?;
     resolve_current_status(state, session, &mut reader).await?;
     Ok(reader)
 }

@@ -1386,6 +1386,18 @@ pub use coland_storage::{
 
 #[async_trait]
 pub trait SecurityTransactionPort: Send + Sync {
+    async fn human_content_recovery_preparation(
+        &self,
+        _reader: &coland_storage::HumanPcrHistoryReader,
+        _authorization: &arkret_wire::EventId,
+    ) -> ServiceResult<
+        coland_storage::HumanPcrHistoryRead<arkret_models_crypto::ContentRecoveryPreparation>,
+    > {
+        Err(coland_storage::PersistenceError::Conflict(
+            "revision_unavailable: native recovery preparation unavailable".into(),
+        )
+        .into())
+    }
     async fn commit_revoke_proposal(
         &self,
         write: RevokeProposalCommitWrite,
@@ -1459,6 +1471,17 @@ pub struct SecurityTransactionService {
 }
 
 impl SecurityTransactionService {
+    pub async fn human_content_recovery_preparation(
+        &self,
+        reader: &coland_storage::HumanPcrHistoryReader,
+        authorization: &arkret_wire::EventId,
+    ) -> ServiceResult<
+        coland_storage::HumanPcrHistoryRead<arkret_models_crypto::ContentRecoveryPreparation>,
+    > {
+        self.transactions
+            .human_content_recovery_preparation(reader, authorization)
+            .await
+    }
     pub fn new(transactions: Arc<dyn SecurityTransactionPort>) -> Self {
         Self { transactions }
     }

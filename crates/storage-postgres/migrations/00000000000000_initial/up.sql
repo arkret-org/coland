@@ -2214,6 +2214,17 @@ ALTER TABLE ONLY public.mls_key_packages
 
 CREATE INDEX mls_key_packages_by_owner_endpoint ON public.mls_key_packages USING btree (owner_actor_id, actor_id, device_id, endpoint_verification_method, claimed_by_mls_group_id);
 
+-- Publication-time RFC signature/Actor proof is retained independently of the
+-- current KeyPackage lifetime. Recovery never re-admits an expired package.
+CREATE TABLE content_keypackage_signature_history (
+ keypackage_id TEXT PRIMARY KEY REFERENCES mls_key_packages(id),
+ publication_digest TEXT NOT NULL,
+ binding JSONB NOT NULL CHECK(binding->'actor_id'->>'kind'='account'),
+ admitted_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX content_keypackage_signature_history_actor
+ ON content_keypackage_signature_history ((binding->'actor_id'));
+
 -- Authenticated claim attempts share one database-clock budget across workers.
 -- Only identity digests and a short-lived first decision are retained; this
 -- table is neither a claim reservation nor a receipt or authority source.
@@ -3026,6 +3037,26 @@ CREATE INDEX security_transactions_principal_created_idx ON public.security_tran
 CREATE INDEX security_transactions_content_recovery_source_idx
  ON public.security_transactions (principal_id, station_id, (prepared_plan->'binding'->>'authorize_event_id'))
  WHERE kind='recovery' AND terminal_outcome->>'outcome'='completed';
+
+-- Native recovery intents survive process loss before the inventory worker.
+-- Material preparation and release of the membership fence are independent.
+CREATE TABLE content_recovery_episodes (
+ authorization_event_ref TEXT PRIMARY KEY,
+ transaction_id UUID NOT NULL UNIQUE REFERENCES security_transactions(id),
+ actor_id JSONB NOT NULL CHECK(jsonb_typeof(actor_id)='object'),
+ state TEXT NOT NULL CHECK(state IN ('pending','prepared')),
+ replacement JSONB NOT NULL CHECK(jsonb_typeof(replacement)='object'),
+ pcr_cut JSONB NOT NULL CHECK(jsonb_typeof(pcr_cut)='object'),
+ inventory_blob_ref TEXT,
+ security_completed_at TIMESTAMPTZ,
+ created_at TIMESTAMPTZ NOT NULL,
+ CHECK((state='pending' AND inventory_blob_ref IS NULL)
+    OR (state='prepared' AND inventory_blob_ref IS NOT NULL))
+);
+CREATE INDEX content_recovery_episodes_active_actor
+ ON content_recovery_episodes (actor_id)
+ WHERE security_completed_at IS NULL;
+
 CREATE UNIQUE INDEX security_transactions_revoke_proposal_event_unique
  ON public.security_transactions ((revoke_proposal->>'proposal_event_id'))
  WHERE revoke_proposal IS NOT NULL;

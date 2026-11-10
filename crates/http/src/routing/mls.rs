@@ -248,6 +248,66 @@ pub fn protocol_router() -> Router {
             Router::with_path("mls/roster-authority/query")
                 .post(mls_roster_read::resolve_self_mls_roster_authority),
         )
+        .push(
+            Router::with_path("mls/content-recoveries/{authorization_event_ref}")
+                .get(read_content_recovery_preparation),
+        )
+}
+
+#[salvo::oapi::endpoint(
+    operation_id = "ak.self.mls.content_recovery.resource.get",
+    tags("mls.rs")
+)]
+#[tracing::instrument(skip_all, fields(op = "ak.self.mls.content_recovery.resource.get.v1"))]
+async fn read_content_recovery_preparation(
+    aa: AuthArgs,
+    depot: &mut Depot,
+    req: &mut Request,
+) -> GuardedJsonResult<arkret_models_crypto::ContentRecoveryPreparation> {
+    use coland_storage::HumanPcrHistoryRead;
+
+    use crate::routing::events::pcr_history;
+
+    let missing =
+        || AppError::indistinguishable_not_found("content recovery preparation not found");
+    let unavailable = || {
+        crate::app_error!(
+            RevisionUnavailable,
+            "native content recovery preparation is unavailable"
+        )
+    };
+    let state = depot.get_typed::<AppState>().expect("state injected");
+    let authorization = req
+        .param::<String>("authorization_event_ref")
+        .and_then(|value| arkret_wire::EventId::new(value).ok())
+        .ok_or_else(missing)?;
+    let session = aa
+        .authenticated_session(state, req)
+        .await
+        .map_err(|_| missing())?;
+    let mut reader = pcr_history::standard_reader(state, &session)
+        .await
+        .map_err(|_| missing())?;
+    let mut result = state
+        .security_transactions()
+        .human_content_recovery_preparation(&reader, &authorization)
+        .await
+        .map_err(|_| unavailable())?;
+    if matches!(result, HumanPcrHistoryRead::CurrentStatusRequired) {
+        pcr_history::resolve_current_status(state, &session, &mut reader)
+            .await
+            .map_err(|_| unavailable())?;
+        result = state
+            .security_transactions()
+            .human_content_recovery_preparation(&reader, &authorization)
+            .await
+            .map_err(|_| unavailable())?;
+    }
+    match result {
+        HumanPcrHistoryRead::Ready { value, guard } => guarded_json_ok(value, Some(guard)),
+        HumanPcrHistoryRead::CurrentStatusRequired => Err(unavailable()),
+        HumanPcrHistoryRead::NotApplicable => Err(missing()),
+    }
 }
 
 pub(crate) fn peer_router() -> Router {

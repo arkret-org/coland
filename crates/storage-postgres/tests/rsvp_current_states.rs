@@ -118,7 +118,7 @@ async fn rsvp_current_accepts_encrypted_entry_and_rejects_without_partial_commit
         arkret_wire::EventKind::StrandUpdate,
         &author,
         json!({
-            "target_ref": discussion.strand_id,
+            "strand_id": discussion.strand_id,
             "patch": {
                 "schema_refs": {"$op":"set", "value":["ak.schema.calendar_event.v1"]},
                 "metadata.fields.calendar": {"$op":"set", "value":{

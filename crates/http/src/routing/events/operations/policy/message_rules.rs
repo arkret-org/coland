@@ -109,10 +109,13 @@ pub(super) fn operation_target_scope_circle_id(
             let (_, _, strand_id) = projection.message_origin(message_id)?;
             projection.strand_scope_circle_id(&strand_id)
         }
-        arkret_wire::EventKind::StrandUpdate => strand_scope("target_ref"),
-        arkret_wire::EventKind::MorphUpdate
-        | arkret_wire::EventKind::MorphArchive
-        | arkret_wire::EventKind::MorphRestore => morph_scope("target_ref"),
+        arkret_wire::EventKind::StrandUpdate | arkret_wire::EventKind::StrandTracksUpdate => {
+            strand_scope("strand_id")
+        }
+        arkret_wire::EventKind::MorphUpdate => morph_scope("morph_id"),
+        arkret_wire::EventKind::MorphArchive | arkret_wire::EventKind::MorphRestore => {
+            morph_scope("target_ref")
+        }
         arkret_wire::EventKind::StrandArchive
         | arkret_wire::EventKind::StrandRestore
         | arkret_wire::EventKind::StrandMove

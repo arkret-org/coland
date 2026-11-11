@@ -306,7 +306,7 @@ fn builtin_operation_conformance_vectors_cover_registry() {
         OperationVector {
             name: "strand update",
             kind: arkret_wire::EventKind::StrandUpdate,
-            payload: json!({"target_ref": "ak:strand:AUtQ1IrDq4bUl2tchpqyVaLFC99If4UbReAATcBFDUhp", "patch": {"metadata.title": { "$op": "set", "value": "Launch v2" }}}),
+            payload: json!({"strand_id": "ak:strand:AUtQ1IrDq4bUl2tchpqyVaLFC99If4UbReAATcBFDUhp", "patch": {"metadata.title": { "$op": "set", "value": "Launch v2" }}}),
             valid: true,
         },
         OperationVector {
@@ -383,7 +383,7 @@ fn builtin_operation_conformance_vectors_cover_registry() {
         OperationVector {
             name: "morph update",
             kind: arkret_wire::EventKind::MorphUpdate,
-            payload: json!({"target_ref": "ak:morph:AQ-DRvjAp7PmXKkjoqk8vbmRDFZoSMbThbqNN0j6guzb", "patch": {"metadata.title": "Backfill v2"}}),
+            payload: json!({"morph_id": "ak:morph:AQ-DRvjAp7PmXKkjoqk8vbmRDFZoSMbThbqNN0j6guzb", "patch": {"metadata.title": "Backfill v2"}}),
             valid: true,
         },
         OperationVector {

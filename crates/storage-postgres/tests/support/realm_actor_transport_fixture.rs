@@ -985,7 +985,7 @@ async fn realm_profile_update_source_failure_and_cas(
     let make_update = |label: &str| {
         let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
         let payload: ActorProfileUpdatePayload = serde_json::from_value(json!({
-            "target_ref":arkret_wire::ActorProfileId::from_event_id(&original.event.event_id),
+            "actor_profile_id":arkret_wire::ActorProfileId::from_event_id(&original.event.event_id),
             "patch":{"display_name":label},
             "expected_revision":{"commit_id":original.commit.commit_id,"stream_position":original.commit.stream_position}
         })).unwrap();

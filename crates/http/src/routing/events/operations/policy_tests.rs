@@ -1262,7 +1262,7 @@ async fn profile_accountable_principal_committed_revoke_wins() {
         "ak.profile.update",
         json!({
             "sender": AGENT_CORE_ID,
-            "target_ref": "ak:actor_profile:AQsHmGu_9sPOyJ4aG8VlWQBp8wGGhdC-BjfAaXqrIbk-",
+            "actor_profile_id": "ak:actor_profile:AQsHmGu_9sPOyJ4aG8VlWQBp8wGGhdC-BjfAaXqrIbk-",
             "patch": {"accountable_principal_ids": [issuer_id]}
         }),
     );

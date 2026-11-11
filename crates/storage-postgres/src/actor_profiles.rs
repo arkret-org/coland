@@ -671,10 +671,10 @@ pub(crate) async fn materialize_profile_at_with_source(
                     "the Account and scope have no accepted Actor Profile to update",
                 )
             })?;
-            if current.id.as_ref() != Some(&update.target_ref) {
+            if current.id.as_ref() != Some(&update.actor_profile_id) {
                 return Err(rejected(
                     ConflictCode::FailedPrecondition,
-                    "ak.profile.update target_ref is not the Account and scope accepted Actor Profile",
+                    "ak.profile.update actor_profile_id is not the Account and scope accepted Actor Profile",
                 ));
             }
             if current.principal_id.as_ref() != Some(&subject.principal_id) {

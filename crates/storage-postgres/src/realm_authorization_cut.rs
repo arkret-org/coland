@@ -3856,7 +3856,7 @@ impl RealmAuthorizationCut {
             >(
                 serde_json::to_value(&event.payload).unwrap_or(serde_json::Value::Null),
             ) {
-                facts.strand_id = Some(payload.target_ref.as_str().to_owned());
+                facts.strand_id = Some(payload.strand_id.as_str().to_owned());
                 facts.write_fields = Some(
                     payload
                         .patch
@@ -3865,7 +3865,7 @@ impl RealmAuthorizationCut {
                         .collect(),
                 );
                 return (
-                    WireResourceSelector::strand(self.realm_id.clone(), payload.target_ref),
+                    WireResourceSelector::strand(self.realm_id.clone(), payload.strand_id),
                     facts,
                 );
             }
@@ -3887,8 +3887,8 @@ impl RealmAuthorizationCut {
         }
         if event.kind == EventKind::StrandTracksUpdate {
             // event-kind-registry.json: the tracks writer selects its Strand
-            // by `payload.target_ref`; the action carries no field constraint.
-            if let Some(strand) = payload_id("target_ref").and_then(|id| StrandId::new(id).ok()) {
+            // by `payload.strand_id`; the action carries no field constraint.
+            if let Some(strand) = payload_id("strand_id").and_then(|id| StrandId::new(id).ok()) {
                 facts.strand_id = Some(strand.to_string());
                 return (
                     WireResourceSelector::strand(self.realm_id.clone(), strand),
@@ -4518,11 +4518,14 @@ mod operation_fact_tests {
         ));
         let event = arkret_wire::test_support::raw_event_for_actor_at(
             EventKind::StrandUpdate.as_str(),
-            arkret_wire::ScopeRef::Realm { realm_id: realm_id.clone() },
+            arkret_wire::ScopeRef::Realm {
+                realm_id: realm_id.clone(),
+            },
             actor.clone(),
-            json!({"target_ref":strand_id,"patch":{"metadata.title":{"$op":"set","value":"Title"}}}),
+            json!({"strand_id":strand_id,"patch":{"metadata.title":{"$op":"set","value":"Title"}}}),
             arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
-        ).unwrap();
+        )
+        .unwrap();
         let cut = RealmAuthorizationCut {
             realm_id: realm_id.clone(),
             actor,

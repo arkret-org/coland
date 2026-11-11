@@ -322,6 +322,17 @@ fn creating_event(reference: &str) -> Option<arkret_wire::EventId> {
     None
 }
 
+fn morph_mutation_target(operation: &ProjectedEventOperation) -> Option<&str> {
+    match operation.event_kind {
+        EventKind::MorphUpdate | EventKind::MorphStageSet => operation.payload.get("morph_id"),
+        _ => operation
+            .payload
+            .get("target_ref")
+            .or_else(|| operation.payload.get("object_ref")),
+    }
+    .and_then(serde_json::Value::as_str)
+}
+
 fn dependencies(
     operation: &ProjectedEventOperation,
     originals: &BTreeMap<arkret_wire::EventId, CommittedEventFullView>,
@@ -358,11 +369,7 @@ fn dependencies(
                 .ok_or_else(|| unavailable("Morph Circle fact has no original creation token"))?,
         );
     }
-    if let Some(target) = operation
-        .payload
-        .get("target_ref")
-        .or_else(|| operation.payload.get("object_ref"))
-        .and_then(serde_json::Value::as_str)
+    if let Some(target) = morph_mutation_target(operation)
         && target.starts_with("ak:morph:")
     {
         dependencies.insert(
@@ -426,11 +433,7 @@ fn reduce_streams(
             if morph_streams.insert(id, stream.clone()).is_some() {
                 return Err(unavailable("Morph creation has multiple accepted sources"));
             }
-        } else if let Some(target) = operation
-            .payload
-            .get("target_ref")
-            .or_else(|| operation.payload.get("object_ref"))
-            .and_then(serde_json::Value::as_str)
+        } else if let Some(target) = morph_mutation_target(&operation)
             && target.starts_with("ak:morph:")
             && morph_streams.get(target) != Some(&stream)
         {
@@ -2695,7 +2698,7 @@ mod tests {
         let update = event(
             EventKind::MorphUpdate,
             &opening.realm_id,
-            json!({"target_ref":id,"patch":{"metadata.title":{"$op":"set","value":"Accepted successor"}}}),
+            json!({"morph_id":id,"patch":{"metadata.title":{"$op":"set","value":"Accepted successor"}}}),
             2,
         );
         insert_history(&mut conn, &update, 2).await;

@@ -120,7 +120,7 @@ fn source_strand_id(source: &CommittedSource<'_>) -> Option<StrandId> {
     let value = match source.kind {
         EventKind::MessageCreate => source.payload.get("strand_id"),
         EventKind::RelationCreate => source.payload.pointer("/relation/from_ref"),
-        EventKind::StrandUpdate => source.payload.get("target_ref"),
+        EventKind::StrandUpdate => source.payload.get("strand_id"),
         _ => None,
     }?;
     StrandId::new(value.as_str()?.to_owned()).ok()
@@ -618,7 +618,7 @@ mod tests {
             seed,
             sender,
             EventKind::StrandUpdate,
-            json!({"target_ref": STRAND, "patch": patch}),
+            json!({"strand_id": STRAND, "patch": patch}),
         )
     }
 

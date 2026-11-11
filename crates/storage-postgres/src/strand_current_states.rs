@@ -6,6 +6,11 @@ use diesel_async::AsyncPgConnection;
 use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
+#[cfg(test)]
+#[path = "../tests/support/ordinary_realm.rs"]
+#[allow(dead_code)]
+mod signed_scope_test_realm;
+
 #[derive(diesel::QueryableByName)]
 struct StrandCurrentRow {
     #[diesel(sql_type = Text)]
@@ -124,12 +129,11 @@ pub(crate) async fn locked_active_strand_scope(
         arkret_wire::EventKind::StrandCreate => current.event_id == creation.event_id,
         arkret_wire::EventKind::StrandUpdate
         | arkret_wire::EventKind::StrandTracksUpdate
-        | arkret_wire::EventKind::StrandArchive
-        | arkret_wire::EventKind::StrandRestore => {
-            current_target["target_ref"].as_str() == Some(strand.as_str())
-        }
-        arkret_wire::EventKind::StrandStageSet => {
+        | arkret_wire::EventKind::StrandStageSet => {
             current_target["strand_id"].as_str() == Some(strand.as_str())
+        }
+        arkret_wire::EventKind::StrandArchive | arkret_wire::EventKind::StrandRestore => {
+            current_target["target_ref"].as_str() == Some(strand.as_str())
         }
         _ => false,
     };
@@ -684,7 +688,7 @@ pub(crate) async fn commit_strand_update_current_state_in_connection(
     }
     let mut post = payload
         .patch
-        .apply_for_typed_target(&row.value, payload.target_ref.as_str())
+        .apply_for_typed_target(&row.value, payload.strand_id.as_str())
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     let object = post.as_object_mut().ok_or_else(|| {
         PersistenceError::SchemaViolation("Strand patch did not produce an object".to_owned())
@@ -782,7 +786,7 @@ async fn lock_active_patch_target(
         "SELECT realm_id,current_commit_id,current_stream_position,value \
          FROM strand_current_states WHERE strand_id=$1 FOR UPDATE",
     )
-    .bind::<Text, _>(payload.target_ref.as_str())
+    .bind::<Text, _>(payload.strand_id.as_str())
     .get_result::<StrandCurrentRow>(&mut *conn)
     .await
     .optional()
@@ -801,7 +805,7 @@ async fn lock_active_patch_target(
         serde_json::from_value(row.value.clone()).map_err(|error| {
             PersistenceError::Internal(format!("stored Strand current value is invalid: {error}"))
         })?;
-    if current.id.as_ref() != Some(&payload.target_ref) || current.realm_id != event.realm_id {
+    if current.id.as_ref() != Some(&payload.strand_id) || current.realm_id != event.realm_id {
         return Err(reject("Strand patch target identity or Realm differs"));
     }
     match current.state {
@@ -861,7 +865,7 @@ async fn store_patched_strand(
          value=$5,updated_at=$6 WHERE realm_id=$1 AND strand_id=$2 AND current_commit_id=$7",
     )
     .bind::<Text, _>(event.realm_id.as_str())
-    .bind::<Text, _>(payload.target_ref.as_str())
+    .bind::<Text, _>(payload.strand_id.as_str())
     .bind::<Text, _>(commit.commit_id.as_str())
     .bind::<BigInt, _>(position)
     .bind::<Jsonb, _>(post)
@@ -873,7 +877,7 @@ async fn store_patched_strand(
     if updated != 1 {
         return Err(reject("Strand current changed before patch"));
     }
-    refresh_calendar_source_in_connection(conn, event, commit, payload.target_ref.as_str()).await?;
+    refresh_calendar_source_in_connection(conn, event, commit, payload.strand_id.as_str()).await?;
     Ok(())
 }
 
@@ -1058,7 +1062,7 @@ pub(crate) async fn commit_strand_tracks_update_current_state_in_connection(
     let (row, current, position) = lock_active_patch_target(conn, event, commit, &payload).await?;
     let mut post = payload
         .patch
-        .apply_for_typed_target(&row.value, payload.target_ref.as_str())
+        .apply_for_typed_target(&row.value, payload.strand_id.as_str())
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     let object = post.as_object_mut().ok_or_else(|| {
         PersistenceError::SchemaViolation("Strand patch did not produce an object".to_owned())
@@ -1181,6 +1185,76 @@ fn validate_calendar_profile(
             .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod signed_scope_tests {
+    use coland_storage::{AuthorityCommitStore as _, EventCommitUnitOfWork as _};
+    use serde_json::json;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn accepted_update_and_tracks_keep_signed_current_scope_readable() {
+        let database = crate::test_database::TestDatabase::lease().await;
+        let pool = database.pool();
+        let uow = crate::PgEventCommitUnitOfWork::new(pool.clone());
+        let discussion = Box::pin(signed_scope_test_realm::open_discussion(
+            &pool,
+            "named-target-signed-scope",
+        ))
+        .await;
+        let mut head = discussion.head.authority_commit.clone();
+        let expected = arkret_wire::ScopeRef::Realm {
+            realm_id: head.event.realm_id.clone(),
+        };
+        let actor = head.event.actor_id.clone();
+        let store = crate::PgAuthorityCommitStore { pool: pool.clone() };
+        for (kind, patch) in [
+            (
+                arkret_wire::EventKind::StrandUpdate,
+                json!({"metadata.summary":{"$op":"set","value":"Readable successor"}}),
+            ),
+            (
+                arkret_wire::EventKind::StrandTracksUpdate,
+                json!({"tracks.discussion.enabled":{"$op":"set","value":true}}),
+            ),
+        ] {
+            let request = Box::pin(signed_scope_test_realm::source_request(
+                &pool,
+                signed_scope_test_realm::next_request(
+                    &head,
+                    kind,
+                    actor.signing_principal_id(),
+                    json!({"strand_id":discussion.strand_id,"patch":patch}),
+                    head.commit.committed_at,
+                ),
+            ))
+            .await;
+            let accepted_head = request.authority_commit.clone();
+            Box::pin(uow.commit_event(request)).await.unwrap();
+            head = accepted_head;
+            let mut conn = pool.get().await.unwrap();
+            assert_eq!(
+                locked_active_strand_scope(&mut conn, &head.event.realm_id, &discussion.strand_id)
+                    .await
+                    .unwrap(),
+                expected,
+            );
+            drop(conn);
+            assert_eq!(
+                store
+                    .visible_strand_scope_for_actor(
+                        &head.event.realm_id,
+                        &discussion.strand_id,
+                        &actor
+                    )
+                    .await
+                    .unwrap(),
+                Some(expected.clone()),
+            );
+        }
+    }
 }
 
 #[cfg(test)]

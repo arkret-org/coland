@@ -395,10 +395,7 @@ fn confirmation_target_matches(payload: &AgentActionApprovePayload, event: &Even
                     == Some(expected.as_str())
                     || (matches!(
                         event.kind,
-                        EventKind::StrandArchive
-                            | EventKind::StrandRestore
-                            | EventKind::StrandStageSet
-                            | EventKind::StrandTracksUpdate
+                        EventKind::StrandArchive | EventKind::StrandRestore
                     ) && event
                         .payload
                         .get("target_ref")
@@ -432,7 +429,13 @@ fn confirmation_target_matches(payload: &AgentActionApprovePayload, event: &Even
                             == expected.as_str()))
         }),
         "object" => target.object_ref.as_ref().is_some_and(|expected| {
-            ["target_ref", "object_ref"].iter().any(|field| {
+            let fields: &[&str] = match event.kind {
+                EventKind::MorphUpdate => &["morph_id"],
+                EventKind::ProfileUpdate | EventKind::ProfileRealmOverride => &["actor_profile_id"],
+                EventKind::StrandUpdate | EventKind::StrandTracksUpdate => &["strand_id"],
+                _ => &["target_ref", "object_ref"],
+            };
+            fields.iter().any(|field| {
                 event
                     .payload
                     .get(*field)

@@ -81,7 +81,7 @@ async fn strand_scope_rebind_returns_the_contract_reason_without_writes() {
         head,
         arkret_wire::EventKind::StrandUpdate,
         head.event.actor_id.signing_principal_id(),
-        json!({"target_ref":discussion.strand_id,"patch":{
+        json!({"strand_id":discussion.strand_id,"patch":{
             "scope_circle_id":{"$op":"set","value":arkret_wire::CircleId::from_event_id(&head.event.event_id)}
         }}),
         head.commit.committed_at,
@@ -124,7 +124,7 @@ async fn synthesis_content_update_preserves_track_controls_and_refuses_inactive_
                 .actor_id
                 .signing_principal_id()
                 .clone(),
-            json!({"target_ref": discussion.strand_id, "patch": {
+            json!({"strand_id": discussion.strand_id, "patch": {
                 "tracks.synthesis.content": {"$op":"set", "value": {
                     "kind":"ak.content.text", "body":body
                 }}
@@ -161,7 +161,7 @@ async fn synthesis_content_update_preserves_track_controls_and_refuses_inactive_
                 .actor_id
                 .signing_principal_id()
                 .clone(),
-            json!({"target_ref": discussion.strand_id, "patch": {
+            json!({"strand_id": discussion.strand_id, "patch": {
                 "tracks.synthesis.enabled": {"$op":"set", "value":true},
                 "tracks.synthesis.is_primary": {"$op":"set", "value":false}
             }}),
@@ -194,7 +194,7 @@ async fn synthesis_content_update_preserves_track_controls_and_refuses_inactive_
                 .actor_id
                 .signing_principal_id()
                 .clone(),
-            json!({"target_ref": discussion.strand_id, "patch": {
+            json!({"strand_id": discussion.strand_id, "patch": {
                 "tracks.synthesis.enabled": {"$op":"set", "value":false}
             }}),
             at,
@@ -246,7 +246,7 @@ async fn strand_update_current_cas_and_rejection_are_one_pg_cut() {
                     .signing_principal_id()
                     .clone(),
                 json!({
-                    "target_ref": discussion.strand_id,
+                    "strand_id": discussion.strand_id,
                     "expected_state_digest": digest(&before.value),
                     "patch": {"metadata.title": {"$op":"set", "value":"Accepted title"}},
                 }),
@@ -380,7 +380,7 @@ async fn strand_update_current_cas_and_rejection_are_one_pg_cut() {
                     .signing_principal_id()
                     .clone(),
                 json!({
-                    "target_ref": discussion.strand_id,
+                    "strand_id": discussion.strand_id,
                     "expected_state_digest": digest(&before.value),
                     "patch": {"metadata.title": {"$op":"set", "value":"Stale title"}},
                 }),
@@ -400,7 +400,7 @@ async fn strand_update_current_cas_and_rejection_are_one_pg_cut() {
             .signing_principal_id()
             .clone(),
         json!({
-            "target_ref": arkret_wire::StrandId::from_event_id(&accepted.authority_commit.event.event_id),
+            "strand_id": arkret_wire::StrandId::from_event_id(&accepted.authority_commit.event.event_id),
             "patch": {"metadata.title": {"$op":"set", "value":"Unknown title"}},
         }),
         at,
@@ -419,7 +419,7 @@ async fn strand_update_current_cas_and_rejection_are_one_pg_cut() {
                     .signing_principal_id()
                     .clone(),
                 json!({
-                    "target_ref": discussion.strand_id,
+                    "strand_id": discussion.strand_id,
                     "patch": {"stage": {"$op":"set", "value":"done"}},
                 }),
                 at,
@@ -441,7 +441,7 @@ async fn strand_update_current_cas_and_rejection_are_one_pg_cut() {
                 arkret_wire::EventKind::StrandUpdate,
                 &outsider.principal_id,
                 json!({
-                    "target_ref": discussion.strand_id,
+                    "strand_id": discussion.strand_id,
                     "patch": {"metadata.title": {"$op":"set", "value":"Unauthorized title"}},
                 }),
                 at,
@@ -449,6 +449,51 @@ async fn strand_update_current_cas_and_rejection_are_one_pg_cut() {
         ))
         .await,
     );
+    for kind in [
+        arkret_wire::EventKind::StrandUpdate,
+        arkret_wire::EventKind::StrandTracksUpdate,
+    ] {
+        let patch = if kind == arkret_wire::EventKind::StrandUpdate {
+            json!({"metadata.title": {"$op":"set", "value":"Legacy target"}})
+        } else {
+            json!({"tracks.discussion.enabled": {"$op":"set", "value":true}})
+        };
+        for payload in [
+            json!({"target_ref": discussion.strand_id, "patch": patch}),
+            json!({"strand_id": discussion.strand_id, "target_ref": discussion.strand_id, "patch": patch}),
+        ] {
+            let request = Box::pin(ordinary_realm::source_request(
+                &pool,
+                next_request(
+                    head,
+                    kind.clone(),
+                    head.event.actor_id.signing_principal_id(),
+                    payload,
+                    at,
+                ),
+            ))
+            .await;
+            let invalid_id = request.authority_commit.event.event_id.clone();
+            let error = uow.commit_event(request).await.unwrap_err();
+            assert!(
+                matches!(error, coland_storage::PersistenceError::SchemaViolation(_)),
+                "{error}"
+            );
+            assert_eq!(current(&pool, &discussion.strand_id).await, after);
+            assert_eq!(
+                realm_counts(&pool, &realm_id).await,
+                (baseline.0 + 1, baseline.1 + 1)
+            );
+            assert!(
+                coland_storage_postgres::PgAuthorityCommitStore { pool: pool.clone() }
+                    .committed_event(&invalid_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
     for (request, reason) in [
         (stale, "expected_state_digest"),
         (unknown, "target is absent"),
@@ -495,7 +540,7 @@ async fn strand_update_calendar_profile_requires_ref_and_subtree_together() {
             arkret_wire::EventKind::StrandUpdate,
             &author,
             json!({
-                "target_ref": discussion.strand_id,
+                "strand_id": discussion.strand_id,
                 "patch": {
                     "schema_refs": {"$op":"set", "value":["ak.schema.calendar_event.v1"]},
                     "metadata.fields.calendar": {"$op":"set", "value":schedule},
@@ -539,7 +584,7 @@ async fn strand_update_calendar_profile_requires_ref_and_subtree_together() {
         &accepted.authority_commit,
         arkret_wire::EventKind::StrandUpdate,
         &author,
-        json!({"target_ref":discussion.strand_id,"patch":{"metadata.title":{"$op":"set","value":"Renamed calendar"}}}),
+        json!({"strand_id":discussion.strand_id,"patch":{"metadata.title":{"$op":"set","value":"Renamed calendar"}}}),
         at,
     ))).await;
     uow.commit_event(title.clone()).await.unwrap();
@@ -553,7 +598,7 @@ async fn strand_update_calendar_profile_requires_ref_and_subtree_together() {
         &title.authority_commit,
         arkret_wire::EventKind::StrandUpdate,
         &author,
-        json!({"target_ref":discussion.strand_id,"patch":{"metadata.fields.calendar":{"$op":"set","value":schedule}}}),
+        json!({"strand_id":discussion.strand_id,"patch":{"metadata.fields.calendar":{"$op":"set","value":schedule}}}),
         at,
     ))).await;
     uow.commit_event(same_schedule.clone()).await.unwrap();
@@ -574,7 +619,7 @@ async fn strand_update_calendar_profile_requires_ref_and_subtree_together() {
             arkret_wire::EventKind::StrandUpdate,
             &author,
             json!({
-                "target_ref": discussion.strand_id,
+                "strand_id": discussion.strand_id,
                 "patch": {"schema_refs": {"$op":"unset"}},
             }),
             at,

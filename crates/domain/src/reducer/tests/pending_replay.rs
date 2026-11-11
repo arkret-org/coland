@@ -75,7 +75,7 @@ fn strand_update_pending_replays_after_create() {
         arkret_wire::EventKind::StrandUpdate,
         REALM,
         serde_json::json!({
-            "target_ref": STRAND,
+            "strand_id": STRAND,
             "patch": { "metadata.title": "Backfilled title" }
         }),
     );

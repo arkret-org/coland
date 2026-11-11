@@ -178,6 +178,12 @@ pub(crate) async fn require_current(
             .and_then(Value::as_str)
             .map(str::to_owned)
             .or_else(|| {
+                if matches!(
+                    event.kind,
+                    EventKind::StrandUpdate | EventKind::StrandTracksUpdate
+                ) {
+                    return None;
+                }
                 event
                     .payload
                     .get("target_ref")

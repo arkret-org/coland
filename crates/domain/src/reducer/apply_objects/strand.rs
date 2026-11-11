@@ -157,7 +157,7 @@ impl ProjectionState {
         let Some(strand_id) = strand_id_from_payload(&operation.payload).map(ToOwned::to_owned)
         else {
             return ProjectionEffect::Rejected {
-                reason: "strand_update_missing_target_ref".to_owned(),
+                reason: "strand_update_missing_strand_id".to_owned(),
             };
         };
         // AKP-0007: Strand scope is set at create time; `scope_circle_id`
@@ -294,8 +294,8 @@ impl ProjectionState {
         if !arkret_wire::events::kinds::is_strand_tracks_kind(&kind) {
             return Ok(());
         }
-        let Some(strand_id) = operation.payload.get("target_ref").and_then(|v| v.as_str()) else {
-            // Missing target_ref is caught by operation-schema validator
+        let Some(strand_id) = operation.payload.get("strand_id").and_then(|v| v.as_str()) else {
+            // Missing strand_id is caught by operation-schema validator
             // upstream; preflight tolerates absence (responsibilities split).
             return Ok(());
         };
@@ -394,12 +394,12 @@ impl ProjectionState {
     ) -> ProjectionEffect {
         let Some(strand_id) = operation
             .payload
-            .get("target_ref")
+            .get("strand_id")
             .and_then(|v| v.as_str())
             .map(ToOwned::to_owned)
         else {
             return ProjectionEffect::Rejected {
-                reason: "missing_target_ref".to_owned(),
+                reason: "missing_strand_id".to_owned(),
             };
         };
         let Some(strand) = self.strands.get_mut(&strand_id) else {

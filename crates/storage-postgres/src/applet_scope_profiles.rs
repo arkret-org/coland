@@ -271,7 +271,7 @@ pub(crate) async fn prepare_control(
                     commit_id: source.commit_id.clone(),
                     stream_position: source.stream_position,
                 })
-                || value["profile_id"] != json!(payload.target_ref)
+                || value["profile_id"] != json!(payload.actor_profile_id)
             {
                 return Err(denied("Profile CAS or target differs"));
             }

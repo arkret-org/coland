@@ -33,7 +33,7 @@ fn accepted_topic_set_and_unset_preserve_narrative_and_allow_independent_descrip
         let update = make_operation(
             arkret_wire::EventKind::StrandUpdate,
             realm,
-            serde_json::json!({"target_ref":strand,
+            serde_json::json!({"strand_id":strand,
                 "expected_state_digest":format!("sha256:{}", "1".repeat(64)),
                 "patch":{"topic":topic},
             }),
@@ -52,7 +52,7 @@ fn accepted_topic_set_and_unset_preserve_narrative_and_allow_independent_descrip
     let mixed = make_operation(
         arkret_wire::EventKind::StrandUpdate,
         realm,
-        serde_json::json!({"target_ref":strand,
+        serde_json::json!({"strand_id":strand,
             "expected_state_digest":format!("sha256:{}", "2".repeat(64)),
             "patch":{"topic":{"$op":"set", "value":{
                     "space_id":"ak:space:ARkwFWDTPrObvpqVAL9kBsWkK8GrMr5FDO--3PcMFEwU", "rank":"b0"}},
@@ -204,7 +204,7 @@ fn strand_description_and_synthesis_are_projected_and_updated_independently() {
         arkret_wire::EventKind::StrandUpdate,
         realm_id,
         serde_json::json!({
-            "target_ref": strand_id,
+            "strand_id": strand_id,
             "patch": {
                 "content": {"$op": "set", "value": content("Description v2")},
                 "metadata.summary": {"$op": "unset"}
@@ -235,7 +235,7 @@ fn strand_description_and_synthesis_are_projected_and_updated_independently() {
         arkret_wire::EventKind::StrandUpdate,
         realm_id,
         serde_json::json!({
-            "target_ref": strand_id,
+            "strand_id": strand_id,
             "patch": {
                 "tracks.synthesis.content": {
                     "$op": "set",
@@ -377,7 +377,7 @@ fn morph_lifecycle_preflight_rejects_illegal_transitions() {
         arkret_wire::EventKind::MorphUpdate,
         realm_id,
         serde_json::json!({
-            "target_ref": morph_id,
+            "morph_id": morph_id,
             "patch": { "metadata.title": "Edit blocked" }
         }),
     );
@@ -936,7 +936,7 @@ fn strand_tracks_update_touches_active_strand_only() {
             arkret_wire::EventKind::StrandTracksUpdate,
             realm_id,
             serde_json::json!({
-                "target_ref": strand_id,
+                "strand_id": strand_id,
                 "patch": {
                     "tracks.synthesis.profile": {"$op": "set", "value": "synthesis"}
                 },
@@ -988,7 +988,7 @@ fn strand_tracks_update_projects_discussion_enabled_state() {
         arkret_wire::EventKind::StrandTracksUpdate,
         realm_id,
         serde_json::json!({
-            "target_ref": strand_id,
+            "strand_id": strand_id,
             // `strand-and-message.md` §4.6/§4.8 — closing the current primary
             // track MUST hand primary to another active track in the SAME
             // patch, so this disables `discussion` while promoting `synthesis`.
@@ -1052,7 +1052,7 @@ fn strand_tracks_update_cannot_change_synthesis_content() {
         arkret_wire::EventKind::StrandTracksUpdate,
         realm_id,
         serde_json::json!({
-            "target_ref": strand_id,
+            "strand_id": strand_id,
             "patch": {
                 "tracks.synthesis.content": {
                     "$op": "set",
@@ -1122,7 +1122,7 @@ fn strand_tracks_preflight_rejects_when_strand_archived() {
         arkret_wire::EventKind::StrandTracksUpdate,
         realm_id,
         serde_json::json!({
-            "target_ref": strand_id,
+            "strand_id": strand_id,
             "patch": {"tracks.synthesis.profile": {"$op": "set", "value": "synthesis"}}
         }),
     );
@@ -1147,7 +1147,7 @@ fn strand_tracks_preflight_tolerates_unknown_strand() {
         arkret_wire::EventKind::StrandTracksUpdate,
         "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb",
         serde_json::json!({
-            "target_ref": "ak:strand:nope-not-here",
+            "strand_id": "ak:strand:nope-not-here",
             "patch": {"tracks.synthesis.profile": {"$op": "set", "value": "synthesis"}}
         }),
     );

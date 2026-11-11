@@ -147,7 +147,7 @@ async fn add_public_profile_history(pool: &PgPool, fixture: &RootFixture) -> ark
         } else {
             (
                 EventKind::ProfileUpdate,
-                json!({"target_ref":create,
+                json!({"actor_profile_id":create,
                 "patch":{"display_name":format!("Archive control profile {index}")},
                 "expected_revision":{
                     "commit_id":previous.as_ref().unwrap().commit_id,

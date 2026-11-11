@@ -578,7 +578,12 @@ impl ProjectionState {
             }
             _ => return Ok(()),
         };
-        let Some(morph_id) = operation.payload.get("target_ref").and_then(|v| v.as_str()) else {
+        let field = if kind == arkret_wire::EventKind::MorphUpdate {
+            "morph_id"
+        } else {
+            "target_ref"
+        };
+        let Some(morph_id) = operation.payload.get(field).and_then(|v| v.as_str()) else {
             return Ok(());
         };
         let Some(morph) = self.morphs.get(morph_id) else {

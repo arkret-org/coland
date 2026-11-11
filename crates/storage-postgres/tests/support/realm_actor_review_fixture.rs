@@ -1149,7 +1149,7 @@ fn realm_review_profile_update(
         ScopeRef::RealmControl {
             realm_id: context.factory.fixture.realm.clone(),
         },
-        json!({"target_ref":profile_id,"patch":patch,"expected_revision":{"commit_id":original.commit.commit_id,"stream_position":original.commit.stream_position}}),
+        json!({"actor_profile_id":profile_id,"patch":patch,"expected_revision":{"commit_id":original.commit.commit_id,"stream_position":original.commit.stream_position}}),
         None,
     )
 }

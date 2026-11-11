@@ -848,7 +848,7 @@ async fn strand_patch_exact_resource_and_field_grant_are_decided_at_the_pg_cut()
         arkret_wire::EventKind::StrandUpdate,
         &member,
         serde_json::json!({
-            "target_ref": discussion.strand_id,
+            "strand_id": discussion.strand_id,
             "patch":{"metadata.title":{"$op":"set","value":"Authorized title"}}
         }),
     )
@@ -861,11 +861,11 @@ async fn strand_patch_exact_resource_and_field_grant_are_decided_at_the_pg_cut()
         .unwrap();
     for payload in [
         serde_json::json!({
-            "target_ref":discussion.strand_id,
+            "strand_id":discussion.strand_id,
             "patch":{"metadata.summary":{"$op":"set","value":"Unpermitted field"}}
         }),
         serde_json::json!({
-            "target_ref":arkret_wire::StrandId::from_event_id(&permission.authority_commit.event.event_id),
+            "strand_id":arkret_wire::StrandId::from_event_id(&permission.authority_commit.event.event_id),
             "patch":{"metadata.title":{"$op":"set","value":"Unpermitted target"}}
         }),
     ] {

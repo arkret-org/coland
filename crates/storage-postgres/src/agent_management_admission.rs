@@ -339,8 +339,21 @@ pub(crate) fn event_content_resources(
         "relation_id",
         "view_id",
         "morph_id",
+        "actor_profile_id",
         "blob_ref",
     ] {
+        if key == "target_ref"
+            && matches!(
+                event.kind,
+                arkret_wire::EventKind::StrandUpdate
+                    | arkret_wire::EventKind::StrandTracksUpdate
+                    | arkret_wire::EventKind::MorphUpdate
+                    | arkret_wire::EventKind::ProfileUpdate
+                    | arkret_wire::EventKind::ProfileRealmOverride
+            )
+        {
+            continue;
+        }
         let Some(reference) = event.payload.get(key).and_then(serde_json::Value::as_str) else {
             continue;
         };

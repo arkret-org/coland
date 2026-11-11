@@ -1379,7 +1379,13 @@ pub async fn hydrate_projections_from_persistence(
                     | arkret_wire::EventKind::StrandRestore
             ) && event
                 .envelope
-                .pointer("/payload/target_ref")
+                .pointer(
+                    if event.kind == arkret_wire::EventKind::StrandUpdate.as_str() {
+                        "/payload/strand_id"
+                    } else {
+                        "/payload/target_ref"
+                    },
+                )
                 .and_then(Value::as_str)
                 .is_some_and(|id| {
                     canonical_strands.contains_key(id) && !replayable_strands.contains(id)

@@ -3292,7 +3292,7 @@ mod tests {
             let mut event = arkret_wire::test_support::raw_event_for_actor_at(
                 arkret_wire::EventKind::StrandUpdate.as_str(),
                 arkret_wire::ScopeRef::Realm { realm_id: realm_id.clone() }, actor.clone(),
-                json!({"target_ref":strand_id,"expected_state_digest":expected,"patch":{"metadata.title":{"$op":"set","value":title}}}), at,
+                json!({"strand_id":strand_id,"expected_state_digest":expected,"patch":{"metadata.title":{"$op":"set","value":title}}}), at,
             ).unwrap();
             let digest = arkret_wire::Hash::new(
                 event
@@ -3458,7 +3458,7 @@ mod tests {
                     realm_id: realm_id.clone(),
                 },
                 actor.clone(),
-                json!({"target_ref": strand_id, "patch": patch}),
+                json!({"strand_id": strand_id, "patch": patch}),
                 at,
             )
             .unwrap();

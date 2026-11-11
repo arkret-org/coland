@@ -4815,9 +4815,9 @@ async fn profile_update_commits_actor_profile_current_and_rejects_forbidden_patc
         refusal(&second).await,
         Some(ConflictCode::FailedPrecondition)
     );
-    // target_ref that is not the accepted create-derived id.
+    // actor_profile_id that is not the accepted create-derived id.
     let foreign = update(serde_json::json!({
-        "target_ref": arkret_wire::ActorProfileId::from_event_id(&second.event_id),
+        "actor_profile_id": arkret_wire::ActorProfileId::from_event_id(&second.event_id),
         "patch": {"display_name": "Mallory"}
     }));
     assert_eq!(
@@ -4831,7 +4831,7 @@ async fn profile_update_commits_actor_profile_current_and_rejects_forbidden_patc
         serde_json::json!({"resolution.did": "did:web:mallory.example"}),
         serde_json::json!({"created_at": "2026-01-01T00:00:00.000Z"}),
     ] {
-        let forbidden = update(serde_json::json!({"target_ref": profile_id, "patch": patch}));
+        let forbidden = update(serde_json::json!({"actor_profile_id": profile_id, "patch": patch}));
         assert_eq!(
             refusal(&forbidden).await,
             Some(ConflictCode::SchemaViolation),
@@ -4840,7 +4840,7 @@ async fn profile_update_commits_actor_profile_current_and_rejects_forbidden_patc
     }
     // A stale expected_state_digest.
     let stale = update(serde_json::json!({
-        "target_ref": profile_id,
+        "actor_profile_id": profile_id,
         "patch": {"display_name": "Alice C."},
         "expected_state_digest": format!("sha256:{}", "0".repeat(64))
     }));
@@ -4856,7 +4856,7 @@ async fn profile_update_commits_actor_profile_current_and_rejects_forbidden_patc
         )
         .unwrap();
     let delta = update(serde_json::json!({
-        "target_ref": profile_id,
+        "actor_profile_id": profile_id,
         "patch": {"display_name": "Alice C.", "profile_fields.biography": {"$op": "unset"}},
         "expected_state_digest": digest
     }));
@@ -5100,7 +5100,7 @@ async fn profile_accountability_requires_active_grant_at_commit_cut() {
         subject_seed,
         EventKind::ProfileUpdate,
         serde_json::json!({
-            "target_ref": created.profile.id,
+            "actor_profile_id": created.profile.id,
             "patch": {"display_name": "Renamed service"}
         }),
     );
@@ -5124,7 +5124,7 @@ async fn profile_accountability_requires_active_grant_at_commit_cut() {
         subject_seed,
         EventKind::ProfileUpdate,
         serde_json::json!({
-            "target_ref": created.profile.id,
+            "actor_profile_id": created.profile.id,
             "patch": {"accountable_principal_ids": {"$op": "unset"}}
         }),
     );
@@ -5654,7 +5654,7 @@ async fn agent_profile_accountability_follows_the_provision_projection() {
         agent_seed,
         EventKind::ProfileUpdate,
         serde_json::json!({
-            "target_ref": created.profile.id,
+            "actor_profile_id": created.profile.id,
             "patch": {"display_name": "Renamed agent"}
         }),
     );

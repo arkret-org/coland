@@ -423,7 +423,7 @@ async fn circle_scoped_morph_update_requires_circle_membership() {
             arkret_wire::EventKind::MorphUpdate.as_str(),
             json!({
                 "sender": sender,
-                "target_ref": morph_id,
+                "morph_id": morph_id,
                 "patch": {"fields.status": "done"}
             }),
         )
@@ -790,7 +790,7 @@ fn event_payload_validator_enforces_strand_update_patch_schema() {
     let valid = typed_event_envelope(
         "ak.strand.update",
         json!({
-            "target_ref": strand_id,
+            "strand_id": strand_id,
             "patch": {
                 "fields.document": {
                     "$op": "set",
@@ -811,7 +811,7 @@ fn event_payload_validator_enforces_strand_update_patch_schema() {
     let invalid_patch_op = typed_event_envelope(
         "ak.strand.update",
         json!({
-            "target_ref": strand_id,
+            "strand_id": strand_id,
             "patch": {
                 "fields.document": {
                     "$op": "replace",
@@ -872,22 +872,22 @@ fn event_payload_validator_enforces_patch_family_schema() {
         (
             "ak.strand.update",
             json!({
-                "target_ref": "ak:strand:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
+                "strand_id": "ak:strand:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
                 "patch": { "metadata.title": { "$op": "set", "value": "Roadmap" } }
             }),
             json!({
-                "target_ref": "ak:strand:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
+                "strand_id": "ak:strand:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
                 "patch": { "metadata.title": { "$op": "replace", "value": "Roadmap" } }
             }),
         ),
         (
             "ak.morph.update",
             json!({
-                "target_ref": "ak:morph:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
+                "morph_id": "ak:morph:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
                 "patch": { "metadata.title": { "$op": "set", "value": "Roadmap" } }
             }),
             json!({
-                "target_ref": "ak:morph:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
+                "morph_id": "ak:morph:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
                 "patch": { "metadata.title": { "$op": "replace", "value": "Roadmap" } }
             }),
         ),
@@ -905,11 +905,11 @@ fn event_payload_validator_enforces_patch_family_schema() {
         (
             "ak.profile.update",
             json!({
-                "target_ref": "ak:actor_profile:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
+                "actor_profile_id": "ak:actor_profile:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
                 "patch": { "title": { "$op": "set", "value": "Roadmap" } }
             }),
             json!({
-                "target_ref": "ak:actor_profile:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
+                "actor_profile_id": "ak:actor_profile:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
                 "patch": { "title": { "$op": "replace", "value": "Roadmap" } }
             }),
         ),
@@ -929,13 +929,13 @@ fn event_payload_validator_enforces_patch_family_schema() {
     }
 
     // ak.profile.realm_override carries a Realm-scoped override and uses the
-    // dedicated profile_realm_override_payload (target_ref + target_realm_id
+    // dedicated profile_realm_override_payload (actor_profile_id + target_realm_id
     // + patch), not the generic object_patch_payload.
     catalog
         .validate_payload(
             "ak.profile.realm_override",
             &json!({
-                "target_ref": "ak:actor_profile:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
+                "actor_profile_id": "ak:actor_profile:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
                 "target_realm_id": "ak:realm:AQqDnmYP2y5kt6ZLD--QatyqmmeXf3WAeSGGrAGZoR-6",
                 "patch": { "title": { "$op": "set", "value": "Roadmap" } }
             }),
@@ -948,7 +948,7 @@ fn event_payload_validator_enforces_patch_family_schema() {
         .validate_payload(
             "ak.strand.tracks.update",
             &json!({
-                "target_ref": "ak:strand:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
+                "strand_id": "ak:strand:AR3ud0srmtpodQ47XfsVC4uD75mQDAGaKLEww6VGMZZC",
                 "patch": {
                     "tracks.discussion.enabled": {"$op": "set", "value": true},
                     "tracks.discussion.is_primary": {"$op": "set", "value": true}

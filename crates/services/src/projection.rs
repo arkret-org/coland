@@ -601,9 +601,10 @@ impl ProjectionService {
         if is_morph_kind {
             let id = if kind == arkret_wire::EventKind::MorphCreate {
                 object_id()
-            } else if kind == arkret_wire::EventKind::MorphStageSet {
-                // `morph_stage_set_payload` names its target `morph_id`; every
-                // other Morph mutation carries the generic `target_ref`.
+            } else if matches!(
+                kind,
+                arkret_wire::EventKind::MorphUpdate | arkret_wire::EventKind::MorphStageSet
+            ) {
                 string_field("morph_id")
             } else {
                 string_field("target_ref")

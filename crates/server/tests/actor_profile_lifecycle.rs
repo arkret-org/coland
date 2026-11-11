@@ -175,7 +175,7 @@ async fn create_and_update_share_one_profile_and_a_patch_is_a_delta() {
         &state,
         &fixture,
         EventKind::ProfileUpdate,
-        json!({"target_ref": profile_id, "patch": {"display_name": "Alice C."}}),
+        json!({"actor_profile_id": profile_id, "patch": {"display_name": "Alice C."}}),
     );
     let (status, updated) = post_profile_event(&state, &token, &update).await;
     assert_eq!(status, StatusCode::OK, "profile update: {updated}");
@@ -187,6 +187,20 @@ async fn create_and_update_share_one_profile_and_a_patch_is_a_delta() {
     );
     assert_eq!(updated["profile"]["updated_by"], json!(update.actor_id));
     assert_eq!(updated["commit"]["event_ref"], json!(update.event_id));
+
+    for payload in [
+        json!({"target_ref": profile_id, "patch": {"display_name": "Legacy target"}}),
+        json!({"actor_profile_id": profile_id, "target_ref": profile_id,
+            "patch": {"display_name": "Ambiguous target"}}),
+    ] {
+        let invalid = profile_event(&state, &fixture, EventKind::ProfileUpdate, payload);
+        let (status, body) = post_profile_event(&state, &token, &invalid).await;
+        assert!(status.is_client_error(), "{body}");
+        assert_eq!(problem_code(&body), "schema_violation", "{body}");
+        let (status, unchanged) = viewer(&state, &token).await;
+        assert_eq!(status, StatusCode::OK, "{unchanged}");
+        assert_eq!(unchanged["profile"]["display_name"], "Alice C.");
+    }
 
     // An exact retry of the create returns its stored outcome and Commit.
     let (status, replayed) = post_profile_event(&state, &token, &create).await;
@@ -209,7 +223,7 @@ async fn create_and_update_share_one_profile_and_a_patch_is_a_delta() {
             &state,
             &fixture,
             EventKind::ProfileUpdate,
-            json!({"target_ref": profile_id, "patch": patch}),
+            json!({"actor_profile_id": profile_id, "patch": patch}),
         );
         let (status, body) = post_profile_event(&state, &token, &forbidden).await;
         assert!(status.is_client_error(), "{body}");
@@ -240,7 +254,7 @@ async fn a_stale_expected_state_digest_refuses_the_profile_update() {
         &fixture,
         EventKind::ProfileUpdate,
         json!({
-            "target_ref": profile_id,
+            "actor_profile_id": profile_id,
             "patch": {"display_name": "Bob B."},
             "expected_state_digest": format!("sha256:{}", "0".repeat(64))
         }),
@@ -259,7 +273,7 @@ async fn a_stale_expected_state_digest_refuses_the_profile_update() {
         &fixture,
         EventKind::ProfileUpdate,
         json!({
-            "target_ref": profile_id,
+            "actor_profile_id": profile_id,
             "patch": {"display_name": "Bob B."},
             "expected_state_digest": ActorProfileUpdatePayload::state_digest(&current).unwrap()
         }),

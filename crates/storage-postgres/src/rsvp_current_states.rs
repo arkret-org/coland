@@ -411,7 +411,7 @@ fn basis_names_target(
             let payload = event
                 .as_strand_update()
                 .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-            Ok(payload.target_ref == *target)
+            Ok(payload.strand_id == *target)
         }
         _ => Ok(false),
     }
@@ -470,7 +470,7 @@ mod typed_basis_tests {
         let expected = target(2);
         let (row, id) = basis(
             EventKind::StrandUpdate,
-            json!({"target_ref": expected, "patch": {"metadata.title": {"$op": "set", "value": "Changed"}}}),
+            json!({"strand_id": expected, "patch": {"metadata.title": {"$op": "set", "value": "Changed"}}}),
         );
         assert!(basis_names_target(&row, &id, &expected).unwrap());
         assert!(!basis_names_target(&row, &id, &target(3)).unwrap());
@@ -499,7 +499,7 @@ mod typed_basis_tests {
         let expected = target(2);
         let (mut row, id) = basis(
             EventKind::StrandUpdate,
-            json!({"target_ref": expected, "patch": {}}),
+            json!({"strand_id": expected, "patch": {}}),
         );
         row.kind = EventKind::StrandCreate.as_str().to_owned();
         assert!(basis_names_target(&row, &id, &expected).is_err());
@@ -520,8 +520,9 @@ mod typed_basis_tests {
         assert!(basis_names_target(&row, &id, &expected).is_err());
         for payload in [
             json!({"target_ref": expected}),
-            json!({"strand_id": expected, "patch": {}}),
-            json!({"target_ref": expected, "patch": {}, "unexpected": true}),
+            json!({"target_ref": expected, "patch": {}}),
+            json!({"strand_id": expected, "target_ref": expected, "patch": {}}),
+            json!({"strand_id": expected, "patch": {}, "unexpected": true}),
         ] {
             let (row, id) = basis(EventKind::StrandUpdate, payload);
             assert!(basis_names_target(&row, &id, &expected).is_err());

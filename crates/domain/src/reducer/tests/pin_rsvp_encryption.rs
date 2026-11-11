@@ -280,7 +280,7 @@ fn calendar_schedule_source_tracks_only_calendar_writes() {
         arkret_wire::EventKind::StrandUpdate,
         REALM_ID,
         serde_json::json!({
-            "target_ref": STRAND_ID,
+            "strand_id": STRAND_ID,
             "patch": {"metadata.title": {"$op": "set", "value": "Renamed"}}
         }),
     );
@@ -298,7 +298,7 @@ fn calendar_schedule_source_tracks_only_calendar_writes() {
         arkret_wire::EventKind::StrandUpdate,
         REALM_ID,
         serde_json::json!({
-            "target_ref": STRAND_ID,
+            "strand_id": STRAND_ID,
             "patch": {"metadata.fields.calendar": {"$op": "unset"}}
         }),
     );

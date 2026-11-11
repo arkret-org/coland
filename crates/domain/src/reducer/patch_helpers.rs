@@ -349,7 +349,7 @@ pub(crate) fn apply_metadata_fields_value(fields: &mut BTreeMap<String, Value>, 
 
 pub(crate) fn strand_id_from_payload(payload: &Value) -> Option<&str> {
     payload
-        .get("target_ref")
+        .get("strand_id")
         .and_then(Value::as_str)
         .filter(|value| value.starts_with("ak:strand:"))
 }

@@ -889,8 +889,16 @@ async fn structure_admits_in_connection(
         arkret_wire::StrandId::new(&founding.main_strand_id).map_err(PersistenceError::database)?;
     let target = event
         .payload
-        .get("strand_id")
-        .or_else(|| event.payload.get("target_ref"))
+        .get(
+            if matches!(
+                event.kind,
+                arkret_wire::EventKind::StrandArchive | arkret_wire::EventKind::StrandRestore
+            ) {
+                "target_ref"
+            } else {
+                "strand_id"
+            },
+        )
         .and_then(serde_json::Value::as_str)
         .unwrap_or(&founding.main_strand_id);
     let rows = sql_query("SELECT s.value FROM strand_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id AND c.realm_id=s.realm_id AND c.stream_position=s.current_stream_position WHERE s.realm_id=$1 AND s.strand_id IN ($2,$3) AND c.stream_ref->>'kind'='realm' AND c.stream_ref->>'realm_id'=s.realm_id FOR SHARE OF s")

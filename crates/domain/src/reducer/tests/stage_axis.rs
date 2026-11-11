@@ -259,7 +259,7 @@ fn strand_update_patch_on_the_stage_axis_is_refused() {
     ] {
         let error = arkret_event_draft::validate_event_payload(
             &arkret_wire::EventKind::StrandUpdate,
-            &serde_json::json!({ "target_ref": strand_id, "patch": patch }),
+            &serde_json::json!({ "strand_id": strand_id, "patch": patch }),
         )
         .expect_err("stage-axis patches must be rejected before operation projection");
         assert!(error.to_string().contains("forbidden wire field patch:"));

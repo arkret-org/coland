@@ -30,7 +30,12 @@ pub(crate) async fn retain(
     let arkret_mls::AuthorLeafCredential::Basic { identity } = leaf.credential else {
         return Err(unavailable("has no registered Actor credential"));
     };
-    if arkret_mls::decode_leaf_credential(&identity).map_err(unavailable)? != record.owner_actor_id
+    let actor = if record.agent_key_authorize_event_id.is_some() {
+        crate::mls_keypackage_claim_endpoints::require_agent_publication(conn, record).await?
+    } else {
+        record.owner_actor_id.clone()
+    };
+    if arkret_mls::decode_leaf_credential(&identity).map_err(unavailable)? != actor
         || arkret_canonical::sha256_digest(&record.key_package_bytes) != record.keypackage_digest
     {
         return Err(unavailable(
@@ -59,7 +64,7 @@ pub(crate) async fn retain(
         _ => return Err(unavailable("has no exact original native endpoint")),
     };
     let binding = ContentEndpoint {
-        actor_id: record.owner_actor_id.clone(),
+        actor_id: actor,
         endpoint,
         authorization_event_ref: EventId::new(authorization.clone()).map_err(unavailable)?,
         signature_key_base64url: arkret_canonical::base64url_encode(leaf.signature_key),

@@ -420,6 +420,42 @@ async fn agent(
     })
 }
 
+/// Resolve an Agent publication's encryption Actor separately from its owner.
+/// Reuse the same transaction-held current authorization as claim delivery.
+pub(crate) async fn require_agent_publication(
+    conn: &mut AsyncPgConnection,
+    record: &coland_storage::MlsKeyPackageRow,
+) -> PersistenceResult<ActorId> {
+    let principal = DidCoreId::new(record.actor_id.clone()).map_err(denied)?;
+    let method = record
+        .endpoint_verification_method
+        .as_ref()
+        .ok_or_else(|| denied("Agent publication omits its method"))?;
+    let method = DidUrl::new(method.clone()).map_err(denied)?;
+    let event = record
+        .agent_key_authorize_event_id
+        .as_ref()
+        .ok_or_else(|| denied("Agent publication omits its authorization"))?;
+    let event = EventId::new(event.clone()).map_err(denied)?;
+    let full = original(conn, &event).await?;
+    if full.event.actor_id.as_account_id().is_none()
+        || full.event.actor_id.signing_principal_id() != &principal
+        || record.owner_actor_id.as_account_id().is_none()
+        || full.event.executed_by.as_ref() != Some(&record.owner_actor_id)
+        || record.device_id.is_some()
+        || record.device_authorize_event_id.is_some()
+    {
+        return Err(denied(
+            "Agent publication differs from its accepted native Actor",
+        ));
+    }
+    agent(conn, &principal, &method, &event)
+        .await?
+        .require_current(conn)
+        .await?;
+    Ok(full.event.actor_id)
+}
+
 /// Resolve only the ordinary local requester's accepted authorization. The
 /// caller must subsequently lock its PCR and repeat current qualification.
 pub(crate) async fn ordinary_requester(

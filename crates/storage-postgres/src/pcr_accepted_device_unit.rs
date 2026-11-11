@@ -327,6 +327,11 @@ pub(crate) async fn admit_accepted_device_unit_in_connection(
         )
     })?;
 
+    let historical =
+        crate::agent_producer_signer_keys::prepare_confirmed_human_outcome_in_connection(
+            conn, event, commit, &status, account, approver,
+        )
+        .await?;
     crate::authority_commit::queue_event_in_connection(conn, event, queued_at).await?;
     match crate::authority_commit::commit_verified_pcr_device_transaction_in_connection(
         conn,
@@ -348,6 +353,10 @@ pub(crate) async fn admit_accepted_device_unit_in_connection(
             ));
         }
     }
+    crate::agent_producer_signer_keys::retain_self_outcome_in_connection(
+        conn, event, commit, historical,
+    )
+    .await?;
     crate::pcr_device_current_states::project_pcr_device_current_in_connection(
         conn, event, commit, None,
     )

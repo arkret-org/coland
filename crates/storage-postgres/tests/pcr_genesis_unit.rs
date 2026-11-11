@@ -2564,6 +2564,63 @@ async fn accepted_device_unit_admits_only_a_current_active_approver() {
         AcceptedDeviceAuthorizationOutcome::Committed(commit_d.clone())
     );
     let accepted = accepted_device_footprint(&pool, &realm_id, &account).await;
+    let selector = arkret_models_identity::SignerKeyQuerySelector::HistoricalEvent {
+        sender: arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice {
+            actor: arkret_wire::ActorId::account(account.clone()),
+            device_id: device_a.clone(),
+            verification_method: method_a.clone(),
+            committed_event_ref: arkret_wire::CommittedEventRef {
+                event_id: approve_d.event_id.clone(),
+                commit_id: commit_d.commit_id.clone(),
+                stream_ref: commit_d.stream_ref.clone(),
+                stream_position: commit_d.stream_position,
+            },
+        },
+    };
+    let Some(arkret_models_identity::SignerKeyResolution::HistoricalResolved { key, .. }) = store
+        .historical_self_pcr_producer_signer_key(&realm_id, &selector, &account)
+        .await
+        .unwrap()
+    else {
+        panic!("accepted Device authorization must retain its original approving signer")
+    };
+    assert_eq!(
+        key.public_key_base64url.as_str(),
+        arkret_canonical::base64url_encode(
+            SigningKey::from_bytes(&seed_a).verifying_key().as_bytes(),
+        )
+    );
+    assert_eq!(
+        key.authorization_ref.event_id,
+        genesis.transactions[1].event.event_id
+    );
+    let mut wrong = selector.clone();
+    let arkret_models_identity::SignerKeyQuerySelector::HistoricalEvent {
+        sender:
+            arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice { device_id, .. },
+    } = &mut wrong
+    else {
+        unreachable!()
+    };
+    *device_id = device_d.clone();
+    assert!(
+        store
+            .historical_self_pcr_producer_signer_key(&realm_id, &wrong, &account)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let other = arkret_wire::AccountId::new(
+        account.principal_id.clone(),
+        arkret_wire::DidCoreId::new("ak:did_core:web:other-station.example").unwrap(),
+    );
+    assert!(
+        store
+            .historical_self_pcr_producer_signer_key(&realm_id, &selector, &other)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         accepted,
         AcceptedDeviceFootprint {

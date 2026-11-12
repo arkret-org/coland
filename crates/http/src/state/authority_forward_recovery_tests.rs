@@ -4055,8 +4055,12 @@ async fn tcp_opening_bootstrap(
         let authority_bundle = crate::routing::realm_join::local_authority_bundle(
             &governor, &actual.realm_id, &nonce,
         ).await.unwrap();
+        let producer_signer_fact = store
+            .producer_signer_fact(&authority_bundle.genesis_event, &authority_bundle.genesis_commit)
+            .await
+            .unwrap();
         arkret_models_collaboration::governance::realm_join_intake::PeerRealmJoinBootstrapResponseBody {
-            request_id: actual.request_id, visible_stream_heads: snapshot.visible_stream_heads.clone(), snapshot, authority_bundle,
+            request_id: actual.request_id, visible_stream_heads: snapshot.visible_stream_heads.clone(), snapshot, authority_bundle, producer_signer_fact,
         }
     });
     let body = arkret_canonical::canonical_json_bytes(&outcome).unwrap();

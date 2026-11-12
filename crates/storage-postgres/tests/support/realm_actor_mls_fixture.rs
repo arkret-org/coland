@@ -1723,7 +1723,7 @@ async fn receive_and_consume(
             account_request(
                 recipient,
                 reqwest::Method::GET,
-                "/_arkret/self/device_messages",
+                "/_arkret/self/device-messages",
                 ServiceOperationId::SelfDeviceMessagesReadListV1,
                 None,
             )
@@ -1758,7 +1758,7 @@ async fn receive_and_consume(
         account_request(
             recipient,
             reqwest::Method::POST,
-            "/_arkret/self/device_messages/ack",
+            "/_arkret/self/device-messages/ack",
             ServiceOperationId::SelfDeviceMessagesCommandAckV1,
             Some(json!(ack)),
         )
@@ -1772,7 +1772,7 @@ async fn receive_and_consume(
         account_request(
             recipient,
             reqwest::Method::GET,
-            "/_arkret/self/device_messages",
+            "/_arkret/self/device-messages",
             ServiceOperationId::SelfDeviceMessagesReadListV1,
             None,
         )

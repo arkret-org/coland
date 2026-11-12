@@ -4713,6 +4713,24 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         conn.finish(result).await
     }
 
+    async fn install_replica_bootstrap(
+        &self,
+        install: &coland_storage::ReplicaBootstrapInstall,
+    ) -> PersistenceResult<()> {
+        let mut conn = crate::issued_realm_snapshots::SnapshotIssuanceConnection::acquire(
+            &self.pool,
+            &install.anchor.realm_id,
+        )
+        .await?;
+        let result = conn
+            .transaction::<_, PgTransactionError, _>(async move |conn| {
+                replica::install_replica_bootstrap_in_connection(conn, install).await
+            })
+            .await
+            .map_err(PgTransactionError::into_persistence);
+        conn.finish(result).await
+    }
+
     async fn held_stream_head_commit(
         &self,
         stream_ref: &arkret_wire::CommitStreamRef,

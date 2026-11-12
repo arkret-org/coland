@@ -10502,7 +10502,7 @@ async fn owned_consumer_device_flow(mut input: Box<OwnedConsumerDeviceFlow>) {
         .await;
         let cursor = Box::pin(owned_consumer_exact_welcome_cursor(
             &http,
-            "/_arkret/self/device_messages?limit=1",
+            "/_arkret/self/device-messages?limit=1",
             &input.delivery,
         ))
         .await;
@@ -10527,7 +10527,7 @@ async fn owned_consumer_device_flow(mut input: Box<OwnedConsumerDeviceFlow>) {
         assert!(later.effective_scope == input.delivery.effective_scope);
         assert!(later.commit_event_ref != input.delivery.commit_event_ref);
         assert!(later.keypackage_claim_ref != input.delivery.keypackage_claim_ref);
-        let path = format!("/_arkret/self/device_messages?limit=1&after={cursor}");
+        let path = format!("/_arkret/self/device-messages?limit=1&after={cursor}");
         let _later_cursor =
             Box::pin(owned_consumer_exact_welcome_cursor(&http, &path, &later)).await;
         Box::pin(owned_consumer_device_messages_refusal(
@@ -10581,7 +10581,7 @@ async fn owned_consumer_device_messages_scenario(
         pool, station, controller, realm, agent, endpoint, vault,
     ))
     .await;
-    let path = "/_arkret/self/device_messages?limit=100";
+    let path = "/_arkret/self/device-messages?limit=100";
     let mut response = Box::pin(owned_consumer_http_get(
         &http,
         path,

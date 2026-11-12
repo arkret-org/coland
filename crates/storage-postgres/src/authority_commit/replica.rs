@@ -2141,6 +2141,85 @@ pub(super) async fn replica_anchor_for_stream_in_connection(
         .transpose()
 }
 
+/// Keep a verified founding original and its immutable producer source in
+/// the same transaction as the member's bootstrap anchor. The ordinary
+/// stream still opens at its own join and retains its existing floor.
+pub(super) async fn install_replica_bootstrap_in_connection(
+    conn: &mut AsyncPgConnection,
+    install: &coland_storage::ReplicaBootstrapInstall,
+) -> Result<(), PgTransactionError> {
+    arkret_models_collaboration::governance::realm_join_intake::validate_bootstrap_genesis_original(
+        &install.genesis,
+        install.producer_signer_fact.as_ref(),
+    )
+    .map_err(invalid)?;
+    if install.genesis.event.realm_id != install.anchor.realm_id {
+        return Err(invalid("bootstrap founding original belongs to another Realm").into());
+    }
+    install_replica_anchor_in_connection(conn, &install.anchor).await?;
+    let original = &install.genesis;
+    let key = stream_key(&original.commit.stream_ref)?;
+    if let Some(held) = sql_query(
+        "SELECT c.commit_json,e.envelope FROM realm_commits c \
+         LEFT JOIN canonical_events e ON e.pk=c.event_pk \
+         WHERE c.stream_key=$1 AND c.stream_position=0 FOR UPDATE OF c",
+    )
+    .bind::<Text, _>(&key)
+    .get_result::<HeldRow>(&mut *conn)
+    .await
+    .optional()?
+    {
+        if held.commit_json != serde_json::to_value(&original.commit).map_err(invalid)? {
+            return Err(conflict(
+                ConflictCode::ForkQuarantine,
+                "bootstrap founding position belongs to another original Commit",
+            ));
+        }
+        if held.envelope.is_none() {
+            return Err(conflict(
+                ConflictCode::DependencyMissing,
+                "the held founding Commit lacks its canonical original",
+            ));
+        }
+    }
+    match held_duplicate(conn, &original.commit, Some(&original.event)).await? {
+        Some(CommittedReplicaOutcome::Duplicate) => {
+            let held = crate::agent_producer_signer_keys::producer_source_for_commit_in_connection(
+                conn,
+                &original.event,
+                &original.commit,
+            )
+            .await?;
+            if held != install.producer_signer_fact {
+                return Err(conflict(
+                    ConflictCode::DuplicateConflict,
+                    "bootstrap founding original changed its retained producer source",
+                ));
+            }
+        }
+        _ => {
+            store_replica_rows(
+                conn,
+                &original.event,
+                &original.commit,
+                &key,
+                chrono::Utc::now(),
+            )
+            .await?;
+            if let Some(fact) = install.producer_signer_fact.as_ref() {
+                crate::agent_producer_signer_keys::retain_prepared_producer_in_connection(
+                    conn,
+                    &original.event,
+                    &original.commit,
+                    fact,
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Install a verified bootstrap snapshot and its typed current atomically.
 /// A pending stream requires its original opening join. An anchored refresh
 /// may use another exact current hosted join, preserving the opening prefix.

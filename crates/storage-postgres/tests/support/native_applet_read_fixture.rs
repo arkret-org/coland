@@ -90,7 +90,7 @@ async fn native_applet_reads(
     super::native_read_evidence::capture(
         arkret_wire::ServiceOperationId::EdgeAppletThirdPartyUsersReadListV1,
         "GET",
-        &format!("/_arkret/edge/applet/third_party/users?{encoded}"),
+        &format!("/_arkret/edge/applet/third-party/users?{encoded}"),
         None,
         json!(response),
         originals,

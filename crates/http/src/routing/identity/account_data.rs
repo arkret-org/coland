@@ -2,7 +2,7 @@
 //!
 //! Protocol writes use `ak.account_data.set` actor-private events and
 //! `ak.self.account.stream.subscribe.v1` for sync/read. This module is mounted under
-//! `/_arkret/self/account_data*`.
+//! `/_arkret/self/account-data*`.
 //!
 //! Spec: `discovery/client-preferences.md` §2 (storage model) plus the per-key
 //! sections (§3.1 Space tags, §3.5 blocklist, §3.6 contact remarks, §3.7 Space
@@ -186,7 +186,7 @@ fn validate_private_account_data_content(
 }
 
 pub(super) fn router() -> Router {
-    Router::with_path("account_data")
+    Router::with_path("account-data")
         .get(list_account_data)
         .push(
             Router::with_path("{account_data_key}")

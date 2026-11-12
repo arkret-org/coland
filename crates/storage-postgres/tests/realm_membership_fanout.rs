@@ -1289,6 +1289,7 @@ async fn held_genesis_replica_freezes_only_its_exact_scope_provenance() {
         first_carried_commit_event_ref: String,
     }
     let database = TestDatabase::lease().await;
+    database.bind_device_inventory_station(member_station().as_str());
     let pool = database.pool();
     let store = PgAuthorityCommitStore { pool: pool.clone() };
     let unit = bootstrap_unit_with_join_rule("replica-genesis-provenance", "public");

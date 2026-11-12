@@ -15,6 +15,9 @@ enum BootstrapFault {
     None,
     WrongNonce,
     WrongSigner,
+    MissingGenesisFact,
+    SubstitutedGenesisFact,
+    InvalidGenesisProducerSignature,
 }
 
 struct CircleScene {
@@ -681,10 +684,51 @@ async fn actual_peer_reply(
                 governor
             },
         );
-        let response = arkret_models_collaboration::governance::realm_join_intake::PeerRealmJoinBootstrapResponseBody {
+        let producer_signer_fact = store
+            .producer_signer_fact(&bundle.genesis_event, &bundle.genesis_commit)
+            .await
+            .unwrap();
+        let mut response = arkret_models_collaboration::governance::realm_join_intake::PeerRealmJoinBootstrapResponseBody {
             request_id: request.request_id, visible_stream_heads:snapshot.visible_stream_heads.clone(),
-            snapshot, authority_bundle:bundle,
+            snapshot, authority_bundle:bundle, producer_signer_fact,
         };
+        if fault == BootstrapFault::MissingGenesisFact {
+            assert!(
+                response
+                    .authority_bundle
+                    .genesis_commit
+                    .producer_signer_fact_digest
+                    .is_some()
+            );
+            response.producer_signer_fact = None;
+        }
+        if fault == BootstrapFault::SubstitutedGenesisFact {
+            response
+                .producer_signer_fact
+                .as_mut()
+                .unwrap()
+                .as_account_device_mut()
+                .unwrap()
+                .event_id = arkret_wire::EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [0x71; 32],
+            );
+        }
+        if fault == BootstrapFault::InvalidGenesisProducerSignature {
+            let proof = response
+                .authority_bundle
+                .genesis_event
+                .producer_proof
+                .as_mut()
+                .unwrap();
+            let index = proof.jws.rfind('.').unwrap() + 1;
+            let replacement = if proof.jws.as_bytes()[index] == b'A' {
+                "B"
+            } else {
+                "A"
+            };
+            proof.jws.replace_range(index..index + 1, replacement);
+        }
         return (
             200,
             arkret_canonical::canonical_json_bytes(&response).unwrap(),
@@ -804,9 +848,11 @@ async fn qualified_circle_refresh_precedes_full_tail_when_metadata_is_physically
 }
 
 #[tokio::test]
-async fn unproved_circle_rejects_wrong_nonce_and_other_station_snapshot_without_effects() {
+async fn unproved_circle_rejects_wrong_nonce_signer_and_genesis_source_without_effects() {
     scenario_future(|| async {
-        for fault in [BootstrapFault::WrongNonce,BootstrapFault::WrongSigner] {
+        for fault in [BootstrapFault::WrongNonce,BootstrapFault::WrongSigner,
+            BootstrapFault::MissingGenesisFact,BootstrapFault::SubstitutedGenesisFact,
+            BootstrapFault::InvalidGenesisProducerSignature] {
             let scene = scenario_future(circle_scene).await;
             Box::pin(scene.bob_realm_snapshot()).await;
             Box::pin(scene.remove_only_derived_circle_metadata()).await;
@@ -819,7 +865,7 @@ async fn unproved_circle_rejects_wrong_nonce_and_other_station_snapshot_without_
             assert_eq!(calls.iter().filter(|p|p.as_str()=="/_arkret/peer/realm-joins/bootstrap").count(),1);
             assert!(scene.member().committed_event(&tail.authority_commit.event.event_id).await.unwrap().is_none());
             assert_eq!(realm_terminal_peer_tests::terminal_persistent_rows(&scene.origin_pool).await,before,
-                "a real signed reply with wrong request nonce or source signer changes no accepted state");
+                "a real signed reply with wrong nonce, signer or founding source changes no accepted state");
         }
     }).await;
 }

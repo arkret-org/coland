@@ -513,10 +513,10 @@ fn agent_recipient_operation(method: &str, path: &str) -> Option<&'static str> {
             Some(ServiceOperationId::SELF_STRAND_WATCH_READ_CURRENT_V1)
         }
         ("POST", "/_arkret/self/signal") => Some(ServiceOperationId::SELF_SIGNAL_COMMAND_SEND_V1),
-        ("GET", "/_arkret/self/device_messages") => {
+        ("GET", "/_arkret/self/device-messages") => {
             Some(ServiceOperationId::SELF_DEVICE_MESSAGES_READ_LIST_V1)
         }
-        ("POST", "/_arkret/self/device_messages/ack") => {
+        ("POST", "/_arkret/self/device-messages/ack") => {
             Some(ServiceOperationId::SELF_DEVICE_MESSAGES_COMMAND_ACK_V1)
         }
         ("GET", path) if path_template_matches("/_arkret/self/realm-state-snapshot/head", path) => {
@@ -541,7 +541,7 @@ fn agent_recipient_operation(method: &str, path: &str) -> Option<&'static str> {
         ("POST", "/_arkret/self/mls/roster-authority/query") => {
             Some(ServiceOperationId::SELF_MLS_READ_ROSTER_AUTHORITY_V1)
         }
-        ("POST", "/_arkret/self/device_messages") => {
+        ("POST", "/_arkret/self/device-messages") => {
             Some(ServiceOperationId::SELF_DEVICE_MESSAGES_COMMAND_SEND_V1)
         }
         ("POST", "/_arkret/self/actor-private-events") => {
@@ -1207,17 +1207,17 @@ mod tests {
             ),
             (
                 "GET",
-                "/_arkret/self/device_messages",
+                "/_arkret/self/device-messages",
                 ServiceOperationId::SELF_DEVICE_MESSAGES_READ_LIST_V1,
             ),
             (
                 "POST",
-                "/_arkret/self/device_messages/ack",
+                "/_arkret/self/device-messages/ack",
                 ServiceOperationId::SELF_DEVICE_MESSAGES_COMMAND_ACK_V1,
             ),
             (
                 "POST",
-                "/_arkret/self/device_messages",
+                "/_arkret/self/device-messages",
                 ServiceOperationId::SELF_DEVICE_MESSAGES_COMMAND_SEND_V1,
             ),
             (
@@ -1376,7 +1376,7 @@ mod tests {
         ));
         assert!(method_path_requires_fresh_introspection(
             &Method::DELETE,
-            "/_arkret/self/account_data/ak.push_rules"
+            "/_arkret/self/account-data/ak.push_rules"
         ));
     }
 
@@ -1387,7 +1387,7 @@ mod tests {
             "/_arkret/admin/registry",
             "/_arkret/self/account",
             "/_arkret/self/authz/effective-grants",
-            "/_arkret/self/device_messages",
+            "/_arkret/self/device-messages",
             "/_arkret/self/keys/backups",
             "/_arkret/self/keys/query",
             "/_arkret/self/realms/r1/strands",

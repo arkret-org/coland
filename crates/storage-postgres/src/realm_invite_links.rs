@@ -115,7 +115,7 @@ async fn definition(
         || definition.creator_actor_id != source.actor_id
         || definition.public_key != p.public_key
         || definition.expires_at != p.expires_at
-        || definition.max_uses != p.max_uses
+        || definition.max_use_count != p.max_use_count
     {
         return Err(corrupt("definition differs from its accepted original"));
     }
@@ -152,7 +152,7 @@ async fn usable(
     .await
     .map_err(PersistenceError::database)?
     .count;
-    if count >= i64::from(definition.max_uses) {
+    if count >= i64::from(definition.max_use_count) {
         return Err(unavailable());
     }
     Ok(definition)
@@ -248,7 +248,7 @@ pub(crate) async fn commit_in_connection(
             if p.expires_at <= commit.committed_at
                 || lifetime < chrono::Duration::seconds(60)
                 || lifetime > chrono::Duration::seconds(i64::from(limits.max_lifetime_seconds))
-                || p.max_uses > limits.max_uses_per_link
+                || p.max_use_count > limits.max_use_count_per_link
             {
                 return Err(invalid("Realm invite link exceeds generation limits"));
             }
@@ -256,7 +256,7 @@ pub(crate) async fn commit_in_connection(
             let definition = RealmInviteLinkDefinitionValue {
                 public_key: p.public_key,
                 expires_at: p.expires_at,
-                max_uses: p.max_uses,
+                max_use_count: p.max_use_count,
                 create_event_id: event.event_id.clone(),
                 creator_actor_id: event.actor_id.clone(),
             };

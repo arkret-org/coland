@@ -336,7 +336,7 @@ fn account_registration_evidence_summary(
             .and_then(|value| value.invitation_token.as_deref())
             .is_some_and(|value| !value.trim().is_empty()),
         organization: evidence
-            .and_then(|value| value.organization.as_deref())
+            .and_then(|value| value.organization_label.as_deref())
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_owned),
@@ -441,17 +441,17 @@ fn organization_allowed(
     policy: &AccountRegistrationPolicy,
     evidence: Option<&AccountRegistrationPolicyEvidence>,
 ) -> bool {
-    if policy.organization_allowlist.is_empty() {
+    if policy.allowed_organization_labels.is_empty() {
         return true;
     }
     let mut candidates = Vec::new();
-    if let Some(organization) = evidence.and_then(|value| value.organization.as_deref()) {
+    if let Some(organization) = evidence.and_then(|value| value.organization_label.as_deref()) {
         candidates.push(normalized_registration_policy_label(organization));
     }
     if let Some(host) = did_host_candidate(did) {
         candidates.push(host);
     }
-    policy.organization_allowlist.iter().any(|allowed| {
+    policy.allowed_organization_labels.iter().any(|allowed| {
         let allowed = normalized_registration_policy_label(allowed);
         candidates
             .iter()
@@ -521,7 +521,7 @@ async fn enforce_account_registration_policy(
         .await);
     }
     let verification_code = evidence.and_then(|value| value.verification_code.as_deref());
-    if policy.verification_code.required
+    if policy.verification_code.verification_required
         && verification_code
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -543,7 +543,7 @@ async fn enforce_account_registration_policy(
         )
         .await);
     }
-    if policy.verification_code.required
+    if policy.verification_code.verification_required
         && let Some(code_digest) = policy.verification_code.code_digest.as_ref()
         && !evidence_secret_matches(verification_code, std::slice::from_ref(code_digest))?
     {
@@ -581,7 +581,7 @@ async fn enforce_account_registration_policy(
         .await);
     }
     let invitation_token = evidence.and_then(|value| value.invitation_token.as_deref());
-    if policy.invitation.required
+    if policy.invitation.invitation_required
         && invitation_token
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -603,7 +603,7 @@ async fn enforce_account_registration_policy(
         )
         .await);
     }
-    if policy.invitation.required
+    if policy.invitation.invitation_required
         && !evidence_secret_matches(invitation_token, &policy.invitation.token_digests)?
     {
         let audit = account_registration_audit(

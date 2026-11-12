@@ -1469,6 +1469,16 @@ pub struct ReplicaAnchorInstall {
     pub verified_snapshot: arkret_wire::RealmStateSnapshot,
 }
 
+/// Independently verified founding original retained atomically with a
+/// member bootstrap. It never changes the ordinary replay head or floor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplicaBootstrapInstall {
+    pub anchor: ReplicaAnchorInstall,
+    pub genesis: arkret_wire::CommittedEventFullView,
+    pub producer_signer_fact:
+        Option<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
+}
+
 /// Inputs for the same read-only Signal eligibility cut used by every layer.
 #[derive(Clone, Copy, Debug)]
 pub struct SignalScopeAuthorityQuery<'a> {
@@ -2383,6 +2393,11 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// Refreshing via another current hosted join retains the original prefix.
     async fn install_replica_anchor(&self, install: &ReplicaAnchorInstall)
     -> PersistenceResult<()>;
+
+    async fn install_replica_bootstrap(
+        &self,
+        install: &ReplicaBootstrapInstall,
+    ) -> PersistenceResult<()>;
 
     /// The Commit this Station holds at the head of `stream_ref`, whether a
     /// full replica or a chain node.

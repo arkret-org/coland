@@ -3,7 +3,7 @@
 //! Exercises:
 //! - all eight canonical link_kinds write their cell + are queryable
 //! - the structured `realm_links` / `realm_links_inbound` caches populate
-//! - the query API filters by direction + link_kind_allow
+//! - the query API filters by direction + allowed_link_kinds
 //! - schema validation rejects bad kinds / self-references / bad status
 
 use arkret_event_draft::ProjectedEventOperation as Operation;

@@ -31,7 +31,7 @@ use coland_services::committed_receipt::{
 };
 use coland_storage::{
     CommittedChainNode, CommittedReplica, CommittedReplicaRole, ReplicaAnchorInstall,
-    ReplicaStreamAnchor,
+    ReplicaBootstrapInstall, ReplicaStreamAnchor,
 };
 
 use super::AppState;
@@ -1057,6 +1057,20 @@ async fn anchor_stream_with_forward_source(
     }
     *located = served;
     RealmJoinBootstrapAssembly::new(outcome.clone()).map_err(temporary)?;
+    let genesis = outcome.genesis_original().map_err(temporary)?;
+    verify_committed_event_receipt_with_source(
+        state.persistence(),
+        &genesis.event,
+        &genesis.commit,
+        CommitContinuity::Standalone,
+        &located.authority,
+        &located.keys,
+        &state.service_core_id(),
+        genesis.event.event_id.digest_suite_code().digest_suite(),
+        outcome.producer_signer_fact.as_ref(),
+    )
+    .await
+    .map_err(temporary)?;
     let snapshot = &outcome.snapshot;
     verify_snapshot(state, located, snapshot).await?;
     let realm_stream = join.stream_ref.clone();
@@ -1093,14 +1107,18 @@ async fn anchor_stream_with_forward_source(
     }
     state
         .authority_commits()
-        .install_replica_anchor(&ReplicaAnchorInstall {
-            realm_id: realm_id.clone(),
-            join_commit_id: join.commit_id.clone(),
-            governance_generation: snapshot.governance_generation,
-            snapshot_head: head.clone(),
-            visible_stream_heads: snapshot.visible_stream_heads.clone(),
-            current_state_entries: snapshot.current_state_entries.clone(),
-            verified_snapshot: snapshot.clone(),
+        .install_replica_bootstrap(&ReplicaBootstrapInstall {
+            anchor: ReplicaAnchorInstall {
+                realm_id: realm_id.clone(),
+                join_commit_id: join.commit_id.clone(),
+                governance_generation: snapshot.governance_generation,
+                snapshot_head: head.clone(),
+                visible_stream_heads: snapshot.visible_stream_heads.clone(),
+                current_state_entries: snapshot.current_state_entries.clone(),
+                verified_snapshot: snapshot.clone(),
+            },
+            genesis,
+            producer_signer_fact: outcome.producer_signer_fact.clone(),
         })
         .await
         .map_err(temporary)?;

@@ -830,11 +830,11 @@ impl ProjectionState {
         &self,
         realm_id: &str,
         direction: arkret_models_collaboration::governance::realm_governance::RealmLinkDirection,
-        link_kind_allow: Option<&[String]>,
+        allowed_link_kinds: Option<&[String]>,
     ) -> Vec<RealmLinkState> {
         use arkret_models_collaboration::governance::realm_governance::RealmLinkDirection;
         let filter = |row: &&RealmLinkState| {
-            link_kind_allow
+            allowed_link_kinds
                 .map(|allow| allow.iter().any(|k| k == &row.link_kind))
                 .unwrap_or(true)
         };

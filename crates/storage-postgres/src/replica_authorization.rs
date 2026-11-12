@@ -1018,7 +1018,7 @@ mod snapshot_evidence_tests {
                 serde_json::to_value(arkret::RealmInviteLinkDefinitionValue {
                     public_key,
                     expires_at: at + chrono::Duration::hours(1),
-                    max_uses: 2,
+                    max_use_count: 2,
                     create_event_id: event.clone(),
                     creator_actor_id: creator,
                 })

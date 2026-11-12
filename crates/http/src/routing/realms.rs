@@ -1,9 +1,9 @@
 //! Realm governance HTTP surface.
 //!
 //! Surfaces:
-//! - `GET /_arkret/self/realms/{realm_id}/links?direction=outbound|inbound|both&link_kind_allow=...
-//!   ` — list the typed cross-Realm links projected from `ak.realm.link` events. Powered by the
-//!   exact durable accepted current rows and their original Events/Commits.
+//! - `GET /_arkret/self/realms/{realm_id}/links?direction=outbound|inbound|both&
+//!   allowed_link_kinds=... ` — list the typed cross-Realm links projected from `ak.realm.link`
+//!   events. Powered by the exact durable accepted current rows and their original Events/Commits.
 use arkret_identifiers::RealmId;
 use arkret_models_collaboration::governance::realm_governance::{
     RealmLinkDirection, RealmLinkKind, RealmLinkList,
@@ -34,7 +34,7 @@ pub(crate) async fn list_realm_links(
     aa: AuthArgs,
     realm_id: PathParam<String>,
     direction: QueryParam<String, false>,
-    link_kind_allow: QueryParam<String, false>,
+    allowed_link_kinds: QueryParam<String, false>,
     depot: &mut Depot,
     req: &mut Request,
 ) -> GuardedJsonResult<RealmLinkList> {
@@ -42,7 +42,7 @@ pub(crate) async fn list_realm_links(
         let state = depot.get_typed::<AppState>().expect("state injected");
         aa.authenticated_session(state, req).await?
     };
-    list_realm_links_impl(session, realm_id, direction, link_kind_allow, depot).await
+    list_realm_links_impl(session, realm_id, direction, allowed_link_kinds, depot).await
 }
 
 #[endpoint(
@@ -55,11 +55,11 @@ pub(crate) async fn admin_list_realm_links(
     admin: super::admin::AdminAuth,
     realm_id: PathParam<String>,
     direction: QueryParam<String, false>,
-    link_kind_allow: QueryParam<String, false>,
+    allowed_link_kinds: QueryParam<String, false>,
     depot: &mut Depot,
 ) -> GuardedJsonResult<RealmLinkList> {
     let session = admin.session()?;
-    list_realm_links_impl(session, realm_id, direction, link_kind_allow, depot).await
+    list_realm_links_impl(session, realm_id, direction, allowed_link_kinds, depot).await
 }
 
 /// Administrative role does not grant access to private Realm contents.
@@ -67,7 +67,7 @@ async fn list_realm_links_impl(
     session: coland_services::identity::SessionIdentityState,
     realm_id: PathParam<String>,
     direction: QueryParam<String, false>,
-    link_kind_allow: QueryParam<String, false>,
+    allowed_link_kinds: QueryParam<String, false>,
     depot: &mut Depot,
 ) -> GuardedJsonResult<RealmLinkList> {
     let state = depot.get_typed::<AppState>().expect("state injected");
@@ -78,9 +78,9 @@ async fn list_realm_links_impl(
     let direction_str = direction.into_inner().unwrap_or_else(|| "both".to_owned());
     let direction_enum = RealmLinkDirection::parse(&direction_str)
         .ok_or_else(|| AppError::param_invalid("direction MUST be one of outbound|inbound|both"))?;
-    // `link_kind_allow` is a comma-separated list — keeps the query
+    // `allowed_link_kinds` is a comma-separated list — keeps the query
     // surface dense and avoids repeated query parameters.
-    let allow_raw = link_kind_allow.into_inner();
+    let allow_raw = allowed_link_kinds.into_inner();
     let allow: Option<Vec<String>> = allow_raw
         .as_ref()
         .map(|s| {
@@ -92,7 +92,7 @@ async fn list_realm_links_impl(
                         .map(|kind| kind.as_str().to_owned())
                         .ok_or_else(|| {
                             AppError::param_invalid(format!(
-                                "link_kind_allow contains unknown kind '{value}'"
+                                "allowed_link_kinds contains unknown kind '{value}'"
                             ))
                         })
                 })

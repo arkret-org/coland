@@ -2263,6 +2263,13 @@ impl AuthorityCommitApplication {
         Ok(self.store().install_replica_anchor(install).await?)
     }
 
+    pub async fn install_replica_bootstrap(
+        &self,
+        install: &coland_storage::ReplicaBootstrapInstall,
+    ) -> ServiceResult<()> {
+        Ok(self.store().install_replica_bootstrap(install).await?)
+    }
+
     pub async fn held_stream_head_commit(
         &self,
         stream_ref: &CommitStreamRef,

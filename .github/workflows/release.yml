@@ -54,7 +54,6 @@ jobs:
         uses: ./arkret-org/coland/.github/actions/checkout-workspace
         with:
           token: ${{ secrets.CI_REPO_TOKEN || github.token }}
-          frozen: "true"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"

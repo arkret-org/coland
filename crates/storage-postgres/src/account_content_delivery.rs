@@ -2041,10 +2041,10 @@ async fn revalidate_committed_events_in_connection(
             if !matches!(
                 row.commit().stream_ref,
                 arkret_wire::CommitStreamRef::Sidecar { .. }
-            ) && floor
-                .as_ref()
-                .is_none_or(|floor| row.commit().stream_position < floor.oldest_position)
-            {
+            ) && floor.as_ref().is_none_or(|floor| {
+                row.commit().stream_position < floor.oldest_position
+                    && !crate::committed_disclosure::is_shared_realm_genesis(&accepted)
+            }) {
                 return Err(unavailable(
                     "queued position is no longer readable by the recipient",
                 ));

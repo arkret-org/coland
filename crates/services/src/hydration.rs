@@ -402,6 +402,43 @@ fn install_relation_current_states(
     Ok(())
 }
 
+/// Distinguish a held member suffix from this Station's governing history.
+async fn is_member_replica(
+    persistence: &dyn coland_storage::PersistenceStore,
+    realm: &RealmId,
+) -> coland_storage::PersistenceResult<bool> {
+    let Some(anchor) = persistence
+        .authority_commits()
+        .replica_stream_anchor(realm)
+        .await?
+    else {
+        return Ok(false);
+    };
+    if anchor.realm_id != *realm
+        || anchor.join_commit.realm_id != *realm
+        || anchor.join_commit.stream_ref
+            != (arkret_wire::CommitStreamRef::Realm {
+                realm_id: realm.clone(),
+            })
+    {
+        return Err(coland_storage::PersistenceError::Internal(
+            "hydration replica anchor belongs to another Realm stream".to_owned(),
+        ));
+    }
+    let authority = persistence
+        .authority_commits()
+        .current_authority(realm)
+        .await?
+        .ok_or_else(|| {
+            coland_storage::PersistenceError::Internal(
+                "hydration replica has no current Realm authority".to_owned(),
+            )
+        })?;
+    // A retained member anchor must not bypass the complete-prefix checks if
+    // this Station subsequently becomes governor through a planned handoff.
+    Ok(authority.service_id != anchor.member_account_id.station_id)
+}
+
 /// Rebuild ordinary Realm genesis from its exact confirmed command unit.
 /// Raw admission, actor sequence and timestamps confer no execution outcome.
 async fn hydrate_canonical_realm_bootstraps(
@@ -444,6 +481,12 @@ async fn hydrate_canonical_realm_bootstraps(
         ) {
             continue;
         }
+        // A member's exact founding original is custody evidence outside its
+        // since-join suffix, never permission to replay the Genesis reducer
+        // or to treat that sparse suffix as the governing bootstrap prefix.
+        if is_member_replica(persistence, &create_event.realm_id).await? {
+            continue;
+        }
 
         // A current ordinary bootstrap is one confirmed Realm stream prefix.
         // `snapshot_all` orders by receive time and Event id, neither of which
@@ -484,12 +527,8 @@ async fn hydrate_canonical_realm_bootstraps(
             continue;
         }
 
-        // Realm creation is one producer-signed `ak.realm.create` Event. The
-        // multi-Event bootstrap unit and the confirmed-order selector that
-        // rebuilt it no longer exist: ordering and predecessor binding are
-        // properties of the Realm commit stream, so hydration validates the
-        // genesis Event itself and leaves every later genesis facet to the
-        // ordinary replay paths that already own those Event kinds.
+        // Keep original-event shape validation distinct from the complete
+        // bootstrap validation above and from member custody classification.
         arkret_policy::realm_bootstrap::validate_realm_genesis_event(&create_event).map_err(
             |error| {
                 coland_storage::PersistenceError::Internal(format!(
@@ -1132,6 +1171,7 @@ pub async fn hydrate_projections_from_persistence(
     // its own authority stream position, never by Event reception time.
     let mut circle_creates = BTreeMap::new();
     let mut circle_transitions = BTreeMap::new();
+    let mut member_replicas = BTreeMap::new();
     for record in events.iter().filter(|record| {
         matches!(
             arkret_wire::EventKind::from_wire(&record.kind),
@@ -1144,6 +1184,26 @@ pub async fn hydrate_projections_from_persistence(
                 | arkret_wire::EventKind::CircleMemberState
         )
     }) {
+        let realm = RealmId::new(record.realm_id.clone().ok_or_else(|| {
+            coland_storage::PersistenceError::Internal(
+                "Circle hydration Event has no Realm".to_owned(),
+            )
+        })?)
+        .map_err(coland_storage::PersistenceError::database)?;
+        let member_replica = match member_replicas.get(&realm).copied() {
+            Some(member_replica) => member_replica,
+            None => {
+                let member_replica = is_member_replica(persistence, &realm).await?;
+                member_replicas.insert(realm, member_replica);
+                member_replica
+            }
+        };
+        if member_replica {
+            // The installed typed Circle current is independently authoritative.
+            // A member's visible suffix cannot rebuild its hidden create or
+            // earlier membership transitions into a governing reducer cache.
+            continue;
+        }
         let id = arkret_wire::EventId::new(record.event_id.clone())
             .map_err(coland_storage::PersistenceError::database)?;
         let accepted = persistence

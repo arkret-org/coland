@@ -188,8 +188,8 @@ async fn station_excludes_applet_queries(fixture: &Fixture) {
     for (operation, path) in [
         (Op::EdgeAppletRealmReadResolveV1, "realms/known-portal"),
         (Op::EdgeAppletReadProtocolMetadataV1, "protocols/fixture"),
-        (Op::EdgeAppletThirdPartyUsersReadListV1, "third_party/users?protocol=fixture&external_id=known"),
-        (Op::EdgeAppletThirdPartyLocationsReadListV1, "third_party/locations?protocol=fixture&external_id=known"),
+        (Op::EdgeAppletThirdPartyUsersReadListV1, "third-party/users?protocol=fixture&external_id=known"),
+        (Op::EdgeAppletThirdPartyLocationsReadListV1, "third-party/locations?protocol=fixture&external_id=known"),
     ] {
         assert!(!describe.supports_operation(operation));
         let response = client.get(format!("{base}/_arkret/edge/applet/{path}"))

@@ -127,6 +127,35 @@ impl CircleScene {
         );
     }
 
+    async fn await_circle_join_effective(&self) {
+        let event = &self.circle_join.authority_commit.event;
+        let payload: arkret_models_collaboration::events_payloads::circle::CircleMemberStatePayload =
+            serde_json::from_value(serde_json::to_value(&event.payload).unwrap()).unwrap();
+        let effective_at = payload.effective_at.unwrap_or(event.created_at);
+        if effective_at > Utc::now() {
+            assert!(
+                self.member()
+                    .circle_view_for_actor(
+                        &self.circle,
+                        &ActorId::account(self.alice.pcr.history.account.clone()),
+                    )
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a future membership cannot disclose a Full Circle view"
+            );
+            let remaining = effective_at.signed_duration_since(Utc::now());
+            assert!(
+                remaining < Duration::seconds(30),
+                "fixture unexpectedly scheduled a distant membership"
+            );
+            if let Ok(remaining) = remaining.to_std() {
+                tokio::time::sleep(remaining).await;
+            }
+        }
+        assert!(Utc::now() >= effective_at);
+    }
+
     async fn owner_circle_join(&self) -> coland_storage::EventCommitRequest {
         let parent = historical_human::ordinary_realm::parent_membership_revision(
             &self.governor_pool,
@@ -1039,6 +1068,7 @@ async fn qualified_circle_refresh_precedes_full_tail_when_metadata_is_physically
                 .unwrap(),
             tail.authority_commit.producer_signer_fact
         );
+        scene.await_circle_join_effective().await;
         assert!(
             scene
                 .member()

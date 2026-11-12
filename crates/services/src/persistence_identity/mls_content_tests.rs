@@ -1223,7 +1223,7 @@ async fn encrypted_original_requires_real_root_backup_and_binds_one_immutable_ke
     let service_method = arkret_wire::DidUrl::new("did:web:backup-test.example#authority").unwrap();
     assert!(
         store
-            .prepare_content_backup_source(&event, &issuer, &destination, &service_method)
+            .prepare_content_backup_source(&event, &issuer, &destination, &service_method, None)
             .await
             .is_err()
     );
@@ -1278,7 +1278,13 @@ async fn encrypted_original_requires_real_root_backup_and_binds_one_immutable_ke
     .await;
     assert!(
         store
-            .prepare_content_backup_source(&unknown_event, &issuer, &destination, &service_method)
+            .prepare_content_backup_source(
+                &unknown_event,
+                &issuer,
+                &destination,
+                &service_method,
+                None
+            )
             .await
             .is_err()
     );
@@ -1323,7 +1329,7 @@ async fn encrypted_original_requires_real_root_backup_and_binds_one_immutable_ke
             .is_none()
     );
     let source = store
-        .prepare_content_backup_source(&event, &issuer, &destination, &service_method)
+        .prepare_content_backup_source(&event, &issuer, &destination, &service_method, None)
         .await
         .unwrap();
     assert_eq!(source.event_ref, event.event_id);
@@ -1351,7 +1357,7 @@ async fn encrypted_original_requires_real_root_backup_and_binds_one_immutable_ke
     );
     assert!(
         store
-            .prepare_content_backup_source(&event, &issuer, &issuer, &service_method)
+            .prepare_content_backup_source(&event, &issuer, &issuer, &service_method, None)
             .await
             .is_err()
     );

@@ -38,11 +38,6 @@ struct Row {
     #[diesel(sql_type=Nullable<Jsonb>)]
     envelope: Option<serde_json::Value>,
 }
-#[derive(diesel::QueryableByName)]
-struct ValueRow {
-    #[diesel(sql_type=Jsonb)]
-    value: serde_json::Value,
-}
 
 struct History {
     base: Cut,
@@ -1545,39 +1540,12 @@ async fn held_mls_current(
     scope: &ScopeRef,
     expected_head: &arkret_wire::CommitStreamHead,
 ) -> PersistenceResult<Option<arkret_wire::MlsGroupValue>> {
-    let key =
-        String::from_utf8(arkret_canonical::canonical_json_bytes(scope).map_err(unavailable)?)
-            .map_err(unavailable)?;
-    if let Some(row) =
-        diesel::sql_query("SELECT value FROM mls_group_current_states WHERE scope_key=$1")
-            .bind::<Text, _>(&key)
-            .get_result::<ValueRow>(&mut *conn)
-            .await
-            .optional()
-            .map_err(PersistenceError::database)?
-    {
-        return serde_json::from_value(row.value)
-            .map(Some)
-            .map_err(unavailable);
-    }
-    // Replicas hold verified authority projections, never admission-owned group state.
-    // Reuse the exact covered-cut reader; stale, forked or uncovered rows fail closed.
-    let stream = CommitStreamRef::from_scope(scope, None).map_err(unavailable)?;
-    let selector = arkret_wire::CurrentSelector::MlsGroup {
-        scope_ref: scope.clone(),
-    };
-    let Some((head, entries)) =
-        crate::replica_authorization::exact_current_evidence(conn, &stream, &[selector]).await?
-    else {
-        return Ok(None);
-    };
-    if head != *expected_head {
-        return Ok(None);
-    }
-    let Some(arkret_wire::CurrentState::Value { value, .. }) = entries.into_iter().next() else {
-        return Ok(None);
-    };
-    serde_json::from_value(value).map(Some).map_err(unavailable)
+    crate::mls_group_current_states::held_current_value_in_connection(
+        conn,
+        scope,
+        Some(expected_head),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -2033,6 +2001,40 @@ mod held_mls_current_tests {
             .await
             .unwrap();
         (scope, head, value)
+    }
+
+    #[tokio::test]
+    async fn message_preflight_reads_verified_replica_without_admission_owned_group_state() {
+        use coland_storage::MlsGroupCurrentStore;
+
+        let database = TestDatabase::lease().await;
+        let pool = database.pool();
+        let mut conn = pg_conn(&pool).await.unwrap();
+        let (scope, _, value) = replica_fixture(&mut conn).await;
+        drop(conn);
+        let groups = crate::mls_group_current_states::PgMlsGroupCurrentStore { pool: pool.clone() };
+        assert!(groups.current(&scope).await.unwrap().is_none());
+        let held = groups.held_current_value(&scope).await.unwrap();
+        assert_eq!(held, Some(value));
+        assert_eq!(
+            coland_storage::decide_mls_send_gate(held.as_ref(), &scope, None),
+            Err(coland_storage::MlsSendGateRefusal::ActivationRequired),
+            "a member replica must not treat an activated scope as plaintext-ready"
+        );
+        assert!(
+            groups.current(&scope).await.unwrap().is_none(),
+            "a read cannot create admission-owned state"
+        );
+        let mut conn = pg_conn(&pool).await.unwrap();
+        diesel::sql_query("DELETE FROM replica_authorization_cuts")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        drop(conn);
+        assert!(
+            groups.held_current_value(&scope).await.is_err(),
+            "a stored projection without its verified current cut is unavailable"
+        );
     }
 
     #[tokio::test]

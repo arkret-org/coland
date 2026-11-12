@@ -1684,8 +1684,98 @@ pub(crate) async fn advance_key_access_revision_in_connection(
     .await
 }
 
+/// The public MLS current is distinct from the governor's admission-owned
+/// RFC state. Replicas supply only an exact covered authorization projection.
+pub(crate) async fn held_current_value_in_connection(
+    conn: &mut AsyncPgConnection,
+    scope: &ScopeRef,
+    expected_head: Option<&arkret_wire::CommitStreamHead>,
+) -> PersistenceResult<Option<MlsGroupValue>> {
+    #[derive(QueryableByName)]
+    struct HeldValueRow {
+        #[diesel(sql_type = Jsonb)]
+        value: serde_json::Value,
+    }
+    let invalid = |error: serde_json::Error| {
+        PersistenceError::Internal(format!("held MLS current is invalid: {error}"))
+    };
+    let key = scope_key(scope)?;
+    let value = if let Some(row) =
+        sql_query("SELECT value FROM mls_group_current_states WHERE scope_key=$1")
+            .bind::<Text, _>(&key)
+            .get_result::<HeldValueRow>(&mut *conn)
+            .await
+            .optional()
+            .map_err(PersistenceError::database)?
+    {
+        serde_json::from_value(row.value).map_err(invalid)?
+    } else {
+        let stream = arkret_wire::CommitStreamRef::from_scope(scope, None)
+            .map_err(PersistenceError::database)?;
+        let selector = arkret_wire::CurrentSelector::MlsGroup {
+            scope_ref: scope.clone(),
+        };
+        let Some((head, entries)) =
+            crate::replica_authorization::exact_current_evidence(conn, &stream, &[selector])
+                .await?
+        else {
+            return Ok(None);
+        };
+        if expected_head.is_some_and(|expected| expected != &head) {
+            return Ok(None);
+        }
+        let Some(arkret_wire::CurrentState::Value { value, .. }) = entries.into_iter().next()
+        else {
+            return Ok(None);
+        };
+        serde_json::from_value(value).map_err(invalid)?
+    };
+    let value: MlsGroupValue = value;
+    if &value.effective_scope != scope {
+        return Err(PersistenceError::Internal(
+            "held MLS current scope differs".into(),
+        ));
+    }
+    Ok(Some(value))
+}
+
 #[async_trait]
 impl MlsGroupCurrentStore for PgMlsGroupCurrentStore {
+    async fn held_current_value(
+        &self,
+        effective_scope: &ScopeRef,
+    ) -> PersistenceResult<Option<MlsGroupValue>> {
+        let mut conn = crate::pg_conn(&self.pool).await?;
+        conn.transaction::<_, crate::PgTransactionError, _>(async move |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *conn)
+                .await?;
+            let value = held_current_value_in_connection(conn, effective_scope, None).await?;
+            if value.is_none() {
+                #[derive(QueryableByName)]
+                struct KnownGroup {
+                    #[diesel(sql_type = diesel::sql_types::Bool)]
+                    known: bool,
+                }
+                let selector = arkret_wire::CurrentSelector::MlsGroup {
+                    scope_ref: effective_scope.clone(),
+                };
+                let known = sql_query("SELECT EXISTS(SELECT 1 FROM replica_authorization_rows WHERE realm_id=$1 AND selector=$2) AS known")
+                    .bind::<Text, _>(effective_scope.realm_id().as_str())
+                    .bind::<Jsonb, _>(serde_json::to_value(selector).map_err(PersistenceError::database)?)
+                    .get_result::<KnownGroup>(&mut *conn).await?;
+                if known.known {
+                    return Err(PersistenceError::Conflict(
+                        "revision_unavailable: held MLS current lacks an exact verified cut".into(),
+                    ).into());
+                }
+            }
+            Ok(value)
+        })
+        .await
+        .map_err(crate::PgTransactionError::into_persistence)
+    }
+
     async fn current(
         &self,
         effective_scope: &ScopeRef,

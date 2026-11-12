@@ -232,7 +232,12 @@ pub(crate) async fn current_producer_in_connection(
         return current_producer_from_fact_in_connection(conn, &transaction.event, fact, group)
             .await;
     }
-    let (actor, endpoint, authorization) = own_human_pcr_producer(conn, transaction).await?;
+    let (actor, endpoint, authorization) =
+        if let Some(producer) = local_agent_producer(conn, transaction, group).await? {
+            producer
+        } else {
+            own_human_pcr_producer(conn, transaction).await?
+        };
     current_endpoint_in_connection(
         conn,
         &transaction.event,
@@ -242,6 +247,142 @@ pub(crate) async fn current_producer_in_connection(
         authorization,
     )
     .await
+}
+
+/// Ordinary local Agent originals have a native runtime guard, not the
+/// Human historical-fact adapter. Resolve the already installed leaf's exact
+/// authorization, then repeat its current PCR and original signature checks.
+async fn local_agent_producer(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+    group: &MlsGroupValue,
+) -> PersistenceResult<
+    Option<(
+        arkret_wire::ActorId,
+        MlsWelcomeRecipientEndpoint,
+        arkret_wire::EventId,
+    )>,
+> {
+    use horme::OptionalExtension as _;
+    let event = &transaction.event;
+    let Some(account) = event.actual_signer().as_account_id() else {
+        return Ok(None);
+    };
+    let pcr = sql_query("SELECT to_jsonb(pcr_realm_id) AS payload FROM principal_resolutions WHERE principal_id=$1 AND station_id=$2")
+        .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
+        .get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let Some(pcr) = pcr else { return Ok(None) };
+    let pcr: arkret_wire::RealmId =
+        serde_json::from_value(pcr.payload).map_err(PersistenceError::database)?;
+    if crate::pcr_private_authority::accepted_governance(conn, &pcr).await?
+        != arkret_wire::GenesisGovernance::Agent(account.clone())
+    {
+        return Ok(None);
+    }
+    if account.station_id != transaction.expected_authority.service_id
+        || event.executed_by.is_some()
+        || event.realm_id == pcr
+    {
+        return Err(unavailable(
+            "Agent content requires its own local ordinary runtime source",
+        ));
+    }
+    // Resource authority is independently checked by native Event admission.
+    // In particular a Direct participant must carry its registered authority
+    // ref; that ref is not the runtime key's authorization instance below.
+    crate::content_recovery_fence::require_unfenced(conn, event.actual_signer()).await?;
+    let proof = event
+        .producer_proof
+        .as_ref()
+        .ok_or_else(|| unavailable("Agent content has no producer proof"))?;
+    let endpoint = MlsWelcomeRecipientEndpoint::AgentRuntime {
+        verification_method: proof.verification_method.clone(),
+    };
+    let rows = sql_query("SELECT binding AS payload FROM mls_endpoint_current_bindings WHERE scope_key=$1 AND epoch=$2 AND current_event_ref=$3 AND actor_id=$4 AND binding->'endpoint'=$5 LIMIT 2 FOR SHARE")
+        .bind::<Text,_>(crate::mls_group_current_states::scope_key(&group.effective_scope)?)
+        .bind::<BigInt,_>(i64::try_from(group.epoch).map_err(PersistenceError::database)?)
+        .bind::<Text,_>(group.current_mls_commit_event_ref.as_str())
+        .bind::<Jsonb,_>(serde_json::to_value(event.actual_signer()).map_err(PersistenceError::database)?)
+        .bind::<Jsonb,_>(serde_json::to_value(&endpoint).map_err(PersistenceError::database)?)
+        .get_results::<crate::JsonPayloadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+    if rows.len() != 1 {
+        return Err(unavailable(
+            "Agent content has no unique admitted current runtime leaf",
+        ));
+    }
+    let binding: ContentEndpoint = serde_json::from_value(rows.into_iter().next().unwrap().payload)
+        .map_err(PersistenceError::database)?;
+    binding
+        .validate()
+        .map_err(|error| invalid(error.to_string()))?;
+    let authorization = crate::committed_disclosure::accepted_full_event_in_connection(
+        conn,
+        &binding.authorization_event_ref,
+    )
+    .await?
+    .ok_or_else(|| unavailable("Agent content authorization original is unavailable"))?;
+    if authorization.event.realm_id != pcr
+        || authorization.event.actor_id != *event.actual_signer()
+        || binding.actor_id != *event.actual_signer()
+        || binding.endpoint != endpoint
+    {
+        return Err(unavailable(
+            "Agent content leaf differs from its native Account and PCR",
+        ));
+    }
+    crate::mls_keypackage_claim_endpoints::agent(
+        conn,
+        &account.principal_id,
+        &proof.verification_method,
+        &binding.authorization_event_ref,
+    )
+    .await?
+    .require_current(conn)
+    .await?;
+    let payload: arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload =
+        serde_json::from_value(
+            serde_json::to_value(&authorization.event.payload)
+                .map_err(PersistenceError::database)?,
+        )
+        .map_err(PersistenceError::database)?;
+    if event.created_at < payload.issued_at
+        || payload
+            .expires_at
+            .is_some_and(|end| event.created_at >= end)
+    {
+        return Err(unavailable(
+            "Agent content is outside its original authorization window",
+        ));
+    }
+    let key = arkret_signatures::agent::validate_agent_runtime_public_key(
+        &payload.public_key,
+        &proof.verification_method,
+    )
+    .map_err(|error| invalid(error.to_string()))?;
+    let suite = event.realm_id.digest_suite_code().digest_suite();
+    event
+        .verify_event_id_matches_content_with_digest_suite(suite)
+        .map_err(|error| invalid(error.to_string()))?;
+    event
+        .verify_producer_proof_self_consistency(suite)
+        .map_err(|error| invalid(error.to_string()))?;
+    arkret_signatures::verify_ed25519_detached_jws_proof_with_digest_suite(
+        proof,
+        &arkret_signatures::EventProofBuilder::new()
+            .envelope_bytes(event)
+            .map_err(|error| invalid(error.to_string()))?,
+        &event.actor_id,
+        &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+            bytes: key.raw_public_key.to_vec(),
+        },
+        suite,
+    )
+    .map_err(|error| invalid(error.to_string()))?;
+    Ok(Some((
+        event.actual_signer().clone(),
+        endpoint,
+        binding.authorization_event_ref,
+    )))
 }
 
 /// The caller independently qualified this original producer at its native

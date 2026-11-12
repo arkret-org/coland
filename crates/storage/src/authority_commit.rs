@@ -198,6 +198,19 @@ pub struct CurrentRealmAuthority {
     pub last_handoff_ref: Option<arkret_wire::RealmAuthorityHandoffId>,
 }
 
+/// Public material obtained by the owning Station through the registered
+/// member read and a fully verified Realm authority bundle. This internal
+/// input carries no membership, private MLS state or root custody authority;
+/// the source transaction rechecks every selector against its locked cut.
+#[derive(Clone, Debug)]
+pub struct ContentBackupSourcePublicEvidence {
+    pub expected_authority: CurrentRealmAuthority,
+    pub group: arkret_wire::MlsGroupValue,
+    pub realm_declaration: Event,
+    pub request: arkret_models_collaboration::mls_group_state_material::MlsMemberGroupStateMaterialReadRequestBody,
+    pub material: arkret_models_collaboration::mls_group_state_material::MlsGroupStateMaterialResponseBody,
+}
+
 /// The accepted lifecycle roster of one Realm held by this Station
 /// (`realm-read-operations.schema.json#/$defs/realm_lifecycle_view`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2513,8 +2526,15 @@ pub trait AuthorityCommitStore: Send + Sync {
         issuer: &arkret_wire::DidCoreId,
         destination: &arkret_wire::DidCoreId,
         verification_method: &arkret_wire::DidUrl,
+        public_evidence: Option<&ContentBackupSourcePublicEvidence>,
     ) -> PersistenceResult<arkret_models_crypto::ContentBackupSourceDraft> {
-        let _ = (event, issuer, destination, verification_method);
+        let _ = (
+            event,
+            issuer,
+            destination,
+            verification_method,
+            public_evidence,
+        );
         Err(crate::PersistenceError::Conflict(
             "dependency_missing: native content backup source issuance is unavailable".into(),
         ))

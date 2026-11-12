@@ -462,6 +462,7 @@ name = "arkret-identity"
 version = "0.3.0"
 dependencies = [
  "arkret-canonical",
+ "arkret-crypto",
  "arkret-egress-policy",
  "arkret-event-draft",
  "arkret-keystore",
@@ -614,6 +615,7 @@ version = "0.3.0"
 dependencies = [
  "arkret-canonical",
  "arkret-models-collaboration",
+ "arkret-models-crypto",
  "arkret-models-identity",
  "arkret-wire",
  "chrono",

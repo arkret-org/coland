@@ -3178,9 +3178,11 @@ async fn provision_owned_agent_binding_phase_at_head(
     let station = controller.station_id.clone();
     let station_did = principal.history.station_did.clone();
     let controller_realm = principal.unit.transactions[0].event.realm_id.clone();
-    let controller_head = accepted_controller_head
+    let inception_created_at = accepted_controller_head
         .unwrap_or(&principal.unit.transactions[1].commit)
-        .clone();
+        .committed_at;
+    let (controller_head, history_custody) =
+        Box::pin(sidecar_agent::history_custody(pool, principal)).await;
     let controller_authority = principal.unit.transactions[1].expected_authority.clone();
     let controller_method = principal.history.device_verification_method.clone();
     let controller_seed = principal.history.founding_device_signing_seed;
@@ -3204,7 +3206,7 @@ async fn provision_owned_agent_binding_phase_at_head(
                 principal_endpoint: &endpoint,
                 local_id,
                 controller_principal_id: &controller.principal_id,
-                version_created_at: controller_head.committed_at,
+                version_created_at: inception_created_at,
                 root_seed: &[101; 32],
                 next_root_public_key_multibase: &next,
             },
@@ -3265,6 +3267,10 @@ async fn provision_owned_agent_binding_phase_at_head(
     );
     let provision = if let Some(scope) = requested_scope {
         let mut provision = provision;
+        provision.payload.insert(
+            "history_custody".into(),
+            serde_json::to_value(history_custody).unwrap(),
+        );
         provision.payload.insert(
             "requested_scope_digest".into(),
             serde_json::json!(
@@ -9735,6 +9741,54 @@ async fn owned_consumer_http_read_scenario(policy_deny: bool) {
         .unwrap();
     let http = Box::pin(owned_consumer_http_fixture(&fixture)).await;
     Box::pin(owned_consumer_assert_delivery_setup(&fixture, &http)).await;
+    let genesis_path = format!("/_arkret/self/committed-events/{}", fixture.root_event_ref);
+    let mut genesis_response = Box::pin(owned_consumer_http_get(
+        &http,
+        &genesis_path,
+        arkret_wire::ServiceOperationId::SELF_COMMITTED_EVENT_RESOURCE_GET_V1,
+    ))
+    .await;
+    owned_consumer_assert_http_status(
+        &mut genesis_response,
+        salvo::http::StatusCode::OK,
+        "member_authority_genesis",
+    )
+    .await;
+    let genesis =
+        owned_consumer_take_response_json::<arkret_wire::CommittedEventView>(&mut genesis_response)
+            .await
+            .unwrap();
+    let arkret_wire::CommittedEventView::Full(genesis) = genesis else {
+        panic!("current Agent and controller must receive the exact authority genesis")
+    };
+    assert_eq!(genesis.event.event_id, fixture.root_event_ref);
+    assert_eq!(genesis.commit.stream_position, 0);
+    assert!(fixture.controller_join.commit.stream_position > 1);
+    // The exception names only the founding original, not older business rows.
+    #[derive(diesel::QueryableByName)]
+    struct PreJoinOriginal {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        id: String,
+    }
+    let old = {
+        let mut connection = fixture.pool.get().await.unwrap();
+        use diesel_async::RunQueryDsl;
+        diesel::sql_query("SELECT commit_json->>'event_ref' AS id FROM realm_commits WHERE realm_id=$1 AND stream_position=1")
+            .bind::<diesel::sql_types::Text,_>(realm.as_str())
+            .get_result::<PreJoinOriginal>(&mut *connection).await.unwrap()
+    };
+    let mut old_response = Box::pin(owned_consumer_http_get(
+        &http,
+        &format!("/_arkret/self/committed-events/{}", old.id),
+        arkret_wire::ServiceOperationId::SELF_COMMITTED_EVENT_RESOURCE_GET_V1,
+    ))
+    .await;
+    owned_consumer_assert_http_status(
+        &mut old_response,
+        salvo::http::StatusCode::NOT_FOUND,
+        "pre_join_business_remains_hidden",
+    )
+    .await;
     // The original resource handler keeps typed selector rejection as 404.
     // A matching operation scope supplies no authority for malformed content.
     let malformed_before = owned_consumer_footprint(&fixture.pool, realm).await;
@@ -9887,6 +9941,18 @@ async fn owned_consumer_http_read_scenario(policy_deny: bool) {
         before == owned_consumer_footprint(&fixture.pool, realm).await,
         "post-withdrawal HTTP read cannot write business effects"
     );
+    let mut refused_genesis = Box::pin(owned_consumer_http_get(
+        &http,
+        &genesis_path,
+        arkret_wire::ServiceOperationId::SELF_COMMITTED_EVENT_RESOURCE_GET_V1,
+    ))
+    .await;
+    owned_consumer_assert_http_status(
+        &mut refused_genesis,
+        salvo::http::StatusCode::FORBIDDEN,
+        "genesis_requires_current_owner_membership_and_management_policy",
+    )
+    .await;
 }
 
 #[tokio::test]

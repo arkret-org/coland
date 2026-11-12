@@ -328,7 +328,9 @@ impl DeviceHistoryFixture {
             self.account.principal_id.clone(),
             self.account.station_id.clone(),
             payload,
-            self.created_at,
+            self.commits.last().map_or(self.created_at, |commit| {
+                self.created_at.max(commit.committed_at)
+            }),
         )
         .unwrap()
     }
@@ -349,6 +351,13 @@ impl DeviceHistoryFixture {
         let genesis_event_ref = self.events.first().unwrap_or(&events[0]).event_id.clone();
         let authority_ref = RealmCommitAuthorityRef::GenesisOrChangeEvent(genesis_event_ref);
         for event in events {
+            // A fixture can resume after real native commits. Its next cut
+            // must cover that accepted predecessor instead of backdating it.
+            let committed_at = self.created_at.max(event.created_at).max(
+                self.commits
+                    .last()
+                    .map_or(self.created_at, |commit| commit.committed_at),
+            );
             let stream_ref =
                 CommitStreamRef::from_scope(&event.scope_ref, Some(event.realm_id.clone()))
                     .expect("a fixture Event scope always names one commit stream");
@@ -365,13 +374,13 @@ impl DeviceHistoryFixture {
                 event_ref: event.event_id.clone(),
                 governance_generation: 0,
                 authority_ref: authority_ref.clone(),
-                committed_at: self.created_at,
+                committed_at,
                 signature: DetachedObjectSignature {
                     context: DetachedSignatureContext::RealmCommit,
                     signature_algorithm: DetachedSignatureAlgorithm::Ed25519,
                     verification_method: self.authority_method(),
                     signed_digest: hash("unsigned"),
-                    created_at: self.created_at,
+                    created_at: committed_at,
                     signature: Base64UrlString::new("AA".to_owned()).unwrap(),
                 },
             };

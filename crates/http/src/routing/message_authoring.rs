@@ -30,15 +30,11 @@ pub(crate) async fn mls_send_gate(
 ) -> Result<(), MlsSendGateError> {
     let current = state
         .mls_groups()
-        .current(scope)
+        .held_current_value(scope)
         .await
         .map_err(|_| MlsSendGateError::CurrentUnavailable)?;
-    coland_storage::decide_mls_send_gate(
-        current.as_ref().map(|current| &current.value),
-        scope,
-        envelopes,
-    )
-    .map_err(MlsSendGateError::Refused)
+    coland_storage::decide_mls_send_gate(current.as_ref(), scope, envelopes)
+        .map_err(MlsSendGateError::Refused)
 }
 
 /// Apply the current MLS send gate to one self-submitted `ak.message.create`.

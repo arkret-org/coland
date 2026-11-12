@@ -965,7 +965,7 @@ fn method_path_requires_fresh_introspection(method: &salvo::http::Method, path: 
         "/_arkret/admin/",
         "/account",
         "/authz",
-        "/device_messages",
+        "/device-messages",
         "/devices",
         "/keys",
         "/members",

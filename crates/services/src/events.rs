@@ -1202,6 +1202,15 @@ pub trait MlsGroupReadPort: Send + Sync {
         &self,
         effective_scope: &ScopeRef,
     ) -> ServiceResult<Option<coland_storage::MlsGroupCurrentRecord>>;
+    async fn held_current_value(
+        &self,
+        effective_scope: &ScopeRef,
+    ) -> ServiceResult<Option<arkret_wire::MlsGroupValue>> {
+        Ok(self
+            .current(effective_scope)
+            .await?
+            .map(|record| record.value))
+    }
     async fn realm_currents(
         &self,
         realm_id: &arkret_wire::RealmId,
@@ -1230,6 +1239,14 @@ impl MlsGroupQueryService {
         effective_scope: &ScopeRef,
     ) -> ServiceResult<Option<coland_storage::MlsGroupCurrentRecord>> {
         self.groups.current(effective_scope).await
+    }
+
+    /// Read a public current without requiring local governance-owned RFC state.
+    pub async fn held_current_value(
+        &self,
+        effective_scope: &ScopeRef,
+    ) -> ServiceResult<Option<arkret_wire::MlsGroupValue>> {
+        self.groups.held_current_value(effective_scope).await
     }
 
     /// Every accepted current group of one Realm, Realm scope first.

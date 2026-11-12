@@ -730,10 +730,17 @@ impl AuthorityCommitApplication {
         issuer: &DidCoreId,
         destination: &DidCoreId,
         verification_method: &DidUrl,
+        public_evidence: Option<&coland_storage::ContentBackupSourcePublicEvidence>,
     ) -> ServiceResult<arkret_models_crypto::ContentBackupSourceDraft> {
         Ok(self
             .store()
-            .prepare_content_backup_source(event, issuer, destination, verification_method)
+            .prepare_content_backup_source(
+                event,
+                issuer,
+                destination,
+                verification_method,
+                public_evidence,
+            )
             .await?)
     }
 

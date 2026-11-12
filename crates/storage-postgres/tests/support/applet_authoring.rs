@@ -3162,6 +3162,7 @@ mod realm_native_fixture {
         let control = SigningKey::from_bytes(&[33; 32]);
         let next_key =
             arkret_canonical::ed25519_pubkey_to_did_key_multibase(next.verifying_key().as_bytes());
+        let archive_key = arkret_crypto::hpke::generate_x25519_keypair().unwrap();
         let inception = prepare_realm_actor_inception(&RealmActorInceptionInput {
             principal_endpoint: &endpoint,
             local_id: "ghost-1",
@@ -3169,6 +3170,7 @@ mod realm_native_fixture {
             root_seed: &root,
             next_root_public_key_multibase: &next_key,
             controller_public_key: control.verifying_key().as_bytes(),
+            content_backup_public_key: archive_key.public_key(),
         })
         .unwrap();
         let document: DidDocument =
@@ -3218,7 +3220,11 @@ mod realm_native_fixture {
             "method_history_evidence":evidence,"control_method_kid":method,
             "expires_at":arkret_canonical::format_timestamp_canonical(at + chrono::Duration::minutes(5)),
             "external_ref":{"protocol":"matrix","instance_id":"chat.example","external_id":"external-user"},
-            "recovery":{"kind":"manager_native","enabled":true}
+            "recovery":{"kind":"manager_native","enabled":true,"content_backup_recipient":{
+                "key_agreement_ref":format!("{}#content-backup",document.id),
+                "hpke_suite":"ak.hpke_x25519_aead_chacha20poly1305.v1",
+                "public_key_base64url":arkret_canonical::base64url_encode(archive_key.public_key())
+            }}
         });
         let transcript: RealmActorCreationTranscript =
             serde_json::from_value(value.clone()).unwrap();

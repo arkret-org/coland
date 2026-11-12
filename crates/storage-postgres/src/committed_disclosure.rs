@@ -84,6 +84,28 @@ pub(crate) async fn accepted_full_event_in_connection(
     Ok(Some(full))
 }
 
+/// The exact public founding original belongs to every current member's
+/// authority bundle, independently of the ordinary business-history floor.
+pub(crate) fn is_shared_realm_genesis(row: &CommittedEventFullView) -> bool {
+    row.event.kind == arkret_wire::EventKind::RealmCreate
+        && row.event.scope_ref == arkret_wire::ScopeRef::RealmGenesis
+        && row.event.event_id == row.event.realm_id.event_id()
+        && row.commit.event_ref == row.event.event_id
+        && row.commit.realm_id == row.event.realm_id
+        && row.commit.stream_ref
+            == (arkret_wire::CommitStreamRef::Realm {
+                realm_id: row.event.realm_id.clone(),
+            })
+        && row.commit.stream_position == 0
+        && row.commit.previous_commit_ref.is_none()
+        && row.commit.governance_generation == 0
+        && matches!(
+            arkret_wire::GenesisGovernance::from_genesis(&row.event),
+            Ok(arkret_wire::GenesisGovernance::Collaboration
+                | arkret_wire::GenesisGovernance::DirectConversation(_))
+        )
+}
+
 /// Decide canonical byte visibility after the caller's stream interval is proved.
 pub(crate) async fn full_event_for_member_in_connection(
     conn: &mut AsyncPgConnection,
@@ -144,7 +166,7 @@ pub(crate) async fn full_event_for_member_in_connection(
             else {
                 return Ok(false);
             };
-            if row.commit.stream_position < floor.oldest_position {
+            if row.commit.stream_position < floor.oldest_position && !is_shared_realm_genesis(row) {
                 return Ok(false);
             }
         }

@@ -388,7 +388,7 @@ async fn group_scope(
     Ok(scope)
 }
 
-async fn agent(
+pub(crate) async fn agent(
     conn: &mut AsyncPgConnection,
     id: &DidCoreId,
     method: &DidUrl,

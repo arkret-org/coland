@@ -1658,7 +1658,7 @@ fn agent_action_approve_payload(
     approved_event_id: &arkret_wire::EventId,
 ) -> serde_json::Value {
     json!({
-        "approval_id": "ak:agent_approval:01904100-0000-7000-8000-0000000007aa",
+        "approval_id": "approval-01904100-0000-7000-8000-0000000007aa",
         "request_id": request_id,
         "agent_id": agent_id,
         "proposed_action": arkret_wire::EventKind::MessageCreate.as_str(),

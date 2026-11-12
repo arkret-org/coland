@@ -415,7 +415,7 @@ fn key_authorize_envelope(
         "realm_id": record.principal_control_realm_id.as_str(),
         "payload": {
             "agent_id": agent_id,
-            "key_id": "ak:agent_key:01999999000070008000000000000001",
+            "key_id": "runtime-key-01999999000070008000000000000001",
             "verification_method": verification_method,
             "public_key": record.runtime_key_request.as_ref().unwrap().public_key,
             "accountable_principal_id": controller,
@@ -548,7 +548,7 @@ fn key_pair_request_body(
         crate::test_actor_id(&agent_did),
         1,
         arkret_identifiers::Hlc::new("01970e589d21-0004-a13f9c2e").unwrap(),
-        json!({"agent_id":agent_id,"key_id":"ak:agent_key:01999999000070008000000000000001","verification_method":verification_method,
+        json!({"agent_id":agent_id,"key_id":"runtime-key-01999999000070008000000000000001","verification_method":verification_method,
             "public_key":public_key,"accountable_principal_id":controller_principal_id,
             "agent_key_scope":requested_agent_scope(),"audience":[service_id],"issued_at":"2026-07-06T00:00:00.000Z",
             "approval_evidence":{"kind":"pairing_request","pairing_request_id":pairing_request_id,"approved_by":controller_principal_id,"request_canonical_digest":format!("sha256:{}","0".repeat(64))}}),

@@ -35,7 +35,7 @@ pub fn generate_operation_id() -> String {
 }
 
 pub fn generate_install_id() -> String {
-    generate("install")
+    Uuid::now_v7().to_string()
 }
 
 pub fn generate_realm_state_snapshot_id() -> String {
@@ -89,6 +89,13 @@ mod tests {
         let raw = parse_typed_uuid(&id, "operation").expect("parse");
         let back = format_typed_uuid("operation", &raw);
         assert_eq!(id, back);
+    }
+
+    #[test]
+    fn install_handle_is_opaque_and_outside_the_typed_id_namespace() {
+        let handle = generate_install_id();
+        arkret_wire::validate_bounded_non_typed_identifier(&handle, 256).unwrap();
+        assert!(Uuid::parse_str(&handle).is_ok());
     }
 
     #[test]

@@ -222,6 +222,7 @@ impl GovernedRealm {
                 "governance_station_id":station,
                 "initial_join_rule":"invite",
                 "initial_history_access":"since_join",
+                "initial_encryption_backup_strategy":arkret_wire::EncryptionBackupStrategy::EpochContentRoots,
                 "initial_discoverability":"invite_only"
             }}),
             at,

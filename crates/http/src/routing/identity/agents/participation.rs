@@ -179,7 +179,9 @@ pub(crate) async fn load_agent_participation_outcome(
         });
     }
     Ok(AgentParticipationResponseBody {
-        agent_id: agent_id.to_owned(),
+        agent_id: arkret_wire::DidCoreId::new(agent_id.to_owned()).map_err(|error| {
+            AppError::internal(format!("accepted Agent identity is invalid: {error}"))
+        })?,
         participation_entries: entries,
     })
 }

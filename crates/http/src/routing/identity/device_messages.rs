@@ -1,12 +1,12 @@
 //! To-device message transport.
 //!
 //! Surfaces:
-//! - `POST /_arkret/self/device_messages` — send to-device messages, idempotent on `(actor,
+//! - `POST /_arkret/self/device-messages` — send to-device messages, idempotent on `(actor,
 //!   idempotency_key)` so duplicate retries return 200 without re-queueing. The idempotency key is
 //!   supplied via the `Idempotency-Key` request header.
-//! - `GET /_arkret/self/device_messages` — pull pending to-device messages for the bound
+//! - `GET /_arkret/self/device-messages` — pull pending to-device messages for the bound
 //!   session/device. A `from` cursor is read-only pagination state; it never prunes the queue.
-//! - `POST /_arkret/self/device_messages/ack` — consume a bearer ack token and prune the messages
+//! - `POST /_arkret/self/device-messages/ack` — consume a bearer ack token and prune the messages
 //!   covered by that delivery batch.
 
 use std::collections::BTreeMap;
@@ -335,11 +335,11 @@ fn sender_idempotency_identity(
 pub(super) fn protocol_router() -> Router {
     Router::new()
         .push(
-            Router::with_path("device_messages")
+            Router::with_path("device-messages")
                 .post(send_device_messages)
                 .get(get_device_messages),
         )
-        .push(Router::with_path("device_messages/ack").post(ack_device_messages))
+        .push(Router::with_path("device-messages/ack").post(ack_device_messages))
 }
 
 #[handler]
@@ -1156,6 +1156,17 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[tokio::test]
+    async fn removed_device_message_paths_do_not_dispatch() {
+        let service = salvo::Service::new(protocol_router());
+        for path in ["device_messages", "device_messages/ack"] {
+            let response = salvo::test::TestClient::post(format!("http://server/{path}"))
+                .send(&service)
+                .await;
+            assert_eq!(response.status_code, Some(StatusCode::NOT_FOUND), "{path}");
+        }
+    }
 
     /// A Station over a leased PostgreSQL database that holds this Station's
     /// persisted service identity. Persisting the identity is what binds the

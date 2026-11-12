@@ -390,6 +390,11 @@ pub(super) async fn register_package_install(
                 })
                 .collect(),
         };
+        response.validate().map_err(|error| {
+            coland_storage::PersistenceError::Internal(format!(
+                "invalid Applet install response: {error}"
+            ))
+        })?;
         let mut record = AppletRecord {
             identity: identity.clone(),
             applet_id: typed_applet_id.clone(),

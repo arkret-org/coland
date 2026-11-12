@@ -1,12 +1,12 @@
 //! Realm governance HTTP surface.
 //!
 //! Surfaces:
-//! - `GET /_arkret/self/realms/{realm_id}/links?direction=outbound|inbound|both&link_kind_allow=...
-//!   ` — list the typed cross-Realm links projected from `ak.realm.link` events. Powered by the
-//!   exact durable accepted current rows and their original Events/Commits.
+//! - `GET /_arkret/self/realms/{realm_id}/links?direction=outbound|inbound|both&
+//!   allowed_link_kinds=... ` — list the typed cross-Realm links projected from `ak.realm.link`
+//!   events. Powered by the exact durable accepted current rows and their original Events/Commits.
 use arkret_identifiers::RealmId;
 use arkret_models_collaboration::governance::realm_governance::{
-    RealmLinkDirection, RealmLinkKind, RealmLinkList,
+    RealmLinkList, RealmLinkListQuery,
 };
 use coland_http::error::AppError;
 use coland_http::result::{GuardedJsonResult, guarded_json_ok};
@@ -34,7 +34,7 @@ pub(crate) async fn list_realm_links(
     aa: AuthArgs,
     realm_id: PathParam<String>,
     direction: QueryParam<String, false>,
-    link_kind_allow: QueryParam<String, false>,
+    allowed_link_kinds: QueryParam<String, false>,
     depot: &mut Depot,
     req: &mut Request,
 ) -> GuardedJsonResult<RealmLinkList> {
@@ -42,7 +42,10 @@ pub(crate) async fn list_realm_links(
         let state = depot.get_typed::<AppState>().expect("state injected");
         aa.authenticated_session(state, req).await?
     };
-    list_realm_links_impl(session, realm_id, direction, link_kind_allow, depot).await
+    // Extractors describe the HTTP parameters; validation retains all raw pairs.
+    let _ = (direction, allowed_link_kinds);
+    let query = realm_link_query(req)?;
+    list_realm_links_impl(session, realm_id, query, depot).await
 }
 
 #[endpoint(
@@ -55,19 +58,28 @@ pub(crate) async fn admin_list_realm_links(
     admin: super::admin::AdminAuth,
     realm_id: PathParam<String>,
     direction: QueryParam<String, false>,
-    link_kind_allow: QueryParam<String, false>,
+    allowed_link_kinds: QueryParam<String, false>,
     depot: &mut Depot,
+    req: &mut Request,
 ) -> GuardedJsonResult<RealmLinkList> {
     let session = admin.session()?;
-    list_realm_links_impl(session, realm_id, direction, link_kind_allow, depot).await
+    let _ = (direction, allowed_link_kinds);
+    let query = realm_link_query(req)?;
+    list_realm_links_impl(session, realm_id, query, depot).await
+}
+
+fn realm_link_query(req: &Request) -> Result<RealmLinkListQuery, AppError> {
+    RealmLinkListQuery::from_query_pairs(url::form_urlencoded::parse(
+        req.uri().query().unwrap_or_default().as_bytes(),
+    ))
+    .map_err(|error| crate::app_error!(QueryInvalid, error.to_string()))
 }
 
 /// Administrative role does not grant access to private Realm contents.
 async fn list_realm_links_impl(
     session: coland_services::identity::SessionIdentityState,
     realm_id: PathParam<String>,
-    direction: QueryParam<String, false>,
-    link_kind_allow: QueryParam<String, false>,
+    query: RealmLinkListQuery,
     depot: &mut Depot,
 ) -> GuardedJsonResult<RealmLinkList> {
     let state = depot.get_typed::<AppState>().expect("state injected");
@@ -75,30 +87,10 @@ async fn list_realm_links_impl(
         crate::routing::identity::session_actor::validated_session_actor(state, &session).await?;
     let realm_id = RealmId::new(realm_id.into_inner())
         .map_err(|e| AppError::param_invalid(format!("realm_id: {e}")))?;
-    let direction_str = direction.into_inner().unwrap_or_else(|| "both".to_owned());
-    let direction_enum = RealmLinkDirection::parse(&direction_str)
-        .ok_or_else(|| AppError::param_invalid("direction MUST be one of outbound|inbound|both"))?;
-    // `link_kind_allow` is a comma-separated list — keeps the query
-    // surface dense and avoids repeated query parameters.
-    let allow_raw = link_kind_allow.into_inner();
-    let allow: Option<Vec<String>> = allow_raw
+    let allow: Option<Vec<String>> = query
+        .allowed_link_kinds
         .as_ref()
-        .map(|s| {
-            s.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|value| {
-                    RealmLinkKind::parse(value)
-                        .map(|kind| kind.as_str().to_owned())
-                        .ok_or_else(|| {
-                            AppError::param_invalid(format!(
-                                "link_kind_allow contains unknown kind '{value}'"
-                            ))
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?;
+        .map(|kinds| kinds.iter().map(|kind| kind.as_str().to_owned()).collect());
 
     let list = state
         .persistence()
@@ -106,7 +98,7 @@ async fn list_realm_links_impl(
             &realm_id,
             &actor,
             &state.service_core_id(),
-            direction_enum,
+            query.direction,
             allow.as_deref(),
         )
         .await
@@ -122,4 +114,65 @@ async fn list_realm_links_impl(
     let guard =
         crate::routing::events::sync::content_delivery_guard(state, &session, &input).await?;
     guarded_json_ok(list, guard)
+}
+
+#[cfg(test)]
+mod tests {
+    use arkret_models_collaboration::governance::realm_governance::{
+        RealmLinkDirection, RealmLinkKind,
+    };
+    use coland_http::result::{JsonResult, json_ok};
+    use salvo::test::{ResponseExt, TestClient};
+
+    use super::*;
+
+    #[handler]
+    async fn query_boundary(req: &mut Request) -> JsonResult<RealmLinkListQuery> {
+        json_ok(realm_link_query(req)?)
+    }
+
+    #[tokio::test]
+    async fn realm_link_query_keeps_the_typed_filter_and_rejects_dropped_pairs() {
+        let service = salvo::Service::new(Router::with_path("links").get(query_boundary));
+        let mut response = TestClient::get(
+            "http://server/links?direction=outbound&allowed_link_kinds=governed_by%2Cmirror_of",
+        )
+        .send(&service)
+        .await;
+        assert_eq!(response.status_code, Some(StatusCode::OK));
+        let query: RealmLinkListQuery = response.take_json().await.unwrap();
+        assert_eq!(query.direction, RealmLinkDirection::Outbound);
+        assert_eq!(
+            query.allowed_link_kinds,
+            Some(vec![RealmLinkKind::GovernedBy, RealmLinkKind::MirrorOf])
+        );
+
+        for query in [
+            "link_kind_allow=governed_by",
+            "allowed_link_kinds=governed_by&link_kind_allow=mirror_of",
+            "allowed_link_kinds=governed_by&allowed_link_kinds=mirror_of",
+            "direction=outbound&direction=inbound",
+            "allowed_link_kinds=",
+            "allowed_link_kinds=governed_by,",
+            "allowed_link_kinds=unknown",
+            "direction=unknown",
+            "unregistered_filter=governed_by",
+        ] {
+            let mut response = TestClient::get(format!("http://server/links?{query}"))
+                .send(&service)
+                .await;
+            assert_eq!(
+                response.status_code,
+                Some(StatusCode::BAD_REQUEST),
+                "{query}"
+            );
+            let problem: arkret_wire::Problem = response.take_json().await.unwrap();
+            assert_eq!(problem.status, 400, "{query}: {problem:?}");
+            assert_eq!(
+                problem.problem_type,
+                arkret_wire::ErrorCode::QueryInvalid.type_uri(),
+                "{query}: {problem:?}"
+            );
+        }
+    }
 }

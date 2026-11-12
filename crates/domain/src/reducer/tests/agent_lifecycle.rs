@@ -2,7 +2,7 @@ use super::*;
 const REALM: &str = "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb";
 const AGENT: &str = "ak:did_core:web:agent.example";
 const CONTROLLER: &str = "ak:did_core:web:controller.example";
-const REQUEST: &str = "ak:agent-action-request:01904100-0000-7000-8000-cfc039892037";
+const REQUEST: &str = "action-request-01904100-0000-7000-8000-cfc039892037";
 
 /// Assert an Operation was rejected for exactly `expected`, printing the real
 /// effect when it was not. A bare `matches!` here hides the reason that makes
@@ -25,7 +25,7 @@ fn action_approve(request_id: &str) -> Operation {
     let mut operation = agent_operation(
         arkret_wire::EventKind::AgentActionApprove,
         serde_json::json!({
-            "approval_id": "ak:agent-approval:01904100-0000-7000-8000-cfc039892038",
+            "approval_id": "approval-01904100-0000-7000-8000-cfc039892038",
             "request_id": request_id,
             "agent_id": AGENT,
             "proposed_action": "ak.message.create",

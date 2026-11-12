@@ -51,7 +51,13 @@ fn install_admission_rebind_package(fixture: &Fixture, body: &mut AppletInstallR
         ScopeRef::realm(basis.effective_scope.realm_id().clone()),
         serde_json::to_value(
             package
-                .to_registration(&applet_registration_epoch_evidence(package), serde_json::from_value(basis.registration_event.payload["expected_revision"].clone()).unwrap())
+                .to_registration(
+                    &applet_registration_epoch_evidence(package),
+                    serde_json::from_value(
+                        basis.registration_event.payload["expected_revision"].clone(),
+                    )
+                    .unwrap(),
+                )
                 .unwrap(),
         )
         .unwrap(),
@@ -148,9 +154,10 @@ pub(super) async fn install_admission_policy(
         "schema":"ak.schema.policy.v1","id":id,"realm_id":fixture.realm,"policy_kind":"applet","default_effect":"allow","created_by":actor,
         "created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),
         "rules":[{"rule_id":"native_admission_current_policy","kind":"applet","effect":"deny","applet_target":target,"applet_operations":[operation]}]}}));
-    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
-        arkret_wire::EventAdmissionSubmission::new(event.clone()),
-    );
+    let request =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission::new(event.clone()),
+        );
     let (status, value) = boxed_step(|| async {
         fixture
             .admin_post(
@@ -181,20 +188,38 @@ async fn station_excludes_applet_queries(fixture: &Fixture) {
     use arkret_wire::ServiceOperationId as Op;
     let client = native_http_client(std::time::Duration::from_secs(30));
     let base = fixture.state.config().public_base_url.trim_end_matches('/');
-    let response = client.get(format!("{base}/_arkret/describe"))
-        .header("Arkret-Operation", Op::ServerReadDescribeV1.as_str()).send().await.unwrap();
+    let response = client
+        .get(format!("{base}/_arkret/describe"))
+        .header("Arkret-Operation", Op::ServerReadDescribeV1.as_str())
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status().as_u16(), 200);
     let describe: arkret::ServiceDescribe = response.json().await.unwrap();
     for (operation, path) in [
         (Op::EdgeAppletRealmReadResolveV1, "realms/known-portal"),
         (Op::EdgeAppletReadProtocolMetadataV1, "protocols/fixture"),
-        (Op::EdgeAppletThirdPartyUsersReadListV1, "third_party/users?protocol=fixture&external_id=known"),
-        (Op::EdgeAppletThirdPartyLocationsReadListV1, "third_party/locations?protocol=fixture&external_id=known"),
+        (
+            Op::EdgeAppletThirdPartyUsersReadListV1,
+            "third-party/users?protocol=fixture&external_id=known",
+        ),
+        (
+            Op::EdgeAppletThirdPartyLocationsReadListV1,
+            "third-party/locations?protocol=fixture&external_id=known",
+        ),
     ] {
         assert!(!describe.supports_operation(operation));
-        let response = client.get(format!("{base}/_arkret/edge/applet/{path}"))
-            .header("Arkret-Operation", operation.as_str()).send().await.unwrap();
-        assert_eq!(response.status().as_u16(), 404, "Station cannot answer Applet lookup {operation:?}");
+        let response = client
+            .get(format!("{base}/_arkret/edge/applet/{path}"))
+            .header("Arkret-Operation", operation.as_str())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status().as_u16(),
+            404,
+            "Station cannot answer Applet lookup {operation:?}"
+        );
     }
 }
 
@@ -288,7 +313,13 @@ pub(super) async fn run_install_admission(pool: PgPool) {
     })
     .await;
     let coland_storage::AppletAdmissionRequest::Install(body) = unit.input.candidate.request;
-    install_admission_policy(&factory.fixture, &id, &service.package.service_id, "install").await;
+    install_admission_policy(
+        &factory.fixture,
+        &id,
+        &service.package.service_id,
+        "install",
+    )
+    .await;
     let before = boxed_step(|| async { install_admission_footprint(&factory.fixture).await }).await;
     let (status, problem) = boxed_step(|| async {
         factory
@@ -322,9 +353,10 @@ async fn install_admission_exact_material_binding(
     package: &AppletPackage,
     scope: &ScopeRef,
     install: &AppletInstallResponseBody,
-) -> arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialResponseBody {
+) -> arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialResponseBody
+{
     use arkret_models_collaboration::applet_installation_authority::{
-        AppletAuthorityMaterialResponseBody, AppletAuthorityMaterialRequestBody,
+        AppletAuthorityMaterialRequestBody, AppletAuthorityMaterialResponseBody,
         AppletInstallationCurrentBinding,
     };
     let request = AppletAuthorityMaterialRequestBody {
@@ -366,7 +398,10 @@ async fn install_admission_exact_material_binding(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(material.registration.event.scope_ref, ScopeRef::realm(scope.realm_id().clone()));
+    assert_eq!(
+        material.registration.event.scope_ref,
+        ScopeRef::realm(scope.realm_id().clone())
+    );
     assert_eq!(json!(material.registration.event), json!(original.event));
     assert_eq!(json!(material.registration.commit), json!(original.commit));
     let AppletInstallationCurrentBinding::Active {
@@ -506,9 +541,10 @@ async fn install_admission_reproof_and_missing_creation(factory: &AppletAuthorin
         )
     })
     .await;
-    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
-        arkret_wire::EventAdmissionSubmission::new(pending.clone()),
-    );
+    let request =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission::new(pending.clone()),
+        );
     let (status, result) = boxed_step(|| async {
         factory
             .fixture
@@ -613,9 +649,10 @@ async fn install_admission_reproof_and_missing_creation(factory: &AppletAuthorin
         &signer,
     )
     .unwrap();
-    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
-        arkret_wire::EventAdmissionSubmission::new(original.clone()),
-    );
+    let request =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission::new(original.clone()),
+        );
     let before = boxed_step(|| async { install_admission_footprint(&factory.fixture).await }).await;
     let (status, problem) = boxed_step(|| async {
         factory
@@ -709,9 +746,10 @@ pub(super) async fn policy_blocks_fresh_native_join(fixture: &Fixture, package: 
         &signer,
     )
     .unwrap();
-    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
-        arkret_wire::EventAdmissionSubmission::new(event.clone()),
-    );
+    let request =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission::new(event.clone()),
+        );
     let (status, value) = boxed_step(|| async {
         fixture
             .service_post(
@@ -783,9 +821,10 @@ pub(super) async fn policy_blocks_fresh_native_join(fixture: &Fixture, package: 
     )
     .unwrap();
     let join_event = authored.into_event();
-    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
-        arkret_wire::EventAdmissionSubmission::new(join_event.clone()),
-    );
+    let request =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission::new(join_event.clone()),
+        );
     // A distinct accepted identity still joins after both provision sources
     // close. The original subject below is already created and authorized too.
     boxed_step(|| admission_native_endpoint(fixture, package, 93, true)).await;
@@ -893,9 +932,10 @@ pub(super) async fn admission_native_endpoint(
         &signer,
     )
     .unwrap();
-    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
-        arkret_wire::EventAdmissionSubmission::new(create.clone()),
-    );
+    let request =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission::new(create.clone()),
+        );
     let (status, value) = boxed_step(|| async {
         fixture
             .service_post(
@@ -968,9 +1008,10 @@ pub(super) async fn admission_native_endpoint(
         arkret_signatures::SignEventOptions::new().with_created_at(at),
     )
     .unwrap();
-    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
-        arkret_wire::EventAdmissionSubmission::new(authored.into_event()),
-    );
+    let request =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission::new(authored.into_event()),
+        );
     let mut metadata = AppletManagedDeviceMetadata {
         actor_id: candidate.actor_id.clone(),
         device_id: device,
@@ -1136,9 +1177,10 @@ pub(super) async fn admission_pause_target(fixture: &Fixture, candidate: &RealmA
         control_ref,
         nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
     };
-    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
-        arkret_wire::EventAdmissionSubmission::new(event.clone()),
-    );
+    let request =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission::new(event.clone()),
+        );
     let (status, value) = boxed_step(|| async {
         control_post(
             fixture,

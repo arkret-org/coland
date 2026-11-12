@@ -80,8 +80,8 @@ mod agent_key_tests {
         let mut state = ProjectionState::default();
         let old_event = "ak:event:AVI3AO2X2rB2hMfALczp6qgYt73z3AwmGo2isSyuWZGo";
         let new_event = "ak:event:AQ985E-2w6lvWUxeIPTXvhe07EuX-DPPiDaS3_w-r37V";
-        let old_key = "ak:agent_key:old";
-        let new_key = "ak:agent_key:new";
+        let old_key = "runtime-key-old";
+        let new_key = "runtime-key-new";
 
         assert!(matches!(
             state.apply_agent_key_authorize(&op(
@@ -141,7 +141,7 @@ mod agent_key_tests {
         let mut state = ProjectionState::default();
         let old_event = "ak:event:AV97PI2Y6Qum1pZ62jB1P6M_I7KjPy5KVQxs3bDBUkws";
         let new_event = "ak:event:AcQWkV0enAXbpr18oGw1oRi_yX4oOxV_-eTJTh_5RzRv";
-        let key_id = "ak:agent_key:stable";
+        let key_id = "runtime-key-stable";
 
         assert!(matches!(
             state.apply_agent_key_authorize(&op(

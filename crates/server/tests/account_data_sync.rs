@@ -18,7 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[allow(dead_code)]
 mod ordinary_realm;
 
-const ACCOUNT_DATA_PATH: &str = "/_arkret/self/account_data/ak.push_rules";
+const ACCOUNT_DATA_PATH: &str = "/_arkret/self/account-data/ak.push_rules";
 const INTROSPECTION_PATH: &str = "/_coauth/internal/session-grants/introspect";
 
 fn test_config() -> AppConfig {
@@ -633,7 +633,7 @@ async fn development_bearer_session_cannot_produce_account_data_events() {
     let app = service(state.clone());
     let key = arkret_wire::AccountDataKey::PUSH_RULES;
     let event = signed_account_data_event(&state, &fixture, key);
-    let mut response = TestClient::put(format!("http://server/_arkret/self/account_data/{key}"))
+    let mut response = TestClient::put(format!("http://server/_arkret/self/account-data/{key}"))
         .add_header("authorization", format!("Bearer {token}"), true)
         .add_header(
             "Arkret-Operation",

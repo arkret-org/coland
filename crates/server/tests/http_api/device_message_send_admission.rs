@@ -13,7 +13,7 @@ use coland_test_support::pcr_genesis::PcrGenesisFixture;
 
 use super::common::*;
 
-const SEND_PATH: &str = "http://server/_arkret/self/device_messages";
+const SEND_PATH: &str = "http://server/_arkret/self/device-messages";
 const APPLICATION_KIND: &str = "ak.mls.application";
 
 struct Sender {

@@ -1,14 +1,15 @@
 # Media Token Issuer
 
-> Spec: `arkret-spec @ e3f6832d`, `ak.self.call.media.exchange.issue_token.v1` operation.
+> Spec: `arkret-spec @ e7c978e4`, `ak.self.call.media.exchange.issue_token.v1` operation.
 > Companion runbook: [`../runbook.md` → Media token issuer](../runbook.md#media-token-issuer-rotating-service_signaturekid-focus-binding-troubleshooting).
 > SDK type reference:
 > [`arkret-rust-sdk docs/architecture.md`](../../../arkret-rust-sdk/docs/architecture.md#call-media-cxcallmediatoken_exchange).
 
 This document is the architectural reference for coland's role as the
 **canonical media-token issuer** in the Arkret v1 protocol family. It is
-the source of truth for: who issues, when floria proxies, focus_id derivation
-rules, participant_binding canonical bytes, TTL policy, and kid rotation.
+an implementation reference for: who issues, when floria proxies, focus_id
+handling, participant_binding canonical bytes, TTL policy, and kid rotation.
+The formal Spec governs the protocol contract.
 
 ## Issuer roles
 
@@ -39,32 +40,28 @@ by the client. Clients always request `/rtc/token` against the realm's
 canonical endpoint; whether that endpoint is fronted by floria is a
 deployment detail.
 
-## `focus_id` derivation
+## `focus_id` handling
 
-Each focus in a realm's `ak.realm.media_service.foci[]` advertises a
-canonical `focus_id` of the form:
+A focus identifier is an opaque, nonempty local handle. It MUST NOT begin
+with `ak:`. There is no required backend, region, or disambiguator syntax;
+`focus_kind` and `region` are separate descriptor fields. Unicode and spaces
+are permitted. Preserve the exact string without trimming, normalization,
+case conversion, or truncation.
 
-```text
-<backend>:<region>:<instance-disambiguator>
-```
+The carrier determines the length bound, measured in Unicode scalar values
+rather than UTF-8 octets:
 
-Examples:
+- Realm media-service configuration, committed call focus, and the SFrame/RTC
+  exporter focus handle allow 1–256 characters.
+- `CallMediaTokenExchangeRequestBody.focus_id`,
+  `CallMediaTokenExchangeResponseBody.focus_id`, and the Arkret-native backend
+  token payload's `focus_id` allow 1–64 characters. The issuer enforces this
+  narrower bound before signing, including when a focus comes from configured
+  or committed state.
 
-- `livekit_eu-west-1` — a LiveKit pool in eu-west-1.
-- `mediasoup_us-east-2:b` — a second Mediasoup pool in us-east-2.
-
-Derivation rules:
-
-1. `backend` MUST be one of the registered `MediaBackendKind` arms
-   (`livekit`, `mediasoup`, `janus`, `arkret_native`, `moq_relay`). Unknown
-   backends surface `unknown_focus_type` at exchange time.
-2. `region` is a free-form lowercase tag MAX 32 chars matching
-   `[a-z0-9-]+`. Region is opaque to coland — its only role is human
-   readability and dispatch.
-3. `instance-disambiguator` is optional. When present, it MUST match
-   `[a-z0-9-]+` MAX 16 chars.
-4. The total `focus_id` MUST be <= 96 octets and MUST round-trip through
-   ASCII bytes (no UTF-8 multibyte).
+For example, `fra-1` and `livekit_eu-west-1` are valid local handles. A
+256-character configured focus does not become eligible for a 64-character
+token carrier by shortening or rewriting it.
 
 coland refuses to issue a token for a `focus_id` that is not currently in
 the realm's `ak.realm.media_service.foci[]` set, returning `focus_mismatch`.

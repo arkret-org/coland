@@ -42,6 +42,23 @@ fn payload<T: serde::de::DeserializeOwned>(event: &Event) -> PersistenceResult<T
     serde_json::from_value(serde_json::to_value(&event.payload).map_err(invalid)?).map_err(invalid)
 }
 
+fn require_generation_limits(
+    payload: &RealmInviteLinkCreatePayload,
+    created_at: chrono::DateTime<chrono::Utc>,
+    committed_at: chrono::DateTime<chrono::Utc>,
+    limits: &RealmInviteLinkLimits,
+) -> PersistenceResult<()> {
+    let lifetime = payload.expires_at.signed_duration_since(created_at);
+    if payload.expires_at <= committed_at
+        || lifetime < chrono::Duration::seconds(60)
+        || lifetime > chrono::Duration::seconds(i64::from(limits.max_lifetime_seconds))
+        || payload.max_use_count > limits.max_use_count_per_link
+    {
+        return Err(invalid("Realm invite link exceeds generation limits"));
+    }
+    Ok(())
+}
+
 async fn current(
     conn: &mut AsyncPgConnection,
     realm: &RealmId,
@@ -115,7 +132,7 @@ async fn definition(
         || definition.creator_actor_id != source.actor_id
         || definition.public_key != p.public_key
         || definition.expires_at != p.expires_at
-        || definition.max_uses != p.max_uses
+        || definition.max_use_count != p.max_use_count
     {
         return Err(corrupt("definition differs from its accepted original"));
     }
@@ -152,7 +169,7 @@ async fn usable(
     .await
     .map_err(PersistenceError::database)?
     .count;
-    if count >= i64::from(definition.max_uses) {
+    if count >= i64::from(definition.max_use_count) {
         return Err(unavailable());
     }
     Ok(definition)
@@ -244,19 +261,12 @@ pub(crate) async fn commit_in_connection(
                 .map_err(corrupt)?
                 .unwrap_or_default();
             limits.validate().map_err(corrupt)?;
-            let lifetime = p.expires_at.signed_duration_since(event.created_at);
-            if p.expires_at <= commit.committed_at
-                || lifetime < chrono::Duration::seconds(60)
-                || lifetime > chrono::Duration::seconds(i64::from(limits.max_lifetime_seconds))
-                || p.max_uses > limits.max_uses_per_link
-            {
-                return Err(invalid("Realm invite link exceeds generation limits"));
-            }
+            require_generation_limits(&p, event.created_at, commit.committed_at, &limits)?;
             let id = RealmInviteLinkId::from_event_id(&event.event_id);
             let definition = RealmInviteLinkDefinitionValue {
                 public_key: p.public_key,
                 expires_at: p.expires_at,
-                max_uses: p.max_uses,
+                max_use_count: p.max_use_count,
                 create_event_id: event.event_id.clone(),
                 creator_actor_id: event.actor_id.clone(),
             };
@@ -354,5 +364,62 @@ pub(crate) async fn commit_in_connection(
             .await
         }
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renamed_use_count_is_enforced_at_the_admission_cut() {
+        let created_at = chrono::DateTime::parse_from_rfc3339("2026-11-12T00:00:00.000Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let committed_at = created_at + chrono::Duration::seconds(1);
+        let limits = RealmInviteLinkLimits {
+            max_lifetime_seconds: 120,
+            max_use_count_per_link: 2,
+        };
+        let mut payload = RealmInviteLinkCreatePayload {
+            public_key: arkret_canonical::base64url_encode([7; 32]),
+            expires_at: created_at + chrono::Duration::seconds(120),
+            max_use_count: 2,
+        };
+        assert!(require_generation_limits(&payload, created_at, committed_at, &limits).is_ok());
+        payload.max_use_count = 3;
+        assert!(matches!(
+            require_generation_limits(&payload, created_at, committed_at, &limits),
+            Err(PersistenceError::SchemaViolation(_))
+        ));
+        payload.max_use_count = 2;
+        payload.expires_at = created_at + chrono::Duration::seconds(121);
+        assert!(require_generation_limits(&payload, created_at, committed_at, &limits).is_err());
+        payload.expires_at = created_at + chrono::Duration::seconds(59);
+        assert!(require_generation_limits(&payload, created_at, committed_at, &limits).is_err());
+        payload.expires_at = created_at + chrono::Duration::seconds(60);
+        assert!(
+            require_generation_limits(&payload, created_at, payload.expires_at, &limits).is_err()
+        );
+    }
+
+    #[test]
+    fn invitation_creation_rejects_legacy_and_unknown_count_members() {
+        let valid = serde_json::json!({
+            "public_key": arkret_canonical::base64url_encode([7; 32]),
+            "expires_at": "2026-11-12T00:02:00.000Z",
+            "max_use_count": 2
+        });
+        let payload: RealmInviteLinkCreatePayload = serde_json::from_value(valid.clone()).unwrap();
+        payload.validate().unwrap();
+        for member in ["max_uses", "use_limit"] {
+            let mut extra = valid.clone();
+            extra[member] = serde_json::json!(3);
+            assert!(serde_json::from_value::<RealmInviteLinkCreatePayload>(extra).is_err());
+        }
+        let mut legacy = valid;
+        legacy.as_object_mut().unwrap().remove("max_use_count");
+        legacy["max_uses"] = serde_json::json!(2);
+        assert!(serde_json::from_value::<RealmInviteLinkCreatePayload>(legacy).is_err());
     }
 }

@@ -734,7 +734,7 @@ pub(super) async fn native_prepared_queue_handoff_boundaries(
         #[diesel(sql_type=diesel::sql_types::Bool)]
         stopped: bool,
     }
-    let path = "/_arkret/self/device_messages?limit=1";
+    let path = "/_arkret/self/device-messages?limit=1";
     let scope = &welcome.effective_scope;
     let operation = arkret_wire::ServiceOperationId::SelfDeviceMessagesReadListV1;
     // First prove the retained original is really reachable through this route.

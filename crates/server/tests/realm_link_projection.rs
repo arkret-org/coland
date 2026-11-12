@@ -3,7 +3,7 @@
 //! Exercises:
 //! - all eight canonical link_kinds write their cell + are queryable
 //! - the structured `realm_links` / `realm_links_inbound` caches populate
-//! - the query API filters by direction + link_kind_allow
+//! - the query API filters by direction + allowed_link_kinds
 //! - schema validation rejects bad kinds / self-references / bad status
 
 use arkret_event_draft::ProjectedEventOperation as Operation;
@@ -80,7 +80,7 @@ fn realm_link_projects_all_seven_canonical_kinds() {
 }
 
 #[test]
-fn realm_link_query_filters_by_link_kind_allow() {
+fn realm_link_query_filters_by_allowed_link_kinds() {
     let mut state = ProjectionState::new();
     let hlc = ServerHlc::new("test");
     state.apply(&link_op(REALM_A, REALM_B, "governed_by", None), &hlc);

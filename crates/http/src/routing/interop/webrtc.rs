@@ -505,6 +505,8 @@ async fn handle_rtc_token_with_original(
     body: CallMediaTokenExchangeRequestBody,
     original: Option<Value>,
 ) -> JsonResult<CallMediaTokenExchangeResponseBody> {
+    body.validate()
+        .map_err(|error| AppError::param_invalid(error.to_string()))?;
     // The request body is the SDK typed shape: `realm_id`/`call_id`/`actor_id`/
     // `device_id` retain their exact complete ActorId and typed DeviceId shapes,
     // and the response binding carries the same typed ids — so the wire outcome
@@ -529,9 +531,6 @@ async fn handle_rtc_token_with_original(
         ));
     }
     let device_id = body.device_id.clone();
-    if body.focus_id.trim().is_empty() {
-        return Err(AppError::param_invalid("focus_id is required"));
-    }
     // Authz (`media-service-binding.md` §6 commit ordering) — the token issuer does NOT
     // depend on any ephemeral signaling session. Per `media-service-binding.md`
     // the client redeems the media token BEFORE it joins the durable
@@ -728,6 +727,9 @@ async fn handle_rtc_token_with_original(
             screen: desired_media.2,
         },
     };
+    outcome
+        .validate()
+        .map_err(|error| AppError::internal(error.to_string()))?;
     let signing_input = arkret_signatures::media::participant_binding_signing_input(
         &arkret_signatures::media::ParticipantBindingContext::from_outcome(&outcome),
     )
@@ -1033,7 +1035,7 @@ fn session_focus_for_call(
         ));
     }
 
-    let requested = requested_focus_id.trim();
+    let requested = requested_focus_id;
     if !requested.is_empty() && media_epoch.focus(requested).is_some() {
         return Ok(requested.to_owned());
     }
@@ -1301,6 +1303,8 @@ fn issue_arkret_native_backend_token(
     request: &MediaTokenIssueRequestBody<'_>,
     signing_key: &ed25519_dalek::SigningKey,
 ) -> Result<IssuedMediaToken, AppError> {
+    arkret_wire::validate_bounded_non_typed_identifier(&request.focus.focus_id, 64)
+        .map_err(focus_unavailable_error)?;
     let (audio, video, screen) = token_media_permissions(request);
     let payload = ArkretNativeMediaTokenPayload {
         call_id: CallId::new(request.call_id.to_owned()).map_err(|error| {
@@ -1358,6 +1362,8 @@ fn issue_livekit_backend_token(
     request: &MediaTokenIssueRequestBody<'_>,
     livekit: &crate::config::LiveKitConfig,
 ) -> Result<IssuedMediaToken, AppError> {
+    arkret_wire::validate_bounded_non_typed_identifier(&request.focus.focus_id, 64)
+        .map_err(focus_unavailable_error)?;
     let api_key = livekit.api_key.as_deref().filter(|key| !key.is_empty());
     let api_secret = livekit
         .api_secret
@@ -1677,6 +1683,62 @@ mod tests {
             .expect("spec focus ids are not required to use a private prefix");
 
         assert_eq!(epoch.foci[0].focus_id, "fra-1");
+    }
+
+    #[test]
+    fn focus_selection_preserves_the_exact_configured_handle() {
+        let requested = " fra-1 ";
+        let epoch = MediaServiceEpoch {
+            service_id: "ak:did_core:web:media.example".to_owned(),
+            foci: ["default", requested]
+                .into_iter()
+                .map(|focus_id| MediaProviderConfig {
+                    provider: MediaProviderKind::ArkretNative,
+                    focus_id: focus_id.to_owned(),
+                    token_endpoint: "https://media.example/_arkret/self/rtc/token".to_owned(),
+                    connect_url: "https://media.example".to_owned(),
+                })
+                .collect(),
+        };
+        let cells = CallMediaCells {
+            accepted: None,
+            focus: None,
+            moderation: None,
+        };
+        assert_eq!(
+            session_focus_for_call(&cells, &epoch, requested).unwrap(),
+            requested
+        );
+    }
+
+    #[test]
+    fn media_token_issuer_enforces_the_narrow_focus_carrier_before_signing() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let issued_at = Utc::now();
+        for length in [64, 65] {
+            let focus = MediaProviderConfig {
+                provider: MediaProviderKind::ArkretNative,
+                focus_id: "界".repeat(length),
+                token_endpoint: "https://media.example/_arkret/self/rtc/token".to_owned(),
+                connect_url: "https://media.example".to_owned(),
+            };
+            let request = MediaTokenIssueRequestBody {
+                focus: &focus,
+                issuer_kid: "did:web:media.example#media-1",
+                realm_id: "ak:realm:ASReu6ls3Ao5vTK0TGXBCAvLLQChFejCEmN9KaSceZOt",
+                call_id: "ak:call:AXN8h1ovgRUvcxrjsoB4ffwwej16MPpikhZbvZ6pt_Hj",
+                participant_id: "ak:rtc_participant:01904100-0000-7000-8000-000000000009",
+                desired_media: (true, true, false),
+                allow_screen_share: false,
+                issued_at,
+                expires_at: issued_at + Duration::seconds(300),
+            };
+            assert_eq!(
+                issue_arkret_native_backend_token(&request, &signing_key).is_ok(),
+                length == 64,
+                "{length} Unicode code points"
+            );
+        }
     }
 
     /// `media-service-binding.md` §2: `token_endpoint` and `connect_url` are

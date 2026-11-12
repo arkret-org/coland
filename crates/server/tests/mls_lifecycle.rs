@@ -259,7 +259,7 @@ impl Member {
     }
 
     async fn recipient_queue(&self, state: &AppState) -> DeviceMessagesGetResponseBody {
-        let mut response = TestClient::get("http://server/_arkret/self/device_messages")
+        let mut response = TestClient::get("http://server/_arkret/self/device-messages")
             .add_header("authorization", format!("Bearer {}", self.token), true)
             .add_header(
                 "arkret-operation",
@@ -1318,7 +1318,7 @@ async fn mls_lifecycle_body() {
     let acked = bob
         .post(
             &state,
-            "/_arkret/self/device_messages/ack",
+            "/_arkret/self/device-messages/ack",
             arkret_wire::ServiceOperationId::SELF_DEVICE_MESSAGES_COMMAND_ACK_V1,
             &DeviceMessagesAcknowledgementRequestBody {
                 acknowledgement_token,

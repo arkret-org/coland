@@ -18,6 +18,7 @@ enum BootstrapFault {
     MissingGenesisFact,
     SubstitutedGenesisFact,
     InvalidGenesisProducerSignature,
+    UnverifiedNativeGenesisProducer,
 }
 
 struct CircleScene {
@@ -729,6 +730,29 @@ async fn actual_peer_reply(
             };
             proof.jws.replace_range(index..index + 1, replacement);
         }
+        if fault == BootstrapFault::UnverifiedNativeGenesisProducer {
+            let original = &mut response.authority_bundle;
+            let proof = original.genesis_event.producer_proof.as_mut().unwrap();
+            let did = proof
+                .verification_method
+                .as_str()
+                .split_once('#')
+                .unwrap()
+                .0;
+            proof.verification_method =
+                arkret_wire::DidUrl::new(format!("{did}#unavailable-native-key")).unwrap();
+            original.genesis_commit.producer_signer_fact_digest = None;
+            response.producer_signer_fact = None;
+            seal_service_commit(&mut original.genesis_commit, governor);
+            assert!(
+                original
+                    .genesis_event
+                    .verify_producer_proof_self_consistency(arkret_canonical::DigestSuite::Sha256)
+                    .unwrap()
+                    .is_none()
+            );
+            response.genesis_original().unwrap();
+        }
         return (
             200,
             arkret_canonical::canonical_json_bytes(&response).unwrap(),
@@ -750,6 +774,197 @@ async fn actual_peer_reply(
 async fn settle(scene: &CircleScene) {
     crate::state::replica_anchor::spawn_converge_stream(&scene.origin, scene.stream());
     crate::state::replica_anchor::wait_for_converge_stream(&scene.origin, &scene.stream()).await;
+}
+
+async fn assert_exact_genesis_signer_disclosure(scene: &CircleScene) {
+    use arkret_models_identity::{
+        HistoricalSignerKeyQuerySender, SignerKeyQuerySelector, SignerKeyResolution,
+        SignerKeysQueryRequestBody,
+    };
+    let realm = &scene.realm_join.authority_commit.event.realm_id;
+    let record = scene
+        .source()
+        .committed_event(&realm.event_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let original = arkret_wire::CommittedEventFullView {
+        event: record.event,
+        commit: record.commit,
+    };
+    let producer = original.event.account_device_producer().unwrap().unwrap();
+    let selector = SignerKeyQuerySelector::HistoricalEvent {
+        sender: HistoricalSignerKeyQuerySender::AccountDevice {
+            actor: ActorId::account(producer.account_id),
+            device_id: producer.device_id,
+            verification_method: original
+                .event
+                .producer_proof
+                .as_ref()
+                .unwrap()
+                .verification_method
+                .clone(),
+            committed_event_ref: arkret_wire::CommittedEventRef {
+                event_id: original.event.event_id.clone(),
+                commit_id: original.commit.commit_id.clone(),
+                stream_ref: original.commit.stream_ref.clone(),
+                stream_position: original.commit.stream_position,
+            },
+        },
+    };
+    let request = |recipient: &AccountId| SignerKeysQueryRequestBody {
+        request_id: arkret_wire::RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7()))
+            .unwrap(),
+        realm_id: realm.clone(),
+        recipient_account_id: Some(recipient.clone()),
+        recipient_actor_id: None,
+        queries: vec![selector.clone()],
+    };
+    let member_actor = ActorId::account(scene.alice.pcr.history.account.clone());
+    let held = scene
+        .member()
+        .committed_event_for_member(
+            &original.event.event_id,
+            &member_actor,
+            &scene.origin.service_core_id(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(held, coland_storage::MemberCommittedEventRead::Read(view)
+        if matches!(*view, arkret_wire::CommittedEventView::Full(_)))
+    );
+    let before_one = StreamScanRequestBody {
+        realm_id: realm.clone(),
+        stream_ref: original.commit.stream_ref.clone(),
+        direction: StreamScanDirection::Before(Some(1)),
+        limit: 1,
+    };
+    let coland_storage::AccountStreamScan::Page(page) = scene
+        .member()
+        .scan_stream_for_account(
+            &before_one,
+            &scene.alice.pcr.history.account,
+            &scene.origin.service_core_id(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("current joined member must have an ordinary scan response");
+    };
+    assert!(
+        page.committed_events.is_empty(),
+        "Genesis disclosure must not lower the scan floor"
+    );
+    for (state, pool, reader) in [
+        (&scene.origin, &scene.origin_pool, &scene.alice),
+        (&scene.governor, &scene.governor_pool, &scene.owner),
+    ] {
+        let session = authenticated_context(pool, reader).await;
+        let outcome = crate::routing::identity::current_signer_evidence::resolve_self_signer_keys(
+            state,
+            &session,
+            &request(&reader.pcr.history.account),
+        )
+        .await
+        .unwrap();
+        let SignerKeyResolution::HistoricalResolved {
+            key, accepted_at, ..
+        } = &outcome.resolutions[0]
+        else {
+            panic!("current member must receive the exact original Genesis signing key");
+        };
+        let fact =
+            arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact {
+                event_id: original.event.event_id.clone(),
+                actor: original.event.actual_signer().clone(),
+                device_id: original
+                    .event
+                    .account_device_producer()
+                    .unwrap()
+                    .unwrap()
+                    .device_id,
+                verification_method: original
+                    .event
+                    .producer_proof
+                    .as_ref()
+                    .unwrap()
+                    .verification_method
+                    .clone(),
+                key: key.clone(),
+                accepted_at: *accepted_at,
+            };
+        let fact: arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact =
+            fact.into();
+        fact.validate_commit_binding(&original, arkret_canonical::DigestSuite::Sha256)
+            .unwrap();
+        assert_ne!(key.authorization_ref.event_id, original.event.event_id);
+        arkret_signatures::verify_ed25519_detached_jws_proof_with_digest_suite(
+            original.event.producer_proof.as_ref().unwrap(),
+            &arkret_signatures::EventProofBuilder::new()
+                .envelope_bytes(&original.event)
+                .unwrap(),
+            &original.event.actor_id,
+            &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+                bytes: arkret_canonical::base64url_decode(key.public_key_base64url.as_str())
+                    .unwrap(),
+            },
+            arkret_canonical::DigestSuite::Sha256,
+        )
+        .unwrap();
+    }
+    let owner_actor = ActorId::account(scene.owner.pcr.history.account.clone());
+    let mut conn = scene.governor_pool.get().await.unwrap();
+    // Accepted originals remain; only the current membership proof is absent.
+    assert_eq!(
+        diesel::sql_query(
+            "DELETE FROM member_state_current_states WHERE realm_id=$1 AND member_id=$2"
+        )
+        .bind::<Text, _>(realm.as_str())
+        .bind::<Text, _>(owner_actor.to_string())
+        .execute(&mut *conn)
+        .await
+        .unwrap(),
+        1
+    );
+    drop(conn);
+    assert!(
+        !scene
+            .source()
+            .accepted_current_member_joined(realm, &owner_actor)
+            .await
+            .unwrap()
+    );
+    assert!(
+        matches!(
+            scene
+                .source()
+                .committed_event_for_member(
+                    &original.event.event_id,
+                    &owner_actor,
+                    &scene.governor.service_core_id()
+                )
+                .await
+                .unwrap(),
+            coland_storage::MemberCommittedEventRead::NotVisible
+        ),
+        "Genesis Full GET requires current membership even for the original author"
+    );
+    let session = authenticated_context(&scene.governor_pool, &scene.owner).await;
+    let outcome = crate::routing::identity::current_signer_evidence::resolve_self_signer_keys(
+        &scene.governor,
+        &session,
+        &request(&scene.owner.pcr.history.account),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            outcome.resolutions[0],
+            SignerKeyResolution::Unavailable { .. }
+        ),
+        "being the original author does not replace current Genesis membership proof"
+    );
 }
 
 #[tokio::test]
@@ -843,6 +1058,7 @@ async fn qualified_circle_refresh_precedes_full_tail_when_metadata_is_physically
                 .unwrap(),
             Some(true)
         );
+        assert_exact_genesis_signer_disclosure(&scene).await;
     })
     .await;
 }
@@ -852,7 +1068,7 @@ async fn unproved_circle_rejects_wrong_nonce_signer_and_genesis_source_without_e
     scenario_future(|| async {
         for fault in [BootstrapFault::WrongNonce,BootstrapFault::WrongSigner,
             BootstrapFault::MissingGenesisFact,BootstrapFault::SubstitutedGenesisFact,
-            BootstrapFault::InvalidGenesisProducerSignature] {
+            BootstrapFault::InvalidGenesisProducerSignature,BootstrapFault::UnverifiedNativeGenesisProducer] {
             let scene = scenario_future(circle_scene).await;
             Box::pin(scene.bob_realm_snapshot()).await;
             Box::pin(scene.remove_only_derived_circle_metadata()).await;

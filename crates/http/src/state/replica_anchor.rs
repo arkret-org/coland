@@ -27,7 +27,7 @@ use arkret_wire::{
     RequestId, StreamScanDirection, StreamScanRequestBody,
 };
 use coland_services::committed_receipt::{
-    CommitContinuity, verify_committed_event_receipt_with_source,
+    CommitContinuity, ReceivedProducer, verify_committed_event_receipt_with_source,
 };
 use coland_storage::{
     CommittedChainNode, CommittedReplica, CommittedReplicaRole, ReplicaAnchorInstall,
@@ -36,6 +36,62 @@ use coland_storage::{
 
 use super::AppState;
 use crate::routing::realm_join::LocatedRealmAuthority;
+
+async fn verify_native_genesis_producer(
+    state: &AppState,
+    original: &arkret_wire::CommittedEventFullView,
+) -> Result<(), String> {
+    use arkret_models_identity::{
+        HistoricalSignerKeyQuerySender, SignerKeyQuerySelector, SignerKeyResolution,
+    };
+    let event = &original.event;
+    let unavailable = "bootstrap native Genesis producer authorization is unavailable";
+    if event.actual_signer().as_account_id().is_none() {
+        return Err(unavailable.to_owned());
+    }
+    let proof = event.producer_proof.as_ref().ok_or(unavailable)?;
+    let selector = SignerKeyQuerySelector::HistoricalEvent {
+        sender: HistoricalSignerKeyQuerySender::Agent {
+            actor: event.actual_signer().clone(),
+            verification_method: proof.verification_method.clone(),
+            committed_event_ref: arkret_wire::CommittedEventRef {
+                event_id: event.event_id.clone(),
+                commit_id: original.commit.commit_id.clone(),
+                stream_ref: original.commit.stream_ref.clone(),
+                stream_position: original.commit.stream_position,
+            },
+        },
+    };
+    // Only an immutable native source retained at this exact accepted target
+    // may supply authorization. Current keys and projections are not sources.
+    let resolution = state
+        .authority_commits()
+        .historical_producer_signer_key(&event.realm_id, &selector)
+        .await
+        .map_err(temporary)?
+        .ok_or(unavailable)?;
+    if resolution.selector() != &selector {
+        return Err(unavailable.to_owned());
+    }
+    resolution.validate(&event.realm_id).map_err(temporary)?;
+    let SignerKeyResolution::HistoricalResolved { key, .. } = resolution else {
+        return Err(unavailable.to_owned());
+    };
+    let material = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+        bytes: arkret_canonical::base64url_decode(key.public_key_base64url.as_str())
+            .map_err(temporary)?,
+    };
+    arkret_signatures::verify_ed25519_detached_jws_proof_with_digest_suite(
+        proof,
+        &arkret_signatures::EventProofBuilder::new()
+            .envelope_bytes(event)
+            .map_err(temporary)?,
+        &event.actor_id,
+        &material,
+        event.realm_id.digest_suite_code().digest_suite(),
+    )
+    .map_err(temporary)
+}
 
 const BOOTSTRAP_PATH: &str = "/_arkret/peer/realm-joins/bootstrap";
 const SCAN_PATH: &str = "/_arkret/peer/streams/scan";
@@ -1058,7 +1114,7 @@ async fn anchor_stream_with_forward_source(
     *located = served;
     RealmJoinBootstrapAssembly::new(outcome.clone()).map_err(temporary)?;
     let genesis = outcome.genesis_original().map_err(temporary)?;
-    verify_committed_event_receipt_with_source(
+    let producer = verify_committed_event_receipt_with_source(
         state.persistence(),
         &genesis.event,
         &genesis.commit,
@@ -1071,6 +1127,9 @@ async fn anchor_stream_with_forward_source(
     )
     .await
     .map_err(temporary)?;
+    if producer == ReceivedProducer::OtherSigner {
+        verify_native_genesis_producer(state, &genesis).await?;
+    }
     let snapshot = &outcome.snapshot;
     verify_snapshot(state, located, snapshot).await?;
     let realm_stream = join.stream_ref.clone();

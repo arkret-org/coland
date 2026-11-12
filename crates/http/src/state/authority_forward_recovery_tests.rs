@@ -952,6 +952,10 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
     store
         .install_replica_anchor(&ReplicaAnchorInstall {
             realm_id: realm.clone(),
+            genesis_original: coland_test_support::member_bootstrap::genesis_original(
+                &source, realm,
+            )
+            .await,
             join_commit_id: join.authority_commit.commit.commit_id.clone(),
             governance_generation: material.governance_generation,
             snapshot_head: material.visible_stream_heads[0].clone(),
@@ -4055,8 +4059,12 @@ async fn tcp_opening_bootstrap(
         let authority_bundle = crate::routing::realm_join::local_authority_bundle(
             &governor, &actual.realm_id, &nonce,
         ).await.unwrap();
+        let producer_signer_fact = store
+            .producer_signer_fact(&authority_bundle.genesis_event, &authority_bundle.genesis_commit)
+            .await
+            .unwrap();
         arkret_models_collaboration::governance::realm_join_intake::PeerRealmJoinBootstrapResponseBody {
-            request_id: actual.request_id, visible_stream_heads: snapshot.visible_stream_heads.clone(), snapshot, authority_bundle,
+            request_id: actual.request_id, visible_stream_heads: snapshot.visible_stream_heads.clone(), snapshot, authority_bundle, producer_signer_fact,
         }
     });
     let body = arkret_canonical::canonical_json_bytes(&outcome).unwrap();

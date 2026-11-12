@@ -293,6 +293,10 @@ pub(crate) async fn admit(
                 commit.committed_at,
             )
             .map_err(invalid)?;
+            if let Some(recipient) = &plan.next_content_backup_recipient {
+                recovery.content_backup_recipient = recipient.clone();
+                recovery.content_backup_recipient_ref = accepted.clone();
+            }
             writes.push((
                 json!({"kind":"realm_actor_control","actor_id":actor}),
                 json!(RealmActorControlValue {
@@ -334,6 +338,7 @@ pub(crate) async fn admit(
     for (selector, value) in writes {
         write_current(conn, &actor, selector, value, commit).await?;
     }
+    crate::realm_actor_content_backup::retain_current_recipient(conn, &actor).await?;
     let outcome = arkret_wire::AuthoritySubmitResponseBody::Accepted {
         status: arkret_wire::AuthorityCommitStatus::Committed,
         commit: commit.clone(),

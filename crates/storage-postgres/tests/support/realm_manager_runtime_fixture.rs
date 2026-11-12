@@ -1,16 +1,33 @@
-fn retained_actor_devices(store: &arkret_bridge_runtime::FileAuthoringStore, actor: &ActorId) -> std::collections::BTreeMap<String, String> {
+fn retained_actor_devices(
+    store: &arkret_bridge_runtime::FileAuthoringStore,
+    actor: &ActorId,
+) -> std::collections::BTreeMap<String, String> {
     use arkret_bridge_runtime::AuthoringStore as _;
     use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
     use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
     let cipher = XChaCha20Poly1305::new(&Key::from([0x53; 32]));
-    store.entries_with_prefix("managed-device/v1/").unwrap().into_iter().filter_map(|(key, raw)| {
-        let parts: Vec<_> = raw.split('.').collect();
-        let nonce = arkret::base64url_decode(parts[1]).unwrap();
-        let ciphertext = arkret::base64url_decode(parts[2]).unwrap();
-        let plain = cipher.decrypt(&XNonce::try_from(nonce.as_slice()).unwrap(), Payload { msg: &ciphertext, aad: key.as_bytes() }).unwrap();
-        let value: Value = serde_json::from_slice(&plain).unwrap();
-        (value["plan"]["actor_id"] == json!(actor)).then(|| (key, arkret_canonical::canonical_digest(raw.as_bytes())))
-    }).collect()
+    store
+        .entries_with_prefix("managed-device/v1/")
+        .unwrap()
+        .into_iter()
+        .filter_map(|(key, raw)| {
+            let parts: Vec<_> = raw.split('.').collect();
+            let nonce = arkret::base64url_decode(parts[1]).unwrap();
+            let ciphertext = arkret::base64url_decode(parts[2]).unwrap();
+            let plain = cipher
+                .decrypt(
+                    &XNonce::try_from(nonce.as_slice()).unwrap(),
+                    Payload {
+                        msg: &ciphertext,
+                        aad: key.as_bytes(),
+                    },
+                )
+                .unwrap();
+            let value: Value = serde_json::from_slice(&plain).unwrap();
+            (value["plan"]["actor_id"] == json!(actor))
+                .then(|| (key, arkret_canonical::canonical_digest(raw.as_bytes())))
+        })
+        .collect()
 }
 
 async fn query_managed_actor(
@@ -22,11 +39,22 @@ async fn query_managed_actor(
         .http_client(native_http_client(std::time::Duration::from_secs(30)))
         .retry(arkret_http_client::RetryConfig::disabled())
         .http_message_signer(arkret_http_client::HttpMessageSigner::new(
-            fixture.state.service_verification_method("notary-key").unwrap().to_string(),
+            fixture
+                .state
+                .service_verification_method("notary-key")
+                .unwrap()
+                .to_string(),
             fixture.state.notary_signing_key().as_ref().clone(),
         ))
-        .build().unwrap();
-    client.applet_actor(&fixture.state.service_core_id(), &service.package.service_id, actor).await
+        .build()
+        .unwrap();
+    client
+        .applet_actor(
+            &fixture.state.service_core_id(),
+            &service.package.service_id,
+            actor,
+        )
+        .await
 }
 
 async fn query_managed_tuple(
@@ -34,18 +62,42 @@ async fn query_managed_tuple(
     service: &NativeService,
     candidate: &RealmActorCreatePayload,
 ) -> arkret_http_client::Result<arkret_models_integration::AppletThirdPartyUserLookupResponseBody> {
-    let external = candidate.external_ref.as_ref().expect("accepted Ghost tuple");
+    let external = candidate
+        .external_ref
+        .as_ref()
+        .expect("accepted Ghost tuple");
     let query = arkret_models_integration::ThirdPartyUserQuery {
-        applet_id:candidate.applet_id.clone(),realm_id:candidate.actor_id.as_realm_actor_id().unwrap().realm_id.clone(),
-        protocol:external.protocol.clone(),instance_id:external.instance_id.clone(),external_id:external.external_id.clone(),
+        applet_id: candidate.applet_id.clone(),
+        realm_id: candidate
+            .actor_id
+            .as_realm_actor_id()
+            .unwrap()
+            .realm_id
+            .clone(),
+        protocol: external.protocol.clone(),
+        instance_id: external.instance_id.clone(),
+        external_id: external.external_id.clone(),
     };
     let client = arkret_http_client::Client::builder(service.package.base_url.parse().unwrap())
         .http_client(native_http_client(std::time::Duration::from_secs(30)))
         .retry(arkret_http_client::RetryConfig::disabled())
         .http_message_signer(arkret_http_client::HttpMessageSigner::new(
-            fixture.state.service_verification_method("notary-key").unwrap().to_string(),
-            fixture.state.notary_signing_key().as_ref().clone())).build().unwrap();
-    client.applet_third_party_user(&fixture.state.service_core_id(), &service.package.service_id, &query).await
+            fixture
+                .state
+                .service_verification_method("notary-key")
+                .unwrap()
+                .to_string(),
+            fixture.state.notary_signing_key().as_ref().clone(),
+        ))
+        .build()
+        .unwrap();
+    client
+        .applet_third_party_user(
+            &fixture.state.service_core_id(),
+            &service.package.service_id,
+            &query,
+        )
+        .await
 }
 
 // Simulate a crash after the real preview and durable request save, before any effect.
@@ -142,7 +194,10 @@ async fn freeze_manager_revoke_request(
 }
 
 // Same Applet, two Services, complete durable custody retained in a shared backend.
-#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
+)]
 async fn run_manager_runtime_transfer(
     factory: &AppletAuthoringFactory,
     previous: &NativeService,
@@ -190,37 +245,124 @@ async fn run_manager_runtime_transfer(
     }
     let fixture = &factory.fixture;
     let actor = &candidate.actor_id;
-    let view = boxed_step(|| query_managed_actor(fixture, previous, actor)).await.unwrap();
+    let view = boxed_step(|| query_managed_actor(fixture, previous, actor))
+        .await
+        .unwrap();
     assert_eq!(view.actor_id.as_ref(), Some(actor));
     // A second subject stays on the original Service throughout the batch.
-    let author = arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService::new(previous_edge.clone()).unwrap();
+    let author = fixture_runtime_manager(previous, previous_edge.clone());
     let external = arkret::GhostExternalTuple {
-        protocol: "fixture".into(), instance_id: "bridge-native".into(), external_id: "stays-on-previous-service".into(),
+        protocol: "fixture".into(),
+        instance_id: "bridge-native".into(),
+        external_id: "stays-on-previous-service".into(),
     };
-    let prepared = boxed_step(|| author.prepare_ghost_in_scope(&candidate.applet_id, &candidate.creation_scope, &external, None)).await.unwrap();
-    let arkret_bridge_runtime::PreparedGhost::Create(other_command) = prepared else { panic!("new companion Ghost required"); };
-    let other_candidate: RealmActorCreatePayload = serde_json::from_value(serde_json::to_value(&other_command.create_event.payload).unwrap()).unwrap();
-    let result = boxed_step(|| previous_edge.submit_managed_creation(&other_command)).await.unwrap();
-    assert!(matches!(result, arkret::AuthoritySubmitResponseBody::Accepted { .. }));
-    boxed_step(|| realm_actor_mls_fixture::business_parent(fixture, &previous.package, &other_candidate.actor_id, &candidate.creation_scope)).await;
-    let other_device = boxed_step(|| previous_runtime.device_for_actor(&other_candidate.actor_id)).await.unwrap();
-    boxed_step(|| previous_runtime.ensure_realm_membership(&other_device)).await.unwrap();
+    let prepared = boxed_step(|| {
+        author.prepare_ghost_in_scope(
+            &candidate.applet_id,
+            &candidate.creation_scope,
+            &external,
+            None,
+        )
+    })
+    .await
+    .unwrap();
+    let arkret_bridge_runtime::PreparedGhost::Create(other_command) = prepared else {
+        panic!("new companion Ghost required");
+    };
+    let other_candidate: RealmActorCreatePayload =
+        serde_json::from_value(serde_json::to_value(&other_command.create_event.payload).unwrap())
+            .unwrap();
+    let result = boxed_step(|| previous_edge.submit_managed_creation(&other_command))
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        arkret::AuthoritySubmitResponseBody::Accepted { .. }
+    ));
+    boxed_step(|| {
+        realm_actor_mls_fixture::business_parent(
+            fixture,
+            &previous.package,
+            &other_candidate.actor_id,
+            &candidate.creation_scope,
+        )
+    })
+    .await;
+    let other_device = boxed_step(|| previous_runtime.device_for_actor(&other_candidate.actor_id))
+        .await
+        .unwrap();
+    boxed_step(|| previous_runtime.ensure_realm_membership(&other_device))
+        .await
+        .unwrap();
     let other_before = snapshot(fixture, &other_candidate.actor_id).await;
 
-    let human_group = boxed_step(|| realm_actor_mls_fixture::human_admits_runtime(fixture, previous_device)).await;
-    let old_reader = boxed_step(|| previous_runtime.open_reader(previous_device)).await.unwrap();
-    let welcome = boxed_step(|| previous_runtime.poll_welcome_queue(previous_device, &old_reader)).await.unwrap();
+    let human_group =
+        boxed_step(|| realm_actor_mls_fixture::human_admits_runtime(fixture, previous_device))
+            .await;
+    let old_reader = boxed_step(|| previous_runtime.open_reader(previous_device))
+        .await
+        .unwrap();
+    let welcome = boxed_step(|| previous_runtime.poll_welcome_queue(previous_device, &old_reader))
+        .await
+        .unwrap();
     assert_eq!(welcome.durable_welcomes, 1);
     assert!(welcome.acknowledged);
-    assert_eq!(previous_runtime.installed_mls_epoch(previous_device).await.unwrap(), Some(1));
-    boxed_step(|| previous_runtime.maintain_mls_key_packages(&other_device, 2)).await.unwrap();
-    let mut human_group = boxed_step(|| realm_actor_mls_fixture::human_adds_runtime_to_group(fixture, &other_device, human_group)).await;
-    let other_reader = boxed_step(|| previous_runtime.open_reader(&other_device)).await.unwrap();
-    let other_welcome = boxed_step(|| previous_runtime.poll_welcome_queue(&other_device, &other_reader)).await.unwrap();
+    assert_eq!(
+        previous_runtime
+            .installed_mls_epoch(previous_device)
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    boxed_step(|| author.maintain_backup_series(actor, &candidate.creation_scope))
+        .await
+        .unwrap();
+    let archived_location = json!({"protocol":"fixture","network_id":"bridge-native","location_id":"before-private-manager-handover"});
+    let archived_portal = boxed_step(|| {
+        previous_runtime.submit_portal_strand(
+            actor,
+            &candidate.creation_scope,
+            "Retained before private archive transfer",
+            &archived_location,
+        )
+    })
+    .await
+    .unwrap();
+    let original_archive = boxed_step(|| author.archive_inventory(actor))
+        .await
+        .unwrap();
+    assert!(
+        original_archive.entries.iter().any(|entry| matches!(
+            entry,
+            arkret_models_integration::RealmActorArchiveInventoryEntry::Backup(_)
+        )),
+        "manager handover must transfer an actual accepted root packet, not an empty private archive"
+    );
+    boxed_step(|| previous_runtime.maintain_mls_key_packages(&other_device, 2))
+        .await
+        .unwrap();
+    let mut human_group = boxed_step(|| {
+        realm_actor_mls_fixture::human_adds_runtime_to_group(fixture, &other_device, human_group)
+    })
+    .await;
+    let other_reader = boxed_step(|| previous_runtime.open_reader(&other_device))
+        .await
+        .unwrap();
+    let other_welcome =
+        boxed_step(|| previous_runtime.poll_welcome_queue(&other_device, &other_reader))
+            .await
+            .unwrap();
     assert_eq!(other_welcome.durable_welcomes, 1);
     assert!(other_welcome.acknowledged);
-    assert_eq!(previous_runtime.installed_mls_epoch(&other_device).await.unwrap(), Some(2));
-    let (frozen_revoke_request, frozen_revoke) = boxed_step(|| freeze_manager_revoke_request(fixture, &previous.package, candidate)).await;
+    assert_eq!(
+        previous_runtime
+            .installed_mls_epoch(&other_device)
+            .await
+            .unwrap(),
+        Some(2)
+    );
+    let (frozen_revoke_request, frozen_revoke) =
+        boxed_step(|| freeze_manager_revoke_request(fixture, &previous.package, candidate)).await;
     eprintln!("manager runtime: explicit pause and independent receiving installation");
     boxed_step(|| {
         previous_runtime.set_owner_status(
@@ -333,83 +475,105 @@ async fn run_manager_runtime_transfer(
     };
     let edge = make_edge();
     *receiving.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
-        arkret_bridge_runtime::web::managed_applet_host_router(edge.clone()).unwrap(),
+        arkret_bridge_runtime::web::managed_applet_host_router_with_manager(
+            edge.clone(),
+            fixture_runtime_manager(&receiving, edge.clone()),
+        )
+        .unwrap(),
     )));
     let runtime = ManagedDeviceRuntime::new(edge.clone()).unwrap();
-    boxed_step(|| runtime.remember_installation_outcome(&install.effective_scope, &receiving_installation)).await.unwrap();
+    boxed_step(|| {
+        runtime.remember_installation_outcome(&install.effective_scope, &receiving_installation)
+    })
+    .await
+    .unwrap();
     assert!(
         boxed_step(|| runtime.local_actor_for_realm(&fixture.realm))
             .await
             .unwrap()
             .is_none()
     );
-    let receiving_author = arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService::new(edge.clone()).unwrap();
+    let receiving_author = fixture_runtime_manager(&receiving, edge.clone());
     let receiving_external = arkret::GhostExternalTuple {
-        protocol: "fixture".into(), instance_id: "bridge-native".into(), external_id: "already-on-receiving-service".into(),
+        protocol: "fixture".into(),
+        instance_id: "bridge-native".into(),
+        external_id: "already-on-receiving-service".into(),
     };
-    let prepared = boxed_step(|| receiving_author.prepare_ghost_in_scope(&candidate.applet_id, &candidate.creation_scope, &receiving_external, None)).await.unwrap();
-    let arkret_bridge_runtime::PreparedGhost::Create(receiving_command) = prepared else { panic!("new receiving companion required"); };
-    let receiving_candidate: RealmActorCreatePayload = serde_json::from_value(serde_json::to_value(&receiving_command.create_event.payload).unwrap()).unwrap();
-    assert!(matches!(boxed_step(|| edge.submit_managed_creation(&receiving_command)).await.unwrap(), arkret::AuthoritySubmitResponseBody::Accepted { .. }));
-    boxed_step(|| realm_actor_mls_fixture::business_parent(fixture, &receiving.package, &receiving_candidate.actor_id, &candidate.creation_scope)).await;
-    let receiving_device = boxed_step(|| runtime.device_for_actor(&receiving_candidate.actor_id)).await.unwrap();
-    boxed_step(|| runtime.ensure_realm_membership(&receiving_device)).await.unwrap();
-    let receiving_before = snapshot(fixture, &receiving_candidate.actor_id).await;
-    let retained_originals = retained_store.entries_with_prefix("managed-authoring/original/").unwrap();
-    assert_eq!(retained_originals.len(), 3, "two old subjects and one receiving subject precede transfer");
-    eprintln!("manager runtime: retained custody and per-actor Service acceptance");
-    let offer =
-        boxed_step(|| runtime.management_transfer_offer(&plan, &candidate.initial_resolution.did))
-            .await
-            .unwrap();
-    let offer =
-        serde_json::from_slice(&arkret_canonical::canonical_json_bytes(&offer).unwrap()).unwrap();
-    let proposal = boxed_step(|| previous_runtime.management_control_transcript(&offer))
-        .await
-        .unwrap();
-    let proposal =
-        serde_json::from_slice(&arkret_canonical::canonical_json_bytes(&proposal).unwrap())
-            .unwrap();
-    let cold_receiver = ManagedDeviceRuntime::new(make_edge()).unwrap();
-    let signature =
-        boxed_step(|| cold_receiver.sign_management_control_transcript(&plan, &proposal))
-            .await
-            .unwrap();
-    let accepted_control =
-        boxed_step(|| previous_runtime.submit_management_control(&plan, &signature))
-            .await
-            .unwrap();
-    let release =
-        boxed_step(|| previous_runtime.release_management_native(&plan, &accepted_control))
-            .await
-            .unwrap();
-    let control_ref = CommittedEventRef {
-        event_id: accepted_control.event_ref,
-        commit_id: accepted_control.commit_id,
-        stream_ref: accepted_control.stream_ref,
-        stream_position: accepted_control.stream_position,
-    };
-    let creation_ref = actor_current_ref(
-        fixture,
-        actor,
-        json!({"kind":"realm_actor_identity","actor_id":actor}),
-    )
-    .await;
-    boxed_step(|| {
-        cold_receiver.prepare_management_acceptance(&plan, &release, &control_ref, &creation_ref)
+    let prepared = boxed_step(|| {
+        receiving_author.prepare_ghost_in_scope(
+            &candidate.applet_id,
+            &candidate.creation_scope,
+            &receiving_external,
+            None,
+        )
     })
     .await
     .unwrap();
-    drop(cold_receiver);
-    boxed_step(|| previous_runtime.prepare_management_transfer_to(&runtime, &plan))
+    let arkret_bridge_runtime::PreparedGhost::Create(receiving_command) = prepared else {
+        panic!("new receiving companion required");
+    };
+    let receiving_candidate: RealmActorCreatePayload = serde_json::from_value(
+        serde_json::to_value(&receiving_command.create_event.payload).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        boxed_step(|| edge.submit_managed_creation(&receiving_command))
+            .await
+            .unwrap(),
+        arkret::AuthoritySubmitResponseBody::Accepted { .. }
+    ));
+    boxed_step(|| {
+        realm_actor_mls_fixture::business_parent(
+            fixture,
+            &receiving.package,
+            &receiving_candidate.actor_id,
+            &candidate.creation_scope,
+        )
+    })
+    .await;
+    let receiving_device = boxed_step(|| runtime.device_for_actor(&receiving_candidate.actor_id))
         .await
         .unwrap();
+    boxed_step(|| runtime.ensure_realm_membership(&receiving_device))
+        .await
+        .unwrap();
+    let receiving_before = snapshot(fixture, &receiving_candidate.actor_id).await;
+    let retained_originals = retained_store
+        .entries_with_prefix("managed-authoring/original/")
+        .unwrap();
+    assert_eq!(
+        retained_originals.len(),
+        3,
+        "two old subjects and one receiving subject precede transfer"
+    );
+    eprintln!("manager runtime: retained custody and per-actor Service acceptance");
+    let previous_manager = fixture_runtime_manager(previous, previous_edge.clone());
+    let receiving_manager = fixture_runtime_manager(&receiving, edge.clone());
+    boxed_step(|| previous_manager.prepare_management_transfer_to(&receiving_manager, &plan))
+        .await
+        .unwrap();
+    let prepared_cut = snapshot(fixture, actor).await;
+    let reopened_manager = fixture_runtime_manager(&receiving, make_edge());
+    boxed_step(|| previous_manager.prepare_management_transfer_to(&reopened_manager, &plan))
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot(fixture, actor).await,
+        prepared_cut,
+        "reopening the manager facade must recover the exact durable private handover rather than rotate native control again"
+    );
+    drop(reopened_manager);
     let before = snapshot(fixture, actor).await;
     assert_eq!(
         before["realm_actor_manager"]["service_id"],
         json!(previous.package.service_id)
     );
-    assert_eq!(boxed_step(|| runtime.local_actor_for_realm(&fixture.realm)).await.unwrap(), Some(receiving_candidate.actor_id.clone()));
+    assert_eq!(
+        boxed_step(|| runtime.local_actor_for_realm(&fixture.realm))
+            .await
+            .unwrap(),
+        Some(receiving_candidate.actor_id.clone())
+    );
     *previous.principal_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
         Arc::new(
             arkret_bridge_runtime::managed_actor_authoring::ManagedActorAuthoringService::new(
@@ -419,7 +583,7 @@ async fn run_manager_runtime_transfer(
         )
         .router(),
     )));
-    let failed = boxed_step(|| runtime.complete_management_transfer(&plan))
+    let failed = boxed_step(|| receiving_manager.complete_management_transfer(&plan))
         .await
         .unwrap_err();
     assert!(
@@ -441,38 +605,136 @@ async fn run_manager_runtime_transfer(
             + 1
     );
     assert_eq!(accepted["realm_actor_statusowner"], "paused");
-    let (status, body) = fixture.admin_post_network(
-        "/_arkret/self/events", arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-        &json!(SelfAuthoritySubmitRequestBody::Event(frozen_revoke.clone())), "manager-race-old-revoke-effect",
-    ).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "old Service revoke cannot remove the transferred subject: {body}");
-    assert!(fixture.state.test_persistence().authority_commits().committed_event(&frozen_revoke.event.event_id).await.unwrap().is_none());
-    assert_eq!(snapshot(fixture, actor).await, accepted, "stale revoke has no control side effects");
+    let (status, body) = fixture
+        .admin_post_network(
+            "/_arkret/self/events",
+            arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+            &json!(SelfAuthoritySubmitRequestBody::Event(frozen_revoke.clone())),
+            "manager-race-old-revoke-effect",
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "old Service revoke cannot remove the transferred subject: {body}"
+    );
+    assert!(
+        fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .committed_event(&frozen_revoke.event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        snapshot(fixture, actor).await,
+        accepted,
+        "stale revoke has no control side effects"
+    );
     // Cover the retired leaf before remaining members publish new content.
-    boxed_step(|| realm_actor_mls_fixture::human_rotates_out_runtime(fixture, previous_device, &mut human_group)).await;
-    boxed_step(|| runtime.maintain_mls_key_packages(&receiving_device, 2)).await.unwrap();
-    human_group = boxed_step(|| realm_actor_mls_fixture::human_adds_runtime_to_group(fixture, &receiving_device, human_group)).await;
-    let receiving_reader = boxed_step(|| runtime.open_reader(&receiving_device)).await.unwrap();
-    let receiving_welcome = boxed_step(|| runtime.poll_welcome_queue(&receiving_device, &receiving_reader)).await.unwrap();
+    boxed_step(|| {
+        realm_actor_mls_fixture::human_rotates_out_runtime(
+            fixture,
+            previous_device,
+            &mut human_group,
+        )
+    })
+    .await;
+    boxed_step(|| runtime.maintain_mls_key_packages(&receiving_device, 2))
+        .await
+        .unwrap();
+    human_group = boxed_step(|| {
+        realm_actor_mls_fixture::human_adds_runtime_to_group(
+            fixture,
+            &receiving_device,
+            human_group,
+        )
+    })
+    .await;
+    let receiving_reader = boxed_step(|| runtime.open_reader(&receiving_device))
+        .await
+        .unwrap();
+    let receiving_welcome =
+        boxed_step(|| runtime.poll_welcome_queue(&receiving_device, &receiving_reader))
+            .await
+            .unwrap();
     assert_eq!(receiving_welcome.durable_welcomes, 1);
     assert!(receiving_welcome.acknowledged);
-    assert_eq!(runtime.installed_mls_epoch(&receiving_device).await.unwrap(), Some(4));
+    assert_eq!(
+        runtime
+            .installed_mls_epoch(&receiving_device)
+            .await
+            .unwrap(),
+        Some(4)
+    );
 
-    assert_eq!(snapshot(fixture, &other_candidate.actor_id).await, other_before,
-        "one actor's Service change must not alter another actor's manager, control or generation");
-    assert!(boxed_step(|| query_managed_actor(fixture, previous, actor)).await.is_err(),
-        "the previous manager must not disclose a transferred actor");
+    assert_eq!(
+        snapshot(fixture, &other_candidate.actor_id).await,
+        other_before,
+        "one actor's Service change must not alter another actor's manager, control or generation"
+    );
+    assert!(
+        boxed_step(|| query_managed_actor(fixture, previous, actor))
+            .await
+            .is_err(),
+        "the previous manager must not disclose a transferred actor"
+    );
     if candidate.external_ref.is_some() {
-        assert!(boxed_step(|| query_managed_tuple(fixture, previous, candidate)).await.is_err(),
-            "the previous manager must not disclose the exact external tuple");
-        assert_eq!(boxed_step(|| query_managed_tuple(fixture, &receiving, candidate)).await.unwrap().actor_id.as_ref(), Some(actor));
+        assert!(
+            boxed_step(|| query_managed_tuple(fixture, previous, candidate))
+                .await
+                .is_err(),
+            "the previous manager must not disclose the exact external tuple"
+        );
+        assert_eq!(
+            boxed_step(|| query_managed_tuple(fixture, &receiving, candidate))
+                .await
+                .unwrap()
+                .actor_id
+                .as_ref(),
+            Some(actor)
+        );
     }
-    assert_eq!(boxed_step(|| query_managed_actor(fixture, &receiving, actor)).await.unwrap().actor_id.as_ref(), Some(actor));
-    assert_eq!(boxed_step(|| query_managed_actor(fixture, previous, &other_candidate.actor_id)).await.unwrap().actor_id.as_ref(), Some(&other_candidate.actor_id));
-    let other_reader = boxed_step(|| previous_runtime.open_reader(&other_device)).await.unwrap();
-    boxed_step(|| other_reader.client().snapshot_head(&fixture.realm)).await.unwrap();
+    assert_eq!(
+        boxed_step(|| query_managed_actor(fixture, &receiving, actor))
+            .await
+            .unwrap()
+            .actor_id
+            .as_ref(),
+        Some(actor)
+    );
+    assert_eq!(
+        boxed_step(|| query_managed_actor(fixture, previous, &other_candidate.actor_id))
+            .await
+            .unwrap()
+            .actor_id
+            .as_ref(),
+        Some(&other_candidate.actor_id)
+    );
+    let other_reader = boxed_step(|| previous_runtime.open_reader(&other_device))
+        .await
+        .unwrap();
+    boxed_step(|| other_reader.client().snapshot_head(&fixture.realm))
+        .await
+        .unwrap();
     let location = json!({"protocol":"fixture","network_id":"bridge-native","location_id":"other-service-continues"});
-    boxed_step(|| previous_runtime.submit_portal_strand(&other_candidate.actor_id, &candidate.creation_scope, "Still managed by the original Service", &location)).await.unwrap();
+    boxed_step(|| {
+        author.maintain_backup_series(&other_candidate.actor_id, &candidate.creation_scope)
+    })
+    .await
+    .unwrap();
+    boxed_step(|| {
+        previous_runtime.submit_portal_strand(
+            &other_candidate.actor_id,
+            &candidate.creation_scope,
+            "Still managed by the original Service",
+            &location,
+        )
+    })
+    .await
+    .unwrap();
 
     let old_reader = boxed_step(|| previous_runtime.open_reader(previous_device))
         .await
@@ -488,71 +750,191 @@ async fn run_manager_runtime_transfer(
             .is_err()
     );
     drop(runtime);
+    drop(receiving_author);
+    drop(receiving_manager);
+    boxed_step(|| fixture_cold_reopen_manager_vault(&receiving)).await;
     drop(edge);
     let edge = make_edge();
     let runtime = ManagedDeviceRuntime::new(edge.clone()).unwrap();
+    let receiving_manager = fixture_runtime_manager(&receiving, edge.clone());
+    *receiving.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
+        arkret_bridge_runtime::web::managed_applet_host_router_with_manager(
+            edge.clone(),
+            receiving_manager.clone(),
+        )
+        .unwrap(),
+    )));
     // Retained-custody setup spends the real API bucket on accepted originals
     // and refusal probes. Pace the recovery phase by its configured window;
     // keep the production limiter and every authority check enabled.
     tokio::time::sleep(fixture.state.config().rate_limiter.window).await;
     eprintln!("manager runtime: cold exact receipt recovery and fresh custody operations");
-    let receipt = boxed_step(|| runtime.complete_management_transfer(&plan))
+    let receipt = boxed_step(|| receiving_manager.complete_management_transfer(&plan))
         .await
         .unwrap();
+    let completed = snapshot(fixture, actor).await;
     assert_eq!(
-        boxed_step(|| runtime.complete_management_transfer(&plan))
+        boxed_step(|| receiving_manager.complete_management_transfer(&plan))
             .await
             .unwrap(),
         receipt
     );
     assert_eq!(
         snapshot(fixture, actor).await,
-        accepted,
+        completed,
         "exact retry changes no accepted state"
     );
-    assert_eq!(boxed_step(|| query_managed_actor(fixture, &receiving, actor)).await.unwrap().actor_id.as_ref(), Some(actor));
-    assert_eq!(boxed_step(|| query_managed_actor(fixture, &receiving, &receiving_candidate.actor_id)).await.unwrap().actor_id.as_ref(), Some(&receiving_candidate.actor_id));
-    assert_eq!(snapshot(fixture, &receiving_candidate.actor_id).await, receiving_before);
-    let receiving_reader = boxed_step(|| runtime.open_reader(&receiving_device)).await.unwrap();
-    boxed_step(|| receiving_reader.client().snapshot_head(&fixture.realm)).await.unwrap();
+    for (family, value) in accepted.as_object().unwrap() {
+        if family != "realm_actor_key_backup_active_series" {
+            assert_eq!(
+                &completed[family], value,
+                "archive completion cannot rewrite accepted manager/control/Device facts"
+            );
+        }
+    }
+    assert_eq!(
+        boxed_step(|| query_managed_actor(fixture, &receiving, actor))
+            .await
+            .unwrap()
+            .actor_id
+            .as_ref(),
+        Some(actor)
+    );
+    assert_eq!(
+        boxed_step(|| query_managed_actor(fixture, &receiving, &receiving_candidate.actor_id))
+            .await
+            .unwrap()
+            .actor_id
+            .as_ref(),
+        Some(&receiving_candidate.actor_id)
+    );
+    assert_eq!(
+        snapshot(fixture, &receiving_candidate.actor_id).await,
+        receiving_before
+    );
+    let receiving_reader = boxed_step(|| runtime.open_reader(&receiving_device))
+        .await
+        .unwrap();
+    boxed_step(|| receiving_reader.client().snapshot_head(&fixture.realm))
+        .await
+        .unwrap();
     let receiving_location = json!({"protocol":"fixture","network_id":"bridge-native","location_id":"receiving-companion"});
-    boxed_step(|| runtime.submit_portal_strand(&receiving_candidate.actor_id, &candidate.creation_scope, "Already managed by the receiving Service", &receiving_location)).await.unwrap();
+    boxed_step(|| {
+        receiving_manager
+            .maintain_backup_series(&receiving_candidate.actor_id, &candidate.creation_scope)
+    })
+    .await
+    .unwrap();
+    boxed_step(|| {
+        runtime.submit_portal_strand(
+            &receiving_candidate.actor_id,
+            &candidate.creation_scope,
+            "Already managed by the receiving Service",
+            &receiving_location,
+        )
+    })
+    .await
+    .unwrap();
     let store = FileAuthoringStore::new(path.clone()).unwrap();
-    assert_eq!(store.entries_with_prefix("managed-authoring/original/").unwrap(), retained_originals,
-        "historical creation custody is preserved byte-for-byte");
-    assert_eq!(retained_actor_devices(&store, actor), retained_devices,
-        "old Device and MLS private state remain retained despite generation fencing");
+    assert_eq!(
+        store
+            .entries_with_prefix("managed-authoring/original/")
+            .unwrap(),
+        retained_originals,
+        "historical creation custody is preserved byte-for-byte"
+    );
+    assert_eq!(
+        retained_actor_devices(&store, actor),
+        retained_devices,
+        "old Device and MLS private state remain retained despite generation fencing"
+    );
     boxed_step(|| runtime.rotate_control(actor, "receiving-control-rotation"))
         .await
         .unwrap();
     let old_did = candidate.initial_resolution.did.clone();
-    let locator = applet_service_did(&receiving.package).as_str().splitn(4, ':').nth(3).unwrap().to_owned();
-    let target_did: arkret::Did = format!("did:webvh:{}:{}",
+    let locator = applet_service_did(&receiving.package)
+        .as_str()
+        .splitn(4, ':')
+        .nth(3)
+        .unwrap()
+        .to_owned();
+    let target_did: arkret::Did = format!(
+        "did:webvh:{}:{}",
         old_did.as_str().split(':').nth(2).unwrap(),
-        locator.replace(":webvh:service", ":webvh:relocated-actor")).parse().unwrap();
+        locator.replace(":webvh:service", ":webvh:relocated-actor")
+    )
+    .parse()
+    .unwrap();
     let mut moved_config = config.clone();
-    moved_config.arkret.managed_actor_authoring.principal_endpoint = receiving.package.base_url.clone();
-    let moved_edge = Arc::new(ArkretEdge::new_outbound(Arc::new(moved_config), client.clone(),
-        Ed25519PayloadSigner::new(SigningKey::from_bytes(&[42; 32]),
-            applet_service_did(&receiving.package), receiving.package.webhook_signature_policy.key_ref.clone()),
-        AuthoringJournal::new(Arc::new(FileAuthoringStore::new(path.clone()).unwrap()))).unwrap());
+    moved_config
+        .arkret
+        .managed_actor_authoring
+        .principal_endpoint = receiving.package.base_url.clone();
+    let moved_edge = Arc::new(
+        ArkretEdge::new_outbound(
+            Arc::new(moved_config),
+            client.clone(),
+            Ed25519PayloadSigner::new(
+                SigningKey::from_bytes(&[42; 32]),
+                applet_service_did(&receiving.package),
+                receiving.package.webhook_signature_policy.key_ref.clone(),
+            ),
+            AuthoringJournal::new(Arc::new(FileAuthoringStore::new(path.clone()).unwrap())),
+        )
+        .unwrap(),
+    );
     *receiving.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
-        arkret_bridge_runtime::web::managed_applet_host_router(moved_edge.clone()).unwrap())));
+        arkret_bridge_runtime::web::managed_applet_host_router_with_manager(
+            moved_edge.clone(),
+            fixture_runtime_manager(&receiving, moved_edge.clone()),
+        )
+        .unwrap(),
+    )));
     let runtime = ManagedDeviceRuntime::new(moved_edge.clone()).unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    let relocation = boxed_step(|| runtime.relocate_control(actor, "retained-data-host-move", &target_did)).await.unwrap();
+    let relocation =
+        boxed_step(|| runtime.relocate_control(actor, "retained-data-host-move", &target_did))
+            .await
+            .unwrap();
     drop(runtime);
     let runtime = ManagedDeviceRuntime::new(moved_edge.clone()).unwrap();
-    assert_eq!(boxed_step(|| runtime.relocate_control(actor, "retained-data-host-move", &target_did)).await.unwrap(), relocation);
-    let old_url: url::Url = arkret_identity::DidWebvhResolver::document_url(&old_did).unwrap().parse().unwrap();
+    assert_eq!(
+        boxed_step(|| runtime.relocate_control(actor, "retained-data-host-move", &target_did))
+            .await
+            .unwrap(),
+        relocation
+    );
+    let old_url: url::Url = arkret_identity::DidWebvhResolver::document_url(&old_did)
+        .unwrap()
+        .parse()
+        .unwrap();
     let prefix = old_url.path().strip_suffix("did.json").unwrap().to_owned();
-    previous.unavailable_principals.lock().unwrap().insert(prefix);
+    previous
+        .unavailable_principals
+        .lock()
+        .unwrap()
+        .insert(prefix);
     let network = native_http_client(std::time::Duration::from_secs(30));
-    assert_eq!(network.get(old_url).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        network.get(old_url).send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
     let new_url = arkret_identity::DidWebvhResolver::document_url(&target_did).unwrap();
-    let new_document: Value = network.get(new_url).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    let new_document: Value = network
+        .get(new_url)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(new_document["id"], json!(target_did));
-    assert_eq!(snapshot(fixture, actor).await["realm_actor_control"]["resolution"]["did"], json!(target_did));
+    assert_eq!(
+        snapshot(fixture, actor).await["realm_actor_control"]["resolution"]["did"],
+        json!(target_did)
+    );
     let edge = moved_edge;
     boxed_step(|| {
         runtime.set_owner_status(
@@ -583,8 +965,9 @@ async fn run_manager_runtime_transfer(
             instance_id: external.instance_id.clone(),
             external_id: external.external_id.clone(),
         };
+        let manager = fixture_runtime_manager(&receiving, edge.clone());
         let reused = boxed_step(|| {
-            author.prepare_ghost_in_scope(
+            manager.prepare_ghost_in_scope(
                 &candidate.applet_id,
                 &candidate.creation_scope,
                 &external,
@@ -620,8 +1003,11 @@ async fn run_manager_runtime_transfer(
     let device = boxed_step(|| runtime.device_for_actor(actor))
         .await
         .unwrap();
-    assert_eq!(runtime.installed_mls_epoch(previous_device).await.unwrap(), Some(1),
-        "retired Device MLS private history remains readable in retained local custody");
+    assert_eq!(
+        runtime.installed_mls_epoch(previous_device).await.unwrap(),
+        Some(1),
+        "retired Device MLS private history remains readable in retained local custody"
+    );
     assert_ne!(device.device_id, previous_device.device_id);
     assert_eq!(device.actor_id, previous_device.actor_id);
     assert!(
@@ -635,18 +1021,55 @@ async fn run_manager_runtime_transfer(
         .await
         .unwrap();
     boxed_step(|| runtime.open_reader(&device)).await.unwrap();
-    eprintln!("manager runtime: ordinary member admits the replacement Device, then native business resumes");
+    let old_event = arkret_wire::EventId::from_token_bytes(archived_portal.token_bytes()).unwrap();
+    assert_eq!(
+        boxed_step(|| receiving_manager.restore_history_for_event(&device, &old_event))
+            .await
+            .unwrap(),
+        1,
+        "the imported historical archive private key must actually open the original old recipient packet for a currently authorized new Device"
+    );
+    assert!(
+        runtime
+            .installed_mls_epoch(&device)
+            .await
+            .unwrap()
+            .is_none(),
+        "history-only root recovery cannot install an active MLS checkpoint or leaf"
+    );
+    eprintln!(
+        "manager runtime: ordinary member admits the replacement Device, then native business resumes"
+    );
 
-    boxed_step(|| runtime.maintain_mls_key_packages(&device, 2)).await.unwrap();
-    let _human_group = boxed_step(|| realm_actor_mls_fixture::human_adds_runtime_to_group(fixture, &device, human_group)).await;
+    boxed_step(|| runtime.maintain_mls_key_packages(&device, 2))
+        .await
+        .unwrap();
+    let _human_group = boxed_step(|| {
+        realm_actor_mls_fixture::human_adds_runtime_to_group(fixture, &device, human_group)
+    })
+    .await;
     let reader = boxed_step(|| runtime.open_reader(&device)).await.unwrap();
-    let welcome = boxed_step(|| runtime.poll_welcome_queue(&device, &reader)).await.unwrap();
+    let welcome = boxed_step(|| runtime.poll_welcome_queue(&device, &reader))
+        .await
+        .unwrap();
     assert_eq!(welcome.durable_welcomes, 1);
     assert!(welcome.acknowledged);
     assert_eq!(runtime.installed_mls_epoch(&device).await.unwrap(), Some(5));
-    assert_eq!(runtime.installed_mls_epoch(previous_device).await.unwrap(), Some(1));
+    assert_eq!(
+        runtime.installed_mls_epoch(previous_device).await.unwrap(),
+        Some(1)
+    );
     let location = json!({"protocol":"fixture","network_id":"bridge-native","location_id":"receiving-service-resumes"});
-    boxed_step(|| runtime.submit_portal_strand(actor, &candidate.creation_scope, "Resumed on the receiving Service", &location)).await.unwrap();
+    boxed_step(|| {
+        runtime.submit_portal_strand(
+            actor,
+            &candidate.creation_scope,
+            "Resumed on the receiving Service",
+            &location,
+        )
+    })
+    .await
+    .unwrap();
     assert_eq!(
         snapshot(fixture, actor).await["realm_actor_recovery"]["enabled"],
         true,
@@ -735,25 +1158,54 @@ async fn run_manager_runtime_transfer(
             .await
             .is_err()
     );
-    let (status, body) = fixture.admin_post_network(
-        &format!("/_arkret/self/applets/{}/revoke", candidate.applet_id),
-        arkret_wire::ServiceOperationId::SELF_APPLET_COMMAND_REVOKE_V1,
-        &json!(frozen_revoke_request), "manager-race-frozen-revoke",
-    ).await;
-    assert_eq!(status, StatusCode::OK, "resume the exact saved uninstall request: {body}");
-    let outcome: arkret_models_integration::AppletRevokeResponseBody = serde_json::from_value(body).unwrap();
-    assert_eq!(outcome.status, arkret_models_integration::AppletRevokeSagaStatus::PartiallyCompleted);
+    let (status, body) = fixture
+        .admin_post_network(
+            &format!("/_arkret/self/applets/{}/revoke", candidate.applet_id),
+            arkret_wire::ServiceOperationId::SELF_APPLET_COMMAND_REVOKE_V1,
+            &json!(frozen_revoke_request),
+            "manager-race-frozen-revoke",
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "resume the exact saved uninstall request: {body}"
+    );
+    let outcome: arkret_models_integration::AppletRevokeResponseBody =
+        serde_json::from_value(body).unwrap();
+    assert_eq!(
+        outcome.status,
+        arkret_models_integration::AppletRevokeSagaStatus::PartiallyCompleted
+    );
     assert!(outcome.steps.iter().any(|step| matches!(step,
         arkret_models_integration::AppletRevokeStep::SubmittedEvent(step)
         if step.submitted_event_id == frozen_revoke.event.event_id
             && step.status == arkret_models_integration::AppletRevokeSubmittedEventStatus::Rejected)));
-    assert!(fixture.state.test_persistence().authority_commits().committed_event(&frozen_revoke.event.event_id).await.unwrap().is_none());
+    assert!(
+        fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .committed_event(&frozen_revoke.event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let independent_leave = fixture.admin_event(EventKind::MemberState, candidate.creation_scope.clone(),
         json!({"member_id":actor,"membership":"leave","reason":"independent admin decision after transfer"}));
-    let (status, body) = fixture.admin_post_network(
-        "/_arkret/self/events", arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-        &json!(SelfAuthoritySubmitRequestBody::Event(arkret_wire::EventAdmissionSubmission::new(independent_leave))),
-        "manager-race-independent-admin-leave",
-    ).await;
-    assert_eq!(status, StatusCode::OK, "independent admin member authority remains valid: {body}");
+    let (status, body) = fixture
+        .admin_post_network(
+            "/_arkret/self/events",
+            arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+            &json!(SelfAuthoritySubmitRequestBody::Event(
+                arkret_wire::EventAdmissionSubmission::new(independent_leave)
+            )),
+            "manager-race-independent-admin-leave",
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "independent admin member authority remains valid: {body}"
+    );
 }

@@ -1965,15 +1965,17 @@ LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
         CASE WHEN member.key = 'encryption' AND jsonb_typeof(member.value) = 'object' THEN
             COALESCE((SELECT jsonb_object_agg(field.key, field.value)
                 FROM jsonb_each(member.value) AS field
-                WHERE field.key IN ('recipient_method', 'recipient_key_ref')), '{}'::jsonb)
+                WHERE field.key IN ('recipient_method', 'recipient_key_ref')
+                   OR (payload#>>'{actor_id,kind}' = 'realm' AND field.key = 'hpke_suite')), '{}'::jsonb)
         ELSE member.value END), '{}'::jsonb)
     FROM jsonb_each(payload) AS member
-    WHERE member.key IN (
+    WHERE (member.key IN (
         'backup_id', 'actor_id', 'device_id', 'backup_kind', 'backup_version',
         'series_id', 'series_sequence', 'supersedes_id', 'supersedes_digest',
         'expires_at', 'created_at',
         'updated_at', 'ciphertext_digest', 'encryption', 'retention'
-    )
+    ) AND NOT (payload#>>'{actor_id,kind}' = 'realm' AND member.key IN ('expires_at', 'retention')))
+       OR (payload#>>'{actor_id,kind}' = 'realm' AND member.key = 'auth_binding')
 $$;
 
 -- First admission survives ordinary ciphertext deletion. Only hashes, public
@@ -5470,6 +5472,103 @@ CREATE TABLE public.realm_actor_current_states (
     FOREIGN KEY (realm_id, actor_id) REFERENCES public.realm_actor_creations(realm_id,actor_id),
     CHECK (selector->'actor_id'=actor_id),
     CHECK (source_stream_ref->>'kind'='realm_control' AND source_stream_ref->>'realm_id'=realm_id)
+);
+
+-- Native content-root custody is an actor namespace, independent of an Account
+-- PCR and of business Event publication. Every mutation uses the same actor
+-- advisory lock as immutable backup identity reservation.
+CREATE TABLE public.realm_actor_backup_namespaces (
+    realm_id text NOT NULL,
+    actor_id jsonb NOT NULL,
+    archive_revision bigint NOT NULL DEFAULT 0 CHECK (archive_revision >= 0),
+    PRIMARY KEY (realm_id, actor_id),
+    FOREIGN KEY (realm_id, actor_id) REFERENCES public.realm_actor_creations(realm_id, actor_id),
+    CHECK (actor_id->>'kind' = 'realm' AND actor_id#>>'{realm_actor_id,realm_id}' = realm_id)
+);
+
+-- The immutable source includes the original Device authorization, historical
+-- issuer governance and real detached admission. The fixed minimal reply is
+-- recovered before applying new recipient/epoch/business admission on retries.
+CREATE TABLE public.realm_actor_backup_admissions (
+    backup_id uuid PRIMARY KEY REFERENCES public.key_backup_identities(id),
+    realm_id text NOT NULL,
+    actor_id jsonb NOT NULL,
+    effective_scope jsonb NOT NULL,
+    envelope_digest text NOT NULL CHECK (envelope_digest ~ '^sha256:[0-9a-f]{64}$'),
+    device_id text NOT NULL,
+    device_authorize_event_id text NOT NULL,
+    device_generation bigint NOT NULL CHECK (device_generation >= 1),
+    idempotency_key text NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 128),
+    source jsonb NOT NULL CHECK (jsonb_typeof(source) = 'object'),
+    fixed_reply jsonb NOT NULL CHECK (jsonb_typeof(fixed_reply) = 'object'),
+    accepted_at timestamptz NOT NULL,
+    UNIQUE(actor_id,idempotency_key),
+    FOREIGN KEY (realm_id, actor_id) REFERENCES public.realm_actor_backup_namespaces(realm_id, actor_id),
+    CHECK (effective_scope->>'kind' IN ('realm', 'circle')),
+    CHECK (effective_scope->>'realm_id' = realm_id),
+    CHECK (source#>>'{admission,envelope_digest}' = envelope_digest),
+    CHECK (source#>'{admission,realm_actor_id}' = actor_id->'realm_actor_id'),
+    CHECK (source#>'{admission,effective_scope}' = effective_scope),
+    CHECK (source->'admission' = fixed_reply->'admission')
+);
+CREATE INDEX realm_actor_backup_admissions_actor_scope
+    ON public.realm_actor_backup_admissions(realm_id, actor_id, effective_scope);
+
+-- Preserve every accepted scoped selection and recipient declaration, not just
+-- the latest projection. Immutable source bytes survive manager and Device
+-- replacement and are exported even if no business Event references a packet.
+CREATE TABLE public.realm_actor_backup_series (
+    realm_id text NOT NULL,
+    actor_id jsonb NOT NULL,
+    effective_scope jsonb NOT NULL,
+    active_series_id text NOT NULL,
+    series_pointer_version bigint NOT NULL CHECK (series_pointer_version >= 1),
+    record jsonb NOT NULL CHECK (jsonb_typeof(record) = 'object'),
+    source jsonb NOT NULL CHECK (jsonb_typeof(source) = 'object'),
+    PRIMARY KEY (realm_id, actor_id, effective_scope, series_pointer_version),
+    FOREIGN KEY (realm_id, actor_id) REFERENCES public.realm_actor_backup_namespaces(realm_id, actor_id),
+    CHECK (effective_scope->>'kind' IN ('realm', 'circle')),
+    CHECK (effective_scope->>'realm_id' = realm_id),
+    CHECK (record->'actor_id' = actor_id),
+    CHECK (record->'effective_scope' = effective_scope),
+    CHECK (record->>'active_series_id' = active_series_id),
+    CHECK ((record->>'series_pointer_version')::bigint = series_pointer_version)
+);
+CREATE TABLE public.realm_actor_backup_recipients (
+    realm_id text NOT NULL,
+    actor_id jsonb NOT NULL,
+    recipient_ref jsonb NOT NULL CHECK (jsonb_typeof(recipient_ref) = 'object'),
+    content_backup_recipient jsonb NOT NULL CHECK (jsonb_typeof(content_backup_recipient) = 'object'),
+    source jsonb NOT NULL CHECK (jsonb_typeof(source) = 'object'),
+    recovery_begin jsonb,
+    PRIMARY KEY (realm_id, actor_id, recipient_ref),
+    FOREIGN KEY (realm_id, actor_id) REFERENCES public.realm_actor_backup_namespaces(realm_id, actor_id),
+    CHECK (recovery_begin IS NULL OR jsonb_typeof(recovery_begin) = 'object')
+);
+
+-- Role-bound native challenges never borrow an Account recovery session or
+-- fabricated Device for a manager. Consumed replies and the original digest
+-- remain durable, so response loss cannot authorize a second delivery.
+CREATE TABLE public.realm_actor_backup_unlocks (
+    realm_id text NOT NULL,
+    actor_id jsonb NOT NULL,
+    challenge_id text PRIMARY KEY,
+    request_identity text NOT NULL,
+    purpose text NOT NULL CHECK (purpose IN ('series_predecessor', 'archive_recovery')),
+    effective_scope jsonb NOT NULL,
+    requester jsonb NOT NULL CHECK (jsonb_typeof(requester) = 'object'),
+    challenge jsonb NOT NULL CHECK (jsonb_typeof(challenge) = 'object'),
+    backup_id uuid NOT NULL REFERENCES public.realm_actor_backup_admissions(backup_id),
+    envelope_digest text NOT NULL CHECK (envelope_digest ~ '^sha256:[0-9a-f]{64}$'),
+    expires_at timestamptz NOT NULL,
+    request_digest text,
+    fixed_reply jsonb,
+    consumed_at timestamptz,
+    FOREIGN KEY (realm_id, actor_id) REFERENCES public.realm_actor_backup_namespaces(realm_id, actor_id),
+    UNIQUE (realm_id, actor_id, request_identity),
+    CHECK (effective_scope->>'realm_id' = realm_id),
+    CHECK ((consumed_at IS NULL) = (fixed_reply IS NULL)),
+    CHECK (fixed_reply IS NULL OR request_digest IS NOT NULL)
 );
 
 -- Private control facts have no public signer-query outcome.

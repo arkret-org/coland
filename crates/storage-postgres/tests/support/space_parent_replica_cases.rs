@@ -55,6 +55,7 @@ async fn accepted_space_parent_replica_cases() {
         .unwrap();
     Box::pin(anchor_at_join(
         &member,
+        &unit,
         &join,
         vec![joined_row(&join, &alice)],
     ))
@@ -265,15 +266,22 @@ async fn snapshot_only_parent_cases() {
         chrono::Utc::now(),
     )
     .unwrap();
-    Box::pin(source.install_replica_anchor(&ReplicaAnchorInstall {
-        realm_id: foreign_realm.clone(),
-        join_commit_id: join.authority_commit.commit.commit_id.clone(),
-        governance_generation: snapshot.governance_generation,
-        snapshot_head: snapshot.visible_stream_heads[0].clone(),
-        visible_stream_heads: snapshot.visible_stream_heads.clone(),
-        current_state_entries: snapshot.current_state_entries.clone(),
-        verified_snapshot: snapshot,
-    }))
+    Box::pin(
+        source.install_replica_anchor(&ReplicaAnchorInstall {
+            realm_id: foreign_realm.clone(),
+            genesis_original: coland_test_support::member_bootstrap::genesis_original(
+                &governor,
+                &foreign_realm,
+            )
+            .await,
+            join_commit_id: join.authority_commit.commit.commit_id.clone(),
+            governance_generation: snapshot.governance_generation,
+            snapshot_head: snapshot.visible_stream_heads[0].clone(),
+            visible_stream_heads: snapshot.visible_stream_heads.clone(),
+            current_state_entries: snapshot.current_state_entries.clone(),
+            verified_snapshot: snapshot,
+        }),
+    )
     .await
     .unwrap();
     let read = Box::pin(coland_storage_postgres::account_snapshot_material(

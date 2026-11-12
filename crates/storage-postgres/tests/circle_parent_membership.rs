@@ -1006,6 +1006,7 @@ product_agent: None,
                     let before_stale_snapshot = handoff_replay_footprint(&pool).await;
                     let stale_snapshot = coland_storage::ReplicaAnchorInstall {
                         realm_id: realm.clone(),
+                        genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
                         join_commit_id: outgoing.join_commit.commit_id.clone(),
                         governance_generation: snapshot.governance_generation,
                         snapshot_head: heads.iter().find(|head| &head.stream_ref == realm_stream).unwrap().clone(),

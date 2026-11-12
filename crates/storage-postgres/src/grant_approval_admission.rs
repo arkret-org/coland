@@ -212,7 +212,7 @@ async fn require_with_source(
             None => None,
         };
         let roster = constraint
-            .approval_actor_ids
+            .approval_principal_ids
             .iter()
             .cloned()
             .collect::<std::collections::BTreeSet<_>>();

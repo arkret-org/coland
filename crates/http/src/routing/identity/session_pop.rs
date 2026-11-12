@@ -128,6 +128,9 @@ async fn enforce_session_pop(state: &AppState, req: &mut Request) -> Result<(), 
             arkret_wire::ServiceOperationId::SelfManagementReviewCommandRequestV1,
             arkret_wire::ServiceOperationId::SelfManagementReviewReadStatusV1,
             arkret_wire::ServiceOperationId::SelfManagementReviewCommandDecideV1,
+            arkret_wire::ServiceOperationId::SelfKeysBackupsReadListV1,
+            arkret_wire::ServiceOperationId::SelfKeysBackupsCommandIssueUnlockChallengeV1,
+            arkret_wire::ServiceOperationId::SelfKeysBackupsCommandUnlockV1,
         ]
         .into_iter()
         .any(|operation| request_matches_operation(req, operation))
@@ -323,7 +326,7 @@ fn is_public_projection_request(req: &Request) -> bool {
         .any(|operation| request_matches_operation(req, operation))
 }
 
-pub(super) fn request_matches_operation(
+pub(in crate::routing) fn request_matches_operation(
     req: &Request,
     operation: arkret_wire::ServiceOperationId,
 ) -> bool {

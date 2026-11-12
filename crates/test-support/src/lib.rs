@@ -6,6 +6,7 @@ mod agent_origin_http;
 pub mod device_authorization_history;
 pub mod fault_injection;
 pub mod governance_authority;
+pub mod member_bootstrap;
 pub mod mls_content;
 pub mod native_tls;
 pub mod pcr_genesis;

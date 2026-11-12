@@ -73,9 +73,11 @@ async fn admission_native_upload(
         "actual native scoped publication: {value}"
     );
     assert_eq!(
-        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(value.clone())
-            .unwrap()
-            .accepted_count,
+        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(
+            value.clone()
+        )
+        .unwrap()
+        .accepted_count,
         1
     );
     let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
@@ -110,6 +112,7 @@ pub(super) async fn keypackage_admission(
     authority: &coland_storage::AppletManagedDeviceAuthority,
     child: &GrantId,
     group: &mut arkret_mls::ArkretMlsGroup,
+    manager_archive: &super::realm_native_fixture::FixtureManagerArchive,
 ) {
     use diesel_async::SimpleAsyncConnection as _;
     let original = fixture
@@ -440,7 +443,15 @@ pub(super) async fn keypackage_admission(
     })
     .await;
     boxed_step(|| {
-        admission_claimed_target_fence(fixture, package, candidate, authority, child, group)
+        admission_claimed_target_fence(
+            fixture,
+            package,
+            candidate,
+            authority,
+            child,
+            group,
+            manager_archive,
+        )
     })
     .await;
     boxed_step(|| {
@@ -451,8 +462,14 @@ pub(super) async fn keypackage_admission(
         admission_read_material_and_snapshot_guards(fixture, package, candidate, authority, group)
     })
     .await;
-    boxed_step(|| super::realm_native_fixture::policy_blocks_fresh_native_join(fixture, package))
-        .await;
+    boxed_step(|| {
+        super::realm_native_fixture::policy_blocks_fresh_native_join(
+            fixture,
+            package,
+            manager_archive,
+        )
+    })
+    .await;
     boxed_step(|| {
         admission_current_mls_policy(
             fixture,
@@ -696,12 +713,15 @@ async fn admission_native_last_resort(
             &binding,
         )
         .unwrap();
-    let payload = super::realm_actor_mls_fixture::commit_payload(fixture,&group,
+    let payload = super::realm_actor_mls_fixture::commit_payload(
+        fixture,
+        &group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &added.commit,
         binding,
-    ).await
+    )
+    .await
     .unwrap();
     let signer = Ed25519PayloadSigner::new(
         SigningKey::from_bytes(&[79; 32]),
@@ -752,7 +772,7 @@ async fn admission_native_last_resort(
     )
     .unwrap();
     let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
-    recovery_source: None,
+        recovery_source: None,
 
         commit_event: event.clone(),
         welcomes: vec![welcome.clone()],
@@ -1094,12 +1114,15 @@ async fn admission_current_mls_policy(
     let update = prepared
         .self_update_commit_with_governance_binding(&binding)
         .unwrap();
-    let payload = super::realm_actor_mls_fixture::commit_payload(fixture,&prepared,
+    let payload = super::realm_actor_mls_fixture::commit_payload(
+        fixture,
+        &prepared,
         state.current_mls_commit_event_ref.clone(),
         state.current_key_access_revision,
         &update,
         binding,
-    ).await
+    )
+    .await
     .unwrap();
     let signer = Ed25519PayloadSigner::new(
         SigningKey::from_bytes(&[79; 32]),
@@ -1116,7 +1139,7 @@ async fn admission_current_mls_policy(
         &signer,
     );
     let request = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
-    recovery_source: None,
+        recovery_source: None,
 
         commit_event: event.clone(),
         welcomes: vec![],
@@ -1197,12 +1220,15 @@ async fn admission_accepted_self_update(
     let update = group
         .self_update_commit_with_governance_binding(&binding)
         .unwrap();
-    let payload = super::realm_actor_mls_fixture::commit_payload(fixture,&group,
+    let payload = super::realm_actor_mls_fixture::commit_payload(
+        fixture,
+        &group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &update,
         binding,
-    ).await
+    )
+    .await
     .unwrap();
     let signer = Ed25519PayloadSigner::new(
         SigningKey::from_bytes(&[79; 32]),
@@ -1219,7 +1245,7 @@ async fn admission_accepted_self_update(
         &signer,
     );
     let request = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
-    recovery_source: None,
+        recovery_source: None,
 
         commit_event: event.clone(),
         welcomes: vec![],
@@ -1331,10 +1357,17 @@ async fn admission_claimed_target_fence(
     source: &coland_storage::AppletManagedDeviceAuthority,
     child: &GrantId,
     group: &arkret_mls::ArkretMlsGroup,
+    manager_archive: &super::realm_native_fixture::FixtureManagerArchive,
 ) {
     let seed = [95; 32];
     let (target, recipient) = boxed_step(|| {
-        super::realm_native_fixture::admission_native_endpoint(fixture, package, 95, false)
+        super::realm_native_fixture::admission_native_endpoint(
+            fixture,
+            package,
+            95,
+            false,
+            manager_archive,
+        )
     })
     .await;
     assert_ne!(target.actor_id, source.actor_id);
@@ -1404,12 +1437,15 @@ async fn admission_claimed_target_fence(
             &binding,
         )
         .unwrap();
-    let payload = super::realm_actor_mls_fixture::commit_payload(fixture,&prepared,
+    let payload = super::realm_actor_mls_fixture::commit_payload(
+        fixture,
+        &prepared,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &added.commit,
         binding,
-    ).await
+    )
+    .await
     .unwrap();
     let source_method = DidUrl::new(format!("{}#{}", source.native_did, source.device_id)).unwrap();
     let event = signed_event(
@@ -1458,7 +1494,7 @@ async fn admission_claimed_target_fence(
     )
     .unwrap();
     let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
-    recovery_source: None,
+        recovery_source: None,
 
         commit_event: event.clone(),
         welcomes: vec![welcome],

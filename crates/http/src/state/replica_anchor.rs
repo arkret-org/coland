@@ -27,7 +27,7 @@ use arkret_wire::{
     RequestId, StreamScanDirection, StreamScanRequestBody,
 };
 use coland_services::committed_receipt::{
-    CommitContinuity, verify_committed_event_receipt_with_source,
+    CommitContinuity, ReceivedProducer, verify_committed_event_receipt_with_source,
 };
 use coland_storage::{
     CommittedChainNode, CommittedReplica, CommittedReplicaRole, ReplicaAnchorInstall,
@@ -36,6 +36,62 @@ use coland_storage::{
 
 use super::AppState;
 use crate::routing::realm_join::LocatedRealmAuthority;
+
+async fn verify_native_genesis_producer(
+    state: &AppState,
+    original: &arkret_wire::CommittedEventFullView,
+) -> Result<(), String> {
+    use arkret_models_identity::{
+        HistoricalSignerKeyQuerySender, SignerKeyQuerySelector, SignerKeyResolution,
+    };
+    let event = &original.event;
+    let unavailable = "bootstrap native Genesis producer authorization is unavailable";
+    if event.actual_signer().as_account_id().is_none() {
+        return Err(unavailable.to_owned());
+    }
+    let proof = event.producer_proof.as_ref().ok_or(unavailable)?;
+    let selector = SignerKeyQuerySelector::HistoricalEvent {
+        sender: HistoricalSignerKeyQuerySender::Agent {
+            actor: event.actual_signer().clone(),
+            verification_method: proof.verification_method.clone(),
+            committed_event_ref: arkret_wire::CommittedEventRef {
+                event_id: event.event_id.clone(),
+                commit_id: original.commit.commit_id.clone(),
+                stream_ref: original.commit.stream_ref.clone(),
+                stream_position: original.commit.stream_position,
+            },
+        },
+    };
+    // Only an immutable native source retained at this exact accepted target
+    // may supply authorization. Current keys and projections are not sources.
+    let resolution = state
+        .authority_commits()
+        .historical_producer_signer_key(&event.realm_id, &selector)
+        .await
+        .map_err(temporary)?
+        .ok_or(unavailable)?;
+    if resolution.selector() != &selector {
+        return Err(unavailable.to_owned());
+    }
+    resolution.validate(&event.realm_id).map_err(temporary)?;
+    let SignerKeyResolution::HistoricalResolved { key, .. } = resolution else {
+        return Err(unavailable.to_owned());
+    };
+    let material = arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+        bytes: arkret_canonical::base64url_decode(key.public_key_base64url.as_str())
+            .map_err(temporary)?,
+    };
+    arkret_signatures::verify_ed25519_detached_jws_proof_with_digest_suite(
+        proof,
+        &arkret_signatures::EventProofBuilder::new()
+            .envelope_bytes(event)
+            .map_err(temporary)?,
+        &event.actor_id,
+        &material,
+        event.realm_id.digest_suite_code().digest_suite(),
+    )
+    .map_err(temporary)
+}
 
 const BOOTSTRAP_PATH: &str = "/_arkret/peer/realm-joins/bootstrap";
 const SCAN_PATH: &str = "/_arkret/peer/streams/scan";
@@ -285,17 +341,18 @@ pub(crate) async fn refresh_account_snapshot(
     realm_id: &RealmId,
     account: &arkret_wire::AccountId,
 ) -> Result<arkret_wire::RealmStateSnapshot, String> {
-    let (snapshot, mut located, material) =
+    let (snapshot, mut located, material, genesis_original) =
         verified_account_snapshot(state, realm_id, account).await?;
     let refresh = async {
         complete_snapshot_tails(state, &snapshot, &material, &mut located).await?;
         state
             .authority_commits()
-            .install_verified_account_snapshot(
+            .install_verified_account_bootstrap_snapshot(
                 account,
                 &state.service_core_id(),
                 &snapshot,
                 &material,
+                &genesis_original,
             )
             .await
             .map_err(temporary)
@@ -423,7 +480,7 @@ async fn prepare_history_original(
     .await?;
     let outcome: PeerRealmJoinBootstrapResponseBody =
         serde_json::from_slice(&body).map_err(temporary)?;
-    let history = outcome.snapshot;
+    let history = outcome.snapshot.clone();
     history.validate_purpose().map_err(temporary)?;
     let signed = history
         .history_basis
@@ -447,15 +504,28 @@ async fn prepare_history_original(
     }
     let nonce = crate::routing::realm_join::nonce_for_request(&request.request_id)
         .map_err(|e| e.message)?;
-    let mut served =
-        crate::routing::realm_join::verify_served_bundle(state, outcome.authority_bundle, &nonce)
-            .await
-            .map_err(|e| e.message)?;
+    let mut served = crate::routing::realm_join::verify_served_bundle(
+        state,
+        outcome.authority_bundle.clone(),
+        &nonce,
+    )
+    .await
+    .map_err(|e| e.message)?;
+    let genesis_original = (
+        verify_bootstrap_genesis(state, &outcome, &mut served).await?,
+        outcome.producer_signer_fact.clone(),
+    );
     verify_snapshot(state, &mut served, &history).await?;
     complete_snapshot_tails(state, &history, material, &mut served).await?;
     state
         .authority_commits()
-        .install_verified_account_snapshot(account, &state.service_core_id(), &history, material)
+        .install_verified_account_bootstrap_snapshot(
+            account,
+            &state.service_core_id(),
+            &history,
+            material,
+            &genesis_original,
+        )
         .await
         .map_err(temporary)?;
     Ok(())
@@ -508,6 +578,10 @@ async fn verified_account_snapshot(
         arkret_wire::RealmStateSnapshot,
         LocatedRealmAuthority,
         coland_storage::RealmStateSnapshotMaterial,
+        (
+            arkret_wire::CommittedEventFullView,
+            Option<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
+        ),
     ),
     String,
 > {
@@ -583,6 +657,10 @@ async fn verified_account_snapshot(
         return Err("bootstrap bundle names another governing tenure".to_owned());
     }
     located = served;
+    let genesis_original = (
+        verify_bootstrap_genesis(state, &outcome, &mut located).await?,
+        outcome.producer_signer_fact.clone(),
+    );
     RealmJoinBootstrapAssembly::new(outcome.clone()).map_err(temporary)?;
     let snapshot = outcome.snapshot;
     verify_snapshot(state, &mut located, &snapshot).await?;
@@ -612,7 +690,7 @@ async fn verified_account_snapshot(
             "the governing Snapshot does not bind the hosted Account's current join".to_owned(),
         );
     }
-    Ok((snapshot, located, material))
+    Ok((snapshot, located, material, genesis_original))
 }
 
 /// Prove recoverable lag through the current governor, without installing a
@@ -625,7 +703,7 @@ pub(crate) async fn account_continuation_recoverable(
 ) -> Result<bool, String> {
     const MAX_PAGES: usize = 16;
     const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
-    let (snapshot, mut located, original_material) =
+    let (snapshot, mut located, original_material, _genesis_original) =
         verified_account_snapshot(state, realm_id, account).await?;
     let governance = located.authority.current_service_id().clone();
     if governance == state.service_core_id() {
@@ -1056,6 +1134,7 @@ async fn anchor_stream_with_forward_source(
         return Err("bootstrap bundle names another governing tenure".to_owned());
     }
     *located = served;
+    let genesis_original = verify_bootstrap_genesis(state, &outcome, located).await?;
     RealmJoinBootstrapAssembly::new(outcome.clone()).map_err(temporary)?;
     let snapshot = &outcome.snapshot;
     verify_snapshot(state, located, snapshot).await?;
@@ -1095,6 +1174,7 @@ async fn anchor_stream_with_forward_source(
         .authority_commits()
         .install_replica_anchor(&ReplicaAnchorInstall {
             realm_id: realm_id.clone(),
+            genesis_original: (genesis_original, outcome.producer_signer_fact.clone()),
             join_commit_id: join.commit_id.clone(),
             governance_generation: snapshot.governance_generation,
             snapshot_head: head.clone(),
@@ -1107,6 +1187,39 @@ async fn anchor_stream_with_forward_source(
     tracing::info!(%realm_id, anchor_position = head.stream_position,
         "held Realm replica anchored on its bootstrap snapshot");
     Ok(head)
+}
+
+async fn verify_bootstrap_genesis(
+    state: &AppState,
+    outcome: &PeerRealmJoinBootstrapResponseBody,
+    located: &mut LocatedRealmAuthority,
+) -> Result<arkret_wire::CommittedEventFullView, String> {
+    let original = outcome.genesis_original().map_err(temporary)?;
+    if located.bundle.genesis_event != original.event
+        || located.bundle.genesis_commit != original.commit
+    {
+        return Err("bootstrap Genesis differs from its verified authority bundle".into());
+    }
+    ensure_historical_method_key(state, located, &original.commit.signature).await?;
+    let producer = verify_committed_event_receipt_with_source(
+        state.persistence(),
+        &original.event,
+        &original.commit,
+        CommitContinuity::StreamStart,
+        &located.authority,
+        &located.keys,
+        &state.service_core_id(),
+        original.event.event_id.digest_suite_code().digest_suite(),
+        outcome.producer_signer_fact.as_ref(),
+    )
+    .await
+    .map_err(temporary)?;
+    if producer == ReceivedProducer::OtherSigner {
+        // A digestless native original still needs its exact retained
+        // historical authority. A current DID document is not a fallback.
+        verify_native_genesis_producer(state, &original).await?;
+    }
+    Ok(original)
 }
 
 /// Pull every Commit after the held head from the governing Station and

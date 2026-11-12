@@ -1031,6 +1031,106 @@ impl PersistenceHandle {
             .await
     }
 
+    pub async fn recover_native_backup_put(
+        &self,
+        backup: &arkret_models_crypto::KeyBackup,
+        credential: &coland_storage::AppletManagedDeviceAuthority,
+        effective_scope: &arkret_wire::ScopeRef,
+        credential_expires_at: chrono::DateTime<chrono::Utc>,
+        idempotency_key: &str,
+    ) -> PersistenceResult<Option<arkret_models_crypto::RealmActorBackupPutResponseBody>> {
+        self.persistence
+            .key_backups()
+            .recover_native_put(
+                backup,
+                credential,
+                effective_scope,
+                credential_expires_at,
+                idempotency_key,
+            )
+            .await
+    }
+
+    pub async fn native_backup_head(
+        &self,
+        context: &coland_storage::RealmActorBackupPutContext,
+    ) -> PersistenceResult<(
+        arkret_models_crypto::RealmActorBackupSeriesHeadResponseBody,
+        Box<dyn coland_storage::AccountContentDeliveryGuard>,
+    )> {
+        self.persistence.key_backups().native_head(context).await
+    }
+
+    pub async fn native_backup_inventory(
+        &self,
+        reader: &coland_storage::RealmActorBackupManagerReader,
+    ) -> PersistenceResult<arkret_models_integration::RealmActorArchiveInventoryManifest> {
+        self.persistence
+            .key_backups()
+            .native_inventory(reader)
+            .await
+    }
+    pub async fn native_backup_inventory_delivery(
+        &self,
+        reader: &coland_storage::RealmActorBackupManagerReader,
+        manifest: &arkret_models_integration::RealmActorArchiveInventoryManifest,
+    ) -> PersistenceResult<Box<dyn coland_storage::AccountContentDeliveryGuard>> {
+        self.persistence
+            .key_backups()
+            .native_inventory_delivery(reader, manifest)
+            .await
+    }
+
+    pub async fn commit_native_backup_series(
+        &self,
+        write: coland_storage::KeyBackupActiveSeriesCommitWrite,
+        producer: &coland_storage::AppletEventProducerGuard,
+    ) -> PersistenceResult<coland_storage::KeyBackupActiveSeriesCommitOutcome> {
+        self.persistence
+            .key_backups()
+            .commit_native_active_series_pointer(write, producer)
+            .await
+    }
+
+    pub async fn put_native_backup(
+        &self,
+        backup: &arkret_models_crypto::KeyBackup,
+        context: &coland_storage::RealmActorBackupPutContext,
+        sign: coland_storage::RealmActorBackupAdmissionSigner<'_>,
+    ) -> PersistenceResult<arkret_models_crypto::RealmActorBackupPutResponseBody> {
+        self.persistence
+            .key_backups()
+            .put_native(backup, context, sign)
+            .await
+    }
+
+    pub async fn issue_native_backup_unlock(
+        &self,
+        reader: &coland_storage::RealmActorBackupReader,
+        id: &arkret_wire::BackupId,
+        request: &arkret_models_crypto::RealmActorBackupIssueUnlockChallengeRequestBody,
+        audience: &str,
+        service_id: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<arkret_models_crypto::RealmActorBackupUnlockChallenge> {
+        self.persistence
+            .key_backups()
+            .issue_native_unlock(reader, id, request, audience, service_id)
+            .await
+    }
+    pub async fn consume_native_backup_unlock(
+        &self,
+        reader: &coland_storage::RealmActorBackupReader,
+        proof: &arkret_models_crypto::KeyBackupUnlockProofBody,
+    ) -> PersistenceResult<(
+        arkret_models_integration::KeysBackupsUnlockResponseBody,
+        Box<dyn coland_storage::AccountContentDeliveryGuard>,
+    )> {
+        self.persistence
+            .key_backups()
+            .consume_native_unlock(reader, proof)
+            .await
+    }
+
     pub async fn pcr_device_generation(
         &self,
         account: &arkret_wire::AccountId,
@@ -1831,6 +1931,30 @@ impl PersistenceHandle {
 
 #[async_trait::async_trait]
 impl coland_storage::DeviceRevocationStore for PersistenceHandle {
+    async fn native_backup_put_device_credential(
+        &self,
+        actor: &arkret_wire::ActorId,
+        device_id: &arkret_wire::DeviceId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {
+        self.persistence
+            .device_revocations()
+            .native_backup_put_device_credential(actor, device_id, now)
+            .await
+    }
+
+    async fn consume_native_backup_put_device_nonce(
+        &self,
+        expected: &coland_storage::AppletManagedDeviceAuthority,
+        metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+        retain_until: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<coland_storage::AppletManagedDeviceAuthority> {
+        self.persistence
+            .device_revocations()
+            .consume_native_backup_put_device_nonce(expected, metadata, retain_until)
+            .await
+    }
+
     async fn applet_managed_event_producer(
         &self,
         event: &arkret_wire::Event,

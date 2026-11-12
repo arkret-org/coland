@@ -817,12 +817,15 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
         .add_members_with_governance_binding(&package_records, &binding)
         .unwrap();
     assert_eq!(added.welcomes.len(), 2);
-    let payload = super::realm_actor_mls_fixture::commit_payload(fixture,&group,
+    let payload = super::realm_actor_mls_fixture::commit_payload(
+        fixture,
+        &group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &added.commit,
         binding,
-    ).await
+    )
+    .await
     .unwrap();
     let event = signed_event(
         package,
@@ -876,7 +879,7 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
         welcomes.push(welcome);
     }
     let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
-    recovery_source: None,
+        recovery_source: None,
 
         commit_event: event.clone(),
         welcomes,
@@ -1101,9 +1104,11 @@ async fn realm_device_owned_query_prepared_guard_crosses_deadline(
         "actual native recipient publication: {value}"
     );
     assert_eq!(
-        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(value.clone())
-            .unwrap()
-            .accepted_count,
+        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(
+            value.clone()
+        )
+        .unwrap()
+        .accepted_count,
         1
     );
     let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
@@ -1519,9 +1524,11 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
         "actual independent recipient publishes its own scoped KeyPackage: {value}"
     );
     assert_eq!(
-        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(value.clone())
-            .unwrap()
-            .accepted_count,
+        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(
+            value.clone()
+        )
+        .unwrap()
+        .accepted_count,
         1
     );
     let mut request = claim_request_with_lifetime(
@@ -1604,12 +1611,15 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
     let added = group
         .add_member_with_governance_binding(&package_record, &binding)
         .unwrap();
-    let payload = super::realm_actor_mls_fixture::commit_payload(fixture,&group,
+    let payload = super::realm_actor_mls_fixture::commit_payload(
+        fixture,
+        &group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &added.commit,
         binding,
-    ).await
+    )
+    .await
     .unwrap();
     let event = signed_event(
         package,
@@ -1654,7 +1664,7 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
     )
     .unwrap();
     let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
-    recovery_source: None,
+        recovery_source: None,
 
         commit_event: event.clone(),
         welcomes: vec![welcome.clone()],
@@ -1693,6 +1703,11 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
         commit: record.commit,
     };
     group.install_accepted_commit(&accepted, &current).unwrap();
+    // Same-Station Add provenance is durable in the accepted Commit transaction.
+    boxed_step(|| {
+        obligation_install_native_roster(fixture, authority, &[79; 32], &accepted, group)
+    })
+    .await;
     let actual_queue = boxed_step(|| obligation_mls_footprint(fixture)).await;
     let queue = actual_queue["mls_welcome_deliveries"]
         .as_array()

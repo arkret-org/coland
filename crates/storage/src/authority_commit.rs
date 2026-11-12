@@ -1456,6 +1456,11 @@ pub struct ReplicaStreamAnchor {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReplicaAnchorInstall {
     pub realm_id: arkret_wire::RealmId,
+    /// Exact independently verified founding original, retained without replay.
+    pub genesis_original: (
+        arkret_wire::CommittedEventFullView,
+        Option<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
+    ),
     /// Exact current bootstrap reader join. A pending anchor requires its
     /// original opening; refresh may use another proved hosted current join.
     pub join_commit_id: arkret_wire::RealmCommitId,
@@ -1467,6 +1472,16 @@ pub struct ReplicaAnchorInstall {
     pub current_state_entries: Vec<arkret_wire::CurrentState>,
     /// Exact signed bootstrap verified by the caller, archived with its rows.
     pub verified_snapshot: arkret_wire::RealmStateSnapshot,
+}
+
+/// Independently verified founding original retained atomically with a
+/// member bootstrap. It never changes the ordinary replay head or floor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplicaBootstrapInstall {
+    pub anchor: ReplicaAnchorInstall,
+    pub genesis: arkret_wire::CommittedEventFullView,
+    pub producer_signer_fact:
+        Option<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
 }
 
 /// Inputs for the same read-only Signal eligibility cut used by every layer.
@@ -2384,6 +2399,11 @@ pub trait AuthorityCommitStore: Send + Sync {
     async fn install_replica_anchor(&self, install: &ReplicaAnchorInstall)
     -> PersistenceResult<()>;
 
+    async fn install_replica_bootstrap(
+        &self,
+        install: &ReplicaBootstrapInstall,
+    ) -> PersistenceResult<()>;
+
     /// The Commit this Station holds at the head of `stream_ref`, whether a
     /// full replica or a chain node.
     async fn held_stream_head_commit(
@@ -3290,6 +3310,25 @@ pub trait AuthorityCommitStore: Send + Sync {
         let _ = (account, issuer, snapshot, minimum);
         Err(crate::PersistenceError::Internal(
             "verified Account Snapshot installation is unavailable".to_owned(),
+        ))
+    }
+
+    /// Archive a member-bootstrap Snapshot and its independently verified
+    /// founding original in the same transaction, without replaying Genesis.
+    async fn install_verified_account_bootstrap_snapshot(
+        &self,
+        account: &arkret_wire::AccountId,
+        issuer: &arkret_wire::DidCoreId,
+        snapshot: &RealmStateSnapshot,
+        minimum: &RealmStateSnapshotMaterial,
+        genesis_original: &(
+            arkret_wire::CommittedEventFullView,
+            Option<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
+        ),
+    ) -> PersistenceResult<RealmStateSnapshot> {
+        let _ = (account, issuer, snapshot, minimum, genesis_original);
+        Err(crate::PersistenceError::Internal(
+            "member bootstrap Snapshot installation is unavailable".to_owned(),
         ))
     }
 

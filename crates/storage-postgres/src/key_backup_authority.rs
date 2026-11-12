@@ -81,6 +81,65 @@ impl DeviceBackupAdmission {
     }
 }
 
+/// Verify a real Realm-native writer without constructing an Account or PCR
+/// trust anchor. The caller has re-read this exact live authorization at the
+/// locked accepting cut and separately applies the resource/business gates.
+pub(crate) fn verify_realm_device_backup_signature(
+    backup: &KeyBackup,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    accepted_at: chrono::DateTime<chrono::Utc>,
+) -> crate::PersistenceResult<DeviceBackupAdmission> {
+    let invalid = || {
+        PersistenceError::Conflict(
+            "signature_invalid: native backup differs from its original Device".into(),
+        )
+    };
+    backup.validate().map_err(PersistenceError::database)?;
+    backup
+        .validate_ciphertext_digest()
+        .map_err(PersistenceError::database)?;
+    let binding = backup.auth_binding.as_ref().ok_or_else(invalid)?;
+    let fingerprint = arkret_canonical::ed25519_pubkey_to_did_key_multibase(&authority.public_key);
+    if backup.actor_id != authority.actor_id
+        || backup.actor_id.as_realm_actor_id().is_none()
+        || backup.device_id.as_ref() != Some(&authority.device_id)
+        || backup.signature_proof.device_id.as_ref() != Some(&authority.device_id)
+        || backup.signature_proof.device_authorize_event_id.as_ref()
+            != Some(&authority.authorization_ref.event_id)
+        || backup.signature_proof.verification_method.as_str()
+            != format!("did:key:{fingerprint}#{fingerprint}")
+        || binding.device_generation != authority.current_device_generation_ref
+        || backup.created_at < authority.not_before
+        || backup.created_at >= authority.expires_at
+        || accepted_at < authority.not_before
+        || accepted_at >= authority.expires_at
+    {
+        return Err(invalid());
+    }
+    if !arkret_signatures::verify_detached_ed25519_signature(
+        &arkret_signatures::PublicKeyMaterial::Ed25519Raw {
+            bytes: authority.public_key.to_vec(),
+        },
+        &backup
+            .signing_payload_bytes()
+            .map_err(PersistenceError::database)?,
+        backup.signature_proof.signature.as_str(),
+    ) {
+        return Err(invalid());
+    }
+    Ok(DeviceBackupAdmission {
+        envelope_digest: arkret_canonical::canonical_sha256(backup)
+            .map_err(PersistenceError::database)?,
+        signer_actor: authority.actor_id.clone(),
+        signer_device: authority.device_id.clone(),
+        authorization_event_ref: authority.authorization_ref.event_id.clone(),
+        source_head: authority.authorization_ref.commit_id.clone(),
+        generation: authority.current_device_generation_ref,
+        public_key_did: format!("did:key:{fingerprint}"),
+        accepted_at,
+    })
+}
+
 fn rejected(code: impl std::fmt::Display, reason: &str) -> PgTransactionError {
     PersistenceError::Conflict(format!("{code}: {reason}")).into()
 }

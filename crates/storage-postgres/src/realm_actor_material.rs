@@ -219,11 +219,23 @@ pub(crate) async fn read(
             (requester, *expires_at)
         }
         RealmActorMaterialCaller::Device { guard, expires_at } => {
-            let RealmActorMaterialRequestBody::Event { target, .. } = request else {
+            if &guard.authority.actor_id != actor {
                 return Err(hidden());
-            };
-            if &guard.authority.actor_id != actor || target != &guard.authority.authorization_ref {
-                return Err(hidden());
+            }
+            match request {
+                RealmActorMaterialRequestBody::Event { target, .. }
+                    if target == &guard.authority.authorization_ref => {}
+                RealmActorMaterialRequestBody::Current { selectors, .. }
+                    if selectors.len() == 2
+                        && selectors.iter().filter(|selector|matches!(selector,
+                            CurrentSelector::RealmActorRecovery { actor_id } if actor_id == actor
+                        )).count() == 1
+                        && selectors.iter().filter(|selector|matches!(selector,
+                            CurrentSelector::RealmActorKeyBackupActiveSeries {
+                                actor_id,effective_scope,..
+                            } if actor_id == actor && effective_scope == &guard.effective_scope
+                        )).count() == 1 => {}
+                _ => return Err(hidden()),
             }
             let current = crate::realm_actor_device_authority::current_in_connection(
                 conn,
@@ -304,6 +316,25 @@ pub(crate) async fn read(
                         source_ref: source,
                     });
                 } else {
+                    if let CurrentSelector::RealmActorKeyBackupActiveSeries {
+                        effective_scope,
+                        ..
+                    } = selector
+                    {
+                        let exists=sql_query("SELECT to_jsonb(EXISTS(SELECT 1 FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE c.realm_id=$1 AND c.stream_ref=$2 AND e.state='committed' AND e.kind=$3 AND e.envelope#>'{payload,actor_id}'=$4 AND e.envelope#>'{payload,effective_scope}'=$5)) AS value")
+                            .bind::<Text,_>(subject.realm_id.as_str()).bind::<Jsonb,_>(json!(stream))
+                            .bind::<Text,_>(arkret_wire::event_kind_str::KEY_BACKUP_ACTIVE_SERIES).bind::<Jsonb,_>(json!(actor)).bind::<Jsonb,_>(json!(effective_scope))
+                            .get_result::<Row>(&mut *conn).await.map_err(PersistenceError::database)?;
+                        if exists.value != json!(false) {
+                            return Err(unavailable(
+                                "written native scoped series lost its current",
+                            ));
+                        }
+                        entries.push(RealmActorMaterialCurrentEntry::NeverWritten {
+                            selector: selector.clone(),
+                        });
+                        continue;
+                    }
                     let (kind, device) = match selector {
                         CurrentSelector::RealmActorDeviceAuthorization { device_id, .. } => (
                             arkret_wire::event_kind_str::DEVICE_AUTHORIZE,
@@ -333,7 +364,24 @@ pub(crate) async fn read(
             }
             (
                 RealmActorMaterialPurpose::Current,
-                RealmActorMaterial::Current { entries },
+                RealmActorMaterial::Current {
+                    entries,
+                    next_prepare_input: if let RealmActorMaterialCaller::Device { guard, .. } =
+                        caller
+                    {
+                        Some(
+                            crate::realm_actor_content_backup::prepare_input_in_connection(
+                                conn,
+                                &guard.authority,
+                                &guard.effective_scope,
+                            )
+                            .await?
+                            .input,
+                        )
+                    } else {
+                        None
+                    },
+                },
             )
         }
         RealmActorMaterialRequestBody::Event { target, .. } => {

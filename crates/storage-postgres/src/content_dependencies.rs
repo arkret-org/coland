@@ -61,7 +61,7 @@ async fn original_event(
     serde_json::from_value(row.payload).map_err(PersistenceError::database)
 }
 
-async fn validate_root_basis(
+pub(crate) async fn validate_root_basis(
     conn: &mut AsyncPgConnection,
     root: &ContentRootContext,
     group: &MlsGroupValue,
@@ -814,6 +814,12 @@ pub(crate) async fn guard_delete_in_connection(
     conn: &mut AsyncPgConnection,
     backup: &KeyBackup,
 ) -> Result<(), PgTransactionError> {
+    if backup.actor_id.as_realm_actor_id().is_some() {
+        return Err(invalid(
+            "native first-PUT custody has no registered resource-delete operation",
+        )
+        .into());
+    }
     if backup
         .contents
         .iter()

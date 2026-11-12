@@ -256,6 +256,27 @@ pub(crate) async fn effective_member_in_connection(
     circle_id: &CircleId,
     actor: &arkret_wire::ActorId,
 ) -> PersistenceResult<bool> {
+    joined_member_in_connection(conn, realm_id, circle_id, actor, false).await
+}
+
+/// An archived Circle retains its accepted membership basis for existing
+/// content reads. This never grants an active Circle writer or a new MLS leaf.
+pub(crate) async fn joined_member_for_content_read_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+    circle_id: &CircleId,
+    actor: &arkret_wire::ActorId,
+) -> PersistenceResult<bool> {
+    joined_member_in_connection(conn, realm_id, circle_id, actor, true).await
+}
+
+async fn joined_member_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+    circle_id: &CircleId,
+    actor: &arkret_wire::ActorId,
+    allow_archived: bool,
+) -> PersistenceResult<bool> {
     let current = sql_query("SELECT value FROM circle_member_state_current_states WHERE realm_id=$1 AND circle_id=$2 AND member_id=$3")
         .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<Text,_>(actor.to_string())
         .get_result::<CircleRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
@@ -287,8 +308,8 @@ pub(crate) async fn effective_member_in_connection(
         return Err(unproved("Circle member source coverage is unproved"));
     }
     require_metadata_in_connection(conn, realm_id, circle_id).await?;
-    Ok(sql_query("SELECT EXISTS(SELECT 1 FROM circle_current_states WHERE realm_id=$1 AND circle_id=$2 AND value->>'state'='active') AS present")
-        .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(circle_id.as_str())
+    Ok(sql_query("SELECT EXISTS(SELECT 1 FROM circle_current_states WHERE realm_id=$1 AND circle_id=$2 AND (value->>'state'='active' OR ($3 AND value->>'state'='archived'))) AS present")
+        .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(circle_id.as_str()).bind::<diesel::sql_types::Bool,_>(allow_archived)
         .get_result::<PresentRow>(conn).await.map_err(PersistenceError::database)?.present)
 }
 

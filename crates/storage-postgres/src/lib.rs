@@ -184,6 +184,7 @@ mod push_handoff;
 #[cfg(test)]
 mod read_capacity_tests;
 mod read_cursors;
+mod realm_actor_content_backup;
 mod realm_actor_device_authority;
 mod realm_actor_device_control;
 mod realm_actor_device_revoke;

@@ -338,12 +338,15 @@ pub(crate) async fn commit_key_backup_pointer_unit_in_connection(
         .authority
         .current_generation
         .ok_or_else(|| pointer_rejected("KeyBackup pointer PCR has no current generation"))?;
-    if record.signature_proof.device_authorize_event_id != authorization.event_id {
+    if record.signature_proof.device_authorize_event_id.as_ref() != Some(&authorization.event_id) {
         return Err(pointer_rejected(
             "KeyBackup pointer names a device authorization that is not current",
         ));
     }
-    if record.source_commit_ref.device_generation_ref != generation {
+    let source = record.source_commit_ref.as_ref().ok_or_else(|| {
+        pointer_rejected("Account backup pointer requires its original PCR source")
+    })?;
+    if source.device_generation_ref != generation {
         return Err(pointer_rejected("backup_revision_stale"));
     }
     let checkpoint = sql_query(
@@ -356,7 +359,7 @@ pub(crate) async fn commit_key_backup_pointer_unit_in_connection(
               AS authorization_position",
     )
     .bind::<Text, _>(event.realm_id.as_str())
-    .bind::<Text, _>(record.source_commit_ref.realm_commit_id.as_str())
+    .bind::<Text, _>(source.realm_commit_id.as_str())
     .bind::<Text, _>(authorization.source_commit_id.as_str())
     .get_result::<SourceCheckpointRow>(&mut *conn)
     .await?;

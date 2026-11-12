@@ -711,6 +711,10 @@ pub(crate) async fn install_verified_account_snapshot(
     issuer: &arkret_wire::DidCoreId,
     snapshot: &arkret_wire::RealmStateSnapshot,
     minimum: &coland_storage::RealmStateSnapshotMaterial,
+    genesis_original: Option<&(
+        arkret_wire::CommittedEventFullView,
+        Option<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
+    )>,
 ) -> PersistenceResult<arkret_wire::RealmStateSnapshot> {
     let mut conn = SnapshotIssuanceConnection::acquire(pool, &snapshot.realm_id).await?;
     let result = conn
@@ -769,6 +773,15 @@ pub(crate) async fn install_verified_account_snapshot(
             )
             .await?;
             recheck_disclosure_in_connection(conn, account, issuer, snapshot).await?;
+            if let Some((genesis, fact)) = genesis_original {
+                crate::authority_commit::replica::retain_bootstrap_genesis_in_connection(
+                    conn,
+                    &snapshot.realm_id,
+                    genesis,
+                    fact.as_ref(),
+                )
+                .await?;
+            }
             let original = coland_storage::RealmStateSnapshotMaterial {
                 purpose: snapshot.purpose,
                 history_basis: snapshot.history_basis.clone(),

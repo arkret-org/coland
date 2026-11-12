@@ -1138,15 +1138,12 @@ pub(super) async fn human_updates_group(
         .await
         .unwrap()
         .unwrap();
-    group
-        .install_accepted_commit(
-            &arkret_wire::CommittedEventFullView {
-                event: accepted.event,
-                commit: accepted.commit,
-            },
-            &current,
-        )
-        .unwrap();
+    let accepted = arkret_wire::CommittedEventFullView {
+        event: accepted.event,
+        commit: accepted.commit,
+    };
+    group.install_accepted_commit(&accepted, &current).unwrap();
+    boxed_step(|| install_received_roster(fixture, &accepted, group)).await;
 }
 
 pub(super) async fn verify_runtime_message(
@@ -1654,6 +1651,11 @@ async fn commit_add(
             &accepted,
             &claim,
         )
+    })
+    .await;
+    // The recipient's durable attestation now closes the source's accepted roster.
+    boxed_step(|| {
+        obligation_install_native_roster(fixture, authority, &[79; 32], &accepted, group)
     })
     .await;
     (submission, accepted.commit)
@@ -2524,6 +2526,7 @@ pub(super) async fn run_admission(
     package: &AppletPackage,
     candidate: &RealmActorCreatePayload,
     device: &DeviceId,
+    manager_archive: &super::realm_native_fixture::FixtureManagerArchive,
 ) {
     let authority = fixture
         .state
@@ -2538,7 +2541,15 @@ pub(super) async fn run_admission(
     let mut group =
         boxed_step(|| genesis(fixture, package, candidate, device, &authority, &child)).await;
     boxed_step(|| {
-        keypackage_admission(fixture, package, candidate, &authority, &child, &mut group)
+        keypackage_admission(
+            fixture,
+            package,
+            candidate,
+            &authority,
+            &child,
+            &mut group,
+            manager_archive,
+        )
     })
     .await;
 }

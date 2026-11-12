@@ -466,6 +466,7 @@ async fn install_admission_reproof_and_missing_creation(factory: &AppletAuthorin
         &first_registration.event_id,
         &arkret_wire::GrantId::from_event_id(&provision.event_id),
         false,
+        &service.archive,
     );
     let pending = arkret::author_realm_actor_create(
         candidate.clone(),
@@ -641,6 +642,7 @@ async fn install_admission_reproof_and_missing_creation(factory: &AppletAuthorin
         &body.authoring_request_basis.registration_event.event_id,
         &arkret_wire::GrantId::from_event_id(&wrong_source.event_id),
         false,
+        &service.archive,
     );
     let original = arkret::author_realm_actor_create(
         candidate.clone(),
@@ -693,7 +695,11 @@ async fn install_admission_reproof_and_missing_creation(factory: &AppletAuthorin
     );
 }
 
-pub(super) async fn policy_blocks_fresh_native_join(fixture: &Fixture, package: &AppletPackage) {
+pub(super) async fn policy_blocks_fresh_native_join(
+    fixture: &Fixture,
+    package: &AppletPackage,
+    manager_archive: &FixtureManagerArchive,
+) {
     let scope = ScopeRef::Realm {
         realm_id: fixture.realm.clone(),
     };
@@ -738,6 +744,7 @@ pub(super) async fn policy_blocks_fresh_native_join(fixture: &Fixture, package: 
         &registration.event_id,
         &arkret_wire::GrantId::from_event_id(&creation.event_id),
         false,
+        manager_archive,
     );
     let event = arkret::author_realm_actor_create(
         candidate.clone(),
@@ -827,7 +834,7 @@ pub(super) async fn policy_blocks_fresh_native_join(fixture: &Fixture, package: 
         );
     // A distinct accepted identity still joins after both provision sources
     // close. The original subject below is already created and authorized too.
-    boxed_step(|| admission_native_endpoint(fixture, package, 93, true)).await;
+    boxed_step(|| admission_native_endpoint(fixture, package, 93, true, manager_archive)).await;
     install_admission_policy(fixture, &package.applet_id, &package.service_id, "join").await;
     let metadata = AppletManagedDeviceMetadata {
         actor_id: candidate.actor_id,
@@ -884,6 +891,7 @@ pub(super) async fn admission_native_endpoint(
     package: &AppletPackage,
     key_seed: u8,
     close_creation: bool,
+    manager_archive: &FixtureManagerArchive,
 ) -> (
     RealmActorCreatePayload,
     coland_storage::AppletManagedDeviceAuthority,
@@ -924,6 +932,7 @@ pub(super) async fn admission_native_endpoint(
         &registration.event_id,
         &arkret_wire::GrantId::from_event_id(&source("ak.applet.ghost.provision").event_id),
         false,
+        manager_archive,
     );
     let create = arkret::author_realm_actor_create(
         candidate.clone(),
@@ -1254,6 +1263,7 @@ async fn install_admission_circle_claim_independence(factory: &AppletAuthoringFa
             .event_id,
         &arkret_wire::GrantId::from_event_id(&source(&realm_body, "ak.applet.ghost.provision")),
         false,
+        &native.archive,
     );
     let create = authority_admission_create(&candidate, &signer);
     let (status, value) =

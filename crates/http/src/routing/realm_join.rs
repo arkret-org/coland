@@ -283,12 +283,7 @@ async fn peer_bootstrap(
             .await
             .map_err(unavailable)?
             .ok_or_else(|| AppError::not_found("history basis unavailable"))?;
-        return json_ok(PeerRealmJoinBootstrapResponseBody {
-            request_id: body.request_id,
-            authority_bundle: bundle,
-            visible_stream_heads: snapshot.visible_stream_heads.clone(),
-            snapshot,
-        });
+        return json_ok(bootstrap_response(state, body.request_id, bundle, snapshot).await?);
     }
     // The member Station anchors its held stream on this snapshot: the
     // member's complete disclosure with the Realm stream floor at its own
@@ -316,10 +311,27 @@ async fn peer_bootstrap(
         crate::wire::now(),
     )
     .map_err(unavailable)?;
-    json_ok(PeerRealmJoinBootstrapResponseBody {
-        request_id: body.request_id,
+    json_ok(bootstrap_response(state, body.request_id, bundle, snapshot).await?)
+}
+
+async fn bootstrap_response(
+    state: &AppState,
+    request_id: arkret_wire::RequestId,
+    bundle: arkret_wire::RealmAuthorityBundle,
+    snapshot: arkret_wire::RealmStateSnapshot,
+) -> Result<PeerRealmJoinBootstrapResponseBody, AppError> {
+    let producer_signer_fact = state
+        .authority_commits()
+        .producer_signer_fact(&bundle.genesis_event, &bundle.genesis_commit)
+        .await
+        .map_err(unavailable)?;
+    let outcome = PeerRealmJoinBootstrapResponseBody {
+        request_id,
         authority_bundle: bundle,
+        producer_signer_fact,
+        visible_stream_heads: snapshot.visible_stream_heads.clone(),
         snapshot,
-        visible_stream_heads: material.visible_stream_heads,
-    })
+    };
+    outcome.genesis_original().map_err(unavailable)?;
+    Ok(outcome)
 }

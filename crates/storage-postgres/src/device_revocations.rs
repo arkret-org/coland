@@ -121,6 +121,33 @@ impl DeviceRevocationStore for PgDeviceRevocationStore {
         crate::realm_actor_device_authority::current(&self.pool, account, device_id, now).await
     }
 
+    async fn native_backup_put_device_credential(
+        &self,
+        actor: &arkret_wire::ActorId,
+        device_id: &arkret_wire::DeviceId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<Option<coland_storage::AppletManagedDeviceAuthority>> {
+        crate::realm_actor_device_authority::backup_put_credential(
+            &self.pool, actor, device_id, now,
+        )
+        .await
+    }
+
+    async fn consume_native_backup_put_device_nonce(
+        &self,
+        expected: &coland_storage::AppletManagedDeviceAuthority,
+        metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+        retain_until: chrono::DateTime<chrono::Utc>,
+    ) -> PersistenceResult<coland_storage::AppletManagedDeviceAuthority> {
+        crate::realm_actor_device_authority::consume_backup_put_nonce(
+            &self.pool,
+            expected,
+            metadata,
+            retain_until,
+        )
+        .await
+    }
+
     async fn pcr_device_generation(
         &self,
         account: &arkret_wire::AccountId,

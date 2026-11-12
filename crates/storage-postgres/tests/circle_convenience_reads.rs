@@ -524,6 +524,11 @@ async fn qualified_member_snapshot(
         .clone();
     coland_storage::ReplicaAnchorInstall {
         realm_id: commit.realm_id.clone(),
+        genesis_original: coland_test_support::member_bootstrap::genesis_original(
+            governor,
+            &commit.realm_id,
+        )
+        .await,
         join_commit_id: commit.commit_id.clone(),
         governance_generation: snapshot.governance_generation,
         snapshot_head: realm_head,

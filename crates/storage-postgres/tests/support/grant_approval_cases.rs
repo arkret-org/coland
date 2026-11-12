@@ -202,7 +202,7 @@ async fn message_create_approval_transaction(pool: PgPool, setup: Box<GrantSetup
         json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,
             "issuer_id":actor,"subject":actor,"actions":["ak.message.create"],"resources":[target],
             "constraints":[{"constraint_kind":"claim_based","constraint_subkind":"approval","effect":"require_review","approval_required":true,
-                "approval_mode":"before_commit","approval_actor_ids":roster,"approval_threshold":"majority","timeout":"PT60S"}],
+                "approval_mode":"before_commit","approval_principal_ids":roster,"approval_threshold":"majority","timeout":"PT60S"}],
             "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],
             "issued_at":arkret_canonical::format_timestamp_canonical(at)}}), at,
     ))).await;
@@ -398,7 +398,7 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
         &founder(),
         json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,
         "issuer_id":actor,"subject":actor,"actions":["ak.strand.move"],"resources":[target],
-        "constraints":[{"constraint_kind":"claim_based","constraint_subkind":"approval","effect":"require_review","approval_required":true,"approval_mode":"before_commit","approval_actor_ids":roster,"approval_threshold":"majority","timeout":"PT60S"},
+        "constraints":[{"constraint_kind":"claim_based","constraint_subkind":"approval","effect":"require_review","approval_required":true,"approval_mode":"before_commit","approval_principal_ids":roster,"approval_threshold":"majority","timeout":"PT60S"},
             {"constraint_kind":"temporal","effect":"allow","not_before":arkret_canonical::format_timestamp_canonical(at+chrono::TimeDelta::seconds(10))}],
         "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],
         "issued_at":arkret_canonical::format_timestamp_canonical(at)}}),
@@ -745,7 +745,7 @@ async fn ordinary_writer_approval_transaction(
         json!({"grant":{"schema":"ak.schema.capability.v1","realm_id":realm,
             "issuer_id":actor,"subject":actor,"actions":[action.as_str()],"resources":[target],
             "constraints":[{"constraint_kind":"claim_based","constraint_subkind":"approval","effect":if alternative { "allow" } else { "require_review" },"approval_required":true,
-                "approval_mode":"before_commit","approval_actor_ids":roster,"approval_threshold":if scoped { json!(1) } else { json!("majority") },"timeout":"PT60S"}],
+                "approval_mode":"before_commit","approval_principal_ids":roster,"approval_threshold":if scoped { json!(1) } else { json!("majority") },"timeout":"PT60S"}],
             "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":setup.opened.unit.transactions[0].event.event_id,"authority_generation":"0"}],
             "issued_at":arkret_canonical::format_timestamp_canonical(at)}}), at,
     ))).await;

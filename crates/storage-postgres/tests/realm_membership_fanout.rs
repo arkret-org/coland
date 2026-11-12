@@ -178,6 +178,10 @@ async fn refresh_qualified_member_stream(
     member
         .install_replica_anchor(&ReplicaAnchorInstall {
             realm_id: realm.clone(),
+            genesis_original: coland_test_support::member_bootstrap::genesis_original(
+                governor, realm,
+            )
+            .await,
             join_commit_id: opening.commit_id.clone(),
             governance_generation: material.governance_generation,
             snapshot_head,
@@ -1218,6 +1222,7 @@ fn replica(
 /// join would.
 async fn anchor_at_join(
     store: &PgAuthorityCommitStore,
+    unit: &OrdinaryRealmBootstrapCommitUnit,
     join: &EventCommitRequest,
     entries: Vec<arkret_wire::CurrentState>,
 ) {
@@ -1226,6 +1231,7 @@ async fn anchor_at_join(
         .install_replica_anchor(&{
             let mut install = ReplicaAnchorInstall {
                 realm_id: commit.realm_id.clone(),
+                genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(unit),
                 join_commit_id: commit.commit_id.clone(),
                 governance_generation: commit.governance_generation,
                 snapshot_head: arkret_wire::CommitStreamHead {
@@ -1289,9 +1295,12 @@ async fn held_genesis_replica_freezes_only_its_exact_scope_provenance() {
         first_carried_commit_event_ref: String,
     }
     let database = TestDatabase::lease().await;
+    database.bind_device_inventory_station(member_station().as_str());
     let pool = database.pool();
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let unit = bootstrap_unit_with_join_rule("replica-genesis-provenance", "public");
+    let genesis_governor = TestDatabase::lease().await;
+    let genesis_pool = genesis_governor.pool();
+    let unit = heap_future(|| admit(&genesis_pool, "replica-genesis-provenance", "public")).await;
     let last = unit.transactions.last().unwrap();
     let member = remote_member("genesis-reader");
     let join = membership_request(last, member.clone(), &member, "join");
@@ -1328,7 +1337,7 @@ async fn held_genesis_replica_freezes_only_its_exact_scope_provenance() {
         .install_committed_replica(&replica(&unit, &join, true))
         .await
         .unwrap();
-    anchor_at_join(&store, &join, vec![joined_row(&join, &member)]).await;
+    anchor_at_join(&store, &unit, &join, vec![joined_row(&join, &member)]).await;
     let source = replica(&unit, &genesis, false);
     let scope_key =
         String::from_utf8(arkret_canonical::canonical_json_bytes(&source.event.scope_ref).unwrap())
@@ -1479,7 +1488,9 @@ async fn committed_replication_persists_exact_source_bytes_and_remote_authority(
     let store = PgAuthorityCommitStore { pool: pool.clone() };
     // The governance Station's cut is built but never admitted here: this
     // database is the member Station.
-    let unit = bootstrap_unit_with_join_rule("replica-public", "public");
+    let genesis_governor = TestDatabase::lease().await;
+    let genesis_pool = genesis_governor.pool();
+    let unit = heap_future(|| admit(&genesis_pool, "replica-public", "public")).await;
     let realm_id = unit.transactions[0].event.realm_id.clone();
     let last = unit.transactions.last().unwrap();
     let alice = remote_member("replica-alice");
@@ -1550,7 +1561,7 @@ async fn committed_replication_persists_exact_source_bytes_and_remote_authority(
             .unwrap_err(),
         ConflictCode::DependencyMissing,
     );
-    anchor_at_join(&store, &join, vec![joined_row(&join, &alice)]).await;
+    anchor_at_join(&store, &unit, &join, vec![joined_row(&join, &alice)]).await;
     // A different Commit at the held position is a fork, not a successor.
     let mut fork = next.clone();
     fork.authority_commit.commit.stream_position = join.authority_commit.commit.stream_position;
@@ -1677,7 +1688,7 @@ async fn committed_replication_persists_exact_source_bytes_and_remote_authority(
             .unwrap_err(),
         ConflictCode::DependencyMissing,
     );
-    anchor_at_join(&store, &rejoin, vec![joined_row(&rejoin, &alice)]).await;
+    anchor_at_join(&store, &unit, &rejoin, vec![joined_row(&rejoin, &alice)]).await;
     // The position in the gap is behind the re-opened head.
     assert_code(
         &store
@@ -1711,7 +1722,9 @@ async fn committed_replication_opens_the_stream_with_a_hosted_invite_accept() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let unit = bootstrap_unit_with_join_rule("replica-invite", "invite");
+    let genesis_governor = TestDatabase::lease().await;
+    let genesis_pool = genesis_governor.pool();
+    let unit = heap_future(|| admit(&genesis_pool, "replica-invite", "invite")).await;
     let realm_id = unit.transactions[0].event.realm_id.clone();
     let last = unit.transactions.last().unwrap();
     let bob = remote_member("replica-bob");
@@ -1755,7 +1768,7 @@ async fn committed_replication_opens_the_stream_with_a_hosted_invite_accept() {
         Some((Some("join".to_owned()), true))
     );
 
-    anchor_at_join(&store, &accept, vec![joined_row(&accept, &bob)]).await;
+    anchor_at_join(&store, &unit, &accept, vec![joined_row(&accept, &bob)]).await;
     let leave = membership_request(&accept.authority_commit, bob.clone(), &bob, "leave");
     assert_eq!(
         store
@@ -1820,7 +1833,9 @@ async fn old_governance_replica_replay_is_idempotent_but_successor_writes_nothin
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let unit = bootstrap_unit_with_join_rule("old-replica-tenure", "public");
+    let genesis_governor = TestDatabase::lease().await;
+    let genesis_pool = genesis_governor.pool();
+    let unit = heap_future(|| admit(&genesis_pool, "old-replica-tenure", "public")).await;
     let realm_id = unit.transactions[0].event.realm_id.clone();
     let actor = remote_member("old-replica-tenure-member");
     let join = membership_request(
@@ -1834,7 +1849,7 @@ async fn old_governance_replica_replay_is_idempotent_but_successor_writes_nothin
         store.install_committed_replica(&opening).await.unwrap(),
         CommittedReplicaOutcome::Stored
     );
-    anchor_at_join(&store, &join, vec![joined_row(&join, &actor)]).await;
+    anchor_at_join(&store, &unit, &join, vec![joined_row(&join, &actor)]).await;
     store
         .record_remote_authority(
             &successor_authority(governance_authority(&unit)),
@@ -1890,7 +1905,9 @@ async fn old_governance_snapshot_cannot_anchor_or_publish_current() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let unit = bootstrap_unit_with_join_rule("old-snapshot-tenure", "public");
+    let genesis_governor = TestDatabase::lease().await;
+    let genesis_pool = genesis_governor.pool();
+    let unit = heap_future(|| admit(&genesis_pool, "old-snapshot-tenure", "public")).await;
     let realm_id = unit.transactions[0].event.realm_id.clone();
     let actor = remote_member("old-snapshot-tenure-member");
     let join = membership_request(
@@ -1920,6 +1937,7 @@ async fn old_governance_snapshot_cannot_anchor_or_publish_current() {
         .install_replica_anchor(&{
             let mut install = ReplicaAnchorInstall {
                 realm_id: realm_id.clone(),
+                genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
                 join_commit_id: commit.commit_id.clone(),
                 governance_generation: 0,
                 snapshot_head: head.clone(),
@@ -2052,7 +2070,9 @@ async fn committed_replication_rejects_broken_predecessor_and_no_local_member() 
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let unit = bootstrap_unit_with_join_rule("replica-negative", "public");
+    let genesis_governor = TestDatabase::lease().await;
+    let genesis_pool = genesis_governor.pool();
+    let unit = heap_future(|| admit(&genesis_pool, "replica-negative", "public")).await;
     let last = unit.transactions.last().unwrap();
     let alice = remote_member("replica-negative-alice");
     let join = membership_request(last, alice.clone(), &alice, "join");
@@ -2079,7 +2099,7 @@ async fn committed_replication_rejects_broken_predecessor_and_no_local_member() 
         .install_committed_replica(&replica(&unit, &join, true))
         .await
         .unwrap();
-    anchor_at_join(&store, &join, vec![joined_row(&join, &alice)]).await;
+    anchor_at_join(&store, &unit, &join, vec![joined_row(&join, &alice)]).await;
     let next = profile(&join.authority_commit, "Next");
     let after = profile(&next.authority_commit, "After");
     assert_code(
@@ -2310,6 +2330,7 @@ async fn circle_create_withheld_gap_allows_next_realm_replica() {
         .install_replica_anchor(&{
             let mut install = ReplicaAnchorInstall {
                 realm_id: realm_id.clone(),
+                genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
                 join_commit_id: join.authority_commit.commit.commit_id.clone(),
                 governance_generation: join.authority_commit.commit.governance_generation,
                 snapshot_head: material.visible_stream_heads[0].clone(),
@@ -3265,6 +3286,7 @@ async fn replica_bootstrap_waits_for_authority_without_holding_anchor_case() {
     let head = snapshot.visible_stream_heads[0].clone();
     let install = ReplicaAnchorInstall {
         realm_id: realm.clone(),
+        genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
         join_commit_id: join.authority_commit.commit.commit_id.clone(),
         governance_generation: snapshot.governance_generation,
         snapshot_head: head.clone(),
@@ -3336,8 +3358,96 @@ async fn replica_bootstrap_waits_for_authority_without_holding_anchor_case() {
     );
 }
 
-/// Collaboration remains transferable with an authenticated since-join
-/// genesis current; a receiver need not invent the unavailable position 0.
+/// Member bootstrap retains exactly the authenticated founding original while
+/// ordinary history remains bounded by the hosted reader's opening join.
+#[tokio::test]
+async fn member_bootstrap_retains_exact_genesis_without_replaying_history() {
+    heap_future(|| async {
+        let governor_db = TestDatabase::lease().await;
+        let member_db = TestDatabase::lease().await;
+        let pool = governor_db.pool();
+        let member_pool = member_db.pool();
+        let governor = PgAuthorityCommitStore { pool: pool.clone() };
+        let member = PgAuthorityCommitStore { pool: member_pool.clone() };
+        let unit = heap_future(|| admit(&pool, "bootstrap-original-custody", "public")).await;
+        let realm = unit.transactions[0].event.realm_id.clone();
+        let reader = remote_member("bootstrap-original-reader");
+        let join = membership_request(unit.transactions.last().unwrap(), reader.clone(), &reader, "join");
+        let join = heap_future(|| ordinary_realm::source_request(&pool, join)).await;
+        let uow = PgEventCommitUnitOfWork::new(pool.clone());
+        heap_future(|| uow.commit_event(join.clone())).await.unwrap();
+        member.install_committed_replica(&replica(&unit, &join, true)).await.unwrap();
+        let material = governor.member_station_bootstrap_material(
+            &realm, reader.as_account_id().unwrap(), &join.authority_commit.commit.commit_id,
+        ).await.unwrap().unwrap();
+        let snapshot = bootstrap_snapshot_from_material(&material);
+        let genesis = coland_test_support::member_bootstrap::genesis_original(&governor, &realm).await;
+        assert!(genesis.1.is_some(), "the original Human admission froze its producer fact");
+        let install = ReplicaAnchorInstall {
+            realm_id: realm.clone(),
+            genesis_original: genesis.clone(),
+            join_commit_id: join.authority_commit.commit.commit_id.clone(),
+            governance_generation: snapshot.governance_generation,
+            snapshot_head: snapshot.visible_stream_heads[0].clone(),
+            visible_stream_heads: snapshot.visible_stream_heads.clone(),
+            current_state_entries: snapshot.current_state_entries.clone(),
+            verified_snapshot: snapshot.clone(),
+        };
+        assert!(member.committed_event(&realm.event_id()).await.unwrap().is_none());
+        let before = governance_gate_footprint(&member_pool).await;
+        let mut missing = install.clone();
+        missing.genesis_original.1 = None;
+        let mut wrong_signature = install.clone();
+        let proof = wrong_signature.genesis_original.0.event.producer_proof.as_mut().unwrap();
+        let (prefix, _) = proof.jws.rsplit_once('.').unwrap();
+        proof.jws = format!("{prefix}.{}", arkret_canonical::base64url_encode([0_u8;64]));
+        let mut wrong_realm = install.clone();
+        wrong_realm.genesis_original.0.event.realm_id = arkret_wire::RealmId::from_event_id(&join.authority_commit.event.event_id);
+        for invalid in [missing, wrong_signature, wrong_realm] {
+            assert!(member.install_replica_anchor(&invalid).await.is_err());
+            assert_eq!(governance_gate_footprint(&member_pool).await, before,
+                "invalid original custody must roll back snapshot, original, fact and anchor together");
+        }
+        let head_before = member.held_stream_head_commit(&join.authority_commit.commit.stream_ref).await.unwrap();
+        member.install_replica_anchor(&install).await.unwrap();
+        let original = member.committed_event(&realm.event_id()).await.unwrap().unwrap();
+        assert_eq!(original.event, genesis.0.event);
+        assert_eq!(original.commit, genesis.0.commit);
+        assert_eq!(member.producer_signer_fact(&original.event, &original.commit).await.unwrap(), genesis.1);
+        arkret_identity::account_device_signer_evidence::verify_historical_producer_event_signature(
+            &original.event, genesis.1.as_ref().unwrap(), realm.digest_suite_code().digest_suite(),
+        ).unwrap();
+        let producer = genesis.1.as_ref().unwrap().as_account_device().unwrap();
+        let selector = arkret_models_identity::SignerKeyQuerySelector::HistoricalEvent {
+            sender: arkret_models_identity::HistoricalSignerKeyQuerySender::AccountDevice {
+                actor: producer.actor.clone(), device_id:producer.device_id.clone(),
+                verification_method:producer.verification_method.clone(),
+                committed_event_ref:arkret_wire::CommittedEventRef {
+                    event_id:original.event.event_id.clone(),commit_id:original.commit.commit_id.clone(),
+                    stream_ref:original.commit.stream_ref.clone(),stream_position:0,
+                },
+            },
+        };
+        assert!(matches!(member.historical_producer_signer_key(&realm,&selector).await.unwrap(),
+            Some(arkret_models_identity::SignerKeyResolution::HistoricalResolved { key, .. }) if key == producer.key));
+        assert_eq!(member.held_stream_head_commit(&join.authority_commit.commit.stream_ref).await.unwrap(), head_before);
+        let coland_storage::MemberCommittedEventRead::Read(view) = member.committed_event_for_member(
+            &realm.event_id(), &reader, &member_station(),
+        ).await.unwrap() else { panic!("current joined member resolves its exact founding original") };
+        assert!(matches!(*view, arkret_wire::CommittedEventView::Full(ref full) if full == &genesis.0));
+        let coland_storage::AccountStreamScan::Page(page) = member.scan_stream_for_actor(
+            &arkret_wire::StreamScanRequestBody { realm_id:realm.clone(),stream_ref:join.authority_commit.commit.stream_ref.clone(),direction:arkret_wire::StreamScanDirection::Before(Some(1)),limit:1 },
+            &reader, &member_station(),
+        ).await.unwrap() else { panic!("the exact current joined reader has a proven ordinary floor") };
+        assert!(page.committed_events.is_empty(), "original custody never opens pre-join ordinary history");
+        member.install_replica_anchor(&install).await.unwrap();
+        assert_eq!(member.held_stream_head_commit(&join.authority_commit.commit.stream_ref).await.unwrap(), head_before);
+        assert_eq!(member.producer_signer_fact(&original.event, &original.commit).await.unwrap(), genesis.1);
+    }).await;
+}
+
+/// Collaboration remains transferable with the retained original Genesis and
+/// its separately authenticated since-join current projection.
 #[tokio::test]
 async fn collaboration_governance_change_replica_uses_verified_since_join_genesis() {
     heap_future(collaboration_governance_change_replica_case).await;
@@ -3387,6 +3497,7 @@ async fn collaboration_governance_change_replica_case() {
     member
         .install_replica_anchor(&ReplicaAnchorInstall {
             realm_id: realm.clone(),
+            genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
             join_commit_id: join.authority_commit.commit.commit_id.clone(),
             governance_generation: snapshot.governance_generation,
             snapshot_head: snapshot.visible_stream_heads[0].clone(),
@@ -3398,7 +3509,7 @@ async fn collaboration_governance_change_replica_case() {
         .unwrap();
     let mut conn = member_pool.get().await.unwrap();
     assert_eq!(diesel::sql_query("SELECT COUNT(*)::bigint AS count FROM realm_commits WHERE realm_id=$1 AND stream_ref->>'kind'='realm' AND stream_position=0")
-        .bind::<Text,_>(realm.as_str()).get_result::<CountRow>(&mut *conn).await.unwrap().count, 0);
+        .bind::<Text,_>(realm.as_str()).get_result::<CountRow>(&mut *conn).await.unwrap().count, 1);
     drop(conn);
     let mut change = sourced(next_request_for_actor(
         &join.authority_commit,
@@ -3638,6 +3749,7 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
     member
         .install_replica_anchor(&ReplicaAnchorInstall {
             realm_id: realm.clone(),
+            genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
             join_commit_id: join.authority_commit.commit.commit_id.clone(),
             governance_generation: snapshot.governance_generation,
             snapshot_head: snapshot.visible_stream_heads[0].clone(),
@@ -3761,6 +3873,7 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
         member
             .install_replica_anchor(&ReplicaAnchorInstall {
                 realm_id: realm.clone(),
+                genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
                 join_commit_id: join.authority_commit.commit.commit_id.clone(),
                 governance_generation: narrow.governance_generation,
                 snapshot_head: narrow.visible_stream_heads[0].clone(),
@@ -4767,6 +4880,7 @@ async fn member_station_anchor_case() {
         .install_replica_anchor(&{
             let mut install = ReplicaAnchorInstall {
                 realm_id: realm_id.clone(),
+                genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
                 join_commit_id: join.authority_commit.commit.commit_id.clone(),
                 governance_generation: join.authority_commit.commit.governance_generation,
                 snapshot_head: head.clone(),
@@ -5506,7 +5620,9 @@ async fn replicated_welcomes_queue_with_their_commit_replica_or_on_replay() {
         device.principal_id.clone(),
         member_station(),
     ));
-    let unit = bootstrap_unit_with_join_rule("replica-welcomes", "public");
+    let genesis_governor = TestDatabase::lease().await;
+    let genesis_pool = genesis_governor.pool();
+    let unit = heap_future(|| admit(&genesis_pool, "replica-welcomes", "public")).await;
     let realm_id = unit.transactions[0].event.realm_id.clone();
     let last = unit.transactions.last().unwrap();
     let join = membership_request(last, bob.clone(), &bob, "join");
@@ -5514,7 +5630,7 @@ async fn replicated_welcomes_queue_with_their_commit_replica_or_on_replay() {
         .install_committed_replica(&replica(&unit, &join, true))
         .await
         .unwrap();
-    anchor_at_join(&store, &join, vec![joined_row(&join, &bob)]).await;
+    anchor_at_join(&store, &unit, &join, vec![joined_row(&join, &bob)]).await;
     let genesis_ref = join.authority_commit.event.event_id.clone();
 
     // A Commit carrying three Welcomes: one passes, one names a claim that is
@@ -5649,7 +5765,9 @@ async fn recipient_mls_add_attestation_outbox_is_atomic_durable_and_idempotent()
         device.principal_id.clone(),
         member_station(),
     ));
-    let unit = bootstrap_unit_with_join_rule("roster-outbox", "public");
+    let genesis_governor = TestDatabase::lease().await;
+    let genesis_pool = genesis_governor.pool();
+    let unit = heap_future(|| admit(&genesis_pool, "roster-outbox", "public")).await;
     let last = unit.transactions.last().unwrap();
     let realm_id = last.event.realm_id.clone();
     let join = membership_request(last, bob.clone(), &bob, "join");
@@ -5657,7 +5775,7 @@ async fn recipient_mls_add_attestation_outbox_is_atomic_durable_and_idempotent()
         .install_committed_replica(&replica(&unit, &join, true))
         .await
         .unwrap();
-    anchor_at_join(&store, &join, vec![joined_row(&join, &bob)]).await;
+    anchor_at_join(&store, &unit, &join, vec![joined_row(&join, &bob)]).await;
     // This storage test treats the Genesis reference as an input already
     // verified by the serving layer. It does not assert MLS admission here.
     let genesis_ref = join.authority_commit.event.event_id.clone();
@@ -6241,6 +6359,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         .install_replica_anchor(&{
             let mut install = ReplicaAnchorInstall {
                 realm_id: realm.clone(),
+                genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
                 join_commit_id: join.authority_commit.commit.commit_id.clone(),
                 governance_generation: join.authority_commit.commit.governance_generation,
                 snapshot_head: realm_head,
@@ -6544,6 +6663,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         .install_replica_anchor(&{
             let mut install = ReplicaAnchorInstall {
                 realm_id: realm.clone(),
+                genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
                 join_commit_id: circle_join.authority_commit.commit.commit_id.clone(),
                 governance_generation: circle_join.authority_commit.commit.governance_generation,
                 snapshot_head: circle_head,
@@ -6660,6 +6780,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         member
             .install_replica_anchor(&ReplicaAnchorInstall {
                 realm_id: realm.clone(),
+                genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
                 join_commit_id: other_join.authority_commit.commit.commit_id.clone(),
                 governance_generation: other_material.governance_generation,
                 snapshot_head: other_head,
@@ -6887,6 +7008,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                     member
                         .install_replica_anchor(&ReplicaAnchorInstall {
                             realm_id: realm.clone(),
+                            genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
                             join_commit_id: other_join.authority_commit.commit.commit_id.clone(),
                             governance_generation: fresh.governance_generation,
                             snapshot_head: head,
@@ -7021,6 +7143,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                         archived
                             .install_replica_anchor(&ReplicaAnchorInstall {
                                 realm_id: realm.clone(),
+                                genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
                                 join_commit_id: other_join
                                     .authority_commit
                                     .commit
@@ -7057,6 +7180,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                             .clone();
                         let install = ReplicaAnchorInstall {
                             realm_id: realm.clone(),
+                            genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
                             join_commit_id: request.authority_commit.commit.commit_id.clone(),
                             governance_generation: circle_material.governance_generation,
                             snapshot_head: circle_head,
@@ -7342,6 +7466,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                     member
                         .install_replica_anchor(&ReplicaAnchorInstall {
                             realm_id: realm.clone(),
+                            genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
                             join_commit_id: circle_join.authority_commit.commit.commit_id.clone(),
                             governance_generation: fresh.governance_generation,
                             snapshot_head: head,
@@ -7371,6 +7496,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                     member
                         .install_replica_anchor(&ReplicaAnchorInstall {
                             realm_id: realm.clone(),
+                            genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
                             join_commit_id: join.authority_commit.commit.commit_id.clone(),
                             governance_generation: realm_fresh.governance_generation,
                             snapshot_head: realm_head,
@@ -7449,6 +7575,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
                     assert_eq!(fresh_head.commit_id, next.authority_commit.commit.commit_id);
                     let install = ReplicaAnchorInstall {
                         realm_id: realm.clone(),
+                        genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
                         join_commit_id: circle_join.authority_commit.commit.commit_id.clone(),
                         governance_generation: fresh.governance_generation,
                         snapshot_head: fresh_head,
@@ -7711,6 +7838,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         assert_bootstrap_join_floor(&snapshot, &circle_join.authority_commit.commit);
         ReplicaAnchorInstall {
             realm_id: realm.clone(),
+            genesis_original: coland_test_support::member_bootstrap::genesis_from_unit(&unit),
             join_commit_id: circle_join.authority_commit.commit.commit_id.clone(),
             governance_generation: material.governance_generation,
             snapshot_head,

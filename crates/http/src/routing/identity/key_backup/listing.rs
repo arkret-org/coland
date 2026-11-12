@@ -22,7 +22,30 @@ pub(crate) async fn list_key_backups(
     limit: QueryParam<u32, false>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeysBackupsPage> {
+) -> coland_http::result::GuardedJsonResult<arkret_models_integration::KeysBackupsListResponseBody>
+{
+    let parameters = arkret_models_crypto::KeysBackupsListParameters::from_query_pairs(
+        url::form_urlencoded::parse(req.uri().query().unwrap_or_default().as_bytes()),
+    )
+    .map_err(|error| crate::app_error!(QueryInvalid, error.to_string()))?;
+    match parameters {
+        arkret_models_crypto::KeysBackupsListParameters::Device(query) => {
+            return super::native::head(depot, req, query).await;
+        }
+        arkret_models_crypto::KeysBackupsListParameters::Manager(query) => {
+            return super::native::inventory(depot, req, query).await;
+        }
+        arkret_models_crypto::KeysBackupsListParameters::Account(_) => {}
+    }
+    if depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>()
+        .is_ok()
+        || req.headers().contains_key("source-service-id")
+    {
+        return Err(AppError::capability_denied(
+            "native backup role requires its exact native purpose",
+        ));
+    }
     if agent_id.into_inner().is_some() {
         return Err(AppError::not_found("account backups unavailable"));
     }
@@ -40,6 +63,12 @@ pub(crate) async fn list_key_backups(
         arkret_wire::ServiceOperationId::SELF_KEYS_BACKUPS_READ_LIST_V1,
     )
     .await
+    .and_then(|Json(page)| {
+        coland_http::result::guarded_json_ok(
+            arkret_models_integration::KeysBackupsListResponseBody::Account(page),
+            None,
+        )
+    })
 }
 
 #[salvo::oapi::endpoint(
@@ -302,7 +331,7 @@ fn invalid_cursor(error: impl std::fmt::Display) -> AppError {
         format!("invalid backup cursor: {error}")
     )
 }
-fn cursor_authority_error(error: arkret_server::CursorAuthorityError) -> AppError {
+pub(super) fn cursor_authority_error(error: arkret_server::CursorAuthorityError) -> AppError {
     match error {
         arkret_server::CursorAuthorityError::ParamInvalid(message) => {
             AppError::param_invalid(message)

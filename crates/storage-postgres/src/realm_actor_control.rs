@@ -185,6 +185,23 @@ pub(crate) async fn recovery_service_fact(
             .map_err(denied)?
             .target_actor_id
         }
+        EventKind::KeyBackupActiveSeries => {
+            let record: arkret_models_collaboration::events_payloads::KeyBackupActiveSeries =
+                serde_json::from_value(json!(event.payload)).map_err(denied)?;
+            arkret_models_collaboration::events_payloads::validate_key_backup_active_series_record(
+                &record,
+            )
+            .map_err(denied)?;
+            if record.actor_id.as_realm_actor_id().is_none()
+                || event.authorization_ref.is_some()
+                || event.executed_by.is_some()
+            {
+                return Err(denied(
+                    "native series signer requires its exact maintenance branch",
+                ));
+            }
+            record.actor_id
+        }
         _ => return Err(denied("recovery signer fact requires a recovery Event")),
     };
     let registration = crate::managed_message_actor::registration(conn, event).await?;
@@ -213,7 +230,7 @@ pub(crate) async fn recovery_service_fact(
     )
     .await?;
     if manager["service_id"] != json!(registration.service_id)
-        || recovery["enabled"] != true
+        || (event.kind != EventKind::KeyBackupActiveSeries && recovery["enabled"] != true)
         || recovery["kind"] != "manager_native"
     {
         return Err(denied(
@@ -349,6 +366,7 @@ pub(crate) async fn commit_creation(
         .bind::<Nullable<Jsonb>,_>(candidate.external_ref.as_ref().map(|value| json!(value)))
         .bind::<Text,_>(event.event_id.as_str()).bind::<Text,_>(commit.commit_id.as_str())
         .execute(&mut *conn).await.map_err(PersistenceError::database)?;
+    crate::realm_actor_content_backup::initialize_namespace(conn, &candidate.actor_id).await?;
     for CurrentState::Value {
         selector,
         source_stream_ref,

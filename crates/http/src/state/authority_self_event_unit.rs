@@ -721,6 +721,57 @@ pub(crate) async fn submit_applet_event(
     event: Event,
     service_did_document: arkret_identity::DidDocument,
 ) -> ServiceResult<AuthoritySubmitResponseBody> {
+    if event.kind == arkret_wire::EventKind::KeyBackupActiveSeries {
+        let producer = coland_storage::AppletEventProducerGuard {
+            service_did_document,
+        };
+        let committed_at = arkret_canonical::normalize_timestamp_canonical(Utc::now());
+        let fact = state
+            .authority_commits()
+            .prepare_service_signer_fact(&event, &producer, committed_at)
+            .await?;
+        let method = arkret_wire::DidUrl::new(
+            crate::routing::federation::federation_service_signature_key_id(
+                state.service_did().as_str(),
+            ),
+        )
+        .map_err(|error| ServiceError::Internal(error.to_string()))?;
+        let transaction = state
+            .authority_commits()
+            .prepare_self_event_transaction_with_signer_fact(
+                &event,
+                &state.service_core_id(),
+                method,
+                state.notary_signing_key().as_ref(),
+                committed_at,
+                Some(&fact),
+            )
+            .await?;
+        let outcome = state
+            .persistence()
+            .commit_native_backup_series(
+                coland_storage::KeyBackupActiveSeriesCommitWrite {
+                    commit: transaction,
+                    queued_at: committed_at,
+                },
+                &producer,
+            )
+            .await?;
+        return Ok(match outcome {
+            coland_storage::KeyBackupActiveSeriesCommitOutcome::Committed(commit) => {
+                AuthoritySubmitResponseBody::Accepted {
+                    status: AuthorityCommitStatus::Committed,
+                    commit,
+                }
+            }
+            coland_storage::KeyBackupActiveSeriesCommitOutcome::Duplicate(commit) => {
+                AuthoritySubmitResponseBody::Accepted {
+                    status: AuthorityCommitStatus::Duplicate,
+                    commit,
+                }
+            }
+        });
+    }
     let submission = EventAdmissionSubmission {
         event,
         approval_signatures: None,

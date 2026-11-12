@@ -19,6 +19,12 @@ struct JsonRow {
     #[diesel(sql_type=Jsonb)]
     value: Value,
 }
+
+#[derive(Clone, Copy)]
+enum DeviceCredentialGate {
+    ActiveBusiness,
+    NativeBackupPutOutcome,
+}
 fn invalid(message: impl std::fmt::Display) -> PgTransactionError {
     PersistenceError::SchemaViolation(message.to_string()).into()
 }
@@ -132,6 +138,56 @@ pub(crate) async fn current_in_connection(
     device: &DeviceId,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<AppletManagedDeviceAuthority>, PgTransactionError> {
+    current_with_gate_in_connection(
+        conn,
+        actor,
+        device,
+        now,
+        DeviceCredentialGate::ActiveBusiness,
+    )
+    .await
+}
+
+pub(crate) async fn backup_put_credential_in_connection(
+    conn: &mut AsyncPgConnection,
+    actor: &ActorId,
+    device: &DeviceId,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<AppletManagedDeviceAuthority>, PgTransactionError> {
+    current_with_gate_in_connection(
+        conn,
+        actor,
+        device,
+        now,
+        DeviceCredentialGate::NativeBackupPutOutcome,
+    )
+    .await
+}
+
+pub(crate) async fn backup_put_credential(
+    pool: &PgPool,
+    actor: &ActorId,
+    device: &DeviceId,
+    now: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<Option<AppletManagedDeviceAuthority>> {
+    let mut conn = pg_conn(pool).await?;
+    conn.transaction::<_, PgTransactionError, _>(async |conn| {
+        sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *conn)
+            .await?;
+        backup_put_credential_in_connection(conn, actor, device, now).await
+    })
+    .await
+    .map_err(PgTransactionError::into_persistence)
+}
+
+async fn current_with_gate_in_connection(
+    conn: &mut AsyncPgConnection,
+    actor: &ActorId,
+    device: &DeviceId,
+    now: chrono::DateTime<chrono::Utc>,
+    gate: DeviceCredentialGate,
+) -> Result<Option<AppletManagedDeviceAuthority>, PgTransactionError> {
     let Some(subject) = actor.as_realm_actor_id() else {
         return Ok(None);
     };
@@ -139,7 +195,12 @@ pub(crate) async fn current_in_connection(
     let Some((value, source)) = optional_current_source(
         conn,
         actor,
-        json!({"kind":"realm_actor_device_authorization","actor_id":actor,"device_id":device}),
+        json!(
+            arkret_wire::CurrentSelector::RealmActorDeviceAuthorization {
+                actor_id: actor.clone(),
+                device_id: device.clone()
+            }
+        ),
     )
     .await?
     else {
@@ -153,32 +214,44 @@ pub(crate) async fn current_in_connection(
     let (value, _) = current_source(
         conn,
         actor,
-        json!({"kind":"realm_actor_manager","actor_id":actor}),
+        json!(arkret_wire::CurrentSelector::RealmActorManager {
+            actor_id: actor.clone()
+        }),
     )
     .await?;
     let manager: RealmActorManagerValue = decode(value)?;
     let (value, _) = current_source(
         conn,
         actor,
-        json!({"kind":"realm_actor_recovery","actor_id":actor}),
+        json!(arkret_wire::CurrentSelector::RealmActorRecovery {
+            actor_id: actor.clone()
+        }),
     )
     .await?;
     let recovery: RealmActorRecoveryValue = decode(value)?;
     let (value, _) = current_source(
         conn,
         actor,
-        json!({"kind":"realm_actor_device_generation","actor_id":actor}),
+        json!(arkret_wire::CurrentSelector::RealmActorDeviceGeneration {
+            actor_id: actor.clone()
+        }),
     )
     .await?;
     let generation: DeviceGenerationState = decode(value)?;
-    for gate in ["owner", "governance"] {
+    for status_gate in [
+        arkret_wire::RealmActorStatusGate::Owner,
+        arkret_wire::RealmActorStatusGate::Governance,
+    ] {
         let (value, _) = current_source(
             conn,
             actor,
-            json!({"kind":"realm_actor_status","actor_id":actor,"gate":gate}),
+            json!(arkret_wire::CurrentSelector::RealmActorStatus {
+                actor_id: actor.clone(),
+                gate: status_gate
+            }),
         )
         .await?;
-        if value != "active" {
+        if value != "active" && matches!(gate, DeviceCredentialGate::ActiveBusiness) {
             return Err(denied("Realm actor status gate is not active"));
         }
     }
@@ -285,6 +358,39 @@ pub(crate) async fn consume_nonce(
     metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
     retain_until: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<AppletManagedDeviceAuthority> {
+    consume_nonce_with_gate(
+        pool,
+        expected,
+        metadata,
+        retain_until,
+        DeviceCredentialGate::ActiveBusiness,
+    )
+    .await
+}
+
+pub(crate) async fn consume_backup_put_nonce(
+    pool: &PgPool,
+    expected: &AppletManagedDeviceAuthority,
+    metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+    retain_until: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<AppletManagedDeviceAuthority> {
+    consume_nonce_with_gate(
+        pool,
+        expected,
+        metadata,
+        retain_until,
+        DeviceCredentialGate::NativeBackupPutOutcome,
+    )
+    .await
+}
+
+async fn consume_nonce_with_gate(
+    pool: &PgPool,
+    expected: &AppletManagedDeviceAuthority,
+    metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+    retain_until: chrono::DateTime<chrono::Utc>,
+    gate: DeviceCredentialGate,
+) -> PersistenceResult<AppletManagedDeviceAuthority> {
     metadata
         .validate()
         .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
@@ -297,7 +403,7 @@ pub(crate) async fn consume_nonce(
   if locked.is_none() {return Err(denied("Realm authority unavailable"));}
   let now=chrono::Utc::now();
   if retain_until<=now || retain_until>now+chrono::Duration::seconds(arkret_signatures::http_signature::HTTP_SIGNATURE_MAX_LIFETIME_SECONDS+arkret_signatures::http_signature::HTTP_SIGNATURE_CREATED_SKEW_SECONDS) {return Err(denied("Device signature window is not current"));}
-  let current=current_in_connection(conn,&expected.actor_id,&expected.device_id,now).await?.ok_or_else(||denied("Realm Device disappeared"))?;
+  let current=current_with_gate_in_connection(conn,&expected.actor_id,&expected.device_id,now,gate).await?.ok_or_else(||denied("Realm Device disappeared"))?;
   if &current!=expected || metadata.actor_id!=current.actor_id || metadata.device_id!=current.device_id
     || metadata.authorization_event_id!=current.authorization_ref.event_id || metadata.applet_id!=current.applet_id
     || !current.scopes.contains_scope(&metadata.effective_scope) {return Err(denied("Realm Device current differs from signed metadata"));}

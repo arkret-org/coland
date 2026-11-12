@@ -2305,6 +2305,30 @@ impl RealmAuthorizationCut {
         self.require_membership_basis(kind.as_str())
     }
 
+    pub(crate) fn require_native_backup_subject(&self) -> PersistenceResult<()> {
+        if self.lifecycle.terminal {
+            return Err(PersistenceError::Conflict(
+                "failed_precondition: terminal Realm refuses a new native backup".into(),
+            ));
+        }
+        if self.lifecycle.archived || self.lifecycle.frozen {
+            return Err(PersistenceError::Conflict(
+                "realm_frozen: archived or frozen Realm refuses a new native backup".into(),
+            ));
+        }
+        self.require_membership_basis("ak.self.keys.backups.resource.replace.v1")
+    }
+
+    pub(crate) fn require_native_archive_lifecycle(&self) -> PersistenceResult<()> {
+        if self.lifecycle.terminal {
+            return Err(PersistenceError::Conflict(
+                "failed_precondition: terminal Realm has no native archive maintenance authority"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn require_membership_basis(&self, operation: &str) -> PersistenceResult<()> {
         if self.profile_authorized() {
             return if self.actor_is_joined() {

@@ -3,7 +3,11 @@ fn mount_completion_receiver(native: &NativeService, edge: Arc<arkret_bridge_run
         native.completion_handler.lock().unwrap().is_none(),
         "real receiver must not be intercepted by a callback"
     );
-    let router = arkret_bridge_runtime::web::managed_applet_host_router(edge).unwrap();
+    let router = arkret_bridge_runtime::web::managed_applet_host_router_with_manager(
+        edge.clone(),
+        fixture_runtime_manager(native, edge),
+    )
+    .unwrap();
     *native.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(router)));
 }
 

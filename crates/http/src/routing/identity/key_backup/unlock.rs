@@ -196,7 +196,7 @@ pub(super) fn validate_key_backup_unlock_proof_shape(
     Ok(())
 }
 
-fn unlock_audience(state: &AppState) -> Result<String, AppError> {
+pub(super) fn unlock_audience(state: &AppState) -> Result<String, AppError> {
     let url = reqwest::Url::parse(&state.config().public_base_url)
         .map_err(|error| AppError::internal(error.to_string()))?;
     Ok(url.origin().ascii_serialization())
@@ -401,15 +401,20 @@ pub(super) async fn verify_key_backup_unlock_proof(
 pub(super) async fn issue_key_backup_unlock_challenge(
     aa: AuthArgs,
     backup_id: PathParam<String>,
-    body: JsonBody<arkret_models_crypto::KeysBackupsIssueUnlockChallengeRequestBody>,
+    body: JsonBody<arkret_models_crypto::KeysBackupsIssueUnlockChallengeBody>,
     depot: &mut Depot,
     req: &mut Request,
     res: &mut Response,
-) -> JsonResult<arkret_models_crypto::KeysBackupsUnlockChallenge> {
+) -> JsonResult<arkret_models_crypto::KeysBackupsIssueUnlockChallengeResponseBody> {
     crate::routing::authority_commit::no_store(res);
     use rand::RngExt as _;
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let request = body.into_inner();
+    let request = match body.into_inner() {
+        arkret_models_crypto::KeysBackupsIssueUnlockChallengeBody::Account(request) => request,
+        arkret_models_crypto::KeysBackupsIssueUnlockChallengeBody::Native(request) => {
+            return super::native::issue_unlock(depot, req, backup_id.into_inner(), request).await;
+        }
+    };
     request
         .validate()
         .map_err(|error| schema_error(error.to_string()))?;
@@ -487,7 +492,9 @@ pub(super) async fn issue_key_backup_unlock_challenge(
             .issue_human_pcr_history_unlock_challenge(&reader, &challenge)
             .await
             .map_err(history_unlock_error)?;
-        return json_ok(stored);
+        return json_ok(
+            arkret_models_crypto::KeysBackupsIssueUnlockChallengeResponseBody::Account(stored),
+        );
     }
     let stored = state
         .key_backups()
@@ -498,7 +505,12 @@ pub(super) async fn issue_key_backup_unlock_challenge(
         )
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
-    json_ok(serde_json::from_value(stored).map_err(|error| AppError::internal(error.to_string()))?)
+    json_ok(
+        arkret_models_crypto::KeysBackupsIssueUnlockChallengeResponseBody::Account(
+            serde_json::from_value(stored)
+                .map_err(|error| AppError::internal(error.to_string()))?,
+        ),
+    )
 }
 
 pub(super) fn history_unlock_error(error: coland_services::ServiceError) -> AppError {

@@ -19,6 +19,7 @@ async fn terminal_replication_respects_last_member_departure_after_restart() {
             .unwrap();
         Box::pin(anchor_at_join(
             &store,
+            &unit,
             &join,
             vec![joined_row(&join, &alice)],
         ))
@@ -427,6 +428,7 @@ async fn replica_terminal_admission_is_atomic_and_preserves_retained_history() {
         .unwrap();
     Box::pin(anchor_at_join(
         &store,
+        &unit,
         &join,
         vec![joined_row(&join, &alice)],
     ))

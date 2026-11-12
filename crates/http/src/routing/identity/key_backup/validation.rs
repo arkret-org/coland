@@ -114,6 +114,9 @@ pub(super) fn validate_key_backup_encryption_typed(backup: &KeyBackup) -> Result
             .with_reason_code(reason)
         })?;
     match backup.encryption.recipient_method {
+        KeyBackupRecipientMethod::RealmActorRecovery => Err(schema_error(
+            "realm_actor_recovery key backups require native Device authentication",
+        )),
         KeyBackupRecipientMethod::PassphraseKdf => {
             validate_key_backup_kdf_typed(backup)?;
             let nonce_salt = backup

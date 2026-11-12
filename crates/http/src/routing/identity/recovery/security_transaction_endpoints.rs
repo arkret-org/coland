@@ -1308,7 +1308,10 @@ async fn execute_rotation_erase(
         .await
         .map_err(recovery_service_error)?;
         if generation.map(|generation| generation.current_ref)
-            != Some(active.source_commit_ref.device_generation_ref)
+            != active
+                .source_commit_ref
+                .as_ref()
+                .map(|source| source.device_generation_ref)
         {
             return Err(crate::app_error!(
                 FailedPrecondition,

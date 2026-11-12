@@ -128,9 +128,12 @@ pub(crate) async fn load_agent_participation_outcome(
     state: &AppState,
     agent_id: &str,
 ) -> Result<AgentParticipationResponseBody, AppError> {
+    let agent_id = arkret_wire::DidCoreId::new(agent_id.to_owned()).map_err(|error| {
+        AppError::internal(format!("Agent participation identity is invalid: {error}"))
+    })?;
     let selections = state
         .agent_participations()
-        .selections(agent_id)
+        .selections(agent_id.as_str())
         .await
         .map_err(|err| AppError::internal(format!("participation read failed: {err}")))?;
     let mut entries = Vec::with_capacity(selections.len());
@@ -150,7 +153,7 @@ pub(crate) async fn load_agent_participation_outcome(
         let version = row.get("version").and_then(Value::as_u64).unwrap_or(0);
         if version == 0
             || version > MAX_PARTICIPATION_REPLACE_EXPECTED_VERSION
-            || row.get("agent_id").and_then(Value::as_str) != Some(agent_id)
+            || row.get("agent_id").and_then(Value::as_str) != Some(agent_id.as_str())
             || row.get("scope_key").and_then(Value::as_str) != Some(scope.scope_key().as_str())
             || row.get("realm_id").and_then(Value::as_str) != Some(scope.realm_id().as_str())
             || row.get("scope_kind").and_then(Value::as_str)
@@ -179,9 +182,7 @@ pub(crate) async fn load_agent_participation_outcome(
         });
     }
     Ok(AgentParticipationResponseBody {
-        agent_id: arkret_wire::DidCoreId::new(agent_id.to_owned()).map_err(|error| {
-            AppError::internal(format!("accepted Agent identity is invalid: {error}"))
-        })?,
+        agent_id,
         participation_entries: entries,
     })
 }

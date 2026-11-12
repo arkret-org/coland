@@ -213,6 +213,32 @@ pub trait DeviceRevocationStore: Send + Sync {
         ))
     }
 
+    /// Authenticate only the original live Device credential for native backup
+    /// PUT outcome recovery. This grants no first-PUT or business authority.
+    /// The accepting unit separately applies every current first-PUT gate when
+    /// no matching immutable fixed outcome exists.
+    async fn native_backup_put_device_credential(
+        &self,
+        _actor: &arkret_wire::ActorId,
+        _device_id: &arkret_wire::DeviceId,
+        _now: DateTime<Utc>,
+    ) -> PersistenceResult<Option<AppletManagedDeviceAuthority>> {
+        Err(PersistenceError::SchemaViolation(
+            "native backup PUT credential provider is unavailable".to_owned(),
+        ))
+    }
+
+    async fn consume_native_backup_put_device_nonce(
+        &self,
+        _expected: &AppletManagedDeviceAuthority,
+        _metadata: &arkret_models_integration::AppletManagedDeviceMetadata,
+        _retain_until: DateTime<Utc>,
+    ) -> PersistenceResult<AppletManagedDeviceAuthority> {
+        Err(PersistenceError::SchemaViolation(
+            "native backup PUT nonce provider is unavailable".to_owned(),
+        ))
+    }
+
     /// The accepted `device_generation` of the Account's PCR at one confirmed
     /// cut whose projection matches its latest writer Commit. `None` when this
     /// Station holds no PCR for the Account.

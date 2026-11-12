@@ -4,8 +4,8 @@ pub(super) async fn run_configuration(pool: PgPool) {
     use arkret_bridge_runtime::{ArkretEdge, AuthoringJournal, FileAuthoringStore};
     use arkret_models_integration::{
         AppletConfigurationAdmissionStatus as Admission, AppletConfigurationCommand as Command,
-        AppletConfigurationIntent, AppletConfigurationResponseBody as Outcome,
-        AppletConfigurationRequestBody, AppletConfigurationSelection,
+        AppletConfigurationIntent, AppletConfigurationRequestBody,
+        AppletConfigurationResponseBody as Outcome, AppletConfigurationSelection,
     };
     let (fixture, _governor_server) = boxed_step(|| network_fixture(pool.clone())).await;
     let factory = AppletAuthoringFactory {
@@ -102,8 +102,13 @@ pub(super) async fn run_configuration(pool: PgPool) {
         )
     };
     let make_router = || {
+        let edge = make_edge();
         Arc::new(salvo::Service::new(
-            arkret_bridge_runtime::web::managed_applet_router(make_edge()).unwrap(),
+            arkret_bridge_runtime::web::managed_applet_router_with_manager(
+                edge.clone(),
+                fixture_runtime_manager(&native, edge),
+            )
+            .unwrap(),
         ))
     };
     *native.managed_router.lock().unwrap() = Some(make_router());
@@ -111,7 +116,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
     let mut request = AppletConfigurationRequestBody {
         command: Command::Recover,
         intent: AppletConfigurationIntent {
-                    service_id: package.service_id.clone(),
+            service_id: package.service_id.clone(),
             request_id: format!("ak:request:{}", uuid::Uuid::now_v7())
                 .parse()
                 .unwrap(),
@@ -177,9 +182,17 @@ pub(super) async fn run_configuration(pool: PgPool) {
     assert_eq!(committed.event, **original);
     let completion = durable_completion(&factory.fixture, &candidate.actor_id).await;
     assert_eq!(completion.creation_ref.event_id, original.event_id);
-    assert_eq!(completion.creation_ref.commit_id, committed.commit.commit_id);
-    assert_eq!(durable_completion(&factory.fixture, &candidate.actor_id).await.creation_ref, completion.creation_ref,
-        "repeated durable enumeration preserves the exact original");
+    assert_eq!(
+        completion.creation_ref.commit_id,
+        committed.commit.commit_id
+    );
+    assert_eq!(
+        durable_completion(&factory.fixture, &candidate.actor_id)
+            .await
+            .creation_ref,
+        completion.creation_ref,
+        "repeated durable enumeration preserves the exact original"
+    );
     let delivery = prepare_configuration_completion(&factory.fixture, &completion)
         .await
         .unwrap();
@@ -202,13 +215,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
     let receipt: Value = serde_json::from_str(&receipts[0].1).unwrap();
     let authentication: arkret_models_integration::AppletDeliveryAuthenticationRecord =
         serde_json::from_value(receipt["record"].clone()).unwrap();
-    assert_eq!(
-        receipt["record"]
-            .as_object()
-            .unwrap()
-            .len(),
-        14
-    );
+    assert_eq!(receipt["record"].as_object().unwrap().len(), 14);
     assert_eq!(
         authentication.registration_epoch,
         native.package.registration_epoch
@@ -418,10 +425,19 @@ pub(super) async fn run_configuration(pool: PgPool) {
         "cancelled cannot restart: {cancelled}"
     );
     assert_eq!(cancelled["admission_status"], "cancelled");
-    assert!(cancelled["source_response_body"].get("create_event").is_none());
+    assert!(
+        cancelled["source_response_body"]
+            .get("create_event")
+            .is_none()
+    );
 
     boxed_step(|| {
-        cross_station_configuration(&factory.fixture, &id, &package.service_id, &request.intent.effective_scope)
+        cross_station_configuration(
+            &factory.fixture,
+            &id,
+            &package.service_id,
+            &request.intent.effective_scope,
+        )
     })
     .await;
 
@@ -678,7 +694,10 @@ pub(super) async fn run_configuration(pool: PgPool) {
         .find(|row| row["request_id"] == json!(request.intent.request_id))
         .unwrap();
     assert_eq!(row["outcome"], pending);
-    assert_eq!(row["candidate"], pending["source_response_body"]["create_event"]);
+    assert_eq!(
+        row["candidate"],
+        pending["source_response_body"]["create_event"]
+    );
     assert_eq!(
         row["ingress"]["requester_account_id"],
         json!(factory.fixture.pcr.history.account)
@@ -803,11 +822,13 @@ async fn prepare_configuration_completion(
         .prepare_applet_authoring_completion(
             completion,
             &fixture.state.service_core_id(),
-            &fixture.state.service_verification_method("notary-key").unwrap(),
+            &fixture
+                .state
+                .service_verification_method("notary-key")
+                .unwrap(),
             fixture.state.notary_signing_key().as_ref(),
         )
         .await
-
 }
 
 // The same signed activation is exercised by configuration and native MLS.
@@ -818,7 +839,8 @@ async fn activate_fixture_handoff(
     bytes: &[u8],
 ) {
     use arkret_models_collaboration::authority_commit::{
-        AuthorityRealmAuthorityHandoffRequestBody, HistoricalProducerSignerFactEntry, historical_signer_facts_digest,
+        AuthorityRealmAuthorityHandoffRequestBody, HistoricalProducerSignerFactEntry,
+        historical_signer_facts_digest,
     };
     use arkret_wire::*;
     let source = PgAuthorityCommitStore {
@@ -1262,7 +1284,12 @@ async fn configuration_handoff_resume(
         .unwrap();
     assert_eq!(resumed_delivery.source_id, next.state.service_core_id());
     assert_eq!(
-        resumed_delivery.context.as_ref().unwrap().material.governance_generation,
+        resumed_delivery
+            .context
+            .as_ref()
+            .unwrap()
+            .material
+            .governance_generation,
         manifest.governance_generation + 1
     );
     let arkret_models_integration::RealmActorMaterial::Event { event, commit, .. } =
@@ -1316,7 +1343,10 @@ async fn configuration_handoff_resume(
         resumed["admission_status"], "accepted",
         "continued configuration: {resumed}"
     );
-    assert_eq!(resumed["source_response_body"], pending["source_response_body"]);
+    assert_eq!(
+        resumed["source_response_body"],
+        pending["source_response_body"]
+    );
     let accepted = target
         .committed_event(&candidate.event_id)
         .await
@@ -1426,7 +1456,12 @@ fn configuration_review_vote(
     vote
 }
 
-async fn cross_station_configuration(governor: &Fixture, applet: &AppletId, service: &arkret_wire::DidCoreId, scope: &ScopeRef) {
+async fn cross_station_configuration(
+    governor: &Fixture,
+    applet: &AppletId,
+    service: &arkret_wire::DidCoreId,
+    scope: &ScopeRef,
+) {
     use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let (account_station, _server) = boxed_step(|| network_fixture(database.pool())).await;
@@ -1797,9 +1832,10 @@ pub(super) async fn handoff_runtime_realm(previous: &Fixture, next: &Fixture) {
             "expected_realm_stream_commit_id":head.commit_id,
             "new_governance_station_id":next.state.service_core_id()}),
     );
-    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
-        arkret_wire::EventAdmissionSubmission::new(change.clone()),
-    );
+    let request =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission::new(change.clone()),
+        );
     // Keep client orchestration outside the server's admission stack, exactly
     // as a deployed Account client sending the same signed change would be.
     let (status, outcome) = previous

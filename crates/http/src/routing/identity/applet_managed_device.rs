@@ -94,13 +94,27 @@ pub(crate) async fn verify(
     if !bytes.is_empty() && operation.descriptor().body_class != Some("binary_stream") {
         arkret_canonical::canonical::validate_canonical_bytes(&bytes).map_err(refused)?;
     }
-    let authority = coland_storage::DeviceRevocationStore::applet_managed_device_authority(
-        state.persistence(),
-        &metadata.actor_id,
-        &metadata.device_id,
-        chrono::Utc::now(),
-    )
-    .await
+    // Accepted native PUT outcomes remain recoverable after business status,
+    // epoch or recipient changes. Authenticate the real original credential
+    // here; only the storage first-PUT branch may grant a new publication.
+    let put_outcome = operation == ServiceOperationId::SelfKeysBackupsResourceReplaceV1;
+    let authority = if put_outcome {
+        coland_storage::DeviceRevocationStore::native_backup_put_device_credential(
+            state.persistence(),
+            &metadata.actor_id,
+            &metadata.device_id,
+            chrono::Utc::now(),
+        )
+        .await
+    } else {
+        coland_storage::DeviceRevocationStore::applet_managed_device_authority(
+            state.persistence(),
+            &metadata.actor_id,
+            &metadata.device_id,
+            chrono::Utc::now(),
+        )
+        .await
+    }
     .map_err(authority_error)?
     .ok_or_else(|| refused("accepted identity unavailable"))?;
     if metadata.authorization_event_id != authority.authorization_ref.event_id
@@ -112,8 +126,31 @@ pub(crate) async fn verify(
             "metadata does not bind the current original authorization",
         ));
     }
-    if let Some(arkret_wire::ManagedDeviceScopeRule::AllActions(actions)) =
-        arkret_wire::applet_managed_device_scope_rule(operation)
+    let scope_rule = arkret_wire::applet_managed_device_scope_rule(operation);
+    if let Some(arkret_wire::ManagedDeviceScopeRule::AllActionsAndControl { control, .. }) =
+        scope_rule
+    {
+        if control != arkret_wire::ManagedDeviceControl::NativeRootBackup
+            || !matches!(
+                operation,
+                ServiceOperationId::SelfKeysBackupsResourceReplaceV1
+                    | ServiceOperationId::SelfKeysBackupsReadListV1
+                    | ServiceOperationId::SelfKeysBackupsCommandIssueUnlockChallengeV1
+                    | ServiceOperationId::SelfKeysBackupsCommandUnlockV1
+            )
+        {
+            return Err(refused(
+                "no implemented native root consumer for this combined control rule",
+            ));
+        }
+        // This is only the original action ceiling. Each exact root handler
+        // still checks its native role, target and current transactional gates;
+        // no ordinary business grant is substituted for that consumer.
+    }
+    if let Some(
+        arkret_wire::ManagedDeviceScopeRule::AllActions(actions)
+        | arkret_wire::ManagedDeviceScopeRule::AllActionsAndControl { actions, .. },
+    ) = scope_rule
         && !authority.scopes.permits(&metadata.effective_scope, actions)
     {
         return Err(refused(
@@ -152,11 +189,21 @@ pub(crate) async fn verify(
     .map_err(refused)?;
     let retain_until = chrono::DateTime::from_timestamp(verified.signature_input.expires, 0)
         .ok_or_else(|| refused("signature expiry cannot be represented"))?;
-    let authority = state
-        .persistence()
-        .consume_applet_managed_device_nonce(&authority, &metadata, retain_until)
+    let authority = if put_outcome {
+        coland_storage::DeviceRevocationStore::consume_native_backup_put_device_nonce(
+            state.persistence(),
+            &authority,
+            &metadata,
+            retain_until,
+        )
         .await
-        .map_err(authority_error)?;
+    } else {
+        state
+            .persistence()
+            .consume_applet_managed_device_nonce(&authority, &metadata, retain_until)
+            .await
+    }
+    .map_err(authority_error)?;
     Ok(VerifiedAppletManagedDevice {
         metadata,
         authority,

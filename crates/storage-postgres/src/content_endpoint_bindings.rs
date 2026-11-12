@@ -296,6 +296,33 @@ async fn current_endpoint_in_connection(
             "content endpoint differs from the original actual signer",
         ));
     }
+    current_exact_endpoint_in_connection(conn, group, actor, endpoint, authorization).await
+}
+
+pub(crate) async fn native_backup_endpoint_in_connection(
+    conn: &mut AsyncPgConnection,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    group: &MlsGroupValue,
+) -> PersistenceResult<ContentEndpoint> {
+    current_exact_endpoint_in_connection(
+        conn,
+        group,
+        authority.actor_id.clone(),
+        MlsWelcomeRecipientEndpoint::Device {
+            device_id: authority.device_id.clone(),
+        },
+        authority.authorization_ref.event_id.clone(),
+    )
+    .await
+}
+
+async fn current_exact_endpoint_in_connection(
+    conn: &mut AsyncPgConnection,
+    group: &MlsGroupValue,
+    actor: arkret_wire::ActorId,
+    endpoint: MlsWelcomeRecipientEndpoint,
+    authorization: arkret_wire::EventId,
+) -> PersistenceResult<ContentEndpoint> {
     let rows = sql_query("SELECT binding AS payload FROM mls_endpoint_current_bindings WHERE scope_key=$1 AND epoch=$2 AND current_event_ref=$3 AND actor_id=$4 AND binding->'endpoint'=$5 AND binding->>'authorization_event_ref'=$6 LIMIT 2 FOR SHARE")
         .bind::<Text,_>(crate::mls_group_current_states::scope_key(&group.effective_scope)?)
         .bind::<diesel::sql_types::BigInt,_>(i64::try_from(group.epoch).map_err(PersistenceError::database)?)

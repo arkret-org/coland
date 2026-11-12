@@ -57,6 +57,19 @@ const TABLES: &[(&str, &str)] = &[
         "EXISTS(SELECT 1 FROM canonical_events e WHERE e.realm_id=$1 AND e.scope_ref->>'kind'='realm_control' AND e.pk=t.provision_event_pk)",
     ),
     ("realm_actor_creations", "t.realm_id=$1"),
+    ("realm_actor_backup_namespaces", "t.realm_id=$1"),
+    (
+        "key_backup_identities",
+        "t.actor_id::jsonb#>>'{realm_actor_id,realm_id}'=$1",
+    ),
+    (
+        "key_backups",
+        "t.payload#>>'{actor_id,realm_actor_id,realm_id}'=$1",
+    ),
+    ("realm_actor_backup_admissions", "t.realm_id=$1"),
+    ("realm_actor_backup_series", "t.realm_id=$1"),
+    ("realm_actor_backup_recipients", "t.realm_id=$1"),
+    ("realm_actor_backup_unlocks", "t.realm_id=$1"),
     ("applet_configurations", "t.realm_id=$1"),
     ("realm_actor_current_states", "t.realm_id=$1"),
     ("realm_actor_private_signer_facts", "t.realm_id=$1"),
@@ -266,6 +279,7 @@ async fn frozen_cut(
 }
 
 async fn state(conn: &mut AsyncPgConnection, realm: &RealmId) -> PersistenceResult<Value> {
+    crate::realm_actor_content_backup::lock_realm_namespaces(conn, realm).await?;
     sql_query("SET LOCAL TIME ZONE 'UTC'")
         .execute(&mut *conn)
         .await
@@ -273,6 +287,7 @@ async fn state(conn: &mut AsyncPgConnection, realm: &RealmId) -> PersistenceResu
 
     crate::realm_claim_source::validate_archive(conn, realm).await?;
     validate_blob_uploads(conn, realm).await?;
+    crate::realm_actor_content_backup::validate_archived_namespaces(conn, realm).await?;
     let claims = sql_query("SELECT jsonb_build_object('source_id',c.source_id,'claim_request_id',c.claim_request_id,'has_request',EXISTS(SELECT 1 FROM keypackage_claim_sources s WHERE s.source_id=c.source_id AND s.claim_request_id=c.claim_request_id AND s.request_body#>>'{target_actor_id,realm_actor_id,realm_id}'=$1)) AS value FROM peer_keypackage_claims c WHERE c.outcome#>>'{claim_receipt,request,target_actor_id,realm_actor_id,realm_id}'=$1")
         .bind::<Text,_>(realm.as_str()).get_results::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     for claim in claims {

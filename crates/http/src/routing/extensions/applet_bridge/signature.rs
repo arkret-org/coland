@@ -21,6 +21,15 @@ pub(super) struct VerifiedAppletServiceSignature {
     pub(super) request_digest: String,
     pub(super) delivery_authentication_record: serde_json::Value,
     pub(super) delivery_authentication_record_digest: String,
+    pub(super) native_maintenance: Option<NativeBackupMaintenance>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct NativeBackupMaintenance {
+    pub(super) realm_id: arkret_wire::RealmId,
+    pub(super) applet_id: arkret_wire::AppletId,
+    pub(super) service_id: arkret_wire::DidCoreId,
+    pub(super) authenticated_document: arkret_identity::DidDocument,
 }
 
 #[derive(Clone, Debug)]
@@ -107,6 +116,40 @@ pub(crate) async fn verify_self_service_grant_read(
         ));
     }
     verify_self_service(state, req, true).await
+}
+
+/// Transport authentication for the three registered native manager archive
+/// operations only. The consuming storage unit still proves the exact current
+/// manager, full target actor, role and immutable target-source disclosure cut.
+pub(crate) async fn verify_native_backup_manager_service(
+    state: &AppState,
+    req: &mut Request,
+) -> Result<VerifiedAppletService, AppError> {
+    let operation = req
+        .headers()
+        .get("arkret-operation")
+        .and_then(|value| value.to_str().ok())
+        .and_then(arkret_wire::ServiceOperationId::from_wire)
+        .filter(|operation| {
+            matches!(
+                *operation,
+                arkret_wire::ServiceOperationId::SelfKeysBackupsReadListV1
+                    | arkret_wire::ServiceOperationId::SelfKeysBackupsCommandIssueUnlockChallengeV1
+                    | arkret_wire::ServiceOperationId::SelfKeysBackupsCommandUnlockV1
+            )
+        })
+        .ok_or_else(|| AppError::unauthenticated("Service native archive operation differs"))?;
+    if !crate::routing::identity::session_pop::request_matches_operation(req, operation) {
+        return Err(AppError::unauthenticated(
+            "Service native archive operation does not match its method and path",
+        ));
+    }
+    verify_self_service(
+        state,
+        req,
+        operation == arkret_wire::ServiceOperationId::SelfKeysBackupsReadListV1,
+    )
+    .await
 }
 
 async fn verify_self_service(
@@ -496,24 +539,93 @@ async fn verify_inbound_applet_service_signature(
         )
         .map_err(|error| applet_verification_error(HttpMessageVerificationError::Policy(error)))?;
 
-    // §7.3.1 anchor: the signing key comes only from an active installed
-    // registration. Without one there is no authenticated key source to try;
-    // reject at the registration gate instead of manufacturing a method URL
-    // from the Core service id.
-    let install = active_install_for_service_id(state, &header_source, &applet_id, &scope_selector)
-        .await?
-        .ok_or_else(|| {
-            AppError::capability_denied(
-                "Source-Service-ID has no active effective install on this edge",
-            )
-            .with_wire_code("applet_registration_unauthorized")
-        })?;
-    let verification_method = applet_registration_verification_method(&install, &header_source)?;
+    let native_events = if matches!(scope_carrier, SignedAppletScopeCarrier::TransactionEvents) {
+        let body: arkret_models_integration::applet_models::AppletEventTransactionRequestBody =
+            serde_json::from_value(request_body.clone())
+                .map_err(|error| applet_signature_error_invalid(error.to_string()))?;
+        let native_only = !body.events.is_empty()
+            && body.signals.is_empty()
+            && body.committed_events.is_empty()
+            && body
+                .events
+                .iter()
+                .all(|event| event.kind == arkret_wire::EventKind::KeyBackupActiveSeries);
+        if native_only { Some(body.events) } else { None }
+    } else {
+        None
+    };
+    let mut native_maintenance = None;
+    let (verification_method, registration_epoch, native_key) = if let Some(events) = &native_events
+    {
+        let first = &events[0];
+        let registration = state
+            .authority_commits()
+            .applet_registration_for_event(first)
+            .await
+            .map_err(|error| AppError::capability_denied(error.to_string()))?;
+        if registration.service_id.as_str() != header_source
+            || registration.applet_id.as_str() != applet_id
+            || events.iter().any(|event| {
+                event.realm_id != first.realm_id
+                    || event.actor_id
+                        != arkret_wire::ActorId::service(registration.service_id.clone())
+                    || event.applet_id.as_ref() != Some(&registration.applet_id)
+                    || event.scope_ref
+                        != (arkret_wire::ScopeRef::RealmControl {
+                            realm_id: first.realm_id.clone(),
+                        })
+                    || event.authorization_ref.is_some()
+                    || event.executed_by.is_some()
+            })
+        {
+            return Err(applet_signature_error_invalid(
+                "native maintenance transaction identity differs",
+            ));
+        }
+        let method = registration.webhook_signature_policy.key_ref.to_string();
+        let (key, document) =
+            authority_material_current_service_identity(state, &header_source, &method).await?;
+        registration
+            .manifest
+            .registration_epoch_evidence
+            .validate_against_did_document(&document)
+            .map_err(|error| applet_signature_error_invalid(error.to_string()))?;
+        native_maintenance = Some(NativeBackupMaintenance {
+            realm_id: first.realm_id.clone(),
+            applet_id: registration.applet_id,
+            service_id: registration.service_id,
+            authenticated_document: document,
+        });
+        (
+            method,
+            registration.registration_epoch.to_string(),
+            Some(key),
+        )
+    } else {
+        // Ordinary business keeps its exact active installation key source.
+        let install =
+            active_install_for_service_id(state, &header_source, &applet_id, &scope_selector)
+                .await?
+                .ok_or_else(|| {
+                    AppError::capability_denied(
+                        "Source-Service-ID has no active effective install on this edge",
+                    )
+                    .with_wire_code("applet_registration_unauthorized")
+                })?;
+        (
+            applet_registration_verification_method(&install, &header_source)?,
+            install.package.registration_epoch.to_string(),
+            None,
+        )
+    };
 
     let target_uri = crate::routing::federation::signature_target_uri(req, state);
     let authority = crate::routing::federation::signature_authority(req, state);
     applet_validate_signature_input(&signature_input, &verification_method)?;
-    let verifying_key = applet_resolve_verifying_key(state, &verification_method)?;
+    let verifying_key = match native_key {
+        Some(key) => key,
+        None => applet_resolve_verifying_key(state, &verification_method)?,
+    };
     let verified = http_signature::verify_signed_canonical_json_request(
         req,
         &target_uri,
@@ -530,10 +642,21 @@ async fn verify_inbound_applet_service_signature(
         .wire_value
         .as_str();
 
-    // §7.3.1: a verified signature is not yet authorisation — the
-    // `Source-Service-ID` MUST also hit an active effective install whose
-    // registration service DID equals it (§4b.1). fail closed otherwise.
-    let package = &install.package;
+    // Native maintenance authenticates the current manager per actual target,
+    // with real outer Event Ed. Storage rechecks the same authority and every
+    // record signature, status, scope and CAS before accepting an Event.
+    if let (Some(events), Some(native)) = (&native_events, &native_maintenance) {
+        let guard = coland_storage::AppletEventProducerGuard {
+            service_did_document: native.authenticated_document.clone(),
+        };
+        for event in events {
+            state
+                .authority_commits()
+                .prepare_service_signer_fact(event, &guard, chrono::Utc::now())
+                .await
+                .map_err(|error| AppError::capability_denied(error.to_string()))?;
+        }
+    }
     let (delivery_authentication_record, delivery_authentication_record_digest) =
         applet_delivery_authentication_record_digest(
             &source_id,
@@ -541,7 +664,7 @@ async fn verify_inbound_applet_service_signature(
             idempotency_key,
             content_digest,
             &verification_method,
-            package.registration_epoch.as_str(),
+            &registration_epoch,
             &verifying_key,
             &verified.signature_input,
         )?;
@@ -549,6 +672,7 @@ async fn verify_inbound_applet_service_signature(
         request_digest,
         delivery_authentication_record,
         delivery_authentication_record_digest,
+        native_maintenance,
     })
 }
 

@@ -246,6 +246,13 @@ async fn install_opening_anchor(
     store
         .install_replica_anchor(&ReplicaAnchorInstall {
             realm_id: tx.event.realm_id.clone(),
+            genesis_original: coland_test_support::member_bootstrap::genesis_original(
+                &PgAuthorityCommitStore {
+                    pool: source.pool.clone(),
+                },
+                &tx.event.realm_id,
+            )
+            .await,
             join_commit_id: tx.commit.commit_id.clone(),
             governance_generation: material.governance_generation,
             snapshot_head: material.visible_stream_heads[0].clone(),

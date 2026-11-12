@@ -85,6 +85,7 @@ impl Fixture {
             serde_json::from_value(proof_payload.clone()).unwrap();
         let device = wire::DeviceId::new("ak:device:01904100-0000-7000-8000-000000000023").unwrap();
         let backup = crypto::KeyBackup {
+            auth_binding: None,
             custodian_actor_id: None,
             custody_authorization_ref: None,
 

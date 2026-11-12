@@ -1,3 +1,8 @@
+DROP TABLE IF EXISTS public.realm_actor_backup_unlocks;
+DROP TABLE IF EXISTS public.realm_actor_backup_recipients;
+DROP TABLE IF EXISTS public.realm_actor_backup_series;
+DROP TABLE IF EXISTS public.realm_actor_backup_admissions;
+DROP TABLE IF EXISTS public.realm_actor_backup_namespaces;
 DROP TABLE IF EXISTS content_endpoint_admission_history;
 DROP TABLE IF EXISTS ordinary_keypackage_claim_sources;
 DROP FUNCTION IF EXISTS circle_current_row_proved(TEXT, JSONB, JSONB, TEXT, BIGINT, JSONB);

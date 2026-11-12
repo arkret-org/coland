@@ -573,9 +573,13 @@ pub(crate) async fn prepare_account_device_source_in_connection(
         .verify_commit_id_matches_content()
         .map_err(|e| reject(&e.to_string()))?;
     if revision_commit.committed_at > admitted_at {
-        return Err(reject(
-            "Account Device source revision is after the admission cut",
-        ));
+        // The exact Device authorization is still current, but a concurrent
+        // PCR write moved its confirmed revision beyond this attempt's cut.
+        // Refuse without writing; retry the original at a new admission cut.
+        return Err(reject(&format!(
+            "{}: Account Device source revision is after the admission cut",
+            coland_storage::ConflictCode::TemporarilyUnavailable.as_str()
+        )));
     }
     if revision_commit.commit_id != cut.authority.authority_commit_id
         || revision_commit.event_ref != revision_event.event_id

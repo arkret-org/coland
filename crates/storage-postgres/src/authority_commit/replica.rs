@@ -2141,6 +2141,122 @@ pub(super) async fn replica_anchor_for_stream_in_connection(
         .transpose()
 }
 
+/// The bootstrap command and its anchor carry the same immutable original.
+/// Keep the upstream domain command as a checked adapter to the one anchor
+/// transaction, not a second writer with different retention semantics.
+pub(super) async fn install_replica_bootstrap_in_connection(
+    conn: &mut AsyncPgConnection,
+    install: &coland_storage::ReplicaBootstrapInstall,
+) -> Result<(), PgTransactionError> {
+    if install.anchor.genesis_original.0 != install.genesis
+        || install.anchor.genesis_original.1 != install.producer_signer_fact
+    {
+        return Err(
+            invalid("bootstrap command and anchor name different founding originals").into(),
+        );
+    }
+    install_replica_anchor_in_connection(conn, &install.anchor).await
+}
+
+/// Retain the independently verified founding original without replaying its
+/// effects or touching the held stream head, anchor, or history floor.
+pub(crate) async fn retain_bootstrap_genesis_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &arkret_wire::RealmId,
+    original: &arkret_wire::CommittedEventFullView,
+    fact: Option<&arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
+) -> Result<(), PgTransactionError> {
+    arkret_models_collaboration::governance::realm_join_intake::validate_bootstrap_genesis_original(
+        original, fact,
+    )
+    .map_err(invalid)?;
+    if &original.event.realm_id != realm_id {
+        return Err(invalid("bootstrap Genesis belongs to another Realm").into());
+    }
+    crate::agent_producer_signer_keys::validate_producer_fact_binding(
+        &original.event,
+        &original.commit,
+        fact,
+    )?;
+    if held_duplicate(conn, &original.commit, Some(&original.event))
+        .await?
+        .is_some()
+    {
+        let frozen = crate::agent_producer_signer_keys::producer_source_for_commit_in_connection(
+            conn,
+            &original.event,
+            &original.commit,
+        )
+        .await?;
+        if frozen.as_ref() != fact {
+            return Err(conflict(
+                ConflictCode::DuplicateConflict,
+                "bootstrap Genesis producer source differs from frozen original",
+            ));
+        }
+        return Ok(());
+    }
+    let key = stream_key(&original.commit.stream_ref)?;
+    let existing = sql_query("SELECT c.commit_json,e.envelope FROM realm_commits c LEFT JOIN canonical_events e ON e.pk=c.event_pk WHERE c.stream_key=$1 AND c.stream_position=0 FOR UPDATE OF c")
+        .bind::<Text,_>(&key).get_result::<HeldRow>(&mut *conn).await.optional()?;
+    if let Some(existing) = existing {
+        if existing.envelope.is_some()
+            || existing.commit_json
+                != serde_json::to_value(&original.commit).map_err(PersistenceError::database)?
+        {
+            return Err(conflict(
+                ConflictCode::ForkQuarantine,
+                "bootstrap Genesis differs from the held stream origin",
+            ));
+        }
+        super::queue_event_in_connection(conn, &original.event, chrono::Utc::now()).await?;
+        let token = super::ids::parse_event_id(original.event.event_id.as_str())
+            .ok_or_else(|| invalid("bootstrap Genesis Event token is invalid"))?;
+        let event_pk = sql_query("SELECT pk FROM canonical_events WHERE id=$1 FOR UPDATE")
+            .bind::<super::Binary, _>(token.to_vec())
+            .get_result::<EventPkOnlyRow>(&mut *conn)
+            .await?
+            .pk;
+        let attached = sql_query("UPDATE realm_commits SET event_pk=$2 WHERE commit_id=$1 AND event_pk IS NULL AND commit_json=$3")
+            .bind::<Text,_>(original.commit.commit_id.as_str()).bind::<BigInt,_>(event_pk)
+            .bind::<Jsonb,_>(serde_json::to_value(&original.commit).map_err(PersistenceError::database)?)
+            .execute(&mut *conn).await?;
+        if attached != 1 {
+            return Err(conflict(
+                ConflictCode::DuplicateConflict,
+                "bootstrap Genesis attachment changed",
+            ));
+        }
+        let settled = sql_query("UPDATE canonical_events SET state='committed',committed_at=$2,rejection_reason=NULL WHERE pk=$1 AND state='queued'")
+            .bind::<BigInt,_>(event_pk).bind::<Timestamptz,_>(original.commit.committed_at).execute(&mut *conn).await?;
+        if settled != 1 {
+            return Err(conflict(
+                ConflictCode::DuplicateConflict,
+                "bootstrap Genesis conflicts with its original terminal state",
+            ));
+        }
+    } else {
+        store_replica_rows(
+            conn,
+            &original.event,
+            &original.commit,
+            &key,
+            chrono::Utc::now(),
+        )
+        .await?;
+    }
+    if let Some(fact) = fact {
+        crate::agent_producer_signer_keys::retain_prepared_producer_in_connection(
+            conn,
+            &original.event,
+            &original.commit,
+            fact,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Install a verified bootstrap snapshot and its typed current atomically.
 /// A pending stream requires its original opening join. An anchored refresh
 /// may use another exact current hosted join, preserving the opening prefix.
@@ -2324,6 +2440,13 @@ pub(super) async fn install_replica_anchor_in_connection(
     {
         return Err(invalid("verified bootstrap differs from its installed material").into());
     }
+    retain_bootstrap_genesis_in_connection(
+        conn,
+        &install.realm_id,
+        &install.genesis_original.0,
+        install.genesis_original.1.as_ref(),
+    )
+    .await?;
     crate::issued_realm_snapshots::issue_head_in_connection(
         conn,
         member_account_id,

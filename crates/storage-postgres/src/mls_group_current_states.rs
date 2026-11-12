@@ -1594,7 +1594,7 @@ pub(crate) async fn require_mls_send_gate_in_connection(
 /// Circle member (`circle.md` section 9.1) is `epoch_update_required`. A
 /// parent Realm leave, ban or rejoin never advances the Circle key-access
 /// revision; this same-cut leaf judgment is the other, independent gate.
-async fn circle_tree_holds_invalid_leaf(
+pub(crate) async fn circle_tree_holds_invalid_leaf(
     conn: &mut AsyncPgConnection,
     scope: &ScopeRef,
     current: &MlsGroupCurrentRecord,

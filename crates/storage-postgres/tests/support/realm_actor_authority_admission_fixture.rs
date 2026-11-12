@@ -7,8 +7,15 @@ fn authority_admission_candidate(
     registration: &EventId,
     grant: &arkret_wire::GrantId,
     bot: bool,
+    manager_archive: &FixtureManagerArchive,
 ) -> (RealmActorCreatePayload, Ed25519PayloadSigner) {
-    let (mut candidate, signer) = realm_candidate(package, &fixture.realm, registration, grant);
+    let (mut candidate, signer) = realm_candidate(
+        package,
+        &fixture.realm,
+        registration,
+        grant,
+        manager_archive,
+    );
     candidate.request_id = uuid::Uuid::now_v7().simple().to_string();
     if bot {
         candidate.actor_role = RealmActorCreatePayloadActorRole::Bot;
@@ -114,6 +121,7 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
             registration,
             &bot_grant,
             true,
+            &native.archive,
         );
         let request = authority_admission_create(&candidate, &signer);
         let (status, value) =
@@ -171,6 +179,7 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
         registration,
         &ghost_grant,
         false,
+        &native.archive,
     );
     let request = authority_admission_create(&outside, &signer);
     let (status, value) =
@@ -223,8 +232,14 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
         "independent DID hosting must not duplicate the accepted creation or its effects"
     );
 
-    let (accepted_candidate, signer) =
-        authority_admission_candidate(package, &factory.fixture, registration, &ghost_grant, false);
+    let (accepted_candidate, signer) = authority_admission_candidate(
+        package,
+        &factory.fixture,
+        registration,
+        &ghost_grant,
+        false,
+        &native.archive,
+    );
     let accepted = authority_admission_create(&accepted_candidate, &signer);
     let (status, value) =
         boxed_step(|| authority_admission_send(&factory.fixture, package, &accepted)).await;
@@ -233,8 +248,14 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
         StatusCode::OK,
         "accepted before grant closure: {value}"
     );
-    let (fresh, signer) =
-        authority_admission_candidate(package, &factory.fixture, registration, &ghost_grant, false);
+    let (fresh, signer) = authority_admission_candidate(
+        package,
+        &factory.fixture,
+        registration,
+        &ghost_grant,
+        false,
+        &native.archive,
+    );
     let fresh = authority_admission_create(&fresh, &signer);
     let rows = factory
         .fixture
@@ -332,7 +353,7 @@ async fn authority_material_survives_service_rotation(
     install: &AppletInstallResponseBody,
 ) {
     use arkret_models_collaboration::applet_installation_authority::{
-        AppletAuthorityMaterialResponseBody, AppletAuthorityMaterialRequestBody,
+        AppletAuthorityMaterialRequestBody, AppletAuthorityMaterialResponseBody,
     };
     let path = format!(
         "/_arkret/self/applets/{}/authority/material",
@@ -356,7 +377,8 @@ async fn authority_material_survives_service_rotation(
         )
         .await;
     assert_eq!(status, StatusCode::OK, "original material: {before}");
-    let original: AppletAuthorityMaterialResponseBody = serde_json::from_value(before.clone()).unwrap();
+    let original: AppletAuthorityMaterialResponseBody =
+        serde_json::from_value(before.clone()).unwrap();
     original
         .validate_for_request(&install.applet_id, &request)
         .unwrap();

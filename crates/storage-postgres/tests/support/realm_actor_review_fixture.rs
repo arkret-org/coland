@@ -310,7 +310,10 @@ fn realm_review_installation_target(
     let effective_scope: ScopeRef =
         serde_json::from_value(context.installation["effective_scope"].clone()).unwrap();
     assert_eq!(effective_scope, candidate.creation_scope);
-    assert_eq!(context.registration.scope_ref, ScopeRef::realm(effective_scope.realm_id().clone()));
+    assert_eq!(
+        context.registration.scope_ref,
+        ScopeRef::realm(effective_scope.realm_id().clone())
+    );
     assert_eq!(
         context.registration.payload["applet_id"],
         json!(context.package.applet_id)
@@ -374,7 +377,7 @@ async fn realm_review_governance(fixture: &Fixture, action: &str) {
 
 fn realm_review_required(fixture: &Fixture) -> GrantConstraint {
     serde_json::from_value(json!({"constraint_kind":"claim_based","constraint_subkind":"approval","effect":"require_review","approval_required":true,
-        "approval_mode":"before_commit","approval_actor_ids":[fixture.pcr.history.account.principal_id],"approval_threshold":1,"timeout":"PT5M"})).unwrap()
+        "approval_mode":"before_commit","approval_principal_ids":[fixture.pcr.history.account.principal_id],"approval_threshold":1,"timeout":"PT5M"})).unwrap()
 }
 
 async fn realm_review_creation_grant(
@@ -414,6 +417,7 @@ fn realm_review_candidate(
         &context.registration.event_id,
         grant,
         bot,
+        &context._native.archive,
     )
 }
 

@@ -91,7 +91,9 @@ pub(crate) fn prepare_applet_producer_in_connection<'a>(
         // accepting transaction checks business grants with its prepared votes.
         if matches!(
             event.kind,
-            EventKind::RealmActorRecoveryBegin | EventKind::RealmActorControlReset
+            EventKind::RealmActorRecoveryBegin
+                | EventKind::RealmActorControlReset
+                | EventKind::KeyBackupActiveSeries
         ) {
             return crate::realm_actor_control::recovery_service_fact(conn, event, guard, at).await;
         }
@@ -117,7 +119,9 @@ pub(crate) fn require_applet_producer_in_connection<'a>(
     crate::boxed_future(|| async move {
         if matches!(
             event.kind,
-            EventKind::RealmActorRecoveryBegin | EventKind::RealmActorControlReset
+            EventKind::RealmActorRecoveryBegin
+                | EventKind::RealmActorControlReset
+                | EventKind::KeyBackupActiveSeries
         ) {
             return Ok((
                 crate::realm_actor_control::recovery_service_fact(

@@ -33,6 +33,10 @@ impl RootPacket {
         &self,
         conn: &mut AsyncPgConnection,
     ) -> crate::PersistenceResult<chrono::DateTime<chrono::Utc>> {
+        if self.backup.actor_id.as_realm_actor_id().is_some() {
+            return crate::realm_actor_content_backup::current_root_recipient(conn, &self.backup)
+                .await;
+        }
         let until = crate::key_backup_history::recipient(conn, &self.backup).await?;
         Ok(self.expires_at.map_or(until, |expiry| expiry.min(until)))
     }
@@ -44,9 +48,11 @@ pub(crate) async fn read_in_connection(
     wanted: &[String],
 ) -> Result<RootPacket, PgTransactionError> {
     let backup = read_retained_envelope(conn, id).await?;
-    if backup.encryption.recipient_method
-        != arkret_models_crypto::KeyBackupRecipientMethod::RecoveryPublicKey
-    {
+    if !matches!(
+        backup.encryption.recipient_method,
+        arkret_models_crypto::KeyBackupRecipientMethod::RecoveryPublicKey
+            | arkret_models_crypto::KeyBackupRecipientMethod::RealmActorRecovery
+    ) {
         return Err(PersistenceError::Conflict(
             "failed_precondition: root package has no recovery recipient".into(),
         )

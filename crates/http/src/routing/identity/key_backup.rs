@@ -23,6 +23,7 @@ use crate::wire::{KeyBackupPutStatus, KeysBackupsPage, KeysBackupsReplaceRespons
 mod delete;
 mod handlers;
 mod listing;
+mod native;
 mod unlock;
 mod validation;
 

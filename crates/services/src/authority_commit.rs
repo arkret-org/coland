@@ -2263,6 +2263,13 @@ impl AuthorityCommitApplication {
         Ok(self.store().install_replica_anchor(install).await?)
     }
 
+    pub async fn install_replica_bootstrap(
+        &self,
+        install: &coland_storage::ReplicaBootstrapInstall,
+    ) -> ServiceResult<()> {
+        Ok(self.store().install_replica_bootstrap(install).await?)
+    }
+
     pub async fn held_stream_head_commit(
         &self,
         stream_ref: &CommitStreamRef,
@@ -2618,6 +2625,30 @@ impl AuthorityCommitApplication {
         Ok(self
             .store()
             .install_verified_account_snapshot(account, issuer, snapshot, minimum)
+            .await?)
+    }
+
+    pub async fn install_verified_account_bootstrap_snapshot(
+        &self,
+        account: &arkret_wire::AccountId,
+        issuer: &DidCoreId,
+        snapshot: &RealmStateSnapshot,
+        minimum: &coland_storage::RealmStateSnapshotMaterial,
+        genesis_original: &(
+            arkret_wire::CommittedEventFullView,
+            Option<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
+        ),
+    ) -> ServiceResult<RealmStateSnapshot> {
+        coland_storage::enforce_inline_realm_state_snapshot_capacity(snapshot)?;
+        Ok(self
+            .store()
+            .install_verified_account_bootstrap_snapshot(
+                account,
+                issuer,
+                snapshot,
+                minimum,
+                genesis_original,
+            )
             .await?)
     }
 

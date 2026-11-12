@@ -6,6 +6,26 @@ mod applet_authoring;
 #[allow(dead_code)]
 mod ordinary_realm;
 #[tokio::test]
+async fn native_root_first_put_fixed_retry_and_recovery_source_advance_use_real_http() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_test_writer()
+        .try_init();
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_backup_custody(
+        database.pool(),
+    ))
+    .await;
+}
+#[tokio::test]
+async fn native_backup_head_and_exact_unlock_read_archived_realm_and_circle() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    Box::pin(applet_authoring::realm_native_backup_archived_circle(
+        database.pool(),
+    ))
+    .await;
+}
+#[tokio::test]
 async fn public_read_contracts_preserve_fourteen_native_authority_closures() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)

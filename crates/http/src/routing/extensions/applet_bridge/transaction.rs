@@ -60,32 +60,52 @@ pub(super) async fn process_verified_transaction(
     let mut rejected = Vec::new();
     for event in transaction.events {
         let event_id = event.event_id.to_string();
-        let install =
-            match applet_record(state, applet_id.as_str(), &source_id, &event.scope_ref).await? {
-                Some(install) => install,
-                None => {
-                    rejected.push(rejected_event(
-                        &event_id,
-                        "applet_registration_unauthorized",
-                    ));
-                    continue;
-                }
-            };
-        if let Err(reason_code) = validate_transaction_event_binding(&install, &source_id, &event) {
-            rejected.push(rejected_event(&event_id, reason_code));
-            continue;
-        }
-        let registration: arkret_models_integration::AppletRegistrationPayload =
-            serde_json::from_value(
-                serde_json::to_value(&install.registration_event.payload)
-                    .map_err(|error| AppError::internal(error.to_string()))?,
+        let document = if let Some(native) = &verified.native_maintenance {
+            if event.kind != arkret_wire::EventKind::KeyBackupActiveSeries
+                || event.realm_id != native.realm_id
+                || event.applet_id.as_ref() != Some(&native.applet_id)
+                || event.actor_id != arkret_wire::ActorId::service(native.service_id.clone())
+                || native.service_id.as_str() != source_id
+            {
+                rejected.push(rejected_event(
+                    &event_id,
+                    "applet_registration_unauthorized",
+                ));
+                continue;
+            }
+            native.authenticated_document.clone()
+        } else {
+            let install =
+                match applet_record(state, applet_id.as_str(), &source_id, &event.scope_ref).await?
+                {
+                    Some(install) => install,
+                    None => {
+                        rejected.push(rejected_event(
+                            &event_id,
+                            "applet_registration_unauthorized",
+                        ));
+                        continue;
+                    }
+                };
+            if let Err(reason_code) =
+                validate_transaction_event_binding(&install, &source_id, &event)
+            {
+                rejected.push(rejected_event(&event_id, reason_code));
+                continue;
+            }
+            let registration: arkret_models_integration::AppletRegistrationPayload =
+                serde_json::from_value(
+                    serde_json::to_value(&install.registration_event.payload)
+                        .map_err(|error| AppError::internal(error.to_string()))?,
+                )
+                .map_err(|error| AppError::internal(error.to_string()))?;
+            let document = crate::jws_verify::resolve_did_document(
+                state,
+                &registration.manifest.registration_epoch_evidence.did,
             )
-            .map_err(|error| AppError::internal(error.to_string()))?;
-        let document = crate::jws_verify::resolve_did_document(
-            state,
-            &registration.manifest.registration_epoch_evidence.did,
-        )
-        .map_err(AppError::param_invalid)?;
+            .map_err(AppError::param_invalid)?;
+            document
+        };
         match crate::state::submit_applet_event(state, event.clone(), document).await {
             Ok(outcome) => {
                 committed_event_refs.push(

@@ -4713,6 +4713,24 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         conn.finish(result).await
     }
 
+    async fn install_replica_bootstrap(
+        &self,
+        install: &coland_storage::ReplicaBootstrapInstall,
+    ) -> PersistenceResult<()> {
+        let mut conn = crate::issued_realm_snapshots::SnapshotIssuanceConnection::acquire(
+            &self.pool,
+            &install.anchor.realm_id,
+        )
+        .await?;
+        let result = conn
+            .transaction::<_, PgTransactionError, _>(async move |conn| {
+                replica::install_replica_bootstrap_in_connection(conn, install).await
+            })
+            .await
+            .map_err(PgTransactionError::into_persistence);
+        conn.finish(result).await
+    }
+
     async fn held_stream_head_commit(
         &self,
         stream_ref: &arkret_wire::CommitStreamRef,
@@ -6196,7 +6214,29 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         minimum: &coland_storage::RealmStateSnapshotMaterial,
     ) -> PersistenceResult<arkret_wire::RealmStateSnapshot> {
         crate::issued_realm_snapshots::install_verified_account_snapshot(
-            &self.pool, account, issuer, snapshot, minimum,
+            &self.pool, account, issuer, snapshot, minimum, None,
+        )
+        .await
+    }
+
+    async fn install_verified_account_bootstrap_snapshot(
+        &self,
+        account: &arkret_wire::AccountId,
+        issuer: &arkret_wire::DidCoreId,
+        snapshot: &arkret_wire::RealmStateSnapshot,
+        minimum: &coland_storage::RealmStateSnapshotMaterial,
+        genesis_original: &(
+            arkret_wire::CommittedEventFullView,
+            Option<arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
+        ),
+    ) -> PersistenceResult<arkret_wire::RealmStateSnapshot> {
+        crate::issued_realm_snapshots::install_verified_account_snapshot(
+            &self.pool,
+            account,
+            issuer,
+            snapshot,
+            minimum,
+            Some(genesis_original),
         )
         .await
     }

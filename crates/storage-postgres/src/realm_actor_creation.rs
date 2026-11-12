@@ -135,6 +135,7 @@ pub(crate) async fn admit(
         conn, event, commit, &fact,
     )
     .await?;
+    crate::realm_actor_content_backup::retain_current_recipient(conn, &candidate.actor_id).await?;
     if let Some(review) = review {
         crate::agent_management_review::consume_in_connection(
             conn,

@@ -2057,7 +2057,10 @@ pub async fn registered_service_pair(pool: PgPool) {
 }
 
 mod realm_native_fixture {
+    pub(super) const NATIVE_BACKUP_CUSTODY_MODE: u8 = 5;
+    pub(super) const NATIVE_BACKUP_ARCHIVE_READ_MODE: u8 = 6;
     include!("applet_configuration_fixture.rs");
+    include!("realm_actor_archive_fixture.rs");
     include!("realm_actor_transport_fixture.rs");
     include!("realm_actor_queue_boundary_fixture.rs");
     include!("realm_actor_runtime_recovery_fixture.rs");
@@ -2131,6 +2134,11 @@ mod realm_native_fixture {
         pub(super) package: AppletPackage,
         service_resolution: Arc<Mutex<arkret_models_identity::AuthenticatedServiceResolution>>,
         actor_log: Arc<Mutex<Vec<Value>>>,
+        archive: FixtureManagerArchive,
+        manager_vault:
+            Mutex<Option<Arc<arkret_bridge_runtime::manager_archive::ManagerArchiveVault>>>,
+        manager_archive_path: std::path::PathBuf,
+        manager_archive_wrapping_key: arkret::KeyBytes,
         managed_router: Arc<Mutex<Option<Arc<salvo::Service>>>>,
         principal_router: Arc<Mutex<Option<Arc<salvo::Service>>>>,
         unavailable_principals: Arc<Mutex<std::collections::BTreeSet<String>>>,
@@ -2338,8 +2346,23 @@ mod realm_native_fixture {
                     connection.join().unwrap();
                 }
             });
+            let manager_archive_path = std::env::temp_dir().join(format!(
+                "arkret-native-manager-vault-{}.redb",
+                uuid::Uuid::now_v7()
+            ));
+            let manager_archive_wrapping_key =
+                arkret::KeyBytes::new(rand::random::<[u8; 32]>().to_vec());
+            let manager_vault = arkret_bridge_runtime::manager_archive::ManagerArchiveVault::open(
+                &manager_archive_path,
+                manager_archive_wrapping_key.clone(),
+            )
+            .unwrap();
             Self {
                 package,
+                archive: FixtureManagerArchive::new(),
+                manager_vault: Mutex::new(Some(Arc::new(manager_vault))),
+                manager_archive_path,
+                manager_archive_wrapping_key,
                 service_resolution,
                 actor_log,
                 managed_router,
@@ -2794,7 +2817,7 @@ mod realm_native_fixture {
             json!(material),
             json!({"creation":{"event":original.event,"commit":original.commit}}),
         );
-        let RealmActorMaterial::Current { entries } = material.material else {
+        let RealmActorMaterial::Current { entries, .. } = material.material else {
             panic!("current material required");
         };
         let RealmActorMaterialCurrentEntry::Present { source_ref, .. } = &entries[0] else {
@@ -3154,14 +3177,34 @@ mod realm_native_fixture {
         realm: &RealmId,
         registration: &EventId,
         grant: &arkret_wire::GrantId,
+        manager_archive: &FixtureManagerArchive,
     ) -> (RealmActorCreatePayload, Ed25519PayloadSigner) {
-        let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
         let endpoint = package.base_url.parse().unwrap();
         let root = rand::random::<[u8; 32]>();
         let next = SigningKey::from_bytes(&[32; 32]);
         let control = SigningKey::from_bytes(&[33; 32]);
         let next_key =
             arkret_canonical::ed25519_pubkey_to_did_key_multibase(next.verifying_key().as_bytes());
+        let archive = arkret::crypto::hpke::generate_x25519_keypair().unwrap();
+        let public = archive.public_key().to_vec();
+        let intent_slot = format!(
+            "candidate/content-backup/{}",
+            arkret_canonical::base64url_encode(&public)
+        );
+        let private =
+            arkret_models_crypto::SecretBytes::new(archive.private_key().try_into().unwrap());
+        manager_archive.put(&intent_slot, &private);
+        drop(private);
+        drop(archive);
+        let archive_private: arkret_models_crypto::SecretBytes = manager_archive.get(&intent_slot);
+        let archive_public =
+            arkret::crypto::hpke::x25519_public_key(archive_private.expose()).unwrap();
+        assert_eq!(
+            arkret_canonical::base64url_encode(&archive_public),
+            arkret_canonical::base64url_encode(&public),
+            "durable candidate custody must open to the same key before inception or SCID signing"
+        );
+        let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
         let inception = prepare_realm_actor_inception(&RealmActorInceptionInput {
             principal_endpoint: &endpoint,
             local_id: "ghost-1",
@@ -3169,6 +3212,7 @@ mod realm_native_fixture {
             root_seed: &root,
             next_root_public_key_multibase: &next_key,
             controller_public_key: control.verifying_key().as_bytes(),
+            content_backup_public_key: &archive_public,
         })
         .unwrap();
         let document: DidDocument =
@@ -3218,8 +3262,17 @@ mod realm_native_fixture {
             "method_history_evidence":evidence,"control_method_kid":method,
             "expires_at":arkret_canonical::format_timestamp_canonical(at + chrono::Duration::minutes(5)),
             "external_ref":{"protocol":"matrix","instance_id":"chat.example","external_id":"external-user"},
-            "recovery":{"kind":"manager_native","enabled":true}
+            "recovery":{"kind":"manager_native","enabled":true,"content_backup_recipient":{
+                "key_agreement_ref":format!("{}#content-backup",document.id),
+                "hpke_suite":"ak.hpke_x25519_aead_chacha20poly1305.v1",
+                "public_key_base64url":arkret_canonical::base64url_encode(&archive_public)
+            }}
         });
+        let actor: ActorId = serde_json::from_value(value["actor_id"].clone()).unwrap();
+        manager_archive.put(
+            &FixtureManagerArchive::recipient_slot(&actor),
+            &archive_private,
+        );
         let transcript: RealmActorCreationTranscript =
             serde_json::from_value(value.clone()).unwrap();
         value["control_signature"] = serde_json::to_value(
@@ -3233,7 +3286,8 @@ mod realm_native_fixture {
             .unwrap(),
         )
         .unwrap();
-        (serde_json::from_value(value).unwrap(), signer)
+        let candidate: RealmActorCreatePayload = serde_json::from_value(value).unwrap();
+        (candidate, signer)
     }
 
     async fn native_successor_time(previous: &[Value]) -> chrono::DateTime<chrono::Utc> {
@@ -4866,6 +4920,25 @@ mod realm_native_fixture {
             StatusCode::OK,
             "receiving Service management grant: {response}"
         );
+        let (inventory, archive_authority, archive_keys, _) =
+            fixture_archive_inventory(fixture, native, actor).await;
+        let next_archive = arkret::crypto::hpke::generate_x25519_keypair().unwrap();
+        let next_archive_private =
+            arkret_models_crypto::SecretBytes::new(next_archive.private_key().try_into().unwrap());
+        receiving.archive.put(
+            &format!("fresh/{}", FixtureManagerArchive::recipient_slot(actor)),
+            &next_archive_private,
+        );
+        let next_content_backup_recipient =
+            arkret_models_crypto::RealmActorContentBackupRecipient {
+                key_agreement_ref: DidUrl::new(format!(
+                    "{}#next-content-backup",
+                    control.resolution.did
+                ))
+                .unwrap(),
+                hpke_suite: arkret_models_crypto::ContentBackupRecipientHpkeSuite::AkHpkeX25519AeadChacha20poly1305V1,
+                public_key_base64url: arkret_canonical::base64url_encode(next_archive.public_key()),
+            };
         let mut entries = native.actor_log.lock().unwrap().clone();
         let mut document = entries.last().unwrap()["state"].clone();
         let method = &control.control_method_kid;
@@ -4875,6 +4948,14 @@ mod realm_native_fixture {
             .retain(|entry| entry["id"] == json!(method));
         document["assertionMethod"] = json!([method]);
         document["authentication"] = json!([method]);
+        let archive_multikey = arkret_canonical::encode_multibase_base58btc(
+            [&[0xec_u8, 0x01][..], next_archive.public_key().as_slice()].concat(),
+        );
+        document["verificationMethod"].as_array_mut().unwrap().push(json!({
+            "id":next_content_backup_recipient.key_agreement_ref,"controller":control.resolution.did,
+            "type":"Multikey","publicKeyMultibase":archive_multikey
+        }));
+        document["keyAgreement"] = json!([next_content_backup_recipient.key_agreement_ref]);
         for (seed, next) in [(46u8, 47u8), (47, 48)] {
             let previous_time: chrono::DateTime<chrono::Utc> =
                 entries.last().unwrap()["versionTime"]
@@ -4942,6 +5023,117 @@ mod realm_native_fixture {
             stream_position: reference.stream_position,
         };
         let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+        let inventory_digest = inventory.inventory_digest().unwrap();
+        let offer =
+            arkret_identity::realm_actor_backup_handover::sign_realm_actor_backup_handover_offer(
+                arkret_models_integration::RealmActorContentBackupHandoverOfferSignatureInput {
+                    realm_actor_id: actor.as_realm_actor_id().unwrap().clone(),
+                    manager_ref: manager_ref.clone(),
+                    new_service_id: receiving.package.service_id.clone(),
+                    next_content_backup_recipient: next_content_backup_recipient.clone(),
+                    inventory_digest: inventory_digest.clone(),
+                    archive_revision: inventory.archive_revision,
+                    expires_at: at + chrono::Duration::minutes(5),
+                    nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
+                },
+                receiving.package.webhook_signature_policy.key_ref.clone(),
+                at,
+                &applet_service_signing_key(&receiving.package.webhook_signature_policy.key_ref),
+            )
+            .unwrap();
+        let old_private: arkret_models_crypto::SecretBytes = native
+            .archive
+            .get(&FixtureManagerArchive::recipient_slot(actor));
+        let private_keys = inventory
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                arkret_models_integration::RealmActorArchiveInventoryEntry::Recipient(entry) => {
+                    Some(
+                        arkret_models_integration::RealmActorContentBackupPrivateRecipientKey {
+                            recipient_ref: entry.recipient_ref.clone(),
+                            content_backup_recipient: entry.content_backup_recipient.clone(),
+                            private_key_base64url: old_private.clone(),
+                        },
+                    )
+                }
+                _ => None,
+            })
+            .collect();
+        let new_service_document =
+            fixture_applet_service_history(&receiving.package).normalized_did_document;
+        let pending =
+            arkret_identity::realm_actor_backup_handover::seal_realm_actor_backup_handover(
+                offer,
+                &new_service_document,
+                inventory.clone(),
+                private_keys,
+                at,
+            )
+            .unwrap();
+        let imported_slot = format!("received/{inventory_digest}");
+        let confirmation_key =
+            applet_service_signing_key(&receiving.package.webhook_signature_policy.key_ref);
+        let import = |confirmed_at| {
+            arkret_identity::realm_actor_backup_handover::import_realm_actor_backup_handover(
+                pending.sealed(),
+                &next_archive_private,
+                &archive_authority,
+                &archive_keys,
+                &arkret_identity::realm_actor_backup_handover::RealmActorBackupHandoverImportContext {
+                    offer_original_document: &new_service_document,
+                    confirmation_current_document: &new_service_document,
+                    confirmation_method: receiving.package.webhook_signature_policy.key_ref.clone(),
+                    confirmation_signing_key: &confirmation_key,
+                    confirmed_at,
+                },
+                |identity| {
+                    Ok(receiving.archive
+                        .get_if_present::<FixtureManagerArchiveImport>(&imported_slot)
+                        .map(|retained| {
+                            retained.assert_identity(identity);
+                            retained.imported_at
+                        }))
+                },
+                |identity, plaintext, imported_at| {
+                    receiving.archive.put(
+                        &imported_slot,
+                        &FixtureManagerArchiveImport::from_verified(identity, plaintext, imported_at),
+                    );
+                    Ok(())
+                },
+            )
+        };
+        let confirmation = import(arkret_canonical::normalize_timestamp_canonical(
+            chrono::Utc::now(),
+        ))
+        .unwrap();
+        pending
+            .verify_confirmation(&confirmation, &new_service_document)
+            .unwrap();
+        let retained: FixtureManagerArchiveImport = receiving.archive.get(&imported_slot);
+        let replay = import(arkret_canonical::normalize_timestamp_canonical(
+            chrono::Utc::now(),
+        ))
+        .unwrap();
+        pending
+            .verify_confirmation(&replay, &new_service_document)
+            .unwrap();
+        let replayed: FixtureManagerArchiveImport = receiving.archive.get(&imported_slot);
+        assert_eq!(
+            replayed.imported_at, retained.imported_at,
+            "cold replay must recover the exact original durable import time"
+        );
+        let imported = retained.plaintext;
+        assert_eq!(
+            imported.inventory_manifest.inventory_digest().unwrap(),
+            inventory_digest
+        );
+        assert_eq!(
+            arkret_canonical::canonical_json_bytes(&imported.inventory_manifest).unwrap(),
+            arkret_canonical::canonical_json_bytes(&inventory).unwrap()
+        );
+        let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
         let transcript = RealmActorManagerAcceptanceTranscript {
             actor_id: actor.clone(),
             applet_id: candidate.applet_id.clone(),
@@ -4959,6 +5151,9 @@ mod realm_native_fixture {
                 method_history_head: head,
             },
             method_history_evidence: serde_json::from_value(json!(evidence)).unwrap(),
+            next_content_backup_recipient,
+            content_backup_inventory_digest: inventory_digest,
+            content_backup_handover_digest: confirmation.handover_digest,
         };
         let signature = sign_detached_object(
             &transcript,
@@ -5065,9 +5260,25 @@ mod realm_native_fixture {
             after["realm_actor_device_generation"]["current_device_generation_ref"],
             generation + 1
         );
+        let mut expected_recovery = before["realm_actor_recovery"].clone();
+        expected_recovery["content_backup_recipient"] =
+            event.payload["next_content_backup_recipient"].clone();
+        let arkret_wire::AuthoritySubmitResponseBody::Accepted {
+            commit: accepted_manager,
+            ..
+        } = serde_json::from_value(response.clone()).unwrap()
+        else {
+            panic!("real manager acceptance required");
+        };
+        expected_recovery["content_backup_recipient_ref"] = json!(CommittedEventRef {
+            event_id: event.event_id.clone(),
+            commit_id: accepted_manager.commit_id,
+            stream_ref: accepted_manager.stream_ref,
+            stream_position: accepted_manager.stream_position
+        });
         assert_eq!(
-            after["realm_actor_recovery"],
-            before["realm_actor_recovery"]
+            after["realm_actor_recovery"], expected_recovery,
+            "manager handover switches the future recipient while retaining identity recovery policy"
         );
         let replay_metadata = RealmActorControlHttpMetadata {
             control_ref: actor_current_ref(
@@ -5470,7 +5681,7 @@ mod realm_native_fixture {
             },
         )
         .unwrap();
-        let RealmActorMaterial::Current { entries } = &material.material else {
+        let RealmActorMaterial::Current { entries, .. } = &material.material else {
             panic!("current required")
         };
         let RealmActorMaterialCurrentEntry::Present {
@@ -6117,6 +6328,69 @@ mod realm_native_fixture {
             "a mid-import writer failure rolls back original Events and creations"
         );
         conn.batch_execute("DROP TRIGGER test_private_archive_failure ON realm_actor_current_states; DROP FUNCTION test_private_archive_failure();").await.unwrap();
+        if !archive["tables"]["realm_actor_backup_admissions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+        {
+            for fault in [
+                "native_source_digest",
+                "native_fixed_outcome",
+                "native_missing_packet",
+                "native_missing_source",
+                "native_missing_recipient",
+                "native_missing_namespace",
+            ] {
+                let mut changed = archive.clone();
+                match fault {
+                    "native_source_digest" => {
+                        changed["tables"]["realm_actor_backup_admissions"][0]["source"]["admission"]
+                            ["envelope_digest"] = json!(format!("sha256:{}", "00".repeat(32)))
+                    }
+                    "native_fixed_outcome" => {
+                        changed["tables"]["realm_actor_backup_admissions"][0]["fixed_reply"]["admission"]
+                            ["service_id"] = json!("ak:did_core:web:unrelated-archive.example")
+                    }
+                    "native_missing_packet" => changed["tables"]["key_backups"]
+                        .as_array_mut()
+                        .unwrap()
+                        .clear(),
+                    "native_missing_source" => changed["tables"]["realm_actor_backup_admissions"]
+                        .as_array_mut()
+                        .unwrap()
+                        .clear(),
+                    "native_missing_recipient" => {
+                        changed["tables"]["realm_actor_backup_recipients"]
+                            .as_array_mut()
+                            .unwrap()
+                            .clear()
+                    }
+                    "native_missing_namespace" => {
+                        changed["tables"]["realm_actor_backup_namespaces"]
+                            .as_array_mut()
+                            .unwrap()
+                            .clear()
+                    }
+                    _ => unreachable!(),
+                }
+                let altered = arkret_canonical::canonical_json_bytes(&changed).unwrap();
+                let mut bad = manifest.clone();
+                bad.state_digest =
+                    arkret_wire::Hash::new(arkret_canonical::sha256_digest(&altered)).unwrap();
+                assert!(
+                    target_store
+                        .import_management_private_state(&bad, &altered)
+                        .await
+                        .is_err(),
+                    "a matching file hash cannot replace native custody closure: {fault}"
+                );
+                let count=diesel::sql_query("SELECT (SELECT COUNT(*) FROM key_backups)+(SELECT COUNT(*) FROM realm_actor_backup_admissions)+(SELECT COUNT(*) FROM realm_actor_backup_namespaces) AS count").get_result::<Count>(&mut *conn).await.unwrap();
+                assert_eq!(
+                    count.count, 0,
+                    "{fault} must roll back every native custody row"
+                );
+            }
+        }
         if !archive["tables"]["realm_actor_blob_uploads"]
             .as_array()
             .unwrap()
@@ -6166,6 +6440,29 @@ mod realm_native_fixture {
             .import_management_private_state(manifest, bytes)
             .await
             .unwrap();
+        drop(conn);
+        drop(target_store);
+        target_pool.close();
+        let reopened = coland_storage_postgres::Db::connect(
+            Some(target.url()),
+            coland_storage_postgres::PoolTuning::default(),
+        )
+        .await
+        .unwrap();
+        let cold_store = PgAuthorityCommitStore {
+            pool: reopened.pool.unwrap(),
+        };
+        let (cold_manifest, cold_bytes) = cold_store
+            .export_management_private_state(&fixture.realm)
+            .await
+            .unwrap();
+        assert_eq!(cold_manifest.state_digest, manifest.state_digest);
+        assert_eq!(
+            cold_bytes, bytes,
+            "a fresh pool and store must re-export the actual imported first-PUT originals, fixed outcomes and private state byte-for-byte"
+        );
+        let target_store = cold_store;
+        let mut conn = target_store.pool.get().await.unwrap();
         let (restored, actual) = target_store
             .export_management_private_state(&fixture.realm)
             .await
@@ -6556,6 +6853,7 @@ mod realm_native_fixture {
             fail_after_control_plan: bool,
             recipient_fault: Arc<NativeRecipientStoreFault>,
             runtime_fault: Arc<NativeRuntimeRecoveryFault>,
+            native_backup_ack_armed: Arc<std::sync::atomic::AtomicBool>,
         }
         impl AuthoringStore for LostDeviceReceipt {
             fn load(&self, key: &str) -> arkret_bridge_runtime::Result<Option<String>> {
@@ -6572,6 +6870,56 @@ mod realm_native_fixture {
                 expected: &[(String, Option<String>)],
                 writes: &[(String, Option<String>)],
             ) -> arkret_bridge_runtime::Result<bool> {
+                if self
+                    .native_backup_ack_armed
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
+                    let accepted = writes.iter().any(|(key, value)| {
+                        if !key.starts_with("content-root-backup/v1/") {
+                            return false;
+                        }
+                        let Some(raw) = value else {
+                            return false;
+                        };
+                        let parts = raw.split('.').collect::<Vec<_>>();
+                        if parts.len() != 3 {
+                            return false;
+                        }
+                        let nonce = arkret_canonical::base64url_decode(parts[1]).unwrap();
+                        let ciphertext = arkret_canonical::base64url_decode(parts[2]).unwrap();
+                        let cipher =
+                            chacha20poly1305::XChaCha20Poly1305::new_from_slice(&[0x53; 32])
+                                .unwrap();
+                        let plain = arkret::KeyBytes::new(
+                            cipher
+                                .decrypt(
+                                    &chacha20poly1305::XNonce::try_from(nonce.as_slice()).unwrap(),
+                                    Payload {
+                                        msg: &ciphertext,
+                                        aad: key.as_bytes(),
+                                    },
+                                )
+                                .unwrap(),
+                        );
+                        let decoded = arkret::KeyBytes::new(
+                            serde_json::from_slice::<Vec<u8>>(plain.as_slice()).unwrap(),
+                        );
+                        let record: Value = serde_json::from_slice(decoded.as_slice()).unwrap();
+                        record
+                            .get("response")
+                            .is_some_and(|response| response.get("admission").is_some())
+                    });
+                    if accepted
+                        && self
+                            .native_backup_ack_armed
+                            .swap(false, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        return Err(arkret_bridge_runtime::BridgeError::App(
+                            "injected lost native root ACK journal".into(),
+                        ));
+                    }
+                }
                 if self.fail_after_control_plan
                     && expected.iter().any(|(key, value)| {
                         key.starts_with("managed-control/v1/") && value.is_none()
@@ -6878,7 +7226,11 @@ mod realm_native_fixture {
             drop(edge);
             let edge = make_edge();
             *native.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
-                arkret_bridge_runtime::web::managed_applet_host_router(edge.clone()).unwrap(),
+                arkret_bridge_runtime::web::managed_applet_host_router_with_manager(
+                    edge.clone(),
+                    fixture_runtime_manager(native, edge.clone()),
+                )
+                .unwrap(),
             )));
             let author = ManagedActorAuthoringService::new(edge.clone()).unwrap();
             let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
@@ -7241,6 +7593,8 @@ mod realm_native_fixture {
             );
             drop(custody);
             drop(devices);
+            drop(author);
+            *native.managed_router.lock().unwrap() = None;
             drop(edge);
             std::fs::remove_file(path).unwrap();
         }
@@ -7300,7 +7654,8 @@ mod realm_native_fixture {
                 "verification_method_fragment":"#applet-service-key", "trusted_server_did":factory.fixture.state.service_did(),
                 "applet_namespaces":package.namespaces,
                 "managed_actor_authoring":{"principal_endpoint":package.base_url,"key_encryption_key_hex":"53".repeat(32),
-                    "device":{"actions":["ak.applet.join","ak.circle.member.add","ak.event.read","ak.message.create","ak.message.redact","ak.mls.commit","ak.object.read_content","ak.self.blob.resource.get.v1","ak.self.blob.command.presign.v1","ak.self.blob.upload.create.v1","ak.strand.create"],
+                    "device":{"actions":["ak.applet.join","ak.circle.member.add","ak.event.read","ak.message.create","ak.message.redact","ak.mls.commit","ak.object.read_content","ak.self.blob.resource.get.v1","ak.self.blob.command.presign.v1","ak.self.blob.upload.create.v1","ak.strand.create",
+                        "ak.self.keys.backups.resource.replace.v1","ak.self.keys.backups.read.list.v1","ak.self.keys.backups.command.issue_unlock_challenge.v1","ak.self.keys.backups.command.unlock.v1"],
                         "lifetime_seconds":3600,"mls":true,"key_package_inventory_target":2}}
             }
         })).unwrap();
@@ -7336,6 +7691,7 @@ mod realm_native_fixture {
         let control_plan_skip = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let recipient_fault = Arc::new(NativeRecipientStoreFault::default());
         let runtime_fault = Arc::new(NativeRuntimeRecoveryFault::default());
+        let native_backup_ack_armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let make_edge = || {
             Arc::new(
                 ArkretEdge::new_outbound(
@@ -7361,6 +7717,7 @@ mod realm_native_fixture {
                         ),
                         recipient_fault: recipient_fault.clone(),
                         runtime_fault: runtime_fault.clone(),
+                        native_backup_ack_armed: native_backup_ack_armed.clone(),
                     })),
                 )
                 .unwrap(),
@@ -7374,8 +7731,13 @@ mod realm_native_fixture {
             external_id: "user-1".into(),
         };
         eprintln!("real Bridge runtime: signed governance preview and independent native creation");
+        let manager = fixture_runtime_manager(&native, edge.clone());
         *native.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
-            arkret_bridge_runtime::web::managed_applet_host_router(edge.clone()).unwrap(),
+            arkret_bridge_runtime::web::managed_applet_host_router_with_manager(
+                edge.clone(),
+                manager.clone(),
+            )
+            .unwrap(),
         )));
         let mut creation_commit = None;
         let candidate = if bot {
@@ -7450,7 +7812,7 @@ mod realm_native_fixture {
             candidate
         } else {
             let prepared =
-                boxed_step(|| author.prepare_ghost_in_scope(&id, &content_scope, &external, None))
+                boxed_step(|| manager.prepare_ghost_in_scope(&id, &content_scope, &external, None))
                     .await
                     .unwrap();
             let PreparedGhost::Create(command) = prepared else {
@@ -7495,12 +7857,22 @@ mod realm_native_fixture {
                 .is_some()
         );
         drop(author);
+        drop(manager);
+        *native.managed_router.lock().unwrap() = None;
         drop(edge);
         let edge = make_edge();
         let author = ManagedActorAuthoringService::new(edge.clone()).unwrap();
+        let manager = fixture_runtime_manager(&native, edge.clone());
+        *native.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
+            arkret_bridge_runtime::web::managed_applet_host_router_with_manager(
+                edge.clone(),
+                manager.clone(),
+            )
+            .unwrap(),
+        )));
         if !bot {
             assert!(matches!(
-                boxed_step(|| author.prepare_ghost_in_scope(&id, &content_scope, &external, None))
+                boxed_step(|| manager.prepare_ghost_in_scope(&id, &content_scope, &external, None))
                     .await
                     .unwrap(),
                 PreparedGhost::Reuse { .. }
@@ -7522,6 +7894,8 @@ mod realm_native_fixture {
                 )
             })
             .await;
+            drop(manager);
+            *native.managed_router.lock().unwrap() = None;
             std::fs::remove_file(&path).unwrap();
             return;
         }
@@ -7540,6 +7914,8 @@ mod realm_native_fixture {
                 )
             })
             .await;
+            drop(manager);
+            *native.managed_router.lock().unwrap() = None;
             std::fs::remove_file(&path).unwrap();
             return;
         }
@@ -7557,6 +7933,7 @@ mod realm_native_fixture {
             "{failure}"
         );
         if let Some(scenario) = recovery_scenario {
+            drop(manager);
             boxed_step(|| {
                 recover_runtime_key_loss(
                     &factory.fixture,
@@ -7627,6 +8004,8 @@ mod realm_native_fixture {
             .await;
             drop(devices);
             drop(author);
+            drop(manager);
+            *native.managed_router.lock().unwrap() = None;
             drop(edge);
             std::fs::remove_file(&path).unwrap();
             return;
@@ -7635,6 +8014,30 @@ mod realm_native_fixture {
             .await
             .unwrap();
         assert_eq!(device.actor_id, actor);
+        let original_authorization = factory
+            .fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .committed_event(&device.authorization_event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let original_scope =
+            arkret::RealmActorDeviceAuthorizationValue::from_event(&original_authorization.event)
+                .unwrap();
+        assert!(
+            original_scope.scopes.permits(
+                &content_scope,
+                &[
+                    arkret_wire::CapabilityActionId::SelfKeysBackupsResourceReplaceV1,
+                    arkret_wire::CapabilityActionId::SelfKeysBackupsReadListV1,
+                    arkret_wire::CapabilityActionId::SelfKeysBackupsCommandIssueUnlockChallengeV1,
+                    arkret_wire::CapabilityActionId::SelfKeysBackupsCommandUnlockV1,
+                ]
+            ),
+            "encrypted publisher must retain its four explicitly signed subject-only actions in the exact content scope"
+        );
         assert_eq!(
             control_nonce_count(&factory.fixture.pool, &actor).await,
             authorized_nonces,
@@ -7709,6 +8112,19 @@ mod realm_native_fixture {
         let mut human_group =
             boxed_step(|| realm_actor_mls_fixture::human_admits_runtime(&factory.fixture, &device))
                 .await;
+        let selected_series = boxed_step(|| manager.maintain_backup_series(&actor, &content_scope))
+            .await
+            .unwrap();
+        let backup_toggle = if recipient_mode == NATIVE_BACKUP_CUSTODY_MODE {
+            Some(
+                boxed_step(|| {
+                    fixture_backup_recovery_toggle(&factory.fixture, &actor, false, None)
+                })
+                .await,
+            )
+        } else {
+            None
+        };
         if recipient_mode == 1 {
             drop(reader);
             drop(device);
@@ -7725,6 +8141,8 @@ mod realm_native_fixture {
                 )
             })
             .await;
+            drop(manager);
+            *native.managed_router.lock().unwrap() = None;
             std::fs::remove_file(&path).unwrap();
             return;
         }
@@ -7743,11 +8161,220 @@ mod realm_native_fixture {
                 .unwrap()
                 .is_none()
         );
+        let (edge, author, manager, devices, device, reader, unknown_packet) = if recipient_mode
+            == NATIVE_BACKUP_CUSTODY_MODE
+        {
+            native_backup_ack_armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            let failure = boxed_step(|| {
+                devices.submit_portal_strand(&actor, &content_scope, "Native portal", &location)
+            })
+            .await
+            .unwrap_err();
+            assert!(
+                failure
+                    .to_string()
+                    .contains("injected lost native root ACK journal"),
+                "{failure}"
+            );
+            assert!(
+                boxed_step(|| devices.find_portal_strand(
+                    &actor,
+                    &factory.fixture.realm,
+                    &location
+                ))
+                .await
+                .unwrap()
+                .is_none(),
+                "first-use failure must precede the business Event"
+            );
+            let (inventory, ..) =
+                fixture_archive_inventory(&factory.fixture, &native, &actor).await;
+            let packet=inventory.entries.iter().find_map(|entry|match entry {
+                arkret_models_integration::RealmActorArchiveInventoryEntry::Backup(entry)=>Some(entry.backup.clone()),_=>None,
+            }).expect("an accepted root remains in full inventory even with no business Event or local ACK");
+            drop(reader);
+            drop(device);
+            drop(devices);
+            drop(author);
+            drop(manager);
+            *native.managed_router.lock().unwrap() = None;
+            drop(edge);
+            let probe = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match probe.try_lock() {
+                    Ok(()) => break,
+                    Err(error) => {
+                        assert!(
+                            tokio::time::Instant::now() < deadline,
+                            "every daily database owner must close before native cold reopen: {error}"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }
+            }
+            probe.unlock().unwrap();
+            drop(probe);
+            let edge = make_edge();
+            let author = ManagedActorAuthoringService::new(edge.clone()).unwrap();
+            let manager = fixture_runtime_manager(&native, edge.clone());
+            *native.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
+                arkret_bridge_runtime::web::managed_applet_host_router_with_manager(
+                    edge.clone(),
+                    manager.clone(),
+                )
+                .unwrap(),
+            )));
+            let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
+            let device = boxed_step(|| devices.device_for_actor(&actor))
+                .await
+                .unwrap();
+            assert_eq!(
+                device.device_id,
+                packet.device_id.clone().unwrap(),
+                "cold retry must retain the exact original requester"
+            );
+            boxed_step(|| {
+                devices.set_owner_status(
+                    &actor,
+                    "native-root-cold-repair-pause",
+                    arkret_models_integration::RealmActorStatusSetPayloadState::Paused,
+                )
+            })
+            .await
+            .unwrap();
+            let operation = format!(
+                "content/{}",
+                arkret_canonical::canonical_sha256(&(
+                    &actor,
+                    &content_scope,
+                    EventKind::StrandCreate,
+                    &location
+                ))
+                .unwrap()
+            );
+            let repaired = boxed_step(|| {
+                devices.repair_content_root_publication(
+                    &device,
+                    &operation,
+                    packet.contents[0].root_ref.as_ref().unwrap(),
+                )
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                repaired.len(),
+                1,
+                "cold repair must recover the one actually sent frozen intent"
+            );
+            assert_eq!(
+                arkret_canonical::canonical_json_bytes(repaired[0].packet()).unwrap(),
+                arkret_canonical::canonical_json_bytes(&packet).unwrap()
+            );
+            assert_eq!(
+                repaired[0].response().admission.envelope_digest.as_str(),
+                arkret_canonical::canonical_sha256(&packet).unwrap()
+            );
+            assert!(
+                boxed_step(|| devices.submit_portal_strand(
+                    &actor,
+                    &content_scope,
+                    "Native portal",
+                    &location
+                ))
+                .await
+                .is_err(),
+                "history-only ACK repair cannot mint paused business authority"
+            );
+            boxed_step(|| {
+                devices.set_owner_status(
+                    &actor,
+                    "native-root-cold-repair-resume",
+                    arkret_models_integration::RealmActorStatusSetPayloadState::Active,
+                )
+            })
+            .await
+            .unwrap();
+            assert!(
+                boxed_step(|| devices.find_portal_strand(
+                    &actor,
+                    &factory.fixture.realm,
+                    &location
+                ))
+                .await
+                .unwrap()
+                .is_none(),
+                "failed paused business publication must leave no portal Event"
+            );
+            let reader = boxed_step(|| devices.open_reader(&device)).await.unwrap();
+            (edge, author, manager, devices, device, reader, Some(packet))
+        } else {
+            (edge, author, manager, devices, device, reader, None)
+        };
         let strand_id = boxed_step(|| {
             devices.submit_portal_strand(&actor, &content_scope, "Native portal", &location)
         })
         .await
         .unwrap();
+        if let Some(original) = &unknown_packet {
+            let (inventory, ..) =
+                fixture_archive_inventory(&factory.fixture, &native, &actor).await;
+            let packets = inventory
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    arkret_models_integration::RealmActorArchiveInventoryEntry::Backup(entry) => {
+                        Some(&entry.backup)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                packets.len(),
+                1,
+                "cold unknown-ACK recovery must not allocate a second root packet"
+            );
+            assert_eq!(
+                arkret_canonical::canonical_json_bytes(packets[0]).unwrap(),
+                arkret_canonical::canonical_json_bytes(original).unwrap()
+            );
+        }
+        if let Some((permission, advanced)) = &backup_toggle {
+            boxed_step(|| {
+                fixture_native_backup_outcomes(
+                    &factory.fixture,
+                    &native,
+                    &devices,
+                    &device,
+                    &reader,
+                    &selected_series,
+                    advanced,
+                    &path,
+                )
+            })
+            .await;
+            boxed_step(|| {
+                fixture_backup_recovery_toggle(&factory.fixture, &actor, true, Some(permission))
+            })
+            .await;
+            let unchanged = boxed_step(|| manager.maintain_backup_series(&actor, &content_scope))
+                .await
+                .unwrap();
+            assert_eq!(
+                arkret_canonical::canonical_json_bytes(&unchanged).unwrap(),
+                arkret_canonical::canonical_json_bytes(&selected_series).unwrap(),
+                "benign enable/source advancement must not rotate the selected native series"
+            );
+        }
+        if recipient_mode == NATIVE_BACKUP_CUSTODY_MODE
+            || recipient_mode == NATIVE_BACKUP_ARCHIVE_READ_MODE
+        {
+            boxed_step(|| fixture_native_archived_head(&factory.fixture, &device, &reader)).await;
+        }
         assert_eq!(
             boxed_step(|| devices.submit_portal_strand(
                 &actor,
@@ -8162,8 +8789,17 @@ mod realm_native_fixture {
         drop(device);
         drop(devices);
         drop(author);
+        drop(manager);
+        *native.managed_router.lock().unwrap() = None;
         drop(edge);
         let edge = make_edge();
+        *native.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
+            arkret_bridge_runtime::web::managed_applet_host_router_with_manager(
+                edge.clone(),
+                fixture_runtime_manager(&native, edge.clone()),
+            )
+            .unwrap(),
+        )));
         let devices = ManagedDeviceRuntime::new(edge.clone()).unwrap();
         let device = boxed_step(|| devices.device_for_actor(&actor))
             .await
@@ -8390,6 +9026,7 @@ mod realm_native_fixture {
         );
         drop(device);
         drop(devices);
+        *native.managed_router.lock().unwrap() = None;
         drop(edge);
         std::fs::remove_file(path).unwrap();
         boxed_step(|| private_management_archive(&factory.fixture, true)).await;
@@ -8462,6 +9099,7 @@ mod realm_native_fixture {
                 &factory.fixture.realm,
                 &body.authoring_request_basis.registration_event.event_id,
                 &grant,
+                &native.archive,
             );
             let mut value = json!(candidate);
             value.as_object_mut().unwrap().remove("control_signature");
@@ -8639,6 +9277,7 @@ mod realm_native_fixture {
             &factory.fixture.realm,
             &registration.event_id,
             &creation_grant,
+            &native.archive,
         );
         boxed_step(|| {
             retired_managed_pcr_creation_is_rejected(&factory.fixture, &package, &creation_grant)
@@ -8716,6 +9355,7 @@ mod realm_native_fixture {
                 &grant_event,
                 &candidate,
                 &committed,
+                &native.archive,
             )
         })
         .await;
@@ -8725,6 +9365,7 @@ mod realm_native_fixture {
                 &package,
                 &registration.event_id,
                 &creation_grant,
+                &native.archive,
             )
         })
         .await;
@@ -8790,6 +9431,7 @@ mod realm_native_fixture {
                             &package,
                             &candidate,
                             &device,
+                            &native.archive,
                         )
                     })
                     .await
@@ -8906,6 +9548,36 @@ native_boundary_entry!(realm_native_exact_current_floor, ExactCurrentFloor);
 
 pub async fn realm_bridge_runtime(pool: PgPool) {
     realm_native_fixture::run_bridge(pool, false, false, false, None).await;
+}
+
+pub async fn realm_native_backup_custody(pool: PgPool) {
+    realm_native_fixture::run_bridge_case_with_consumer(
+        pool,
+        false,
+        true,
+        false,
+        None,
+        false,
+        realm_native_fixture::NATIVE_BACKUP_CUSTODY_MODE,
+        false,
+        None,
+    )
+    .await;
+}
+
+pub async fn realm_native_backup_archived_circle(pool: PgPool) {
+    realm_native_fixture::run_bridge_case_with_consumer(
+        pool,
+        true,
+        true,
+        false,
+        None,
+        false,
+        realm_native_fixture::NATIVE_BACKUP_ARCHIVE_READ_MODE,
+        false,
+        None,
+    )
+    .await;
 }
 
 pub async fn realm_bridge_circle_runtime(pool: PgPool) {

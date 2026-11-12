@@ -424,6 +424,38 @@ async fn exact_visible_committed_event(
         signer_query_diagnostic("exact_visibility", "coordinate_mismatch");
         return false;
     }
+    if record.event.kind == arkret_wire::EventKind::RealmCreate
+        || record.event.scope_ref == arkret_wire::ScopeRef::RealmGenesis
+    {
+        if record.event.event_id != realm_id.event_id()
+            || record.event.kind != arkret_wire::EventKind::RealmCreate
+            || record.event.scope_ref != arkret_wire::ScopeRef::RealmGenesis
+            || record.commit.stream_ref
+                != (arkret_wire::CommitStreamRef::Realm {
+                    realm_id: realm_id.clone(),
+                })
+            || record.commit.stream_position != 0
+            || record.commit.previous_commit_ref.is_some()
+            || record.commit.governance_generation != 0
+            || !matches!(
+                arkret_wire::GenesisGovernance::from_genesis(&record.event),
+                Ok(arkret_wire::GenesisGovernance::Collaboration
+                    | arkret_wire::GenesisGovernance::DirectConversation(_))
+            )
+        {
+            return false;
+        }
+        let Ok(actor) = super::session_actor::validated_session_actor(state, session).await else {
+            return false;
+        };
+        // The original author's ordinary history shortcut cannot establish
+        // current membership for the narrow founding-original disclosure.
+        return matches!(state.authority_commits().committed_event_for_member(
+            &reference.event_id, &actor, &state.service_core_id()).await,
+            Ok(coland_storage::MemberCommittedEventRead::Read(view))
+                if matches!(*view, arkret_wire::CommittedEventView::Full(ref full)
+                    if full.event == record.event && full.commit == record.commit));
+    }
     let event_material = match state
         .event_queries()
         .canonical_event(reference.event_id.as_str())

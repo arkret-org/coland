@@ -243,10 +243,7 @@ async fn realm_creation_writer_failure_rolls_back(
 ) {
     use diesel_async::SimpleAsyncConnection as _;
     let before = boxed_step(|| native_business_footprint(fixture)).await;
-    for table in [
-        "realm_actor_current_states",
-        "applet_authoring_completions",
-    ] {
+    for table in ["realm_actor_current_states", "applet_authoring_completions"] {
         {
             let mut connection = fixture.pool.get().await.unwrap();
             connection.batch_execute(&format!(
@@ -301,9 +298,9 @@ async fn realm_creation_quota_grant(fixture: &Fixture, source: &Event) -> arkret
         json!(payload),
     );
     let grant = arkret_wire::GrantId::from_event_id(&event.event_id);
-    let request = SelfAuthoritySubmitRequestBody::Event(arkret_wire::EventAdmissionSubmission::new(
-        event.clone(),
-    ));
+    let request = SelfAuthoritySubmitRequestBody::Event(
+        arkret_wire::EventAdmissionSubmission::new(event.clone()),
+    );
     let (status, outcome) = fixture
         .admin_post(
             "/_arkret/self/events",
@@ -336,6 +333,7 @@ async fn realm_creation_uniqueness_refuses_new_originals(
     original_grant: &Event,
     winner: &RealmActorCreatePayload,
     original: &coland_storage::CommittedEventRecord,
+    manager_archive: &FixtureManagerArchive,
 ) {
     use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
     let grant = arkret_wire::GrantId::from_event_id(&original_grant.event_id);
@@ -346,7 +344,13 @@ async fn realm_creation_uniqueness_refuses_new_originals(
     );
     let before = boxed_step(|| native_business_footprint(fixture)).await;
     for conflict in ["external", "request"] {
-        let (candidate, signer) = realm_candidate(package, &fixture.realm, registration, &grant);
+        let (candidate, signer) = realm_candidate(
+            package,
+            &fixture.realm,
+            registration,
+            &grant,
+            manager_archive,
+        );
         assert_ne!(candidate.actor_id, winner.actor_id);
         let mut value = json!(candidate);
         value.as_object_mut().unwrap().remove("control_signature");
@@ -423,9 +427,9 @@ async fn realm_creation_uniqueness_refuses_new_originals(
             "a different signed {conflict} original leaves no identity/current/fact/Commit/quota/completion"
         );
     }
-    let request = SelfAuthoritySubmitRequestBody::Event(arkret_wire::EventAdmissionSubmission::new(
-        original.event.clone(),
-    ));
+    let request = SelfAuthoritySubmitRequestBody::Event(
+        arkret_wire::EventAdmissionSubmission::new(original.event.clone()),
+    );
     let (status, body) = fixture
         .service_post(
             package,
@@ -510,9 +514,9 @@ async fn realm_device_wrong_possession_is_rejected(
     )
     .unwrap();
     let event = authored.into_event();
-    let request = SelfAuthoritySubmitRequestBody::Event(arkret_wire::EventAdmissionSubmission::new(
-        event.clone(),
-    ));
+    let request = SelfAuthoritySubmitRequestBody::Event(
+        arkret_wire::EventAdmissionSubmission::new(event.clone()),
+    );
     request.validate().unwrap();
     let before = boxed_step(|| native_business_footprint(fixture)).await;
     let (status, problem) = control_post(
@@ -597,9 +601,9 @@ async fn realm_device_noncanonical_expiry_is_rejected(
     )
     .unwrap();
     let event = authored.into_event();
-    let request = SelfAuthoritySubmitRequestBody::Event(arkret_wire::EventAdmissionSubmission::new(
-        event.clone(),
-    ));
+    let request = SelfAuthoritySubmitRequestBody::Event(
+        arkret_wire::EventAdmissionSubmission::new(event.clone()),
+    );
     let mut metadata = metadata.clone();
     metadata.nonce = arkret_canonical::base64url_encode(rand::random::<[u8; 32]>());
     let before = boxed_step(|| native_business_footprint(fixture)).await;
@@ -643,6 +647,7 @@ async fn realm_creation_quota_exhaustion(
     package: &AppletPackage,
     registration: &EventId,
     grant: &arkret_wire::GrantId,
+    manager_archive: &FixtureManagerArchive,
 ) {
     use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
     let before = boxed_step(|| native_business_footprint(fixture)).await;
@@ -668,7 +673,13 @@ async fn realm_creation_quota_exhaustion(
         1,
         "the exact accepted retry cannot create another quota identity"
     );
-    let (candidate, signer) = realm_candidate(package, &fixture.realm, registration, grant);
+    let (candidate, signer) = realm_candidate(
+        package,
+        &fixture.realm,
+        registration,
+        grant,
+        manager_archive,
+    );
     let mut value = json!(candidate);
     value.as_object_mut().unwrap().remove("control_signature");
     value["request_id"] = json!(uuid::Uuid::now_v7().simple().to_string());
@@ -782,9 +793,10 @@ async fn retired_managed_pcr_creation_is_rejected(
         .is_err()
     );
     assert!(arkret_wire::GenesisGovernance::from_genesis(&retired).is_err());
-    let request = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
-        arkret_wire::EventAdmissionSubmission::new(retired),
-    );
+    let request =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission::new(retired),
+        );
     let before = boxed_step(|| native_business_footprint(fixture)).await;
     let (status, problem) = fixture
         .service_post(
@@ -816,17 +828,19 @@ async fn retired_managed_forward_carrier_is_rejected(
     original: &coland_storage::CommittedEventRecord,
 ) {
     use arkret_models_collaboration::authority_commit::{
-        AuthorityForwardBranch, PeerAuthorityForwardEventRequestBody, PeerAuthoritySubmitRequestBody,
+        AuthorityForwardBranch, PeerAuthorityForwardEventRequestBody,
+        PeerAuthoritySubmitRequestBody,
     };
-    let request =
-        PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(PeerAuthorityForwardEventRequestBody {
+    let request = PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(
+        PeerAuthorityForwardEventRequestBody {
             branch: AuthorityForwardBranch::AuthorityForward,
             event_submission: arkret_wire::EventAdmissionSubmission::new(original.event.clone()),
             mls_group_state_material: None,
             content_backup_sources: None,
             producer_device_evidence: None,
             producer_agent_evidence: None,
-        });
+        },
+    );
     let mut retired = json!(request);
     retired["producer_managed_provenance"] = json!({});
     let before = boxed_step(|| native_business_footprint(fixture)).await;
@@ -896,9 +910,9 @@ async fn realm_profile_control_and_writer_atomicity(
     let event = authored.into_event();
     assert!(event.executed_by.is_none());
     assert!(event.authorization_ref.is_none());
-    let request = SelfAuthoritySubmitRequestBody::Event(arkret_wire::EventAdmissionSubmission::new(
-        event.clone(),
-    ));
+    let request = SelfAuthoritySubmitRequestBody::Event(
+        arkret_wire::EventAdmissionSubmission::new(event.clone()),
+    );
     request.validate().unwrap();
     let before = boxed_step(|| native_business_footprint(fixture)).await;
     {

@@ -1674,6 +1674,7 @@ pub(crate) async fn committed_event_for_member_in_connection(
     if let Some(event) = &event
         && &event.actor_id == caller
         && event.kind != arkret_wire::EventKind::CircleCreate
+        && event.kind != arkret_wire::EventKind::RealmCreate
     {
         let full = arkret_wire::CommittedEventFullView {
             commit,

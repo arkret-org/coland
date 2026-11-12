@@ -47,7 +47,7 @@ pub(crate) async fn admit(
         json!({"kind":"realm_actor_recovery","actor_id":actor}),
     )
     .await?;
-    let recovery: RealmActorRecoveryValue = decode(recovery)?;
+    let mut recovery: RealmActorRecoveryValue = decode(recovery)?;
     let (owner, _) = current_source(
         conn,
         actor,
@@ -80,6 +80,14 @@ pub(crate) async fn admit(
     {
         return Err(invalid(
             "manager handover gates, current revisions or publication differ",
+        ));
+    }
+    let inventory = crate::realm_actor_content_backup::inventory_in_connection(conn, actor).await?;
+    if inventory.inventory_digest().map_err(invalid)? != payload.content_backup_inventory_digest
+        || payload.next_content_backup_recipient == recovery.content_backup_recipient
+    {
+        return Err(invalid(
+            "manager handover inventory cut or fresh recipient differs",
         ));
     }
     let (binding_event, _) =
@@ -170,9 +178,15 @@ pub(crate) async fn admit(
     };
     crate::realm_actor_recovery::inventory(conn, actor, payload.expected_generation, &accepted)
         .await?;
+    recovery.content_backup_recipient = payload.next_content_backup_recipient.clone();
+    recovery.content_backup_recipient_ref = accepted.clone();
     // The owner remains paused, governance remains unchanged, and the current
     // recovery permission survives. No new Device or business grant is created.
     Ok(vec![
+        (
+            json!({"kind":"realm_actor_recovery","actor_id":actor}),
+            json!(recovery),
+        ),
         (
             manager_selector,
             json!(RealmActorManagerValue {

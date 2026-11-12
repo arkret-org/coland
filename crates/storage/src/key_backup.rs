@@ -40,6 +40,50 @@ pub struct KeyBackupActiveSeriesCommitWrite {
     pub queued_at: chrono::DateTime<Utc>,
 }
 
+/// Process-local inputs independently established for this native PUT. The
+/// transaction rechecks the Device, governance, scope and current resources;
+/// none of these values is a wire credential or an Account/PCR substitute.
+#[derive(Clone)]
+pub struct RealmActorBackupPutContext {
+    pub endpoint: crate::AppletManagedDeviceScopeGuard,
+    pub credential_expires_at: chrono::DateTime<Utc>,
+    pub authority: arkret_identity::VerifiedRealmAuthority,
+    pub authority_keys: arkret_identity::RealmAuthorityKeyMap,
+    pub origin_resolution: arkret_models_identity::AuthenticatedServiceResolution,
+    pub governance_history: arkret_models_integration::RealmActorBackupGovernanceHistory,
+    pub max_actor_bytes: u64,
+    pub max_realm_bytes: u64,
+    pub idempotency_key: String,
+}
+
+/// A fresh, registered Service transport still needs exact current-manager
+/// qualification at the private namespace's locked read cut.
+#[derive(Clone)]
+pub struct RealmActorBackupManagerReader {
+    pub actor: arkret_wire::RealmActorId,
+    pub service_id: arkret_wire::DidCoreId,
+    pub verification_method: arkret_wire::DidUrl,
+    pub service_did_document: arkret_identity::DidDocument,
+    pub transport_expires_at: chrono::DateTime<Utc>,
+    pub authority: arkret_identity::VerifiedRealmAuthority,
+    pub authority_keys: arkret_identity::RealmAuthorityKeyMap,
+}
+
+/// Process-local role established by the corresponding transport verifier.
+#[derive(Clone)]
+pub enum RealmActorBackupReader {
+    Device(Box<RealmActorBackupPutContext>),
+    Manager(Box<RealmActorBackupManagerReader>),
+}
+
+pub type RealmActorBackupAdmissionSigner<'a> = &'a (
+        dyn Fn(
+    arkret_models_crypto::RealmActorContentBackupAdmissionSignatureInput,
+) -> PersistenceResult<arkret_models_crypto::RealmActorContentBackupAdmission>
+            + Send
+            + Sync
+    );
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum KeyBackupActiveSeriesCommitOutcome {
     Committed(arkret_wire::RealmCommit),
@@ -142,6 +186,93 @@ pub struct KeyBackupDeleteGate {
 /// delete-challenge ledger the high-risk DELETE path consumes.
 #[async_trait]
 pub trait KeyBackupStore: Send + Sync {
+    async fn issue_native_unlock(
+        &self,
+        _reader: &RealmActorBackupReader,
+        _backup_id: &arkret_wire::BackupId,
+        _request: &arkret_models_crypto::RealmActorBackupIssueUnlockChallengeRequestBody,
+        _audience: &str,
+        _service_id: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<arkret_models_crypto::RealmActorBackupUnlockChallenge> {
+        Err(crate::PersistenceError::SchemaViolation(
+            "native unlock challenge is unavailable".into(),
+        ))
+    }
+    async fn consume_native_unlock(
+        &self,
+        _reader: &RealmActorBackupReader,
+        _proof: &arkret_models_crypto::KeyBackupUnlockProofBody,
+    ) -> PersistenceResult<(
+        arkret_models_integration::KeysBackupsUnlockResponseBody,
+        Box<dyn crate::AccountContentDeliveryGuard>,
+    )> {
+        Err(crate::PersistenceError::SchemaViolation(
+            "native unlock is unavailable".into(),
+        ))
+    }
+    async fn native_head(
+        &self,
+        _context: &RealmActorBackupPutContext,
+    ) -> PersistenceResult<(
+        arkret_models_crypto::RealmActorBackupSeriesHeadResponseBody,
+        Box<dyn crate::AccountContentDeliveryGuard>,
+    )> {
+        Err(crate::PersistenceError::SchemaViolation(
+            "native predecessor read is unavailable".into(),
+        ))
+    }
+
+    async fn native_inventory(
+        &self,
+        _reader: &RealmActorBackupManagerReader,
+    ) -> PersistenceResult<arkret_models_integration::RealmActorArchiveInventoryManifest> {
+        Err(crate::PersistenceError::SchemaViolation(
+            "native archive inventory is unavailable".into(),
+        ))
+    }
+    async fn native_inventory_delivery(
+        &self,
+        _reader: &RealmActorBackupManagerReader,
+        _manifest: &arkret_models_integration::RealmActorArchiveInventoryManifest,
+    ) -> PersistenceResult<Box<dyn crate::AccountContentDeliveryGuard>> {
+        Err(crate::PersistenceError::SchemaViolation(
+            "native archive delivery is unavailable".into(),
+        ))
+    }
+    async fn put_native(
+        &self,
+        _backup: &arkret_models_crypto::KeyBackup,
+        _context: &RealmActorBackupPutContext,
+        _sign: RealmActorBackupAdmissionSigner<'_>,
+    ) -> PersistenceResult<arkret_models_crypto::RealmActorBackupPutResponseBody> {
+        Err(crate::PersistenceError::SchemaViolation(
+            "native root publication is unavailable".into(),
+        ))
+    }
+    async fn commit_native_active_series_pointer(
+        &self,
+        _write: KeyBackupActiveSeriesCommitWrite,
+        _producer: &crate::AppletEventProducerGuard,
+    ) -> PersistenceResult<KeyBackupActiveSeriesCommitOutcome> {
+        Err(crate::PersistenceError::SchemaViolation(
+            "native manager series admission is unavailable".into(),
+        ))
+    }
+    /// Recover a fixed native PUT before resolving installation, epoch or a new
+    /// recipient. This authenticates only the still-valid original Device and
+    /// its exact metadata scope; `None` grants no first-PUT authority.
+    async fn recover_native_put(
+        &self,
+        _backup: &arkret_models_crypto::KeyBackup,
+        _credential: &crate::AppletManagedDeviceAuthority,
+        _effective_scope: &arkret_wire::ScopeRef,
+        _credential_expires_at: chrono::DateTime<Utc>,
+        _idempotency_key: &str,
+    ) -> PersistenceResult<Option<arkret_models_crypto::RealmActorBackupPutResponseBody>> {
+        Err(crate::PersistenceError::SchemaViolation(
+            "native PUT fixed-outcome recovery is unavailable".into(),
+        ))
+    }
     /// Resolve the PCR Realm head and the secret-storage pointer from one
     /// confirmed database cut. `None` means the PCR/current authority could
     /// not be established; it must never be mapped to `Absent` by a caller.

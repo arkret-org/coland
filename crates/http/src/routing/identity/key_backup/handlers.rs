@@ -189,8 +189,20 @@ pub(super) async fn put_key_backup(
     backup: JsonBody<KeyBackup>,
     depot: &mut Depot,
     req: &mut Request,
-) -> JsonResult<KeysBackupsReplaceResponseBody> {
+) -> JsonResult<arkret_models_crypto::KeysBackupsReplaceOperationResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
+    if let Ok(device) = depot
+        .get_typed::<crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice>(
+    ) {
+        return super::native::put(
+            state,
+            device,
+            &backup_id.into_inner(),
+            backup.into_inner(),
+            req,
+        )
+        .await;
+    }
     let session = aa.authenticated_session(state, req).await?;
     let idempotency_principal_id = arkret_wire::DidCoreId::new(session.actor.clone())
         .map_err(|error| AppError::internal(format!("session actor invalid: {error}")))?;
@@ -264,12 +276,15 @@ pub(super) async fn put_key_backup(
         .map_err(|error| AppError::internal(format!("idempotency lookup failed: {error}")))?
     {
         Some(record) if record.request_hash == request_hash => {
-            let outcome = serde_json::from_value(record.response_body).map_err(|error| {
-                AppError::internal(format!(
-                    "stored key-backup replay outcome is invalid: {error}"
-                ))
-            })?;
-            return json_ok(outcome);
+            let outcome: KeysBackupsReplaceResponseBody =
+                serde_json::from_value(record.response_body).map_err(|error| {
+                    AppError::internal(format!(
+                        "stored key-backup replay outcome is invalid: {error}"
+                    ))
+                })?;
+            return json_ok(
+                arkret_models_crypto::KeysBackupsReplaceOperationResponseBody::Account(outcome),
+            );
         }
         Some(_) => {
             return Err(crate::app_error!(
@@ -304,7 +319,9 @@ pub(super) async fn put_key_backup(
             &outcome,
         )
         .await;
-        return json_ok(outcome);
+        return json_ok(
+            arkret_models_crypto::KeysBackupsReplaceOperationResponseBody::Account(outcome),
+        );
     }
     enforce_key_backup_series_chain_typed(state, &backup).await?;
     state
@@ -407,7 +424,7 @@ pub(super) async fn put_key_backup(
         &outcome,
     )
     .await;
-    json_ok(outcome)
+    json_ok(arkret_models_crypto::KeysBackupsReplaceOperationResponseBody::Account(outcome))
 }
 
 async fn persist_key_backup_idempotency(
@@ -448,18 +465,24 @@ async fn persist_key_backup_idempotency(
 pub(super) async fn unlock_key_backup(
     aa: AuthArgs,
     backup_id: PathParam<String>,
-    body: JsonBody<KeysBackupsUnlockRequestBody>,
+    body: JsonBody<arkret_models_crypto::KeysBackupsUnlockOperationRequestBody>,
     depot: &mut Depot,
     req: &mut Request,
     res: &mut Response,
-) -> coland_http::result::GuardedJsonResult<KeyBackup> {
+) -> coland_http::result::GuardedJsonResult<arkret_models_integration::KeysBackupsUnlockResponseBody>
+{
     crate::routing::authority_commit::no_store(res);
     let state = depot.get_typed::<AppState>().expect("state injected");
+    let body = match body.into_inner().proof {
+        arkret_models_crypto::KeyBackupUnlockProofBody::Account(proof) => {
+            KeysBackupsUnlockRequestBody { proof }
+        }
+        proof => return super::native::unlock(depot, req, backup_id.into_inner(), proof).await,
+    };
     let session = aa.authenticated_session(state, req).await?;
     let backup_id = backup_id.into_inner();
     // spec `keys_backups_unlock_request_body` (additionalProperties: false):
     // `{proof}` only; the unlock proof MUST NOT travel in a header or query.
-    let body = body.into_inner();
     let proof = serde_json::to_value(&body.proof).map_err(|error| {
         AppError::internal(format!("key backup unlock proof serialize: {error}"))
     })?;
@@ -582,11 +605,17 @@ pub(super) async fn unlock_key_backup(
             .human_pcr_history_unlock_delivery(reader, &body.proof, &holder)
             .await
             .map_err(|_| AppError::not_found("key backup history source unavailable"))?;
-        return coland_http::result::guarded_json_ok(value, Some(guard));
+        return coland_http::result::guarded_json_ok(
+            arkret_models_integration::KeysBackupsUnlockResponseBody::Account(value),
+            Some(guard),
+        );
     }
     let backup = serde_json::from_value(backup)
         .map_err(|error| AppError::internal(format!("stored key backup invalid: {error}")))?;
-    coland_http::result::guarded_json_ok(backup, None)
+    coland_http::result::guarded_json_ok(
+        arkret_models_integration::KeysBackupsUnlockResponseBody::Account(backup),
+        None,
+    )
 }
 
 #[salvo::oapi::endpoint(

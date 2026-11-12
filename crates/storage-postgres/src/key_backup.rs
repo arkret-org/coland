@@ -307,6 +307,85 @@ async fn list_page_in_connection(
 
 #[async_trait]
 impl KeyBackupStore for PgKeyBackupStore {
+    async fn issue_native_unlock(
+        &self,
+        reader: &coland_storage::RealmActorBackupReader,
+        id: &arkret_wire::BackupId,
+        request: &arkret_models_crypto::RealmActorBackupIssueUnlockChallengeRequestBody,
+        audience: &str,
+        service_id: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<arkret_models_crypto::RealmActorBackupUnlockChallenge> {
+        crate::realm_actor_content_backup::issue_native_unlock(
+            &self.pool, reader, id, request, audience, service_id,
+        )
+        .await
+    }
+    async fn consume_native_unlock(
+        &self,
+        reader: &coland_storage::RealmActorBackupReader,
+        proof: &arkret_models_crypto::KeyBackupUnlockProofBody,
+    ) -> PersistenceResult<(
+        arkret_models_integration::KeysBackupsUnlockResponseBody,
+        Box<dyn coland_storage::AccountContentDeliveryGuard>,
+    )> {
+        crate::realm_actor_content_backup::consume_native_unlock(&self.pool, reader, proof).await
+    }
+    async fn native_head(
+        &self,
+        context: &coland_storage::RealmActorBackupPutContext,
+    ) -> PersistenceResult<(
+        arkret_models_crypto::RealmActorBackupSeriesHeadResponseBody,
+        Box<dyn coland_storage::AccountContentDeliveryGuard>,
+    )> {
+        crate::realm_actor_content_backup::native_head(&self.pool, context).await
+    }
+    async fn native_inventory(
+        &self,
+        reader: &coland_storage::RealmActorBackupManagerReader,
+    ) -> PersistenceResult<arkret_models_integration::RealmActorArchiveInventoryManifest> {
+        crate::realm_actor_content_backup::native_inventory(&self.pool, reader).await
+    }
+    async fn native_inventory_delivery(
+        &self,
+        reader: &coland_storage::RealmActorBackupManagerReader,
+        manifest: &arkret_models_integration::RealmActorArchiveInventoryManifest,
+    ) -> PersistenceResult<Box<dyn coland_storage::AccountContentDeliveryGuard>> {
+        crate::realm_actor_content_backup::native_inventory_delivery(&self.pool, reader, manifest)
+            .await
+    }
+    async fn put_native(
+        &self,
+        backup: &arkret_models_crypto::KeyBackup,
+        context: &coland_storage::RealmActorBackupPutContext,
+        sign: coland_storage::RealmActorBackupAdmissionSigner<'_>,
+    ) -> PersistenceResult<arkret_models_crypto::RealmActorBackupPutResponseBody> {
+        crate::realm_actor_content_backup::put_native(&self.pool, backup, context, sign).await
+    }
+    async fn commit_native_active_series_pointer(
+        &self,
+        write: coland_storage::KeyBackupActiveSeriesCommitWrite,
+        producer: &coland_storage::AppletEventProducerGuard,
+    ) -> PersistenceResult<coland_storage::KeyBackupActiveSeriesCommitOutcome> {
+        crate::realm_actor_content_backup::admit_series(&self.pool, &write, producer).await
+    }
+    async fn recover_native_put(
+        &self,
+        backup: &arkret_models_crypto::KeyBackup,
+        credential: &coland_storage::AppletManagedDeviceAuthority,
+        effective_scope: &arkret_wire::ScopeRef,
+        credential_expires_at: chrono::DateTime<Utc>,
+        idempotency_key: &str,
+    ) -> PersistenceResult<Option<arkret_models_crypto::RealmActorBackupPutResponseBody>> {
+        crate::realm_actor_content_backup::recover_put(
+            &self.pool,
+            backup,
+            credential,
+            effective_scope,
+            credential_expires_at,
+            idempotency_key,
+        )
+        .await
+    }
     async fn confirmed_list_page_for_account(
         &self,
         account_id: &arkret_wire::AccountId,

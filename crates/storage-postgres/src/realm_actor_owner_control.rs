@@ -203,6 +203,10 @@ pub(crate) async fn admit(
                 }
                 writes.push((recovery_selector, json!(recovery)));
             }
+            if payload.state == RealmActorStatusSetPayloadState::Active {
+                crate::realm_actor_content_backup::require_manager_resume_ready(conn, actor)
+                    .await?;
+            }
             writes.push((owner_selector, json!(payload.state)));
         }
         EventKind::RealmActorDevicesReset => {
@@ -255,6 +259,9 @@ pub(crate) async fn admit(
     .await?;
     for (selector, value) in writes {
         write_current(conn, actor, selector, value, commit).await?;
+    }
+    if event.kind == EventKind::RealmActorManagerChange {
+        crate::realm_actor_content_backup::retain_current_recipient(conn, actor).await?;
     }
     if let Some(revoke) = revoke {
         crate::realm_actor_device_revoke::retain(conn, transaction, digest, revoke).await?;

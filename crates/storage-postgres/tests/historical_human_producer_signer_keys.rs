@@ -551,11 +551,10 @@ async fn production_uow_exact_accepted_retry_precedes_current_revocation_and_nev
 }
 
 #[tokio::test]
-async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_head_or_current_rewrite()
- {
+async fn bootstrap_genesis_and_withheld_upgrade_retain_sources_without_head_or_floor_rewrite() {
     use coland_storage::{
         CommittedChainNode, CommittedReplica, CommittedReplicaOutcome, CommittedReplicaRole,
-        ReplicaAnchorInstall,
+        MemberCommittedEventRead, ReplicaAnchorInstall, ReplicaBootstrapInstall,
     };
     let mut source_config = coland_test_support::app_config();
     source_config.public_base_url = "https://full-upgrade-governance.example".into();
@@ -646,6 +645,11 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
             .unwrap(),
         CommittedReplicaOutcome::Stored
     );
+    let genesis_original = coland_test_support::member_bootstrap::genesis_original(
+        &source_store,
+        &previous.event.realm_id,
+    )
+    .await;
     let anchor = |material: coland_storage::RealmStateSnapshotMaterial| {
         let key =
             ed25519_dalek::SigningKey::from_bytes(&historical_human::station_authority_seed());
@@ -668,6 +672,7 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
         .unwrap();
         ReplicaAnchorInstall {
             realm_id: material.realm_id,
+            genesis_original: genesis_original.clone(),
             join_commit_id: join.authority_commit.commit.commit_id.clone(),
             governance_generation: material.governance_generation,
             snapshot_head: material.visible_stream_heads[0].clone(),
@@ -685,10 +690,163 @@ async fn withheld_full_upgrade_atomically_retains_original_human_fact_without_he
         .await
         .unwrap()
         .unwrap();
+    // The integrated anchor command now requires the verified founding
+    // original itself. Its first transaction must retain that source; the
+    // upstream bootstrap wrapper below must name the identical original.
     member
-        .install_replica_anchor(&anchor(material))
+        .install_replica_anchor(&anchor(material.clone()))
         .await
         .unwrap();
+    let founding = source.unit.transactions.as_slice().first().unwrap();
+    let original = arkret_wire::CommittedEventFullView {
+        event: founding.event.clone(),
+        commit: founding.commit.clone(),
+    };
+    assert!(matches!(
+        member
+            .committed_event_for_member(
+                &original.event.event_id,
+                &actor,
+                &member_account.station_id
+            )
+            .await
+            .unwrap(),
+        MemberCommittedEventRead::Read(ref view)
+            if view.as_ref()==&arkret_wire::CommittedEventView::Full(original.clone())
+    ));
+    let bootstrap = ReplicaBootstrapInstall {
+        anchor: anchor(material),
+        genesis: original.clone(),
+        producer_signer_fact: source_store
+            .producer_signer_fact(&original.event, &original.commit)
+            .await
+            .unwrap(),
+    };
+    let held_head = member
+        .held_stream_head_commit(&join.authority_commit.commit.stream_ref)
+        .await
+        .unwrap();
+    let held_anchor = member
+        .replica_stream_anchor(&original.event.realm_id)
+        .await
+        .unwrap();
+    let before = footprint(&member_pool).await;
+    let mut missing = bootstrap.clone();
+    missing.producer_signer_fact = None;
+    assert!(member.install_replica_bootstrap(&missing).await.is_err());
+    assert_eq!(footprint(&member_pool).await, before);
+    assert_eq!(
+        member
+            .replica_stream_anchor(&original.event.realm_id)
+            .await
+            .unwrap(),
+        held_anchor
+    );
+    let mut substituted = bootstrap.clone();
+    substituted
+        .producer_signer_fact
+        .as_mut()
+        .unwrap()
+        .as_account_device_mut()
+        .unwrap()
+        .event_id = join.authority_commit.event.event_id.clone();
+    assert!(
+        member
+            .install_replica_bootstrap(&substituted)
+            .await
+            .is_err()
+    );
+    assert_eq!(footprint(&member_pool).await, before);
+    let mut other_realm = bootstrap.clone();
+    other_realm.anchor.realm_id = arkret_wire::RealmId::from_event_id(
+        &arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0x79; 32]),
+    );
+    assert!(
+        member
+            .install_replica_bootstrap(&other_realm)
+            .await
+            .is_err()
+    );
+    assert_eq!(footprint(&member_pool).await, before);
+    member.install_replica_bootstrap(&bootstrap).await.unwrap();
+    assert!(matches!(
+        member.committed_event_for_member(&original.event.event_id, &actor, &member_account.station_id)
+            .await.unwrap(), MemberCommittedEventRead::Read(ref view)
+            if view.as_ref() == &arkret_wire::CommittedEventView::Full(original.clone())
+    ));
+    assert_eq!(
+        member
+            .producer_signer_fact(&original.event, &original.commit)
+            .await
+            .unwrap(),
+        bootstrap.producer_signer_fact
+    );
+    assert_eq!(
+        member
+            .held_stream_head_commit(&join.authority_commit.commit.stream_ref)
+            .await
+            .unwrap(),
+        held_head
+    );
+    assert_eq!(
+        member
+            .replica_stream_anchor(&original.event.realm_id)
+            .await
+            .unwrap(),
+        held_anchor
+    );
+    let outsider = arkret_wire::ActorId::account(arkret_wire::AccountId {
+        principal_id: arkret_wire::DidCoreId::new("ak:did_core:web:not-a-member.example").unwrap(),
+        station_id: member_account.station_id.clone(),
+    });
+    assert!(matches!(
+        member
+            .committed_event_for_member(
+                &original.event.event_id,
+                &outsider,
+                &member_account.station_id
+            )
+            .await
+            .unwrap(),
+        MemberCommittedEventRead::NotVisible
+    ));
+    assert!(matches!(
+        member
+            .committed_event_for_member(
+                &source.unit.transactions[1].event.event_id,
+                &actor,
+                &member_account.station_id
+            )
+            .await
+            .unwrap(),
+        MemberCommittedEventRead::NotVisible
+    ));
+    let scan = arkret_wire::StreamScanRequestBody {
+        realm_id: original.event.realm_id.clone(),
+        stream_ref: original.commit.stream_ref.clone(),
+        direction: arkret_wire::StreamScanDirection::After(None),
+        limit: 128,
+    };
+    let page = member
+        .scan_stream_for_actor(&scan, &actor, &member_account.station_id)
+        .await
+        .unwrap();
+    let coland_storage::AccountStreamScan::Page(page) = page else {
+        panic!("joined reader keeps its original scan");
+    };
+    assert_eq!(
+        page.readable_floor.as_ref().unwrap().oldest_position,
+        join.authority_commit.commit.stream_position
+    );
+    assert!(
+        page.committed_events
+            .iter()
+            .all(|view| view.commit().stream_position
+                >= join.authority_commit.commit.stream_position)
+    );
+    let after = footprint(&member_pool).await;
+    member.install_replica_bootstrap(&bootstrap).await.unwrap();
+    assert_eq!(footprint(&member_pool).await, after);
     let mut target = source.next(
         &join.authority_commit,
         source.pcr.history.founding_device_signing_seed,
@@ -967,4 +1125,79 @@ mod forward_retention {
         }
         assert_eq!(installed(&pool).await, before);
     }
+}
+
+#[tokio::test]
+async fn later_pcr_revision_is_retryable_without_rewriting_or_authorizing_the_original() {
+    use coland_storage::ActorProfileStore as _;
+    use historical_human::ordinary_realm;
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let fixture = historical_human::HumanFixture::new(
+        &pool,
+        Did::new("did:web:human-history-cut-race.example").unwrap(),
+    )
+    .await;
+    let history = &fixture.pcr.history;
+    ordinary_realm::human_profile::register_fixture_signer(
+        &history.account,
+        history.device_verification_method.clone(),
+        history.founding_device_signing_seed,
+    );
+    let pcr_head = fixture.pcr.unit.transactions.last().unwrap();
+    let profile_at = pcr_head.commit.committed_at + chrono::Duration::seconds(2);
+    let mut profile = ordinary_realm::next_human_request_for_actor(
+        pcr_head,
+        arkret_wire::EventKind::ProfileCreate,
+        arkret_wire::ActorId::account(history.account.clone()),
+        serde_json::json!({"object":{"principal_id":history.account.principal_id,
+            "actor_kind":"user","display_name":"Verified cut race fixture"}}),
+        profile_at,
+    );
+    ordinary_realm::seal_final_commit(&mut profile.authority_commit.commit);
+    coland_storage_postgres::PgActorProfileStore { pool: pool.clone() }
+        .admit_profile(coland_storage::ActorProfileAdmissionWrite {
+            commit: profile.authority_commit,
+            queued_at: profile_at,
+        })
+        .await
+        .unwrap();
+    let stale_at = profile_at - chrono::Duration::milliseconds(500);
+    let probe = ordinary_realm::next_human_request_for_actor(
+        fixture.unit.transactions.last().unwrap(),
+        arkret_wire::EventKind::RealmProfile,
+        arkret_wire::ActorId::account(history.account.clone()),
+        serde_json::json!({"schema":"ak.schema.realm_profile.v1","title":"Original cut probe"}),
+        stale_at,
+    );
+    let original = probe.authority_commit.event;
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let before = footprint(&pool).await;
+    let error = store
+        .prepare_account_device_signer_fact(&original, stale_at)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .ends_with("Account Device source revision is after the admission cut"),
+        "the real signed fixture must reach the newer-PCR-revision branch: {error}"
+    );
+    assert_eq!(
+        error.conflict_code(),
+        Some(coland_storage::ConflictCode::TemporarilyUnavailable),
+        "a verified newer PCR revision cannot establish the earlier admission cut"
+    );
+    assert_eq!(footprint(&pool).await, before);
+    let fresh = store
+        .prepare_account_device_signer_fact(&original, profile_at + chrono::Duration::seconds(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fresh.event_id, original.event_id);
+    assert_eq!(
+        fresh.key.authorization_ref.event_id,
+        history.events[1].event_id
+    );
+    assert_eq!(footprint(&pool).await, before);
 }

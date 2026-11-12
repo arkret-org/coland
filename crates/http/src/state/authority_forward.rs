@@ -1017,6 +1017,85 @@ async fn require_live_forward(state: &AppState, event: &arkret_wire::Event) -> S
 }
 
 /// Freeze root custody sources before computing any producer body evidence.
+async fn content_backup_public_evidence(
+    state: &AppState,
+    destination: &DidCoreId,
+    event: &Event,
+) -> ServiceResult<Option<coland_storage::ContentBackupSourcePublicEvidence>> {
+    use arkret_models_collaboration::mls_group_state_material::MlsMemberGroupStateMaterialReadRequestBody;
+    if state
+        .mls_groups()
+        .current(&event.scope_ref)
+        .await?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    let missing = || temporarily_unavailable("content source public MLS evidence is unavailable");
+    let group = state
+        .mls_groups()
+        .held_current_value(&event.scope_ref)
+        .await?
+        .ok_or_else(missing)?;
+    let original = state
+        .event_queries()
+        .canonical_event(group.current_mls_commit_event_ref.as_str())
+        .await?
+        .ok_or_else(missing)?;
+    let invalid = |error: serde_json::Error| ServiceError::SchemaViolation(error.to_string());
+    let original: Event = serde_json::from_value(original.envelope).map_err(invalid)?;
+    let value = serde_json::to_value(&original.payload).map_err(invalid)?;
+    let (group_info_ref, ratchet_tree_ref) = match original.kind {
+        arkret_wire::EventKind::MlsGenesis => {
+            let payload: arkret_models_collaboration::events_payloads::MlsGenesisPayload =
+                serde_json::from_value(value).map_err(invalid)?;
+            (payload.group_info_ref, payload.ratchet_tree_ref)
+        }
+        arkret_wire::EventKind::MlsCommit => {
+            let payload: arkret_models_crypto::MlsCommitPayload =
+                serde_json::from_value(value).map_err(invalid)?;
+            (
+                payload.group_info_ref().clone(),
+                payload.ratchet_tree_ref().clone(),
+            )
+        }
+        _ => return Err(missing()),
+    };
+    let request = MlsMemberGroupStateMaterialReadRequestBody {
+        realm_id: event.realm_id.clone(),
+        effective_scope: event.scope_ref.clone(),
+        mls_group_id: event
+            .scope_ref
+            .canonical_mls_group_id()
+            .map_err(wire_refusal)?,
+        epoch: group.epoch,
+        group_state_event_id: group.current_mls_commit_event_ref.clone(),
+        caller_actor_id: event.actual_signer().clone(),
+        target_commit_event_ref: group.current_mls_commit_event_ref.clone(),
+        target_epoch: group.epoch,
+        group_info_ref,
+        ratchet_tree_ref,
+        max_response_bytes: None,
+    };
+    let material = crate::routing::mls::read_member_group_state_material(state, &request)
+        .await
+        .map_err(|error| temporarily_unavailable(error.message))?;
+    let located = crate::routing::realm_join::resolve_verified_authority_of_service(
+        state,
+        &event.realm_id,
+        destination,
+    )
+    .await
+    .map_err(|error| temporarily_unavailable(error.message))?;
+    Ok(Some(coland_storage::ContentBackupSourcePublicEvidence {
+        expected_authority: located.current_authority(),
+        group,
+        realm_declaration: located.bundle.genesis_event,
+        request,
+        material,
+    }))
+}
+
 pub(crate) async fn content_backup_sources(
     state: &AppState,
     destination: &DidCoreId,
@@ -1041,9 +1120,16 @@ pub(crate) async fn content_backup_sources(
         let method = state
             .service_verification_method("notary-key")
             .map_err(ServiceError::internal)?;
+        let public_evidence = content_backup_public_evidence(state, destination, event).await?;
         let draft = state
             .authority_commits()
-            .prepare_content_backup_source(event, &state.service_core_id(), destination, &method)
+            .prepare_content_backup_source(
+                event,
+                &state.service_core_id(),
+                destination,
+                &method,
+                public_evidence.as_ref(),
+            )
             .await?;
         let bytes = draft.signing_payload_bytes().map_err(wire_refusal)?;
         let signature = arkret_models_crypto::KeyOperationSignature {

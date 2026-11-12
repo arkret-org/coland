@@ -657,6 +657,17 @@ impl crate::events::ProjectionWritePort for PersistenceProjectionWriter {
 
 #[async_trait::async_trait]
 impl crate::events::MlsGroupReadPort for PersistenceMlsGroupReader {
+    async fn held_current_value(
+        &self,
+        effective_scope: &arkret_wire::ScopeRef,
+    ) -> crate::ServiceResult<Option<arkret_wire::MlsGroupValue>> {
+        Ok(self
+            .0
+            .mls_groups()
+            .held_current_value(effective_scope)
+            .await?)
+    }
+
     async fn current(
         &self,
         effective_scope: &arkret_wire::ScopeRef,

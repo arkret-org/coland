@@ -1,5 +1,7 @@
 #[path = "support/historical_human.rs"]
 mod historical_human;
+#[path = "support/hydration.rs"]
+mod hydration;
 
 use arkret_models_identity::{HistoricalSignerKeyQuerySender, SignerKeyQuerySelector};
 use arkret_wire::{CommittedEventRef, Did};
@@ -795,6 +797,54 @@ async fn bootstrap_genesis_and_withheld_upgrade_retain_sources_without_head_or_f
             .unwrap(),
         held_anchor
     );
+    // The disclosed position-zero original is not the member's stream floor.
+    // Restart must preserve the sparse suffix and every independent current cell.
+    let current_before_restart = member
+        .realm_state_snapshot_material(&original.event.realm_id)
+        .await
+        .unwrap();
+    let footprint_before_restart = footprint(&member_pool).await;
+    for _ in 0..2 {
+        let restarted =
+            coland_services::projection::ProjectionService::new("disclosed-genesis-restart");
+        restarted
+            .hydrate_from_persistence(
+                &coland_storage_postgres::PgPersistenceStore::new(member_pool.clone()),
+                &hydration::BootstrapHydrationAdapter,
+                [original.event.realm_id.clone()],
+            )
+            .await
+            .unwrap();
+        assert!(
+            restarted
+                .snapshot()
+                .realm_create_log(original.event.realm_id.as_str())
+                .is_none(),
+            "member custody must not execute the Genesis reducer"
+        );
+        assert_eq!(
+            member
+                .realm_state_snapshot_material(&original.event.realm_id)
+                .await
+                .unwrap(),
+            current_before_restart
+        );
+        assert_eq!(
+            member
+                .replica_stream_anchor(&original.event.realm_id)
+                .await
+                .unwrap(),
+            held_anchor
+        );
+        assert_eq!(
+            member
+                .held_stream_head_commit(&join.authority_commit.commit.stream_ref)
+                .await
+                .unwrap(),
+            held_head
+        );
+        assert_eq!(footprint(&member_pool).await, footprint_before_restart);
+    }
     let outsider = arkret_wire::ActorId::account(arkret_wire::AccountId {
         principal_id: arkret_wire::DidCoreId::new("ak:did_core:web:not-a-member.example").unwrap(),
         station_id: member_account.station_id.clone(),

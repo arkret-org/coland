@@ -5089,6 +5089,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         issuer: &arkret_wire::DidCoreId,
         destination: &arkret_wire::DidCoreId,
         verification_method: &arkret_wire::DidUrl,
+        public_evidence: Option<&coland_storage::ContentBackupSourcePublicEvidence>,
     ) -> PersistenceResult<arkret_models_crypto::ContentBackupSourceDraft> {
         crate::content_backup_source::prepare(
             &self.pool,
@@ -5096,6 +5097,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             issuer,
             destination,
             verification_method,
+            public_evidence,
         )
         .await
     }

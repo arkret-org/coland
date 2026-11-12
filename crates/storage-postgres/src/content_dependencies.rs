@@ -50,7 +50,7 @@ struct DomainRow {
     content_context: Value,
 }
 
-async fn original_event(
+pub(crate) async fn original_event(
     conn: &mut AsyncPgConnection,
     event_id: &arkret_wire::EventId,
 ) -> PersistenceResult<Event> {
@@ -118,7 +118,8 @@ pub(crate) async fn validate_root_basis(
 
 pub(crate) struct NativeContentGroup {
     pub group: MlsGroupValue,
-    public_state: Vec<u8>,
+    pub(crate) public_state: Vec<u8>,
+    pub(crate) realm_declaration: Option<Event>,
 }
 
 type RootDependencies = BTreeMap<String, (Option<ContentRootContext>, Option<String>)>;
@@ -150,6 +151,7 @@ pub(crate) async fn current_group_in_connection(
     Ok(NativeContentGroup {
         group,
         public_state: row.public_state,
+        realm_declaration: None,
     })
 }
 
@@ -191,11 +193,14 @@ pub(crate) async fn local_original_dependencies_in_connection(
     {
         return Err(invalid("original producer is not one exact accepted MLS leaf").into());
     }
-    let declaration = sql_query("SELECT e.envelope AS payload FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.realm_id=$1 AND e.kind='ak.realm.create' AND e.state='committed' ORDER BY c.stream_position LIMIT 1")
+    let declaration = if let Some(declaration) = &current.realm_declaration {
+        declaration.clone()
+    } else {
+        let declaration = sql_query("SELECT e.envelope AS payload FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.realm_id=$1 AND e.kind='ak.realm.create' AND e.state='committed' ORDER BY c.stream_position LIMIT 1")
         .bind::<Text,_>(event.realm_id.as_str()).get_result::<crate::JsonPayloadRow>(&mut *conn).await.optional()?
         .ok_or_else(|| missing("scope has no accepted original backup strategy declaration"))?;
-    let declaration: Event =
-        serde_json::from_value(declaration.payload).map_err(PersistenceError::database)?;
+        serde_json::from_value::<Event>(declaration.payload).map_err(PersistenceError::database)?
+    };
     let realm = declaration
         .as_realm_create()
         .map_err(|error| invalid(error.to_string()))?;

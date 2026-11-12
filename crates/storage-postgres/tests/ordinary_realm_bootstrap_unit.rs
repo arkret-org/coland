@@ -1083,6 +1083,7 @@ fn legacy_unit() -> OrdinaryRealmBootstrapCommitUnit {
             "governance_station_id":station,
             "initial_join_rule":"invite",
             "initial_history_access":"since_join",
+            "initial_encryption_backup_strategy":"ak.encryption_backup.epoch_content_roots.v1",
             "initial_discoverability":"invite_only"
         }}),
         at,
@@ -1685,6 +1686,49 @@ async fn confirmed_bootstrap_recovers_after_postcommit_projection_install_is_los
     assert_eq!(
         second.realm_history_access(realm_id.as_str()),
         restored.realm_history_access(realm_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn governor_hydration_rejects_corrupted_bootstrap_prefix() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    human_profile::admit(
+        &pool,
+        &arkret_wire::DidCoreId::new("ak:did_core:web:bootstrap-station.example").unwrap(),
+        "bootstrap-actor",
+    )
+    .await;
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let unit = unit(&pool).await;
+    let realm = unit.transactions[0].event.realm_id.clone();
+    store
+        .admit_ordinary_realm_bootstrap_unit(&unit, unit.transactions[0].commit.committed_at)
+        .await
+        .unwrap();
+    assert!(store.replica_stream_anchor(&realm).await.unwrap().is_none());
+    let mut connection = pool.get().await.unwrap();
+    diesel::sql_query("UPDATE realm_commits SET commit_json=jsonb_set(commit_json,'{previous_commit_ref}',to_jsonb($1::text)) WHERE realm_id=$2 AND stream_position=2")
+        .bind::<Text, _>(unit.transactions[0].commit.commit_id.as_str())
+        .bind::<Text, _>(realm.as_str())
+        .execute(&mut *connection).await.unwrap();
+    drop(connection);
+    let restarted = ProjectionService::new("corrupt-governor-bootstrap-restart");
+    assert!(
+        restarted
+            .hydrate_from_persistence(
+                &coland_storage_postgres::PgPersistenceStore::new(pool),
+                &BootstrapHydrationAdapter,
+                [realm.clone()],
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        restarted
+            .snapshot()
+            .realm_create_log(realm.as_str())
+            .is_none()
     );
 }
 

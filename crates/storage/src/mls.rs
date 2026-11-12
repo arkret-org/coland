@@ -1008,6 +1008,17 @@ pub trait MlsGroupCurrentStore: Send + Sync {
         &self,
         effective_scope: &arkret_wire::ScopeRef,
     ) -> PersistenceResult<Option<MlsGroupCurrentRecord>>;
+    /// Read only the public current value held at one governing or verified
+    /// member-replica cut. This never manufactures admission-owned group state.
+    /// A known activated replica without a covered cut is unavailable, not inactive.
+    async fn held_current_value(
+        &self,
+        effective_scope: &arkret_wire::ScopeRef,
+    ) -> PersistenceResult<Option<arkret_wire::MlsGroupValue>> {
+        self.current(effective_scope)
+            .await
+            .map(|record| record.map(|record| record.value))
+    }
     /// Every current group of one Realm, Realm scope first.
     async fn realm_currents(
         &self,

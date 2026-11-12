@@ -1850,7 +1850,8 @@ mod tests {
                 "genesis_salt":arkret_canonical::base64url_encode([91u8;32]),
                 "trust_domain":"ak:trust_domain:morph.example","security_class":"high_assurance",
                 "governance_station_id":station(),"initial_join_rule":"invite",
-                "initial_history_access":"since_join","initial_discoverability":"invite_only"
+                "initial_history_access":"since_join","initial_discoverability":"invite_only",
+                "initial_encryption_backup_strategy":arkret_wire::EncryptionBackupStrategy::EpochContentRoots
             }}))
             .unwrap();
         arkret_wire::test_support::raw_event_for_actor_at(

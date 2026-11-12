@@ -1,5 +1,7 @@
 #[path = "support/historical_human.rs"]
 mod historical_human;
+#[path = "support/hydration.rs"]
+mod hydration;
 
 use arkret_wire::{ActorId, CommitStreamRef, EventKind};
 use coland_storage::{AuthorityCommitStore, AuthorityCommitTransaction, EventCommitUnitOfWork};
@@ -411,6 +413,43 @@ async fn check_remote_snapshot_without_create_history(visibility: &str) {
         .unwrap();
     assert_eq!(view.viewer_membership, Some(CircleMembership::Join));
     assert_eq!(view.member_ids, vec![actor.clone()]);
+    let current_before_restart = member_store
+        .circle_read_for_actor(&circle, &actor)
+        .await
+        .unwrap();
+    let restarted =
+        coland_services::projection::ProjectionService::new("since-join-circle-restart");
+    Box::pin(restarted.hydrate_from_persistence(
+        &coland_storage_postgres::PgPersistenceStore::new(member_pool.clone()),
+        &hydration::BootstrapHydrationAdapter,
+        [realm.clone()],
+    ))
+    .await
+    .unwrap();
+    assert!(
+        !restarted.snapshot().circles.contains_key(circle.as_str()),
+        "a member tail cannot invent the missing Circle creation history"
+    );
+    assert_eq!(
+        serde_json::to_value(
+            member_store
+                .circle_view_for_actor(&circle, &actor)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(Some(view.clone())).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(
+            member_store
+                .circle_read_for_actor(&circle, &actor)
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(current_before_restart).unwrap()
+    );
     assert_eq!(
         member_store
             .circle_views_for_actor(&realm, &actor)

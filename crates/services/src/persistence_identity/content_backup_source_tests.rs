@@ -52,6 +52,167 @@ async fn original_audit(pool: &PgPool, event: &arkret_wire::Event) -> Value {
         .get_result::<BindingRow>(&mut *conn).await.unwrap().payload
 }
 
+async fn source_from_public_replica(
+    pool: &PgPool,
+    prepared: &PreparedGroup,
+    event: &arkret_wire::Event,
+    issuer: &arkret_wire::DidCoreId,
+    governor: &arkret_wire::DidCoreId,
+    method: &arkret_wire::DidUrl,
+) {
+    use arkret_models_collaboration::mls_group_state_material::{
+        MlsGroupStateMaterialResponseBody, MlsMemberGroupStateMaterialReadRequestBody,
+    };
+    let scope = &event.scope_ref;
+    let mut conn = pool.get().await.unwrap();
+    let stored = diesel::sql_query(
+        "SELECT to_jsonb(g) AS payload FROM mls_group_current_states g WHERE realm_id=$1",
+    )
+    .bind::<Text, _>(event.realm_id.as_str())
+    .get_result::<BindingRow>(&mut *conn)
+    .await
+    .unwrap()
+    .payload;
+    let group: arkret_wire::MlsGroupValue =
+        serde_json::from_value(stored["value"].clone()).unwrap();
+    let genesis = &prepared.request.authority_commit.event;
+    let payload: arkret_models_collaboration::events_payloads::MlsGenesisPayload =
+        serde_json::to_value(&genesis.payload)
+            .and_then(serde_json::from_value)
+            .unwrap();
+    let (info, tree) = prepared.group.public_group_state_bytes().unwrap();
+    let request = MlsMemberGroupStateMaterialReadRequestBody {
+        realm_id: event.realm_id.clone(),
+        effective_scope: scope.clone(),
+        mls_group_id: scope.canonical_mls_group_id().unwrap(),
+        epoch: group.epoch,
+        group_state_event_id: genesis.event_id.clone(),
+        caller_actor_id: event.actual_signer().clone(),
+        target_commit_event_ref: genesis.event_id.clone(),
+        target_epoch: group.epoch,
+        group_info_ref: payload.group_info_ref,
+        ratchet_tree_ref: payload.ratchet_tree_ref,
+        max_response_bytes: None,
+    };
+    let evidence = coland_storage::ContentBackupSourcePublicEvidence {
+        expected_authority: prepared.request.authority_commit.expected_authority.clone(),
+        group,
+        realm_declaration: prepared.strategy_event.clone(),
+        material: MlsGroupStateMaterialResponseBody {
+            realm_id: request.realm_id.clone(),
+            effective_scope: scope.clone(),
+            mls_group_id: request.mls_group_id.clone(),
+            epoch: request.epoch,
+            group_state_event_id: request.group_state_event_id.clone(),
+            group_info_ref: request.group_info_ref.clone(),
+            group_info_base64url: arkret_canonical::base64url_encode(&info)
+                .try_into()
+                .unwrap(),
+            ratchet_tree_ref: request.ratchet_tree_ref.clone(),
+            ratchet_tree_base64url: arkret_canonical::base64url_encode(&tree)
+                .try_into()
+                .unwrap(),
+        },
+        request,
+    };
+    // Trusted adapter fixtures model an already verified replica cut. The
+    // material itself remains the real RFC publication from native admission.
+    diesel::sql_query("INSERT INTO replica_authorization_rows(realm_id,selector,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) SELECT g.realm_id,$2,c.stream_ref,g.current_commit_id,g.current_stream_position,g.value,g.updated_at FROM mls_group_current_states g JOIN realm_commits c ON c.commit_id=g.current_commit_id WHERE g.realm_id=$1")
+        .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(arkret_wire::CurrentSelector::MlsGroup { scope_ref: scope.clone() }).unwrap()).execute(&mut *conn).await.unwrap();
+    diesel::sql_query("INSERT INTO replica_authorization_cuts(realm_id,source_stream_ref,head_commit_id,head_stream_position,verified_at) SELECT realm_id,stream_ref,commit_id,stream_position,committed_at FROM realm_commits WHERE realm_id=$1 ORDER BY stream_position DESC LIMIT 1")
+        .bind::<Text,_>(event.realm_id.as_str()).execute(&mut *conn).await.unwrap();
+    diesel::sql_query("INSERT INTO replica_stream_anchors(stream_key,realm_id,join_commit_id,member_account_id,anchor_commit_id,anchor_stream_position,anchored_at) SELECT c.stream_key,c.realm_id,m.current_commit_id,$3,c.commit_id,c.stream_position,c.committed_at FROM realm_commits c JOIN member_state_current_states m ON m.realm_id=c.realm_id AND m.member_id=$2 WHERE c.realm_id=$1 ORDER BY c.stream_position DESC LIMIT 1")
+        .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.actual_signer().to_string())
+        .bind::<Jsonb,_>(serde_json::to_value(event.actual_signer().as_account_id().unwrap()).unwrap())
+        .execute(&mut *conn).await.unwrap();
+    diesel::sql_query("DELETE FROM mls_group_current_states WHERE realm_id=$1")
+        .bind::<Text, _>(event.realm_id.as_str())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let groups = PgMlsGroupCurrentStore { pool: pool.clone() };
+    assert!(groups.current(scope).await.unwrap().is_none());
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let before = original_audit(pool, event).await;
+    // A replica can lose its verified cut between the public read and the
+    // locked source transaction. This is retryable and mints no source.
+    let mut conn = pool.get().await.unwrap();
+    assert_eq!(
+        diesel::sql_query("DELETE FROM replica_authorization_cuts WHERE realm_id=$1")
+            .bind::<Text, _>(event.realm_id.as_str())
+            .execute(&mut *conn)
+            .await
+            .unwrap(),
+        1,
+    );
+    drop(conn);
+    assert!(groups.held_current_value(scope).await.is_err());
+    let pending = store
+        .prepare_content_backup_source(event, issuer, governor, method, Some(&evidence))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        pending.conflict_code(),
+        Some(coland_storage::ConflictCode::TemporarilyUnavailable),
+    );
+    assert_eq!(original_audit(pool, event).await, before);
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("INSERT INTO replica_authorization_cuts(realm_id,source_stream_ref,head_commit_id,head_stream_position,verified_at) SELECT realm_id,stream_ref,commit_id,stream_position,committed_at FROM realm_commits WHERE realm_id=$1 ORDER BY stream_position DESC LIMIT 1")
+        .bind::<Text,_>(event.realm_id.as_str()).execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let mut bad_authority = evidence.clone();
+    bad_authority.expected_authority.generation += 1;
+    let mut bad_cut = evidence.clone();
+    bad_cut.group.epoch += 1;
+    let mut bad_caller = evidence.clone();
+    bad_caller.request.target_epoch += 1;
+    let mut bad_bytes = evidence.clone();
+    bad_bytes.material.group_info_base64url =
+        arkret_canonical::base64url_encode(b"wrong public material")
+            .try_into()
+            .unwrap();
+    let mut bad_strategy = evidence.clone();
+    bad_strategy.realm_declaration.created_at += chrono::Duration::seconds(1);
+    for stale in [bad_authority, bad_cut] {
+        let pending = store
+            .prepare_content_backup_source(event, issuer, governor, method, Some(&stale))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            pending.conflict_code(),
+            Some(coland_storage::ConflictCode::TemporarilyUnavailable),
+        );
+        assert_eq!(original_audit(pool, event).await, before);
+    }
+    for bad in [bad_caller, bad_bytes, bad_strategy] {
+        assert!(
+            store
+                .prepare_content_backup_source(event, issuer, governor, method, Some(&bad))
+                .await
+                .is_err()
+        );
+        assert_eq!(original_audit(pool, event).await, before);
+    }
+    let source = store
+        .prepare_content_backup_source(event, issuer, governor, method, Some(&evidence))
+        .await
+        .unwrap();
+    assert_eq!(source.producer, prepared.endpoint);
+    assert_eq!(
+        source.event_original_digest.as_str(),
+        arkret_canonical::canonical_sha256(event).unwrap()
+    );
+    assert!(
+        groups.current(scope).await.unwrap().is_none(),
+        "source issuance cannot manufacture governing state"
+    );
+    assert_eq!(original_audit(pool, event).await, before);
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("INSERT INTO mls_group_current_states SELECT * FROM jsonb_populate_record(NULL::mls_group_current_states,$1)")
+        .bind::<Jsonb,_>(stored).execute(&mut *conn).await.unwrap();
+}
+
 #[tokio::test]
 async fn foreign_original_requires_signed_native_custody_without_copying_foreign_backups() {
     use arkret_models_identity::service_identity::{CanonicalServiceUrl, ServiceRegistrationKey};
@@ -189,10 +350,20 @@ async fn foreign_original_requires_signed_native_custody_without_copying_foreign
         &issuer,
         &governor,
         &arkret_wire::DidUrl::new(inception.did_key_id.clone()).unwrap(),
+        None,
     )
     .await
     .unwrap();
     let source = sign_source(draft.clone(), &inception);
+    source_from_public_replica(
+        &origin_pool,
+        &prepared,
+        &event,
+        &issuer,
+        &governor,
+        &arkret_wire::DidUrl::new(inception.did_key_id.clone()).unwrap(),
+    )
+    .await;
     arkret::verify_content_backup_source_signature(&source).unwrap();
     let mut request = Box::pin(ordinary_realm::source_request(
         &governor_pool,
@@ -445,6 +616,7 @@ async fn assert_target_dependency_refusals(case: TargetDependencyCase<'_>) {
         issuer,
         governor,
         &arkret_wire::DidUrl::new(inception.did_key_id.clone()).unwrap(),
+        None,
     )
     .await
     .unwrap();

@@ -108,8 +108,10 @@ pub(super) async fn require_fresh(
         let binding: ContentEndpoint = serde_json::from_value(row.payload).map_err(unavailable)?;
         check_binding(&binding, &actor, &authorizations, &new_key)?;
     }
-    let published = sql_query("SELECT p.keypackage_digest,h.publication_digest,h.binding FROM mls_key_packages p LEFT JOIN content_keypackage_signature_history h ON h.keypackage_id=p.id WHERE p.owner_actor_id=$1 FOR SHARE OF p")
-        .bind::<Jsonb,_>(&actor_json).get_results::<Publication>(conn).await.map_err(PersistenceError::database)?;
+    // Controller-owned Agent inventory does not contain this Human's Device keys.
+    let published = sql_query("SELECT p.keypackage_digest,h.publication_digest,h.binding FROM mls_key_packages p LEFT JOIN content_keypackage_signature_history h ON h.keypackage_id=p.id WHERE p.owner_actor_id=$1 AND p.actor_id=$2 FOR SHARE OF p")
+        .bind::<Jsonb,_>(&actor_json).bind::<Text,_>(account.principal_id.as_str())
+        .get_results::<Publication>(conn).await.map_err(PersistenceError::database)?;
     for publication in published {
         if publication.publication_digest.as_deref() != Some(publication.keypackage_digest.as_str())
         {

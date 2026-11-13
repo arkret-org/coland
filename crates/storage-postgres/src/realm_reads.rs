@@ -13,6 +13,52 @@ fn unavailable(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!("revision_unavailable: {detail}"))
 }
 
+pub(crate) async fn device_directory_shared_realm_in_connection(
+    conn: &mut AsyncPgConnection,
+    requester: &ActorId,
+    target: &ActorId,
+) -> PersistenceResult<Option<RealmId>> {
+    #[derive(diesel::QueryableByName)]
+    struct SharedRealm {
+        #[diesel(sql_type = Text)]
+        realm_id: String,
+    }
+    let candidates = sql_query(
+        "SELECT r.realm_id FROM member_state_current_states r \
+         JOIN member_state_current_states t ON t.realm_id=r.realm_id \
+         WHERE r.member_id=$1 AND t.member_id=$2 \
+           AND r.membership='join' AND t.membership='join' ORDER BY r.realm_id",
+    )
+    .bind::<Text, _>(requester.to_string())
+    .bind::<Text, _>(target.to_string())
+    .load::<SharedRealm>(&mut *conn)
+    .await
+    .map_err(PersistenceError::database)?;
+    let at = chrono::Utc::now();
+    for row in candidates {
+        let realm = RealmId::new(row.realm_id).map_err(unavailable)?;
+        if !crate::authority_commit::accepted_current_member_joined_in_connection(
+            conn, &realm, requester,
+        )
+        .await?
+            || !crate::authority_commit::accepted_current_member_joined_in_connection(
+                conn, &realm, target,
+            )
+            .await?
+        {
+            continue;
+        }
+        let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read_accepted(
+            conn, &realm, requester,
+        )
+        .await?;
+        if cut.require_realm_projection_read(at).is_ok() {
+            return Ok(Some(realm));
+        }
+    }
+    Ok(None)
+}
+
 #[derive(diesel::QueryableByName)]
 struct LifecycleRow {
     #[diesel(sql_type = Text)]

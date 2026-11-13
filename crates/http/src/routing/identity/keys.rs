@@ -477,11 +477,7 @@ async fn keys_query(
             continue;
         }
         let target = arkret_wire::ActorId::account(account_id.clone());
-        if !keys_query_actor_visible_to_requester(
-            &state.projections().snapshot(),
-            &requester,
-            &target,
-        ) {
+        if !keys_query_actor_visible_to_requester(state, &requester, &target).await? {
             continue;
         }
         let generation_entry =
@@ -680,24 +676,14 @@ async fn peer_relationship_basis_for_target(
     requester: &arkret_wire::ActorId,
     target: &arkret_wire::ActorId,
 ) -> Result<Option<arkret_models_crypto::PeerKeysRelationshipBasis>, AppError> {
-    let projection = state.projections().snapshot();
-    if let Some(((realm_id, _), _)) =
-        projection
-            .members
-            .iter()
-            .find(|((realm_id, actor), membership)| {
-                actor == &requester.to_string()
-                    && membership.state == "join"
-                    && projection
-                        .member(realm_id, &target.to_string())
-                        .is_some_and(|row| row.state == "join")
-            })
+    if let Some(realm_id) = state
+        .authority_commits()
+        .device_directory_shared_realm(requester, target)
+        .await
+        .map_err(|error| directory_evidence_service_error(error.into()))?
     {
         return Ok(Some(
-            arkret_models_crypto::PeerKeysRelationshipBasis::RealmMembership {
-                realm_id: arkret_wire::RealmId::new(realm_id.clone())
-                    .map_err(|error| AppError::internal(error.to_string()))?,
-            },
+            arkret_models_crypto::PeerKeysRelationshipBasis::RealmMembership { realm_id },
         ));
     }
     let contact = state
@@ -1123,29 +1109,17 @@ async fn peer_keys_relationship_authorized(
     }
 }
 
-fn keys_query_actor_visible_to_requester(
-    projection: &coland_domain::reducer::ProjectionState,
+async fn keys_query_actor_visible_to_requester(
+    state: &AppState,
     requester: &arkret_wire::ActorId,
     actor: &arkret_wire::ActorId,
-) -> bool {
+) -> Result<bool, AppError> {
     if requester == actor {
-        return true;
+        return Ok(true);
     }
-    let requester = requester.to_string();
-    let actor = actor.to_string();
-    projection
-        .members
-        .iter()
-        .any(|((realm_id, member_actor), membership)| {
-            if member_actor != &requester || membership.state != "join" {
-                return false;
-            }
-            projection
-                .member(realm_id, &actor)
-                .is_some_and(|membership| {
-                    matches!(membership.state.as_str(), "join" | "leave" | "ban")
-                })
-        })
+    Ok(peer_relationship_basis_for_target(state, requester, actor)
+        .await?
+        .is_some())
 }
 
 fn verification_method_controller(verification_method: &str) -> &str {
@@ -1267,11 +1241,7 @@ async fn keys_claim(
             continue;
         }
         let target = arkret_wire::ActorId::account(account_id.clone());
-        if !keys_query_actor_visible_to_requester(
-            &state.projections().snapshot(),
-            &requester,
-            &target,
-        ) {
+        if !keys_query_actor_visible_to_requester(state, &requester, &target).await? {
             continue;
         }
         let mut device_map = BTreeMap::new();
@@ -1420,7 +1390,7 @@ async fn device_signing_keys_query(
 
 #[cfg(test)]
 mod tests {
-    use super::{device_signature_kid_points_to_device_key, keys_query_actor_visible_to_requester};
+    use super::device_signature_kid_points_to_device_key;
 
     #[test]
     fn directory_evidence_cut_race_preserves_registered_retryable_error() {
@@ -1438,72 +1408,6 @@ mod tests {
         );
         assert_eq!(database.code, arkret_wire::ErrorCode::InternalError);
     }
-    #[test]
-    fn key_visibility_requires_exact_actor_membership_not_a_shared_principal() {
-        use arkret_wire::{AccountId, ActorId, DidCoreId};
-        let actor = |principal: &str, station: &str| {
-            ActorId::account(AccountId::new(
-                DidCoreId::new(principal).unwrap(),
-                DidCoreId::new(station).unwrap(),
-            ))
-        };
-        let alice = actor(
-            "ak:did_core:web:alice.example",
-            "ak:did_core:web:station.example",
-        );
-        let other_alice = actor(
-            "ak:did_core:web:alice.example",
-            "ak:did_core:web:other.example",
-        );
-        let bob = actor(
-            "ak:did_core:web:bob.example",
-            "ak:did_core:web:station.example",
-        );
-        let mut projection = coland_domain::reducer::ProjectionState::default();
-        assert!(keys_query_actor_visible_to_requester(
-            &projection,
-            &alice,
-            &alice
-        ));
-        assert!(!keys_query_actor_visible_to_requester(
-            &projection,
-            &other_alice,
-            &alice
-        ));
-        for member in [&alice, &bob] {
-            let member = member.to_string();
-            projection.members.insert(
-                ("realm".into(), member.clone()),
-                coland_domain::reducer::ColandMembershipState {
-                    member,
-                    realm_id: "realm".into(),
-                    state: "join".into(),
-                    role: "member".into(),
-                    membership_event_ref: None,
-                    invited_at: None,
-                    joined_at: chrono::Utc::now(),
-                    updated_at: chrono::Utc::now(),
-                    reason: None,
-                },
-            );
-        }
-        assert!(keys_query_actor_visible_to_requester(
-            &projection,
-            &alice,
-            &bob
-        ));
-        assert!(!keys_query_actor_visible_to_requester(
-            &projection,
-            &other_alice,
-            &bob
-        ));
-        assert!(!keys_query_actor_visible_to_requester(
-            &projection,
-            &bob,
-            &other_alice
-        ));
-    }
-
     #[test]
     fn device_signature_kid_projects_did_controller_to_core_actor() {
         for key in ["z6MkAuthorizedDeviceKey", "did:key:z6MkAuthorizedDeviceKey"] {

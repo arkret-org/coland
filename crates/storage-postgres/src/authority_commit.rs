@@ -5788,6 +5788,24 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         crate::signal_scope_authority::recipient_realms(&self.pool, actor).await
     }
 
+    async fn device_directory_shared_realm(
+        &self,
+        requester: &arkret_wire::ActorId,
+        target: &arkret_wire::ActorId,
+    ) -> PersistenceResult<Option<arkret_wire::RealmId>> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *conn)
+                .await?;
+            crate::realm_reads::device_directory_shared_realm_in_connection(conn, requester, target)
+                .await
+                .map_err(Into::into)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn realm_stream_heads(
         &self,
         realm_id: &arkret_wire::RealmId,

@@ -676,6 +676,19 @@ impl AuthorityCommitApplication {
         Ok(self.store().accepted_realm_roster(realm_id).await?)
     }
 
+    /// Current accepted shared membership and requester visibility in one cut.
+    /// Device authorization and key disclosure remain independent gates.
+    pub async fn device_directory_shared_realm(
+        &self,
+        requester: &arkret_wire::ActorId,
+        target: &arkret_wire::ActorId,
+    ) -> ServiceResult<Option<arkret_wire::RealmId>> {
+        Ok(self
+            .store()
+            .device_directory_shared_realm(requester, target)
+            .await?)
+    }
+
     /// The accepted Agent join and its controller's exact current generation.
     pub async fn accepted_effective_agent_member_joined(
         &self,

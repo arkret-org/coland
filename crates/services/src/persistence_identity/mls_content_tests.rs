@@ -32,6 +32,7 @@ mod history_root_unlock_tests;
 mod history_forward_intent_tests;
 
 mod content_backup_source_tests;
+mod directory_relationship_tests;
 mod history_grant_tests;
 
 fn public_blob(bytes: &[u8]) -> MlsPublicBlob {

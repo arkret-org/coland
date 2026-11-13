@@ -2487,6 +2487,16 @@ pub trait AuthorityCommitStore: Send + Sync {
         realm_id: &arkret_wire::RealmId,
     ) -> PersistenceResult<Option<AcceptedRealmRoster>>;
 
+    /// A currently readable shared Realm for an exact device-directory pair.
+    /// Both joined memberships and the requester's read constraints are proved
+    /// from accepted sources in one durable cut, never a process projection.
+    /// This basis grants no content or history-key disclosure authority.
+    async fn device_directory_shared_realm(
+        &self,
+        requester: &arkret_wire::ActorId,
+        target: &arkret_wire::ActorId,
+    ) -> PersistenceResult<Option<arkret_wire::RealmId>>;
+
     /// The Agent's joined member row and its controller's exact active join
     /// generation, both from accepted durable current state. A stale binding
     /// never becomes effective after the controller rejoins.

@@ -1714,7 +1714,6 @@ pub(super) fn relay_governance_response(
 }
 
 #[cfg(test)]
-#[path = "authority_forward_tests.rs"]
 mod tests;
 
 /// Capture the original producer root before the Event acceptance timestamp.
@@ -1843,5 +1842,4 @@ impl AppState {
 }
 
 #[cfg(test)]
-#[path = "authority_forward_recovery_tests.rs"]
 mod recovery_tests;

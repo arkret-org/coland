@@ -1,7 +1,4 @@
-// `did_resolver_chain.rs` lives at `src/did_resolver_chain.rs`; declare it as
-// a submodule of `state` so `AppState::new` can construct the resolver chain
-// locally and re-export it as `crate::state::did_resolver_chain`.
-#[path = "../did_resolver_chain.rs"]
+// Keep the resolver chain in `state` for local AppState construction.
 pub mod did_resolver_chain;
 
 mod account_authority_device_pairing;

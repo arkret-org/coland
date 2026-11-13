@@ -226,5 +226,5 @@ pub async fn run(pool: PgPool) {
     }
 }
 
-include!("native_account_read_fixture.rs");
-include!("native_mls_read_fixture.rs");
+include!("../native_account_read_fixture.rs");
+include!("../native_mls_read_fixture.rs");

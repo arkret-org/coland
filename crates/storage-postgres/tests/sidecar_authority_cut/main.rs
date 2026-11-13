@@ -1,36 +1,34 @@
 //! Native Sidecar cut preserves exact controller identity and parent authority.
 
-#[path = "support/historical_control_source.rs"]
+#[path = "../support/historical_control_source.rs"]
 #[expect(
     dead_code,
     reason = "This integration binary uses only its subset of the shared control source fixture."
 )]
 mod historical_control_source;
 
-#[path = "../../test-support/src/device_authorization_history.rs"]
+#[path = "../../../test-support/src/device_authorization_history.rs"]
 #[allow(dead_code)]
 mod device_authorization_history;
-#[path = "support/ordinary_realm.rs"]
+#[path = "../support/ordinary_realm.rs"]
 #[expect(
     dead_code,
     reason = "This integration binary uses only its subset of the shared Realm fixture."
 )]
 mod ordinary_realm;
-#[path = "../../test-support/src/pcr_genesis.rs"]
+#[path = "../../../test-support/src/pcr_genesis.rs"]
 #[allow(dead_code)]
 mod pcr_genesis;
-#[path = "support/sidecar_agent.rs"]
+#[path = "../support/sidecar_agent.rs"]
 mod sidecar_agent;
-#[path = "support/sidecar_exchange_controls.rs"]
 mod sidecar_exchange_controls;
-#[path = "support/sidecar_readiness.rs"]
 #[expect(
     dead_code,
     reason = "This integration binary uses only its subset of the shared readiness fixture."
 )]
 mod sidecar_readiness;
 
-#[path = "support/agent_scope_custody.rs"]
+#[path = "../support/agent_scope_custody.rs"]
 #[allow(dead_code)]
 mod agent_scope_custody;
 use std::future::Future;

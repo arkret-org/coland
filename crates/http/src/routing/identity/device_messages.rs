@@ -11,7 +11,6 @@
 
 use std::collections::BTreeMap;
 
-#[path = "device_messages_native.rs"]
 mod native;
 
 use arkret_models_collaboration::device_messages::{

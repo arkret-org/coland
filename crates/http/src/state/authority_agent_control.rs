@@ -108,5 +108,4 @@ pub(super) async fn submit_self_agent_controller_event(
 }
 
 #[cfg(test)]
-#[path = "authority_control_exact_replay_tests.rs"]
 mod exact_replay_tests;

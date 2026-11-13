@@ -3,18 +3,14 @@
 //! does not claim a live OIDC/DPoP middleware or subprocess-crash test.
 //! Box the admission/recovery phases separately so signed multi-Station
 //! regression futures fit the ordinary test-thread stack in debug builds.
-#[path = "circle_current_coverage_tests.rs"]
 mod circle_current_coverage_tests;
-#[path = "../../../storage-postgres/tests/support/historical_human.rs"]
+#[path = "../../../../storage-postgres/tests/support/historical_human.rs"]
 mod historical_human;
-#[path = "realm_terminal_fanout_tests.rs"]
 mod realm_terminal_fanout_tests;
-#[path = "realm_terminal_peer_tests.rs"]
 mod realm_terminal_peer_tests;
-#[path = "../../../storage-postgres/tests/support/sql_fault_matrix.rs"]
+#[path = "../../../../storage-postgres/tests/support/sql_fault_matrix.rs"]
 #[allow(dead_code)]
 mod sql_fault_matrix;
-#[path = "test_material_evidence_tests.rs"]
 mod test_material_evidence_tests;
 
 use std::io::{Read, Write};

@@ -1,4 +1,4 @@
-#[path = "support/applet_authoring.rs"]
+#[path = "support/applet_authoring/mod.rs"]
 #[expect(
     dead_code,
     reason = "This integration binary uses only the AppletAuthoringFactory subset of the shared fixture."

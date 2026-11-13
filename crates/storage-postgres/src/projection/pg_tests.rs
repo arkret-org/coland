@@ -1,6 +1,6 @@
 //! Actual projection persistence must preserve idempotency across PG precision.
 
-#[path = "../tests/support/ordinary_realm.rs"]
+#[path = "../../tests/support/ordinary_realm.rs"]
 #[allow(dead_code)]
 mod ordinary_realm;
 

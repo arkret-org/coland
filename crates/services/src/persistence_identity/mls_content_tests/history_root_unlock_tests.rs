@@ -12,19 +12,14 @@ use ed25519_dalek::Signer as _;
 use super::super::pcr_history_tests;
 use super::RootFixture;
 
-#[path = "history_identity_recovery_tests.rs"]
 mod identity_recovery;
 
-#[path = "history_root_rotation_tests.rs"]
 mod root_rotation;
 
-#[path = "history_recovery_source_tests.rs"]
 mod recovery_source;
 
-#[path = "history_material_read_tests.rs"]
 mod history_material;
 
-#[path = "history_claim_fence_tests.rs"]
 mod claim_fence;
 
 fn random() -> arkret_wire::Base64UrlString {

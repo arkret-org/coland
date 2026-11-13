@@ -164,5 +164,4 @@ impl ProjectionState {
 }
 
 #[cfg(test)]
-#[path = "apply_capability_tests.rs"]
 mod tests;

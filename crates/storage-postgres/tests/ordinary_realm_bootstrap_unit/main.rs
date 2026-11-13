@@ -1,22 +1,21 @@
-#[path = "support/accepted_pcr_account.rs"]
+#[path = "../support/accepted_pcr_account.rs"]
 mod accepted_pcr_account;
-#[path = "../../test-support/src/device_authorization_history.rs"]
+#[path = "../../../test-support/src/device_authorization_history.rs"]
 #[allow(dead_code)]
 mod device_authorization_history;
-#[path = "support/human_profile.rs"]
+#[path = "../support/human_profile.rs"]
 #[allow(dead_code)]
 mod human_profile;
-#[path = "support/hydration.rs"]
+#[path = "../support/hydration.rs"]
 mod hydration;
-#[path = "support/ordinary_bootstrap_fault_cases.rs"]
 mod ordinary_bootstrap_fault_cases;
-#[path = "support/ordinary_realm.rs"]
+#[path = "../support/ordinary_realm.rs"]
 #[allow(dead_code)]
 mod ordinary_realm;
-#[path = "../../test-support/src/pcr_genesis.rs"]
+#[path = "../../../test-support/src/pcr_genesis.rs"]
 #[allow(dead_code)]
 mod pcr_genesis;
-#[path = "support/sql_fault_matrix.rs"]
+#[path = "../support/sql_fault_matrix.rs"]
 mod sql_fault_matrix;
 
 use arkret_models_collaboration::authority_commit::{
@@ -7790,8 +7789,6 @@ async fn member_identity_accepted_assertions_keep_bad_proofs_edges_and_restart_e
         .unwrap();
     assert_eq!(after.current_state_entries, material.current_state_entries);
 }
-
-#[path = "support/realm_lifecycle_cases.rs"]
 mod realm_lifecycle_cases;
 
 async fn source_unit(

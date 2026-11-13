@@ -620,7 +620,7 @@ jobs:
         run: |
           set -euo pipefail
           target='realm_membership_fanout'
-          test -f 'crates/storage-postgres/tests/realm_membership_fanout.rs'
+          test -f 'crates/storage-postgres/tests/realm_membership_fanout/main.rs'
           test_args=(cargo test --locked -p coland-storage-postgres --test "$target")
           list_file="$RUNNER_TEMP/coland-complete-realm-membership-fanout-list.txt"
           list_metadata="$RUNNER_TEMP/coland-complete-realm-membership-fanout-list.json"

@@ -452,5 +452,4 @@ pub(crate) fn scope_selector_to_realm_id(
 }
 
 #[cfg(test)]
-#[path = "sync_tests.rs"]
 mod tests;

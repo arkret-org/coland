@@ -2516,10 +2516,10 @@ pub(super) async fn human_rotates_out_runtime(
     );
 }
 
-include!("realm_actor_obligation_fixture.rs");
-include!("realm_actor_mls_admission_fixture.rs");
-include!("realm_actor_mls_boundary_fixture.rs");
-include!("realm_actor_grant_boundary_fixture.rs");
+include!("../realm_actor_obligation_fixture.rs");
+include!("../realm_actor_mls_admission_fixture.rs");
+include!("../realm_actor_mls_boundary_fixture.rs");
+include!("../realm_actor_grant_boundary_fixture.rs");
 
 pub(super) async fn run_admission(
     fixture: &Fixture,

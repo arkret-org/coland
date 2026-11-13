@@ -14,7 +14,6 @@ use diesel_async::AsyncPgConnection;
 use horme::{OptionalExtension, RunQueryDsl};
 use serde_json::{Value, json};
 
-#[path = "applet_management_review.rs"]
 pub(crate) mod applet;
 
 fn refused(code: &str, detail: &str) -> PersistenceError {

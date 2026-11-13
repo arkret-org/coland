@@ -769,5 +769,4 @@ pub(in crate::routing) use value::{submit_applet_revoke_event_submission, submit
 // re-export here; `event_log.rs` names it directly.
 
 #[cfg(test)]
-#[path = "submit_tests.rs"]
 mod tests;

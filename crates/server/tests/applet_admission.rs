@@ -1,7 +1,7 @@
 //! Applet and Realm actor admission through the shared production-HTTP fixtures.
 //! Bot/Ghost creation has one realm_control original, no Account/PCR aggregate.
 
-#[path = "../../storage-postgres/tests/support/applet_authoring.rs"]
+#[path = "../../storage-postgres/tests/support/applet_authoring/mod.rs"]
 #[allow(dead_code)]
 mod applet_authoring;
 #[path = "../../storage-postgres/tests/support/ordinary_realm.rs"]

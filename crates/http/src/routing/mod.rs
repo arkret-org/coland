@@ -135,11 +135,9 @@ mod outbound_operation_selector_tests {
 }
 
 #[cfg(test)]
-#[path = "operation_conformance_tests.rs"]
 mod operation_conformance_tests;
 
 #[cfg(test)]
-#[path = "canonical_conformance_vectors.rs"]
 mod canonical_conformance_vectors;
 
 pub use consent_private::spawn_effect_publication_worker;

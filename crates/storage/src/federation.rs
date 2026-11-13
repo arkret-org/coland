@@ -293,7 +293,6 @@ pub struct FederationOutboxStateDepth {
     pub oldest_created_at: Option<i64>,
 }
 #[cfg(test)]
-#[path = "federation/tests.rs"]
 mod tests;
 
 /// Replay log of federation operations the local service has accepted from

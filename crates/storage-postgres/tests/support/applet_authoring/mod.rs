@@ -2,13 +2,9 @@
 //! Mirrors the registered HTTP fixture's signed prerequisites; commits always
 //! pass the production closed aggregate, never a synthetic verified flag.
 
-#[path = "applet_widget_inventory_fixture.rs"]
 mod applet_widget_inventory_fixture;
-#[path = "management_archive_fixture.rs"]
 mod management_archive_fixture;
-#[path = "native_read_evidence.rs"]
 pub mod native_read_evidence;
-#[path = "realm_actor_mls_fixture.rs"]
 mod realm_actor_mls_fixture;
 
 use std::collections::BTreeMap;
@@ -2059,19 +2055,19 @@ pub async fn registered_service_pair(pool: PgPool) {
 mod realm_native_fixture {
     pub(super) const NATIVE_BACKUP_CUSTODY_MODE: u8 = 5;
     pub(super) const NATIVE_BACKUP_ARCHIVE_READ_MODE: u8 = 6;
-    include!("applet_configuration_fixture.rs");
-    include!("realm_actor_archive_fixture.rs");
-    include!("realm_actor_transport_fixture.rs");
-    include!("realm_actor_queue_boundary_fixture.rs");
-    include!("realm_actor_runtime_recovery_fixture.rs");
-    include!("realm_actor_read_boundary_fixture.rs");
-    include!("realm_actor_completion_fixture.rs");
-    include!("realm_manager_runtime_fixture.rs");
-    include!("realm_actor_install_admission_fixture.rs");
-    include!("realm_actor_authority_admission_fixture.rs");
-    include!("realm_actor_revoke_boundary_fixture.rs");
-    include!("realm_actor_review_fixture.rs");
-    include!("native_applet_read_fixture.rs");
+    include!("../applet_configuration_fixture.rs");
+    include!("../realm_actor_archive_fixture.rs");
+    include!("../realm_actor_transport_fixture.rs");
+    include!("../realm_actor_queue_boundary_fixture.rs");
+    include!("../realm_actor_runtime_recovery_fixture.rs");
+    include!("../realm_actor_read_boundary_fixture.rs");
+    include!("../realm_actor_completion_fixture.rs");
+    include!("../realm_manager_runtime_fixture.rs");
+    include!("../realm_actor_install_admission_fixture.rs");
+    include!("../realm_actor_authority_admission_fixture.rs");
+    include!("../realm_actor_revoke_boundary_fixture.rs");
+    include!("../realm_actor_review_fixture.rs");
+    include!("../native_applet_read_fixture.rs");
     use arkret_canonical::canonical_sha256;
     use arkret_models_identity::*;
     use arkret_signatures::detached_object::sign_detached_object;

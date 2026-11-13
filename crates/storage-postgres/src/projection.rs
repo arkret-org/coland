@@ -9,7 +9,6 @@ use super::{
 };
 
 #[cfg(test)]
-#[path = "projection_pg_tests.rs"]
 mod pg_tests;
 
 /// Space, Strand, Morph and Circle are Event-derived kinds: their protocol id is

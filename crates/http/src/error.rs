@@ -143,7 +143,6 @@ pub fn render_error_code(code: ErrorCode, res: &mut Response, message: &str) {
 }
 
 #[cfg(test)]
-#[path = "error_status_registry_gate.rs"]
 mod status_registry_gate;
 
 #[cfg(test)]

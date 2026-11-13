@@ -25,13 +25,9 @@ use crate::capability_grant_current_states::{
     decode_authority_root, decode_row,
 };
 
-#[path = "applet_blob_delivery.rs"]
 mod blobs;
-#[path = "applet_exact_current_delivery.rs"]
 mod exact_current;
-#[path = "applet_mls_material_delivery.rs"]
 mod mls_material;
-#[path = "applet_snapshot_delivery.rs"]
 mod snapshots;
 
 #[derive(QueryableByName)]

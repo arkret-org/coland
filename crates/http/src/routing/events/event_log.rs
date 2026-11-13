@@ -164,9 +164,7 @@ mod sdk_projection;
 pub(crate) use sdk_projection::*;
 
 #[cfg(test)]
-#[path = "event_log/admission_tests.rs"]
 mod admission_tests;
 
 #[cfg(test)]
-#[path = "event_log_proof_strictness_tests.rs"]
 mod proof_strictness_tests;

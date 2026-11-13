@@ -12,9 +12,7 @@ use salvo::conn::{Acceptor as _, Listener as _};
 use super::realm_terminal_peer_tests::terminal_persistent_rows;
 use super::*;
 
-#[path = "realm_departure_fanout_tests.rs"]
 mod departure_tests;
-#[path = "erasure_receipt_live_tests.rs"]
 mod erasure_receipt_tests;
 
 struct LiveStation {

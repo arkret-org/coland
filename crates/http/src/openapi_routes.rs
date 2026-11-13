@@ -333,5 +333,4 @@ pub struct WaitForSyncToken(pub String);
 /// is covered by the integration test
 /// `framework_errors_use_problem_details` in `tests/http_api/openapi.rs`.
 #[cfg(test)]
-#[path = "openapi_routes_tests.rs"]
 mod framework_error_routing_tests;

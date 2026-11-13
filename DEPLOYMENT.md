@@ -180,7 +180,7 @@ global — coland has two distinct did:webvh paths:
   it must not be relaxed into unconditional acceptance.
 - **External resolution path — real witness verification.**
   Pinned/historical did:webvh resolution
-  (`crates/http/src/did_resolver_chain.rs`, `fetch_verified_webvh_history`)
+  (`crates/http/src/state/did_resolver_chain.rs`, `fetch_verified_webvh_history`)
   fetches `did-witness.json` whenever the log declares a witness policy and
   calls the SDK `verify_did_webvh_v1_chain_and_witness_bytes`, performing
   full chain + witness verification. The spec §3.4 requirement that every

@@ -1,6 +1,5 @@
 //! Current local claim endpoints, derived from their accepted SDK originals.
 #[cfg(test)]
-#[path = "mls_keypackage_claim_endpoints_tests.rs"]
 mod tests;
 use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
 use arkret_models_collaboration::events_payloads::agent::AgentKeyAuthorizePayload;

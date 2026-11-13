@@ -11,7 +11,6 @@ use coland_storage::{
 
 use super::{AppState, authority_self_event_unit as unit};
 
-#[path = "authority_managed_device_mls.rs"]
 pub(super) mod mls;
 
 fn denied(detail: &str) -> ServiceError {

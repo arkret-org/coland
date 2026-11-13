@@ -52,5 +52,4 @@ mod mention_tests;
 mod policy_tests;
 
 #[cfg(test)]
-#[path = "operations_wire_payload_tests.rs"]
 mod wire_payload_tests;

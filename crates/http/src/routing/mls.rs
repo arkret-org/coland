@@ -72,17 +72,12 @@ use crate::wire::now;
 /// Canonical MLS event-payload field readers shared by every surface that
 /// inspects a raw `ak.mls.*` payload (submit preflight, projection mirroring,
 /// sync visibility, sidecar binding, MIMI interop, circle scope rotation).
-#[path = "mls_payload_fields.rs"]
 pub(crate) mod payload_fields;
 
-#[path = "mls_keypackage_native.rs"]
 mod mls_keypackage_native;
-#[path = "mls_keypackage_upload.rs"]
 mod mls_keypackage_upload;
 
-#[path = "mls_roster_read.rs"]
 mod mls_roster_read;
-#[path = "mls_roster_signature.rs"]
 mod mls_roster_signature;
 
 const LAST_RESORT_KEYPACKAGE_MAX_LIFETIME_SECS: i64 = 30 * 24 * 60 * 60;

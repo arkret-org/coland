@@ -2,7 +2,6 @@
 //! persistence port. These cases exercise writer/recipient checks and immutable
 //! root-package transactions; they do not claim content decryption or E2E.
 
-#[path = "key_backup_tests/retention.rs"]
 mod retention;
 
 use arkret_models_crypto::{KeyBackup, RecoveryPolicy, recovery_policy_signature_transcript_bytes};

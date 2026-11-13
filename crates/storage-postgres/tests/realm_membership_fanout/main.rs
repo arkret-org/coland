@@ -8,29 +8,26 @@
 //!   its held Realm stream, later Commits must directly follow it, and gaps, forks and unheld
 //!   streams are refused with zero writes.
 
-#[path = "support/accepted_pcr_account.rs"]
+#[path = "../support/accepted_pcr_account.rs"]
 mod accepted_pcr_account;
-#[path = "../../test-support/src/device_authorization_history.rs"]
+#[path = "../../../test-support/src/device_authorization_history.rs"]
 #[allow(dead_code)]
 mod device_authorization_history;
-#[path = "support/historical_human.rs"]
+#[path = "../support/historical_human.rs"]
 mod historical_human;
-#[path = "support/hydration.rs"]
+#[path = "../support/hydration.rs"]
 mod hydration;
-#[path = "support/ordinary_realm.rs"]
+#[path = "../support/ordinary_realm.rs"]
 #[expect(
     dead_code,
     reason = "This integration binary uses only its subset of the shared Realm fixture."
 )]
 mod ordinary_realm;
-#[path = "../../test-support/src/pcr_genesis.rs"]
+#[path = "../../../test-support/src/pcr_genesis.rs"]
 #[allow(dead_code)]
 mod pcr_genesis;
-#[path = "support/realm_fanout_authority_cases.rs"]
 mod realm_fanout_authority_cases;
-#[path = "support/realm_terminal_replica_cases.rs"]
 mod realm_terminal_replica_cases;
-#[path = "support/space_parent_replica_cases.rs"]
 mod space_parent_replica_cases;
 
 use arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody;

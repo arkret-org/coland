@@ -26,13 +26,10 @@ struct PersistenceSecurityTransactions(Arc<dyn PersistenceStore>);
 struct PersistenceDidDocuments(Arc<dyn PersistenceStore>);
 
 #[cfg(test)]
-#[path = "persistence_identity/key_backup_tests.rs"]
 mod key_backup_tests;
 #[cfg(test)]
-#[path = "persistence_identity/mls_content_tests.rs"]
 mod mls_content_tests;
 #[cfg(test)]
-#[path = "persistence_identity/pcr_history_tests.rs"]
 mod pcr_history_tests;
 // Exercise the same PostgreSQL adapter contracts in the core harness, without
 // the standalone adapter target's HTTP/Bridge development dependencies.

@@ -1,5 +1,5 @@
 //! Real HTTP lifecycle backed by accepted identity, installation and private control.
-#[path = "support/applet_authoring.rs"]
+#[path = "support/applet_authoring/mod.rs"]
 #[allow(dead_code)]
 mod applet_authoring;
 #[path = "support/ordinary_realm.rs"]

@@ -22,7 +22,6 @@ use crate::{
     AsyncPgConnection, PersistenceError, PersistenceResult, PgPool, PgTransactionError, pg_conn,
 };
 
-#[path = "account_device_forward_source.rs"]
 pub(crate) mod forward_source;
 
 fn retention_transaction_error(error: PgTransactionError) -> PersistenceError {

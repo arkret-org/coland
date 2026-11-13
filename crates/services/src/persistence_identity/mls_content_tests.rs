@@ -27,13 +27,10 @@ use serde_json::{Value, json};
 
 use super::key_backup_tests::{self, RootFixture};
 
-#[path = "history_root_unlock_tests.rs"]
 mod history_root_unlock_tests;
 
-#[path = "history_forward_intent_tests.rs"]
 mod history_forward_intent_tests;
 
-#[path = "content_backup_source_tests.rs"]
 mod content_backup_source_tests;
 
 fn public_blob(bytes: &[u8]) -> MlsPublicBlob {

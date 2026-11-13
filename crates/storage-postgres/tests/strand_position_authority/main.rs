@@ -1,7 +1,7 @@
 //! A real ordinary Realm cut drives Board/List placement; rejected writes
 //! leave both the Realm stream and the typed-pair current result unchanged.
 
-#[path = "support/ordinary_realm.rs"]
+#[path = "../support/ordinary_realm.rs"]
 #[allow(dead_code)]
 mod ordinary_realm;
 
@@ -1342,10 +1342,7 @@ async fn wip_override_requires_a_current_grant_matching_the_strand_and_destinati
     ))
     .await;
 }
-
-#[path = "support/approval_wip_cases.rs"]
 mod approval_wip_cases;
-#[path = "support/grant_approval_cases.rs"]
 mod grant_approval_cases;
 
 #[tokio::test]

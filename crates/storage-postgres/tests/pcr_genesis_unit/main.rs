@@ -1,20 +1,20 @@
-#[path = "../../test-support/src/device_authorization_history.rs"]
+#[path = "../../../test-support/src/device_authorization_history.rs"]
 #[expect(
     dead_code,
     reason = "This integration binary uses only its subset of the shared device history fixture."
 )]
 mod device_history_fixture;
-#[path = "support/historical_control_source.rs"]
+#[path = "../support/historical_control_source.rs"]
 #[expect(
     dead_code,
     reason = "This integration binary uses only its subset of the shared control source fixture."
 )]
 mod historical_control_source;
-#[path = "support/sql_fault_matrix.rs"]
+#[path = "../support/sql_fault_matrix.rs"]
 mod sql_fault_matrix;
+#[path = "../support/mod.rs"]
 mod support;
 
-#[path = "support/principal_resolution_update.rs"]
 mod principal_resolution_update;
 
 use arkret_models_collaboration::events_payloads::{

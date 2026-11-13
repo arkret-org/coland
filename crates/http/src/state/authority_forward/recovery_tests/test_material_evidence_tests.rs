@@ -22,7 +22,7 @@ fn reserved_material_and_identifiers_leave_no_pg_cache_binding_or_auth_state() {
         let safe = SigningKey::from_bytes(&[91; 32]);
         let published = SigningKey::from_bytes(&std::array::from_fn(|index| index as u8));
         let rules: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../../arkret-spec/spec/v1/artifacts/registry/test-material-registry.json"
+            "../../../../../../../arkret-spec/spec/v1/artifacts/registry/test-material-registry.json"
         ))
         .unwrap();
         let did_rule = rules["reserved_identifiers"][0]["examples"][0]

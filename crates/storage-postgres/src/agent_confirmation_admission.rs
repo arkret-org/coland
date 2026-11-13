@@ -546,5 +546,4 @@ async fn require_draft_publication(
 }
 
 #[cfg(test)]
-#[path = "agent_confirmation_admission/pg_tests.rs"]
 mod pg_tests;

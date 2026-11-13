@@ -1,5 +1,5 @@
 //! Service delegation passes real signed peer HTTP and accepted PG state.
-#[path = "support/applet_authoring.rs"]
+#[path = "support/applet_authoring/mod.rs"]
 #[allow(dead_code)]
 mod applet_authoring;
 #[path = "support/ordinary_realm.rs"]

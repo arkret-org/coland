@@ -34,7 +34,6 @@ pub use well_known::well_known_arkret_router;
 pub(crate) use wire::FederationTrustHeaders;
 
 #[cfg(test)]
-#[path = "federation_tests.rs"]
 mod tests;
 
 /// RFC 9530 `Content-Digest` structured-field value over `bytes`:

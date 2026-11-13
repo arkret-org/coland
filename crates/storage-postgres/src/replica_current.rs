@@ -1963,15 +1963,12 @@ pub(crate) async fn advance_in_connection(
 }
 
 #[cfg(test)]
-#[path = "replica_current/circle_revision_tests.rs"]
 mod circle_revision_tests;
 
 #[cfg(test)]
-#[path = "replica_current/current_integrity_tests.rs"]
 mod current_integrity_tests;
 
 #[cfg(test)]
-#[path = "replica_current/call_effective_tests.rs"]
 mod call_effective_tests;
 
 #[cfg(test)]

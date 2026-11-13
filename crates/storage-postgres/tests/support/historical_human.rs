@@ -7,7 +7,6 @@
     reason = "This fixture is also compiled by test-support without a circular crate dependency."
 )]
 mod device_authorization_history;
-#[path = "ordinary_realm.rs"]
 #[allow(dead_code)]
 pub mod ordinary_realm;
 #[path = "../../../test-support/src/pcr_genesis.rs"]

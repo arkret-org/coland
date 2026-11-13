@@ -1,5 +1,5 @@
 //! Creation completion preserves the exact Realm original over authenticated TLS retries.
-#[path = "../../storage-postgres/tests/support/applet_authoring.rs"]
+#[path = "../../storage-postgres/tests/support/applet_authoring/mod.rs"]
 #[allow(dead_code)]
 mod applet_authoring;
 #[path = "../../storage-postgres/tests/support/ordinary_realm.rs"]

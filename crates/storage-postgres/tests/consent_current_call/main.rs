@@ -1,12 +1,12 @@
 //! Real holder-PCR current cuts for the registered call consumers.
 
-#[path = "../../test-support/src/device_authorization_history.rs"]
+#[path = "../../../test-support/src/device_authorization_history.rs"]
 #[expect(
     dead_code,
     reason = "This binary uses the accepted PCR subset of the shared fixture."
 )]
 mod device_authorization_history;
-#[path = "../../test-support/src/pcr_genesis.rs"]
+#[path = "../../../test-support/src/pcr_genesis.rs"]
 #[expect(
     dead_code,
     reason = "This binary uses the accepted PCR subset of the shared fixture."
@@ -19,8 +19,6 @@ use arkret_wire::{ActorId, EventKind};
 use coland_storage::{ConsentAdmissionOutcome, ConsentCurrentStore};
 use coland_storage_postgres::PgConsentCurrentStore;
 use coland_storage_postgres::test_database::TestDatabase;
-
-#[path = "support/consent_current_call.rs"]
 mod support;
 
 #[tokio::test]

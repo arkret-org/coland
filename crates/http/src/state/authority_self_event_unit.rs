@@ -10,7 +10,7 @@
 //! `producer_device_evidence` is retained, inside that transaction together
 //! with the stream head, so a failure leaves zero writes.
 //!
-//! Only kinds with a registered same-cut current writer enter this unit. The
+//! Only kinds with a registered atomic domain admission enter this unit. The
 //! generic `/_arkret/self/events` route and `authority_forward` on
 //! `/_arkret/peer/events` share it; every other kind stays closed at its caller.
 
@@ -114,12 +114,15 @@ pub(super) struct SelfEventUnitEffects {
 }
 
 /// Kinds whose authorization and domain pre-state are decided only at the
-/// accepting transaction's cut, by the same-cut evaluator and their typed
-/// current writers. The in-process projection is not consulted for admission.
+/// accepting transaction's cut, by native domain gates and any typed current
+/// writers. History controls are durable facts with no current writer. The
+/// in-process projection is not consulted for admission.
 fn decided_at_commit_cut(kind: &arkret_wire::EventKind) -> bool {
     matches!(
         kind,
-        arkret_wire::EventKind::RealmActorStatusSet
+        arkret_wire::EventKind::MlsHistoryRequest
+            | arkret_wire::EventKind::MlsHistoryGrant
+            | arkret_wire::EventKind::RealmActorStatusSet
             | arkret_wire::EventKind::RealmActorRecoverySet
             | arkret_wire::EventKind::CircleCreate
             | arkret_wire::EventKind::ProfileCreate
@@ -832,6 +835,8 @@ mod claim_privacy_tests {
     #[test]
     fn relationship_and_scope_policy_admission_use_the_durable_current_cut() {
         for kind in [
+            arkret_wire::EventKind::MlsHistoryRequest,
+            arkret_wire::EventKind::MlsHistoryGrant,
             arkret_wire::EventKind::RealmLink,
             arkret_wire::EventKind::RealmJoinRule,
             arkret_wire::EventKind::RealmHistoryAccess,

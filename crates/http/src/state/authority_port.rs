@@ -35,7 +35,7 @@ enum SelfEventRoute {
     Consent,
     /// `ak.mls.genesis` and `ak.mls.commit`: the MLS public-transition unit.
     Mls,
-    /// Kinds with a guarded current-state authority cut in their source scope.
+    /// Kinds with an atomic native authorization/source cut in their scope.
     GuardedUnit,
 }
 
@@ -53,7 +53,9 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         EventKind::IdentityAccountabilityGrant => Ok(SelfEventRoute::AccountabilityGrant),
         EventKind::ConsentReplace => Ok(SelfEventRoute::Consent),
         EventKind::MlsGenesis | EventKind::MlsCommit => Ok(SelfEventRoute::Mls),
-        EventKind::RealmActorStatusSet
+        EventKind::MlsHistoryRequest
+        | EventKind::MlsHistoryGrant
+        | EventKind::RealmActorStatusSet
         | EventKind::RealmActorRecoverySet
         | EventKind::CircleCreate
         | EventKind::AppletBridgeError
@@ -224,6 +226,8 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
             && matches!(
                 event.kind,
                 arkret_wire::EventKind::CircleMemberState
+                    | arkret_wire::EventKind::MlsHistoryRequest
+                    | arkret_wire::EventKind::MlsHistoryGrant
                     | arkret_wire::EventKind::CapabilityGrant
                     | arkret_wire::EventKind::CapabilityRevoke
                     | arkret_wire::EventKind::ScopeReadReceiptPolicy
@@ -250,6 +254,8 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
             && matches!(
                 event.kind,
                 arkret_wire::EventKind::SidecarContextAttach
+                    | arkret_wire::EventKind::MlsHistoryRequest
+                    | arkret_wire::EventKind::MlsHistoryGrant
                     | arkret_wire::EventKind::MessageCreate
                     | arkret_wire::EventKind::AgentSidecarExchangeControl
             ))
@@ -939,6 +945,8 @@ mod tests {
         }
         for kind in [
             EventKind::AppletBridgeError,
+            EventKind::MlsHistoryRequest,
+            EventKind::MlsHistoryGrant,
             EventKind::PinAdd,
             EventKind::PinRemove,
             EventKind::PinReorder,
@@ -1024,6 +1032,8 @@ mod tests {
     #[test]
     fn every_other_active_kind_is_unsupported_event_kind_not_internal() {
         let routed = [
+            EventKind::MlsHistoryRequest,
+            EventKind::MlsHistoryGrant,
             EventKind::RealmActorStatusSet,
             EventKind::RealmActorRecoverySet,
             EventKind::AppletBridgeError,
@@ -1188,6 +1198,8 @@ mod tests {
             EventKind::MessageCreate,
             EventKind::SidecarContextAttach,
             EventKind::AgentSidecarExchangeControl,
+            EventKind::MlsHistoryRequest,
+            EventKind::MlsHistoryGrant,
         ] {
             event.kind = kind;
             assert!(
@@ -1204,6 +1216,30 @@ mod tests {
             EventKind::MessageRevise,
         ] {
             event.kind = kind;
+            assert!(
+                require_guarded_unit_event(&arkret_wire::EventAdmissionSubmission::new(
+                    event.clone()
+                ))
+                .is_err()
+            );
+        }
+        // This exercises scope dispatch only, not native read or disclosure
+        // authority. Those are independently checked by the accepting unit.
+        for kind in [EventKind::MlsHistoryRequest, EventKind::MlsHistoryGrant] {
+            event.kind = kind;
+            event.scope_ref = arkret_wire::ScopeRef::Circle {
+                realm_id: event.realm_id.clone(),
+                circle_id: arkret_wire::CircleId::from_event_id(&event.event_id),
+            };
+            assert!(
+                require_guarded_unit_event(&arkret_wire::EventAdmissionSubmission::new(
+                    event.clone()
+                ))
+                .is_ok()
+            );
+            event.scope_ref = arkret_wire::ScopeRef::RealmControl {
+                realm_id: event.realm_id.clone(),
+            };
             assert!(
                 require_guarded_unit_event(&arkret_wire::EventAdmissionSubmission::new(
                     event.clone()

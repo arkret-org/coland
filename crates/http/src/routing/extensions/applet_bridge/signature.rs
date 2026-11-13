@@ -542,7 +542,7 @@ async fn verify_inbound_applet_service_signature(
     let native_events = if matches!(scope_carrier, SignedAppletScopeCarrier::TransactionEvents) {
         let body: arkret_models_integration::applet_models::AppletEventTransactionRequestBody =
             serde_json::from_value(request_body.clone())
-                .map_err(|error| applet_signature_error_invalid(error.to_string()))?;
+                .map_err(|error| AppError::schema_violation(error.to_string()))?;
         let native_only = !body.events.is_empty()
             && body.signals.is_empty()
             && body.committed_events.is_empty()

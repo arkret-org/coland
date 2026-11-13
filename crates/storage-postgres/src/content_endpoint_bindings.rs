@@ -232,12 +232,18 @@ pub(crate) async fn current_producer_in_connection(
         return current_producer_from_fact_in_connection(conn, &transaction.event, fact, group)
             .await;
     }
-    let (actor, endpoint, authorization) =
-        if let Some(producer) = local_agent_producer(conn, transaction, group).await? {
-            producer
-        } else {
-            own_human_pcr_producer(conn, transaction).await?
-        };
+    let (actor, endpoint, authorization) = if let Some(producer) = local_agent_producer(
+        conn,
+        &transaction.event,
+        &transaction.expected_authority.service_id,
+        group,
+    )
+    .await?
+    {
+        producer
+    } else {
+        own_human_pcr_producer(conn, transaction).await?
+    };
     current_endpoint_in_connection(
         conn,
         &transaction.event,
@@ -254,7 +260,8 @@ pub(crate) async fn current_producer_in_connection(
 /// authorization, then repeat its current PCR and original signature checks.
 async fn local_agent_producer(
     conn: &mut AsyncPgConnection,
-    transaction: &AuthorityCommitTransaction,
+    event: &arkret_wire::Event,
+    service_id: &arkret_wire::DidCoreId,
     group: &MlsGroupValue,
 ) -> PersistenceResult<
     Option<(
@@ -264,7 +271,6 @@ async fn local_agent_producer(
     )>,
 > {
     use horme::OptionalExtension as _;
-    let event = &transaction.event;
     let Some(account) = event.actual_signer().as_account_id() else {
         return Ok(None);
     };
@@ -279,10 +285,7 @@ async fn local_agent_producer(
     {
         return Ok(None);
     }
-    if account.station_id != transaction.expected_authority.service_id
-        || event.executed_by.is_some()
-        || event.realm_id == pcr
-    {
+    if &account.station_id != service_id || event.executed_by.is_some() || event.realm_id == pcr {
         return Err(unavailable(
             "Agent content requires its own local ordinary runtime source",
         ));
@@ -496,6 +499,171 @@ async fn current_exact_endpoint_in_connection(
         .validate()
         .map_err(|error| invalid(error.to_string()))?;
     Ok(binding)
+}
+
+/// Requalify the accepted request's original native signer and its current
+/// exact leaf. A retained request or leaf row alone is never current authority.
+pub(crate) async fn current_history_recipient_in_connection(
+    conn: &mut AsyncPgConnection,
+    original: &arkret_wire::CommittedEventFullView,
+    group: &MlsGroupValue,
+    native_station: &arkret_wire::DidCoreId,
+) -> PersistenceResult<ContentEndpoint> {
+    let request = original
+        .event
+        .as_mls_history_request()
+        .map_err(|error| invalid(error.to_string()))?;
+    let recipient = &request.recipient;
+    let fact = crate::agent_producer_signer_keys::producer_source_for_commit_in_connection(
+        conn,
+        &original.event,
+        &original.commit,
+    )
+    .await?;
+    let mut original_runtime_qualified = false;
+    if let Some(fact) = fact.as_ref() {
+        let bound =
+            current_producer_from_fact_in_connection(conn, &original.event, fact, group).await?;
+        if &bound != recipient {
+            return Err(unavailable(
+                "history request native producer differs from its exact recipient",
+            ));
+        }
+    } else if let Some((actor, endpoint, authorization)) =
+        local_agent_producer(conn, &original.event, native_station, group).await?
+    {
+        if actor != recipient.actor_id
+            || endpoint != recipient.endpoint
+            || authorization != recipient.authorization_event_ref
+        {
+            return Err(unavailable("history Agent request native instance differs"));
+        }
+        original_runtime_qualified = true;
+    } else if original.event.scope_ref
+        != (arkret_wire::ScopeRef::Realm {
+            realm_id: original.event.realm_id.clone(),
+        })
+    {
+        return Err(unavailable(
+            "history request has no independently qualified original producer",
+        ));
+    }
+    crate::content_recovery_fence::require_unfenced(conn, &recipient.actor_id).await?;
+    if let Some(account) = recipient.actor_id.as_account_id() {
+        // Use the actual PCR writer lock without waiting backwards while the
+        // resource Realm is held. Then verify the native holder, not a replica.
+        let holder = sql_query("SELECT to_jsonb(a.service_id) AS payload FROM principal_resolutions p JOIN realm_authorities a ON a.realm_id=p.pcr_realm_id WHERE p.principal_id=$1 AND p.station_id=$2 FOR UPDATE OF a NOWAIT")
+            .bind::<Text,_>(account.principal_id.as_str()).bind::<Text,_>(account.station_id.as_str())
+            .get_result::<crate::JsonPayloadRow>(&mut *conn).await
+            .map_err(|_| PersistenceError::Conflict("temporarily_unavailable: history recipient current native cut is busy or unavailable".into()))?;
+        if holder.payload.as_str() != Some(native_station.as_str()) {
+            return Err(unavailable(
+                "history recipient has no qualified current native holder at this Station",
+            ));
+        }
+        crate::pcr_private_authority::lock_holder(conn, account, Some(native_station)).await?;
+    }
+    match &recipient.endpoint {
+        MlsWelcomeRecipientEndpoint::Device { device_id }
+            if recipient.actor_id.as_realm_actor_id().is_some() =>
+        {
+            if fact.is_none() {
+                return Err(unavailable(
+                    "history Realm Device request has no original native signer source",
+                ));
+            }
+            let authority = crate::realm_actor_device_authority::current_in_connection(
+                conn,
+                &recipient.actor_id,
+                device_id,
+                chrono::Utc::now(),
+            )
+            .await
+            .map_err(crate::PgTransactionError::into_persistence)?
+            .ok_or_else(|| unavailable("history recipient has no current native Realm Device"))?;
+            if authority.authorization_ref.event_id != recipient.authorization_event_ref
+                || !authority.scopes.contains_scope(&original.event.scope_ref)
+            {
+                return Err(unavailable(
+                    "history Realm Device authorization instance or scope changed",
+                ));
+            }
+        }
+        MlsWelcomeRecipientEndpoint::Device { device_id } => {
+            let account = recipient
+                .actor_id
+                .as_account_id()
+                .ok_or_else(|| unavailable("history Device has no full Account"))?;
+            // This is the existing native holder barrier, not a private PCR
+            // replica inferred from a current leaf or public DID key. Missing
+            // qualified origin/current material remains unavailable.
+            let current = crate::mls_keypackage_claim_endpoints::device(
+                conn,
+                account,
+                device_id,
+                &recipient.authorization_event_ref,
+            )
+            .await?;
+            current.require_current(conn).await?;
+            if fact.is_none() {
+                if current.realm() != &original.event.realm_id
+                    || crate::pcr_private_authority::accepted_governance(conn, current.realm())
+                        .await?
+                        != arkret_wire::GenesisGovernance::Human(account.clone())
+                {
+                    return Err(unavailable(
+                        "history request is missing its original native signer fact",
+                    ));
+                }
+                crate::actor_profiles::verify_device_signer_in_connection(
+                    conn,
+                    &original.event,
+                    account,
+                    device_id,
+                    current.realm(),
+                    chrono::Utc::now(),
+                    original.event.realm_id.digest_suite_code().digest_suite(),
+                    "history recipient original",
+                )
+                .await
+                .map_err(crate::PgTransactionError::into_persistence)?;
+            }
+        }
+        MlsWelcomeRecipientEndpoint::AgentRuntime {
+            verification_method,
+        } => {
+            if fact.is_none() && !original_runtime_qualified {
+                return Err(unavailable(
+                    "history runtime request has no original native signer source",
+                ));
+            }
+            let account = recipient
+                .actor_id
+                .as_account_id()
+                .ok_or_else(|| unavailable("history runtime has no full Agent Account"))?;
+            crate::mls_keypackage_claim_endpoints::agent(
+                conn,
+                &account.principal_id,
+                verification_method,
+                &recipient.authorization_event_ref,
+            )
+            .await?
+            .require_current(conn)
+            .await?;
+        }
+    }
+    let current = current_exact_endpoint_in_connection(
+        conn,
+        group,
+        recipient.actor_id.clone(),
+        recipient.endpoint.clone(),
+        recipient.authorization_event_ref.clone(),
+    )
+    .await?;
+    if current != *recipient {
+        return Err(unavailable("history recipient leaf binding changed"));
+    }
+    Ok(current)
 }
 
 /// Own-PCR originals use the separately registered self-admission contract,

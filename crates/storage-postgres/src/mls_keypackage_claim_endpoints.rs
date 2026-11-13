@@ -291,7 +291,7 @@ fn reference(full: &arkret_wire::CommittedEventFullView) -> CommittedEventRef {
         stream_position: full.commit.stream_position,
     }
 }
-async fn device(
+pub(crate) async fn device(
     conn: &mut AsyncPgConnection,
     account: &AccountId,
     id: &DeviceId,

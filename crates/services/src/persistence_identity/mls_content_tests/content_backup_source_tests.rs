@@ -535,8 +535,16 @@ async fn foreign_original_requires_signed_native_custody_without_copying_foreign
             .len(),
         1
     );
-    assert!(archive["tables"].get("key_backups").is_none());
-    assert!(archive["tables"].get("key_backup_identities").is_none());
+    assert_eq!(
+        archive["tables"]["key_backups"],
+        json!([]),
+        "foreign packages must not be copied into the governing Station"
+    );
+    assert_eq!(
+        archive["tables"]["key_backup_identities"],
+        json!([]),
+        "foreign package identities must not be copied into the governing Station"
+    );
     store
         .import_management_private_state(&manifest, &bytes)
         .await

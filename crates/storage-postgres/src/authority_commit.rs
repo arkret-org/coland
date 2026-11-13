@@ -1861,6 +1861,7 @@ enum VerifiedPcrUnit {
     ProfileOrAccountability,
     ManagedScopeProfile,
     ContentHistoryRequest,
+    ContentHistoryGrant,
     AgentProvision,
     AgentPcrGenesis,
     AgentControl,
@@ -1967,11 +1968,11 @@ async fn commit_transaction_with_device_guard_inner(
     verified_unit: VerifiedPcrUnit,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
-    if matches!(
-        transaction.event.kind,
-        arkret_wire::EventKind::MlsHistoryGrant | arkret_wire::EventKind::MlsHistoryRecovery
-    ) || (transaction.event.kind == arkret_wire::EventKind::MlsHistoryRequest
-        && verified_unit != VerifiedPcrUnit::ContentHistoryRequest)
+    if transaction.event.kind == arkret_wire::EventKind::MlsHistoryRecovery
+        || (transaction.event.kind == arkret_wire::EventKind::MlsHistoryGrant
+            && verified_unit != VerifiedPcrUnit::ContentHistoryGrant)
+        || (transaction.event.kind == arkret_wire::EventKind::MlsHistoryRequest
+            && verified_unit != VerifiedPcrUnit::ContentHistoryRequest)
     {
         // These facts need their native current-reader, grant or replacement
         // unit. A generic capability check must never install them unchecked.
@@ -2190,7 +2191,7 @@ async fn commit_transaction_with_device_guard_inner(
     }
 
     crate::boxed_future(|| {
-        crate::content_history_admission::require_request_in_connection(conn, transaction)
+        crate::content_history_admission::require_in_connection(conn, transaction)
     })
     .await?;
 
@@ -2306,21 +2307,21 @@ async fn commit_transaction_with_device_guard_inner(
 
 /// The Event unit has rechecked the current local/forwarded producer and
 /// locked the Realm cut. Generic transaction entry points remain closed.
-pub(crate) async fn commit_content_history_request_in_connection(
+pub(crate) async fn commit_content_history_in_connection(
     conn: &mut AsyncPgConnection,
     transaction: &AuthorityCommitTransaction,
     prepared: Option<&coland_storage::EventApprovalCommit>,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
-    if transaction.event.kind != arkret_wire::EventKind::MlsHistoryRequest {
-        return Err(invalid("history request unit requires its exact Event kind").into());
-    }
-    commit_transaction_in_connection_with_device_guard(
-        conn,
-        transaction,
-        VerifiedPcrUnit::ContentHistoryRequest,
-        prepared,
-    )
-    .await
+    let unit = match transaction.event.kind {
+        arkret_wire::EventKind::MlsHistoryRequest => VerifiedPcrUnit::ContentHistoryRequest,
+        arkret_wire::EventKind::MlsHistoryGrant => VerifiedPcrUnit::ContentHistoryGrant,
+        _ => {
+            return Err(
+                invalid("history unit requires its exact request or grant Event kind").into(),
+            );
+        }
+    };
+    commit_transaction_in_connection_with_device_guard(conn, transaction, unit, prepared).await
 }
 
 #[cfg(any(test, feature = "test-support"))]

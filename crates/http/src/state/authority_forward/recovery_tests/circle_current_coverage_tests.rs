@@ -1093,6 +1093,34 @@ async fn qualified_circle_refresh_precedes_full_tail_when_metadata_is_physically
                 .unwrap(),
             Some(true)
         );
+        let circle_before_restart = scene
+            .member()
+            .circle_view_for_actor(
+                &scene.circle,
+                &ActorId::account(scene.alice.pcr.history.account.clone()),
+            )
+            .await
+            .unwrap();
+        scene
+            .origin
+            .hydrate()
+            .await
+            .expect("member Genesis disclosure must not require a complete governing bootstrap");
+        assert!(
+            serde_json::to_value(
+                scene
+                    .member()
+                    .circle_view_for_actor(
+                        &scene.circle,
+                        &ActorId::account(scene.alice.pcr.history.account.clone()),
+                    )
+                    .await
+                    .unwrap()
+            )
+            .unwrap()
+                == serde_json::to_value(circle_before_restart).unwrap(),
+            "restart must preserve the independently qualified Circle current"
+        );
         assert_exact_genesis_signer_disclosure(&scene).await;
     })
     .await;

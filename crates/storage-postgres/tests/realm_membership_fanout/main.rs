@@ -5992,20 +5992,14 @@ async fn recipient_mls_add_attestation_outbox_is_atomic_durable_and_idempotent()
 }
 
 /// Structural producer proofs isolate accepted-state replication and disclosure.
-#[tokio::test]
-async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires() {
-    heap_future(|| {
-        circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(false, None)
-    })
-    .await;
+#[test]
+fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires() {
+    run_circle_coverage(false, None);
 }
 
-#[tokio::test]
-async fn account_scoped_realm_snapshot_preserves_another_hosted_accounts_circle_at_the_same_cut() {
-    heap_future(|| {
-        circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(true, None)
-    })
-    .await;
+#[test]
+fn account_scoped_realm_snapshot_preserves_another_hosted_accounts_circle_at_the_same_cut() {
+    run_circle_coverage(true, None);
 }
 
 #[derive(Clone, Copy)]
@@ -6020,96 +6014,61 @@ enum CircleCoverageControl {
     HistoricalArchive,
 }
 
-#[tokio::test]
-async fn missing_circle_member_projection_is_unproved_but_retains_qualified_refresh_candidate() {
-    heap_future(|| {
-        circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(
-            true,
-            Some(CircleCoverageControl::MissingMember),
-        )
-    })
-    .await;
+#[test]
+fn missing_circle_member_projection_is_unproved_but_retains_qualified_refresh_candidate() {
+    run_circle_coverage(true, Some(CircleCoverageControl::MissingMember));
 }
 
-#[tokio::test]
-async fn unknown_circle_current_cannot_reopen_over_an_unconsumed_real_leave() {
-    heap_future(|| {
-        circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(
-            true,
-            Some(CircleCoverageControl::UnknownOpening),
-        )
-    })
-    .await;
+#[test]
+fn unknown_circle_current_cannot_reopen_over_an_unconsumed_real_leave() {
+    run_circle_coverage(true, Some(CircleCoverageControl::UnknownOpening));
 }
 
-#[tokio::test]
-async fn missing_circle_metadata_self_leave_exact_replay_stays_stored_without_future_rights() {
-    heap_future(|| {
-        circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(
-            true,
-            Some(CircleCoverageControl::TerminalReplay),
-        )
-    })
-    .await;
+#[test]
+fn missing_circle_metadata_self_leave_exact_replay_stays_stored_without_future_rights() {
+    run_circle_coverage(true, Some(CircleCoverageControl::TerminalReplay));
 }
 
-#[tokio::test]
-async fn same_cut_snapshot_refresh_preserves_first_stored_peer_receipt() {
-    heap_future(|| {
-        circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(
-            true,
-            Some(CircleCoverageControl::SameCutReplay),
-        )
-    })
-    .await;
+#[test]
+fn same_cut_snapshot_refresh_preserves_first_stored_peer_receipt() {
+    run_circle_coverage(true, Some(CircleCoverageControl::SameCutReplay));
 }
 
-#[tokio::test]
-async fn higher_account_snapshot_advances_realm_without_certifying_hidden_circle() {
-    heap_future(|| {
-        circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(
-            true,
-            Some(CircleCoverageControl::HigherCut),
-        )
-    })
-    .await;
+#[test]
+fn higher_account_snapshot_advances_realm_without_certifying_hidden_circle() {
+    run_circle_coverage(true, Some(CircleCoverageControl::HigherCut));
 }
 
-#[tokio::test]
-async fn unproved_local_circle_member_does_not_hide_another_qualified_hosted_member() {
-    heap_future(|| {
-        circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(
-            true,
-            Some(CircleCoverageControl::OtherHostedMember),
-        )
-    })
-    .await;
+#[test]
+fn unproved_local_circle_member_does_not_hide_another_qualified_hosted_member() {
+    run_circle_coverage(true, Some(CircleCoverageControl::OtherHostedMember));
 }
 
-#[tokio::test]
-async fn held_full_at_snapshot_endpoint_rejects_other_commit_id_without_writes() {
-    heap_future(|| {
-        circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(
-            true,
-            Some(CircleCoverageControl::WrongEndpoint),
-        )
-    })
-    .await;
+#[test]
+fn held_full_at_snapshot_endpoint_rejects_other_commit_id_without_writes() {
+    run_circle_coverage(true, Some(CircleCoverageControl::WrongEndpoint));
 }
 
 #[test]
 fn trusted_archival_join_requires_real_interval_observation_for_self_terminal() {
+    run_circle_coverage(true, Some(CircleCoverageControl::HistoricalArchive));
+}
+
+// Every branch shares the same future containing the native PCR/HTTP fixture.
+// Keep its existing archival-case stack budget consistent across these
+// unoptimized Windows test drivers; product runtime limits are unchanged.
+fn run_circle_coverage(check_other_account_snapshot: bool, control: Option<CircleCoverageControl>) {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
+        .spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap()
                 .block_on(heap_future(|| {
                     circle_own_opening_join_anchors_remote_stream_and_membership_basis_expires_case(
-                        true,
-                        Some(CircleCoverageControl::HistoricalArchive),
+                        check_other_account_snapshot,
+                        control,
                     )
                 }));
         })

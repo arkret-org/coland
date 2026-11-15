@@ -24,16 +24,17 @@ fn account(name: &str, station: &DidCoreId) -> AccountId {
     )
 }
 
-/// One Event by `actor` carrying a structural producer proof; these fixtures
-/// exercise the governance read path, not signature verification.
+/// A read fixture still supplies the real native Device producer required by
+/// the ordinary Realm admission contract.
 fn fixture_event(
     kind: EventKind,
     scope_ref: ScopeRef,
     actor: &AccountId,
+    producer_method: &arkret_wire::DidUrl,
     payload: serde_json::Value,
     at: chrono::DateTime<chrono::Utc>,
 ) -> Event {
-    let mut event = arkret_wire::test_support::raw_event_for_actor_at(
+    let event = arkret_wire::test_support::raw_event_for_actor_at(
         kind.as_str(),
         scope_ref,
         ActorId::account(actor.clone()),
@@ -41,31 +42,11 @@ fn fixture_event(
         at,
     )
     .unwrap();
-    let digest = arkret_wire::Hash::new(
-        event
-            .event_digest_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
-            .unwrap(),
+    coland_test_support::device_authorization_history::sign_event(
+        event,
+        producer_method.clone(),
+        [81; 32],
     )
-    .unwrap();
-    event.producer_proof = Some(arkret_wire::ProducerEventProof {
-        kind: arkret_wire::proof_kind::DETACHED_JWS.to_owned(),
-        verification_method: arkret_wire::DidUrl::new(format!(
-            "did:{}#key",
-            actor
-                .principal_id
-                .as_str()
-                .strip_prefix("ak:did_core:")
-                .unwrap()
-        ))
-        .unwrap(),
-        event_digest: digest.clone(),
-        created_at: at,
-        domain: None,
-        audience: None,
-        proof_purpose: None,
-        jws: arkret_wire::test_support::structural_only_detached_jws(&digest),
-    });
-    event
 }
 
 fn commit_signature(
@@ -90,9 +71,11 @@ struct GovernedRealm {
     method: arkret_wire::DidUrl,
     head: RealmCommit,
     founder: AccountId,
+    founder_method: arkret_wire::DidUrl,
 }
 
-fn realm_transaction(
+async fn realm_transaction(
+    store: &dyn coland_storage::PersistenceStore,
     authority: &CurrentRealmAuthority,
     method: &arkret_wire::DidUrl,
     event: &Event,
@@ -101,7 +84,13 @@ fn realm_transaction(
 ) -> AuthorityCommitTransaction {
     let at = event.created_at;
     let realm_id = authority.realm_id.clone();
-    AuthorityCommitTransaction {
+    let producer_signer_fact = store
+        .authority_commits()
+        .prepare_account_device_signer_fact(event, at)
+        .await
+        .unwrap()
+        .map(Into::into);
+    let mut transaction = AuthorityCommitTransaction {
         expected_authority: authority.clone(),
         event: event.clone(),
         commit: RealmCommit {
@@ -119,12 +108,33 @@ fn realm_transaction(
             committed_at: at,
             signature: commit_signature(method, at),
         },
-        producer_signer_fact: None,
+        producer_signer_fact,
         content_backup_source: None,
         mls_state: None,
         welcomes: Vec::new(),
         recipient_queue_capacity: 0,
-    }
+    };
+    let commit = &mut transaction.commit;
+    commit.producer_signer_fact_digest = transaction.producer_signer_fact.as_ref().map(|fact| {
+        arkret_wire::Hash::new(arkret_canonical::canonical_sha256(fact).unwrap()).unwrap()
+    });
+    commit.commit_id = RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
+        arkret_canonical::canonical_json_bytes(
+            &arkret_canonical::canonical::unsigned_value(commit, &["commit_id", "signature"])
+                .unwrap(),
+        )
+        .unwrap(),
+    ));
+    commit.signature = arkret_signatures::detached_object::sign_detached_object(
+        &arkret_canonical::canonical::unsigned_value(commit, &["signature"]).unwrap(),
+        arkret_wire::DetachedSignatureContext::RealmCommit,
+        method.clone(),
+        at,
+        &ed25519_dalek::SigningKey::from_bytes(&[9; 32]),
+    )
+    .unwrap();
+    commit.validate_content_address().unwrap();
+    transaction
 }
 
 async fn commit_projected_invite(
@@ -206,7 +216,18 @@ impl GovernedRealm {
         };
 
         let at = at();
-        let founder = account("preview-founder", station);
+        let station_did =
+            arkret_wire::Did::new(method.as_str().split_once('#').unwrap().0).unwrap();
+        let principal = coland_test_support::pcr_genesis::PcrGenesisFixture::new_with(
+            station_did,
+            coland_test_support::device_authorization_history::DeviceHistoryFixtureOptions {
+                local_id: format!("preview-founder-{}", uuid::Uuid::now_v7()),
+                ..Default::default()
+            },
+        );
+        principal.admit_founding_device(store).await.unwrap();
+        let founder = principal.history.account.clone();
+        let founder_method = principal.history.device_verification_method.clone();
         let genesis_salt = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
             arkret_canonical::sha256_bytes(uuid::Uuid::now_v7().to_string().as_bytes()),
         );
@@ -214,6 +235,7 @@ impl GovernedRealm {
             EventKind::RealmCreate,
             ScopeRef::RealmGenesis,
             &founder,
+            &founder_method,
             serde_json::json!({"object":{
                 "schema":"ak.schema.realm_genesis.v1",
                 "purpose":"collaboration",
@@ -262,7 +284,14 @@ impl GovernedRealm {
                 }),
             ),
         ] {
-            events.push(fixture_event(kind, scope.clone(), &founder, payload, at));
+            events.push(fixture_event(
+                kind,
+                scope.clone(),
+                &founder,
+                &founder_method,
+                payload,
+                at,
+            ));
         }
         let authority = CurrentRealmAuthority {
             realm_id: realm_id.clone(),
@@ -277,7 +306,8 @@ impl GovernedRealm {
         let mut transactions = Vec::new();
         for (position, event) in events.iter().enumerate() {
             let transaction =
-                realm_transaction(&authority, &method, event, position as u64, previous);
+                realm_transaction(store, &authority, &method, event, position as u64, previous)
+                    .await;
             previous = Some(transaction.commit.commit_id.clone());
             transactions.push(transaction);
         }
@@ -287,6 +317,7 @@ impl GovernedRealm {
             method,
             head: transactions.last().unwrap().commit.clone(),
             founder,
+            founder_method,
         };
         let submission = OrdinaryRealmBootstrapUnitSubmission {
             unit_kind: OrdinaryRealmBootstrapUnitKind::OrdinaryRealmBootstrap,
@@ -327,6 +358,7 @@ impl GovernedRealm {
                 realm_id: self.realm_id.clone(),
             },
             &self.founder,
+            &self.founder_method,
             serde_json::json!({
                 "invitee_account_id": invitee,
                 "introduction_evidence_digest": format!("sha256:{}", "1".repeat(64)),
@@ -335,12 +367,14 @@ impl GovernedRealm {
             at(),
         );
         let transaction = realm_transaction(
+            store,
             &self.authority,
             &self.method,
             &event,
             self.head.stream_position + 1,
             Some(self.head.commit_id.clone()),
-        );
+        )
+        .await;
         commit_projected_invite(store, transaction.clone()).await;
         self.head = transaction.commit;
         let invite_id = InviteId::from_event_id(&event.event_id);
@@ -359,6 +393,7 @@ impl GovernedRealm {
                 realm_id: self.realm_id.clone(),
             },
             &self.founder,
+            &self.founder_method,
             serde_json::json!({
                 "invite_id": invite_id,
                 "invitee_account_id": invitee,
@@ -368,12 +403,14 @@ impl GovernedRealm {
             at(),
         );
         let transaction = realm_transaction(
+            store,
             &self.authority,
             &self.method,
             &event,
             self.head.stream_position + 1,
             Some(self.head.commit_id.clone()),
-        );
+        )
+        .await;
         commit_projected_invite(store, transaction.clone()).await;
         self.head = transaction.commit;
     }
@@ -426,16 +463,19 @@ async fn set_preview_policy(
             realm_id: realm.realm_id.clone(),
         },
         &realm.founder,
+        &realm.founder_method,
         serde_json::json!({"value":value,"reason":"preview policy fixture"}),
         at(),
     );
     let transaction = realm_transaction(
+        store,
         &realm.authority,
         &realm.method,
         &event,
         realm.head.stream_position + 1,
         Some(realm.head.commit_id.clone()),
-    );
+    )
+    .await;
     commit_projected_invite(store, transaction.clone()).await;
     realm.head = transaction.commit;
 }
@@ -446,6 +486,7 @@ fn station() -> (
 ) {
     let config = crate::config::AppConfig {
         seed_demo_data: false,
+        notary_signing_key_seed: Some([9; 32]),
         ..crate::config::AppConfig::test_default()
     };
     let service_did =
@@ -661,20 +702,58 @@ async fn governance_preview_discloses_only_policy_fields_to_an_admitted_audience
 
     // A Realm governed by another Station is not answered here, even with a
     // permissive policy in this Station's projection.
-    let elsewhere = DidCoreId::new("ak:did_core:web:other-governance.example").unwrap();
+    let mut foreign_config = coland_test_support::app_config();
+    foreign_config.notary_signing_key_seed = Some([9; 32]);
+    foreign_config.public_base_url = "https://other-governance.example".to_owned();
+    foreign_config.seed_demo_data = false;
+    let foreign_state = coland_test_support::app_state(foreign_config);
+    let foreign_store = foreign_state.test_persistence();
+    let elsewhere = foreign_state.service_core_id();
     let mut foreign = GovernedRealm::admit(
-        store.as_ref(),
+        foreign_store.as_ref(),
         &elsewhere,
-        arkret_wire::DidUrl::new("did:web:other-governance.example#authority").unwrap(),
+        foreign_state
+            .service_verification_method("notary-key")
+            .unwrap(),
     )
     .await;
     set_preview_policy(
-        store.as_ref(),
+        foreign_store.as_ref(),
         &mut foreign,
         Some(serde_json::json!({
             "mode":"directory_card",
             "audiences":["anonymous"],
             "fields":["title"]
+        })),
+    )
+    .await;
+    // Retain the actual remote Station's locator result to reach the
+    // non-local governance guard. This negative fixture does not exercise
+    // peer signature verification or grant authority through the cache.
+    let remote_authority = foreign_store
+        .authority_commits()
+        .current_authority(&foreign.realm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .authority_commits()
+        .record_remote_authority(&remote_authority, &local)
+        .await
+        .unwrap();
+    let local_locator = store
+        .authority_commits()
+        .current_authority(&foreign.realm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(local_locator.service_id, elsewhere);
+    assert_ne!(local_locator.service_id, local);
+    set_preview_metadata(
+        store.as_ref(),
+        &foreign.realm_id,
+        Some(serde_json::json!({
+            "mode":"directory_card", "audiences":["anonymous"], "fields":["title"]
         })),
     )
     .await;

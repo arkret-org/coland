@@ -3049,7 +3049,7 @@ async fn capability_revoke_and_relinquish_follow_their_target_guards_case() {
     .await;
     // The subject releases by exact revision only, once.
     let mut stale = revision.clone();
-    stale.stream_position += 100;
+    stale.commit_id = arkret_wire::RealmCommitId::from_digest([0x94; 32]);
     heap_future(|| {
         assert_refused(
             &pool,
@@ -3891,7 +3891,7 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
                 realm_id: realm.clone(),
                 account: account.clone(),
                 issuer: issuer.clone(),
-                window_limit: 20,
+                max_window_event_count: 20,
                 window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7()),
                 expires_at_ms: now_ms + 300_000,
                 now_ms,
@@ -4275,7 +4275,7 @@ async fn account_window_starts_joined_member_at_its_join_commit() {
         realm_id: realm.realm_id.clone(),
         account: bob_account.clone(),
         issuer: issuer.clone(),
-        window_limit: limit,
+        max_window_event_count: limit,
         window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
         expires_at_ms: now_ms + 300_000,
         now_ms,

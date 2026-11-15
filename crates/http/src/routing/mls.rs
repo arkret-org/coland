@@ -16,7 +16,7 @@
 //! every Welcome at the covering RealmCommit.
 //!
 //! Each handler:
-//!   1. authenticates the caller via [`AuthArgs`] (bearer session);
+//!   1. authenticates the caller via [`AuthArgs`] (DPoP SessionGrant);
 //!   2. applies the KeyPackage lifecycle transition to the durable ledger;
 //!   3. mirrors accepted KeyPackage state into the in-process projection.
 //!

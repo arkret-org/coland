@@ -97,7 +97,7 @@ fn source_files() -> Vec<PathBuf> {
             // The AppError API and its own panic tests, and this gate's
             // pattern literals, are not producer sites.
             !path.ends_with("http/src/error.rs")
-                && !path.ends_with("http/src/error_status_registry_gate.rs")
+                && !path.ends_with("http/src/error/status_registry_gate.rs")
         })
         .collect()
 }
@@ -246,12 +246,16 @@ fn call_arguments(text: &str, open: usize) -> Vec<&str> {
         match bytes[index] {
             b'"' => {
                 index += 1;
-                while bytes[index] != b'"' {
+                while index < bytes.len() && bytes[index] != b'"' {
                     if bytes[index] == b'\\' {
                         index += 1;
                     }
                     index += 1;
                 }
+                assert!(
+                    index < bytes.len(),
+                    "unterminated string in an error-status call"
+                );
             }
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' if depth == 0 => {

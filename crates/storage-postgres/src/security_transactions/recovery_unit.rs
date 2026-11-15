@@ -1,9 +1,8 @@
-use horme::RunQueryDsl as _;
-
 use coland_storage::{
     AuthorityCommitWriteOutcome, PersistenceError, RecoveryUnitCommitWrite,
     SecurityTransactionRecord,
 };
+use horme::RunQueryDsl as _;
 
 use super::{
     AsyncPgConnection, PgTransactionError, insert_one, load_one, lock_transaction_identity,

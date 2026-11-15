@@ -938,7 +938,10 @@ async fn check_policy_cas_in_connection(
             ));
         }
     }
-    let revision = chain.last().map(|row| policy_revision(row).map(|r| r.commit_id)).transpose()?;
+    let revision = chain
+        .last()
+        .map(|row| policy_revision(row).map(|r| r.commit_id))
+        .transpose()?;
     if payload.expected_commit_id.as_ref() != Some(&revision) {
         return Err(refused(
             "Management Policy expected_commit_id differs from current",
@@ -1242,7 +1245,7 @@ mod admission_tests {
         circle_join.rules[0].review_requirement = Some(
             arkret_models_collaboration::governance::operation_wire::ManagementReviewRequirement {
                 approver_actor_ids: vec![policy.created_by.clone()],
-                threshold: 1,
+                min_approver_count: 1,
                 max_age_seconds: 60,
             },
         );

@@ -126,7 +126,9 @@ pub(crate) async fn admit(
     }
     let selector = json!({"kind":"realm_actor_device_authorization","actor_id":actor,"device_id":payload.device_id});
     let previous = optional_current_source(conn, actor, selector.clone()).await?;
-    let expected = previous.as_ref().map(|(_, source)| source.commit_id.clone());
+    let expected = previous
+        .as_ref()
+        .map(|(_, source)| source.commit_id.clone());
     if payload.expected_device_commit_id.as_ref() != Some(&expected) {
         return Err(invalid("Device authorization CAS differs"));
     }

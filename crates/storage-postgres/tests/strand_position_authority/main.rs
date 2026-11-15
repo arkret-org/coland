@@ -167,7 +167,7 @@ async fn prepare_placement_setup(pool: &PgPool) -> PlacementSetup {
                 "list",
                 "A",
                 Some(&board_id),
-                json!({"wip_limit":1,"wip_limit_enforcement":"reject"}),
+                json!({"max_active_strand_count":1,"active_strand_count_enforcement":"reject"}),
             ),
             at,
         ),
@@ -588,7 +588,7 @@ async fn prepare_wip_warn_setup(pool: &PgPool) -> WipWarnSetup {
                 "list",
                 "Warn",
                 Some(&board_id),
-                json!({"wip_limit":1,"wip_limit_enforcement":"warn"}),
+                json!({"max_active_strand_count":1,"active_strand_count_enforcement":"warn"}),
             ),
             at,
         ),
@@ -614,7 +614,7 @@ async fn prepare_wip_warn_setup(pool: &PgPool) -> WipWarnSetup {
                 "list",
                 "Review",
                 Some(&board_id),
-                json!({"wip_limit":1,"wip_limit_enforcement":"require_review"}),
+                json!({"max_active_strand_count":1,"active_strand_count_enforcement":"require_review"}),
             ),
             at,
         ),
@@ -827,7 +827,7 @@ async fn prepare_wip_override_setup(pool: &PgPool) -> WipOverrideSetup {
                 "list",
                 "A",
                 Some(&board_id),
-                json!({"wip_limit":1,"wip_limit_enforcement":"reject"}),
+                json!({"max_active_strand_count":1,"active_strand_count_enforcement":"reject"}),
             ),
             at,
         ),
@@ -853,7 +853,7 @@ async fn prepare_wip_override_setup(pool: &PgPool) -> WipOverrideSetup {
                 "list",
                 "B",
                 Some(&board_id),
-                json!({"wip_limit":1,"wip_limit_enforcement":"reject"}),
+                json!({"max_active_strand_count":1,"active_strand_count_enforcement":"reject"}),
             ),
             at,
         ),
@@ -954,7 +954,7 @@ async fn exercise_wip_override_resource_grants(
         "constraints":[{
             "constraint_kind":"scope_limitation","effect":"allow",
             "allowed_to_container_refs":[list_a_id],
-            "wip_limit_override_allowed":true
+            "active_strand_count_override_allowed":true
         }],
         "issuer_authority_refs":[{
             "kind":"realm_root","realm_id":realm,
@@ -969,7 +969,7 @@ async fn exercise_wip_override_resource_grants(
         .unwrap()
         .push(
             json!({"constraint_kind":"scope_limitation","effect":"allow",
-            "wip_limit_override_allowed":false}),
+            "active_strand_count_override_allowed":false}),
         );
     let conflicting_grant = Box::pin(ordinary_realm::source_request(
         &pool,
@@ -1108,7 +1108,7 @@ async fn exercise_wip_override_global_deny(
         "constraints":[{
             "constraint_kind":"scope_limitation","effect":"allow",
             "allowed_to_container_refs":[list_a_id],
-            "wip_limit_override_allowed":true
+            "active_strand_count_override_allowed":true
         }],
         "issuer_authority_refs":[{
             "kind":"realm_root","realm_id":realm,
@@ -1384,7 +1384,7 @@ async fn terminal_target_keeps_canonical_position_without_breaking_the_joined_re
                 "list",
                 "A",
                 Some(&board_id),
-                json!({"wip_limit":1,"wip_limit_enforcement":"reject"}),
+                json!({"max_active_strand_count":1,"active_strand_count_enforcement":"reject"}),
             ),
             at,
         ),

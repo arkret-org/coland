@@ -211,7 +211,7 @@ async fn message_create_approval_transaction(pool: PgPool, setup: Box<GrantSetup
     head = requirement.authority_commit;
     let config = Box::pin(ordinary_realm::source_request(&pool, next_request(
         &head, arkret_wire::EventKind::PolicyAction, &founder(),
-        json!({"action_id":"message_review","value":{"action":"ak.message.create","approval_required":true,"approval_quorum":2,"policy_scope":realm}}), at,
+        json!({"action_id":"message_review","value":{"action":"ak.message.create","approval_required":true,"min_approver_count":2,"policy_scope":realm}}), at,
     ))).await;
     uow.commit_event(config.clone()).await.unwrap();
     head = config.authority_commit;
@@ -424,7 +424,7 @@ async fn prepare_grant_setup(pool: &PgPool) -> GrantSetup {
                 &founder(),
                 json!({
             "action_id":id,"value":{"action":"ak.strand.move","approval_required":required,
-                "approval_quorum":quorum,"policy_scope":scope}}),
+                "min_approver_count":quorum,"policy_scope":scope}}),
                 at,
             ),
         ))
@@ -754,7 +754,7 @@ async fn ordinary_writer_approval_transaction(
     head = requirement.authority_commit;
     let config = Box::pin(ordinary_realm::source_request(&pool, next_request(
         &head, arkret_wire::EventKind::PolicyAction, &founder(),
-        json!({"action_id":"ordinary_event_review","value":{"action":action.as_str(),"approval_required":!alternative,"approval_quorum":2,"policy_scope":if scoped { json!(setup.opened.strand_id) } else { json!(realm) }}}), at,
+        json!({"action_id":"ordinary_event_review","value":{"action":action.as_str(),"approval_required":!alternative,"min_approver_count":2,"policy_scope":if scoped { json!(setup.opened.strand_id) } else { json!(realm) }}}), at,
     ))).await;
     uow.commit_event(config.clone()).await.unwrap();
     head = config.authority_commit;

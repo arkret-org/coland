@@ -1205,7 +1205,9 @@ impl AuthorityCommitApplication {
         committed_at: DateTime<Utc>,
     ) -> ServiceResult<[AuthorityCommitTransaction; 2]> {
         for submission in events {
-            submission.validate().map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+            submission
+                .validate()
+                .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
         }
         let expected_stream = CommitStreamRef::Realm {
             realm_id: authority.realm_id.clone(),

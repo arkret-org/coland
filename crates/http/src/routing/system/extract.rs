@@ -25,7 +25,7 @@ impl<'ex> Extractible<'ex> for AuthArgs {
     }
 }
 
-/// Document the shared bearer-session requirement on every `#[endpoint]` that
+/// Document the shared DPoP SessionGrant requirement on every `#[endpoint]` that
 /// takes an [`AuthArgs`]. The extractor pulls the credential from the
 /// `Authorization` header (validated in [`AuthArgs::authenticated_session`]),
 /// so it contributes a security requirement rather than a request parameter or
@@ -36,23 +36,37 @@ impl salvo::oapi::EndpointArgRegister for AuthArgs {
         operation: &mut salvo::oapi::Operation,
         _arg: &str,
     ) {
-        use salvo::oapi::security::{Http, HttpAuthScheme, SecurityRequirement, SecurityScheme};
+        use salvo::oapi::security::{ApiKey, ApiKeyValue, SecurityRequirement, SecurityScheme};
         components.security_schemes.insert(
-            "bearer_session".to_owned(),
-            SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer).bearer_format("JWT")).into(),
+            "DpopProof".to_owned(),
+            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("DPoP"))).into(),
         );
-        operation
-            .securities
-            .get_or_insert_with(Vec::new)
-            .push(SecurityRequirement::new(
-                "bearer_session",
-                Vec::<String>::new(),
-            ));
+        operation.securities.get_or_insert_with(Vec::new).push(
+            SecurityRequirement::new("SessionGrantAuth", Vec::<String>::new())
+                .add("DpopProof", Vec::<String>::new()),
+        );
+    }
+}
+
+/// Salvo's closed HTTP scheme enum cannot represent DPoP. Complete the
+/// registered scheme in the serialized document without a Bearer placeholder.
+pub(crate) fn install_session_grant_security_scheme(document: &mut serde_json::Value) {
+    let Some(schemes) = document
+        .pointer_mut("/components/securitySchemes")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    if schemes.contains_key("DpopProof") {
+        schemes.insert(
+            "SessionGrantAuth".to_owned(),
+            serde_json::json!({ "type": "http", "scheme": "DPoP" }),
+        );
     }
 }
 
 impl AuthArgs {
-    /// Validate the bearer session against `state` and return the matched
+    /// Validate the DPoP SessionGrant against `state` and return the matched
     /// session record.
     pub async fn authenticated_session(
         &self,
@@ -73,5 +87,69 @@ impl AuthArgs {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use salvo::oapi::{Components, EndpointArgRegister, Operation};
+    use serde_json::json;
+
+    use super::{AuthArgs, install_session_grant_security_scheme};
+
+    #[test]
+    fn session_grant_registration_requires_dpop_credential_and_proof_together() {
+        let mut components = Components::new();
+        let mut operation = Operation::new();
+        AuthArgs::register(&mut components, &mut operation, "aa");
+        let mut document = json!({ "components": components, "operation": operation });
+        install_session_grant_security_scheme(&mut document);
+
+        assert_eq!(
+            document["components"]["securitySchemes"],
+            json!({
+                "SessionGrantAuth": { "type": "http", "scheme": "DPoP" },
+                "DpopProof": { "type": "apiKey", "in": "header", "name": "DPoP" }
+            })
+        );
+        assert_eq!(
+            document["operation"]["security"],
+            json!([{ "SessionGrantAuth": [], "DpopProof": [] }])
+        );
+        let serialized = document.to_string();
+        for retired in ["bearer_session", "bearer", "JWT"] {
+            assert!(!serialized.contains(retired));
+        }
+    }
+
+    #[test]
+    fn product_document_resolves_registered_session_grant_security() {
+        let document = crate::openapi::product_openapi_surface_doc();
+        assert_eq!(
+            document["components"]["securitySchemes"]["SessionGrantAuth"],
+            json!({ "type": "http", "scheme": "DPoP" })
+        );
+        assert_eq!(
+            document["components"]["securitySchemes"]["DpopProof"],
+            json!({ "type": "apiKey", "in": "header", "name": "DPoP" })
+        );
+        assert!(
+            document["components"]["securitySchemes"]
+                .get("bearer_session")
+                .is_none()
+        );
+        let mut session_operation_count = 0;
+        for path in document["paths"].as_object().expect("paths").values() {
+            for operation in path.as_object().expect("path item").values() {
+                for requirement in operation["security"].as_array().into_iter().flatten() {
+                    if requirement.get("SessionGrantAuth").is_some() {
+                        assert_eq!(requirement["DpopProof"], json!([]));
+                        session_operation_count += 1;
+                    }
+                    assert!(requirement.get("bearer_session").is_none());
+                }
+            }
+        }
+        assert!(session_operation_count > 0);
     }
 }

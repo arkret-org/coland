@@ -120,9 +120,8 @@ impl<'ex> salvo::extract::Extractible<'ex> for AdminAuth {
     }
 }
 
-/// Same bearer-session security requirement as [`AuthArgs`]: the credential
-/// is the request's `Authorization` header, validated once by
-/// [`RequireAdmin`].
+/// Same DPoP SessionGrant security requirement as [`AuthArgs`]: the credential
+/// and proof are validated once by [`RequireAdmin`].
 impl salvo::oapi::EndpointArgRegister for AdminAuth {
     fn register(
         components: &mut salvo::oapi::Components,

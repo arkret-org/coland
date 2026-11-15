@@ -38,6 +38,13 @@ fn apply_call(state: &mut ProjectionState, input: &CallInput, hlc: &ServerHlc) -
 
 const TEST_REALM: &str = "ak:realm:ASReu6ls3Ao5vTK0TGXBCAvLLQChFejCEmN9KaSceZOt";
 
+fn capture_key_ref() -> Value {
+    serde_json::json!({
+        "algorithm":"MLS",
+        "group_state_ref":arkret_identifiers::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[8;32]),
+    })
+}
+
 /// Assert the Event was rejected for exactly `expected`, printing the real
 /// effect otherwise. A bare `matches!` hides the reason that makes a reducer
 /// failure diagnosable.
@@ -198,7 +205,7 @@ fn call_state_projects_independent_state_focus_and_roster_facets() {
             "call_id": call_id,
             "state_transition": {"from": "scheduled", "to": "ringing"},
             "focus": {"mode": "sfu", "session_focus": "fra-1"},
-            "roster_delta": {"op": "join", "participant": participant}
+            "roster_delta": {"operation": "join", "participant": participant}
         }),
     );
 
@@ -280,7 +287,7 @@ fn moderation_removal_is_tagged_with_the_accepted_event_id() {
         realm,
         serde_json::json!({
             "call_id": call_id,
-            "moderation_delta": {"op": "remove_participant", "removal": removal}
+            "moderation_delta": {"operation": "remove_participant", "removal": removal}
         }),
     );
     assert_eq!(
@@ -303,7 +310,7 @@ fn moderation_removal_is_tagged_with_the_accepted_event_id() {
         1,
         serde_json::json!({
             "call_id": call_id,
-            "moderation_delta": {"op": "remove_participant", "removal": removal}
+            "moderation_delta": {"operation": "remove_participant", "removal": removal}
         }),
     );
     assert_eq!(
@@ -343,7 +350,7 @@ fn recording_start_requires_consent_before_both_facets_are_written() {
             "capture_kind": "recording",
             "mode": "audio_video",
             "visible_notice": true,
-            "capture_metadata": {"retention": {"consent_confirmed": consent_confirmed}}
+            "capture_metadata": {"key_ref":capture_key_ref(),"retention": {"consent_confirmed": consent_confirmed}}
         })
     };
     let unconsented = call_input(
@@ -396,7 +403,7 @@ fn accepted_capture_results_do_not_reopen_permission_or_overwrite_pending_on_sto
         serde_json::json!({
         "call_id":call_id,"recording_id":"segment","recording_agent_id":"ak:did_core:web:media.example",
         "capture_kind":"recording","mode":"audio","visible_notice":true,
-        "capture_metadata":{"retention":{"consent_confirmed":true}}}),
+        "capture_metadata":{"key_ref":capture_key_ref(),"retention":{"consent_confirmed":true}}}),
     );
     expect_call_state_projected(apply_call(&mut state, &start, &hlc));
     let pending = state.facet_value(TEST_REALM, &result).unwrap().clone();

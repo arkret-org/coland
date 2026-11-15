@@ -650,7 +650,7 @@ impl WebvhStore for PgWebvhStore {
                               THEN did_document->'service' ELSE '[]'::jsonb END \
                        ) AS entry \
                        WHERE entry->>'type' = 'ArkretService' \
-                         AND entry->>'serviceKind' = $1 \
+                         AND entry->>'service_kind' = $1 \
                          AND entry->>'serviceEndpoint' = $2 \
                      ) LIMIT 1 FOR UPDATE",
                 )

@@ -372,7 +372,7 @@ fn accepted_approvals(
                     return Err(denied("approval original roster repeats a principal"));
                 }
             }
-            let quorum = requirement["effective_approval_quorum"]
+            let quorum = requirement["effective_min_approver_count"]
                 .as_u64()
                 .filter(|value| *value > 0)
                 .ok_or_else(|| denied("approval has no original quorum"))?;

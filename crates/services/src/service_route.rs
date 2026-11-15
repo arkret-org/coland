@@ -403,7 +403,7 @@ mod tests {
             "service": [{
                 "id": format!("{did}#station"),
                 "type": "ArkretService",
-                "serviceKind": "station",
+                "service_kind": "station",
                 "serviceEndpoint": base_url,
             }],
         }))

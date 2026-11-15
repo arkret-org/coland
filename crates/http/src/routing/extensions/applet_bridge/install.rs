@@ -871,8 +871,11 @@ pub(super) async fn build_install_plan(
     }
     let approved_actions = actions_from_approved_scopes(&approved_scopes);
     let denied_scopes = denied_scope_values(package, &approved_actions);
-    let registration_payload =
-        registration_payload_from_package(package, registration_epoch_evidence, expected_commit_id)?;
+    let registration_payload = registration_payload_from_package(
+        package,
+        registration_epoch_evidence,
+        expected_commit_id,
+    )?;
     let package_digest = package
         .package_digest
         .clone()

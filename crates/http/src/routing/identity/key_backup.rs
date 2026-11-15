@@ -149,6 +149,9 @@ mod tests {
         assert!(validate_key_backup_ciphertext_digest_typed(&backup).is_err());
         body["ciphertext_digest"] = json!(arkret_canonical::blake3_digest([0, 0, 1]));
         let backup = typed_key_backup_body(&body).unwrap();
+        assert!(validate_key_backup_ciphertext_digest_typed(&backup).is_err());
+        body["ciphertext_digest"] = json!(arkret_canonical::sha256_digest([0, 0, 1]));
+        let backup = typed_key_backup_body(&body).unwrap();
         validate_key_backup_ciphertext_digest_typed(&backup).unwrap();
     }
 
@@ -275,7 +278,10 @@ mod tests {
         let err = validate_key_backup_body(BACKUP_ID, ACTOR, &body)
             .expect_err("key backup signature_proof must have a device trust anchor");
         assert_eq!(err.code, ErrorCode::SchemaViolation);
-        assert!(err.message.contains("device_authorize_event_id"));
+        assert!(
+            err.message
+                .contains("select exactly one native Device or Agent author")
+        );
     }
 
     #[test]
@@ -543,6 +549,8 @@ mod tests {
         let mut tampered_service = base.clone();
         tampered_service.service_id =
             DidCoreId::new("ak:did_core:web:other.test".to_owned()).unwrap();
+        assert!(tampered_service.delete_intent_digest(None).is_err());
+        tampered_service.account_id.station_id = tampered_service.service_id.clone();
         assert_ne!(
             baseline,
             tampered_service.delete_intent_digest(None).unwrap()
@@ -552,6 +560,8 @@ mod tests {
         // re-dated into a fresh one.
         let mut tampered_window = base;
         tampered_window.expires_at = "2026-08-01T01:00:00.000Z".parse().unwrap();
+        assert!(tampered_window.delete_intent_digest(None).is_err());
+        tampered_window.expires_at = tampered_window.issued_at + chrono::Duration::seconds(299);
         assert_ne!(
             baseline,
             tampered_window.delete_intent_digest(None).unwrap()
@@ -599,16 +609,20 @@ mod tests {
     }
 
     #[test]
-    fn genesis_envelope_tolerates_null_predecessor_fields() {
-        // Spec §7.6 phrases genesis as `supersedes == null`; an explicit
-        // JSON null is equivalent to absence, not a chain claim.
-        let mut body = key_backup_body("secret_storage", passphrase_encryption());
-        body["supersedes_id"] = Value::Null;
-        body["supersedes_digest"] = Value::Null;
-
-        let backup = typed_key_backup_body(&body).expect("typed key backup");
-        validate_series_genesis_shape_typed(&backup)
-            .expect("explicit null predecessor fields are equivalent to absence");
+    fn genesis_envelope_rejects_null_predecessor_fields() {
+        let body = key_backup_body("secret_storage", passphrase_encryption());
+        validate_series_genesis_shape_typed(&typed_key_backup_body(&body).unwrap()).unwrap();
+        for fields in [
+            &["supersedes_id"][..],
+            &["supersedes_digest"][..],
+            &["supersedes_id", "supersedes_digest"][..],
+        ] {
+            let mut legacy = body.clone();
+            for field in fields {
+                legacy[*field] = Value::Null;
+            }
+            assert!(typed_key_backup_body(&legacy).is_err());
+        }
     }
 
     // ── §7.8 download-quota clamp ────────────────────────────────────────

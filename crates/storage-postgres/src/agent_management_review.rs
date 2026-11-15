@@ -1089,7 +1089,7 @@ fn threshold_met(
                 distinct.insert(actor.signing_principal_id().clone());
             }
         }
-        if distinct.len() < usize::try_from(requirement.threshold).map_err(invalid)? {
+        if distinct.len() < usize::try_from(requirement.min_approver_count).map_err(invalid)? {
             return Ok(false);
         }
     }
@@ -1811,10 +1811,10 @@ mod tests {
         }))
         .unwrap()
     }
-    fn rule(id: &str, priority: i64, admin: &str, threshold: u64) -> Value {
+    fn rule(id: &str, priority: i64, admin: &str, min_approver_count: u64) -> Value {
         json!({"rule_id":id,"priority":priority,"kind":"agent","agent_target":{"kind":"all"},
             "agent_operations":["join","publish"],"effect":"require_review",
-            "review_requirement":{"approver_actor_ids":[ActorId::account(account(admin)),ActorId::account(account("second-admin"))],"threshold":threshold,"max_age_seconds":3600}})
+            "review_requirement":{"approver_actor_ids":[ActorId::account(account(admin)),ActorId::account(account("second-admin"))],"min_approver_count":min_approver_count,"max_age_seconds":3600}})
     }
     #[test]
     fn management_review_preserves_all_highest_priority_thresholds() {
@@ -1841,7 +1841,7 @@ mod tests {
             !r.approver_actor_ids
                 .contains(&ActorId::account(account("lower-admin")))
         }));
-        assert!(required.iter().any(|r| r.threshold == 2));
+        assert!(required.iter().any(|r| r.min_approver_count == 2));
     }
     #[test]
     fn management_review_stricter_matching_deny_cannot_be_approved() {

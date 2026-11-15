@@ -708,14 +708,20 @@ async fn tcp_scan(
 
 #[tokio::test]
 async fn accepted_forward_witness_reopens_then_executes_registered_prefix_without_new_submission() {
+    scenario_future(accepted_forward_witness_recovery_scenario).await;
+}
+
+async fn accepted_forward_witness_recovery_scenario() {
     let listener = registered_tls_peer();
     let base = format!("https://{}/", listener.listener.local_addr().unwrap());
     let (governor_state, governor_pool, _governor_lease) = station(base.clone());
     let (origin, origin_pool, _origin_lease) =
         station("https://forward-recovery-origin.internal/".into());
     register_original_peer_history(&listener, &governor_state, &governor_pool).await;
-    let mut governor =
-        historical_human::HumanFixture::new(&governor_pool, governor_state.service_did()).await;
+    let mut governor = scenario_future(|| {
+        historical_human::HumanFixture::new(&governor_pool, governor_state.service_did())
+    })
+    .await;
     // The existing closed bootstrap facet must explicitly authorize the Origin
     // to receive plaintext. Membership/action grants alone grant no such right.
     // Author this before the unit is accepted; never patch accepted state.
@@ -817,8 +823,7 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
     );
     let mut strand = historical_human::request_for_event(&governor, previous, strand_event, at);
     seal_service_commit(&mut strand.authority_commit.commit, &governor_state);
-    let uow = PgEventCommitUnitOfWork::new(governor_pool.clone());
-    Box::pin(uow.commit_event(strand.clone())).await.unwrap();
+    admit_fixture_event(&governor_pool, strand.clone()).await;
     // Membership is not an action grant. Read the actual accepted root cut,
     // then admit the owner's narrow Grant before the foreign member joins. The
     // Grant grants no membership; MessageCreate still runs after the real join.
@@ -886,12 +891,12 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
     grant.authority_commit.commit.producer_signer_fact_digest = Some(grant_fact.digest().unwrap());
     grant.authority_commit.producer_signer_fact = Some(grant_fact.into());
     seal_service_commit(&mut grant.authority_commit.commit, &governor_state);
-    Box::pin(uow.commit_event(grant.clone())).await.unwrap();
+    admit_fixture_event(&governor_pool, grant.clone()).await;
     let previous = &grant.authority_commit;
-    let mut join = Box::pin(foreign_request(&origin, &human, &governor, previous, EventKind::MemberState,
+    let mut join = scenario_future(|| foreign_request(&origin, &human, &governor, previous, EventKind::MemberState,
         serde_json::json!({"realm_id":previous.event.realm_id,"member_id":actor,"membership":"join","reason":"real forward recovery membership"}))).await;
     seal_service_commit(&mut join.authority_commit.commit, &governor_state);
-    Box::pin(uow.commit_event(join.clone())).await.unwrap();
+    admit_fixture_event(&governor_pool, join.clone()).await;
     let source = PgAuthorityCommitStore {
         pool: governor_pool.clone(),
     };
@@ -960,20 +965,18 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
         })
         .await
         .unwrap();
-    let mut predecessor = Box::pin(foreign_request(&origin, &human, &governor, &join.authority_commit, EventKind::MessageCreate,
+    let mut predecessor = scenario_future(|| foreign_request(&origin, &human, &governor, &join.authority_commit, EventKind::MessageCreate,
         serde_json::json!({"strand_id":arkret_wire::StrandId::from_event_id(&strand.authority_commit.event.event_id),"track_name":"discussion","content":{"kind":"ak.content.text","body":"valid prefix before a later invalid peer row","format":"plain"}}))).await;
     seal_service_commit(&mut predecessor.authority_commit.commit, &governor_state);
-    Box::pin(uow.commit_event(predecessor.clone()))
-        .await
-        .unwrap();
-    let mut target = Box::pin(foreign_request(&origin, &human, &governor, &predecessor.authority_commit, EventKind::MessageCreate,
+    admit_fixture_event(&governor_pool, predecessor.clone()).await;
+    let mut target = scenario_future(|| foreign_request(&origin, &human, &governor, &predecessor.authority_commit, EventKind::MessageCreate,
         serde_json::json!({"strand_id":arkret_wire::StrandId::from_event_id(&strand.authority_commit.event.event_id),"track_name":"discussion","content":{"kind":"ak.content.text","body":"accepted original transport fixture","format":"plain"}}))).await;
     seal_service_commit(&mut target.authority_commit.commit, &governor_state);
-    Box::pin(uow.commit_event(target.clone())).await.unwrap();
-    let mut suffix = Box::pin(foreign_request(&origin, &human, &governor, &target.authority_commit, EventKind::MessageCreate,
+    admit_fixture_event(&governor_pool, target.clone()).await;
+    let mut suffix = scenario_future(|| foreign_request(&origin, &human, &governor, &target.authority_commit, EventKind::MessageCreate,
         serde_json::json!({"strand_id":arkret_wire::StrandId::from_event_id(&strand.authority_commit.event.event_id),"track_name":"discussion","content":{"kind":"ak.content.text","body":"valid suffix beyond the accepted target","format":"plain"}}))).await;
     seal_service_commit(&mut suffix.authority_commit.commit, &governor_state);
-    Box::pin(uow.commit_event(suffix.clone())).await.unwrap();
+    admit_fixture_event(&governor_pool, suffix.clone()).await;
     let event = &target.authority_commit.event;
     let commit = &target.authority_commit.commit;
     assert!(
@@ -1221,14 +1224,17 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
             human.pcr.history.account.clone(),
             governor_state.service_core_id(),
         ));
-        let refused = Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            Some(commit),
-            &mut located,
-            &session,
-        ))
+        let refused = scenario_future(|| async {
+            super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                Some(commit),
+                &mut located,
+                &session,
+            )
+            .await
+        })
         .await;
         eprintln!("[2133-peer] mutation={mutation} result={refused:?}");
         assert!(
@@ -1271,14 +1277,17 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
         human.pcr.history.account.clone(),
         governor_state.service_core_id(),
     ));
-    let refused = Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-        &origin,
-        &governor_state.service_core_id(),
-        event,
-        Some(commit),
-        &mut located,
-        &session,
-    ))
+    let refused = scenario_future(|| async {
+        super::super::replica_anchor::ensure_forwarded_target(
+            &origin,
+            &governor_state.service_core_id(),
+            event,
+            Some(commit),
+            &mut located,
+            &session,
+        )
+        .await
+    })
     .await
     .unwrap_err();
     assert!(
@@ -1332,14 +1341,17 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
         governor_state.service_core_id(),
     ));
     assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            Some(commit),
-            &mut located,
-            &session
-        ))
+        scenario_future(|| async {
+            super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                Some(commit),
+                &mut located,
+                &session,
+            )
+            .await
+        })
         .await
         .is_err()
     );
@@ -1365,14 +1377,17 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
         human.pcr.history.account.clone(),
         governor_state.service_core_id(),
     ));
-    let recovered = Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-        &origin,
-        &governor_state.service_core_id(),
-        event,
-        Some(commit),
-        &mut located,
-        &session,
-    ))
+    let recovered = scenario_future(|| async {
+        super::super::replica_anchor::ensure_forwarded_target(
+            &origin,
+            &governor_state.service_core_id(),
+            event,
+            Some(commit),
+            &mut located,
+            &session,
+        )
+        .await
+    })
     .await
     .unwrap()
     .unwrap();
@@ -1398,14 +1413,17 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
     // The held branch performs no network operation. It revalidates the exact
     // original/fact/prefix and caller disclosure, not today's producer key.
     assert_eq!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            Some(commit),
-            &mut located,
-            &session
-        ))
+        scenario_future(|| async {
+            super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                Some(commit),
+                &mut located,
+                &session,
+            )
+            .await
+        })
         .await
         .unwrap(),
         Some(commit.clone())
@@ -1414,14 +1432,17 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
     fork.committed_at += Duration::milliseconds(1);
     seal_service_commit(&mut fork, &governor_state);
     assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            Some(&fork),
-            &mut located,
-            &session
-        ))
+        scenario_future(|| async {
+            super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                Some(&fork),
+                &mut located,
+                &session,
+            )
+            .await
+        })
         .await
         .is_err()
     );
@@ -1435,14 +1456,17 @@ async fn accepted_forward_witness_reopens_then_executes_registered_prefix_withou
     let mut expired = session.clone();
     expired.expires_at = Utc::now() - Duration::seconds(1);
     assert!(
-        Box::pin(super::super::replica_anchor::ensure_forwarded_target(
-            &origin,
-            &governor_state.service_core_id(),
-            event,
-            Some(commit),
-            &mut located,
-            &expired
-        ))
+        scenario_future(|| async {
+            super::super::replica_anchor::ensure_forwarded_target(
+                &origin,
+                &governor_state.service_core_id(),
+                event,
+                Some(commit),
+                &mut located,
+                &expired,
+            )
+            .await
+        })
         .await
         .is_err()
     );
@@ -3287,7 +3311,12 @@ async fn circle_own_leave_bound_result_cases(
             })
             .await;
         }
-        let mut payload = serde_json::json!({"circle_id":circle_id,"member_id":actor,"membership":state,
+        // This scenario reads each transition immediately. The producer's
+        // next Event timestamp is deliberately ahead of the prior Commit;
+        // make the intended membership effective at an already accepted cut.
+        let effective_at = parent_join.commit.committed_at;
+        assert!(effective_at <= chrono::Utc::now());
+        let mut payload = serde_json::json!({"circle_id":circle_id,"member_id":actor,"membership":state,"effective_at":effective_at,
             "expected_membership":if index == 0 { None } else if state == "leave" { Some("join") } else { Some("leave") }});
         if state == "join" {
             payload["parent_membership_revision"] = serde_json::json!({"commit_id":parent_join.commit.commit_id,

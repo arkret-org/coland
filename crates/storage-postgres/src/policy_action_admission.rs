@@ -34,7 +34,7 @@ pub(crate) fn effective_quorum<'a>(
         }
         if document.approval_required {
             require_registered_carrier(action)?;
-            quorum = Some(quorum.unwrap_or(0u64).max(document.approval_quorum));
+            quorum = Some(quorum.unwrap_or(0u64).max(document.min_approver_count));
         }
     }
     Ok(quorum)
@@ -45,7 +45,7 @@ mod tests {
     use super::*;
     fn config(quorum: u64, required: bool) -> PolicyActionDocument {
         serde_json::from_value(serde_json::json!({"action":"ak.strand.move","approval_required":required,
-            "approval_quorum":quorum,"policy_scope":"ak:realm:AKZtk00-QonOuPLHdYdyGYATwu66wDI-jFH83rByulha"})).unwrap()
+            "min_approver_count":quorum,"policy_scope":"ak:realm:AKZtk00-QonOuPLHdYdyGYATwu66wDI-jFH83rByulha"})).unwrap()
     }
     #[test]
     fn governance_or_max_preserves_both_namespaces_and_false_is_layer_local() {

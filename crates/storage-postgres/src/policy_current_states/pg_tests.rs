@@ -316,7 +316,7 @@ async fn governance_approval_reference_matching_distinguishes_absence_from_corru
         json!({
             "policy_id":"ak:policy:0198ff00-0000-7000-8000-000000000001",
             "value":{"action":"ak.message.create","approval_required":true,
-                "approval_quorum":7,"policy_scope":realm()}
+                "min_approver_count":7,"policy_scope":realm()}
         }),
         1,
     );
@@ -394,7 +394,7 @@ async fn governance_approval_reference_matching_distinguishes_absence_from_corru
         EventKind::PolicyAction,
         json!({
             "action_id":"independent_review", "value":{"action":"ak.message.create",
-                "approval_required":true,"approval_quorum":2,"policy_scope":realm()}
+                "approval_required":true,"min_approver_count":2,"policy_scope":realm()}
         }),
         3,
     );
@@ -1462,7 +1462,7 @@ async fn management_support_rejects_raw_unsupported_configuration_without_effect
             ]);
             document.rules[0].effect = arkret_wire::PolicyEffect::RequireReview;
             document.rules[0].review_requirement = Some(arkret_models_collaboration::governance::operation_wire::ManagementReviewRequirement {
-                approver_actor_ids: vec![document.created_by.clone()], threshold: 1, max_age_seconds: 60,
+                approver_actor_ids: vec![document.created_by.clone()], min_approver_count: 1, max_age_seconds: 60,
             });
         } else {
             document.rules[0].actions = Some(vec!["ak.unknown.action".into()]);

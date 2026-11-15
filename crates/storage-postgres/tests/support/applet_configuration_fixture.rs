@@ -453,7 +453,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
                 "created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),
                 "rules":[{"rule_id":"configuration_creation","kind":"applet","effect":"require_review",
                     "applet_target":{"kind":"all"},"applet_operations":["create_bot"],
-                    "review_requirement":{"approver_actor_ids":[administrator],"threshold":1,"max_age_seconds":3600}}]}
+                    "review_requirement":{"approver_actor_ids":[administrator],"min_approver_count":1,"max_age_seconds":3600}}]}
         }));
     boxed_step(|| configuration_admin_event(&factory.fixture, policy)).await;
     request.intent.request_id = format!("ak:request:{}", uuid::Uuid::now_v7())

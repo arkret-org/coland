@@ -35,7 +35,7 @@ async fn account_detail_unavailable_realm_does_not_block_an_independent_window()
         realms.push(
             CommittedRealm::bootstrap(
                 store.as_ref(),
-                account,
+                &genesis,
                 state.service_verification_method("notary-key").unwrap(),
             )
             .await,
@@ -163,7 +163,7 @@ async fn inconsistent_continuation_head_returns_503_without_issuing_or_resetting
     };
     let realm = CommittedRealm::bootstrap(
         store.as_ref(),
-        account,
+        &genesis,
         state.service_verification_method("notary-key").unwrap(),
     )
     .await;
@@ -285,12 +285,12 @@ async fn accepted_leave_preserves_the_ordinary_unavailable_continuation() {
     };
     let mut realm = CommittedRealm::bootstrap(
         store.as_ref(),
-        &founder.history.account,
+        &founder,
         state.service_verification_method("notary-key").unwrap(),
     )
     .await;
     realm
-        .member_state(store.as_ref(), account, account, "join")
+        .member_state(store.as_ref(), &peer, account, "join")
         .await;
     let mut body: AccountSubscribeParameters = serde_json::from_value(json!({
         "filter": {"realm_ids": [realm.head.event.realm_id]}, "catchup": true,
@@ -312,7 +312,7 @@ async fn accepted_leave_preserves_the_ordinary_unavailable_continuation() {
     assert!(!after.detail_positions.is_empty());
     body.after = Some(token);
     realm
-        .member_state(store.as_ref(), account, account, "leave")
+        .member_state(store.as_ref(), &peer, account, "leave")
         .await;
     assert!(
         super::current_details::continuation_heads_covered(&state, account, &body, &after)
@@ -1005,33 +1005,27 @@ async fn sync_snapshot_excludes_public_realms_without_exact_account_membership()
     assert_eq!(detail(left), Some(not_found));
 }
 
-/// One Realm-scope Event by `author` carrying a structural producer proof;
-/// the device-list fixtures exercise storage and sync, not signatures.
+/// One Realm Event by a real accepted native fixture Device.
 fn realm_fixture_event(
     kind: arkret_wire::EventKind,
     scope_ref: arkret_wire::ScopeRef,
-    author: &arkret_wire::AccountId,
+    author: &coland_test_support::device_authorization_history::DeviceHistoryFixture,
     payload: serde_json::Value,
     at: DateTime<Utc>,
 ) -> arkret_wire::Event {
-    let mut event = arkret_wire::test_support::raw_event_for_actor_at(
+    let event = arkret_wire::test_support::raw_event_for_actor_at(
         kind.as_str(),
         scope_ref,
-        arkret_wire::ActorId::account(author.clone()),
+        arkret_wire::ActorId::account(author.account.clone()),
         payload,
         at,
     )
     .unwrap();
-    let principal = author.principal_id.as_str();
-    crate::test_event::attach_structural_only_producer_proof(
-        &mut event,
-        arkret_wire::DidUrl::new(format!(
-            "did:{}#key",
-            principal.strip_prefix("ak:did_core:").unwrap()
-        ))
-        .unwrap(),
-    );
-    event
+    coland_test_support::device_authorization_history::sign_event(
+        event,
+        author.device_verification_method.clone(),
+        author.founding_device_signing_seed,
+    )
 }
 
 /// An ordinary Realm on this Station, admitted through the bootstrap unit
@@ -1041,7 +1035,8 @@ pub(super) struct CommittedRealm {
 }
 
 impl CommittedRealm {
-    fn transaction(
+    async fn transaction(
+        store: &dyn coland_storage::PersistenceStore,
         authority: &coland_storage::CurrentRealmAuthority,
         method: &arkret_wire::DidUrl,
         event: arkret_wire::Event,
@@ -1050,7 +1045,13 @@ impl CommittedRealm {
         let at = event.created_at;
         let realm_id = authority.realm_id.clone();
         let position = previous.map_or(0, |commit| commit.stream_position + 1);
-        coland_storage::AuthorityCommitTransaction {
+        let producer_signer_fact = store
+            .authority_commits()
+            .prepare_account_device_signer_fact(&event, at)
+            .await
+            .unwrap()
+            .map(Into::into);
+        let mut transaction = coland_storage::AuthorityCommitTransaction {
             expected_authority: authority.clone(),
             commit: arkret_wire::RealmCommit {
                 producer_signer_fact_digest: None,
@@ -1077,17 +1078,39 @@ impl CommittedRealm {
                 },
             },
             event,
-            producer_signer_fact: None,
+            producer_signer_fact,
             content_backup_source: None,
             mls_state: None,
             welcomes: Vec::new(),
             recipient_queue_capacity: 0,
-        }
+        };
+        let commit = &mut transaction.commit;
+        commit.producer_signer_fact_digest =
+            transaction.producer_signer_fact.as_ref().map(|fact| {
+                arkret_wire::Hash::new(arkret_canonical::canonical_sha256(fact).unwrap()).unwrap()
+            });
+        commit.commit_id = arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
+            arkret_canonical::canonical_json_bytes(
+                &arkret_canonical::canonical::unsigned_value(commit, &["commit_id", "signature"])
+                    .unwrap(),
+            )
+            .unwrap(),
+        ));
+        commit.signature = arkret_signatures::detached_object::sign_detached_object(
+            &arkret_canonical::canonical::unsigned_value(commit, &["signature"]).unwrap(),
+            arkret_wire::DetachedSignatureContext::RealmCommit,
+            method.clone(),
+            at,
+            &ed25519_dalek::SigningKey::from_bytes(&[9; 32]),
+        )
+        .unwrap();
+        commit.validate_content_address().unwrap();
+        transaction
     }
 
     pub(super) async fn bootstrap(
         store: &dyn coland_storage::PersistenceStore,
-        founder: &arkret_wire::AccountId,
+        principal: &coland_test_support::pcr_genesis::PcrGenesisFixture,
         method: arkret_wire::DidUrl,
     ) -> Self {
         use arkret_models_collaboration::authority_commit::{
@@ -1096,11 +1119,12 @@ impl CommittedRealm {
         };
         use base64::Engine as _;
 
+        let founder = &principal.history.account;
         let at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
         let genesis = realm_fixture_event(
             arkret_wire::EventKind::RealmCreate,
             arkret_wire::ScopeRef::RealmGenesis,
-            founder,
+            &principal.history,
             json!({"object":{
                 "schema":"ak.schema.realm_genesis.v1",
                 "purpose":"collaboration",
@@ -1111,6 +1135,7 @@ impl CommittedRealm {
                 "governance_station_id":founder.station_id,
                 "initial_join_rule":"public",
                 "initial_history_access":"since_join",
+                "initial_encryption_backup_strategy":arkret_wire::EncryptionBackupStrategy::EpochContentRoots,
                 "initial_discoverability":"invite_only"
             }}),
             at,
@@ -1149,7 +1174,7 @@ impl CommittedRealm {
             events.push(realm_fixture_event(
                 kind,
                 scope.clone(),
-                founder,
+                &principal.history,
                 payload,
                 at,
             ));
@@ -1166,7 +1191,8 @@ impl CommittedRealm {
         let mut transactions: Vec<coland_storage::AuthorityCommitTransaction> = Vec::new();
         for event in &events {
             let previous = transactions.last().map(|transaction| &transaction.commit);
-            let transaction = Self::transaction(&authority, &method, event.clone(), previous);
+            let transaction =
+                Self::transaction(store, &authority, &method, event.clone(), previous).await;
             transactions.push(transaction);
         }
         let submission = OrdinaryRealmBootstrapUnitSubmission {
@@ -1200,7 +1226,7 @@ impl CommittedRealm {
     pub(super) async fn member_state(
         &mut self,
         store: &dyn coland_storage::PersistenceStore,
-        author: &arkret_wire::AccountId,
+        author: &coland_test_support::pcr_genesis::PcrGenesisFixture,
         member: &arkret_wire::AccountId,
         membership: &str,
     ) {
@@ -1209,17 +1235,19 @@ impl CommittedRealm {
             arkret_wire::ScopeRef::Realm {
                 realm_id: self.head.event.realm_id.clone(),
             },
-            author,
+            &author.history,
             json!({"member_id":arkret_wire::ActorId::account(member.clone()),"membership":membership}),
             self.head.commit.committed_at,
         );
         let method = self.head.commit.signature.verification_method.clone();
         let transaction = Self::transaction(
+            store,
             &self.head.expected_authority,
             &method,
             event.clone(),
             Some(&self.head.commit),
-        );
+        )
+        .await;
         let record = coland_storage::CanonicalEventRecord {
             event_id: event.event_id.to_string(),
             actor_id: event.actor_id.to_string(),
@@ -1516,13 +1544,13 @@ async fn sync_snapshot_emits_device_list_baseline_changes_and_left_principals() 
 
     let mut realm = CommittedRealm::bootstrap(
         store.as_ref(),
-        &caller,
+        &caller_genesis,
         state.service_verification_method("notary-key").unwrap(),
     )
     .await;
     // The public Realm admits the peer by its own join.
     realm
-        .member_state(store.as_ref(), &actor, &actor, "join")
+        .member_state(store.as_ref(), &actor_genesis, &actor, "join")
         .await;
 
     let body = roster_body(state.service_id());
@@ -1594,7 +1622,7 @@ async fn sync_snapshot_emits_device_list_baseline_changes_and_left_principals() 
     .expect("revoke cursor parses");
 
     realm
-        .member_state(store.as_ref(), &caller, &caller, "leave")
+        .member_state(store.as_ref(), &caller_genesis, &caller, "leave")
         .await;
     incremental_body.after = after_revoke.cursor.clone();
     let after_scope_loss =
@@ -1953,7 +1981,7 @@ async fn account_cursor_is_bound_to_its_account_and_filter() {
     let alice = roster_session(&state, "ak:did_core:web:alice.example");
     let bob = roster_session(&state, "ak:did_core:web:bob.example");
     let filter_a = json!({"realm_ids": [ROSTER_REALM]});
-    let filter_b = json!({"realm_ids": [ROSTER_REALM], "window_limit": 5});
+    let filter_b = json!({"realm_ids": [ROSTER_REALM], "max_window_event_count": 5});
     let token = sync_token_for_account_positions(
         &state,
         Some(&alice),
@@ -2207,7 +2235,7 @@ async fn barrier_cursor_requires_readable_exact_committed_history() {
     };
     let realm = CommittedRealm::bootstrap(
         store.as_ref(),
-        &account,
+        &genesis,
         state.service_verification_method("notary-key").unwrap(),
     )
     .await;
@@ -2303,7 +2331,7 @@ async fn barrier_revoked_during_projection_timeout_refuses_without_issuing() {
     };
     let realm = CommittedRealm::bootstrap(
         store.as_ref(),
-        &account,
+        &genesis,
         state.service_verification_method("notary-key").unwrap(),
     )
     .await;
@@ -2638,9 +2666,10 @@ async fn selected_unreadable_realm_is_an_explicit_unavailable_detail() {
     let state = test_state();
     let session = roster_session(&state, "ak:did_core:web:alice.example");
     let realm = "ak:realm:AQVZRUJrSSC16EodjmqL6mBFC9TGwv6oxx-sQlJzlvxS";
-    let body: AccountSubscribeParameters =
-        serde_json::from_value(json!({"filter": {"realm_ids": [realm], "window_limit": 2}}))
-            .unwrap();
+    let body: AccountSubscribeParameters = serde_json::from_value(
+        json!({"filter": {"realm_ids": [realm], "max_window_event_count": 2}}),
+    )
+    .unwrap();
     let frame = build_sync_snapshot(&state, Some(&session), &body, &SyncCursor::default()).await;
     assert_eq!(
         frame.kind,

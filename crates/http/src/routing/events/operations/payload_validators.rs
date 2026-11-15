@@ -336,7 +336,10 @@ pub(crate) fn validate_view_payload(operation: &Operation) -> Result<(), &'stati
             Value::Object(fields) => fields.iter().any(|(key, value)| {
                 matches!(
                     key.as_str(),
-                    "selection_policy" | "page_size" | "wip_limit_enforcement" | "state_changed_at"
+                    "selection_policy"
+                        | "page_size"
+                        | "active_strand_count_enforcement"
+                        | "state_changed_at"
                 ) || contains_retired_field(value)
             }),
             Value::Array(values) => values.iter().any(contains_retired_field),
@@ -441,9 +444,18 @@ mod tests {
         let envelope = json!({
             "version": "1.0",
             "content_type": "application/json",
+            "encryption_scheme": arkret_wire::EncryptedPayloadScheme::EpochContentAead,
             "encryption_context": {
                 "epoch": (7u64).to_string(),
                 "group_state_ref": "ak:event:AdkQ-RmB1a8zyc52yl9GWAsodQ_EUle1WAVZqbO7pc19",
+                "content_key_salt": arkret_canonical::base64url_encode([9;32]),
+                "root_ref": arkret_canonical::sha256_digest([8;32]),
+                "key_commitment": arkret_canonical::sha256_digest([7;32]),
+                "protection": {
+                    "root_refs":[arkret_canonical::sha256_digest([8;32])],
+                    "blob_refs":[],
+                    "backup_refs":["ak:backup:01904100-0000-7000-8000-000000000001"]
+                },
             },
             "ciphertext": "Y2lwaGVydGV4dA",
         });

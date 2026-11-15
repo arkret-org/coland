@@ -1795,6 +1795,21 @@ pub(crate) async fn commit_verified_key_backup_pointer_in_connection(
     .await
 }
 
+/// Only the native manager-series transaction may append after its locked
+/// registration, manager, scope, original refs, signatures and pointer CAS checks.
+pub(crate) async fn commit_verified_realm_actor_backup_series_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    commit_transaction_in_connection_with_device_guard(
+        conn,
+        transaction,
+        VerifiedPcrUnit::RealmActorBackupSeries,
+        None,
+    )
+    .await
+}
+
 /// Only the recovery policy publication unit may call this after rechecking
 /// the signing device, the version ratchet and the policy signature under the
 /// PCR authority lock; the same transaction then records the accepted policy.
@@ -1886,6 +1901,7 @@ enum VerifiedPcrUnit {
     Device,
     RevokeProposal,
     KeyBackupPointer,
+    RealmActorBackupSeries,
     RecoveryPolicy,
     ProfileOrAccountability,
     ManagedScopeProfile,
@@ -1998,6 +2014,23 @@ async fn commit_transaction_with_device_guard_inner(
     prepared: Option<&coland_storage::EventApprovalCommit>,
     owner_transfer_source: Option<&coland_storage::OwnerTransferSuccessorSource>,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    if verified_unit == VerifiedPcrUnit::RealmActorBackupSeries
+        && (transaction.event.kind != arkret_wire::EventKind::KeyBackupActiveSeries
+            || transaction.event.scope_ref
+                != (arkret_wire::ScopeRef::RealmControl {
+                    realm_id: transaction.event.realm_id.clone(),
+                })
+            || transaction.commit.realm_id != transaction.event.realm_id
+            || transaction.commit.stream_ref
+                != (arkret_wire::CommitStreamRef::RealmControl {
+                    realm_id: transaction.event.realm_id.clone(),
+                }))
+    {
+        return Err(PersistenceError::Conflict(
+            "realm_actor_backup_series_unit_scope_mismatch".into(),
+        )
+        .into());
+    }
     if transaction.event.kind == arkret_wire::EventKind::MlsHistoryRecovery
         || (transaction.event.kind == arkret_wire::EventKind::MlsHistoryGrant
             && verified_unit != VerifiedPcrUnit::ContentHistoryGrant)
@@ -2027,6 +2060,7 @@ async fn commit_transaction_with_device_guard_inner(
             | VerifiedPcrUnit::RealmActorOwner
             | VerifiedPcrUnit::RealmActorGovernance
             | VerifiedPcrUnit::ManagedScopeProfile
+            | VerifiedPcrUnit::RealmActorBackupSeries
     ) {
         return Err(PersistenceError::Conflict("realm_control_atomic_unit_required".into()).into());
     }
@@ -2058,7 +2092,10 @@ async fn commit_transaction_with_device_guard_inner(
     // pointer unit; generic Event admission must not publish an unchecked
     // pointer.
     if transaction.event.kind == arkret_wire::EventKind::KeyBackupActiveSeries
-        && verified_unit != VerifiedPcrUnit::KeyBackupPointer
+        && !matches!(
+            verified_unit,
+            VerifiedPcrUnit::KeyBackupPointer | VerifiedPcrUnit::RealmActorBackupSeries
+        )
     {
         return Err(PersistenceError::Conflict(
             "key_backup_active_series_current_device_authority_unavailable".to_owned(),
@@ -7201,3 +7238,7 @@ pub(crate) async fn commit_realm_actor_governance_in_connection(
     )
     .await
 }
+
+#[cfg(test)]
+#[path = "authority_commit/native_series_unit_tests.rs"]
+mod native_series_unit_tests;

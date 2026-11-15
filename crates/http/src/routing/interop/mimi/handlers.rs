@@ -2429,13 +2429,16 @@ mod consent_proof_tests {
             .unwrap();
 
             let mut stale = body.clone();
-            let mut stale_revision = granted.view().revision;
-            stale_revision.stream_position -= 1;
+            let stale_commit_id = granted
+                .commit
+                .previous_commit_ref
+                .clone()
+                .expect("the accepted consent follows its PCR predecessor");
             stale.consent_event = EventAdmissionSubmission::new(signed_event(
                 EventKind::ConsentReplace,
                 json!({
                     "peer":{"kind":"actor","actor_id":test_requester_actor(&state)},
-                    "expected_current":{"state":"present","commit_id":stale_revision.commit_id},
+                    "expected_current":{"state":"present","commit_id":stale_commit_id},
                     "permissions":[{"consent_scope":"presence"}]
                 }),
             ));

@@ -69,6 +69,7 @@ fn generate_openapi_doc(router: &Router, artifact_registry_summary: Value) -> Va
     );
     install_generated_query_operations(router, &mut doc);
     install_operation_selector_parameters(&mut doc);
+    crate::routing::system::extract::install_session_grant_security_scheme(&mut doc);
     doc
 }
 
@@ -320,6 +321,7 @@ pub fn product_openapi_surface_doc() -> Value {
         .unwrap_or_else(|error| panic!("failed to serialize product OpenAPI surface: {error:#}"));
     install_generated_query_operations(&router, &mut document);
     install_operation_selector_parameters(&mut document);
+    crate::routing::system::extract::install_session_grant_security_scheme(&mut document);
     document
 }
 

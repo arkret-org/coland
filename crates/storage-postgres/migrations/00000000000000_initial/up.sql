@@ -1984,7 +1984,7 @@ LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
         'expires_at', 'created_at',
         'updated_at', 'ciphertext_digest', 'encryption', 'retention'
     ) AND NOT (payload#>>'{actor_id,kind}' = 'realm' AND member.key IN ('expires_at', 'retention')))
-       OR (payload#>>'{actor_id,kind}' = 'realm' AND member.key = 'auth_binding')
+       OR (payload#>>'{actor_id,kind}' = 'realm' AND member.key = 'authorization_binding')
 $$;
 
 -- First admission survives ordinary ciphertext deletion. Only hashes, public

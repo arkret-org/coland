@@ -120,6 +120,113 @@ fn evaluate<'a>(
 }
 
 #[test]
+fn realm_actor_audit_target_binds_the_complete_identity_without_extra_realm_field() {
+    let target_actor = ActorId::realm(arkret_wire::RealmActorId::new(
+        realm(),
+        "ak:did_core:webvh:z6mkghost:ghost.example".parse().unwrap(),
+    ));
+    let target = WireResourceSelector::realm_actor(target_actor.clone()).unwrap();
+    assert!(target.realm_id.is_none());
+    let actions = [CapabilityActionId::REALM_ACTOR_AUDIT];
+    let facts = crate::OperationFacts::default();
+    let mut allowed = grant(230, actor("holder"), &actions, vec![global()]);
+    allowed.resources = vec![target.clone()];
+    let authorization = auth(
+        actor("holder"),
+        cut(vec![allowed.clone()], actor("governor")),
+        vec![allowed.id.clone()],
+    );
+    assert!(
+        !evaluate(&authorization, &actions, &target, &facts)
+            .unreserved()
+            .is_empty()
+    );
+
+    let other_actor = ActorId::realm(arkret_wire::RealmActorId::new(
+        realm(),
+        "ak:did_core:webvh:z6mkother:other.example".parse().unwrap(),
+    ));
+    let other = WireResourceSelector::realm_actor(other_actor).unwrap();
+    assert!(
+        evaluate(&authorization, &actions, &other, &facts)
+            .unreserved()
+            .is_empty()
+    );
+    let mut foreign_actor = target_actor;
+    let ActorId::Realm { realm_actor_id } = &mut foreign_actor else {
+        unreachable!()
+    };
+    realm_actor_id.realm_id = RealmId::from_event_id(&event(231));
+    let foreign = WireResourceSelector::realm_actor(foreign_actor).unwrap();
+    assert!(
+        authorization
+            .evaluate_with_approvals_checked(&actions, &foreign, &facts, &[])
+            .is_err()
+    );
+
+    let mut extra_realm = target.clone();
+    extra_realm.realm_id = Some(realm());
+    let mut wrong_kind = target.clone();
+    wrong_kind.kind = arkret_wire::ResourceSelectorKind::Realm;
+    let mut account_target = target.clone();
+    account_target.actor_id = Some(arkret_wire::ResourceActorId::Realm(actor("holder")));
+    for malformed in [extra_realm, wrong_kind, account_target] {
+        assert!(malformed.validate().is_err());
+        assert!(
+            authorization
+                .evaluate_with_approvals_checked(&actions, &malformed, &facts, &[])
+                .is_err()
+        );
+    }
+
+    let empty = auth(
+        actor("holder"),
+        cut(Vec::new(), actor("governor")),
+        Vec::new(),
+    );
+    assert!(
+        evaluate(&empty, &actions, &target, &facts)
+            .unreserved()
+            .is_empty()
+    );
+    let mut manage = allowed;
+    manage.actions = vec![CapabilityActionId::REALM_ACTOR_MANAGE.to_owned()];
+    let manage = auth(
+        actor("holder"),
+        cut(vec![manage.clone()], actor("governor")),
+        vec![manage.id],
+    );
+    assert!(
+        evaluate(&manage, &actions, &target, &facts)
+            .unreserved()
+            .is_empty()
+    );
+    let mut positive = grant(232, actor("holder"), &actions, vec![global()]);
+    positive.resources = vec![target.clone()];
+    let mut refusal = grant(
+        233,
+        actor("holder"),
+        &actions,
+        vec![temporal(
+            GrantConstraintEffect::Deny,
+            Some(CapabilityActionId::REALM_ACTOR_AUDIT),
+            Some(0),
+            None,
+        )],
+    );
+    refusal.resources = vec![target.clone()];
+    let denied = auth(
+        actor("holder"),
+        cut(vec![positive.clone(), refusal], actor("governor")),
+        vec![positive.id],
+    );
+    assert!(matches!(
+        evaluate(&denied, &actions, &target, &facts),
+        crate::GrantEvaluation::Denied
+    ));
+}
+
+#[test]
 fn display_selection_and_terminal_allow_failure_never_delete_current_refusals() {
     let target = WireResourceSelector::realm(realm());
     let facts = crate::OperationFacts::default();

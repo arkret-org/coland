@@ -160,7 +160,7 @@ fn gateway_route(base: &str, key: &SigningKey) -> PushGatewayRoute {
             "publicKeyMultibase":arkret_canonical::ed25519_pubkey_to_did_key_multibase(key.verifying_key().as_bytes())}],
         "assertionMethod":[method],
         "service":[{"id":format!("{did}#gateway"),"type":"ArkretService",
-            "serviceKind":"push_gateway","serviceEndpoint":base}]
+            "service_kind":"push_gateway","serviceEndpoint":base}]
     })).unwrap();
     let digest = arkret_identity::document_canonical_digest(&document).unwrap();
     let head = digest.to_string();

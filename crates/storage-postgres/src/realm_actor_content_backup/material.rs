@@ -5,7 +5,8 @@ use arkret_models_collaboration::events_payloads::{
     KeyBackupActiveSeries, validate_key_backup_active_series_record,
 };
 use arkret_models_crypto::{
-    ContentBackupNextPrepareInput, RealmActorBackupAuthBinding, RealmActorBackupAuthBindingKind,
+    ContentBackupNextPrepareInput, RealmActorBackupAuthorizationBinding,
+    RealmActorBackupAuthorizationBindingKind,
 };
 use arkret_models_integration::{RealmActorManagerValue, RealmActorRecoveryValue};
 use arkret_wire::{CommittedEventRef, CurrentSelector, ScopeRef};
@@ -127,8 +128,8 @@ pub(crate) async fn prepare_input_in_connection(
     // keeps the accepted source at selection; an enabled-only/no-op source
     // advance with unchanged manager/recipient does not rotate this series.
     let input = ContentBackupNextPrepareInput {
-        auth_binding: RealmActorBackupAuthBinding {
-            kind: RealmActorBackupAuthBindingKind::Value,
+        authorization_binding: RealmActorBackupAuthorizationBinding {
+            kind: RealmActorBackupAuthorizationBindingKind::Value,
             manager_ref,
             recovery_ref,
             recipient_ref: recovery.content_backup_recipient_ref,

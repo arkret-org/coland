@@ -79,7 +79,7 @@ fn route_record(did: &str, key: &SigningKey, now: DateTime<Utc>) -> serde_json::
             "id": format!("{did}#station"),
             "type": "ArkretService",
             "serviceEndpoint": "https://governance-b.example/",
-            "serviceKind": "station",
+            "service_kind": "station",
         }],
     }))
     .expect("fixture route document");

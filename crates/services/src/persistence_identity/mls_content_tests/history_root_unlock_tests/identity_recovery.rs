@@ -122,7 +122,7 @@ pub(super) async fn recover(
             "policy_kind": "principal_control", "scope_ref": policy_commit.stream_ref,
             "source_commit_id": policy_commit.commit_id,
             "authorization_rules": [{"rule_id": "recovery_unlock", "issuer_role": "identity_recovery",
-                "allowed_actions": ["ak.device.reanchor"], "issuers": [{"verification_method": factor_method}], "threshold": 1}]
+                "allowed_actions": ["ak.device.reanchor"], "issuers": [{"verification_method": factor_method}], "min_signature_count": 1}]
         }, "allowed_actions": ["ak.device.reanchor"]
     })).unwrap();
     context.validate_shape().unwrap();

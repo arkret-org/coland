@@ -152,7 +152,7 @@ impl ServiceRouteFetcher for VerifiedBindingRouteFetcher {
             })?;
         let entries: Vec<_> = services
             .iter()
-            .filter(|e| e["type"] == "ArkretService" && e["serviceKind"] == service_kind)
+            .filter(|e| e["type"] == "ArkretService" && e["service_kind"] == service_kind)
             .collect();
         if entries.len() != 1 {
             return Err(ServiceError::SchemaViolation(

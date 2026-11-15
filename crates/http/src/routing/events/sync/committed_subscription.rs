@@ -573,7 +573,7 @@ mod tests {
             .unwrap();
         let realm = super::super::tests::CommittedRealm::bootstrap(
             store.as_ref(),
-            &account,
+            &genesis,
             state.service_verification_method("notary-key").unwrap(),
         )
         .await;
@@ -631,7 +631,7 @@ mod tests {
             .unwrap();
         Box::pin(realm.member_state(
             state.test_persistence().as_ref(),
-            &peer.history.account,
+            &peer,
             &peer.history.account,
             "join",
         ))

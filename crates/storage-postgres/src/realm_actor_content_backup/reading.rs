@@ -467,6 +467,97 @@ pub(crate) async fn native_inventory_commits(
     Ok(commits)
 }
 
+/// Pin only original Commit signers to independently retained governor
+/// histories. Archive entries cannot introduce another issuer or a resolver hint.
+fn insert_archive_signature_key(
+    keys: &mut arkret_identity::RealmAuthorityKeyMap,
+    histories: &[arkret_models_identity::AuthenticatedServiceResolution],
+    signature: &arkret_wire::DetachedObjectSignature,
+) -> PersistenceResult<()> {
+    use arkret_identity::RealmAuthorityKeyDirectory as _;
+
+    let issuer = arkret_wire::detached_signature_service_id(signature).map_err(unavailable)?;
+    let mut selected: Option<arkret_signatures::PublicKeyMaterial> = None;
+    for history in histories.iter().filter(|history| {
+        history.service_id == issuer
+            && history.service_kind == arkret_wire::ServiceKind::Station.as_str()
+    }) {
+        // A retained carrier can end before this original. Another independently
+        // authenticated carrier for the same governor may cover its own time.
+        let Ok(document) = arkret_identity::authenticated_service_document_at(
+            history,
+            &issuer,
+            signature.created_at,
+        ) else {
+            continue;
+        };
+        if arkret_identity::validate_verification_method_relationship(
+            &document,
+            &signature.verification_method,
+            &document.id,
+            arkret_identity::DidVerificationRelationship::AssertionMethod,
+        )
+        .is_err()
+        {
+            continue;
+        }
+        let key = arkret_identity::public_key_material_from_document(
+            &document,
+            &signature.verification_method,
+        )
+        .map_err(unavailable)?;
+        if selected.as_ref().is_some_and(|existing| existing != &key) {
+            return Err(unavailable(
+                "conflicting authenticated archive signer histories",
+            ));
+        }
+        selected = Some(key);
+    }
+    let key = selected.ok_or_else(|| {
+        unavailable("archive signer has no authenticated governor history at signature time")
+    })?;
+    if let Some(existing) = keys.public_key_at(&signature.verification_method, signature.created_at)
+        && existing.ed25519_bytes().map_err(unavailable)?
+            != key.ed25519_bytes().map_err(unavailable)?
+    {
+        return Err(unavailable(
+            "archive signer conflicts with the pinned authority key",
+        ));
+    }
+    keys.insert_at(&signature.verification_method, signature.created_at, key);
+    Ok(())
+}
+
+fn inventory_authority_keys(
+    manifest: &arkret_models_integration::RealmActorArchiveInventoryManifest,
+    reader: &RealmActorBackupManagerReader,
+) -> PersistenceResult<arkret_identity::RealmAuthorityKeyMap> {
+    use arkret_models_integration::RealmActorArchiveInventoryEntry;
+
+    let mut keys = reader.authority_keys.clone();
+    let mut pin = |original: &arkret_models_integration::RealmActorBackupEventMaterial| {
+        insert_archive_signature_key(
+            &mut keys,
+            &reader.authority_service_resolutions,
+            &original.commit.signature,
+        )
+    };
+    for entry in &manifest.entries {
+        match entry {
+            // First-PUT material carries its own complete native source verifier.
+            RealmActorArchiveInventoryEntry::Backup(_) => {}
+            RealmActorArchiveInventoryEntry::Series(entry) => pin(&entry.source)?,
+            RealmActorArchiveInventoryEntry::Recipient(entry) => {
+                pin(&entry.declaration)?;
+                if let Some(begin) = &entry.recovery_begin {
+                    pin(begin)?;
+                }
+            }
+        }
+    }
+    Ok(keys)
+}
+
 pub(crate) async fn native_inventory(
     pool: &PgPool,
     reader: &RealmActorBackupManagerReader,
@@ -475,10 +566,11 @@ pub(crate) async fn native_inventory(
     let manifest = {
         let conn = held.connection();
         let manifest = qualified_inventory_in_connection(conn, reader).await?;
+        let keys = inventory_authority_keys(&manifest, reader)?;
         arkret_identity::realm_actor_content_backup::verify_realm_actor_archive_inventory(
             &manifest,
             &reader.authority,
-            &reader.authority_keys,
+            &keys,
         )
         .map_err(unavailable)?;
         qualify_manager(conn, reader).await?;
@@ -520,3 +612,7 @@ pub(crate) async fn native_inventory_delivery(
         None,
     ))
 }
+
+#[cfg(test)]
+#[path = "reading_tests.rs"]
+mod tests;

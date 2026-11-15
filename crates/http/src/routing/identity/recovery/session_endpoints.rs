@@ -540,7 +540,7 @@ fn materialize_recovery_authorization_rules(
 ) -> Result<Vec<AuthoritySetAuthorizationRule>, AppError> {
     let mut rules = Vec::new();
     for method in &policy.methods {
-        let (role, methods, threshold) = match method {
+        let (role, methods, min_signature_count) = match method {
             arkret_models_crypto::RecoveryMethod::DidRoot => (
                 AuthoritySetIssuerRole::IdentityRecovery,
                 root_methods.to_vec(),
@@ -559,7 +559,7 @@ fn materialize_recovery_authorization_rules(
                 1,
             ),
             arkret_models_crypto::RecoveryMethod::DeviceQuorum {
-                min_device_count: k,
+                min_device_count,
                 member_ids,
             } => (
                 AuthoritySetIssuerRole::AcceptedDevice,
@@ -567,7 +567,7 @@ fn materialize_recovery_authorization_rules(
                     .iter()
                     .filter_map(|id| device_methods.get(id).cloned())
                     .collect(),
-                *k,
+                *min_device_count,
             ),
             arkret_models_crypto::RecoveryMethod::TrustedRecoveryService { services } => (
                 AuthoritySetIssuerRole::IdentityRecovery,
@@ -579,7 +579,7 @@ fn materialize_recovery_authorization_rules(
             ),
         };
         let methods = methods.into_iter().collect::<BTreeSet<_>>();
-        if methods.is_empty() || methods.len() < threshold as usize {
+        if methods.is_empty() || methods.len() < min_signature_count as usize {
             return Err(recovery_proof_authority_error(format!(
                 "recovery method {} has no executable issuer set",
                 method.kind_str(),
@@ -595,7 +595,7 @@ fn materialize_recovery_authorization_rules(
                     verification_method,
                 })
                 .collect(),
-            min_signature_count: threshold,
+            min_signature_count,
         });
     }
     if rules.is_empty() {
@@ -680,17 +680,18 @@ fn selected_recovery_method_active(
         }
         (
             RecoveryMethod::DeviceQuorum {
-                min_device_count: k,
+                min_device_count,
                 member_ids,
             },
             RecoverySessionProof::DeviceQuorum(proof),
         ) => {
-            *k <= proof
-                .signatures
-                .iter()
-                .map(|signature| &signature.device_id)
-                .collect::<BTreeSet<_>>()
-                .len() as u32
+            *min_device_count
+                <= proof
+                    .signatures
+                    .iter()
+                    .map(|signature| &signature.device_id)
+                    .collect::<BTreeSet<_>>()
+                    .len() as u32
                 && proof
                     .signatures
                     .iter()
@@ -1359,7 +1360,7 @@ async fn verify_device_quorum_recovery_proof(
     let policy: RecoveryPolicy = serde_json::from_value(record.policy_payload.clone())
         .map_err(|e| recovery_proof_authority_error(format!("bound policy invalid: {e}")))?;
     let Some(arkret_models_crypto::RecoveryMethod::DeviceQuorum {
-        min_device_count: k,
+        min_device_count,
         member_ids,
     }) = recovery_method(&policy, RecoveryProofKind::DeviceQuorum)
     else {
@@ -1374,7 +1375,8 @@ async fn verify_device_quorum_recovery_proof(
         .iter()
         .find(|rule| rule.rule_id == "device_quorum")
         .ok_or_else(|| recovery_proof_authority_error("frozen quorum authority missing"))?;
-    if proof.min_device_count != *k || rule.min_signature_count != *k {
+    if proof.min_device_count != *min_device_count || rule.min_signature_count != *min_device_count
+    {
         return Err(recovery_proof_authority_error(
             "quorum threshold does not equal the accepted method",
         ));
@@ -1411,7 +1413,7 @@ async fn verify_device_quorum_recovery_proof(
         key.verify(&bytes, &decoded)
             .map_err(|_| recovery_signature_error("quorum signature is invalid"))?;
     }
-    if seen.len() < *k as usize {
+    if seen.len() < *min_device_count as usize {
         return Err(recovery_proof_authority_error(
             "quorum has too few distinct valid members",
         ));

@@ -111,6 +111,14 @@ impl Fixture {
         pcr.admit_founding_device(&PgPersistenceStore::new(pool.clone()))
             .await
             .unwrap();
+        let (_, history_custody) =
+            coland_test_support::agent_origin::admit_controller_history_custody(
+                &pool,
+                &pcr,
+                &method,
+                &SigningKey::from_bytes(&[83; 32]),
+            )
+            .await;
         let controller = &pcr.history.account;
         let persistence = PgPersistenceStore::new(pool.clone());
         let account_pk = persistence
@@ -199,7 +207,7 @@ impl Fixture {
             ScopeRef::Realm {realm_id:pcr.unit.transactions[0].event.realm_id.clone()},ActorId::account(controller.clone()),
             serde_json::json!({"schema":"ak.schema.agent_provision.v1","agent_id":agent.principal_id,"controller_principal_id":controller.principal_id,
               "principal_control_realm_id":genesis.realm_id,"controller_authorization_ref":delegation,"agent_slug":"native-replay-agent",
-              "accountability_scope":"agent_operator","requested_scope_digest":format!("sha256:{}","b".repeat(64)),"selector_visibility":"private",
+              "accountability_scope":"agent_operator","requested_scope_digest":format!("sha256:{}","b".repeat(64)),"selector_visibility":"private","history_custody":history_custody,
               "created_at":arkret_canonical::format_timestamp_canonical(at)}),at).unwrap(),
             pcr.history.device_verification_method.clone(),pcr.history.founding_device_signing_seed);
         let application = state.authority_commits();

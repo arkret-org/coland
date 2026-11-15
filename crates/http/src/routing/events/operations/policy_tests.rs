@@ -2124,6 +2124,7 @@ async fn call_recording_start_defaults_to_record_capability() {
             "mode": "audio_video",
             "visible_notice": true,
             "capture_metadata": {
+                "key_ref":{"algorithm":"MLS","group_state_ref":arkret_identifiers::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[8;32])},
                 "retention": {"consent_confirmed": true}
             }
         }),

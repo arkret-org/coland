@@ -2872,7 +2872,7 @@ async fn case_sidecar_snapshot_lists_and_scans_keep_private_stream_coordinates()
         realm_id: realm.clone(),
         account: controller.clone(),
         issuer: station.clone(),
-        window_limit: 20,
+        max_window_event_count: 20,
         window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
         expires_at_ms: now_ms + 300_000,
         now_ms,
@@ -3014,7 +3014,7 @@ async fn case_sidecar_snapshot_lists_and_scans_keep_private_stream_coordinates()
         let next = ordinary_realm::source_request(&pool, next).await;
         uow.commit_event(next.clone()).await.unwrap();
         let bounded = coland_storage::AccountRealmWindowRequest {
-            realm_id:realm.clone(), account:controller.clone(), issuer:station.clone(), window_limit:1,
+            realm_id:realm.clone(), account:controller.clone(), issuer:station.clone(), max_window_event_count:1,
             window_cursor:format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
             expires_at_ms:now_ms + 300_000, now_ms, byte_budget:7 * 1024 * 1024,
             delivered_heads:Vec::new(), selected_stream_refs:Some(vec![stream.clone()]),
@@ -3574,7 +3574,7 @@ async fn ordinary_member_owned_agent_join_scenario() {
             previous,
             EventKind::PolicySet,
             arkret_wire::ActorId::account(founder.clone()),
-            serde_json::json!({"policy_id":policy_id, "expected_commit_id":revision,
+            serde_json::json!({"policy_id":policy_id, "expected_commit_id":revision.as_ref().map(|value| &value.commit_id),
                 "value":{"schema":"ak.schema.policy.v1", "id":policy_id, "realm_id":realm_id,
                     "policy_kind":"agent", "rules":rules, "default_effect":"allow",
                     "created_by":arkret_wire::ActorId::account(founder.clone()),
@@ -6008,7 +6008,7 @@ async fn import_agent_management_policy(
     let mut payload: arkret_models_collaboration::governance::operation_wire::PolicySetStatePayload =
         serde_json::from_value(serde_json::json!({
             "policy_id":"ak:policy:0198ff00-0000-7000-8000-000000000001",
-            "expected_commit_id":expected,
+            "expected_commit_id":expected.as_ref().map(|value| &value.commit_id),
             "value":{
                 "schema":"ak.schema.policy.v1",
                 "id":"ak:policy:0198ff00-0000-7000-8000-000000000001",

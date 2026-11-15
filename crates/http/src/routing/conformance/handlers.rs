@@ -786,20 +786,18 @@ fn validate_query_shape(vector: &str, body: &Value, query_value: &Value) -> Resu
         ));
     }
 
-    for filter in query_filters(query_value) {
-        // Use the sole SDK filter owner: the renamed operator is required,
-        // retired keys are rejected, and legitimate boolean filters remain.
-        serde_json::from_value::<arkret_models_collaboration::objects::queries::Filter>(
-            filter.clone(),
-        )
-        .map_err(|_| query_schema_error("query filter violates the registered shape"))?;
-        let op = filter
-            .get("operator")
-            .and_then(Value::as_str)
-            .unwrap_or("eq");
-        if !allowed_query_op(op) || vector.contains("unknown_filter_key") {
-            return Err(query_schema_error("query filter op is not registered"));
-        }
+    if vector.contains("unknown_filter_key") {
+        return Err(query_schema_error(
+            "query filter operator is not registered",
+        ));
+    }
+    for value in query_filters(query_value) {
+        let filter: arkret_models_collaboration::objects::queries::Filter =
+            serde_json::from_value(value.clone())
+                .map_err(|_| query_schema_error("query filter does not match its closed schema"))?;
+        filter
+            .validate()
+            .map_err(|_| query_schema_error("query filter is invalid"))?;
     }
 
     let mut seen_sort = BTreeMap::<String, String>::new();
@@ -853,48 +851,66 @@ fn query_sorts(query_value: &Value) -> Vec<&Value> {
 }
 
 fn row_matches_query(row: &Value, query_value: &Value) -> bool {
-    query_filters(query_value).into_iter().all(|filter| {
-        let field = filter.get("field").and_then(Value::as_str).unwrap_or("");
-        let op = filter
-            .get("operator")
-            .and_then(Value::as_str)
-            .unwrap_or("eq");
-        let expected = filter.get("value").unwrap_or(&Value::Null);
-        let actual = row.get(field).unwrap_or(&Value::Null);
-        match op {
-            "eq" => actual == expected,
-            "neq" => actual != expected,
-            "in" => expected
-                .as_array()
-                .is_some_and(|values| values.iter().any(|value| value == actual)),
-            "not_in" => expected
-                .as_array()
-                .is_none_or(|values| values.iter().all(|value| value != actual)),
-            "lt" => compare_json(actual, expected) == Some(Ordering::Less),
-            "lte" => compare_json(actual, expected)
-                .is_some_and(|ordering| matches!(ordering, Ordering::Less | Ordering::Equal)),
-            "gt" => compare_json(actual, expected) == Some(Ordering::Greater),
-            "gte" => compare_json(actual, expected)
-                .is_some_and(|ordering| matches!(ordering, Ordering::Greater | Ordering::Equal)),
-            "contains" => contains_json(actual, expected),
-            "exists" => expected.as_bool().unwrap_or(true) != actual.is_null(),
-            "prefix" => actual
-                .as_str()
-                .zip(expected.as_str())
-                .is_some_and(|(actual, prefix)| actual.starts_with(prefix)),
-            "full_text" => {
-                actual
+    query_filters(query_value).into_iter().all(|value| {
+        serde_json::from_value::<arkret_models_collaboration::objects::queries::Filter>(
+            value.clone(),
+        )
+        .is_ok_and(|filter| filter.validate().is_ok() && row_matches_filter(row, &filter))
+    })
+}
+
+fn row_matches_filter(
+    row: &Value,
+    filter: &arkret_models_collaboration::objects::queries::Filter,
+) -> bool {
+    use arkret_models_collaboration::objects::queries::Filter;
+    use arkret_wire::FilterOperator;
+    match filter {
+        Filter::And { and } => and.iter().all(|filter| row_matches_filter(row, filter)),
+        Filter::Or { or } => or.iter().any(|filter| row_matches_filter(row, filter)),
+        Filter::Not { not } => !row_matches_filter(row, not),
+        Filter::Predicate(filter) => {
+            let expected = filter.value.as_ref().unwrap_or(&Value::Null);
+            let actual = filter
+                .field
+                .split('.')
+                .try_fold(row, |value, field| value.get(field))
+                .unwrap_or(&Value::Null);
+            match filter.operator {
+                FilterOperator::Eq => actual == expected,
+                FilterOperator::Neq => actual != expected,
+                FilterOperator::In => expected
+                    .as_array()
+                    .is_some_and(|values| values.iter().any(|value| value == actual)),
+                FilterOperator::NotIn => expected
+                    .as_array()
+                    .is_none_or(|values| values.iter().all(|value| value != actual)),
+                FilterOperator::Lt => compare_json(actual, expected) == Some(Ordering::Less),
+                FilterOperator::Lte => compare_json(actual, expected)
+                    .is_some_and(|ordering| matches!(ordering, Ordering::Less | Ordering::Equal)),
+                FilterOperator::Gt => compare_json(actual, expected) == Some(Ordering::Greater),
+                FilterOperator::Gte => compare_json(actual, expected).is_some_and(|ordering| {
+                    matches!(ordering, Ordering::Greater | Ordering::Equal)
+                }),
+                FilterOperator::Contains => contains_json(actual, expected),
+                FilterOperator::Exists => expected.as_bool().unwrap_or(true) != actual.is_null(),
+                FilterOperator::Prefix => actual
                     .as_str()
                     .zip(expected.as_str())
-                    .is_some_and(|(actual, needle)| {
-                        actual
-                            .to_ascii_lowercase()
-                            .contains(&needle.to_ascii_lowercase())
-                    })
+                    .is_some_and(|(actual, prefix)| actual.starts_with(prefix)),
+                FilterOperator::FullText => {
+                    actual
+                        .as_str()
+                        .zip(expected.as_str())
+                        .is_some_and(|(actual, needle)| {
+                            actual
+                                .to_ascii_lowercase()
+                                .contains(&needle.to_ascii_lowercase())
+                        })
+                }
             }
-            _ => false,
         }
-    })
+    }
 }
 
 fn sort_query_rows(rows: &mut [Value], query_value: &Value) {
@@ -945,23 +961,6 @@ fn contains_json(actual: &Value, expected: &Value) -> bool {
         (Value::Array(actual), expected) => actual.iter().any(|item| item == expected),
         _ => false,
     }
-}
-
-fn allowed_query_op(op: &str) -> bool {
-    matches!(
-        op,
-        "eq" | "neq"
-            | "in"
-            | "not_in"
-            | "lt"
-            | "lte"
-            | "gt"
-            | "gte"
-            | "contains"
-            | "exists"
-            | "prefix"
-            | "full_text"
-    )
 }
 
 fn default_query_rows() -> Vec<Value> {
@@ -1175,6 +1174,43 @@ fn projection_event_diagnostic(record: &ProjectionEventRecord) -> ProjectionEven
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn query_filters_require_canonical_operator_without_retired_alias() {
+        let valid = json!({"filter":[{"field":"kind","operator":"eq","value":"task"}]});
+        assert!(super::validate_query_shape("query", &json!({}), &valid).is_ok());
+        let boolean = json!({"filter":[{"and":[{"or":[{"field":"kind","operator":"eq","value":"task"},{"field":"kind","operator":"eq","value":"note"}]},{"not":{"field":"metadata.active","operator":"eq","value":false}}]}]});
+        assert!(super::validate_query_shape("query", &json!({}), &boolean).is_ok());
+        assert!(super::row_matches_query(
+            &json!({"kind":"task","metadata":{"active":true}}),
+            &boolean
+        ));
+        assert!(!super::row_matches_query(
+            &json!({"kind":"task","metadata":{"active":false}}),
+            &boolean
+        ));
+        for filter in [
+            json!({"and":[{"field":"kind","op":"eq","value":"task"}]}),
+            json!({"and":[{"field":"kind","operator":"eq","value":"task"}],"op":"eq"}),
+            json!({"or":[]}),
+        ] {
+            assert!(
+                super::validate_query_shape("query", &json!({}), &json!({"filter":[filter]}))
+                    .is_err()
+            );
+        }
+
+        for filter in [
+            json!({"field":"kind","op":"eq","value":"task"}),
+            json!({"field":"kind","op":"neq","operator":"eq","value":"task"}),
+            json!({"field":"kind","value":"task"}),
+        ] {
+            assert!(
+                super::validate_query_shape("query", &json!({}), &json!({"filter":[filter]}))
+                    .is_err()
+            );
+        }
+    }
 
     use super::*;
 

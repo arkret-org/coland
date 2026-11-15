@@ -69,12 +69,9 @@ fn lift_operation(decision_id: &str, expected_commit_id: Value) -> Operation {
     )
 }
 
-/// The typed `{commit_id, stream_position}` revision a lift names.
-fn typed_revision() -> Value {
-    serde_json::json!({
-        "commit_id": "ak:realm_commit:AaE8e4n3nA8AyIlk8Sh9_DhbS-5fInpC8DrDoA81pxI-",
-        "stream_position": 7,
-    })
+/// The one exact source Commit identity a lift names.
+fn accepted_commit_id() -> Value {
+    serde_json::json!("ak:realm_commit:AaE8e4n3nA8AyIlk8Sh9_DhbS-5fInpC8DrDoA81pxI-")
 }
 
 #[test]
@@ -133,8 +130,8 @@ fn moderation_decision_then_lift_converges_on_the_target_facet() {
         Some(entry_tag(MOD_DECISION_ID).as_str())
     );
 
-    // A lift carries the typed revision of the durable result it observed;
-    // an untyped counter is not a revision and is rejected.
+    // A lift carries one exact source Commit identity; a counter or a retired
+    // revision pair cannot replace that identity.
     let untyped = lift_operation(MOD_DECISION_ID, serde_json::json!(1));
     assert!(matches!(
         state.apply(&untyped, &hlc),
@@ -143,7 +140,7 @@ fn moderation_decision_then_lift_converges_on_the_target_facet() {
     ));
     assert!(state.moderation_decision_is_live(MOD_DECISION_ID));
 
-    let lift = lift_operation(MOD_DECISION_ID, typed_revision());
+    let lift = lift_operation(MOD_DECISION_ID, accepted_commit_id());
     let effect = state.apply(&lift, &hlc);
     assert!(matches!(
         effect,
@@ -174,7 +171,7 @@ fn lifting_one_review_never_lifts_another_issuers_decision() {
     assert!(state.moderation_decision_is_live(MOD_DECISION_ID));
     assert!(state.moderation_decision_is_live(OTHER_DECISION_ID));
 
-    let lift = lift_operation(MOD_DECISION_ID, typed_revision());
+    let lift = lift_operation(MOD_DECISION_ID, accepted_commit_id());
     assert!(matches!(
         state.apply(&lift, &hlc),
         ProjectionEffect::ModerationDecisionLifted { .. }

@@ -67,6 +67,9 @@ pub struct RealmActorBackupManagerReader {
     pub transport_expires_at: chrono::DateTime<Utc>,
     pub authority: arkret_identity::VerifiedRealmAuthority,
     pub authority_keys: arkret_identity::RealmAuthorityKeyMap,
+    /// Native histories of the governors independently authenticated by the
+    /// nonce-bound authority bundle, never archive-provided resolution hints.
+    pub authority_service_resolutions: Vec<arkret_models_identity::AuthenticatedServiceResolution>,
 }
 
 /// Process-local role established by the corresponding transport verifier.

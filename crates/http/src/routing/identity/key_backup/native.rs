@@ -235,6 +235,20 @@ async fn manager_reader_with_bundle(
     let bundle =
         crate::routing::realm_join::local_authority_bundle(state, &actor.realm_id, &nonce).await?;
     let located = crate::routing::realm_join::verify_served_bundle(state, bundle, &nonce).await?;
+    let current: AuthenticatedServiceResolution =
+        serde_json::from_value(located.bundle.current_route_record.clone()).map_err(unavailable)?;
+    let mut authority_service_resolutions = vec![current.clone()];
+    authority_service_resolutions
+        .push(resolution(state, &located.bundle.genesis_commit.signature, &current).await?);
+    for transition in &located.bundle.authority_transitions {
+        for signature in [
+            &transition.change_commit.signature,
+            &transition.handoff.old_authority_signature,
+            &transition.handoff.new_authority_acceptance_signature,
+        ] {
+            authority_service_resolutions.push(resolution(state, signature, &current).await?);
+        }
+    }
     Ok((
         coland_storage::RealmActorBackupManagerReader {
             actor,
@@ -244,6 +258,7 @@ async fn manager_reader_with_bundle(
             transport_expires_at: service.expires_at,
             authority: located.authority,
             authority_keys: located.keys,
+            authority_service_resolutions,
         },
         located.bundle,
     ))

@@ -310,7 +310,7 @@ pub(crate) async fn commit_authority_position_in_connection(
                             board_space_id = %board,
                             list_space_id = %destination,
                             strand_id = %strand,
-                            wip_limit = limit,
+                            max_active_strand_count = limit,
                             count_after = counts.count + additional,
                             list_policy_commit_id = %list.space_commit_id,
                             list_policy_stream_position = list.space_position,

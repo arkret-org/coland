@@ -426,18 +426,18 @@ impl ActorRealmAuthorization {
     ) -> PersistenceResult<
         Vec<&'a arkret_models_collaboration::governance::grant_constraint::CapabilityGrant>,
     > {
-        let invalid_target = || {
+        let unbound = || {
             PersistenceError::Conflict(
                 "capability_denied: actual target does not bind the current source cut".into(),
             )
         };
-        target.validate().map_err(|_| invalid_target())?;
+        target.validate().map_err(|_| unbound())?;
         // A closed RealmActor selector has only kind + its full actor_id.
         // Its Realm is embedded in that identity, never a redundant member.
         let target_realm = if target.kind == arkret_wire::ResourceSelectorKind::RealmActor {
             target
                 .realm_actor_id()
-                .and_then(|actor| actor.as_realm_actor_id())
+                .and_then(arkret_wire::ActorId::as_realm_actor_id)
                 .map(|actor| &actor.realm_id)
         } else {
             target.realm_id.as_ref()
@@ -446,7 +446,7 @@ impl ActorRealmAuthorization {
             || target_realm != Some(&self.realm_id)
             || target.kind == arkret_wire::ResourceSelectorKind::All
         {
-            return Err(invalid_target());
+            return Err(unbound());
         }
         let mut candidates = Vec::new();
         for id in &self.terminal_ids {

@@ -45,6 +45,20 @@ fn field<'a>(value: &'a Value, name: &str) -> PersistenceResult<&'a str> {
         .and_then(Value::as_str)
         .ok_or_else(|| rejected("unlock ledger binding incomplete"))
 }
+
+fn recovery_session_holder(session: &Value) -> PersistenceResult<String> {
+    let grant = arkret_wire::SessionGrantRef::new(
+        arkret_wire::DidCoreId::new(field(session, "session_grant_issuer_id")?)
+            .map_err(PersistenceError::database)?,
+        arkret_wire::SessionGrantId::new(field(session, "session_grant_id")?)
+            .map_err(PersistenceError::database)?,
+    );
+    arkret_canonical::canonical_json_string(&serde_json::json!({
+        "session_grant_ref": grant,
+        "cnf_jkt": field(session, "session_grant_cnf_jkt")?,
+    }))
+    .map_err(PersistenceError::database)
+}
 fn issuance_request(
     value: &Value,
 ) -> PersistenceResult<arkret_models_crypto::KeysBackupsIssueUnlockChallengeRequestBody> {
@@ -97,7 +111,7 @@ impl crate::key_backup::PgKeyBackupStore {
                 .bind::<Text,_>(id).get_result::<AuthorityRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(||rejected("recovery_evidence_unbound"))?;
             let session=sql_query("SELECT to_jsonb(s) AS payload FROM recovery_sessions s WHERE id=$1 AND state='verified' AND expires_at>$2 FOR SHARE")
                 .bind::<sql_types::Uuid,_>(ids::typed_uuid_part_expect_internal(id)).bind::<Timestamptz,_>(now).get_result::<JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(||rejected("recovery_evidence_unbound"))?.payload;
-            if authority.expires_at<=now || holder!=format!("{}:{}",field(&session,"session_grant_id")?,field(&session,"session_grant_cnf_jkt")?) {return Err(rejected("recovery_evidence_unbound").into());}
+            if authority.expires_at<=now || holder!=recovery_session_holder(&session)? {return Err(rejected("recovery_evidence_unbound").into());}
             let replay=sql_query("SELECT count(*) AS count FROM key_backup_unlock_entries WHERE authority_id=$1 AND request_digest=$2 AND holder=$3 AND consumed_at IS NOT NULL")
                 .bind::<Text,_>(id).bind::<Text,_>(request_digest).bind::<Text,_>(holder).get_result::<CountRow>(&mut *conn).await.map_err(PersistenceError::database)?.count;
             if replay>0 {return Ok(true);}
@@ -192,7 +206,7 @@ impl crate::key_backup::PgKeyBackupStore {
             if authority.kind=="recovery_session" {
                 let session=sql_query("SELECT to_jsonb(s) AS payload FROM recovery_sessions s WHERE id=$1 AND state='verified' AND expires_at>$2 FOR SHARE")
                     .bind::<sql_types::Uuid,_>(ids::typed_uuid_part_expect_internal(&id)).bind::<Timestamptz,_>(now).get_result::<JsonPayloadRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(||rejected("recovery_evidence_unbound"))?.payload;
-                if holder!=format!("{}:{}",field(&session,"session_grant_id")?,field(&session,"session_grant_cnf_jkt")?) {return Err(rejected("recovery holder changed").into());}
+                if holder!=recovery_session_holder(&session)? {return Err(rejected("recovery holder changed").into());}
             }
             let entry=sql_query("SELECT object_digest,charge,request_digest,holder FROM key_backup_unlock_entries WHERE authority_id=$1 AND backup_id=$2 FOR UPDATE")
                 .bind::<Text,_>(&id).bind::<Text,_>(&backup_id).get_result::<EntryRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(||rejected("backup outside frozen unlock manifest"))?;
@@ -328,17 +342,18 @@ fn ensure_selected_recovery_method_active(
         }
         (
             RecoveryMethod::DeviceQuorum {
-                min_device_count: k,
+                min_device_count,
                 member_ids,
             },
             RecoverySessionProof::DeviceQuorum(proof),
         ) => {
-            *k <= proof
-                .signatures
-                .iter()
-                .map(|signature| &signature.device_id)
-                .collect::<std::collections::BTreeSet<_>>()
-                .len() as u32
+            *min_device_count
+                <= proof
+                    .signatures
+                    .iter()
+                    .map(|signature| &signature.device_id)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len() as u32
                 && proof
                     .signatures
                     .iter()

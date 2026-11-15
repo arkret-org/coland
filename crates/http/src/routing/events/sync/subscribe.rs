@@ -1084,7 +1084,8 @@ mod account_query_tests {
         )
         .unwrap();
         assert_eq!(empty.filter.unwrap().realm_ids, Some(Vec::new()));
-        let bounded = parse_account_subscribe_query("filter=%7B%22window_limit%22%3A0%7D").unwrap();
+        let bounded =
+            parse_account_subscribe_query("filter=%7B%22max_window_event_count%22%3A0%7D").unwrap();
         assert_eq!(bounded.filter.unwrap().max_window_event_count, Some(0));
         for query in [
             "filter.realm_ids=x",
@@ -1092,10 +1093,10 @@ mod account_query_tests {
             "catchup=garbage",
             "catchup=true&catchup=false",
             "filter=%7B%22realm_ids%22%3Anull%7D",
-            "filter=%7B%22window_limit%22%3A1%2C%22window_limit%22%3A2%7D",
+            "filter=%7B%22max_window_event_count%22%3A1%2C%22max_window_event_count%22%3A2%7D",
             // The closed filter rejects the retired member.
             "filter=%7B%22timeline_limit%22%3A20%7D",
-            "filter=%7B%22window_limit%22%3A101%7D",
+            "filter=%7B%22max_window_event_count%22%3A101%7D",
             "filter=%7B%20%7D",
             "filter=%FF",
             "filter=%GG",

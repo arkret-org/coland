@@ -232,13 +232,13 @@ pub(super) async fn authorize_key_backup_delete(
             "recovery_unlock"
         }
         HighRiskAuthorityProof::DeviceQuorum(body) => {
-            let threshold = &body.min_device_count;
+            let min_device_count = &body.min_device_count;
             let signatures = &body.signatures;
             expected_policy = Some(
                 verify_device_quorum_delete(
                     state,
                     &challenge,
-                    *threshold,
+                    *min_device_count,
                     signatures,
                     &expected_digest,
                     &canonical,
@@ -656,22 +656,22 @@ mod recovery_unlock_session_tests {
 async fn verify_device_quorum_delete(
     state: &AppState,
     challenge: &KeysBackupsDeleteChallenge,
-    threshold: u64,
+    min_device_count: u32,
     signatures: &[HighRiskDeviceQuorumSignature],
     expected_digest: &arkret_identifiers::Hash,
     canonical: &[u8],
 ) -> Result<Value, AppError> {
     let accepted = current_recovery_policy(state, &challenge.account_id).await?;
-    let policy_k =
-        crate::routing::identity::device_signing::policy_device_quorum_threshold(&accepted)
+    let policy_min_device_count =
+        crate::routing::identity::device_signing::policy_device_min_device_count(&accepted)
             .ok_or_else(|| AppError::capability_denied("accepted policy has no device quorum"))?;
-    // Equality, not `>=`: §7.8.1 says the request threshold MUST equal the
-    // policy `k`, so a caller cannot declare a lower bar and cannot silently
+    // Equality, not `>=`: §7.8.1 says the request min_device_count MUST equal the
+    // policy `min_device_count`, so a caller cannot declare a lower bar and cannot silently
     // pass a stale higher one either.
-    if threshold != u64::from(policy_k) {
+    if min_device_count != policy_min_device_count {
         return Err(AppError::capability_denied(format!(
-            "key backup delete quorum threshold {threshold} does not equal the accepted recovery \
-             policy k={policy_k}"
+            "key backup delete quorum min_device_count {min_device_count} does not equal the accepted recovery \
+             policy min_device_count={policy_min_device_count}"
         )));
     }
     let policy: arkret_models_crypto::RecoveryPolicy =
@@ -713,10 +713,10 @@ async fn verify_device_quorum_delete(
         }
         valid += 1;
     }
-    if valid < policy_k {
+    if valid < policy_min_device_count {
         return Err(AppError::capability_denied(format!(
             "key backup delete quorum has {valid} valid signatures, below the accepted recovery \
-             policy k={policy_k}"
+             policy min_device_count={policy_min_device_count}"
         )));
     }
     Ok(accepted.raw_payload)

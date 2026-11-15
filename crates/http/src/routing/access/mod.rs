@@ -3,7 +3,7 @@ use salvo::prelude::*;
 mod authz;
 pub(super) mod policy;
 
-use super::{now, query_param, validate_canonical_json_value};
+use super::{now, validate_canonical_json_value};
 
 /// Protocol surface mounted under `/_arkret/self/...`.
 pub fn router() -> Router {

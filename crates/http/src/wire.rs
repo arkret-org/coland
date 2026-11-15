@@ -771,7 +771,7 @@ pub fn describe(
                     "operation_id": arkret_wire::ServiceOperationId::SELF_AUTHZ_GRANTS_READ_EFFECTIVE_V1,
                     "method": "GET",
                     "path": "/_arkret/self/authz/effective-grants",
-                    "query": ["realm_id", "subject", "subject_station_id", "at"],
+                    "query": ["realm_id", "subject_actor_id", "evaluation_at"],
                     "response_shape": "EffectiveGrantSnapshot",
                     "subject_scope": "authenticated_actor_or_realm_owner_for_realm_scoped_queries",
                     "operation_specific_error_codes": []
@@ -780,7 +780,7 @@ pub fn describe(
                     "operation_id": arkret_wire::ServiceOperationId::SELF_AUTHZ_INVITES_READ_LIST_V1,
                     "method": "GET",
                     "path": "/_arkret/self/authz/invites",
-                    "query": ["realm_id", "subject", "cursor"],
+                    "query": ["realm_id", "subject_account_id", "cursor"],
                     "response_schema_ref": "schemas/authorization-operations.schema.json#/$defs/authorization_invite_page",
                     "subject_scope": "authenticated_actor_or_inviter_or_realm_owner",
                     "operation_specific_error_codes": []

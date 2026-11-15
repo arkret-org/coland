@@ -9,7 +9,7 @@ use arkret_models_crypto::{
     ContentContext, ContentCoverageEntry, ContentRootContext, EncryptedEnvelopeEncryptionContext,
     KeyBackup, SecretStorageItemKind,
 };
-use arkret_wire::{CommittedEventRef, Event, EventKind, MlsGroupValue};
+use arkret_wire::{ActorId, CommittedEventRef, Event, EventKind, MlsGroupValue, RealmId};
 use coland_storage::{AuthorityCommitTransaction, PersistenceError, PersistenceResult};
 use diesel::sql_types::{Binary, Jsonb, Text};
 use diesel::{QueryableByName, sql_query};
@@ -130,6 +130,38 @@ pub(crate) struct LocalOriginalDependencies {
     pub blob_refs: BTreeMap<String, arkret_wire::BlobRef>,
     pub retain_full_history: bool,
     pub source_valid_until: chrono::DateTime<chrono::Utc>,
+}
+
+async fn lock_local_root_subjects(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    recipients: &BTreeMap<String, ActorId>,
+    actors: &BTreeMap<String, ActorId>,
+) -> Result<(), PgTransactionError> {
+    // Keep every Account policy lock ahead of every sorted Actor-series lock.
+    // Native recipients use the already-held owning Realm cut, not a PCR policy.
+    for recipient in recipients.values() {
+        if let Some(account) = recipient.as_account_id() {
+            crate::pcr_recovery_policy_unit::current_policy(conn, account).await?;
+        } else if let Some(subject) = recipient.as_realm_actor_id() {
+            if &subject.realm_id != realm {
+                return Err(missing("native root package belongs to another Realm").into());
+            }
+        } else {
+            return Err(missing("root custodian has no full Account policy").into());
+        }
+    }
+    for actor in actors.values() {
+        if let Some(subject) = actor.as_realm_actor_id() {
+            if &subject.realm_id != realm {
+                return Err(missing("native root package belongs to another Realm").into());
+            }
+            crate::realm_actor_content_backup::lock_namespace(conn, actor).await?;
+        } else {
+            crate::key_backup::lock_backup_series_in_connection(conn, actor).await?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn current_group_in_connection(
@@ -285,21 +317,13 @@ pub(crate) async fn local_original_dependencies_in_connection(
             })?;
         let actor: arkret_wire::ActorId =
             serde_json::from_str(&row.actor_id).map_err(PersistenceError::database)?;
-        // Native managed-Agent custody is a separate admission adapter; only
-        // admitted Human Device packages can reach this metadata path today.
+        // Agent custody remains a separate adapter. Human and Realm-native
+        // packages each retain their own current recipient qualification below.
         let recipient = actor.clone();
         recipients.insert(recipient.to_string(), recipient);
         actors.insert(actor.to_string(), actor);
     }
-    for recipient in recipients.values() {
-        let account = recipient
-            .as_account_id()
-            .ok_or_else(|| missing("root custodian has no full Account policy"))?;
-        crate::pcr_recovery_policy_unit::current_policy(conn, account).await?;
-    }
-    for actor in actors.values() {
-        crate::key_backup::lock_backup_series_in_connection(conn, actor).await?;
-    }
+    lock_local_root_subjects(conn, &event.realm_id, &recipients, &actors).await?;
     let mut source_valid_until = chrono::DateTime::<chrono::Utc>::MAX_UTC;
     let mut roots = RootDependencies::new();
     let mut packet_roots = BTreeMap::new();
@@ -911,3 +935,7 @@ pub(crate) async fn guard_delete_in_connection(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "content_dependencies/recipient_lock_tests.rs"]
+mod recipient_lock_tests;

@@ -533,7 +533,7 @@ async fn check_quorum_members_active(
 ) -> Result<(), PgTransactionError> {
     for method in &policy.methods {
         let RecoveryMethod::DeviceQuorum {
-            min_device_count: k,
+            min_device_count,
             member_ids,
         } = method
         else {
@@ -572,10 +572,10 @@ async fn check_quorum_members_active(
                 }
             }
         }
-        if u64::from(*k) > active {
+        if u64::from(*min_device_count) > active {
             return Err(rejected(
                 ConflictCode::FailedPrecondition,
-                "device_quorum k exceeds the active member devices",
+                "device_quorum min_device_count exceeds the active member devices",
             ));
         }
     }

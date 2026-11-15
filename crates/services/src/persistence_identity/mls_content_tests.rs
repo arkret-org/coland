@@ -636,7 +636,7 @@ fn sealed_root_package(
         created_at: package.created_at,
         expires_at: package.expires_at.flatten(),
         author: arkret_crypto::content_history::ContentRootBackupAuthor::Device {
-            binding: arkret_crypto::backup::KeyBackupAuthBinding {
+            binding: arkret_crypto::backup::KeyBackupAuthorizationBinding {
                 device_id: package.signature_proof.device_id.clone().unwrap(),
                 verification_method: package.signature_proof.verification_method.clone(),
                 signature_algorithm: package.signature_proof.signature_algorithm,

@@ -422,10 +422,56 @@ impl Fixture {
 
     async fn ledger(&self) -> Value {
         let mut conn = pg_conn(&self.store.pool).await.unwrap();
-        sql_query("SELECT jsonb_build_object('remaining',a.remaining_bytes,'request',e.request_digest,'holder',e.holder,'consumed',e.consumed_at IS NOT NULL,'session_state',s.state) AS payload FROM key_backup_unlock_authorities a JOIN key_backup_unlock_entries e USING(authority_id) JOIN recovery_sessions s ON s.id=$2 WHERE a.authority_id=$1")
+        sql_query("SELECT jsonb_build_object('remaining',a.remaining_bytes,'request',e.request_digest,'holder',e.holder,'consumed',e.consumed_at IS NOT NULL,'session_state',s.state,'attempt_windows',(SELECT COALESCE(jsonb_agg(to_jsonb(w) ORDER BY w.window_start),'[]'::jsonb) FROM key_backup_unlock_attempt_windows w WHERE w.authority_id=a.authority_id)) AS payload FROM key_backup_unlock_authorities a JOIN key_backup_unlock_entries e USING(authority_id) JOIN recovery_sessions s ON s.id=$2 WHERE a.authority_id=$1")
             .bind::<Text,_>(SESSION).bind::<sql_types::Uuid,_>(ids::typed_uuid_part_expect_internal(SESSION))
             .get_result::<JsonPayloadRow>(&mut conn).await.unwrap().payload
     }
+}
+
+#[tokio::test]
+async fn recovery_unlock_pg_requires_complete_issuer_bound_canonical_holder() {
+    let mut fixture = Fixture::new().await;
+    let correct = fixture.holder.clone();
+    let mut foreign: Value = serde_json::from_str(&correct).unwrap();
+    let legacy = format!(
+        "{}:{}",
+        foreign["session_grant_ref"]["id"].as_str().unwrap(),
+        foreign["cnf_jkt"].as_str().unwrap(),
+    );
+    foreign["session_grant_ref"]["issuer_id"] =
+        json!(wire::DidCoreId::new("ak:did_core:web:other-issuer.example").unwrap());
+    let foreign = arkret_canonical::canonical_json_string(&foreign).unwrap();
+    let before = fixture.ledger().await;
+    for invalid in [foreign, legacy] {
+        let error = fixture
+            .store
+            .reserve_recovery_attempt(SESSION, &invalid, REQUEST, Utc::now())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("recovery_evidence_unbound"),
+            "{error}"
+        );
+        fixture.holder = invalid;
+        let error = fixture.consume(Utc::now()).await.unwrap_err();
+        assert!(
+            error.to_string().contains("recovery holder changed"),
+            "{error}"
+        );
+        assert_eq!(fixture.ledger().await, before);
+    }
+    fixture.holder = correct;
+    assert!(
+        fixture
+            .store
+            .reserve_recovery_attempt(SESSION, &fixture.holder, REQUEST, Utc::now())
+            .await
+            .unwrap()
+    );
+    assert_eq!(fixture.consume(Utc::now()).await.unwrap(), fixture.backup);
+    let consumed = fixture.ledger().await;
+    assert_eq!(fixture.consume(Utc::now()).await.unwrap(), fixture.backup);
+    assert_eq!(fixture.ledger().await, consumed);
 }
 
 #[tokio::test]

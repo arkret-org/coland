@@ -223,7 +223,7 @@ async fn admit_in_connection(
     }
     crate::authority_commit::queue_event_in_connection(conn, event, commit.committed_at).await?;
     if !matches!(
-        crate::authority_commit::commit_verified_key_backup_pointer_in_connection(
+        crate::authority_commit::commit_verified_realm_actor_backup_series_in_connection(
             conn,
             &write.commit
         )

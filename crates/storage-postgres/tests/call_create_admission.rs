@@ -948,7 +948,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
         EventKind::CallState,
         founder.clone(),
         json!({"call_id":call_id,"roster_delta":{"operation":"leave","actor_id":founder,
-            "device_id":device,"expected_commit_id":latest_cut.roster_revision.unwrap()}}),
+            "device_id":device,"expected_commit_id":latest_cut.roster_revision.unwrap().commit_id}}),
         at + chrono::Duration::seconds(38),
     );
     uow.commit_event(left.clone()).await.unwrap();

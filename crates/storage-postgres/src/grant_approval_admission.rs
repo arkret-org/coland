@@ -19,7 +19,7 @@ pub(crate) struct SatisfiedGrantApproval {
 
 fn missing(action: CapabilityActionId, quorum: u64, count: usize) -> PersistenceError {
     PersistenceError::Conflict(format!(
-        "approval_required: action={} effective_approval_quorum={} counted_approvals={}",
+        "approval_required: action={} effective_min_approver_count={} counted_approvals={}",
         action.as_str(),
         quorum,
         count
@@ -258,7 +258,7 @@ async fn require_with_source(
                         method: method.clone(),
                         qualification_basis: serde_json::json!({"voter":basis,"grant_requirement":{
                             "grant_id":grant.id,"constraint_digest":constraint_digest,"constraint":constraint,
-                            "eligible_roster":roster_basis,"effective_approval_quorum":quorum}}),
+                            "eligible_roster":roster_basis,"effective_min_approver_count":quorum}}),
                     });
             }
         }

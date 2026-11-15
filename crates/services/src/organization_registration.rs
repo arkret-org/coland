@@ -24,7 +24,6 @@ use crate::identity::{DidService, PinnedDidDocumentState, PinnedDidVersionStatus
 
 const CHALLENGE_LIFETIME: Duration = Duration::seconds(300);
 const RECEIPT_LIFETIME: Duration = Duration::days(90);
-const GOVERNANCE_PROFILE: &str = "ak.organization.governance.v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OrganizationRegistrationErrorCode {
@@ -982,15 +981,15 @@ fn verify_control_proof_inner(
                     )
                 })?;
             let required = threshold
-                .get("required")
+                .get("min_signature_count")
                 .and_then(Value::as_u64)
                 .ok_or_else(|| {
                     OrganizationRegistrationError::proof(
-                        "organization governance threshold.required is invalid",
+                        "organization governance threshold.min_signature_count is invalid",
                     )
                 })?;
             let mut eligible = threshold
-                .get("eligible_methods")
+                .get("allowed_verification_methods")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
@@ -1001,10 +1000,9 @@ fn verify_control_proof_inner(
             eligible.dedup();
             Hash::new(
                 arkret_canonical::canonical_sha256(&json!({
-                    "profile": GOVERNANCE_PROFILE,
                     "threshold": {
-                        "required": required,
-                        "eligible_methods": eligible,
+                        "min_signature_count": required,
+                        "allowed_verification_methods": eligible,
                     }
                 }))
                 .map_err(|error| internal(error.to_string()))?,
@@ -1069,12 +1067,22 @@ fn governance_control_methods(
         .ok_or_else(|| {
             OrganizationRegistrationError::proof("organization governance threshold is missing")
         })?;
+    if threshold.keys().any(|name| {
+        !matches!(
+            name.as_str(),
+            "min_signature_count" | "allowed_verification_methods"
+        )
+    }) {
+        return Err(OrganizationRegistrationError::proof(
+            "organization governance threshold contains an unregistered field",
+        ));
+    }
     let required = threshold
-        .get("required")
+        .get("min_signature_count")
         .and_then(Value::as_u64)
         .ok_or_else(|| {
             OrganizationRegistrationError::proof(
-                "organization governance threshold.required is invalid",
+                "organization governance threshold.min_signature_count is invalid",
             )
         })?;
     if declared_threshold != Some(required) {
@@ -1084,11 +1092,11 @@ fn governance_control_methods(
         ));
     }
     let eligible = threshold
-        .get("eligible_methods")
+        .get("allowed_verification_methods")
         .and_then(Value::as_array)
         .ok_or_else(|| {
             OrganizationRegistrationError::proof(
-                "organization governance eligible_methods is missing",
+                "organization governance allowed_verification_methods is missing",
             )
         })?
         .iter()
@@ -1120,9 +1128,9 @@ fn governance_policy(
                 "pinned DID document has no arkret_governance policy",
             )
         })?;
-    if governance.get("profile").and_then(Value::as_str) != Some(GOVERNANCE_PROFILE) {
+    if governance.contains_key("profile") {
         return Err(OrganizationRegistrationError::proof(
-            "pinned DID governance profile is not ak.organization.governance.v1",
+            "pinned DID governance metadata contains an unregistered profile",
         ));
     }
     Ok(governance)
@@ -1396,6 +1404,29 @@ fn internal(detail: impl Into<String>) -> OrganizationRegistrationError {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn governance_metadata_uses_registered_fields_without_retired_profile_or_threshold_aliases() {
+        let method = "did:web:organization.example#governance-key";
+        let canonical = serde_json::json!({"arkret_governance":{"threshold":{"min_signature_count":2,"allowed_verification_methods":[method,"did:web:organization.example#other-key"]}}});
+        assert!(super::governance_control_methods(canonical.as_object().unwrap(), Some(2)).is_ok());
+        for (key, value) in [
+            ("required", serde_json::json!(1)),
+            ("eligible_methods", serde_json::json!([method])),
+        ] {
+            let mut legacy = canonical.clone();
+            legacy["arkret_governance"]["threshold"]
+                .as_object_mut()
+                .unwrap()
+                .insert(key.to_owned(), value);
+            assert!(
+                super::governance_control_methods(legacy.as_object().unwrap(), Some(2)).is_err()
+            );
+        }
+        let mut legacy = canonical;
+        legacy["arkret_governance"]["profile"] = serde_json::json!("ak.organization.governance.v1");
+        assert!(super::governance_control_methods(legacy.as_object().unwrap(), Some(2)).is_err());
+    }
     use std::sync::Arc;
 
     use arkret_models_identity::{
@@ -1526,10 +1557,9 @@ mod tests {
             "authentication": [control_method, governance_method_1, governance_method_2],
             "assertionMethod": [control_method, governance_method_1, governance_method_2],
             "arkret_governance": {
-                "profile": GOVERNANCE_PROFILE,
                 "threshold": {
-                    "required": 2,
-                    "eligible_methods": [governance_method_1, governance_method_2],
+                    "min_signature_count": 2,
+                    "allowed_verification_methods": [governance_method_1, governance_method_2],
                 }
             }
         });

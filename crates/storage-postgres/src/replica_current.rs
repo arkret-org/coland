@@ -4086,9 +4086,18 @@ mod tests {
                 "encrypted_response": {
                     "version": "1.0",
                     "content_type": "application/vnd.arkret.calendar-rsvp-response+json",
+                    "encryption_scheme": arkret_wire::EncryptedPayloadScheme::EpochContentAead,
                     "encryption_context": {
                         "epoch": "7",
-                        "group_state_ref": id(84)
+                        "group_state_ref": id(84),
+                        "content_key_salt": arkret_canonical::base64url_encode([9; 32]),
+                        "root_ref": arkret_canonical::sha256_digest([8; 32]),
+                        "key_commitment": arkret_canonical::sha256_digest([7; 32]),
+                        "protection": {
+                            "root_refs": [arkret_canonical::sha256_digest([8; 32])],
+                            "blob_refs": [],
+                            "backup_refs": ["ak:backup:01904100-0000-7000-8000-000000000001"]
+                        }
                     },
                     "ciphertext": ciphertext
                 }

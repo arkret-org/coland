@@ -107,7 +107,7 @@ pub(crate) fn verify_realm_device_backup_signature(
         || backup.signature_proof.device_authorize_event_id.as_ref()
             != Some(&authority.authorization_ref.event_id)
         || backup.signature_proof.verification_method.as_str()
-            != format!("did:key:{fingerprint}#{fingerprint}")
+            != format!("{}#{}", authority.native_did, authority.device_id)
         || binding.device_generation != authority.current_device_generation_ref
         || backup.created_at < authority.not_before
         || backup.created_at >= authority.expires_at
@@ -441,3 +441,7 @@ pub(crate) async fn verify_backup_writer(
     verify_current_backup_recipient(conn, backup, admission.accepted_at).await?;
     Ok(admission)
 }
+
+#[cfg(test)]
+#[path = "key_backup_authority/native_device_signature_tests.rs"]
+mod native_device_signature_tests;

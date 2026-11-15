@@ -16,7 +16,6 @@ use arkret_models_collaboration::governance::authorization::{
 use arkret_models_collaboration::governance::invite_addressing::InviteDelivery;
 use arkret_models_collaboration::governance::operation_wire::Invite;
 use arkret_wire::{AccountDataKey, AccountId, ActorId, AuthorizationDecision, InviteState};
-use chrono::{DateTime, Utc};
 use coland_http::error::AppError;
 use coland_http::result::{JsonResult, json_ok};
 use salvo::oapi::endpoint;
@@ -24,7 +23,7 @@ use salvo::oapi::extract::JsonBody;
 use salvo::prelude::*;
 use serde_json::json;
 
-use super::{now, query_param};
+use super::now;
 use crate::authz::CapabilityVerdict;
 use crate::routing::system::extract::AuthArgs;
 use crate::state::AppState;
@@ -165,36 +164,22 @@ async fn authz_check(
 
 #[cfg(test)]
 mod tests {
-    use arkret_wire::DidCoreId;
-
-    fn query(name: &str, value: &str) -> String {
-        url::form_urlencoded::Serializer::new(String::new())
-            .append_pair(name, value)
-            .finish()
-    }
-
-    fn canonical<T: serde::Serialize>(identity: &T) -> String {
-        String::from_utf8(arkret_canonical::canonical_json_bytes(identity).unwrap()).unwrap()
-    }
-
-    fn account(station: &str) -> super::AccountId {
-        super::AccountId::new(
-            DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
-            DidCoreId::new(station).unwrap(),
-        )
-    }
 
     #[test]
     fn effective_grants_query_preserves_explicit_actor_id_variant_and_credential_default() {
-        let account = super::ActorId::account(account("ak:did_core:web:station.example"));
-        let foreign = super::ActorId::account(self::account("ak:did_core:web:other.example"));
-        let service = super::ActorId::service(account.signing_principal_id().clone());
+        let principal = arkret_wire::DidCoreId::new("ak:did_core:web:alice.example").unwrap();
+        let station = arkret_wire::DidCoreId::new("ak:did_core:web:station.example").unwrap();
+        let account =
+            super::ActorId::account(super::AccountId::new(principal.clone(), station.clone()));
+        let foreign = super::ActorId::account(super::AccountId::new(
+            principal.clone(),
+            arkret_wire::DidCoreId::new("ak:did_core:web:other.example").unwrap(),
+        ));
+        let service = super::ActorId::service(principal);
         for actor in [&account, &foreign, &service] {
-            let selector = query("subject_actor_id", &canonical(actor));
-            assert_eq!(
-                super::effective_grants_subject(Some(&selector), &account).unwrap(),
-                *actor
-            );
+            let parsed =
+                super::effective_grants_subject(Some(&actor.to_string()), &account).unwrap();
+            assert_eq!(&parsed, actor);
             assert_eq!(
                 super::effective_grants_subject(None, actor).unwrap(),
                 *actor
@@ -206,19 +191,9 @@ mod tests {
         assert!(!super::effective_grants_subject_allowed(
             &service, &account, false
         ));
-        assert!(super::effective_grants_subject_allowed(
-            &foreign, &account, true
-        ));
-        assert!(super::effective_grants_subject_allowed(
-            &account, &account, false
-        ));
-        assert!(super::effective_grants_subject(Some("subject="), &account).is_err());
         assert!(
             super::effective_grants_subject(
-                Some(&query(
-                    "subject_actor_id",
-                    account.signing_principal_id().as_str()
-                )),
+                Some(account.signing_principal_id().as_str()),
                 &account
             )
             .is_err()
@@ -227,21 +202,18 @@ mod tests {
 
     #[test]
     fn effective_grants_query_rejects_same_principal_foreign_station_without_owner_scope() {
+        let principal = arkret_wire::DidCoreId::new("ak:did_core:web:alice.example").unwrap();
+        let station = arkret_wire::DidCoreId::new("ak:did_core:web:station.example").unwrap();
+        let other = arkret_wire::DidCoreId::new("ak:did_core:web:other.example").unwrap();
         for principal in [
-            "ak:did_core:web:alice.example",
-            "ak:did_core:web:agent.example",
+            principal,
+            arkret_wire::DidCoreId::new("ak:did_core:web:agent.example").unwrap(),
         ] {
-            let principal = DidCoreId::new(principal).unwrap();
-            let local = super::ActorId::account(super::AccountId::new(
-                principal.clone(),
-                DidCoreId::new("ak:did_core:web:station.example").unwrap(),
-            ));
-            let foreign = super::ActorId::account(super::AccountId::new(
-                principal,
-                DidCoreId::new("ak:did_core:web:other.example").unwrap(),
-            ));
-            let selector = query("subject_actor_id", &canonical(&foreign));
-            let parsed = super::effective_grants_subject(Some(&selector), &local).unwrap();
+            let local =
+                super::ActorId::account(super::AccountId::new(principal.clone(), station.clone()));
+            let foreign = super::ActorId::account(super::AccountId::new(principal, other.clone()));
+            let parsed =
+                super::effective_grants_subject(Some(&foreign.to_string()), &local).unwrap();
             assert_eq!(parsed, foreign);
             assert!(!super::effective_grants_subject_allowed(
                 &parsed, &local, false
@@ -249,30 +221,37 @@ mod tests {
             assert!(super::effective_grants_subject_allowed(
                 &parsed, &local, true
             ));
+            assert!(super::effective_grants_subject_allowed(
+                &local, &local, false
+            ));
         }
     }
 
     #[test]
     fn invite_query_requires_exact_account_or_authenticated_self() {
-        let account = account("ak:did_core:web:station.example");
+        let account = super::AccountId::new(
+            arkret_wire::DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
+            arkret_wire::DidCoreId::new("ak:did_core:web:station.example").unwrap(),
+        );
         let actor = super::ActorId::account(account.clone());
         assert_eq!(
             super::invite_subject_account(None, &actor).unwrap(),
             account
         );
-        let foreign = self::account("ak:did_core:web:other.example");
-        let selector = query("subject_account_id", &canonical(&foreign));
         assert_eq!(
-            super::invite_subject_account(Some(&selector), &actor).unwrap(),
+            super::invite_subject_account(Some(&account.to_string()), &actor).unwrap(),
+            account
+        );
+        let foreign = super::AccountId::new(
+            account.principal_id.clone(),
+            arkret_wire::DidCoreId::new("ak:did_core:web:other.example").unwrap(),
+        );
+        assert_eq!(
+            super::invite_subject_account(Some(&foreign.to_string()), &actor).unwrap(),
             foreign
         );
-        assert_ne!(foreign, account);
-        for legacy in [
-            "subject=ak%3Adid_core%3Aweb%3Aalice.example",
-            "subject_station_id=ak%3Adid_core%3Aweb%3Astation.example",
-            "subject=&subject_station_id=",
-        ] {
-            assert!(super::invite_subject_account(Some(legacy), &actor).is_err());
+        for invalid in [account.principal_id.to_string(), actor.to_string(), format!(" {}", account), serde_json::json!({"principal_id":account.principal_id}).to_string(), serde_json::json!({"principal_id":account.principal_id,"station_id":account.station_id,"extra":true}).to_string()] {
+            assert!(super::invite_subject_account(Some(&invalid), &actor).is_err());
         }
         assert!(
             super::invite_subject_account(None, &super::ActorId::service(account.principal_id))
@@ -281,50 +260,80 @@ mod tests {
     }
 
     #[test]
-    fn authz_identity_queries_reject_duplicate_empty_unknown_and_noncanonical_selectors() {
-        let account = account("ak:did_core:web:station.example");
+    fn authorization_identity_selectors_reject_empty_unknown_and_noncanonical_values() {
+        let account = super::AccountId::new(
+            arkret_wire::DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
+            arkret_wire::DidCoreId::new("ak:did_core:web:station.example").unwrap(),
+        );
         let actor = super::ActorId::account(account.clone());
+        assert!(super::effective_grants_subject_allowed(&actor, &actor, false));
         for (name, identity) in [
-            ("subject_actor_id", canonical(&actor)),
-            ("subject_account_id", canonical(&account)),
+            ("subject_actor_id", actor.to_string()),
+            ("subject_account_id", account.to_string()),
         ] {
-            let valid = query(name, &identity);
-            let empty = query(name, "");
+            let query = |value: &str| {
+                url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair(name, value)
+                    .finish()
+            };
+            let valid = query(&identity);
+            let empty = query("");
             let mut unknown: serde_json::Value = serde_json::from_str(&identity).unwrap();
             unknown["unknown"] = serde_json::json!(true);
-            let unknown = canonical(&unknown);
-            let noncanonical = format!(" {identity}");
+            for value in [
+                String::new(),
+                unknown.to_string(),
+                format!(" {identity}"),
+                "null".to_owned(),
+                account.principal_id.to_string(),
+            ] {
+                let parsed = if name == "subject_actor_id" {
+                    super::effective_grants_subject(Some(&value), &actor).map(|_| ())
+                } else {
+                    super::invite_subject_account(Some(&value), &actor).map(|_| ())
+                };
+                assert!(parsed.is_err(), "accepted invalid identity: {value}");
+            }
             for invalid in [
                 format!("{valid}&{valid}"),
-                format!("{empty}&{valid}"),
                 format!("{valid}&{empty}"),
-                empty,
-                query(name, &unknown),
-                query(name, &noncanonical),
-                query(name, "null"),
-                query(name, account.principal_id.as_str()),
+                format!("{empty}&{valid}"),
+                format!("{valid}&{}=", name.replace('_', "%5F")),
             ] {
-                let result = if name == "subject_actor_id" {
-                    super::effective_grants_subject(Some(&invalid), &actor).map(|_| ())
-                } else {
-                    super::invite_subject_account(Some(&invalid), &actor).map(|_| ())
-                };
-                assert!(result.is_err(), "accepted invalid selector: {invalid}");
+                assert!(super::authorization_query(&invalid, &[name]).is_err());
             }
-            let escaped_key = name.replace('_', "%5F");
+        }
+    }
+
+    #[test]
+    fn authorization_queries_reject_retired_names_and_duplicate_selectors() {
+        for query in [
+            "subject=x",
+            "subject_station_id=x",
+            "at=2026-01-01T00%3A00%3A00.000Z",
+            "realm_id=a&realm_id=b",
+            "subject_actor_id=a&subject_actor_id=b",
+            "subject_account_id=a&subject_account_id=b",
+        ] {
             assert!(
-                super::authz_query_value(Some(&format!("{valid}&{escaped_key}=")), name, &[])
-                    .is_err()
+                super::authorization_query(
+                    query,
+                    &[
+                        "realm_id",
+                        "subject_actor_id",
+                        "subject_account_id",
+                        "evaluation_at"
+                    ]
+                )
+                .is_err()
             );
         }
-        assert!(super::authz_query_value(Some("at="), "evaluation_at", &["at"]).is_err());
         assert!(
-            super::authz_query_value(
-                Some("evaluation_at=&evaluation_at=2026-11-15T00%3A00%3A00Z"),
-                "evaluation_at",
-                &["at"]
+            super::authorization_query(
+                "evaluation_at=2026-01-01T00%3A00%3A00.000Z",
+                &["evaluation_at"]
             )
-            .is_err()
+            .is_ok()
         );
     }
 }
@@ -347,17 +356,25 @@ async fn effective_grants(
         let session = aa.authenticated_session(state, req).await?;
         crate::routing::identity::session_actor::session_actor_from_credential(state, &session)?
     };
-    let subject_actor = effective_grants_subject(req.uri().query(), &session_actor)?;
-    let realm_id = query_param(req, "realm_id")
+    let query = authorization_query(
+        req.uri().query().unwrap_or_default(),
+        &["realm_id", "subject_actor_id", "evaluation_at"],
+    )?;
+    let subject_actor = effective_grants_subject(
+        query.get("subject_actor_id").map(String::as_str),
+        &session_actor,
+    )?;
+    let realm_id = query
+        .get("realm_id")
         .ok_or_else(|| AppError::param_invalid("realm_id is required"))
         .and_then(|value| {
             RealmId::new(value).map_err(|_| AppError::param_invalid("realm_id is invalid"))
         })?;
-    let evaluated_at = authz_query_value(req.uri().query(), "evaluation_at", &["at"])?
+    let evaluated_at = query
+        .get("evaluation_at")
         .map(|value| {
-            DateTime::parse_from_rfc3339(&value)
-                .map(|value| value.with_timezone(&Utc))
-                .map_err(|_| AppError::param_invalid("evaluation_at is invalid"))
+            arkret_canonical::parse_timestamp_canonical(value)
+                .map_err(|_| AppError::param_invalid("evaluation_at is not a canonical timestamp"))
         })
         .transpose()?
         .unwrap_or_else(now);
@@ -388,57 +405,42 @@ async fn effective_grants(
     })
 }
 
-fn authz_query_value(
-    query: Option<&str>,
-    name: &str,
-    retired: &[&str],
-) -> Result<Option<String>, AppError> {
-    let mut result = None;
-    for (key, value) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
-        if retired.contains(&key.as_ref()) {
-            return Err(AppError::param_invalid(format!(
-                "{key} is not a registered query carrier"
-            )));
-        }
-        if key == name && result.replace(value.into_owned()).is_some() {
-            return Err(AppError::param_invalid(format!(
-                "{name} must occur at most once"
-            )));
+fn authorization_query(
+    query: &str,
+    allowed: &[&str],
+) -> Result<std::collections::BTreeMap<String, String>, AppError> {
+    let mut selected = std::collections::BTreeMap::new();
+    for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if !allowed.contains(&name.as_ref())
+            || selected
+                .insert(name.into_owned(), value.into_owned())
+                .is_some()
+        {
+            return Err(AppError::param_invalid(
+                "unknown or duplicate authorization query parameter",
+            ));
         }
     }
-    Ok(result)
-}
-
-fn authz_identity_selector<T>(value: &str, name: &str) -> Result<T, AppError>
-where
-    T: serde::de::DeserializeOwned + serde::Serialize,
-{
-    let identity = serde_json::from_str::<T>(value)
-        .map_err(|_| AppError::param_invalid(format!("{name} requires a complete identity")))?;
-    let canonical = arkret_canonical::canonical_json_bytes(&identity)
-        .map_err(|_| AppError::param_invalid(format!("{name} is invalid")))?;
-    if canonical != value.as_bytes() {
-        return Err(AppError::param_invalid(format!(
-            "{name} requires a canonical JCS identity"
-        )));
-    }
-    Ok(identity)
+    Ok(selected)
 }
 
 fn effective_grants_subject(
-    query: Option<&str>,
+    subject_actor_id: Option<&str>,
     session_actor: &ActorId,
 ) -> Result<ActorId, AppError> {
-    match authz_query_value(
-        query,
-        "subject_actor_id",
-        &["subject", "subject_station_id", "subject_account_id"],
-    )? {
+    match subject_actor_id {
         Some(value) => {
-            let actor: ActorId = authz_identity_selector(&value, "subject_actor_id")?;
+            let actor: ActorId = serde_json::from_str(value).map_err(|_| {
+                AppError::param_invalid("subject_actor_id must be a complete ActorId")
+            })?;
             actor
                 .validate()
-                .map_err(|error| AppError::param_invalid(error.to_string()))?;
+                .map_err(|_| AppError::param_invalid("subject_actor_id is invalid"))?;
+            if actor.to_string() != value {
+                return Err(AppError::param_invalid(
+                    "subject_actor_id must use canonical JCS",
+                ));
+            }
             Ok(actor)
         }
         None => Ok(session_actor.clone()),
@@ -468,19 +470,28 @@ async fn session_owns_realm(
 }
 
 fn invite_subject_account(
-    query: Option<&str>,
+    subject_account_id: Option<&str>,
     session_actor: &ActorId,
 ) -> Result<AccountId, AppError> {
-    match authz_query_value(
-        query,
-        "subject_account_id",
-        &["subject", "subject_station_id", "subject_actor_id"],
-    )? {
-        Some(value) => authz_identity_selector(&value, "subject_account_id"),
+    match subject_account_id {
         None => session_actor
             .as_account_id()
             .cloned()
             .ok_or_else(|| AppError::param_invalid("invite subject requires an Account")),
+        Some(value) => {
+            let account: AccountId = serde_json::from_str(value).map_err(|_| {
+                AppError::param_invalid("subject_account_id must be a complete AccountId")
+            })?;
+            account
+                .validate()
+                .map_err(|_| AppError::param_invalid("subject_account_id is invalid"))?;
+            if account.to_string() != value {
+                return Err(AppError::param_invalid(
+                    "subject_account_id must use canonical JCS",
+                ));
+            }
+            Ok(account)
+        }
     }
 }
 
@@ -495,9 +506,17 @@ async fn invites(
     let session = aa.authenticated_session(state, req).await?;
     let session_actor =
         crate::routing::identity::session_actor::session_actor_from_credential(state, &session)?;
-    let subject = invite_subject_account(req.uri().query(), &session_actor)?;
+    let query = authorization_query(
+        req.uri().query().unwrap_or_default(),
+        &["realm_id", "subject_account_id", "cursor"],
+    )?;
+    let subject = invite_subject_account(
+        query.get("subject_account_id").map(String::as_str),
+        &session_actor,
+    )?;
     let subject_actor = ActorId::account(subject.clone());
-    let realm_filter = query_param(req, "realm_id")
+    let realm_filter = query
+        .get("realm_id")
         .map(|value| {
             RealmId::new(value).map_err(|_| AppError::param_invalid("realm_id is invalid"))
         })

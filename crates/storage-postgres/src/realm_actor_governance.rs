@@ -1,8 +1,6 @@
 //! Account Device governance commands on the private Realm control stream.
 use arkret_models_integration::*;
-use arkret_wire::{
-    ActorId, CommittedEventRef, Event, EventKind, RealmCommit, ScopeRef,
-};
+use arkret_wire::{ActorId, CommittedEventRef, Event, EventKind, RealmCommit, ScopeRef};
 use coland_storage::{EventApprovalCommit, PersistenceError};
 use serde_json::{Value, json};
 

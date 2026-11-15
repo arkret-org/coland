@@ -89,6 +89,48 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y postgresql-client jq
 
+      - name: Use the service PostgreSQL tools for backup and restore
+        env:
+          COLAND_DRILL_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          # Keep host-side archive files and the scripts' exact arguments,
+          # but run both archive tools from the same PG16 service as the DB.
+          # Runner image updates must not select a newer archive producer.
+          TOOLS="$RUNNER_TEMP/coland-drill-postgres-tools"
+          mkdir -p "$TOOLS"
+          cat > "$TOOLS/pg_dump" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          args=()
+          output=
+          for arg in "$@"; do
+            case "$arg" in
+              --file=*) test -z "$output"; output="${arg#--file=}" ;;
+              *) args+=("$arg") ;;
+            esac
+          done
+          test -n "$output"
+          docker exec --env PGPASSWORD "$COLAND_DRILL_POSTGRES_CONTAINER" \
+            pg_dump "${args[@]}" > "$output"
+          SH
+          cat > "$TOOLS/pg_restore" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          args=("$@")
+          test "${#args[@]}" -gt 0
+          archive="${args[-1]}"
+          unset 'args[-1]'
+          test -f "$archive"
+          docker exec -i --env PGPASSWORD "$COLAND_DRILL_POSTGRES_CONTAINER" \
+            pg_restore "${args[@]}" < "$archive"
+          SH
+          chmod +x "$TOOLS/pg_dump" "$TOOLS/pg_restore"
+          echo "$TOOLS" >> "$GITHUB_PATH"
+          echo "COLAND_DRILL_POSTGRES_CONTAINER=$COLAND_DRILL_POSTGRES_CONTAINER" >> "$GITHUB_ENV"
+          docker exec "$COLAND_DRILL_POSTGRES_CONTAINER" pg_dump --version
+          docker exec "$COLAND_DRILL_POSTGRES_CONTAINER" pg_restore --version
+
       - name: Verify postgres reachable
         run: |
           set -euxo pipefail

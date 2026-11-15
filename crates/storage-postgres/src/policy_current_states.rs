@@ -938,7 +938,10 @@ async fn check_policy_cas_in_connection(
             ));
         }
     }
-    let revision = chain.last().map(|row| policy_revision(row).map(|r| r.commit_id)).transpose()?;
+    let revision = chain
+        .last()
+        .map(|row| policy_revision(row).map(|r| r.commit_id))
+        .transpose()?;
     if payload.expected_commit_id.as_ref() != Some(&revision) {
         return Err(refused(
             "Management Policy expected_commit_id differs from current",

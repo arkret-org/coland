@@ -770,7 +770,8 @@ fn authority_from_row(row: AuthorityRow) -> PersistenceResult<CurrentRealmAuthor
 pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, \
          CASE WHEN result.selector_kind='message_reactions' THEN ( \
            SELECT r.source_stream_ref FROM message_reactions_current_states r \
-           WHERE r.realm_id=$1 AND to_jsonb(r.target_ref)=result.selector_subject \
+           WHERE r.realm_id=$1 AND r.target_ref=(result.selector_subject #>> '{}') \
+             AND to_jsonb(r.target_ref)=result.selector_subject \
              AND r.current_commit_id=result.current_commit_id \
              AND r.current_stream_position=result.current_stream_position AND r.value=result.value \
          ) ELSE covering.stream_ref END AS source_stream_ref FROM ( \

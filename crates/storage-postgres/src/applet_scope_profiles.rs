@@ -266,8 +266,7 @@ pub(crate) async fn prepare_control(
             let (value, source) = previous
                 .as_ref()
                 .ok_or_else(|| denied("Profile has never been created"))?;
-            if payload.expected_commit_id.as_ref()
-                != Some(&source.commit_id)
+            if payload.expected_commit_id.as_ref() != Some(&source.commit_id)
                 || value["profile_id"] != json!(payload.actor_profile_id)
             {
                 return Err(denied("Profile CAS or target differs"));

@@ -40,6 +40,8 @@ Mis = "Mis"
 ba = "ba"
 # hex-bytes comment annotating the ASCII "eference" tail of "reference"
 eference = "eference"
+# The actual crate hax-lib-macros in the reviewed RustSec dependency chain.
+hax = "hax"
 
 [files]
 extend-exclude = ["**/*.js", "**/*.css", "**/*.html", "examples/*/static/**/*.*"]

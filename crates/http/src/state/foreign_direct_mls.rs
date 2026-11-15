@@ -510,6 +510,13 @@ mod tests {
         let mut group: ArkretMlsGroup = identity("alice", 1)
             .create_group_with_governance_binding(&scope, &genesis_binding)
             .unwrap();
+        group
+            .install_local_creator_binding(actor("alice"), Some(id(97)))
+            .unwrap();
+        let mut accepted_leaves = std::collections::BTreeMap::from([(
+            group.active_author_leaves()[0].signature_key.clone(),
+            (actor("alice"), group.identity().endpoint_identity(), id(97)),
+        )]);
         let (group_info, tree) = group.public_group_state_bytes().unwrap();
         let mut tracker =
             MlsPublicGroupTracker::from_external(&group_info, &tree, group.group_id().as_str(), 0)
@@ -581,6 +588,11 @@ mod tests {
             )
             .unwrap();
             let mut package = identity(name, *device).key_package_record().unwrap();
+            let recipient_leaf = arkret_mls::author_leaf_from_key_package_bytes(
+                &arkret_canonical::base64url_decode(&package.keypackage).unwrap(),
+                0, // Only extract the key here; read the actual occupied index after acceptance.
+            )
+            .unwrap();
             package.state = MlsKeyPackageState::Claimed;
             package.claim_id = Some(format!(
                 "ak:keypackage_claim:01904100-0000-7000-8000-{:012}",
@@ -616,6 +628,36 @@ mod tests {
                     &value,
                 )
                 .unwrap();
+            // This fixture models an already-verified acceptance boundary.
+            // Retain every accepted endpoint by its actual KeyPackage key;
+            // repeated ActorIds must not collapse two different Devices.
+            accepted_leaves.insert(
+                recipient_leaf.signature_key,
+                (
+                    package.actor_id.clone(),
+                    package.endpoint.clone(),
+                    id(*device),
+                ),
+            );
+            let bindings = group
+                .active_author_leaves()
+                .into_iter()
+                .map(|leaf| {
+                    let (actor_id, endpoint, authorization) =
+                        accepted_leaves.get(&leaf.signature_key).unwrap();
+                    arkret_mls::MlsVerifiedLeafBinding {
+                        leaf_index: leaf.leaf_index,
+                        actor_id: actor_id.clone(),
+                        endpoint: endpoint.clone(),
+                        signature_key: arkret_wire::Base64UrlString::new(
+                            arkret_canonical::base64url_encode(&leaf.signature_key),
+                        )
+                        .unwrap(),
+                        device_authorize_event_id: Some(authorization.clone()),
+                    }
+                })
+                .collect();
+            group.install_verified_leaf_bindings(bindings).unwrap();
             tracker
                 .process_public_handshake(
                     &arkret_canonical::base64url_decode(payload.commit_base64url()).unwrap(),

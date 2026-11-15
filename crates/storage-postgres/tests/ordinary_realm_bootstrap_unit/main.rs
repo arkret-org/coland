@@ -292,7 +292,7 @@ async fn owned_agent_exact_current_is_issuer_only_even_after_membership_ends() {
         &bootstrap_tail(&unit),
         &controller,
         arkret_wire::EventKind::CapabilityRevoke,
-        serde_json::json!({"grant_id":grant_id,"expected_commit_id":head.commit_id}),
+        serde_json::json!({"grant_id":grant_id,"expected_commit_id":arkret_wire::RealmCommitId::from_digest([0x93; 32])}),
     );
     assert_refused_with_zero_writes(
         &uow,
@@ -306,8 +306,9 @@ async fn owned_agent_exact_current_is_issuer_only_even_after_membership_ends() {
         &bootstrap_tail(&unit),
         &controller,
         arkret_wire::EventKind::CapabilityRevoke,
-        serde_json::json!({"grant_id":grant_id,"expected_commit_id":row.revision}),
+        serde_json::json!({"grant_id":grant_id,"expected_commit_id":row.revision.commit_id}),
     );
+    let revoke = source_if_human(&pool, revoke).await;
     uow.commit_event(revoke.clone()).await.unwrap();
     let SelfExactCurrentRead::Answer(ExactCurrentStateReadResponseBody::Present {
         current_state: ExactCurrentState::CapabilityGrant(terminal),
@@ -2517,7 +2518,7 @@ async fn account_window_basis_reserves_exact_issued_snapshot_or_is_preview_only(
         realm_id: realm_id.clone(),
         account: account.clone(),
         issuer: issuer.clone(),
-        window_limit: limit,
+        max_window_event_count: limit,
         window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
         expires_at_ms: now_ms + window_ttl,
         now_ms,
@@ -3061,7 +3062,7 @@ async fn account_window_carries_same_cut_current_and_reservation_deadline() {
         realm_id: realm_id.clone(),
         account: creator.clone(),
         issuer: issuer.clone(),
-        window_limit: 2,
+        max_window_event_count: 2,
         window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
         expires_at_ms: now_ms + coland_storage::MAX_ACCOUNT_WINDOW_RESERVATION_MS,
         now_ms,
@@ -3145,7 +3146,7 @@ async fn account_window_carries_same_cut_current_and_reservation_deadline() {
     let preview = store
         .freeze_account_realm_window(
             &AccountRealmWindowRequest {
-                window_limit: 1,
+                max_window_event_count: 1,
                 window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
                 ..request.clone()
             },
@@ -3291,7 +3292,7 @@ async fn message_tail_window_beyond_twenty_commits_names_the_issued_anchor() {
         realm_id: realm_id.clone(),
         account: creator.clone(),
         issuer: issuer.clone(),
-        window_limit: 21,
+        max_window_event_count: 21,
         window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
         expires_at_ms: now_ms + coland_storage::MAX_ACCOUNT_WINDOW_RESERVATION_MS,
         now_ms,
@@ -3319,7 +3320,7 @@ async fn message_tail_window_beyond_twenty_commits_names_the_issued_anchor() {
     let unanchored = store
         .freeze_account_realm_window(
             &AccountRealmWindowRequest {
-                window_limit: 20,
+                max_window_event_count: 20,
                 window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
                 ..request.clone()
             },
@@ -3527,7 +3528,7 @@ async fn issued_snapshots_and_window_reservations_stay_within_their_caps() {
             realm_id: realm_id.clone(),
             account: creator.clone(),
             issuer: issuer.clone(),
-            window_limit: limit,
+            max_window_event_count: limit,
             window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
             expires_at_ms: now_ms + window_ttl,
             now_ms,
@@ -3858,7 +3859,7 @@ async fn account_scan_withholds_expired_and_redacted_messages_on_their_commits()
                 realm_id: realm_id.clone(),
                 account: creator.clone(),
                 issuer: issuer.clone(),
-                window_limit: 2,
+                max_window_event_count: 2,
                 window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
                 expires_at_ms: now_ms + 300_000,
                 now_ms,
@@ -5459,7 +5460,7 @@ async fn circle_create_and_self_join_write_same_cut_current() {
         realm_id: realm_id.clone(),
         account: creator.clone(),
         issuer: station.clone(),
-        window_limit: 20,
+        max_window_event_count: 20,
         window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
         expires_at_ms: now_ms + 300_000,
         now_ms,
@@ -5680,7 +5681,7 @@ async fn assert_circle_window_dependencies(
     );
     uow.commit_event(strand.clone()).await.unwrap();
     let bounded = coland_storage::AccountRealmWindowRequest {
-        window_limit: 1,
+        max_window_event_count: 1,
         window_cursor: format!("ak:cursor:{}", uuid::Uuid::now_v7().as_simple()),
         selected_stream_refs: Some(vec![join.authority_commit.commit.stream_ref.clone()]),
         ..request.clone()

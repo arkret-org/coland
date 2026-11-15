@@ -1,3 +1,5 @@
+use serde_json::json;
+
 use super::common::*;
 
 /// The served OpenAPI document is generated from the live salvo router via
@@ -40,6 +42,36 @@ async fn served_openapi_is_generated_from_the_router_body() {
     assert_operation_selectors_are_required(&spec);
     assert_operation_ids_are_unique(&spec);
     assert_component_refs_resolve(&spec, &spec);
+    assert_session_grant_security(&spec);
+}
+
+fn assert_session_grant_security(root: &Value) {
+    assert_eq!(
+        root["components"]["securitySchemes"]["SessionGrantAuth"],
+        json!({ "type": "http", "scheme": "DPoP" })
+    );
+    assert_eq!(
+        root["components"]["securitySchemes"]["DpopProof"],
+        json!({ "type": "apiKey", "in": "header", "name": "DPoP" })
+    );
+    assert!(
+        root["components"]["securitySchemes"]
+            .get("bearer_session")
+            .is_none()
+    );
+    let mut session_operation_count = 0;
+    for path in root["paths"].as_object().expect("paths").values() {
+        for operation in path.as_object().expect("path item").values() {
+            for requirement in operation["security"].as_array().into_iter().flatten() {
+                if requirement.get("SessionGrantAuth").is_some() {
+                    assert_eq!(requirement["DpopProof"], json!([]));
+                    session_operation_count += 1;
+                }
+                assert!(requirement.get("bearer_session").is_none());
+            }
+        }
+    }
+    assert!(session_operation_count > 0);
 }
 
 fn assert_operation_selectors_are_required(root: &Value) {

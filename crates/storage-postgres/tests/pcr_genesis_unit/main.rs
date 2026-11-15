@@ -4334,7 +4334,7 @@ fn recovery_policy_event(
                 "signature_algorithm": "Ed25519",
                 "signature": "AA"
             },
-            "methods": [{"kind": "device_quorum", "k": 2, "member_ids": quorum}]
+            "methods": [{"kind": "device_quorum", "min_device_count": 2, "member_ids": quorum}]
         }))
         .unwrap();
     let transcript =

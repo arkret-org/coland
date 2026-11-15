@@ -1839,6 +1839,12 @@ mod typed_replay_tests {
         let grant = cut.grants.get_mut(&id).unwrap();
         grant.issuer_authority_refs = vec![owned.clone()];
         grant.authority_root_ref = owned_root;
+        grant.constraints = vec![
+            arkret_models_collaboration::governance::grant_constraint::GrantConstraint::authority_control(
+                0, false,
+            ),
+        ];
+        grant.validate_authority_shape().unwrap();
         assert_eq!(
             product_grants(&cut, &realm_id(), &actor, at(), Some(&owned)).len(),
             1

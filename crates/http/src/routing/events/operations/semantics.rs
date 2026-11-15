@@ -160,7 +160,7 @@ fn validate_typed_payload_shapes(
             if let Some(binding) = operation
                 .payload
                 .get("roster_delta")
-                .filter(|delta| delta.get("op").and_then(Value::as_str) == Some("join"))
+                .filter(|delta| delta.get("operation").and_then(Value::as_str) == Some("join"))
                 .and_then(|delta| delta.get("participant"))
                 .and_then(|participant| participant.get("participant_binding"))
                 && (binding

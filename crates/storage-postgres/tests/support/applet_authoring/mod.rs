@@ -110,6 +110,10 @@ impl Fixture {
         let origin = spawn_introspection_mock(slot.clone(), management_authority.clone()).await;
         let mut config = AppConfig {
             development_mode: true,
+            rate_limiter: coland_http::ratelimit::RateLimiterConfig::resolve(
+                true,
+                Default::default(),
+            ),
             embedded_webvh_registration_bearer: Some("applet-fixture-registration".to_owned()),
             session_grant_introspection_url: Some(format!(
                 "{origin}/_coauth/internal/session-grants/introspect"
@@ -210,6 +214,7 @@ impl Fixture {
             device_id: Some(pcr.history.founding_device_id.clone()),
             audience_id: state.service_core_id(),
             scopes: vec![
+                arkret_wire::ServiceOperationId::ROOT_IDENTITY_RECOVERY_POLICY_COMMAND_PUBLISH_V1,
                 arkret_wire::ServiceOperationId::SELF_ACCOUNT_COMMAND_UPDATE_PROFILE_V1,
                 arkret_wire::ServiceOperationId::SELF_APPLET_INSTALL_COMMAND_PREVIEW_V1,
                 arkret_wire::ServiceOperationId::SELF_APPLET_COMMAND_INSTALL_V1,
@@ -3402,15 +3407,12 @@ mod realm_native_fixture {
             stream_ref: CommitStreamRef::RealmControl { realm_id: realm },
             stream_position: commit.stream_position,
         };
-        let revision = CurrentRevision {
-            commit_id: source.commit_id.clone(),
-            stream_position: commit.stream_position,
-        };
+        let commit_id = source.commit_id.clone();
         let mut value = json!({
             "target_actor_id":creation.actor_id,"request_id":"0123456789012345678901",
-            "manager_ref":source,"recovery_ref":source,"expected_control_commit_id":revision,
-            "expected_owner_status_commit_id":revision,"expected_governance_status_commit_id":revision,
-            "expected_device_generation_commit_id":revision,"expected_generation":1,"new_generation":2,
+            "manager_ref":source,"recovery_ref":source,"expected_control_commit_id":commit_id,
+            "expected_owner_status_commit_id":commit_id,"expected_governance_status_commit_id":commit_id,
+            "expected_device_generation_commit_id":commit_id,"expected_generation":1,"new_generation":2,
             "replaces_recovery_ref":null,"next_resolution":resolution,
             "method_history_evidence":{"log_entries":entries,"witness_records":[]},
             "next_control_method_kid":next_method,"expires_at":arkret_canonical::format_timestamp_canonical(at + chrono::Duration::minutes(5))
@@ -5426,18 +5428,23 @@ mod realm_native_fixture {
         sql_query("SELECT jsonb_object_agg(selector->>'kind'||COALESCE(selector->>'gate',''),value) AS value FROM realm_actor_current_states WHERE realm_id=$1 AND actor_id=$2")
             .bind::<Text,_>(fixture.realm.as_str()).bind::<Jsonb,_>(json!(actor)).get_result::<Row>(&mut conn).await.unwrap().value
     }
-    async fn current_revision(fixture: &Fixture, actor: &ActorId, kind: &str) -> Value {
+    async fn current_commit_id(
+        fixture: &Fixture,
+        actor: &ActorId,
+        kind: &str,
+    ) -> arkret_wire::RealmCommitId {
         use diesel::sql_query;
         use diesel::sql_types::{Jsonb, Text};
         use diesel_async::RunQueryDsl as _;
         #[derive(diesel::QueryableByName)]
         struct Row {
-            #[diesel(sql_type=Jsonb)]
-            value: Value,
+            #[diesel(sql_type=Text)]
+            value: String,
         }
         let mut conn = fixture.pool.get().await.unwrap();
-        sql_query("SELECT jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position) AS value FROM realm_actor_current_states WHERE realm_id=$1 AND actor_id=$2 AND selector->>'kind'=$3")
-            .bind::<Text,_>(fixture.realm.as_str()).bind::<Jsonb,_>(json!(actor)).bind::<Text,_>(kind).get_result::<Row>(&mut conn).await.unwrap().value
+        let row = sql_query("SELECT current_commit_id AS value FROM realm_actor_current_states WHERE realm_id=$1 AND actor_id=$2 AND selector->>'kind'=$3")
+            .bind::<Text,_>(fixture.realm.as_str()).bind::<Jsonb,_>(json!(actor)).bind::<Text,_>(kind).get_result::<Row>(&mut conn).await.unwrap();
+        arkret_wire::RealmCommitId::new(row.value).unwrap()
     }
 
     async fn governance(
@@ -5577,12 +5584,12 @@ mod realm_native_fixture {
                 .unwrap()
                 .is_none()
         );
-        let recovery_revision =
-            current_revision(fixture, &candidate.actor_id, "realm_actor_recovery").await;
+        let recovery_commit_id =
+            current_commit_id(fixture, &candidate.actor_id, "realm_actor_recovery").await;
         let disable = command(
             EventKind::RealmActorRecoverySet,
             json!({
-                "target_actor_id":candidate.actor_id,"enabled":false,"expected_recovery_commit_id":recovery_revision,
+                "target_actor_id":candidate.actor_id,"enabled":false,"expected_recovery_commit_id":recovery_commit_id,
                 "expected_manager_commit_id":creation.commit_id
             }),
         );
@@ -5590,12 +5597,12 @@ mod realm_native_fixture {
         assert_eq!(status, StatusCode::OK, "disable recovery: {response}");
         let disabled = snapshot(fixture, &candidate.actor_id).await;
         assert_eq!(disabled["realm_actor_recovery"]["enabled"], false);
-        let updated_revision =
-            current_revision(fixture, &candidate.actor_id, "realm_actor_recovery").await;
+        let updated_commit_id =
+            current_commit_id(fixture, &candidate.actor_id, "realm_actor_recovery").await;
         let repeated_value = command(
             EventKind::RealmActorRecoverySet,
             json!({
-                "target_actor_id":candidate.actor_id,"enabled":false,"expected_recovery_commit_id":updated_revision,
+                "target_actor_id":candidate.actor_id,"enabled":false,"expected_recovery_commit_id":updated_commit_id,
                 "expected_manager_commit_id":creation.commit_id
             }),
         );
@@ -5625,7 +5632,7 @@ mod realm_native_fixture {
         let enable = command(
             EventKind::RealmActorRecoverySet,
             json!({
-                "target_actor_id":candidate.actor_id,"enabled":true,"expected_recovery_commit_id":updated_revision,
+                "target_actor_id":candidate.actor_id,"enabled":true,"expected_recovery_commit_id":updated_commit_id,
                 "expected_manager_commit_id":creation.commit_id
             }),
         );
@@ -6623,10 +6630,74 @@ mod realm_native_fixture {
                     .is_empty()
             );
         }
+        let packets = archive["tables"]["key_backups"].as_array().unwrap();
+        let retained = fixture
+            .state
+            .test_persistence()
+            .key_backups()
+            .snapshot_all()
+            .await
+            .unwrap();
+        for row in packets {
+            for column in [
+                "backup_kind",
+                "metadata",
+                "series_actor_id",
+                "series_id",
+                "series_sequence",
+            ] {
+                assert!(!row.as_object().unwrap().contains_key(column));
+            }
+            let original = retained
+                .iter()
+                .find(|packet| packet["backup_id"] == row["payload"]["backup_id"])
+                .unwrap();
+            assert_eq!(
+                arkret_canonical::canonical_json_bytes(&row["payload"]).unwrap(),
+                arkret_canonical::canonical_json_bytes(original).unwrap(),
+                "portable custody must retain the complete signed packet verbatim"
+            );
+        }
+        eprintln!(
+            "portable native backup original rows checked: {}",
+            packets.len()
+        );
         store
             .import_management_private_state(&manifest, &bytes)
             .await
             .unwrap();
+        if !packets.is_empty() {
+            let (_, before) = store
+                .export_management_private_state(&fixture.realm)
+                .await
+                .unwrap();
+            for column in ["metadata", "unknown_private_column"] {
+                let mut changed = archive.clone();
+                changed["tables"]["key_backups"][0][column] = json!({"unexpected":true});
+                let changed = arkret_canonical::canonical_json_bytes(&changed).unwrap();
+                let mut bad = manifest.clone();
+                bad.state_digest =
+                    arkret_wire::Hash::new(arkret_canonical::sha256_digest(&changed)).unwrap();
+                let error = store
+                    .import_management_private_state(&bad, &changed)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("unknown or missing private row column"),
+                    "{error}"
+                );
+                let (_, after) = store
+                    .export_management_private_state(&fixture.realm)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    before, after,
+                    "refused private columns must leave exported custody unchanged"
+                );
+            }
+        }
         boxed_step(|| independent_management_archive(fixture, &manifest, &bytes, &archive)).await;
         if has_blob {
             let mut changed = archive.clone();
@@ -7283,7 +7354,7 @@ mod realm_native_fixture {
                 grant: &arkret_wire::GrantId,
                 enabled: bool,
             ) {
-                let revision = current_revision(fixture, actor, "realm_actor_recovery").await;
+                let commit_id = current_commit_id(fixture, actor, "realm_actor_recovery").await;
                 let mut event = fixture.admin_event(
                     EventKind::RealmActorRecoverySet,
                     ScopeRef::RealmControl {
@@ -7291,7 +7362,7 @@ mod realm_native_fixture {
                     },
                     json!({
                         "target_actor_id":actor,"enabled":enabled,
-                        "expected_recovery_commit_id":revision,
+                        "expected_recovery_commit_id":commit_id,
                         "expected_manager_commit_id":creation.commit_id
                     }),
                 );
@@ -7908,6 +7979,15 @@ mod realm_native_fixture {
         let edge = make_edge();
         let author = ManagedActorAuthoringService::new(edge.clone()).unwrap();
         let manager = fixture_runtime_manager(&native, edge.clone());
+        if matches!(&content_scope, ScopeRef::Realm { .. }) {
+            // Establish the read fixture's standing-manager pointer before the
+            // host's immediate maintenance tick and Device control writes race.
+            // This is a real first attempt; contention/recovery is a separate
+            // contract, and Circle still requires its original known-scope gate.
+            boxed_step(|| manager.maintain_backup_series(&actor, &content_scope))
+                .await
+                .unwrap();
+        }
         *native.managed_router.lock().unwrap() = Some(Arc::new(salvo::Service::new(
             arkret_bridge_runtime::web::managed_applet_host_router_with_manager(
                 edge.clone(),
@@ -8664,6 +8744,14 @@ mod realm_native_fixture {
         eprintln!(
             "real Bridge runtime: reject authenticated malformed content without blocking the stream"
         );
+        boxed_step(|| {
+            realm_actor_mls_fixture::publish_human_root(
+                &factory.fixture,
+                &content_scope,
+                &human_group,
+            )
+        })
+        .await;
         let rejected = boxed_step(|| {
             realm_actor_mls_fixture::invalid_human_messages(
                 &factory.fixture,

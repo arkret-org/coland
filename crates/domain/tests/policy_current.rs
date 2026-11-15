@@ -45,7 +45,7 @@ fn policy_action_payload(policy_id: Option<&str>, action_id: Option<&str>) -> Va
         "value": {
             "action": "ak.message.create",
             "approval_required": true,
-            "approval_quorum": 2,
+            "min_approver_count": 2,
             "policy_scope": REALM
         }
     });
@@ -183,7 +183,7 @@ fn policy_action_rejects_unknown_action_and_zero_quorum() {
 
     for (field, value) in [
         ("action", serde_json::json!("ak.future.unknown")),
-        ("approval_quorum", serde_json::json!(0)),
+        ("min_approver_count", serde_json::json!(0)),
     ] {
         let mut payload = policy_action_payload(None, Some("slot"));
         payload["value"][field] = value;

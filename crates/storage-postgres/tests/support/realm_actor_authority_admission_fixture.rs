@@ -269,7 +269,7 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
     let close = factory.fixture.admin_event(
         EventKind::CapabilityRevoke,
         ScopeRef::Realm { realm_id: factory.fixture.realm.clone() },
-        json!({"grant_id":ghost_grant,"expected_commit_id":current.revision,"reason":"creation source closed after candidate signing"}),
+        json!({"grant_id":ghost_grant,"expected_commit_id":current.revision.commit_id,"reason":"creation source closed after candidate signing"}),
     );
     let (status, value) = factory
         .fixture

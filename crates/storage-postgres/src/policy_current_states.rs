@@ -1245,7 +1245,7 @@ mod admission_tests {
         circle_join.rules[0].review_requirement = Some(
             arkret_models_collaboration::governance::operation_wire::ManagementReviewRequirement {
                 approver_actor_ids: vec![policy.created_by.clone()],
-                threshold: 1,
+                min_approver_count: 1,
                 max_age_seconds: 60,
             },
         );

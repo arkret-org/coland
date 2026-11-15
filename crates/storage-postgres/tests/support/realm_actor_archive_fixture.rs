@@ -321,6 +321,54 @@ async fn fixture_archive_inventory(
         &keys,
     )
     .unwrap();
+    // This independent client learns governor keys only from the public,
+    // nonce-bound bundle it just verified, never the server's private directory.
+    assert_eq!(resolution.service_kind, arkret_wire::ServiceKind::Station.as_str());
+    let mut originals = Vec::new();
+    for entry in &manifest.entries {
+        use arkret_models_integration::RealmActorArchiveInventoryEntry;
+        match entry {
+            RealmActorArchiveInventoryEntry::Backup(_) => {}
+            RealmActorArchiveInventoryEntry::Series(entry) => originals.push(&entry.source),
+            RealmActorArchiveInventoryEntry::Recipient(entry) => {
+                originals.push(&entry.declaration);
+                originals.extend(entry.recovery_begin.iter());
+            }
+        }
+    }
+    for original in originals {
+        let signature = &original.commit.signature;
+        assert_eq!(
+            arkret_wire::detached_signature_service_id(signature).unwrap(),
+            bundle.current_service_id,
+        );
+        let document = arkret_identity::authenticated_service_document_at(
+            &resolution,
+            &bundle.current_service_id,
+            signature.created_at,
+        )
+        .unwrap();
+        arkret_identity::validate_verification_method_relationship(
+            &document,
+            &signature.verification_method,
+            &document.id,
+            arkret_identity::DidVerificationRelationship::AssertionMethod,
+        )
+        .unwrap();
+        let key = arkret_identity::public_key_material_from_document(
+            &document,
+            &signature.verification_method,
+        )
+        .unwrap();
+        if let Some(existing) = arkret_identity::RealmAuthorityKeyDirectory::public_key_at(
+            &keys,
+            &signature.verification_method,
+            signature.created_at,
+        ) {
+            assert_eq!(existing.ed25519_bytes().unwrap(), key.ed25519_bytes().unwrap());
+        }
+        keys.insert_at(&signature.verification_method, signature.created_at, key);
+    }
     arkret_identity::realm_actor_content_backup::verify_realm_actor_archive_inventory(
         &manifest, &authority, &keys,
     )
@@ -628,11 +676,11 @@ async fn fixture_native_backup_outcomes(
         .expect("first real Bot portal must first durably PUT its original root");
     assert_eq!(entry.backup.series_id, selection.active_series_id);
     assert_eq!(
-        entry.backup.auth_binding.as_ref().unwrap().recovery_ref,
+        entry.backup.authorization_binding.as_ref().unwrap().recovery_ref,
         *current_recovery
     );
     assert_ne!(
-        entry.backup.auth_binding.as_ref().unwrap().recovery_ref,
+        entry.backup.authorization_binding.as_ref().unwrap().recovery_ref,
         selection.recovery_ref,
         "new packet binds current Recovery while selected series preserves its historical source"
     );
@@ -830,7 +878,7 @@ async fn fixture_native_backup_transactions(
                 .unwrap(),
             realm_actor_id: device.actor_id.as_realm_actor_id().unwrap().clone(),
             created_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
-            author: arkret::crypto::backup::KeyBackupAuthBinding {
+            author: arkret::crypto::backup::KeyBackupAuthorizationBinding {
                 device_id: device.device_id.clone(),
                 verification_method: original.signature_proof.verification_method.clone(),
                 signature_algorithm: original.signature_proof.signature_algorithm,

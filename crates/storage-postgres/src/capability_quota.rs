@@ -119,13 +119,13 @@ async fn reserve_one(
     if counted.is_none_or(|row| row.consumed > saturating_i64(reservation.max_operation_count)) {
         return Ok(false);
     }
-    match reservation.burst {
+    match reservation.burst_operation_count {
         Some(burst) => take_bucket_token(conn, reservation, burst).await,
         None => Ok(true),
     }
 }
 
-/// §8.1 item 4: a token bucket of capacity `min(burst, max_operation_count)`
+/// §8.1 item 4: a token bucket of capacity `min(burst_operation_count, max_operation_count)`
 /// refilling at `max_operation_count / period` on the same authority. Levels are
 /// kept in units of `1 / period_ms` token.
 async fn take_bucket_token(
@@ -200,7 +200,7 @@ mod tests {
             window_id: 1,
             max_operation_count,
             period_ms: 60_000,
-            burst: None,
+            burst_operation_count: None,
             verification_ms: 60_001,
         }
     }

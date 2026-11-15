@@ -332,8 +332,8 @@ fn space_wip_policy_is_projected_and_removed_scope_fields_fail_closed() {
                 "kind": "list",
                 "title": "WIP",
                 "fields": {
-                    "wip_limit": 5,
-                    "wip_limit_enforcement": "reject"
+                    "max_active_strand_count": 5,
+                    "active_strand_count_enforcement": "reject"
                 }
             }
         }),
@@ -342,7 +342,10 @@ fn space_wip_policy_is_projected_and_removed_scope_fields_fail_closed() {
         state.apply(&create, &hlc),
         ProjectionEffect::SpaceContainerLifecycle { .. }
     ));
-    assert_eq!(state.space_containers[space_id].fields["wip_limit"], 5);
+    assert_eq!(
+        state.space_containers[space_id].fields["max_active_strand_count"],
+        5
+    );
 
     for object in [
         serde_json::json!({
@@ -367,7 +370,7 @@ fn space_wip_policy_is_projected_and_removed_scope_fields_fail_closed() {
             "realm_id": realm_id,
             "kind": "board",
             "title": "Wrong WIP owner",
-            "fields": {"wip_limit": 5, "wip_limit_enforcement": "warn"}
+            "fields": {"max_active_strand_count": 5, "active_strand_count_enforcement": "warn"}
         }),
     ] {
         let effect = state.apply(

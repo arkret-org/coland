@@ -1064,7 +1064,7 @@ mod tests {
                 {
                     "id": format!("{AGENT_DID}#coland"),
                     "type": "ArkretService",
-                    "serviceKind": "station",
+                    "service_kind": "station",
                     "serviceEndpoint": "https://agent.example/"
                 },
                 {

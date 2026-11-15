@@ -942,6 +942,179 @@ pub(super) async fn human_message(
     (event, plaintext)
 }
 
+/// Initialize this existing Human's actual current epoch root through accepted
+/// policy and the production backup writer. This is fixture custody setup; it
+/// does not claim an active-series HTTP lifecycle or use another Actor's packet.
+pub(super) async fn publish_human_root(
+    fixture: &Fixture,
+    scope: &ScopeRef,
+    group: &arkret_mls::ArkretMlsGroup,
+) {
+    use arkret_event_draft::EventPayloadExt as _;
+    use ed25519_dalek::Signer as _;
+
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+    let expires = at + chrono::Duration::days(1);
+    let archive = arkret_crypto::hpke::generate_x25519_keypair().unwrap();
+    let archive_key = arkret_crypto::identity_root::x25519_public_multikey(archive.public_key());
+    let recipient = format!("did:key:{archive_key}#{archive_key}");
+    let proof_key = arkret_canonical::ed25519_pubkey_to_did_key_multibase(
+        SigningKey::from_bytes(&[92; 32]).verifying_key().as_bytes(),
+    );
+    let policy_id =
+        arkret_wire::PolicyId::new(format!("ak:policy:{}", uuid::Uuid::now_v7())).unwrap();
+    let mut policy: RecoveryPolicy = serde_json::from_value(json!({
+        "schema":"ak.schema.recovery_policy.v1","policy_id":policy_id,
+        "account_id":fixture.pcr.history.account,"version":1,"supersedes_id":null,
+        "trust_domain":fixture.state.config().trust_domain,
+        "issued_at":arkret_canonical::format_timestamp_canonical(at),
+        "signature_proof":{"verification_method":fixture.pcr.history.device_verification_method,
+            "signature_algorithm":"Ed25519","signature":"AA"},
+        "methods":[{"kind":"recovery_unlock","keys":[{
+            "verification_method":format!("did:key:{proof_key}#{proof_key}"),
+            "public_key_multibase":proof_key,"signature_algorithm":"Ed25519",
+            "not_before":arkret_canonical::format_timestamp_canonical(at),
+            "expires_at":arkret_canonical::format_timestamp_canonical(expires),
+            "backup_hpke":{"key_agreement_ref":recipient,"public_key_multibase":archive_key,
+                "key_agreement_algorithm":"X25519","hpke_suites":["ak.hpke_x25519_aead_chacha20poly1305.v1"],
+                "use":"backup_hpke","not_before":arkret_canonical::format_timestamp_canonical(at),
+                "expires_at":arkret_canonical::format_timestamp_canonical(expires)}
+        }]}]
+    })).unwrap();
+    let signer = SigningKey::from_bytes(&fixture.pcr.history.founding_device_signing_seed);
+    policy.signature_proof.signature =
+        arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
+            signer
+                .sign(&recovery_policy_signature_transcript_bytes(&policy).unwrap())
+                .to_bytes(),
+        ))
+        .unwrap();
+    let pcr = fixture.pcr.history.events[0].realm_id.clone();
+    let event = fixture.admin_event(
+        EventKind::PolicySet,
+        ScopeRef::Realm {
+            realm_id: pcr.clone(),
+        },
+        json!({"policy_id":policy_id,"value":policy}),
+    );
+    let request =
+        RecoveryPolicyPublishRequestBody::new(arkret_wire::EventAdmissionSubmission::new(event))
+            .unwrap();
+    let (status, response) = account_request(
+        fixture,
+        reqwest::Method::POST,
+        "/_arkret/root/identity/recovery-policy",
+        ServiceOperationId::RootIdentityRecoveryPolicyCommandPublishV1,
+        Some(json!(request)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "Human root policy: {response}");
+    let store = PgAuthorityCommitStore {
+        pool: fixture.pool.clone(),
+    };
+    let head = store
+        .stream_head(&arkret_wire::CommitStreamRef::Realm { realm_id: pcr })
+        .await
+        .unwrap()
+        .unwrap();
+    let generation = fixture
+        .state
+        .test_persistence()
+        .device_revocations()
+        .pcr_device_generation(&fixture.pcr.history.account)
+        .await
+        .unwrap()
+        .unwrap();
+    let current = coland_storage_postgres::PgMlsGroupCurrentStore {
+        pool: fixture.pool.clone(),
+    }
+    .current(scope)
+    .await
+    .unwrap()
+    .unwrap()
+    .value;
+    let declaration = store
+        .committed_event(&fixture.realm.event_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let strategy = declaration
+        .event
+        .as_realm_create()
+        .unwrap()
+        .object
+        .initial_encryption_backup_strategy;
+    let context = ContentRootContext {
+        effective_scope: scope.clone(),
+        genesis_event_ref: current.genesis_event_ref,
+        epoch: current.epoch,
+        group_state_ref: current.current_mls_commit_event_ref,
+        cipher_suite: group.group_ciphersuite_canonical_id().unwrap().to_owned(),
+        encryption_backup_strategy: strategy,
+        backup_strategy_ref: declaration.event.event_id,
+    };
+    assert_eq!(
+        group.local_actor_id(),
+        &ActorId::account(fixture.pcr.history.account.clone())
+    );
+    let root = group.export_content_root(&context).unwrap();
+    let packet = arkret_crypto::content_history::ContentRootBackupDraft {
+        backup_id: arkret_wire::BackupId::new(format!("ak:backup:{}", uuid::Uuid::now_v7()))
+            .unwrap(),
+        actor_id: ActorId::account(fixture.pcr.history.account.clone()),
+        created_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
+        expires_at: Some(expires),
+        author: arkret_crypto::content_history::ContentRootBackupAuthor::Device {
+            binding: arkret_crypto::backup::KeyBackupAuthorizationBinding {
+                device_id: fixture.pcr.history.founding_device_id.clone(),
+                verification_method: fixture.pcr.history.device_verification_method.clone(),
+                signature_algorithm: KeyBackupSignatureAlgorithm::Ed25519,
+                device_authorize_event_id: fixture.pcr.history.events[1].event_id.clone(),
+            },
+            source: KeyBackupSourceCommitRef {
+                realm_commit_id: head.commit_id,
+                device_generation_ref: generation.current_device_generation_ref,
+            },
+        },
+        recipient_key_ref: recipient,
+        recovery_policy_ref: RecoveryPolicyRef {
+            policy_id,
+            policy_version: 1,
+        },
+        domain_separation: KeyBackupDomainSeparation {
+            subdomain: "key_backup".into(),
+            aead_aad_extensions: Default::default(),
+        },
+        series_id: arkret_wire::BackupSeriesId::new(format!(
+            "ak:backup_series:{}",
+            uuid::Uuid::now_v7()
+        ))
+        .unwrap(),
+        series_sequence: 0,
+        supersedes: None,
+        custody: None,
+    }
+    .seal(
+        vec![ContentRootBackupEntry {
+            item_kind: ContentRootItemKind::ContentEpochRoot,
+            secret_id: "human_current_epoch_root".into(),
+            root_ref: arkret_crypto::content_history::content_root_ref(&root, &context).unwrap(),
+            root_context: context,
+            root_base64url: root,
+        }],
+        archive.public_key(),
+        |bytes| Ok(signer.sign(bytes).to_bytes().to_vec()),
+    )
+    .unwrap();
+    fixture
+        .state
+        .test_persistence()
+        .key_backups()
+        .put(packet.backup_id.to_string(), json!(packet))
+        .await
+        .unwrap();
+}
+
 pub(super) async fn invalid_human_messages(
     fixture: &Fixture,
     scope: &ScopeRef,

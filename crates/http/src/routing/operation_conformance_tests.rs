@@ -225,7 +225,7 @@ fn builtin_operation_conformance_vectors_cover_registry() {
             valid: true,
         },
         OperationVector {
-            name: "space create",
+            name: "realm create",
             kind: arkret_wire::EventKind::RealmCreate,
             payload: json!({"object": {
                 "schema": "ak.schema.realm_genesis.v1",
@@ -236,6 +236,7 @@ fn builtin_operation_conformance_vectors_cover_registry() {
                 "governance_station_id": "ak:did_core:web:station.example",
                 "initial_join_rule": "invite",
                 "initial_history_access": "since_join",
+                "initial_encryption_backup_strategy":arkret_wire::EncryptionBackupStrategy::EpochContentRoots,
                 "initial_discoverability": "invite_only"
             }}),
             valid: true,

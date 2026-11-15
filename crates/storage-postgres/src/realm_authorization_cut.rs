@@ -2745,12 +2745,12 @@ impl RealmAuthorizationCut {
                     .constraints
                     .iter()
                     .filter(wip_allow)
-                    .any(|constraint| constraint.wip_limit_override_allowed == Some(true))
+                    .any(|constraint| constraint.active_strand_count_override_allowed == Some(true))
                     && !grant
                         .constraints
                         .iter()
                         .filter(wip_allow)
-                        .any(|constraint| constraint.wip_limit_override_allowed == Some(false))
+                        .any(|constraint| constraint.active_strand_count_override_allowed == Some(false))
             });
         Ok((override_allowed, approved))
     }

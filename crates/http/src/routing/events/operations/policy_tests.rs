@@ -82,7 +82,7 @@ fn view_admission_rejects_retired_collection_and_actor_lifecycle_fields() {
     for definition in [
         json!({"collection": {"page_size": 50}}),
         json!({"collection": {"selection_policy": "multiple"}}),
-        json!({"collection": {"grouping": {"wip_limit_enforcement": "warn"}}}),
+        json!({"collection": {"grouping": {"active_strand_count_enforcement": "warn"}}}),
         json!({"state": "tombstoned", "state_changed_at": "2026-07-17T00:00:00.000Z"}),
     ] {
         let operation = op(
@@ -2124,6 +2124,7 @@ async fn call_recording_start_defaults_to_record_capability() {
             "mode": "audio_video",
             "visible_notice": true,
             "capture_metadata": {
+                "key_ref":{"algorithm":"MLS","group_state_ref":arkret_identifiers::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[8;32])},
                 "retention": {"consent_confirmed": true}
             }
         }),

@@ -35,7 +35,7 @@ pub(crate) async fn current_root_recipient(
     backup.validate().map_err(unavailable)?;
     let actor = &backup.actor_id;
     let binding = backup
-        .auth_binding
+        .authorization_binding
         .as_ref()
         .ok_or_else(|| unavailable("native root has no original binding"))?;
     let (recovery, _) = crate::realm_actor_control::current_source(

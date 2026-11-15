@@ -1052,7 +1052,7 @@ pub(super) async fn admission_native_endpoint(
                 .unwrap();
             let current = currents.iter().find(|row| row.grant_id == grant).unwrap();
             let event = fixture.admin_event(EventKind::CapabilityRevoke, ScopeRef::Realm { realm_id: fixture.realm.clone() },
-                json!({"grant_id":grant,"expected_commit_id":current.revision,"reason":"stop fresh identity creation only"}));
+                json!({"grant_id":grant,"expected_commit_id":current.revision.commit_id,"reason":"stop fresh identity creation only"}));
             let body =
                 arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
                     arkret_wire::EventAdmissionSubmission::new(event),

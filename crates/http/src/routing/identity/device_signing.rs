@@ -10,12 +10,14 @@ use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 
 use crate::state::AppState;
 
-pub(crate) fn policy_device_quorum_threshold(policy: &RecoveryPolicyState) -> Option<u32> {
+pub(crate) fn policy_device_min_device_count(policy: &RecoveryPolicyState) -> Option<u32> {
     let policy: arkret_models_crypto::RecoveryPolicy =
         serde_json::from_value(policy.raw_payload.clone()).ok()?;
     policy.validate_shape().ok()?;
     policy.methods.iter().find_map(|method| match method {
-        arkret_models_crypto::RecoveryMethod::DeviceQuorum { k, .. } => Some(*k),
+        arkret_models_crypto::RecoveryMethod::DeviceQuorum {
+            min_device_count, ..
+        } => Some(*min_device_count),
         _ => None,
     })
 }

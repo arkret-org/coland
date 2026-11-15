@@ -531,6 +531,7 @@ mod tests {
                 "trust_domain":"ak:trust_domain:handoff.example","security_class":"standard",
                 "governance_station_id":"ak:did_core:web:handoff-origin.example",
                 "initial_join_rule":"closed","initial_history_access":"since_join",
+                "initial_encryption_backup_strategy":"ak.encryption_backup.epoch_content_roots.v1",
                 "initial_discoverability":"invite_only"
             }}),
             crate::wire::now(),

@@ -1641,7 +1641,7 @@ async fn still_disclosable(
 /// complete joined-member disclosure proof, the delivered rows, and the
 /// basis reservation. The window's rows are the live delta after the
 /// Account's delivered head when that head is still an accepted ancestor
-/// within `window_limit`, otherwise the last `window_limit` Commits of the
+/// within `max_window_event_count`, otherwise the last `max_window_event_count` Commits of the
 /// Realm stream, never below the Account's readable floor. A caller with an
 /// already-issued exact current head can instead start with an empty tail
 /// immediately after that head. `limited` states whether readable history
@@ -1663,8 +1663,8 @@ pub(crate) async fn freeze_account_realm_window(
 ) -> PersistenceResult<Option<coland_storage::AccountRealmWindow>> {
     use arkret_models_collaboration::sync_frames::account_sync::RealmStreamWindow;
 
-    if !(1..=100).contains(&request.window_limit) {
-        return Err(window_rejected("window_limit must be in 1..=100"));
+    if !(1..=100).contains(&request.max_window_event_count) {
+        return Err(window_rejected("max_window_event_count must be in 1..=100"));
     }
     if request.expires_at_ms <= request.now_ms
         || request.expires_at_ms - request.now_ms
@@ -1751,7 +1751,7 @@ pub(crate) async fn freeze_account_realm_window(
                 .into());
             }
             let per_stream_limit = request
-                .window_limit
+                .max_window_event_count
                 .min((100 / selected_heads.len()) as u32)
                 .max(1);
             let mut windows = Vec::with_capacity(selected_heads.len());
@@ -2017,7 +2017,7 @@ pub(crate) async fn freeze_account_realm_window(
                     head_commit_ref: head.commit_id.clone(),
                     next_position: head.stream_position + 1,
                     limited,
-                    window_limit: per_stream_limit,
+                    max_window_event_count: per_stream_limit,
                     complete: true,
                     preview_only: (start > 0 && basis.is_none()).then_some(true),
                     window_start_basis: basis,

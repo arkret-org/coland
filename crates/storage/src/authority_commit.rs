@@ -270,7 +270,7 @@ pub struct AccountRealmWindowRequest {
     pub realm_id: arkret_wire::RealmId,
     pub account: arkret_wire::AccountId,
     pub issuer: arkret_wire::DidCoreId,
-    pub window_limit: u32,
+    pub max_window_event_count: u32,
     pub window_cursor: String,
     pub expires_at_ms: i64,
     pub now_ms: i64,
@@ -279,8 +279,8 @@ pub struct AccountRealmWindowRequest {
     /// A payload that does not fit fails the entire freeze without truncation.
     pub byte_budget: usize,
     /// The Realm-stream head the Account cursor last delivered. When it is
-    /// still an accepted ancestor of the head within `window_limit`, the
-    /// window is the live delta after it instead of the last `window_limit`
+    /// still an accepted ancestor of the head within `max_window_event_count`, the
+    /// window is the live delta after it instead of the last `max_window_event_count`
     /// Commits.
     pub delivered_heads: Vec<arkret_wire::CommitStreamHead>,
     /// `None` uses the bounded default visible set. An explicit selection

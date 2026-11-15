@@ -1974,10 +1974,8 @@ mod revoke_saga_tests {
     fn stale_capability_revision_is_rejected_before_the_saga_can_apply_an_effect() {
         let actor = admin_actor("ak:did_core:web:service-a.example");
         let scope = realm_scope();
-        let expected_commit_id = json!({
-            "commit_id": "ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4",
-            "stream_position": 41
-        });
+        let expected_commit_id =
+            json!("ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4");
         let plan: AppletRevokePlan = serde_json::from_value(json!({
             "applet_id": APPLET_ID,
             "service_id": "ak:did_core:web:applet.example",
@@ -2022,10 +2020,7 @@ mod revoke_saga_tests {
 
         request.capability_revoke_events[0].event.payload.insert(
             "expected_commit_id".to_owned(),
-            json!({
-                "commit_id": "ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4",
-                "stream_position": 40
-            }),
+            json!(arkret_wire::RealmCommitId::from_digest([40; 32])),
         );
         let error = validate_revoke_submissions(&actor, &plan, &request).unwrap_err();
         assert_eq!(error.wire_code(), "failed_precondition");

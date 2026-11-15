@@ -65,7 +65,7 @@ fn fixture(constraints: Value) -> (Event, RealmCommit, ActorRealmAuthorization) 
     .unwrap();
     validate_original(&start, &start, &commit, at).unwrap();
     let root = json!({"kind":"realm_root","realm_id":start.realm_id,"authority_event_ref":event_id(0x90),"authority_generation":"0"});
-    let grant:CapabilityGrant = serde_json::from_value(json!({"id":cited,"schema":"ak.schema.capability.v1","realm_id":start.realm_id,"issuer_id":actor,"subject":actor,"actions":["ak.call.record"],"resources":[{"kind":"realm","realm_id":start.realm_id}],"constraints":constraints,"issuer_authority_refs":[root],"authority_depth":1,"authority_root_ref":root,"issued_at":at-chrono::Duration::days(1),"status":"active"})).unwrap();
+    let grant:CapabilityGrant = serde_json::from_value(json!({"id":cited,"schema":"ak.schema.capability.v1","realm_id":start.realm_id,"issuer_id":actor,"subject":actor,"actions":["ak.call.record"],"resources":[{"kind":"realm","realm_id":start.realm_id}],"constraints":constraints,"issuer_authority_refs":[root],"authority_depth":1,"authority_root_ref":root,"issued_at":arkret_canonical::format_timestamp_canonical(at-chrono::Duration::days(1)),"status":"active"})).unwrap();
     let grant_id = grant.id.clone();
     let sources = coland_storage::GrantAuthorityCut::new(
         start.realm_id.clone(),
@@ -156,7 +156,7 @@ async fn store_approval(
         },
     )
     .unwrap();
-    let basis = json!({"public_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(signer.verifying_key().as_bytes()),"historical_method":vote.proof.verification_method,"qualifications":[{"voter":{"source":"original-adapter-fixture"},"consumer_authority_cut":{"call_axes":["ak.call.record"]},"grant_requirement":{"grant_id":grant.id,"constraint_digest":arkret_canonical::canonical_sha256(constraint).unwrap(),"constraint":constraint,"eligible_roster":[{"principal":"ak:did_core:web:reviewer.example","qualification":{"source":"original-adapter-fixture"}}],"effective_approval_quorum":1}}]});
+    let basis = json!({"public_key":arkret_canonical::ed25519_pubkey_to_did_key_multibase(signer.verifying_key().as_bytes()),"historical_method":vote.proof.verification_method,"qualifications":[{"voter":{"source":"original-adapter-fixture"},"consumer_authority_cut":{"call_axes":["ak.call.record"]},"grant_requirement":{"grant_id":grant.id,"constraint_digest":arkret_canonical::canonical_sha256(constraint).unwrap(),"constraint":constraint,"eligible_roster":[{"principal":"ak:did_core:web:reviewer.example","qualification":{"source":"original-adapter-fixture"}}],"effective_min_approver_count":1}}]});
     sql_query("INSERT INTO event_approval_private_audit(approval_context,approver_did,nonce,event_id,event_digest,realm_id,accepted_commit_id,evidence,accepted_basis,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
         .bind::<Text,_>(arkret_canonical::canonical_json_string(&vote.input.approval_context).unwrap()).bind::<Text,_>(vote.input.approver_did.as_str()).bind::<Text,_>(&vote.input.nonce)
         .bind::<Text,_>(start.event_id.as_str()).bind::<Text,_>(arkret_canonical::canonical_sha256(start).unwrap()).bind::<Text,_>(start.realm_id.as_str()).bind::<Text,_>(commit.commit_id.as_str())
@@ -230,7 +230,7 @@ async fn original_private_approval_is_read_only_after_timeout_and_rejects_wrong_
     for mutation in [
         "UPDATE event_approval_private_audit SET event_digest='sha256:'||repeat('0',64)",
         "UPDATE event_approval_private_audit SET evidence=jsonb_set(evidence,'{proof,jws}','\"invalid\"')",
-        "UPDATE event_approval_private_audit SET accepted_basis=jsonb_set(accepted_basis,'{qualifications,0,grant_requirement,effective_approval_quorum}','2')",
+        "UPDATE event_approval_private_audit SET accepted_basis=jsonb_set(accepted_basis,'{qualifications,0,grant_requirement,effective_min_approver_count}','2')",
         "UPDATE event_approval_private_audit SET accepted_basis=jsonb_set(accepted_basis,'{qualifications,0,grant_requirement,constraint_digest}',to_jsonb('sha256:'||repeat('0',64)))",
     ] {
         // Each mutation is isolated by a real transaction; no unsafe audit

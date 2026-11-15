@@ -1947,7 +1947,7 @@ async fn account_cursor_is_bound_to_its_account_and_filter() {
     let alice = roster_session(&state, "ak:did_core:web:alice.example");
     let bob = roster_session(&state, "ak:did_core:web:bob.example");
     let filter_a = json!({"realm_ids": [ROSTER_REALM]});
-    let filter_b = json!({"realm_ids": [ROSTER_REALM], "window_limit": 5});
+    let filter_b = json!({"realm_ids": [ROSTER_REALM], "max_window_event_count": 5});
     let token = sync_token_for_account_positions(
         &state,
         Some(&alice),
@@ -2622,9 +2622,10 @@ async fn selected_unreadable_realm_is_an_explicit_unavailable_detail() {
     let state = test_state();
     let session = roster_session(&state, "ak:did_core:web:alice.example");
     let realm = "ak:realm:AQVZRUJrSSC16EodjmqL6mBFC9TGwv6oxx-sQlJzlvxS";
-    let body: AccountSubscribeParameters =
-        serde_json::from_value(json!({"filter": {"realm_ids": [realm], "window_limit": 2}}))
-            .unwrap();
+    let body: AccountSubscribeParameters = serde_json::from_value(
+        json!({"filter": {"realm_ids": [realm], "max_window_event_count": 2}}),
+    )
+    .unwrap();
     let frame = build_sync_snapshot(&state, Some(&session), &body, &SyncCursor::default()).await;
     assert_eq!(
         frame.kind,

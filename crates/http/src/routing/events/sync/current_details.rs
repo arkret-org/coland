@@ -3,7 +3,7 @@
 //! A window is frozen by `freeze_account_realm_window` at a single durable cut
 //! that proves the Account's complete disclosure, delivers the live delta
 //! after the head this cursor already delivered (or, without one, the last
-//! `window_limit` Commits of the Realm stream), and names a
+//! `max_window_event_count` Commits of the Realm stream), and names a
 //! `window_start_basis` only when an exact snapshot already issued to the
 //! Account sits at the anchor and is reserved for the window's consumable
 //! period; otherwise a limited window is `preview_only`. The window deadline,
@@ -19,8 +19,8 @@ use arkret_models_collaboration::sync_frames::account_subscribe::{
 };
 use arkret_models_collaboration::sync_frames::current_states::AccountStateView;
 use arkret_models_collaboration::sync_frames::demand_sync::{
-    ACCOUNT_SYNC_DEFAULT_WINDOW_LIMIT, ACCOUNT_SYNC_MAX_FRAME_BYTES, RealmDetailErrorCode,
-    RealmDetailUnavailable,
+    ACCOUNT_SYNC_DEFAULT_MAX_WINDOW_EVENT_COUNT, ACCOUNT_SYNC_MAX_FRAME_BYTES,
+    RealmDetailErrorCode, RealmDetailUnavailable,
 };
 use coland_storage::{AccountDetailProgress, AccountRealmWindowRequest};
 
@@ -304,7 +304,7 @@ async fn freeze(
     state: &AppState,
     account: &arkret_wire::AccountId,
     realm: &RealmId,
-    window_limit: u32,
+    max_window_event_count: u32,
     delivered_heads: Vec<arkret_wire::CommitStreamHead>,
     selected_stream_refs: Option<Vec<arkret_wire::CommitStreamRef>>,
 ) -> Result<Freeze, String> {
@@ -324,7 +324,7 @@ async fn freeze(
         realm_id: realm.clone(),
         account: account.clone(),
         issuer: state.service_core_id(),
-        window_limit,
+        max_window_event_count,
         window_cursor: window_cursor.as_str().to_owned(),
         expires_at_ms,
         now_ms,
@@ -427,9 +427,9 @@ pub(super) async fn frame(
         Ok(actor) => actor.as_account_id().cloned(),
         Err(_) => return Ok(Some(control("unauthorized"))),
     };
-    let window_limit = filter
-        .window_limit
-        .unwrap_or(ACCOUNT_SYNC_DEFAULT_WINDOW_LIMIT);
+    let max_window_event_count = filter
+        .max_window_event_count
+        .unwrap_or(ACCOUNT_SYNC_DEFAULT_MAX_WINDOW_EVENT_COUNT);
     let report_unavailable = after.detail_turn || body.after.is_none();
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut positions = after.detail_positions.clone();
@@ -530,7 +530,7 @@ pub(super) async fn frame(
                     state,
                     account,
                     &realm,
-                    window_limit,
+                    max_window_event_count,
                     delivered_heads,
                     selected_stream_refs,
                 )

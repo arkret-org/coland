@@ -426,14 +426,25 @@ impl ActorRealmAuthorization {
     ) -> PersistenceResult<
         Vec<&'a arkret_models_collaboration::governance::grant_constraint::CapabilityGrant>,
     > {
+        let unbound = || {
+            PersistenceError::Conflict(
+                "capability_denied: actual target does not bind the current source cut".into(),
+            )
+        };
+        target.validate().map_err(|_| unbound())?;
+        let target_realm = if target.kind == arkret_wire::ResourceSelectorKind::RealmActor {
+            target
+                .realm_actor_id()
+                .and_then(arkret_wire::ActorId::as_realm_actor_id)
+                .map(|actor| &actor.realm_id)
+        } else {
+            target.realm_id.as_ref()
+        };
         if self.realm_id != self.source_cut.realm_id
-            || target.realm_id.as_ref() != Some(&self.realm_id)
-            || target.validate().is_err()
+            || target_realm != Some(&self.realm_id)
             || target.kind == arkret_wire::ResourceSelectorKind::All
         {
-            return Err(PersistenceError::Conflict(
-                "capability_denied: actual target does not bind the current source cut".into(),
-            ));
+            return Err(unbound());
         }
         let mut candidates = Vec::new();
         for id in &self.terminal_ids {

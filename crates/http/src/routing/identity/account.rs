@@ -1427,13 +1427,13 @@ async fn read_principal_resolution_audit(
         )
         .cloned()
         .collect::<Vec<_>>();
-    let requested_depth = usize::from(body.history_depth.unwrap_or(0));
+    let requested_depth = usize::from(body.max_predecessor_event_count.unwrap_or(0));
     let predecessor_resolution_events = available_predecessors
         .iter()
         .take(requested_depth)
         .cloned()
         .collect::<Vec<_>>();
-    // `history_depth = 0` means "return only the current Event", not "claim
+    // `max_predecessor_event_count = 0` means "return only the current Event", not "claim
     // there is no omitted history". Completeness is true only when the
     // bounded segment reaches genesis (which is carried separately) or the
     // caller's exclusive ancestor cursor.

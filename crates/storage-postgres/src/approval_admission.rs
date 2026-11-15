@@ -682,7 +682,7 @@ pub(crate) async fn require_list_wip(
     if accepted.is_empty() {
         return Err(error(
             "approval_required",
-            "action=ak.strand.move effective_approval_quorum=1 counted_approvals=0",
+            "action=ak.strand.move effective_min_approver_count=1 counted_approvals=0",
         ));
     }
     Ok(accepted)
@@ -769,7 +769,7 @@ pub(crate) async fn require_governance(
         {
             basis.as_object_mut().ok_or_else(|| error("schema_violation", "governance qualification must be an object"))?
                 .insert("governance_requirement".to_owned(), serde_json::json!({
-                    "action":action,"target":target,"effective_approval_quorum":quorum,
+                    "action":action,"target":target,"effective_min_approver_count":quorum,
                     "evaluated_at":arkret_canonical::format_timestamp_canonical(commit.committed_at),
                 }));
             accepted.push(QualifiedApproval {
@@ -782,7 +782,7 @@ pub(crate) async fn require_governance(
         return Err(error(
             "approval_required",
             format!(
-                "action={} effective_approval_quorum={} counted_approvals={}",
+                "action={} effective_min_approver_count={} counted_approvals={}",
                 action.as_str(),
                 quorum,
                 accepted.len()

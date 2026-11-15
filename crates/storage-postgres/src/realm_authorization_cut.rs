@@ -4516,15 +4516,29 @@ mod operation_fact_tests {
             1,
             "a local allow expiry preserves the current refusal candidate"
         );
-        assert!(matches!(
-            cut.evaluate(
-                &[CapabilityActionId::EVENT_READ],
-                &target,
-                &OperationFacts::default(),
-                at
-            ),
-            GrantEvaluation::Unsatisfied
-        ));
+        let facts = OperationFacts::default();
+        let evaluation = cut.evaluate(&[CapabilityActionId::EVENT_READ], &target, &facts, at);
+        let checked_evaluation = cut.evaluate_current_sources(
+            &AuthorizationOperation {
+                actor: &cut.actor,
+                actions: &[CapabilityActionId::EVENT_READ],
+                target: &target,
+                at,
+                facts: &facts,
+            },
+            &[],
+            None,
+        );
+        // The candidate remains available for global refusal matching, but
+        // its closed positive window contributes no named authorization path.
+        assert!(
+            matches!(checked_evaluation, Ok(GrantEvaluation::Unnamed)),
+            "the source cut must close the expired read path without an error: {checked_evaluation:?}"
+        );
+        assert!(
+            matches!(evaluation, GrantEvaluation::Unnamed),
+            "an expired read window must not authorize the operation: {evaluation:?}"
+        );
         cut.native_operation = Some((CapabilityActionId::MessageCreate, target.clone()));
         let circle_target = WireResourceSelector::circle(
             cut.realm_id.clone(),
@@ -4609,8 +4623,15 @@ mod operation_fact_tests {
             .last_mut()
             .unwrap()
             .applies_to_actions = vec![CapabilityActionId::EventRead.as_str().to_owned()];
-        cut.grants.get_mut(&refusal_id).unwrap().constraints[0].applies_to_actions =
-            vec![CapabilityActionId::EventRead.as_str().to_owned()];
+        // Per-action gates belong to temporal constraints; a scope-list
+        // refusal cannot become EventRead-only by adding that unrelated field.
+        cut.grants.get_mut(&refusal_id).unwrap().constraints[0] = serde_json::from_value(json!({
+            "constraint_kind":"temporal",
+            "effect":"deny",
+            "applies_to_actions":["ak.event.read"],
+            "not_before":"2026-09-21T00:00:00.000Z"
+        }))
+        .unwrap();
         assert!(
             matches!(
                 cut.evaluate(

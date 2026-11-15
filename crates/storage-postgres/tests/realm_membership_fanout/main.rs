@@ -3049,7 +3049,8 @@ async fn capability_revoke_and_relinquish_follow_their_target_guards_case() {
     .await;
     // The subject releases by exact revision only, once.
     let mut stale = revision.clone();
-    stale.commit_id = arkret_wire::RealmCommitId::from_digest([0x94; 32]);
+    stale.commit_id = alice_revoker.authority_commit.commit.commit_id.clone();
+    assert_ne!(stale.commit_id, revision.commit_id);
     heap_future(|| {
         assert_refused(
             &pool,
@@ -3144,7 +3145,9 @@ async fn joined_realm(pool: &PgPool, seed: &str) -> Box<JoinedRealm> {
         at,
     ));
     let strand = heap_future(|| ordinary_realm::source_request(pool, strand)).await;
-    uow.commit_event(strand.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(strand.clone()))
+        .await
+        .unwrap();
     let strand_id = arkret_wire::StrandId::from_event_id(&strand.authority_commit.event.event_id);
     let founder_message = sourced(next_request(
         &strand.authority_commit,
@@ -3155,10 +3158,14 @@ async fn joined_realm(pool: &PgPool, seed: &str) -> Box<JoinedRealm> {
     ));
     let founder_message =
         heap_future(|| ordinary_realm::source_request(pool, founder_message)).await;
-    uow.commit_event(founder_message.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(founder_message.clone()))
+        .await
+        .unwrap();
     let create = invite_create_request(&founder_message.authority_commit, &bob_account);
     let create = heap_future(|| ordinary_realm::source_request(pool, create)).await;
-    uow.commit_event(create.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(create.clone()))
+        .await
+        .unwrap();
     let accept = accept_request(
         &create.authority_commit,
         &bob,
@@ -3168,7 +3175,9 @@ async fn joined_realm(pool: &PgPool, seed: &str) -> Box<JoinedRealm> {
         1,
     );
     let accept = heap_future(|| ordinary_realm::source_request(pool, accept)).await;
-    uow.commit_event(accept.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(accept.clone()))
+        .await
+        .unwrap();
     let root_event_ref = realm_root_event_ref(pool, &realm_id).await;
     let grant = grant_request(
         &accept.authority_commit,
@@ -3177,7 +3186,9 @@ async fn joined_realm(pool: &PgPool, seed: &str) -> Box<JoinedRealm> {
         &root_event_ref,
     );
     let grant = heap_future(|| ordinary_realm::source_request(pool, grant)).await;
-    uow.commit_event(grant.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(grant.clone()))
+        .await
+        .unwrap();
     let bob_message = sourced(ordinary_realm::next_human_request_for_actor(
         &grant.authority_commit,
         arkret_wire::EventKind::MessageCreate,
@@ -3186,7 +3197,9 @@ async fn joined_realm(pool: &PgPool, seed: &str) -> Box<JoinedRealm> {
         at,
     ));
     let bob_message = heap_future(|| ordinary_realm::source_request(pool, bob_message)).await;
-    uow.commit_event(bob_message.clone()).await.unwrap();
+    heap_future(|| uow.commit_event(bob_message.clone()))
+        .await
+        .unwrap();
     // The snapshot/window callers retain these exact requests across awaits.
     // Keep their shared fixture state out of both test future frames.
     Box::new(JoinedRealm {
@@ -3565,29 +3578,38 @@ async fn collaboration_governance_change_replica_case() {
         );
     }
 
-    #[derive(diesel::QueryableByName)]
-    struct OriginalRow {
-        #[diesel(sql_type = Jsonb)]
-        value: serde_json::Value,
-    }
     // Exercise retained provenance with the actual accepted source genesis
-    // Commit, first withheld and then Full. These are fault-injection copies
-    // of originals; no governance change is manufactured as accepted state.
-    let mut source_conn = pool.get().await.unwrap();
-    let genesis_commit =
-        diesel::sql_query("SELECT to_jsonb(c) AS value FROM realm_commits c WHERE commit_id=$1")
-            .bind::<Text, _>(unit.transactions[0].commit.commit_id.as_str())
-            .get_result::<OriginalRow>(&mut source_conn)
+    // Commit, first withheld and then Full. Temporarily detach its existing
+    // original link; never insert a second copy or manufacture acceptance.
+    let genesis_commit_json = serde_json::to_value(&unit.transactions[0].commit).unwrap();
+    let genesis = member
+        .committed_event(&unit.transactions[0].event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(genesis.event, unit.transactions[0].event);
+    assert_eq!(genesis.commit, unit.transactions[0].commit);
+    #[derive(diesel::QueryableByName)]
+    struct OriginalPk {
+        #[diesel(sql_type = BigInt)]
+        pk: i64,
+    }
+    let mut conn = member_pool.get().await.unwrap();
+    let original_pk =
+        diesel::sql_query("SELECT event_pk AS pk FROM realm_commits WHERE commit_id=$1")
+            .bind::<Text, _>(genesis.commit.commit_id.as_str())
+            .get_result::<OriginalPk>(&mut conn)
             .await
             .unwrap()
-            .value;
-    let genesis_event = diesel::sql_query("SELECT to_jsonb(e) AS value FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE c.commit_id=$1")
-        .bind::<Text,_>(unit.transactions[0].commit.commit_id.as_str())
-        .get_result::<OriginalRow>(&mut source_conn).await.unwrap().value;
-    drop(source_conn);
-    let mut conn = member_pool.get().await.unwrap();
-    diesel::sql_query("INSERT INTO realm_commits SELECT (jsonb_populate_record(NULL::realm_commits,$1 || jsonb_build_object('event_pk',NULL))).*")
-        .bind::<Jsonb,_>(&genesis_commit).execute(&mut conn).await.unwrap();
+            .pk;
+    assert_eq!(
+        diesel::sql_query("UPDATE realm_commits SET event_pk=NULL WHERE commit_id=$1")
+            .bind::<Text, _>(genesis.commit.commit_id.as_str())
+            .execute(&mut conn)
+            .await
+            .unwrap(),
+        1,
+    );
     drop(conn);
     let before = governance_gate_footprint(&member_pool).await;
     assert_eq!(
@@ -3599,14 +3621,7 @@ async fn collaboration_governance_change_replica_case() {
     );
     assert_eq!(governance_gate_footprint(&member_pool).await, before);
 
-    #[derive(diesel::QueryableByName)]
-    struct OriginalPk {
-        #[diesel(sql_type = BigInt)]
-        pk: i64,
-    }
     let mut conn = member_pool.get().await.unwrap();
-    let original_pk = diesel::sql_query("INSERT INTO canonical_events OVERRIDING USER VALUE SELECT (jsonb_populate_record(NULL::canonical_events,$1 || jsonb_build_object('realm_pk',NULL))).* RETURNING pk")
-        .bind::<Jsonb,_>(&genesis_event).get_result::<OriginalPk>(&mut conn).await.unwrap().pk;
     diesel::sql_query("UPDATE realm_commits SET event_pk=$2 WHERE commit_id=$1")
         .bind::<Text, _>(unit.transactions[0].commit.commit_id.as_str())
         .bind::<BigInt, _>(original_pk)
@@ -3639,7 +3654,7 @@ async fn collaboration_governance_change_replica_case() {
     let mut conn = member_pool.get().await.unwrap();
     diesel::sql_query("UPDATE realm_commits SET commit_json=$2 WHERE commit_id=$1")
         .bind::<Text, _>(unit.transactions[0].commit.commit_id.as_str())
-        .bind::<Jsonb, _>(&genesis_commit["commit_json"])
+        .bind::<Jsonb, _>(&genesis_commit_json)
         .execute(&mut conn)
         .await
         .unwrap();
@@ -3657,6 +3672,11 @@ async fn collaboration_governance_change_replica_case() {
             .await
             .unwrap(),
         Some(held)
+    );
+    assert_eq!(
+        member.committed_event(&realm.event_id()).await.unwrap(),
+        Some(genesis),
+        "fault injection restores the same accepted founding original",
     );
 }
 
@@ -3763,10 +3783,24 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
     .await
     .unwrap();
     assert_eq!(
-        inception_count.count, 0,
-        "a since-join replica must serve the verified genesis current without inventing its original Event"
+        inception_count.count, 1,
+        "bootstrap retains exactly the authenticated founding original"
     );
     drop(conn);
+    let genesis = member
+        .committed_event(&realm.event_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(genesis.event, unit.transactions[0].event);
+    assert_eq!(genesis.commit, unit.transactions[0].commit);
+    assert_eq!(
+        member
+            .producer_signer_fact(&genesis.event, &genesis.commit)
+            .await
+            .unwrap(),
+        unit.transactions[0].producer_signer_fact,
+    );
     let issuer = member_station();
     let issued = member
         .issue_realm_state_snapshot_for_account(&realm, account, &issuer, &never_sign)
@@ -3784,8 +3818,9 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
             .unwrap(),
         Some(snapshot.clone())
     );
-    // Losing the verified bootstrap anchor must not promote the retained
-    // genesis current into independent inception authority or sign a new cut.
+    // A transport anchor and the independently verified current cut serve
+    // different purposes. Removing only the anchor must not discard the
+    // original governance-signed Snapshot or invoke the local signer.
     #[derive(diesel::QueryableByName)]
     struct AnchorOriginal {
         #[diesel(sql_type = Jsonb)]
@@ -3810,6 +3845,47 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
     .await
     .unwrap();
     drop(conn);
+    assert_eq!(
+        member
+            .issue_realm_state_snapshot_for_account(&realm, account, &issuer, &never_sign)
+            .await
+            .unwrap(),
+        Some(snapshot.clone()),
+        "a missing transport anchor cannot turn an exact original into a new signature"
+    );
+    assert_eq!(
+        member
+            .issued_realm_state_snapshot(&realm, account, &snapshot.snapshot_id, &issuer)
+            .await
+            .unwrap(),
+        Some(snapshot.clone())
+    );
+    let mut conn = member_pool.get().await.unwrap();
+    diesel::sql_query(
+        "INSERT INTO replica_stream_anchors \
+         SELECT * FROM jsonb_populate_record(NULL::replica_stream_anchors,$1)",
+    )
+    .bind::<Jsonb, _>(&anchor.value)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    // Losing the actual verified source cut must not promote retained
+    // genesis bytes or the transport anchor into independent authority.
+    let cut = diesel::sql_query(
+        "DELETE FROM replica_authorization_cuts WHERE realm_id=$1 \
+         AND source_stream_ref=$2 RETURNING to_jsonb(replica_authorization_cuts) AS value",
+    )
+    .bind::<Text, _>(realm.as_str())
+    .bind::<Jsonb, _>(
+        serde_json::to_value(&arkret_wire::CommitStreamRef::Realm {
+            realm_id: realm.clone(),
+        })
+        .unwrap(),
+    )
+    .get_result::<AnchorOriginal>(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
     assert!(
         member
             .issue_realm_state_snapshot_for_account(&realm, account, &issuer, &never_sign)
@@ -3824,10 +3900,10 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
     );
     let mut conn = member_pool.get().await.unwrap();
     diesel::sql_query(
-        "INSERT INTO replica_stream_anchors \
-         SELECT * FROM jsonb_populate_record(NULL::replica_stream_anchors,$1)",
+        "INSERT INTO replica_authorization_cuts \
+         SELECT * FROM jsonb_populate_record(NULL::replica_authorization_cuts,$1)",
     )
-    .bind::<Jsonb, _>(&anchor.value)
+    .bind::<Jsonb, _>(&cut.value)
     .execute(&mut *conn)
     .await
     .unwrap();
@@ -3838,7 +3914,7 @@ async fn member_account_snapshot_preserves_governance_and_exact_replica_cut() {
             .await
             .unwrap(),
         Some(snapshot.clone()),
-        "restoring the original verified anchor must restore the same signed cut"
+        "restoring the original verified source cut must restore the same signed Snapshot"
     );
     let narrow = governor
         .issue_stream_history_snapshot_for_account(
@@ -5062,13 +5138,19 @@ async fn member_station_anchor_case() {
     };
     let join_position = join.authority_commit.commit.stream_position;
     assert!(join_position > 0);
-    assert!(
+    let genesis = member
+        .committed_event(&unit.transactions[0].event.event_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(genesis.event, unit.transactions[0].event);
+    assert_eq!(genesis.commit, unit.transactions[0].commit);
+    assert_eq!(
         member
-            .committed_event(&unit.transactions[0].event.event_id)
+            .producer_signer_fact(&genesis.event, &genesis.commit)
             .await
-            .unwrap()
-            .is_none(),
-        "the ordinary foreign replica must actually hold a since-join suffix"
+            .unwrap(),
+        unit.transactions[0].producer_signer_fact,
     );
     let floor = own.readable_floor.clone().unwrap();
     assert_eq!(floor.oldest_position, join_position);
@@ -5162,17 +5244,32 @@ async fn member_station_anchor_case() {
         ),
         None
     );
+    let coland_storage::MemberCommittedEventRead::Read(genesis) = member_read(
+        &member,
+        &unit.transactions[0].event.event_id,
+        &alice,
+        &station,
+    )
+    .await
+    else {
+        panic!("a current member must receive the exact retained founding original")
+    };
+    let arkret_wire::CommittedEventView::Full(genesis) = *genesis else {
+        panic!("the exact public founding original must not be withheld")
+    };
+    assert_eq!(genesis.event, unit.transactions[0].event);
+    assert_eq!(genesis.commit, unit.transactions[0].commit);
+    let expected_fact = unit.transactions[0]
+        .producer_signer_fact
+        .as_ref()
+        .expect("the accepted native founding original must carry its producer signer fact");
     assert_eq!(
-        read_shape(
-            member_read(
-                &member,
-                &unit.transactions[0].event.event_id,
-                &alice,
-                &station
-            )
+        member
+            .producer_signer_fact(&genesis.event, &genesis.commit)
             .await
-        ),
-        None
+            .unwrap()
+            .as_ref(),
+        Some(expected_fact),
     );
     assert_eq!(
         read_shape(member_read(&member, strand_event, &bob, &station).await),
@@ -5196,8 +5293,9 @@ async fn member_station_anchor_case() {
             .unwrap()
     );
 
-    // A since-join replica has no Realm genesis to replay. Its accepted
-    // default pointer remains independent of the optional local Realm cache.
+    // A since-join replica retains the exact founding original without
+    // replaying its reducer. Its accepted default pointer remains independent
+    // of the optional local Realm cache and of ordinary pre-join history.
     let pointer = member
         .realm_default_strand_current(&realm_id)
         .await
@@ -7610,6 +7708,63 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
         )
     })
     .await;
+    // The signed cut does not fabricate the raw Realm predecessor chain.
+    // Fill only the accepted join-to-grant prefix, independently of Circle.
+    heap_future(|| async {
+        let coland_storage::AccountStreamScan::Page(prefix) = peer_page(
+            &governor,
+            arkret_wire::StreamScanRequestBody {
+                realm_id: realm.clone(),
+                stream_ref: join.authority_commit.commit.stream_ref.clone(),
+                direction: arkret_wire::StreamScanDirection::After(Some(
+                    join.authority_commit.commit.stream_position,
+                )),
+                limit: 16,
+            },
+            &local_station,
+        )
+        .await
+        else {
+            panic!("the current hosting Station must receive its accepted Realm prefix")
+        };
+        let expected = [&create, &grant];
+        assert_eq!(prefix.committed_events.len(), expected.len());
+        for (item, request) in prefix.committed_events.iter().zip(expected) {
+            let outcome = match item {
+                arkret_wire::CommittedEventView::Full(view) => {
+                    assert_eq!(view.event, request.authority_commit.event);
+                    assert_eq!(view.commit, request.authority_commit.commit);
+                    member
+                        .install_committed_replica(&case_replica(request, false))
+                        .await
+                        .unwrap()
+                }
+                arkret_wire::CommittedEventView::Withheld(view) => {
+                    assert_eq!(view.commit, request.authority_commit.commit);
+                    let outcome = member
+                        .install_committed_chain_node(&CommittedChainNode {
+                            local_service_id: local_station.clone(),
+                            authority: governance_authority(&unit),
+                            historical_commit: None,
+                            commit: view.commit.clone(),
+                        })
+                        .await
+                        .unwrap();
+                    assert!(
+                        member
+                            .committed_event(&request.authority_commit.event.event_id)
+                            .await
+                            .unwrap()
+                            .is_none(),
+                        "a withheld prefix must not manufacture canonical Event bytes"
+                    );
+                    outcome
+                }
+            };
+            assert_eq!(outcome, CommittedReplicaOutcome::Stored);
+        }
+    })
+    .await;
     // The Circle's creator joins as well, then writes a plaintext Message.
     // Alice's Station holds the Circle stream but is not in the Realm's
     // plaintext-visible service set, so it gets only the Message Commit via
@@ -7642,11 +7797,12 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             .unwrap(),
         CommittedReplicaOutcome::Stored
     );
-    // Scoped business source changes stay on the actual Circle stream and
-    // freeze its real membership witness. They never use a Realm-only route.
-    let scoped_grant = circle_event(
-        &creator_join.authority_commit,
+    // Authority changes remain on the Realm stream even when their resource
+    // is one Circle. They must not advance the independent Circle chain.
+    let scoped_grant = sourced(next_request_for_actor(
+        &grant.authority_commit,
         arkret_wire::EventKind::CapabilityGrant,
+        creator.clone(),
         serde_json::json!({"grant":{
             "schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":creator,
             "subject":remote,"actions":["ak.event.read"],
@@ -7654,7 +7810,8 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             "issuer_authority_refs":[{"kind":"realm_root","realm_id":realm,"authority_event_ref":root_event_ref,"authority_generation":"0"}],
             "issued_at":arkret_canonical::format_timestamp_canonical(at)
         }}),
-    );
+        at,
+    ));
     let scoped_grant = heap_future(|| ordinary_realm::source_request(&pool, scoped_grant)).await;
     heap_future(|| uow.commit_event(scoped_grant.clone()))
         .await
@@ -7663,7 +7820,16 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
     assert_eq!(grant_rows.len(), 1);
     let grant_witnesses: Vec<RealmFanoutAuthorityWitness> =
         serde_json::from_value(grant_rows[0].realm_fanout["authority_witnesses"].clone()).unwrap();
-    assert_eq!(grant_witnesses, witnesses);
+    let authority_witnesses = vec![RealmFanoutAuthorityWitness {
+        member_id: remote.clone(),
+        membership_event_ref: join.authority_commit.event.event_id.to_string(),
+        circle_membership_event_ref: None,
+    }];
+    assert_eq!(grant_witnesses, authority_witnesses);
+    assert_eq!(
+        scoped_grant.authority_commit.commit.stream_ref,
+        grant.authority_commit.commit.stream_ref
+    );
     assert_eq!(
         member
             .install_committed_replica(&replica(&unit, &scoped_grant, false))
@@ -7685,16 +7851,18 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             &member,
             &realm,
             remote.as_account_id().unwrap(),
-            &circle_join.authority_commit.commit,
+            &join.authority_commit.commit,
             &scoped_grant.authority_commit.commit,
         )
     })
     .await;
-    let scoped_revoke = circle_event(
+    let scoped_revoke = sourced(next_request_for_actor(
         &scoped_grant.authority_commit,
         arkret_wire::EventKind::CapabilityRevoke,
-        serde_json::json!({"grant_id":grant_id,"expected_commit_id":grant_revision,"reason":"scoped_source_closed"}),
-    );
+        creator.clone(),
+        serde_json::json!({"grant_id":grant_id,"expected_commit_id":grant_revision.commit_id,"reason":"scoped_source_closed"}),
+        at,
+    ));
     let scoped_revoke = heap_future(|| ordinary_realm::source_request(&pool, scoped_revoke)).await;
     heap_future(|| uow.commit_event(scoped_revoke.clone()))
         .await
@@ -7703,7 +7871,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
     assert_eq!(revoke_rows.len(), 1);
     let revoke_witnesses: Vec<RealmFanoutAuthorityWitness> =
         serde_json::from_value(revoke_rows[0].realm_fanout["authority_witnesses"].clone()).unwrap();
-    assert_eq!(revoke_witnesses, witnesses);
+    assert_eq!(revoke_witnesses, authority_witnesses);
     assert_eq!(
         member
             .install_committed_replica(&replica(&unit, &scoped_revoke, false))
@@ -7717,13 +7885,24 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
             &member,
             &realm,
             remote.as_account_id().unwrap(),
-            &circle_join.authority_commit.commit,
+            &join.authority_commit.commit,
             &scoped_revoke.authority_commit.commit,
         )
     })
     .await;
+    heap_future(|| {
+        refresh_qualified_member_stream(
+            &governor,
+            &member,
+            &realm,
+            remote.as_account_id().unwrap(),
+            &circle_join.authority_commit.commit,
+            &creator_join.authority_commit.commit,
+        )
+    })
+    .await;
     let strand = circle_event(
-        &scoped_revoke.authority_commit,
+        &creator_join.authority_commit,
         arkret_wire::EventKind::StrandCreate,
         serde_json::json!({"object":{
             "schema":"ak.schema.strand.v1","realm_id":realm,"scope_circle_id":circle,
@@ -7735,6 +7914,12 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
     heap_future(|| uow.commit_event(strand.clone()))
         .await
         .unwrap();
+    let strand_rows = fanout_rows(&pool, &strand).await;
+    assert_eq!(strand_rows.len(), 1);
+    let strand_witnesses: Vec<RealmFanoutAuthorityWitness> =
+        serde_json::from_value(strand_rows[0].realm_fanout["authority_witnesses"].clone()).unwrap();
+    assert_eq!(strand_witnesses, witnesses);
+    assert_eq!(strand.authority_commit.commit.stream_ref, stream);
     assert_eq!(
         member
             .install_committed_replica(&replica(&unit, &strand, false))

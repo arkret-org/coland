@@ -9,7 +9,9 @@ async fn terminal_replication_respects_last_member_departure_after_restart() {
         let database = TestDatabase::lease().await;
         let pool = database.pool();
         let store = PgAuthorityCommitStore { pool: pool.clone() };
-        let unit = bootstrap_unit_with_join_rule("terminal-departure", "public");
+        let governor = TestDatabase::lease().await;
+        let governor_pool = governor.pool();
+        let unit = heap_future(|| admit(&governor_pool, "terminal-departure", "public")).await;
         let last = unit.transactions.last().unwrap();
         let alice = remote_member("terminal-departure-alice");
         let join = membership_request(last, alice.clone(), &alice, "join");
@@ -417,7 +419,9 @@ async fn replica_terminal_admission_is_atomic_and_preserves_retained_history() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     let store = PgAuthorityCommitStore { pool: pool.clone() };
-    let unit = bootstrap_unit_with_join_rule("replica-terminal", "public");
+    let governor = TestDatabase::lease().await;
+    let governor_pool = governor.pool();
+    let unit = heap_future(|| admit(&governor_pool, "replica-terminal", "public")).await;
     let realm = unit.transactions[0].event.realm_id.clone();
     let last = unit.transactions.last().unwrap();
     let alice = remote_member("replica-terminal-alice");

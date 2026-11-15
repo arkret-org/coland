@@ -281,7 +281,8 @@ jobs:
 
       - name: Snapshot baseline schema
         run: |
-          pg_dump --schema-only --no-owner --no-privileges \
+          docker exec --env PGPASSWORD '${{ job.services.postgres.id }}' \
+            pg_dump --schema-only --no-owner --no-privileges \
             "$DATABASE_URL" > /tmp/schema.baseline.sql
         env:
           PGPASSWORD: coland
@@ -294,7 +295,8 @@ jobs:
 
       - name: Snapshot cycled schema
         run: |
-          pg_dump --schema-only --no-owner --no-privileges \
+          docker exec --env PGPASSWORD '${{ job.services.postgres.id }}' \
+            pg_dump --schema-only --no-owner --no-privileges \
             "$DATABASE_URL" > /tmp/schema.cycled.sql
         env:
           PGPASSWORD: coland

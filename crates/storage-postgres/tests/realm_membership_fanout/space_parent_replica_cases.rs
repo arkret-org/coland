@@ -304,15 +304,30 @@ async fn snapshot_only_parent_cases() {
         ..
     } = original_space;
     let mut conn = source_pool.get().await.unwrap();
-    let old_commits = diesel::sql_query("SELECT COUNT(*)::bigint AS count FROM realm_commits WHERE realm_id=$1 AND stream_position<$2")
+    let old_commits = diesel::sql_query("SELECT COUNT(*)::bigint AS count FROM realm_commits WHERE realm_id=$1 AND stream_position<$2 AND commit_id<>$3")
         .bind::<Text,_>(foreign_realm.as_str())
         .bind::<BigInt,_>(join.authority_commit.commit.stream_position as i64)
+        .bind::<Text,_>(unit.transactions[0].commit.commit_id.as_str())
         .get_result::<CountRow>(&mut conn).await.unwrap().count;
     assert_eq!(
         old_commits, 0,
-        "pre-join Space Commit must not be installed"
+        "the required founding original must not import any other pre-join Space history"
     );
     drop(conn);
+    let genesis = source
+        .committed_event(&foreign_realm.event_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(genesis.event, unit.transactions[0].event);
+    assert_eq!(genesis.commit, unit.transactions[0].commit);
+    assert!(
+        source
+            .committed_event(&foreign.authority_commit.event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let reparent = next_request(
         &child.authority_commit,
         arkret_wire::EventKind::SpaceParent,

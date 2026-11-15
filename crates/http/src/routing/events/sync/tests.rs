@@ -32,14 +32,7 @@ async fn account_detail_unavailable_realm_does_not_block_an_independent_window()
     };
     let mut realms = Vec::new();
     for _ in 0..2 {
-        realms.push(
-            CommittedRealm::bootstrap(
-                store.as_ref(),
-                &genesis,
-                state.service_verification_method("notary-key").unwrap(),
-            )
-            .await,
-        );
+        realms.push(CommittedRealm::bootstrap(&state, store.as_ref(), &genesis.history).await);
     }
     realms.sort_by_key(|realm| realm.head.event.realm_id.clone());
     let broken = &realms[0].head;
@@ -161,12 +154,7 @@ async fn inconsistent_continuation_head_returns_503_without_issuing_or_resetting
     session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
         device_id: device.device_id,
     };
-    let realm = CommittedRealm::bootstrap(
-        store.as_ref(),
-        &genesis,
-        state.service_verification_method("notary-key").unwrap(),
-    )
-    .await;
+    let realm = CommittedRealm::bootstrap(&state, store.as_ref(), &genesis.history).await;
     let mut body: AccountSubscribeParameters = serde_json::from_value(json!({
         "filter": {"realm_ids": [realm.head.event.realm_id]}, "catchup": true,
     }))
@@ -283,14 +271,9 @@ async fn accepted_leave_preserves_the_ordinary_unavailable_continuation() {
     session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
         device_id: device.device_id,
     };
-    let mut realm = CommittedRealm::bootstrap(
-        store.as_ref(),
-        &founder,
-        state.service_verification_method("notary-key").unwrap(),
-    )
-    .await;
+    let mut realm = CommittedRealm::bootstrap(&state, store.as_ref(), &founder.history).await;
     realm
-        .member_state(store.as_ref(), &peer, account, "join")
+        .member_state(&state, store.as_ref(), &peer.history, account, "join")
         .await;
     let mut body: AccountSubscribeParameters = serde_json::from_value(json!({
         "filter": {"realm_ids": [realm.head.event.realm_id]}, "catchup": true,
@@ -312,7 +295,7 @@ async fn accepted_leave_preserves_the_ordinary_unavailable_continuation() {
     assert!(!after.detail_positions.is_empty());
     body.after = Some(token);
     realm
-        .member_state(store.as_ref(), &peer, account, "leave")
+        .member_state(&state, store.as_ref(), &peer.history, account, "leave")
         .await;
     assert!(
         super::current_details::continuation_heads_covered(&state, account, &body, &after)
@@ -1005,7 +988,7 @@ async fn sync_snapshot_excludes_public_realms_without_exact_account_membership()
     assert_eq!(detail(left), Some(not_found));
 }
 
-/// One Realm Event by a real accepted native fixture Device.
+/// The already admitted Human Device signs this exact ordinary Realm Event.
 fn realm_fixture_event(
     kind: arkret_wire::EventKind,
     scope_ref: arkret_wire::ScopeRef,
@@ -1036,82 +1019,58 @@ pub(super) struct CommittedRealm {
 
 impl CommittedRealm {
     async fn transaction(
+        state: &AppState,
         store: &dyn coland_storage::PersistenceStore,
         authority: &coland_storage::CurrentRealmAuthority,
-        method: &arkret_wire::DidUrl,
         event: arkret_wire::Event,
         previous: Option<&arkret_wire::RealmCommit>,
     ) -> coland_storage::AuthorityCommitTransaction {
         let at = event.created_at;
-        let realm_id = authority.realm_id.clone();
-        let position = previous.map_or(0, |commit| commit.stream_position + 1);
-        let producer_signer_fact = store
+        let fact: Option<
+            arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact,
+        > = store
             .authority_commits()
             .prepare_account_device_signer_fact(&event, at)
             .await
-            .unwrap()
+            .expect("read the exact admitted native Device source")
             .map(Into::into);
-        let mut transaction = coland_storage::AuthorityCommitTransaction {
+        assert!(
+            fact.is_some(),
+            "ordinary Realm fixture must retain its real Device source"
+        );
+        let head = previous.map(|commit| arkret_wire::CommitStreamHead {
+            stream_ref: commit.stream_ref.clone(),
+            stream_position: commit.stream_position,
+            commit_id: commit.commit_id.clone(),
+        });
+        let commit = state
+            .authority_commits()
+            .sign_event_commit_at_authority_cut(
+                &event,
+                authority,
+                head.as_ref(),
+                state.service_verification_method("notary-key").unwrap(),
+                state.notary_signing_key().as_ref(),
+                at,
+                fact.as_ref(),
+            )
+            .expect("sign the canonical Commit with its exact native producer fact");
+        coland_storage::AuthorityCommitTransaction {
             expected_authority: authority.clone(),
-            commit: arkret_wire::RealmCommit {
-                producer_signer_fact_digest: None,
-                commit_id: arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-                    format!("{}:{position}", event.event_id).as_bytes(),
-                )),
-                realm_id: realm_id.clone(),
-                stream_ref: arkret_wire::CommitStreamRef::Realm { realm_id },
-                stream_position: position,
-                previous_commit_ref: previous.map(|commit| commit.commit_id.clone()),
-                event_ref: event.event_id.clone(),
-                governance_generation: 0,
-                authority_ref: authority.authority_ref.clone(),
-                committed_at: at,
-                signature: arkret_wire::DetachedObjectSignature {
-                    context: arkret_wire::DetachedSignatureContext::RealmCommit,
-                    signature_algorithm: arkret_wire::DetachedSignatureAlgorithm::Ed25519,
-                    verification_method: method.clone(),
-                    signed_digest: arkret_wire::Hash::new(format!("sha256:{}", "3".repeat(64)))
-                        .unwrap(),
-                    created_at: at,
-                    signature: arkret_wire::Base64UrlString::new("c2lnbmF0dXJl".to_owned())
-                        .unwrap(),
-                },
-            },
+            commit,
             event,
-            producer_signer_fact,
+            producer_signer_fact: fact,
             content_backup_source: None,
             mls_state: None,
             welcomes: Vec::new(),
             recipient_queue_capacity: 0,
-        };
-        let commit = &mut transaction.commit;
-        commit.producer_signer_fact_digest =
-            transaction.producer_signer_fact.as_ref().map(|fact| {
-                arkret_wire::Hash::new(arkret_canonical::canonical_sha256(fact).unwrap()).unwrap()
-            });
-        commit.commit_id = arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-            arkret_canonical::canonical_json_bytes(
-                &arkret_canonical::canonical::unsigned_value(commit, &["commit_id", "signature"])
-                    .unwrap(),
-            )
-            .unwrap(),
-        ));
-        commit.signature = arkret_signatures::detached_object::sign_detached_object(
-            &arkret_canonical::canonical::unsigned_value(commit, &["signature"]).unwrap(),
-            arkret_wire::DetachedSignatureContext::RealmCommit,
-            method.clone(),
-            at,
-            &ed25519_dalek::SigningKey::from_bytes(&[9; 32]),
-        )
-        .unwrap();
-        commit.validate_content_address().unwrap();
-        transaction
+        }
     }
 
     pub(super) async fn bootstrap(
+        state: &AppState,
         store: &dyn coland_storage::PersistenceStore,
-        principal: &coland_test_support::pcr_genesis::PcrGenesisFixture,
-        method: arkret_wire::DidUrl,
+        founder: &coland_test_support::device_authorization_history::DeviceHistoryFixture,
     ) -> Self {
         use arkret_models_collaboration::authority_commit::{
             OrdinaryRealmBootstrapUnitKind, OrdinaryRealmBootstrapUnitSubmission,
@@ -1119,23 +1078,22 @@ impl CommittedRealm {
         };
         use base64::Engine as _;
 
-        let founder = &principal.history.account;
         let at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
         let genesis = realm_fixture_event(
             arkret_wire::EventKind::RealmCreate,
             arkret_wire::ScopeRef::RealmGenesis,
-            &principal.history,
+            founder,
             json!({"object":{
                 "schema":"ak.schema.realm_genesis.v1",
                 "purpose":"collaboration",
                 "genesis_salt":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
-                    arkret_canonical::sha256_bytes(uuid::Uuid::now_v7().as_bytes())),
+                    rand::random::<[u8; 32]>()),
                 "trust_domain":"ak:trust_domain:device-lists.example",
                 "security_class":"high_assurance",
-                "governance_station_id":founder.station_id,
+                "governance_station_id":founder.account.station_id,
                 "initial_join_rule":"public",
                 "initial_history_access":"since_join",
-                "initial_encryption_backup_strategy":arkret_wire::EncryptionBackupStrategy::EpochContentRoots,
+                "initial_encryption_backup_strategy":"ak.encryption_backup.epoch_content_roots.v1",
                 "initial_discoverability":"invite_only"
             }}),
             at,
@@ -1168,13 +1126,13 @@ impl CommittedRealm {
             ),
             (
                 arkret_wire::EventKind::MemberState,
-                json!({"member_id":arkret_wire::ActorId::account(founder.clone()),"membership":"join"}),
+                json!({"member_id":arkret_wire::ActorId::account(founder.account.clone()),"membership":"join"}),
             ),
         ] {
             events.push(realm_fixture_event(
                 kind,
                 scope.clone(),
-                &principal.history,
+                founder,
                 payload,
                 at,
             ));
@@ -1182,7 +1140,7 @@ impl CommittedRealm {
         let authority = coland_storage::CurrentRealmAuthority {
             realm_id,
             generation: 0,
-            service_id: founder.station_id.clone(),
+            service_id: founder.account.station_id.clone(),
             authority_ref: arkret_wire::RealmCommitAuthorityRef::GenesisOrChangeEvent(
                 events[0].event_id.clone(),
             ),
@@ -1192,7 +1150,7 @@ impl CommittedRealm {
         for event in &events {
             let previous = transactions.last().map(|transaction| &transaction.commit);
             let transaction =
-                Self::transaction(store, &authority, &method, event.clone(), previous).await;
+                Self::transaction(state, store, &authority, event.clone(), previous).await;
             transactions.push(transaction);
         }
         let submission = OrdinaryRealmBootstrapUnitSubmission {
@@ -1225,8 +1183,9 @@ impl CommittedRealm {
     /// Commit `author`'s `ak.member.state` for `member` at the Realm head.
     pub(super) async fn member_state(
         &mut self,
+        state: &AppState,
         store: &dyn coland_storage::PersistenceStore,
-        author: &coland_test_support::pcr_genesis::PcrGenesisFixture,
+        author: &coland_test_support::device_authorization_history::DeviceHistoryFixture,
         member: &arkret_wire::AccountId,
         membership: &str,
     ) {
@@ -1235,15 +1194,14 @@ impl CommittedRealm {
             arkret_wire::ScopeRef::Realm {
                 realm_id: self.head.event.realm_id.clone(),
             },
-            &author.history,
+            author,
             json!({"member_id":arkret_wire::ActorId::account(member.clone()),"membership":membership}),
             self.head.commit.committed_at,
         );
-        let method = self.head.commit.signature.verification_method.clone();
         let transaction = Self::transaction(
+            state,
             store,
             &self.head.expected_authority,
-            &method,
             event.clone(),
             Some(&self.head.commit),
         )
@@ -1542,15 +1500,17 @@ async fn sync_snapshot_emits_device_list_baseline_changes_and_left_principals() 
         device_id: caller_device.device_id,
     };
 
-    let mut realm = CommittedRealm::bootstrap(
-        store.as_ref(),
-        &caller_genesis,
-        state.service_verification_method("notary-key").unwrap(),
-    )
-    .await;
+    let mut realm =
+        CommittedRealm::bootstrap(&state, store.as_ref(), &caller_genesis.history).await;
     // The public Realm admits the peer by its own join.
     realm
-        .member_state(store.as_ref(), &actor_genesis, &actor, "join")
+        .member_state(
+            &state,
+            store.as_ref(),
+            &actor_genesis.history,
+            &actor,
+            "join",
+        )
         .await;
 
     let body = roster_body(state.service_id());
@@ -1622,7 +1582,13 @@ async fn sync_snapshot_emits_device_list_baseline_changes_and_left_principals() 
     .expect("revoke cursor parses");
 
     realm
-        .member_state(store.as_ref(), &caller_genesis, &caller, "leave")
+        .member_state(
+            &state,
+            store.as_ref(),
+            &caller_genesis.history,
+            &caller,
+            "leave",
+        )
         .await;
     incremental_body.after = after_revoke.cursor.clone();
     let after_scope_loss =
@@ -2233,12 +2199,7 @@ async fn barrier_cursor_requires_readable_exact_committed_history() {
     session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
         device_id: device.device_id,
     };
-    let realm = CommittedRealm::bootstrap(
-        store.as_ref(),
-        &genesis,
-        state.service_verification_method("notary-key").unwrap(),
-    )
-    .await;
+    let realm = CommittedRealm::bootstrap(&state, store.as_ref(), &genesis.history).await;
     let target = realm.head.event.event_id.to_string();
     let barrier = arkret_hlc::Cursor::new_at(Utc::now(), 60_000)
         .unwrap()
@@ -2329,12 +2290,7 @@ async fn barrier_revoked_during_projection_timeout_refuses_without_issuing() {
     session.endpoint = coland_services::identity::SessionEndpointState::HumanDevice {
         device_id: device.device_id,
     };
-    let realm = CommittedRealm::bootstrap(
-        store.as_ref(),
-        &genesis,
-        state.service_verification_method("notary-key").unwrap(),
-    )
-    .await;
+    let realm = CommittedRealm::bootstrap(&state, store.as_ref(), &genesis.history).await;
     let target = realm.head.event.event_id.to_string();
     let barrier = arkret_hlc::Cursor::new_at(Utc::now(), 60_000)
         .unwrap()

@@ -221,8 +221,6 @@ struct RelationCurrentStateRow {
     state: String,
     #[diesel(sql_type = Text)]
     current_commit_id: String,
-    #[diesel(sql_type = BigInt)]
-    current_stream_position: i64,
     #[diesel(sql_type = Jsonb)]
     value: serde_json::Value,
 }
@@ -772,10 +770,9 @@ fn relation_domain_matches_value(
 
 fn relation_revision_matches(
     row: &RelationCurrentStateRow,
-    expected: &arkret_wire::CurrentRevision,
+    expected: &arkret_wire::RealmCommitId,
 ) -> bool {
-    row.current_commit_id == expected.commit_id.as_str()
-        && u64::try_from(row.current_stream_position).ok() == Some(expected.stream_position)
+    row.current_commit_id == expected.as_str()
 }
 
 fn relation_current_value_for_create(
@@ -827,18 +824,18 @@ pub(crate) async fn commit_relation_current_state_in_connection(
     }
     let created = matches!(mutation, RelationCurrentStateMutation::Create(_));
     let lifecycle_time = std::cmp::max(event.created_at, commit.committed_at);
-    let (domain, expected_revision) = match &mutation {
+    let (domain, expected_commit_id) = match &mutation {
         RelationCurrentStateMutation::Create(payload) => (
             payload.primary_conflict_domain.clone(),
-            payload.expected_revision.clone(),
+            payload.expected_commit_id.clone(),
         ),
         RelationCurrentStateMutation::Update(payload) => (
             payload.primary_conflict_domain.clone(),
-            Some(payload.expected_revision.clone()),
+            Some(payload.expected_commit_id.clone()),
         ),
         RelationCurrentStateMutation::Tombstone(payload) => (
             payload.primary_conflict_domain.clone(),
-            Some(payload.expected_revision.clone()),
+            Some(payload.expected_commit_id.clone()),
         ),
     };
     let domain_key = arkret_canonical::canonical_json_string(&domain).map_err(|error| {
@@ -859,7 +856,7 @@ pub(crate) async fn commit_relation_current_state_in_connection(
         .map_err(PersistenceError::database)?;
 
     let current = sql_query(
-        "SELECT relation_id,state,current_commit_id,current_stream_position,value \
+        "SELECT relation_id,state,current_commit_id,value \
          FROM relation_current_states WHERE realm_id=$1 AND domain_key=$2 FOR UPDATE",
     )
     .bind::<Text, _>(event.realm_id.as_str())
@@ -871,7 +868,7 @@ pub(crate) async fn commit_relation_current_state_in_connection(
 
     let value = match (mutation, current.as_ref()) {
         (RelationCurrentStateMutation::Create(payload), None) => {
-            if expected_revision.is_some() {
+            if expected_commit_id.is_some() {
                 return Err(conflict(
                     "failed_precondition: Relation current revision is absent",
                 ));
@@ -880,7 +877,7 @@ pub(crate) async fn commit_relation_current_state_in_connection(
         }
         (RelationCurrentStateMutation::Create(payload), Some(row)) => {
             if row.state != "tombstoned"
-                || expected_revision
+                || expected_commit_id
                     .as_ref()
                     .is_none_or(|expected| !relation_revision_matches(row, expected))
             {
@@ -912,7 +909,7 @@ pub(crate) async fn commit_relation_current_state_in_connection(
         (RelationCurrentStateMutation::Update(payload), Some(row)) => {
             if row.state != "active"
                 || row.relation_id != payload.relation_id.as_str()
-                || !relation_revision_matches(row, &payload.expected_revision)
+                || !relation_revision_matches(row, &payload.expected_commit_id)
             {
                 return Err(conflict(
                     "failed_precondition: Relation update current value does not match",
@@ -970,7 +967,7 @@ pub(crate) async fn commit_relation_current_state_in_connection(
         (RelationCurrentStateMutation::Tombstone(payload), Some(row)) => {
             if row.state != "active"
                 || row.relation_id != payload.relation_id.as_str()
-                || !relation_revision_matches(row, &payload.expected_revision)
+                || !relation_revision_matches(row, &payload.expected_commit_id)
             {
                 return Err(conflict(
                     "failed_precondition: Relation tombstone current value does not match",
@@ -2462,6 +2459,14 @@ async fn commit_one_inner(
         .into());
     }
     let event = &request.authority_commit.event;
+    if event.kind != arkret_wire::EventKind::RealmOwnerTransfer
+        && request.owner_transfer_successor.is_some()
+    {
+        return Err(PersistenceError::SchemaViolation(
+            "successor Device source is confined to owner transfer".into(),
+        )
+        .into());
+    }
     let mimi = event.payload.contains_key("mimi_provenance")
         || event
             .payload
@@ -3014,6 +3019,16 @@ async fn commit_prepared_event_inner(
             conn,
             &request.authority_commit,
             event_approvals,
+        )
+        .await?
+    } else if event.kind == arkret_wire::EventKind::RealmOwnerTransfer {
+        crate::authority_commit::commit_owner_transfer_in_connection(
+            conn,
+            &request.authority_commit,
+            event_approvals,
+            request.owner_transfer_successor.as_ref().ok_or_else(|| {
+                conflict("temporarily_unavailable: owner transfer successor source is absent")
+            })?,
         )
         .await?
     } else {
@@ -3768,6 +3783,7 @@ async fn commit_batch_in_connection(
 
     let mut outcome = EventCommitOutcome::default();
     let mut fresh_claim_deadlines = Vec::new();
+    let mut fresh_owner_sources = Vec::new();
     let audit_events = request
         .events
         .iter()
@@ -3789,6 +3805,21 @@ async fn commit_batch_in_connection(
             }
             _ => request.event_approvals.as_ref(),
         };
+        let owner_candidate = (event.authority_commit.event.kind
+            == arkret_wire::EventKind::RealmOwnerTransfer)
+            .then(|| {
+                (
+                    event.authority_commit.clone(),
+                    event.owner_transfer_successor.clone(),
+                    event.forwarded_producer_evidence.clone(),
+                )
+            });
+        let mut owner_outcome = EventCommitOutcome::default();
+        let slot_outcome = if owner_candidate.is_some() {
+            &mut owner_outcome
+        } else {
+            &mut outcome
+        };
         // Keep the per-Event admission state out of the enclosing batch future.
         Box::pin(commit_one_in_connection(
             conn,
@@ -3796,11 +3827,28 @@ async fn commit_batch_in_connection(
             request.applet_record.as_ref(),
             request.realm_organization_proof.as_ref(),
             slot_approvals,
-            &mut outcome,
+            slot_outcome,
             audit_unit,
             &mut fresh_claim_deadlines,
         ))
         .await?;
+        if let Some((transaction, source, forwarded)) = owner_candidate {
+            if owner_outcome.event_inserted {
+                fresh_owner_sources.push((
+                    transaction,
+                    source.ok_or_else(|| {
+                        conflict(
+                            "temporarily_unavailable: new owner transfer has no successor source",
+                        )
+                    })?,
+                    forwarded,
+                ));
+            }
+            outcome.event_inserted |= owner_outcome.event_inserted;
+            outcome.projections_inserted += owner_outcome.projections_inserted;
+            outcome.outbox_inserted += owner_outcome.outbox_inserted;
+            outcome.audit_outcome = owner_outcome.audit_outcome.or(outcome.audit_outcome);
+        }
     }
 
     if let Some(preview) = request.applet_authoring_preview.as_ref() {
@@ -3839,6 +3887,38 @@ async fn commit_batch_in_connection(
     }
     crate::mls_group_current_states::require_live_claim_deadlines(conn, &fresh_claim_deadlines)
         .await?;
+    let mut owner_author_windows = Vec::with_capacity(fresh_owner_sources.len());
+    for (transaction, source, forwarded) in &fresh_owner_sources {
+        crate::capability_grant_current_states::require_owner_transfer_source(
+            conn,
+            transaction,
+            source,
+        )
+        .await?;
+        owner_author_windows.push(
+            crate::capability_grant_current_states::require_owner_transfer_author_current(
+                conn,
+                transaction,
+                forwarded.as_ref(),
+            )
+            .await?,
+        );
+    }
+    let final_now = chrono::Utc::now();
+    for (_, source, _) in &fresh_owner_sources {
+        crate::capability_grant_current_states::require_owner_transfer_deadline(source, final_now)?;
+    }
+    if owner_author_windows
+        .into_iter()
+        .any(|(not_before, expires_at)| {
+            final_now < not_before || expires_at.is_some_and(|expiry| final_now >= expiry)
+        })
+    {
+        return Err(conflict(
+            "temporarily_unavailable: root controller source expired after the last accepting wait",
+        )
+        .into());
+    }
     Ok(outcome)
 }
 

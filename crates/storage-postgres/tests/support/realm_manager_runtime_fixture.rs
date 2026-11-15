@@ -137,7 +137,7 @@ async fn freeze_manager_revoke_request(
         effective_scope: candidate.creation_scope.clone(), reason_code: reason, revoke_mode: mode,
         capability_revoke_events: preview.revoke_plan.capability_revocations.iter().map(|intent| {
             arkret_wire::EventAdmissionSubmission::new(fixture.admin_event(EventKind::CapabilityRevoke,
-                candidate.creation_scope.clone(), json!({"grant_id":intent.grant_id,"expected_revision":intent.expected_revision,"reason":intent.reason_code})))
+                candidate.creation_scope.clone(), json!({"grant_id":intent.grant_id,"expected_commit_id":intent.expected_commit_id,"reason":intent.reason_code})))
         }).collect(),
         membership_state_events: preview.revoke_plan.membership_removals.iter().map(|intent| {
             arkret_wire::EventAdmissionSubmission::new(fixture.admin_event(EventKind::MemberState,

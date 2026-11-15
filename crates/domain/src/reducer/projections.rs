@@ -553,13 +553,8 @@ pub struct MessageState {
     pub redacted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Clone, Debug)]
-pub struct ReactionState {
-    pub actor: String,
-    pub key: String,
-    pub active: bool,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
+/// Active current entries use the SDK's complete actor and accepted source.
+pub type ReactionState = arkret_models_collaboration::events_payloads::ReactionCurrentEntry;
 
 /// Settled RSVP of one `(event_ref, occurrence, actor_id)` subject.
 ///

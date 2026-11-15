@@ -707,7 +707,7 @@ async fn actual_peer_reply(
         } else {
             crate::routing::realm_join::nonce_for_request(&request.request_id).unwrap()
         };
-        let mut bundle =
+        let bundle =
             crate::routing::realm_join::local_authority_bundle(governor, &request.realm_id, &nonce)
                 .await
                 .unwrap();

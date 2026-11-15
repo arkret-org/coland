@@ -91,6 +91,10 @@ pub struct EventCommitRequest {
     /// Cross-Station human-device producer evidence verified from an
     /// `authority_forward`; retained only with the Event's first Commit.
     pub forwarded_producer_evidence: Option<crate::ForwardedProducerDeviceEvidence>,
+    /// Exact successor source candidate for an owner transfer. Construction
+    /// only checks shape/bindings; the PG accepting cut independently checks
+    /// original signatures, both validity instants and current authority.
+    pub owner_transfer_successor: Option<crate::OwnerTransferSuccessorSource>,
     pub forwarded_agent_producer:
         Option<arkret_identity::agent_authority_evidence::VerifiedAgentProducer>,
     pub agent_deployment_ceiling:

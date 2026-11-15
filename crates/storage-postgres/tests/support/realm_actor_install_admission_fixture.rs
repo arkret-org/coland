@@ -54,7 +54,7 @@ fn install_admission_rebind_package(fixture: &Fixture, body: &mut AppletInstallR
                 .to_registration(
                     &applet_registration_epoch_evidence(package),
                     serde_json::from_value(
-                        basis.registration_event.payload["expected_revision"].clone(),
+                        basis.registration_event.payload["expected_commit_id"].clone(),
                     )
                     .unwrap(),
                 )
@@ -150,7 +150,7 @@ pub(super) async fn install_admission_policy(
         json!({"kind":"installation","applet_id":applet,"service_id":service,"effective_scope":scope})
     };
     let id = format!("ak:policy:{}", uuid::Uuid::now_v7());
-    let event=fixture.admin_event(EventKind::PolicySet,scope,json!({"policy_id":id,"expected_revision":null,"value":{
+    let event=fixture.admin_event(EventKind::PolicySet,scope,json!({"policy_id":id,"expected_commit_id":null,"value":{
         "schema":"ak.schema.policy.v1","id":id,"realm_id":fixture.realm,"policy_kind":"applet","default_effect":"allow","created_by":actor,
         "created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),
         "rules":[{"rule_id":"native_admission_current_policy","kind":"applet","effect":"deny","applet_target":target,"applet_operations":[operation]}]}}));
@@ -1052,7 +1052,7 @@ pub(super) async fn admission_native_endpoint(
                 .unwrap();
             let current = currents.iter().find(|row| row.grant_id == grant).unwrap();
             let event = fixture.admin_event(EventKind::CapabilityRevoke, ScopeRef::Realm { realm_id: fixture.realm.clone() },
-                json!({"grant_id":grant,"expected_revision":current.revision,"reason":"stop fresh identity creation only"}));
+                json!({"grant_id":grant,"expected_commit_id":current.revision,"reason":"stop fresh identity creation only"}));
             let body =
                 arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
                     arkret_wire::EventAdmissionSubmission::new(event),

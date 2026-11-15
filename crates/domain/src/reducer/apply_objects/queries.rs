@@ -195,12 +195,7 @@ impl ProjectionState {
     pub fn reactions_for_event(&self, event_id: &str) -> Vec<&ReactionState> {
         self.reactions
             .get(event_id)
-            .map(|by_actor| {
-                by_actor
-                    .values()
-                    .flat_map(|by_key| by_key.values().filter(|r| r.active))
-                    .collect()
-            })
+            .map(|value| value.entries().iter().collect())
             .unwrap_or_default()
     }
 

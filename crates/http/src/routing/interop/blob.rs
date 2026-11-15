@@ -1949,8 +1949,9 @@ mod tests {
             actor: "ak:did_core:web:blob-agent.example".into(),
             endpoint: coland_services::identity::SessionEndpointState::AgentRuntime {
                 state: coland_services::identity::AgentSessionState {
-                    granted_scope: Vec::new(),
-                    scope_details: json!({}),
+                    metadata: crate::routing::identity::auth_grant_dpop::tests::test_agent_metadata(
+                        &["ak.self.committed_event.read.scan.v1"],
+                    ),
                     freshness_state: arkret_wire::FreshnessState::Fresh,
                 },
             },

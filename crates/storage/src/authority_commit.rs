@@ -1698,7 +1698,7 @@ pub struct AccountContentDeliveryInput {
         arkret_wire::CapabilityActionId,
     )>,
     pub credential_expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub agent_session_scope: Option<(Vec<String>, serde_json::Map<String, serde_json::Value>)>,
+    pub agent_session_scope: Option<(Vec<String>, arkret_models_identity::SessionGrantScope)>,
     pub agent_endpoint: Option<crate::AgentEndpointGuard>,
     pub applet_endpoint: Option<AppletManagedDeviceScopeGuard>,
     pub qualified_agent_scope_evidence: Option<crate::VerifiedAgentScopeEvidence>,

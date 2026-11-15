@@ -3,7 +3,7 @@ use arkret_models_collaboration::events_payloads::{
     ActorProfileCreatePayload, ActorProfileUpdatePayload,
 };
 use arkret_models_identity::{ActorProfile, AppletInteractionIntent, AppletInteractionMode};
-use arkret_wire::{CurrentRevision, Event, EventKind, RealmCommit, ScopeRef};
+use arkret_wire::{Event, EventKind, RealmCommit, ScopeRef};
 use coland_storage::{AppletManagedDeviceScopeGuard, PersistenceError, PersistenceResult};
 use diesel::sql_types::{Array, Jsonb, Text, Timestamptz};
 use diesel::{QueryableByName, sql_query};
@@ -266,11 +266,8 @@ pub(crate) async fn prepare_control(
             let (value, source) = previous
                 .as_ref()
                 .ok_or_else(|| denied("Profile has never been created"))?;
-            if payload.expected_revision.as_ref()
-                != Some(&CurrentRevision {
-                    commit_id: source.commit_id.clone(),
-                    stream_position: source.stream_position,
-                })
+            if payload.expected_commit_id.as_ref()
+                != Some(&source.commit_id)
                 || value["profile_id"] != json!(payload.actor_profile_id)
             {
                 return Err(denied("Profile CAS or target differs"));

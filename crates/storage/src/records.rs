@@ -28,8 +28,7 @@ impl AccountPk {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentSessionRecord {
-    pub granted_scope: Vec<String>,
-    pub scope_details: Value,
+    pub metadata: arkret_models_identity::SessionGrantMetadata,
     pub freshness_state: FreshnessState,
 }
 
@@ -172,12 +171,12 @@ pub struct RecoveryAuthorityContext {
 /// `pending -> verified -> completed` (or `rejected` / `expired`). Proof
 /// verification (C-P3) is what advances `pending -> verified`; completion
 /// (C-P4) emits a `ak.device.authorize` + receipt.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RecoverySessionRecord {
     pub request_id: String,
     pub create_intent_digest: String,
     pub recovery_session_id: String,
-    pub session_grant_id: String,
+    pub session_grant_ref: arkret_wire::SessionGrantRef,
     pub session_grant_cnf_jkt: String,
     pub principal_id: arkret_identifiers::DidCoreId,
     pub station_id: arkret_identifiers::DidCoreId,
@@ -215,6 +214,48 @@ pub struct RecoverySessionRecord {
 pub struct SecurityTransactionRecord {
     pub canonical_request: Vec<u8>,
     pub resource: arkret_models_crypto::SecurityTransaction,
+}
+
+impl SecurityTransactionRecord {
+    /// Rotation is the only mutable, multi-step transaction branch.
+    pub fn rotation(
+        &self,
+    ) -> crate::PersistenceResult<&arkret_models_crypto::SecurityRotationTransaction> {
+        match &self.resource {
+            arkret_models_crypto::SecurityTransaction::SecurityRotation(rotation) => Ok(rotation),
+            arkret_models_crypto::SecurityTransaction::Recovery(_) => {
+                Err(crate::PersistenceError::Conflict(
+                    "completed Recovery has no rotation steps or mutable plan".to_owned(),
+                ))
+            }
+        }
+    }
+
+    pub fn rotation_mut(
+        &mut self,
+    ) -> crate::PersistenceResult<&mut arkret_models_crypto::SecurityRotationTransaction> {
+        match &mut self.resource {
+            arkret_models_crypto::SecurityTransaction::SecurityRotation(rotation) => Ok(rotation),
+            arkret_models_crypto::SecurityTransaction::Recovery(_) => {
+                Err(crate::PersistenceError::Conflict(
+                    "completed Recovery has no rotation steps or mutable plan".to_owned(),
+                ))
+            }
+        }
+    }
+
+    pub fn recovery(
+        &self,
+    ) -> crate::PersistenceResult<&arkret_models_crypto::RecoveryTransactionCompletion> {
+        match &self.resource {
+            arkret_models_crypto::SecurityTransaction::Recovery(completion) => Ok(completion),
+            arkret_models_crypto::SecurityTransaction::SecurityRotation(_) => {
+                Err(crate::PersistenceError::Conflict(
+                    "transaction is not a completed Recovery".to_owned(),
+                ))
+            }
+        }
+    }
 }
 
 /// First durable request bytes for one security-transaction step.

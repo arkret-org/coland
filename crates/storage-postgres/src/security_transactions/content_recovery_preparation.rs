@@ -66,7 +66,7 @@ pub(super) async fn retain_in_connection(
 ) -> PersistenceResult<()> {
     write.validate()?;
     let authorize = &write.commits[1];
-    let endpoint = replacement(&write.transaction.resource.account_id, &authorize.event)?;
+    let endpoint = replacement(write.transaction.resource.account_id(), &authorize.event)?;
     let pcr_cut = CommittedEventRef {
         event_id: authorize.event.event_id.clone(),
         commit_id: authorize.commit.commit_id.clone(),
@@ -84,7 +84,7 @@ pub(super) async fn retain_in_connection(
         .map_err(unavailable)?;
     sql_query("INSERT INTO content_recovery_episodes(authorization_event_ref,transaction_id,actor_id,state,replacement,pcr_cut,inventory_blob_ref,security_completed_at,created_at) VALUES($1,$2,$3,'pending',$4,$5,NULL,NULL,$6)")
         .bind::<Text,_>(authorize.event.event_id.as_str())
-        .bind::<Uuid,_>(crate::ids::typed_uuid_part_expect_internal(write.transaction.resource.transaction_id.as_str()))
+        .bind::<Uuid,_>(crate::ids::typed_uuid_part_expect_internal(write.transaction.resource.transaction_id().as_str()))
         .bind::<Jsonb,_>(serde_json::to_value(&value.replacement.actor_id).map_err(unavailable)?)
         .bind::<Jsonb,_>(serde_json::to_value(&value.replacement).map_err(unavailable)?)
         .bind::<Jsonb,_>(serde_json::to_value(&value.pcr_cut).map_err(unavailable)?)

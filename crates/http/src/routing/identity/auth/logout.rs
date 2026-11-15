@@ -39,20 +39,20 @@ pub(super) async fn logout(
     if state.config().development_harness_enabled()
         && state.config().session_grant_introspection_url.is_none()
     {
-        let grant_jwt = bearer_token(req)
+        let grant_secret = bearer_token(req)
             .map(str::to_owned)
             .ok_or_else(|| AppError::unauthenticated("missing local development bearer"))?;
         require_logout_body(req).await?;
-        return json_ok(dev_mode_local_logout(state, &grant_jwt).await?);
+        return json_ok(dev_mode_local_logout(state, &grant_secret).await?);
     }
 
     // §4.1 — identify the DPoP-scheme grant's subject + device by
     // introspecting it against the Account Authority process over the existing S2S channel.
-    let grant_jwt = dpop_token(req)
+    let grant_secret = dpop_token(req)
         .map(str::to_owned)
         .ok_or_else(|| AppError::unauthenticated("missing DPoP session grant"))?;
 
-    let grant = introspect_session_grant_for_logout(state, &grant_jwt).await?;
+    let grant = introspect_session_grant_for_logout(state, &grant_secret).await?;
     // The public Account Authority base is the sole client-visible origin for
     // every `gate/account` operation. A deployment gateway may route this
     // exact operation to the Principal service for its local cleanup step,
@@ -62,7 +62,7 @@ pub(super) async fn logout(
         .account_authority_url
         .as_deref()
         .unwrap_or(&state.config().public_base_url);
-    let digest = session_credential_hash(&grant_jwt, state.service_id());
+    let digest = session_credential_hash(&grant_secret, state.service_id());
     let (record, reserve) = if let Some(grant) = grant {
         if grant.credential_class
             != arkret_models_identity::session_credential::SessionGrantCredentialClass::Standard
@@ -81,14 +81,16 @@ pub(super) async fn logout(
         }
         super::super::auth_grant_dpop::verify_grant_dpop_request_at_base(
             req,
-            &grant_jwt,
+            &grant_secret,
             Some(&grant.cnf_jkt),
             logout_public_base,
         )
         .map_err(auth_error_to_app_error)?;
         let session =
             super::super::auth_grant_dpop::session_record_from_introspected_grant_for_logout(
-                state, &grant_jwt, &grant,
+                state,
+                &grant_secret,
+                &grant,
             )
             .map_err(auth_error_to_app_error)?;
         if session.agent_session().is_some() {
@@ -98,11 +100,11 @@ pub(super) async fn logout(
         }
         let record = coland_storage::PushHardLogoutJournalRecord {
             grant_token_digest: digest.clone(),
-            revocation_ref: grant.revocation_ref,
-            account_id: grant.account_id,
+            revocation_ref: grant.revocation_ref.clone(),
+            account_id: grant.account_id.clone(),
             device_id: arkret_wire::DeviceId::new(session.require_human_device_id())
                 .map_err(|error| AppError::internal(error.to_string()))?,
-            cnf_jkt: grant.cnf_jkt,
+            cnf_jkt: grant.cnf_jkt.clone(),
             auth_side_confirmed: false,
             completed_at: None,
             created_at: now(),
@@ -119,7 +121,7 @@ pub(super) async fn logout(
             })?;
         super::super::auth_grant_dpop::verify_grant_dpop_request_at_base(
             req,
-            &grant_jwt,
+            &grant_secret,
             Some(&record.cnf_jkt),
             logout_public_base,
         )
@@ -141,7 +143,7 @@ pub(super) async fn logout(
     }
 
     if !journal.auth_side_confirmed {
-        trigger_auth_side_auth_session_logout(state, &grant_jwt).await?;
+        trigger_auth_side_auth_session_logout(state, &grant_secret).await?;
         state
             .persistence()
             .mark_push_hard_logout_auth_confirmed(&digest)
@@ -156,7 +158,7 @@ pub(super) async fn logout(
     // local session revoke + push-route cleanup + this cache invalidation together
     // fail-close the device's subsequent requests without revoking its durable
     // Event-signing authorization.
-    super::super::auth_grant_dpop::invalidate_cached_grant(state, &grant_jwt);
+    super::super::auth_grant_dpop::invalidate_cached_grant(state, &grant_secret);
 
     let actor = journal.account_id.principal_id.as_str();
     let device_id = journal.device_id.as_str();
@@ -273,11 +275,11 @@ async fn dev_mode_local_logout(
 /// cleanup.
 async fn introspect_session_grant_for_logout(
     state: &AppState,
-    grant_jwt: &str,
+    grant_secret: &str,
 ) -> Result<Option<crate::wire::SessionGrantValidationMetadata>, AppError> {
     let response =
         super::super::account_authority_client::AccountAuthorityClient::from_state(state)?
-            .introspect_logout_grant(grant_jwt)
+            .introspect_logout_grant(grant_secret)
             .await?;
     classify_logout_introspection(response)
 }
@@ -332,10 +334,10 @@ fn invalid_logout_introspection(
 /// sub-operation then only confirms that no Auth-side chain remains.
 async fn trigger_auth_side_auth_session_logout(
     state: &AppState,
-    grant_jwt: &str,
+    grant_secret: &str,
 ) -> Result<(), AppError> {
     let body = super::super::account_authority_client::AccountAuthorityClient::from_state(state)?
-        .logout_auth_session(grant_jwt, now())
+        .logout_auth_session(grant_secret, now())
         .await?;
     confirm_auth_side_logout(body)
 }

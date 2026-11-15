@@ -227,6 +227,8 @@ impl HistoricalControlStation {
                         },
                         attested_at: at,
                         expires_at: at + Duration::minutes(5),
+
+                        owner_transfer_acceptance_intent_digest: None,
                     },
                     DidUrl::new(format!("{}#authority", self.did)).unwrap(),
                     &SigningKey::from_bytes(&self.seed),

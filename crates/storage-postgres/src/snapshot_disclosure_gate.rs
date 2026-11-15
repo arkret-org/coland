@@ -1314,14 +1314,20 @@ async fn disclosure_facts_in_connection(
                 CurrentSelector::CallState { call_id }
                 | CurrentSelector::CallFocus { call_id }
                 | CurrentSelector::CallRoster { call_id }
-                | CurrentSelector::CallModeration { call_id },
+                | CurrentSelector::CallModeration { call_id }
+                | CurrentSelector::CallRecordingState { call_id, .. }
+                | CurrentSelector::CallRecordingArtifact { call_id, .. }
+                | CurrentSelector::CallTranscriptState { call_id, .. }
+                | CurrentSelector::CallTranscriptArtifact { call_id, .. },
             ..
         } = entry
         {
-            call_creations.insert(
-                call_id.clone(),
-                call_creation_fact(conn, realm_id, call_id).await?,
-            );
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                call_creations.entry(call_id.clone())
+            {
+                let fact = call_creation_fact(conn, realm_id, entry.key()).await?;
+                entry.insert(fact);
+            }
         }
     }
     let caller = actor.clone();
@@ -1646,6 +1652,9 @@ pub(crate) fn disclose_to_actor(
     actor: &ActorId,
     facts: &DisclosureFacts,
 ) -> PersistenceResult<coland_storage::RealmStateSnapshotMaterial> {
+    crate::call_state_current_states::validate_capture_current_pairs(
+        &material.current_state_entries,
+    )?;
     if facts.undisclosed_family_row {
         return Err(rejected(
             "a current family outside the disclosure subset has a row",
@@ -1890,7 +1899,11 @@ pub(crate) fn disclose_to_actor(
             CurrentSelector::CallState { call_id }
             | CurrentSelector::CallFocus { call_id }
             | CurrentSelector::CallRoster { call_id }
-            | CurrentSelector::CallModeration { call_id } => Some(
+            | CurrentSelector::CallModeration { call_id }
+            | CurrentSelector::CallRecordingState { call_id, .. }
+            | CurrentSelector::CallRecordingArtifact { call_id, .. }
+            | CurrentSelector::CallTranscriptState { call_id, .. }
+            | CurrentSelector::CallTranscriptArtifact { call_id, .. } => Some(
                 facts
                     .call_creations
                     .get(call_id)
@@ -2112,6 +2125,16 @@ pub(crate) fn disclose_to_actor(
                 moderation
                     .validate_sources(source_stream_ref, revision)
                     .map_err(PersistenceError::database)?;
+            }
+            CurrentSelector::CallRecordingState { .. }
+            | CurrentSelector::CallRecordingArtifact { .. }
+            | CurrentSelector::CallTranscriptState { .. }
+            | CurrentSelector::CallTranscriptArtifact { .. } => {
+                crate::call_state_current_states::validate_capture_current(
+                    &material.realm_id,
+                    selector,
+                    value,
+                )?;
             }
             CurrentSelector::RealmMediaService => {
                 let descriptor: arkret_models_collaboration::events_payloads::RealmMediaServiceValue =
@@ -2381,17 +2404,20 @@ pub(crate) fn disclose_to_actor(
                     below_floor.insert(message_id.clone());
                 }
             }
-            // State family: disclosed with its scope, never floored or
-            // trimmed by a redaction (`realm-state-snapshot-schema.md` §3).
+            // Active metadata is complete even when its add originals are
+            // below the floor. Disclosure still follows the current target.
             CurrentSelector::MessageReactions { target_ref } => {
                 let set: arkret_models_collaboration::events_payloads::reaction::MessageReactionsCurrentValue =
                     serde_json::from_value(value.clone())
-                        .map_err(|_| rejected("reaction current value is not a closed dot set"))?;
-                set.validate_for_target(target_ref)
-                    .map_err(|_| rejected("reaction assertion differs from its target"))?;
-                if set.assertions().is_empty() {
-                    return Err(rejected("reaction current holds no assertion"));
-                }
+                        .map_err(|_| rejected("reaction current value is not closed active metadata"))?;
+                set.validate_installation(
+                    target_ref,
+                    source_stream_ref,
+                    revision,
+                    source_head,
+                    None,
+                )
+                .map_err(|_| rejected("reaction current source differs from its exact cut"))?;
             }
             CurrentSelector::RealmProfile
             | CurrentSelector::RealmPolicyBundle
@@ -2564,6 +2590,34 @@ pub(crate) fn disclose_to_actor(
                 ..
             } if redacted.contains(message_id.as_str()) || below_floor.contains(message_id)
                 || facts.withheld_content_commits.contains(revision.commit_id.as_str())
+        )
+    });
+    // The target's current carrier must survive the same scope, floor,
+    // retention and redaction filtering. A summary never makes an old
+    // invisible Message visible, and it never opens its reaction originals.
+    let visible_messages = material
+        .current_state_entries
+        .iter()
+        .filter_map(|row| {
+            if let CurrentState::Value {
+                selector: CurrentSelector::MessageRevision { message_id },
+                source_stream_ref,
+                ..
+            } = row
+            {
+                Some((message_id.to_string(), source_stream_ref.clone()))
+            } else {
+                None
+            }
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    material.current_state_entries.retain(|row| {
+        !matches!(row,
+            CurrentState::Value {
+                selector: CurrentSelector::MessageReactions { target_ref },
+                source_stream_ref,
+                ..
+            } if !visible_messages.contains(&(target_ref.clone(), source_stream_ref.clone()))
         )
     });
     let mut stream_floors = vec![StreamHistoryFloor {
@@ -3050,15 +3104,21 @@ mod tests {
         assert!(disclose_to_account(material, &account("carol"), &facts).is_err());
     }
 
-    fn reaction_set(target: &MessageId, byte: u8) -> Value {
-        json!({"assertions": [{
-            "tag_id": format!("{}:0", event_id(byte).as_str()),
-            "value": {"target_ref": target, "key": "+1"}
+    fn reaction_set(byte: u8) -> Value {
+        json!({"entries": [{
+            "actor_id": ActorId::account(account("alice")),
+            "key": "+1",
+            "source": {
+                "event_id": event_id(byte),
+                "commit_id": RealmCommitId::from_digest([byte; 32]),
+                "stream_ref": {"kind":"realm", "realm_id": realm_id()},
+                "stream_position": 1
+            }
         }]})
     }
 
     #[test]
-    fn reaction_sets_are_state_disclosed_with_their_target_scope() {
+    fn reaction_active_metadata_follows_visible_targets_without_fetching_old_adds() {
         let (bob, mut material, mut facts) = joined_fixture();
         let floored = MessageId::from_event_id(&event_id(0x33));
         let reactions = row(
@@ -3066,7 +3126,7 @@ mod tests {
                 target_ref: floored.to_string(),
             },
             12,
-            reaction_set(&floored, 0x55),
+            reaction_set(0x55),
         );
         // A Circle Message's reactions stay in that Circle's stream.
         let circle_id = CircleId::from_event_id(&event_id(0x56));
@@ -3088,7 +3148,7 @@ mod tests {
                 target_ref: hidden.to_string(),
             },
             2,
-            reaction_set(&hidden, 0x58),
+            reaction_set(0x58),
         );
         material.current_state_entries.push(reactions.clone());
         material.current_state_entries.push(CurrentState::Value {
@@ -3098,8 +3158,7 @@ mod tests {
             value,
         });
         let disclosed = disclose_to_account(material.clone(), &bob, &facts).unwrap();
-        // The target Message sits below Bob's floor, but the reaction set is
-        // state: it is disclosed whole, while the hidden Circle's is omitted.
+        // Neither an invisible old target nor a hidden Circle is disclosed.
         let reaction_rows = disclosed
             .current_state_entries
             .iter()
@@ -3113,12 +3172,44 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        assert_eq!(reaction_rows, vec![&reactions]);
+        assert!(reaction_rows.is_empty());
+
+        // A legitimate post-join revision makes the old target current
+        // visible. Its active add remains below the floor and is not fetched.
+        for entry in &mut material.current_state_entries {
+            if let CurrentState::Value {
+                selector: CurrentSelector::MessageRevision { message_id },
+                revision,
+                ..
+            } = entry
+            {
+                if message_id == &floored {
+                    revision.stream_position = 12;
+                    revision.commit_id = RealmCommitId::from_digest([13; 32]);
+                }
+            }
+        }
+        let visible = disclose_to_account(material.clone(), &bob, &facts).unwrap();
+        assert!(visible.current_state_entries.contains(&reactions));
+
+        let mut empty = material.clone();
+        let CurrentState::Value { value, .. } = empty
+            .current_state_entries
+            .iter_mut()
+            .find(|entry| **entry == reactions)
+            .unwrap();
+        *value = json!({"entries": []});
+        let empty = disclose_to_account(empty, &bob, &facts).unwrap();
+        assert!(empty.current_state_entries.iter().any(|entry| matches!(entry,
+            CurrentState::Value { selector: CurrentSelector::MessageReactions { .. }, value, .. }
+            if value == &json!({"entries": []})
+        )));
 
         for drift in [
-            reaction_set(&MessageId::from_event_id(&event_id(0x46)), 0x55),
             json!({"assertions": []}),
             json!({"reactions": [{"actor_id": ActorId::account(bob.clone()), "key": "+1"}]}),
+            json!({"entries": [{"actor_id": ActorId::account(bob.clone()), "key": "+1"}]}),
+            json!({"entries": [reaction_set(0x55)["entries"][0].clone(), reaction_set(0x55)["entries"][0].clone()]}),
         ] {
             let mut drifted = material.clone();
             let CurrentState::Value { value, .. } = drifted
@@ -3130,15 +3221,39 @@ mod tests {
             assert!(disclose_to_account(drifted, &bob, &facts).is_err());
         }
 
-        let mut foreign_scope = facts;
-        foreign_scope.message_streams.insert(
+        let mut redacted_material = material.clone();
+        redacted_material
+            .current_state_entries
+            .push(redaction_row(floored.as_str(), &floored, 13));
+        let redacted = disclose_to_account(redacted_material, &bob, &facts).unwrap();
+        assert!(!redacted.current_state_entries.iter().any(|entry| matches!(
+            entry,
+            CurrentState::Value {
+                selector: CurrentSelector::MessageReactions { .. },
+                ..
+            }
+        )));
+        let mut retained_out = DisclosureFacts {
+            withheld_content_commits: [RealmCommitId::from_digest([13; 32]).to_string()].into(),
+            ..facts
+        };
+        let retained = disclose_to_account(material.clone(), &bob, &retained_out).unwrap();
+        assert!(!retained.current_state_entries.iter().any(|entry| matches!(
+            entry,
+            CurrentState::Value {
+                selector: CurrentSelector::MessageReactions { .. },
+                ..
+            }
+        )));
+
+        retained_out.message_streams.insert(
             floored,
             CommitStreamRef::Circle {
                 realm_id: realm_id(),
                 circle_id: CircleId::from_event_id(&event_id(0x56)),
             },
         );
-        assert!(disclose_to_account(material, &bob, &foreign_scope).is_err());
+        assert!(disclose_to_account(material, &bob, &retained_out).is_err());
     }
 
     #[test]

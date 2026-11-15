@@ -1,6 +1,6 @@
 //! Accepted Applet Service proof and managed Message identity at one write cut.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use arkret_models_collaboration::governance::grant_constraint::{
     CapabilitySubject, GrantConstraintKind, GrantConstraintSubkind,
@@ -16,13 +16,49 @@ use serde_json::Value;
 
 use crate::capability_grant_current_states::{
     CapabilityGrantCurrentStateReadRow, RealmAuthorityRootReadRow, decode_authority_root,
-    decode_row, grant_is_active_at, validate_ancestor_graph,
+    decode_row, grant_is_active_at, require_current_grant_lineage,
 };
 
 #[derive(diesel::QueryableByName)]
 struct ValueRow {
     #[diesel(sql_type=Jsonb)]
     value: Value,
+}
+
+fn delegated_recording_result_actions(
+    event: &Event,
+) -> PersistenceResult<Option<Vec<&'static str>>> {
+    use arkret_models_collaboration::events_payloads::call::{
+        CallRecordingState, CallRosterDelta, CallStatePayload,
+    };
+    if event.kind != EventKind::CallState {
+        return Ok(None);
+    }
+    let payload: CallStatePayload = serde_json::from_value(serde_json::json!(event.payload))
+        .map_err(PersistenceError::database)?;
+    payload.validate().map_err(PersistenceError::database)?;
+    if !payload
+        .recording_transition
+        .as_ref()
+        .is_some_and(|transition| transition.to == CallRecordingState::Ready)
+    {
+        return Ok(None);
+    }
+    let mut actions = vec![arkret_wire::CapabilityActionId::CALL_RECORD];
+    if payload.state_transition.is_some()
+        || payload.focus.is_some()
+        || payload.roster_delta.is_some()
+    {
+        actions.push(arkret_wire::CapabilityActionId::CALL_JOIN);
+    }
+    if payload.moderation_delta.is_some() {
+        actions.push(arkret_wire::CapabilityActionId::CALL_MODERATE);
+    }
+    if payload.transcript_transition.is_some() {
+        actions.push(arkret_wire::CapabilityActionId::CALL_TRANSCRIBE);
+    }
+    if payload.roster_delta.as_ref().is_some_and(|delta| matches!(delta, CallRosterDelta::Join { participant } if participant.media.as_ref().is_some_and(|media| media.screen == Some(true)))) { actions.push(arkret_wire::CapabilityActionId::CALL_SCREEN_SHARE); }
+    Ok(Some(actions))
 }
 fn denied(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!("failed_precondition: {detail}"))
@@ -489,10 +525,34 @@ async fn require_applet_producer_inner(
         && arkret_models_collaboration::authority_commit::is_audit_paired_event_slot(event)
             .map_err(denied)?
         && grant.issuer_id == event.actor_id;
+    let delegated_capture = if !native_service
+        && event.actor_id.as_account_id().is_some()
+        && event.executed_by.as_ref() == Some(&service)
+        && grant.issuer_id == event.actor_id
+    {
+        delegated_recording_result_actions(event)?
+    } else {
+        None
+    };
+    if let Some(actions) = delegated_capture.as_ref() {
+        let facts = coland_storage::OperationFacts {
+            applet_id: Some(registration.applet_id.to_string()),
+            executed_by: Some(service.clone()),
+            registration_epoch: Some(registration.registration_epoch.to_string()),
+            circle_id: match &effective_scope {
+                arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id.to_string()),
+                _ => None,
+            },
+            ..Default::default()
+        };
+        if let Some((commit, prepared)) = acceptance {
+            accepted.extend(crate::realm_authorization_cut::RealmAuthorizationCut::require_call_service_producer(conn, event, commit, prepared, grant, &resource, &facts, actions).await?);
+        }
+    }
     // A native Account's explicit delegation to the exact registered Service
     // is not a managed Account terminal child. Its scoped business grant and
     // approvals are rechecked independently by the registered unit's cut.
-    if !native_service && !delegated_audit {
+    if !native_service && !delegated_audit && delegated_capture.is_none() {
         let [
             arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::Grant {
                 grant_id: parent_id,
@@ -531,15 +591,12 @@ async fn require_applet_producer_inner(
     let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1")
         .bind::<Text,_>(event.realm_id.as_str()).get_result::<RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     if !revoking_own_child {
-        validate_ancestor_graph(
-            &GrantId::from_event_id(&event.event_id),
+        require_current_grant_lineage(
             &grant_id,
             &grants,
             &decode_authority_root(root)?,
             &event.realm_id,
             at,
-            &mut BTreeSet::new(),
-            0,
         )?;
     }
     #[derive(diesel::QueryableByName)]

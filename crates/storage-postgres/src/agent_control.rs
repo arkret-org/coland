@@ -101,6 +101,44 @@ async fn pcr_of(
     .transpose()
 }
 
+/// Select only the immutable PCR birth accepted for this complete Agent.
+/// This neither checks today's delegation nor grants controller authority.
+async fn accepted_agent_pcr(
+    conn: &mut AsyncPgConnection,
+    agent: &arkret_wire::AccountId,
+) -> Result<arkret_wire::RealmId, PgTransactionError> {
+    let rows = sql_query(
+        "SELECT c.realm_id AS pcr_realm_id FROM realm_commits c \
+         JOIN canonical_events e ON e.pk=c.event_pk \
+         JOIN agent_producer_signer_keys s ON s.commit_id=c.commit_id \
+         WHERE e.kind='ak.realm.create' AND e.state='committed' \
+           AND e.envelope->'actor_id'=$1 \
+           AND e.envelope->'payload'->'object'->>'purpose'='agent_control' \
+           AND c.stream_ref=jsonb_build_object('kind','realm','realm_id',c.realm_id) \
+           AND c.stream_position=0 AND c.governance_generation=0 \
+           AND s.self_admission_kind='agent_pcr_genesis'",
+    )
+    .bind::<Jsonb, _>(serde_json::json!(arkret_wire::ActorId::account(
+        agent.clone()
+    )))
+    .get_results::<PcrRow>(&mut *conn)
+    .await?;
+    let [row] = rows.as_slice() else {
+        return Err(precondition(
+            "the Agent has no unique accepted PCR inception",
+        ));
+    };
+    let realm = arkret_wire::RealmId::new(row.pcr_realm_id.clone()).map_err(corrupt)?;
+    if !matches!(crate::pcr_private_authority::accepted_governance(conn, &realm).await?,
+        arkret_wire::GenesisGovernance::Agent(ref account) if account == agent)
+    {
+        return Err(precondition(
+            "the accepted PCR inception belongs to another Agent",
+        ));
+    }
+    Ok(realm)
+}
+
 async fn lock_realm(
     conn: &mut AsyncPgConnection,
     realm_id: &arkret_wire::RealmId,
@@ -392,6 +430,15 @@ async fn admit_agent_control_in_connection(
             "Agent control Event is not signed by a device of its controller",
         )
     })?;
+
+    // An otherwise valid controller signature cannot choose the second lock.
+    // Reject a wrong ordinary/native target before taking either Realm lock;
+    // the locked current binding and all delegation checks below still apply.
+    if accepted_agent_pcr(conn, &agent).await? != event.realm_id {
+        return Err(precondition(
+            "the Event Realm is not the Agent account's accepted Principal Control Realm",
+        ));
+    }
 
     // Sidecar admission can already hold the controller PCR while reading
     // the Agent PCR. Take the controller lock required by the historical

@@ -149,10 +149,7 @@ async fn add_public_profile_history(pool: &PgPool, fixture: &RootFixture) -> ark
                 EventKind::ProfileUpdate,
                 json!({"actor_profile_id":create,
                 "patch":{"display_name":format!("Archive control profile {index}")},
-                "expected_revision":{
-                    "commit_id":previous.as_ref().unwrap().commit_id,
-                    "stream_position":previous.as_ref().unwrap().stream_position
-                }}),
+                "expected_commit_id":previous.as_ref().unwrap().commit_id}),
             )
         };
         let event = fixture.pcr.history.event(kind, payload);

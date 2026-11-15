@@ -375,10 +375,9 @@ async fn read_at_cut(
             || accepted.event.actor_id != ActorId::account(request.controller_account_id.clone())
             || accepted.event.executed_by.is_some()
             || accepted.event.realm_id != target.realm
-            || !authorization.grants.iter().any(|row| {
-                row.grant.id == arkret_wire::GrantId::from_event_id(reference)
-                    && row.grant.issuer_id == accepted.event.actor_id
-                    && matches!(&row.grant.subject, arkret_models_collaboration::governance::grant_constraint::CapabilitySubject::Actor(subject) if subject == &actor)
+            || !authorization.current_grant_record(&arkret_wire::GrantId::from_event_id(reference)).is_some_and(|grant| {
+                grant.issuer_id == accepted.event.actor_id
+                    && matches!(&grant.subject, arkret_models_collaboration::governance::grant_constraint::CapabilitySubject::Actor(subject) if subject == &actor)
             })
         {
             return Ok(empty(request));
@@ -540,21 +539,9 @@ async fn read_at_cut(
             // Membership/profile reads are independent sources, but matching
             // global refusals apply to both Agent and controller at this cut.
             if read || profile_write {
-                if coland_storage::evaluate_grants(
-                    &operation,
-                    authorization.grants.iter().map(|row| &row.grant),
-                )
-                .is_refusal()
-                    || authorization.agent_ceiling.as_ref().is_some_and(|ceiling| {
-                        coland_storage::evaluate_grants(
-                            &coland_storage::AuthorizationOperation {
-                                actor: &ceiling.controller.actor,
-                                ..operation
-                            },
-                            ceiling.controller.grants.iter().map(|row| &row.grant),
-                        )
-                        .is_refusal()
-                    })
+                if authorization
+                    .evaluate_with_approvals_checked(&actions, &target.resource, &facts, &[])?
+                    .is_refusal()
                 {
                     continue 'action;
                 }
@@ -564,8 +551,13 @@ async fn read_at_cut(
             if direct || matches!(target.scope, ScopeRef::Sidecar { .. }) {
                 continue 'action;
             }
-            match authorization.evaluate(&actions, &target.resource, &facts) {
-                coland_storage::GrantEvaluation::Allowed(_) => {}
+            let satisfied = match authorization.evaluate_with_approvals_checked(
+                &actions,
+                &target.resource,
+                &facts,
+                &[],
+            )? {
+                coland_storage::GrantEvaluation::Allowed(paths) => paths,
                 coland_storage::GrantEvaluation::Unnamed
                     if evidence_grants.is_empty()
                         && matches!(
@@ -596,9 +588,13 @@ async fn read_at_cut(
                         continue 'action;
                     };
                     let controller = &ceiling.controller;
-                    let controller_verdict =
-                        controller.evaluate(&actions, &target.resource, &facts);
-                    let owner_covers = controller.root_controller
+                    let controller_verdict = controller.evaluate_with_approvals_checked(
+                        &actions,
+                        &target.resource,
+                        &facts,
+                        &[],
+                    )?;
+                    let owner_covers = controller.root_controller()
                         && arkret_policy::owner_may_author_action(action).unwrap_or(false)
                         && !controller_verdict.is_refusal();
                     let management = arkret_policy::agent_management::evaluate_agent_management(
@@ -625,14 +621,9 @@ async fn read_at_cut(
                     continue;
                 }
                 _ => continue 'action,
-            }
-            let Some(chosen) = authorization.grants.iter().find(|row| {
-                (evidence_grants.is_empty() || evidence_grants.contains(&row.grant.id))
-                    && coland_storage::grant_names_target(&row.grant, &actions, &target.resource)
-                    && matches!(
-                        coland_storage::evaluate_grants(&operation, std::iter::once(&row.grant)),
-                        coland_storage::GrantEvaluation::Allowed(_)
-                    )
+            };
+            let Some(chosen) = satisfied.iter().find(|path| {
+                evidence_grants.is_empty() || evidence_grants.contains(&path.grant.id)
             }) else {
                 continue 'action;
             };

@@ -337,8 +337,7 @@ async fn joined_account_needs_call_join_grant_and_other_station_cannot_borrow_it
         EventKind::CapabilityRevoke,
         founder.clone(),
         json!({"grant_id":arkret_wire::GrantId::from_event_id(&grant.authority_commit.event.event_id),
-            "expected_revision":{"commit_id":grant.authority_commit.commit.commit_id,
-                "stream_position":grant.authority_commit.commit.stream_position}}),
+            "expected_commit_id":grant.authority_commit.commit.commit_id}),
         at,
     );
     uow.commit_event(revoked.clone()).await.unwrap();
@@ -454,7 +453,7 @@ async fn moderation_entries_retain_bans_kicks_and_guard_the_whole_axis() {
             json!({"call_id":call_id,"moderation_delta":{"op":"restore_participant",
                 "actor_id":founder,"restored_by":founder.signing_principal_id(),
                 "restored_at":arkret_canonical::format_timestamp_canonical(at),
-                "expected_revision":{"commit_id":revision.commit_id,"stream_position":revision.stream_position}
+                "expected_commit_id":revision.commit_id
             }}),
             at,
         )
@@ -542,8 +541,7 @@ async fn moderation_entries_retain_bans_kicks_and_guard_the_whole_axis() {
             json!({"call_id":call_id,"moderation_delta":{"op":"restore_participant",
                 "actor_id":founder,"restored_by":founder.signing_principal_id(),
                 "restored_at":arkret_canonical::format_timestamp_canonical(changed_at),
-                "expected_revision":{"commit_id":remove.authority_commit.commit.commit_id,
-                    "stream_position":remove.authority_commit.commit.stream_position}
+                "expected_commit_id":remove.authority_commit.commit.commit_id
             }}),
             changed_at,
         );
@@ -921,8 +919,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
         json!({"call_id":call_id,"moderation_delta":{"op":"restore_participant",
             "actor_id":founder,"restored_by":founder.signing_principal_id(),
             "restored_at":arkret_canonical::format_timestamp_canonical(at),
-            "expected_revision":{"commit_id":banned.authority_commit.commit.commit_id,
-                "stream_position":banned.authority_commit.commit.stream_position}
+            "expected_commit_id":banned.authority_commit.commit.commit_id
         }}),
         at + chrono::Duration::seconds(37),
     );
@@ -951,7 +948,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
         EventKind::CallState,
         founder.clone(),
         json!({"call_id":call_id,"roster_delta":{"op":"leave","actor_id":founder,
-            "device_id":device,"expected_revision":latest_cut.roster_revision.unwrap()}}),
+            "device_id":device,"expected_commit_id":latest_cut.roster_revision.unwrap()}}),
         at + chrono::Duration::seconds(38),
     );
     uow.commit_event(left.clone()).await.unwrap();

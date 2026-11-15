@@ -550,7 +550,7 @@ async fn admin_capabilities_accepted_rows_preserve_complete_subjects_and_revisio
             "realm_id":realm,"issuer_id":local,"subject":subject,
             "actions":[arkret_wire::CapabilityActionId::MESSAGE_CREATE],
             "resources":[{"kind":"realm","realm_id":realm}],
-            "issuer_authority_refs":[root],"authority_depth":1,"authority_root_refs":[root],
+            "issuer_authority_refs":[root],"authority_depth":1,"authority_root_ref":root,
             "issued_at":"2026-10-14T00:00:00.000Z","status":status});
         if status != "active" {
             value["revoked_at"] = json!("2026-10-14T00:01:00.000Z");

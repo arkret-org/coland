@@ -21,16 +21,14 @@ use arkret_models_collaboration::authority_commit::{
 };
 use arkret_models_identity::ResolutionCommitment;
 use arkret_models_identity::session_credential::{
-    SessionGrantCredentialClass, SessionGrantDeviceBinding, SessionGrantHolderBinding,
+    SessionGrantDeviceBinding, SessionGrantHolderBinding,
 };
 use arkret_wire::{
     AccountId, ActorId, Base64UrlString, DidUrl, EventAdmissionSubmission, EventKind,
     StreamScanDirection, StreamScanRequestBody,
 };
 use chrono::{Duration, Utc};
-use coland_services::identity::{
-    SessionEndpointState, SessionGrantAuthorizationState, SessionIdentityState,
-};
+use coland_services::identity::{SessionEndpointState, SessionIdentityState};
 use coland_services::service_route::{
     ServiceRouteFetcher, VerifiedRouteCandidate, VerifiedServiceDescribeMetadata,
 };
@@ -160,6 +158,7 @@ async fn foreign_request(
         content_backup_sources: None,
         producer_device_evidence: None,
         producer_agent_evidence: None,
+        successor_device_evidence: None,
         mls_group_state_material: None,
     };
     let mut forward = PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(unsigned);
@@ -233,22 +232,22 @@ async fn authenticated_context(
         },
         audience: account.station_id.to_string(),
         session_public_key: None,
-        session_grant: Some(SessionGrantAuthorizationState {
-            grant_id: arkret_identifiers::SessionGrantId::from_issuance_digest([0x64; 32]),
-            revocation_ref: "public-state-port-context".into(),
-            account_id: account.clone(),
-            issuer_id: account.station_id.clone(),
-            scopes: vec![],
-            credential_class: SessionGrantCredentialClass::Standard,
-            holder_binding: SessionGrantHolderBinding::HumanDevice {
+        session_grant: Some({
+            let mut grant =
+                crate::routing::identity::auth_grant_dpop::tests::test_introspection_grant();
+            grant.metadata.account_id = account.clone();
+            grant.metadata.issuer_id = account.station_id.clone();
+            grant.metadata.audience_id = account.station_id.clone();
+            grant.metadata.device_id = Some(device.clone());
+            grant.metadata.holder_binding = SessionGrantHolderBinding::HumanDevice {
                 device_binding: device.to_string(),
-            },
-            device_binding: Some(SessionGrantDeviceBinding {
+            };
+            grant.metadata.device_binding = Some(SessionGrantDeviceBinding {
                 device_id: device,
                 authorization_event_id: human.guard.authorization_ref.event_id.clone(),
                 model_generation_ref: 1,
-            }),
-            cnf_jkt: "public-state-port-holder".into(),
+            });
+            grant
         }),
         expires_at: Utc::now() + Duration::hours(1),
         created_at: Utc::now(),
@@ -1825,7 +1824,12 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         .is_err()
     );
     let mut other_session = session.clone();
-    other_session.session_grant.as_mut().unwrap().account_id = governor.pcr.history.account.clone();
+    other_session
+        .session_grant
+        .as_mut()
+        .unwrap()
+        .metadata
+        .account_id = governor.pcr.history.account.clone();
     assert!(
         scenario_future(|| async {
             super::super::replica_anchor::ensure_forwarded_target(
@@ -2589,8 +2593,12 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             .is_err()
         );
         let mut other_session = session.clone();
-        other_session.session_grant.as_mut().unwrap().account_id =
-            governor.pcr.history.account.clone();
+        other_session
+            .session_grant
+            .as_mut()
+            .unwrap()
+            .metadata
+            .account_id = governor.pcr.history.account.clone();
         assert!(
             scenario_future(|| async {
                 super::super::replica_anchor::ensure_forwarded_target(

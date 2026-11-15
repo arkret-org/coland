@@ -1531,17 +1531,15 @@ async fn owned_welcome_held_delivery_scenario(
     current_parent.mls_state = None;
     current_parent.welcomes.clear();
     let realm_parent = &current_parent;
-    let details = serde_json::json!({
+    let details = serde_json::from_value(serde_json::json!({
         "controller_principal_id":controller.principal_id,
         "agent_key_authorization_ref":key_event.event_id,
         "realm_ids":[realm],"strand_ids":[],
         "resources":{"realm_ids":[realm],"strand_ids":[]},
         "constraints":{"allowed_tracks":[],"allowed_data_labels":[],"allowed_endpoints":[]},
         "capability_grant_refs":[],"policy_refs":[]
-    })
-    .as_object()
-    .unwrap()
-    .clone();
+    }))
+    .unwrap();
     let input = AccountContentDeliveryInput {
         realms: vec![realm.clone()],
         future_materials: vec![welcome.clone()],
@@ -1704,12 +1702,10 @@ async fn owned_welcome_held_delivery_scenario(
     expired.credential_expires_at = Some(chrono::Utc::now() - chrono::TimeDelta::seconds(1));
     let mut foreign = input.clone();
     let foreign_realm = &principal.unit.transactions[0].event.realm_id;
-    let map = &mut foreign.agent_session_scope.as_mut().unwrap().1;
-    map.insert("realm_ids".into(), serde_json::json!([foreign_realm]));
-    map.insert(
-        "resources".into(),
-        serde_json::json!({"realm_ids":[foreign_realm],"strand_ids":[]}),
-    );
+    let scope = &mut foreign.agent_session_scope.as_mut().unwrap().1;
+    scope.realm_ids = vec![foreign_realm.clone()];
+    scope.resources.realm_ids = vec![foreign_realm.clone()];
+    scope.resources.strand_ids.clear();
     for (label, rejected) in [
         ("missing verified custody", missing),
         ("wrong recipient", recipient),
@@ -3578,7 +3574,7 @@ async fn ordinary_member_owned_agent_join_scenario() {
             previous,
             EventKind::PolicySet,
             arkret_wire::ActorId::account(founder.clone()),
-            serde_json::json!({"policy_id":policy_id, "expected_revision":revision,
+            serde_json::json!({"policy_id":policy_id, "expected_commit_id":revision,
                 "value":{"schema":"ak.schema.policy.v1", "id":policy_id, "realm_id":realm_id,
                     "policy_kind":"agent", "rules":rules, "default_effect":"allow",
                     "created_by":arkret_wire::ActorId::account(founder.clone()),
@@ -4087,7 +4083,7 @@ fn agent_mode_request_at(
         } else {
             arkret_models_collaboration::agent_interaction::AgentInteractionMode::Private
         },
-        expected_revision: expected,
+        expected_commit_id: expected.map(|revision| revision.commit_id),
     };
     let mut request = ordinary_realm::next_request(
         previous,
@@ -4633,7 +4629,7 @@ async fn agent_mode_controller_cas_scenario() -> AgentModeScenario {
     assert!(
         error
             .to_string()
-            .contains("Agent mode expected_revision differs from current"),
+            .contains("Agent mode expected_commit_id differs from current"),
         "{error}"
     );
     assert_eq!(agent_mode_footprint(&pool, realm_id).await, before_stale);
@@ -5743,17 +5739,15 @@ async fn owned_agent_delivery_cut_scenario(expiry_case: DeliveryExpiryCase) {
     let realm_id = &agent_join.authority_commit.event.realm_id;
     let before = agent_mode_footprint(&pool, realm_id).await;
     if matches!(expiry_case, DeliveryExpiryCase::NoExpiry) {
-        let scope_details = serde_json::json!({
+        let scope_details = serde_json::from_value(serde_json::json!({
             "controller_principal_id":controller.principal_id,
             "agent_key_authorization_ref":key_event.event_id,
             "realm_ids":[realm_id],"strand_ids":[],
             "resources":{"realm_ids":[realm_id],"strand_ids":[]},
             "constraints":{"allowed_tracks":[],"allowed_data_labels":[],"allowed_endpoints":[]},
             "capability_grant_refs":[],"policy_refs":[]
-        })
-        .as_object()
-        .unwrap()
-        .clone();
+        }))
+        .unwrap();
         input.credential_expires_at = Some(chrono::Utc::now() + chrono::TimeDelta::minutes(10));
         assert!(
             fixture_delivery_step(&pool, &agent, &agent.station_id, &input)
@@ -5834,16 +5828,9 @@ async fn owned_agent_delivery_cut_scenario(expiry_case: DeliveryExpiryCase) {
         assert_eq!(agent_mode_footprint(&pool, realm_id).await, before);
         let mut other_realm = input.clone();
         let details = &mut other_realm.agent_session_scope.as_mut().unwrap().1;
-        details.insert(
-            "realm_ids".into(),
-            serde_json::json!([principal.unit.transactions[0].event.realm_id]),
-        );
-        details.insert(
-            "resources".into(),
-            serde_json::json!({
-                "realm_ids":[principal.unit.transactions[0].event.realm_id],"strand_ids":[]
-            }),
-        );
+        details.realm_ids = vec![principal.unit.transactions[0].event.realm_id.clone()];
+        details.resources.realm_ids = details.realm_ids.clone();
+        details.resources.strand_ids.clear();
         assert!(
             fixture_delivery_step(&pool, &agent, &agent.station_id, &other_realm)
                 .await
@@ -6021,7 +6008,7 @@ async fn import_agent_management_policy(
     let mut payload: arkret_models_collaboration::governance::operation_wire::PolicySetStatePayload =
         serde_json::from_value(serde_json::json!({
             "policy_id":"ak:policy:0198ff00-0000-7000-8000-000000000001",
-            "expected_revision":expected,
+            "expected_commit_id":expected,
             "value":{
                 "schema":"ak.schema.policy.v1",
                 "id":"ak:policy:0198ff00-0000-7000-8000-000000000001",
@@ -6678,7 +6665,7 @@ async fn management_review_atomic_join_scenario(
     };
     let policy=Box::pin(ordinary_realm::source_request(&pool,ordinary_realm::next_request_for_actor(
         &join.authority_commit,EventKind::PolicySet,administrator.clone(),
-        serde_json::json!({"policy_id":policy_id,"expected_revision":null,
+        serde_json::json!({"policy_id":policy_id,"expected_commit_id":null,
             "value":{"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":realm,
                 "policy_kind":"agent","default_effect":"allow",
                 "created_by":administrator,"created_at":arkret_canonical::format_timestamp_canonical(join.authority_commit.commit.committed_at),
@@ -7419,7 +7406,7 @@ async fn management_review_atomic_join_scenario(
         serde_json::to_value(arkret_models_collaboration::agent_interaction::AgentInteractionSetPayload {
             agent_account_id:agent.clone(),controller_account_id:controller.clone(),
             interaction_mode:arkret_models_collaboration::agent_interaction::AgentInteractionMode::Public,
-            expected_revision:None,
+            expected_commit_id:None,
         }).unwrap(),chrono::Utc::now(),
     ))).await;
     publish.self_producer_guard = Some(producer.clone());
@@ -7673,24 +7660,32 @@ async fn management_review_http_fixture(
         ed25519_dalek::SigningKey::from_bytes(&[89; 32]),
     ];
     let tokens = [
-        uuid::Uuid::now_v7().to_string(),
-        uuid::Uuid::now_v7().to_string(),
+        arkret_identifiers::SessionGrantSecret::from_bytes(
+            Sha256::digest(uuid::Uuid::now_v7().as_bytes()).into(),
+        )
+        .into_string(),
+        arkret_identifiers::SessionGrantSecret::from_bytes(
+            Sha256::digest(uuid::Uuid::now_v7().as_bytes()).into(),
+        )
+        .into_string(),
     ];
     let mut outcomes = std::collections::BTreeMap::new();
     for ((principal, key), token) in [requester, approver].into_iter().zip(&keys).zip(&tokens) {
         let jwk = arkret_signatures::JsonWebKey::from_ed25519_verifying_key(&key.verifying_key());
         let jkt = arkret_signatures::dpop::dpop_jwk_thumbprint(&jwk).unwrap();
         let grant = SessionGrantValidationMetadata {
-            id: arkret_identifiers::SessionGrantId::from_issuance_digest(Sha256::digest(token.as_bytes()).into()),
-            issuer_id: "ak:did_core:web:coauth.example".parse().unwrap(),
+            metadata: arkret_models_identity::SessionGrantMetadata {
+            id: arkret_identifiers::SessionGrantId::new(format!("ak:session_grant:{}",uuid::Uuid::now_v7())).unwrap(),
+            issuer_id: state.service_core_id(),
             account_id: principal.history.account.clone(),
             device_id: Some(principal.history.founding_device_id.clone()),
             audience_id: state.service_core_id(),
-            scopes: vec!["ak.self.management_review.command.request.v1".into(),
-                "ak.self.management_review.read.status.v1".into(),
-                "ak.self.management_review.command.decide.v1".into()],
-            expires_at: chrono::Utc::now()+chrono::TimeDelta::hours(1), revoked_at: None,
-            revocation_ref: format!("ak:session:{}",uuid::Uuid::now_v7()),
+            scopes: vec!["ak.self.management_review.command.decide.v1".into(),
+                "ak.self.management_review.command.request.v1".into(),
+                "ak.self.management_review.read.status.v1".into()],
+            not_before: chrono::Utc::now()-chrono::TimeDelta::seconds(1),
+            expires_at: chrono::Utc::now()+chrono::TimeDelta::hours(1),
+            session_id: uuid::Uuid::now_v7().to_string(), proof_kind: None,
             session_public_key: CanonicalSessionPublicJwk::new(serde_json::to_string(&serde_json::json!({
                 "crv":"Ed25519","kty":"OKP","x":arkret_canonical::base64url_encode(key.verifying_key().to_bytes())
             })).unwrap()).unwrap(),
@@ -7700,6 +7695,8 @@ async fn management_review_http_fixture(
                 device_id: principal.history.founding_device_id.clone(),
                 authorization_event_id: principal.history.events[1].event_id.clone(), model_generation_ref: 1,
             }), scope_details: None,
+        },
+            revoked_at:None, revocation_ref:format!("session-revocation-{}",uuid::Uuid::now_v7()),
         };
         grant.validate().unwrap();
         let outcome = SessionGrantValidationResponseBody {
@@ -7820,7 +7817,7 @@ async fn management_review_http_fixture(
             assert!(headers.lines().any(|line| {
                 line.eq_ignore_ascii_case(&format!("authorization: Bearer {channel}"))
             }));
-            let SessionGrantValidationInput::ByJwt(input) =
+            let SessionGrantValidationInput::BySecret(input) =
                 serde_json::from_slice::<SessionGrantValidationInput>(
                     &request[header_end..header_end + length],
                 )
@@ -7828,8 +7825,10 @@ async fn management_review_http_fixture(
             else {
                 panic!("exact-token introspection required")
             };
-            assert!(input.audience_id.as_ref() == Some(&audience));
-            let outcome = outcomes.get(&input.grant_jwt).expect("exact issuer token");
+            assert!(input.audience_id == audience);
+            let outcome = outcomes
+                .get(input.session_grant.as_str())
+                .expect("exact issuer token");
             let bytes = arkret_canonical::canonical_json_bytes(outcome).unwrap();
             let header = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -8904,7 +8903,7 @@ async fn owned_consumer_circle_scenario(deny_join: bool) {
             EventKind::PolicySet,
             scope.clone(),
             ActorId::account(fixture.founder.clone()),
-            serde_json::json!({"policy_id":policy_id,"expected_revision":null,
+            serde_json::json!({"policy_id":policy_id,"expected_commit_id":null,
                 "value":{"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":realm,
                     "policy_kind":"agent","default_effect":"allow",
                     "created_by":ActorId::account(fixture.founder.clone()),"created_at":arkret_canonical::format_timestamp_canonical(at),
@@ -9190,7 +9189,7 @@ struct OwnedConsumerHttpFixture {
     issuer_status: std::sync::Arc<std::sync::atomic::AtomicU16>,
     object_storage: Option<std::sync::Arc<dyn coland_services::delivery::ObjectStoragePort>>,
     grant_expires_at: chrono::DateTime<chrono::Utc>,
-    delivery_session_scope: (Vec<String>, serde_json::Map<String, serde_json::Value>),
+    delivery_session_scope: (Vec<String>, arkret_models_identity::SessionGrantScope),
     _receiver_directory: Option<OwnedCertificateDirectory>,
     // Keep the foreign Station's exclusive migrated database lease alive for
     // its AppState. DeviceInventory belongs to exactly one serving Station.
@@ -9391,7 +9390,10 @@ async fn owned_consumer_http_for_endpoint_with_storage(
         .requested_scope;
     let key = ed25519_dalek::SigningKey::from_bytes(&[0x61; 32]);
     let jwk = arkret_signatures::JsonWebKey::from_ed25519_verifying_key(&key.verifying_key());
-    let token = uuid::Uuid::now_v7().to_string();
+    let token = arkret_identifiers::SessionGrantSecret::from_bytes(
+        Sha256::digest(uuid::Uuid::now_v7().as_bytes()).into(),
+    )
+    .into_string();
     // This fixture requests no external egress endpoint. Operation/action
     // permissions stay in the original scopes; they are not endpoint URLs.
     let details = serde_json::json!({"controller_principal_id":controller.principal_id,
@@ -9402,19 +9404,23 @@ async fn owned_consumer_http_for_endpoint_with_storage(
     let grant_expires_at =
         arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now() + grant_lifetime);
     let grant = SessionGrantValidationMetadata {
-        id:arkret_identifiers::SessionGrantId::from_issuance_digest(Sha256::digest(token.as_bytes()).into()),
-        issuer_id:"ak:did_core:web:coauth.example".parse().unwrap(), account_id:agent.clone(),device_id:None,
-        audience_id:state.service_core_id(),scopes:scope.actions.clone(),
-        expires_at:grant_expires_at,revoked_at:None,
-        revocation_ref:format!("ak:session:{}",uuid::Uuid::now_v7()),
+            metadata: arkret_models_identity::SessionGrantMetadata {
+        id:arkret_identifiers::SessionGrantId::new(format!("ak:session_grant:{}",uuid::Uuid::now_v7())).unwrap(),
+        issuer_id:state.service_core_id(), account_id:agent.clone(),device_id:None,
+        audience_id:state.service_core_id(),scopes:{let mut actions=scope.actions.clone();actions.sort();actions.dedup();actions},
+        not_before: chrono::Utc::now()-chrono::TimeDelta::seconds(1),
+        expires_at:grant_expires_at,
+        session_id:uuid::Uuid::now_v7().to_string(),proof_kind:None,
         session_public_key:CanonicalSessionPublicJwk::new(serde_json::to_string(&serde_json::json!({
             "crv":"Ed25519","kty":"OKP","x":arkret_canonical::base64url_encode(key.verifying_key().to_bytes())})).unwrap()).unwrap(),
         cnf_jkt:arkret_signatures::dpop::dpop_jwk_thumbprint(&jwk).unwrap(),credential_class:SessionGrantCredentialClass::Standard,
         holder_binding:SessionGrantHolderBinding::AgentRuntime { agent_id:agent.principal_id.clone(),
             agent_key_authorization_ref:endpoint.authorization_ref.event_id.clone(),
             verification_method:endpoint.verification_method.clone() },device_binding:None,
-        scope_details:Some(details.as_object().unwrap().clone()),
-    };
+        scope_details:Some(serde_json::from_value(details).unwrap()),
+    },
+            revoked_at:None, revocation_ref:format!("session-revocation-{}",uuid::Uuid::now_v7()),
+        };
     grant.validate().unwrap();
     let delivery_session_scope = (grant.scopes.clone(), grant.scope_details.clone().unwrap());
     let outcome = SessionGrantValidationResponseBody {
@@ -9467,7 +9473,7 @@ async fn owned_consumer_http_for_endpoint_with_storage(
                 bytes.extend_from_slice(&chunk[..n]);
                 assert!(bytes.len() < 16384);
             }
-            let SessionGrantValidationInput::ByJwt(input) =
+            let SessionGrantValidationInput::BySecret(input) =
                 serde_json::from_slice::<SessionGrantValidationInput>(
                     &bytes[header_end..header_end + length],
                 )
@@ -9475,8 +9481,8 @@ async fn owned_consumer_http_for_endpoint_with_storage(
             else {
                 panic!("exact-token introspection required")
             };
-            assert!(input.grant_jwt == expected_token);
-            assert!(input.audience_id.as_ref() == Some(&audience));
+            assert!(input.session_grant.as_str() == expected_token);
+            assert!(input.audience_id == audience);
             let status = answer_status.load(std::sync::atomic::Ordering::SeqCst);
             let answer = if status == 200 {
                 arkret_canonical::canonical_json_bytes(&outcome).unwrap()
@@ -9838,8 +9844,7 @@ async fn owned_consumer_http_read_scenario(policy_deny: bool) {
         ordinary_realm::next_request_for_actor(&permission.authority_commit,EventKind::CapabilityRevoke,
             ActorId::account(fixture.founder.clone()),
             serde_json::json!({"grant_id":arkret_wire::GrantId::from_event_id(&parent.authority_commit.event.event_id),
-                "expected_revision":{"commit_id":parent.authority_commit.commit.commit_id,
-                    "stream_position":parent.authority_commit.commit.stream_position}}),
+                "expected_commit_id":parent.authority_commit.commit.commit_id}),
             permission.authority_commit.commit.committed_at+chrono::TimeDelta::milliseconds(1)))).await;
     fixture_commit_step(&fixture.pool, revoke.clone())
         .await
@@ -9866,7 +9871,7 @@ async fn owned_consumer_http_read_scenario(policy_deny: bool) {
             &revoke.authority_commit,
             EventKind::PolicySet,
             ActorId::account(fixture.founder.clone()),
-            serde_json::json!({"policy_id":policy_id,"expected_revision":null,
+            serde_json::json!({"policy_id":policy_id,"expected_commit_id":null,
                 "value":{"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":realm,
                     "policy_kind":"agent","default_effect":"allow",
                     "created_by":ActorId::account(fixture.founder.clone()),
@@ -10015,7 +10020,7 @@ async fn owned_consumer_policy_event(
         head,
         EventKind::PolicySet,
         arkret_wire::ActorId::account(fixture.founder.clone()),
-        serde_json::json!({"policy_id":policy_id,"expected_revision":expected,
+        serde_json::json!({"policy_id":policy_id,"expected_commit_id":expected,
             "value":{"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":head.event.realm_id,
                 "policy_kind":"agent","default_effect":"allow",
                 "created_by":arkret_wire::ActorId::account(fixture.founder.clone()),
@@ -11433,12 +11438,12 @@ async fn owned_consumer_remote_barrier_scenario() {
         .command()
         .requested_scope_disclosure
         .requested_scope;
-    let details=serde_json::json!({"controller_principal_id":fixture.controller.history.account.principal_id,
+    let details=serde_json::from_value(serde_json::json!({"controller_principal_id":fixture.controller.history.account.principal_id,
         "agent_key_authorization_ref":agent.endpoint.authorization_ref.event_id,
         "realm_ids":[fixture.head.event.realm_id],"strand_ids":[],
         "resources":{"realm_ids":[fixture.head.event.realm_id],"strand_ids":[]},
         "constraints":{"allowed_tracks":[],"allowed_data_labels":[],"allowed_endpoints":[]},
-        "capability_grant_refs":[],"policy_refs":[]}).as_object().unwrap().clone();
+        "capability_grant_refs":[],"policy_refs":[]})).unwrap();
     let input = coland_storage::AccountContentDeliveryInput {
         realms: vec![fixture.head.event.realm_id.clone()],
         committed_events: vec![arkret_wire::CommittedEventView::Full(
@@ -13084,7 +13089,7 @@ async fn native_reply_policy_deny(fixture: &NativeReplyPreparationFixture, opera
     let request = Box::pin(ordinary_realm::source_request(&fixture.original.pool,
         ordinary_realm::next_request_for_actor(&fixture.head, EventKind::PolicySet,
             arkret_wire::ActorId::account(fixture.original.founder.clone()),
-            serde_json::json!({"policy_id":policy,"expected_revision":null,
+            serde_json::json!({"policy_id":policy,"expected_commit_id":null,
                 "value":{"schema":"ak.schema.policy.v1","id":policy,
                     "realm_id":fixture.source.event.realm_id,"policy_kind":"agent",
                     "default_effect":"allow",
@@ -14025,8 +14030,8 @@ async fn owned_agent_signed_current_source_journey() {
     let current = currents.get(realm, &grant_id).await.unwrap().unwrap();
     assert_eq!(current.value.authority_depth, 1);
     assert_eq!(
-        serde_json::to_value(&current.value.authority_root_refs).unwrap(),
-        serde_json::json!([source])
+        serde_json::to_value(&current.value.authority_root_ref).unwrap(),
+        serde_json::json!(source)
     );
     assert_eq!(
         current.source.event_id,
@@ -14053,7 +14058,7 @@ async fn owned_agent_signed_current_source_journey() {
         &leave.authority_commit,
         EventKind::CapabilityRevoke,
         ActorId::account(controller.clone()),
-        serde_json::json!({"grant_id":grant_id,"expected_revision":current.revision}),
+        serde_json::json!({"grant_id":grant_id,"expected_commit_id":current.revision}),
         at + chrono::TimeDelta::seconds(4),
     );
     let revoke = owned_current_signed_request(&fixture, revoke, &evidence).await;

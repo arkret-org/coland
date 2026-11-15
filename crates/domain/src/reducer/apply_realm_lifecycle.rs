@@ -104,27 +104,25 @@ impl ProjectionState {
                 reason: "realm_authority_root_missing".to_owned(),
             };
         };
-        let controller_actor_id = root
-            .get("controller_actor_id")
-            .cloned()
-            .and_then(|value| serde_json::from_value::<arkret_wire::ActorId>(value).ok());
-        if controller_actor_id.as_ref() != Some(&operation.context.sender) {
-            return ProjectionEffect::Rejected {
-                reason: "realm_authority_controller_mismatch".to_owned(),
-            };
-        }
-        let controller_epoch = root
-            .get("controller_epoch")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        let Some(authority_generation) = root
-            .get("authority_generation")
-            .and_then(arkret_canonical::serde_helpers::parse_uint64_decimal_value)
+        let Ok(root_value) =
+            serde_json::from_value::<arkret_wire::RealmAuthorityRootValue>(root.clone())
         else {
             return ProjectionEffect::Rejected {
                 reason: "realm_authority_root_conflict".to_owned(),
             };
         };
+        if root_value.validate().is_err() {
+            return ProjectionEffect::Rejected {
+                reason: "realm_authority_root_conflict".to_owned(),
+            };
+        }
+        if root_value.controller_actor_id != operation.context.sender {
+            return ProjectionEffect::Rejected {
+                reason: "realm_authority_controller_mismatch".to_owned(),
+            };
+        }
+        let controller_epoch = root_value.controller_epoch;
+        let authority_generation = root_value.authority_generation;
         let mut root = match root {
             Value::Object(root) => root,
             _ => {
@@ -140,7 +138,7 @@ impl ProjectionState {
                 reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
             };
         }
-        let expected_digest = match arkret_canonical::canonical_sha256(&root) {
+        let expected_digest = match arkret_canonical::canonical_sha256(&root_value) {
             Ok(digest) => digest,
             Err(_) => {
                 return ProjectionEffect::Rejected {

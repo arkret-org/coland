@@ -434,7 +434,7 @@ struct DeliveryClockProof {
     credential_expiry: Option<chrono::DateTime<chrono::Utc>>,
     key_scope: arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
     provision_scope: arkret_models_collaboration::events_payloads::agent::AgentKeyScope,
-    session_scope: Option<(Vec<String>, serde_json::Map<String, serde_json::Value>)>,
+    session_scope: Option<(Vec<String>, arkret_models_identity::SessionGrantScope)>,
     scope_operations: Vec<(
         ActorId,
         arkret_wire::WireResourceSelector,
@@ -1416,12 +1416,9 @@ async fn validate_private_delivery_credentials(
             .agent_session_scope
             .as_ref()
             .ok_or_else(|| unavailable("remote Watch lacks the Agent session content ceiling"))?;
-        if details.get("controller_principal_id")
-            != Some(&serde_json::json!(
-                evidence.accepted_binding().controller_account.principal_id
-            ))
-            || details.get("agent_key_authorization_ref")
-                != Some(&serde_json::json!(endpoint.authorization_ref.event_id))
+        if details.controller_principal_id
+            != evidence.accepted_binding().controller_account.principal_id
+            || details.agent_key_authorization_ref != endpoint.authorization_ref.event_id
         {
             return Err(unavailable(
                 "remote Watch session controller or key differs",
@@ -3533,12 +3530,9 @@ async fn acquire_owned_delivery_guard(
     ))
     .await?;
     if let Some((_, details)) = &input.agent_session_scope
-        && (details.get("controller_principal_id")
-            != Some(&serde_json::json!(
-                evidence.accepted_binding().controller_account.principal_id
-            ))
-            || details.get("agent_key_authorization_ref")
-                != Some(&serde_json::json!(endpoint.authorization_ref.event_id)))
+        && (details.controller_principal_id
+            != evidence.accepted_binding().controller_account.principal_id
+            || details.agent_key_authorization_ref != endpoint.authorization_ref.event_id)
     {
         return Err(unavailable(
             "session scope differs from the current controller or key",
@@ -3685,10 +3679,8 @@ async fn acquire_owned_delivery_guard(
             ));
         }
         if let Some((_, details)) = &clock.session_scope
-            && (details.get("controller_principal_id")
-                != Some(&serde_json::json!(controller_account_id.principal_id))
-                || details.get("agent_key_authorization_ref")
-                    != Some(&serde_json::json!(endpoint.authorization_ref.event_id)))
+            && (details.controller_principal_id != controller_account_id.principal_id
+                || details.agent_key_authorization_ref != endpoint.authorization_ref.event_id)
         {
             return Err(unavailable(
                 "session scope differs from the current controller or key",

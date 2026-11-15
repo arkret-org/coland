@@ -79,7 +79,7 @@ async fn begin_worker_step(
     canonical_request: &[u8],
     step: SecurityTransactionStep,
 ) -> Result<Option<SecurityTransactionRecord>, PgTransactionError> {
-    let transaction_id = transaction.resource.transaction_id.as_str();
+    let transaction_id = transaction.resource.transaction_id().as_str();
     let existing = load_one(conn, transaction_id, true)
         .await?
         .ok_or_else(|| rejected(ConflictCode::FailedPrecondition, "rotation is absent"))?;
@@ -99,7 +99,7 @@ async fn begin_worker_step(
         return Ok(Some(existing));
     }
     let next = existing
-        .resource
+        .rotation()?
         .next_required_step()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     if next != Some(step) {
@@ -108,9 +108,9 @@ async fn begin_worker_step(
             "rotation is not at this coordinator-owned step",
         ));
     }
-    let mut prior = transaction.resource.clone();
+    let mut prior = transaction.rotation()?.clone();
     prior.accepted_steps.pop();
-    if existing.resource != prior {
+    if *existing.rotation()? != prior {
         return Err(rejected(
             ConflictCode::DuplicateConflict,
             "rotation step does not extend the durable resource by exactly one step",
@@ -207,10 +207,8 @@ async fn active_authorizer_cut(
 fn planned_replacement_chain(
     transaction: &SecurityTransactionRecord,
 ) -> Result<Vec<(KeyBackup, Value)>, PgTransactionError> {
-    let resource = &transaction.resource;
-    let plan = resource
-        .security_rotation_plan()
-        .ok_or_else(|| rejected(ConflictCode::SchemaViolation, "not a SecurityRotation"))?;
+    let resource = transaction.rotation()?;
+    let plan = &resource.prepared_plan;
     let [rotation] = plan.backup_rotations.as_slice() else {
         return Err(rejected(
             ConflictCode::SchemaViolation,
@@ -305,14 +303,9 @@ pub(super) async fn commit_rotation_upload_in_connection(
     {
         return Ok(stored);
     }
-    let resource = &write.transaction.resource;
+    let resource = write.transaction.rotation()?;
     let account = &resource.account_id;
-    let authorizer = resource.authorizing_device_id.clone().ok_or_else(|| {
-        rejected(
-            ConflictCode::FailedPrecondition,
-            "rotation authorizing device is absent",
-        )
-    })?;
+    let authorizer = resource.authorizing_device_id.clone();
     let accepted_at = resource
         .accepted_steps
         .last()
@@ -415,8 +408,8 @@ pub(super) async fn commit_rotation_pointer_switch_in_connection(
     {
         return Ok(stored);
     }
-    let resource = &write.transaction.resource;
-    let plan = resource.security_rotation_plan().expect("validated");
+    let resource = write.transaction.rotation()?;
+    let plan = &resource.prepared_plan;
     let binding = &plan.backup_rotations[0].binding;
     let event = &write.commit.event;
     let record: KeyBackupActiveSeries = serde_json::from_value(
@@ -572,10 +565,8 @@ pub(super) async fn commit_rotation_local_commit_in_connection(
     conn: &mut AsyncPgConnection,
     write: RotationLocalCommitWrite,
 ) -> Result<SecurityTransactionRecord, PgTransactionError> {
-    use arkret_models_crypto::ClientStepAttestationArtifact;
-
     write.validate()?;
-    let resource = &write.transaction.resource;
+    let resource = write.transaction.rotation()?;
     let transaction_id = resource.transaction_id.as_str();
     let existing = load_one(conn, transaction_id, true)
         .await?
@@ -598,7 +589,7 @@ pub(super) async fn commit_rotation_local_commit_in_connection(
         return Ok(existing);
     }
     let next = existing
-        .resource
+        .rotation()?
         .next_required_step()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     if next != Some(SecurityTransactionStep::LocalCommit) {
@@ -610,19 +601,13 @@ pub(super) async fn commit_rotation_local_commit_in_connection(
     let mut prior = resource.clone();
     prior.accepted_steps.pop();
     prior.terminal_outcome = None;
-    if existing.resource != prior {
+    if *existing.rotation()? != prior {
         return Err(rejected(
             ConflictCode::DuplicateConflict,
             "local commit does not extend the durable resource by exactly its terminal step",
         ));
     }
-    let ClientStepAttestationArtifact::SecurityRotation(artifact) = &write.attestation.artifact
-    else {
-        return Err(rejected(
-            ConflictCode::SchemaViolation,
-            "local commit requires SecurityRotationLocalCommit",
-        ));
-    };
+    let artifact = &write.attestation.artifact;
     let account = &resource.account_id;
     let accepted_at = resource
         .accepted_steps

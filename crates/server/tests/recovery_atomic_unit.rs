@@ -18,7 +18,6 @@ use arkret_wire::*;
 use coland_storage::{
     RecoveryAuthorityContext, RecoveryPolicyPublicationWrite, RecoverySessionLifecycle,
     RecoverySessionRecord, RecoveryUnitCommitWrite, SecurityTransactionRecord,
-    SecurityTransactionStepOutcomeRecord,
 };
 use coland_test_support::AppStateTestExt as _;
 use coland_test_support::device_authorization_history::{
@@ -829,15 +828,16 @@ async fn fixture_with_damage(
     context.validate_shape().unwrap();
     let context_digest = hash(&context);
     let request_id = RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7())).unwrap();
-    let grant_id = SessionGrantId::from_issuance_digest(arkret_canonical::sha256_bytes(
-        session_id.as_str().as_bytes(),
-    ));
+    let grant_ref = SessionGrantRef {
+        issuer_id: account.station_id.clone(),
+        id: SessionGrantId::new(format!("ak:session_grant:{}", uuid::Uuid::now_v7())).unwrap(),
+    };
     let challenge = Base64UrlString::new("Y2hhbGxlbmdl").unwrap();
     let transcript = DidRootRecoveryTranscript {
         schema: RECOVERY_PROOF_TRANSCRIPT_SCHEMA.to_owned(),
         kind: RecoveryProofKind::DidRoot,
         request_id: request_id.clone(),
-        session_grant_id: grant_id.clone(),
+        session_grant_ref: grant_ref.clone(),
         session_grant_cnf_jkt: Base64UrlString::new("A".repeat(43)).unwrap(),
         account_id: account.clone(),
         requesting_device_id: device_id.clone(),
@@ -874,7 +874,7 @@ async fn fixture_with_damage(
             request_id: request_id.to_string(),
             create_intent_digest: hash(&transcript).to_string(),
             recovery_session_id: session_id.to_string(),
-            session_grant_id: grant_id.to_string(),
+            session_grant_ref: grant_ref.clone(),
             session_grant_cnf_jkt: "A".repeat(43),
             principal_id: account.principal_id.clone(),
             station_id: account.station_id.clone(),
@@ -945,78 +945,61 @@ async fn fixture_with_damage(
         let (header, _) = proof.jws.split_once("..").unwrap();
         proof.jws = format!("{header}..{}", arkret_canonical::base64url_encode([0; 64]));
     }
-    let unit = PreparedEventUnit::new(
-        arkret_canonical::DigestSuite::Sha256,
-        arkret_wire::EventsSubmitBatchRequestBody {
-            events: (vec![reanchor.clone(), authorize.clone()])
-                .into_iter()
-                .map(arkret_wire::EventAdmissionSubmission::new)
-                .collect(),
-        },
-    )
-    .unwrap();
-    let intent = RecoveryCommitIntent {
-        realm_id: realm,
+    let recovery_unit = RecoveryUnit {
         predecessor_ref: predecessor.commit_id.clone(),
-        unit_event_digests: [
-            Hash::new(
-                reanchor
-                    .event_digest_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
-                    .unwrap(),
-            )
-            .unwrap(),
-            Hash::new(
-                authorize
-                    .event_digest_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
-                    .unwrap(),
-            )
-            .unwrap(),
+        events: [
+            EventAdmissionSubmission::new(reanchor),
+            EventAdmissionSubmission::new(authorize),
         ],
     };
+    let transaction_id =
+        TransactionId::new(format!("ak:transaction:{}", uuid::Uuid::now_v7())).unwrap();
     let receipt_id = ReceiptId::new(format!("ak:receipt:{}", uuid::Uuid::now_v7())).unwrap();
-    let plan = PcrPolicyRecoveryPlan {
-        binding: PcrPolicyRecoveryBinding {
-            identity_model: RecoveryIdentityModel::PcrPolicy,
-            recovery_session_id: session_id.clone(),
-            replacement_device_id: device_id.clone(),
-            reanchor_event_id: reanchor.event_id.clone(),
-            authorize_event_id: authorize.event_id.clone(),
-            terminal_receipt_id: receipt_id.clone(),
-        },
-        recovery_session_snapshot_digest: hash(&transcript),
-        proof_digest: hash(&proof),
+    let mut receipt = RecoveryReceipt {
+        schema: SchemaId::RECOVERY_RECEIPT_V1.to_owned(),
+        receipt_id: receipt_id.clone(),
+        transaction_id: transaction_id.clone(),
+        account_id: account.clone(),
+        expires_at: expires,
+        recovery_session_id: session_id.clone(),
+        session_grant_ref: grant_ref.clone(),
+        session_grant_cnf_jkt: Base64UrlString::new("A".repeat(43)).unwrap(),
+        policy_id: policy_id.clone(),
+        policy_version: policy.version,
+        trust_domain: policy.trust_domain.clone(),
+        new_device_id: device_id.clone(),
+        identity_model: RecoveryIdentityModel::PcrPolicy,
+        recovery_authority_kind: RecoveryAuthorityKind::PcrPolicy,
         previous_model_generation_ref: 1,
         new_model_generation_ref: 2,
-        reanchor_unit: unit.clone(),
-        reanchor_commit_intent: intent.clone(),
-    };
-    let request = RecoveryTransactionCreateRequestBody::new(
-        TransactionId::new(format!("ak:transaction:{}", uuid::Uuid::now_v7())).unwrap(),
-        account.clone(),
-        expires,
-        PcrPolicyRecoveryIntent {
-            recovery_session_id: session_id.clone(),
-            replacement_device_id: device_id.clone(),
-            previous_model_generation_ref: 1,
-            new_model_generation_ref: 2,
-            terminal_receipt_id: receipt_id.clone(),
-            reanchor_unit: unit,
-            reanchor_commit_intent: intent,
+        proof_summary: RecoveryProofSummary {
+            kind: transcript.kind,
+            proof_digest: hash(&transcript),
+            quorum_participant_count: None,
         },
+        recovery_unit,
+        unlocked_backups: Vec::new(),
+        welcome_count: 0,
+        welcome_realm_summaries: None,
+        outcome: RecoveryReceiptOutcome::Completed,
+        outcome_reason_code: None,
+        started_at: now,
+        completed_at: now,
+        signature_proof: RecoveryReceiptSignatureProof {
+            verification_method: replacement_method.clone(),
+            signature_algorithm: "Ed25519".into(),
+            signature: Base64UrlString::new(arkret_canonical::base64url_encode([0; 64])).unwrap(),
+        },
+    };
+    arkret_signatures::recovery::sign_recovery_receipt(
+        &mut receipt,
+        &SigningKey::from_bytes(&replacement_seed),
     )
     .unwrap();
-    let (resource, canonical_request) = SecurityTransactionCreateRequestBody::Recovery(request)
-        .into_initial_resource(SecurityTransactionPreparedPlan::Recovery(plan), now)
-        .unwrap();
-    let initial = SecurityTransactionRecord {
-        resource,
-        canonical_request,
-    };
-    store
-        .security_transactions()
-        .create(initial.clone())
-        .await
-        .unwrap();
+    let request = SecurityTransactionCreateRequestBody::Recovery(
+        RecoveryTransactionCreateRequestBody::new(receipt.clone()).unwrap(),
+    );
+    let canonical_request = arkret_canonical::canonical_json_bytes(&request).unwrap();
     let authority = store
         .authority_commits()
         .current_authority(&pcr.history.events[0].realm_id)
@@ -1028,7 +1011,7 @@ async fn fixture_with_damage(
         0,
     )
     .prepare_recovery_unit_commits(
-        &[reanchor, authorize],
+        &receipt.recovery_unit.events,
         &authority,
         &predecessor,
         pcr.history.authority_method(),
@@ -1044,86 +1027,14 @@ async fn fixture_with_damage(
         stream_ref: commits[index].commit.stream_ref.clone(),
         stream_position: commits[index].commit.stream_position,
     };
-    let mut receipt = RecoveryReceipt {
-        schema: SchemaId::RECOVERY_RECEIPT_V1.to_owned(),
-        receipt_id: receipt_id.clone(),
-        transaction_id: initial.resource.transaction_id.clone(),
-        transaction_request_digest: initial.resource.request_digest.clone(),
-        prepared_plan_digest: initial.resource.prepared_plan_digest.clone(),
-        account_id: account.clone(),
-        recovery_session_id: session_id.clone(),
-        policy_id,
-        policy_version: 1,
-        trust_domain: policy.trust_domain.clone(),
-        new_device_id: device_id.clone(),
-        identity_model: RecoveryIdentityModel::PcrPolicy,
-        recovery_authority_kind: RecoveryAuthorityKind::PcrPolicy,
-        previous_model_generation_ref: 1,
-        new_model_generation_ref: 2,
-        authorization_event_id: commits[1].event.event_id.clone(),
-        reanchor_event_id: commits[0].event.event_id.clone(),
-        proof_summary: RecoveryProofSummary {
-            kind: RecoveryProofKind::DidRoot,
-            proof_digest: hash(&proof),
-            quorum_participant_count: None,
-        },
-        unlocked_backups: Vec::new(),
-        welcome_count: 0,
-        welcome_realm_summaries: None,
-        outcome: RecoveryReceiptOutcome::Completed,
-        outcome_reason_code: None,
-        started_at: now,
-        completed_at: now,
-        signature_proof: RecoveryReceiptSignatureProof {
-            verification_method: replacement_method.clone(),
-            signature_algorithm: "Ed25519".to_owned(),
-            signature: Base64UrlString::new("AA").unwrap(),
-        },
-        extra: Default::default(),
-    };
-    receipt.signature_proof.signature = signature(
-        replacement_seed,
-        &receipt.signature_transcript_bytes().unwrap(),
-    );
-    let terminal = RecoveryTerminalCommit {
-        recovery_receipt: receipt.clone(),
-    };
-    let mut client_attestation = ClientStepAttestation {
-        step: SecurityTransactionStep::CommitRecoveryUnit,
-        output_ref: receipt_id.to_string(),
-        transaction_id: initial.resource.transaction_id.clone(),
-        transaction_request_digest: initial.resource.request_digest.clone(),
-        prepared_plan_digest: initial.resource.prepared_plan_digest.clone(),
-        artifact: ClientStepAttestationArtifact::Recovery(terminal.clone()),
-        signature_proof: ClientStepAttestationSignatureProof {
-            verification_method: replacement_method,
-            signature_algorithm: "Ed25519".to_owned(),
-            signature: Base64UrlString::new("AA").unwrap(),
-        },
-    };
-    client_attestation.signature_proof.signature = signature(
-        replacement_seed,
-        &client_attestation.signing_bytes().unwrap(),
-    );
-    let terminal_request = SecurityTransactionContinueRequestBody {
-        request_digest: initial.resource.request_digest.clone(),
-        prepared_plan_digest: initial.resource.prepared_plan_digest.clone(),
-        expected_accepted_step_count: 0,
-        client_attestation,
-    };
-    terminal_request
-        .validate_for_transaction(&initial.resource)
-        .unwrap();
     let unsigned = UnsignedRecoveryCompletionAttestation::new(
         UnsignedRecoveryCompletionAttestationBody {
-            transaction_id: initial.resource.transaction_id.clone(),
-            transaction_request_digest: initial.resource.request_digest.clone(),
-            prepared_plan_digest: initial.resource.prepared_plan_digest.clone(),
-            account_id: account,
-            recovery_session_id: session_id,
-            terminal_receipt_id: receipt_id.clone(),
-            terminal_receipt_digest: hash(&receipt),
-            replacement_device_id: device_id,
+            transaction_id: transaction_id.clone(),
+            account_id: account.clone(),
+            recovery_session_id: session_id.clone(),
+            terminal_receipt_id: receipt_id,
+            terminal_receipt_digest: receipt.receipt_digest().unwrap(),
+            replacement_device_id: device_id.clone(),
             new_model_generation_ref: 2,
             completed_at: now,
             reanchor_event_ref: committed_ref(0),
@@ -1137,35 +1048,33 @@ async fn fixture_with_damage(
         &unsigned.signing_bytes().unwrap(),
     );
     let completion = unsigned.attach_signature(completion_signature).unwrap();
-    let mut completed = initial.clone();
-    completed
-        .resource
-        .accepted_steps
-        .push(AcceptedSecurityTransactionStep {
-            acceptor: SecurityTransactionAcceptor::Principal {
-                principal_id: state.service_core_id(),
-            },
-            accepted_at: now,
-        });
-    completed.resource.terminal_outcome = Some(SecurityTransactionTerminalOutcome::Completed {
-        completed_at: now,
-        receipt_id: Some(receipt_id),
-        completion_attestation: Some(completion),
-    });
+    let initial = SecurityTransactionRecord {
+        canonical_request,
+        resource: SecurityTransaction::Recovery(RecoveryTransactionCompletion {
+            transaction_id,
+            kind: SecurityTransactionKind::Recovery,
+            account_id: account.clone(),
+            created_at: now,
+            recovery_receipt: receipt,
+            completion_attestation: completion,
+        }),
+    };
+    let verified_session = store
+        .recovery_sessions()
+        .get(session_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
     let write = RecoveryUnitCommitWrite {
-        step_outcome: SecurityTransactionStepOutcomeRecord {
-            transaction_id: completed.resource.transaction_id.to_string(),
-            step: SecurityTransactionStep::CommitRecoveryUnit,
-            canonical_request: arkret_canonical::canonical_json_bytes(&terminal_request).unwrap(),
-            response: serde_json::to_value(&completed.resource).unwrap(),
-            participant_outcome: Some(serde_json::to_value(terminal).unwrap()),
-        },
-        transaction: completed,
+        transaction: initial.clone(),
+        verified_session,
         predecessor,
         commits,
         queued_at: now,
     };
-    write.validate().unwrap();
+    if damage.is_none() {
+        write.validate().unwrap();
+    }
     Fixture {
         state,
         pool,
@@ -1300,7 +1209,11 @@ async fn recovery_terminal_unit_fences_old_device_and_replays_after_response_los
         .commit_recovery_unit(fixture.write.clone())
         .await
         .unwrap();
-    assert_eq!(replay.response, fixture.write.step_outcome.response);
+    assert_eq!(replay.resource, fixture.write.transaction.resource);
+    assert_eq!(
+        replay.canonical_request,
+        fixture.write.transaction.canonical_request
+    );
     assert_eq!(footprint(&fixture).await, before);
     let head = store
         .authority_commits()
@@ -1314,10 +1227,9 @@ async fn recovery_terminal_unit_fences_old_device_and_replays_after_response_los
         .get(
             fixture
                 .initial
-                .resource
-                .recovery_plan()
+                .recovery()
                 .unwrap()
-                .binding
+                .recovery_receipt
                 .recovery_session_id
                 .as_str(),
         )
@@ -1329,11 +1241,16 @@ async fn recovery_terminal_unit_fences_old_device_and_replays_after_response_los
     let mut changed = fixture.write.clone();
     // Different canonical input cannot reuse the first outcome, even when
     // its outer request remains structurally well formed.
-    let mut request: SecurityTransactionContinueRequestBody =
-        serde_json::from_slice(&fixture.write.step_outcome.canonical_request).unwrap();
-    request.client_attestation.signature_proof.signature = Base64UrlString::new("AQ").unwrap();
-    changed.step_outcome.canonical_request =
-        arkret_canonical::canonical_json_bytes(&request).unwrap();
+    let SecurityTransaction::Recovery(completed) = &mut changed.transaction.resource else {
+        unreachable!()
+    };
+    completed.recovery_receipt.signature_proof.signature =
+        Base64UrlString::new(arkret_canonical::base64url_encode([1; 64])).unwrap();
+    changed.transaction.canonical_request =
+        arkret_canonical::canonical_json_bytes(&SecurityTransactionCreateRequestBody::Recovery(
+            RecoveryTransactionCreateRequestBody::new(completed.recovery_receipt.clone()).unwrap(),
+        ))
+        .unwrap();
     assert!(matches!(
         restarted.commit_recovery_unit(changed).await,
         Err(coland_storage::PersistenceError::Conflict(_))
@@ -1932,43 +1849,57 @@ async fn completed_recovery_device_is_admitted_without_inventory_projection() {
 async fn recovery_terminal_metadata_must_bind_the_exact_receipt_and_response() {
     let fixture = fixture().await;
     let before = footprint(&fixture).await;
-    for case in 0..6 {
+    for case in 0..10 {
         let mut write = fixture.write.clone();
+        let SecurityTransaction::Recovery(completed) = &mut write.transaction.resource else {
+            unreachable!()
+        };
         match case {
-            0 => write.step_outcome.response = json!({"unrelated":"response"}),
-            1 => write.step_outcome.participant_outcome = None,
+            0 => {
+                completed.recovery_receipt.new_device_id =
+                    DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap()
+            }
+            1 => write.transaction.canonical_request = b"{}".to_vec(),
             2 => {
-                write.step_outcome.participant_outcome.as_mut().unwrap()["recovery_receipt"]["signature_proof"]
-                    ["signature"] = json!("AQ")
+                completed.recovery_receipt.signature_proof.signature =
+                    Base64UrlString::new(arkret_canonical::base64url_encode([0; 64])).unwrap();
+                completed.completion_attestation.terminal_receipt_digest =
+                    completed.recovery_receipt.receipt_digest().unwrap();
+                write.transaction.canonical_request = arkret_canonical::canonical_json_bytes(
+                    &SecurityTransactionCreateRequestBody::Recovery(
+                        RecoveryTransactionCreateRequestBody::new(
+                            completed.recovery_receipt.clone(),
+                        )
+                        .unwrap(),
+                    ),
+                )
+                .unwrap();
             }
             3 => {
-                let Some(SecurityTransactionTerminalOutcome::Completed {
-                    completion_attestation: Some(completion),
-                    ..
-                }) = &mut write.transaction.resource.terminal_outcome
-                else {
-                    unreachable!()
-                };
-                completion.terminal_receipt_digest = hash("different receipt");
-                write.step_outcome.response =
-                    serde_json::to_value(&write.transaction.resource).unwrap();
+                completed.completion_attestation.terminal_receipt_digest = hash("different receipt")
             }
             4 => {
-                let mut request: SecurityTransactionContinueRequestBody =
-                    serde_json::from_slice(&write.step_outcome.canonical_request).unwrap();
-                request.expected_accepted_step_count = 1;
-                write.step_outcome.canonical_request =
+                let mut request: Value =
+                    serde_json::from_slice(&write.transaction.canonical_request).unwrap();
+                request["expected_accepted_step_count"] = json!(1);
+                write.transaction.canonical_request =
                     arkret_canonical::canonical_json_bytes(&request).unwrap();
             }
             5 => {
-                let mut request: SecurityTransactionContinueRequestBody =
-                    serde_json::from_slice(&write.step_outcome.canonical_request).unwrap();
-                request
-                    .client_attestation
+                completed
+                    .recovery_receipt
                     .signature_proof
-                    .verification_method = DidUrl::new("did:web:another.example#device").unwrap();
-                write.step_outcome.canonical_request =
-                    arkret_canonical::canonical_json_bytes(&request).unwrap();
+                    .verification_method = DidUrl::new("did:web:another.example#device").unwrap()
+            }
+            6 => {
+                completed.recovery_receipt.recovery_unit.events[0].approval_signatures =
+                    Some(Vec::new())
+            }
+            7 => write.predecessor.commit_id = write.commits[0].commit.commit_id.clone(),
+            8 => write.commits[1].event = write.commits[0].event.clone(),
+            9 => {
+                write.verified_session.session_grant_ref.issuer_id =
+                    DidCoreId::new("ak:did_core:web:other-issuer.example").unwrap()
             }
             _ => unreachable!(),
         }
@@ -2057,15 +1988,13 @@ async fn accepted_policy_revocation_refuses_a_prepared_recovery_without_fencing(
             .is_err()
     );
     assert_eq!(footprint(&fixture).await, before);
-    assert_eq!(
+    assert!(
         store
             .security_transactions()
-            .get(fixture.initial.resource.transaction_id.as_str())
+            .get(fixture.initial.resource.transaction_id().as_str())
             .await
             .unwrap()
-            .unwrap()
-            .resource,
-        fixture.initial.resource
+            .is_none()
     );
 }
 
@@ -2142,10 +2071,9 @@ async fn policy_revocation_boundaries_roll_back_and_response_loss_replays_withou
         .get(
             fixture
                 .initial
-                .resource
-                .recovery_plan()
+                .recovery()
                 .unwrap()
-                .binding
+                .recovery_receipt
                 .recovery_session_id
                 .as_str(),
         )
@@ -2195,11 +2123,9 @@ async fn every_recovery_durable_boundary_rolls_back_both_commits_and_terminal_le
         ("account_global_versions", "TRUE".to_owned()),
         ("account_global_clock", "TRUE".to_owned()),
         ("account_global_channel_clocks", "TRUE".to_owned()),
-        ("security_transaction_step_attempts", "TRUE".to_owned()),
-        ("security_transaction_step_outcomes", "TRUE".to_owned()),
         (
             "security_transactions",
-            "NEW.terminal_outcome IS NOT NULL".to_owned(),
+            "NEW.recovery_completion IS NOT NULL".to_owned(),
         ),
         ("recovery_sessions", "NEW.state='completed'".to_owned()),
     ] {
@@ -2234,4 +2160,121 @@ async fn every_recovery_durable_boundary_rolls_back_both_commits_and_terminal_le
         .await
         .unwrap();
     assert_old_device_fenced(&fixture).await;
+}
+
+#[tokio::test]
+async fn original_station_completion_uses_existing_get_and_registered_authority_channel() {
+    const SECRET: &str = "recovery-completion-channel-secret-0191";
+    let values = std::collections::BTreeMap::from([
+        (
+            "COLAND_TRUST_DOMAIN".into(),
+            "ak:trust_domain:coland.example".into(),
+        ),
+        ("COLAND_DEVELOPMENT_MODE".into(), "true".into()),
+        (
+            "COLAND_ACCOUNT_AUTHORITY_URL".into(),
+            "https://auth.coland.example".into(),
+        ),
+        (
+            "COLAND_INTERNAL_AUTHORITY_SHARED_SECRET".into(),
+            SECRET.into(),
+        ),
+        (
+            "COLAND_ACCOUNT_AUTHORITY_TRUST_DOMAIN".into(),
+            "ak:trust_domain:auth.coland.example".into(),
+        ),
+    ]);
+    let mut config = coland_http::config::AppConfig::from_values(
+        &values,
+        coland_http::config::StartupOverrides::default(),
+    )
+    .unwrap();
+    config.seed_demo_data = false;
+    let fixture = fixture_with_config(config).await;
+    let url = format!(
+        "http://server/_arkret/self/security-transactions/{}",
+        fixture.write.transaction.resource.transaction_id()
+    );
+    let app = http_common::app_from_state(fixture.state.clone());
+    let before = footprint(&fixture).await;
+    let response = http_common::TestClient::get(&url)
+        .add_header("authorization", format!("Bearer {SECRET}"), true)
+        .send(&app)
+        .await;
+    assert_eq!(
+        response.status_code,
+        Some(salvo::http::StatusCode::NOT_FOUND)
+    );
+    assert_eq!(
+        footprint(&fixture).await,
+        before,
+        "an unaccepted R must have no public prepared resource"
+    );
+    fixture
+        .state
+        .test_persistence()
+        .security_transactions()
+        .commit_recovery_unit(fixture.write.clone())
+        .await
+        .unwrap();
+    // The accepted evidence remains retrievable after the original online
+    // Session expires. This neither refreshes it nor creates an issuer grant.
+    let mut conn = fixture.pool.get().await.unwrap();
+    diesel::sql_query(
+        "UPDATE recovery_sessions SET expires_at=now()-interval '1 second' WHERE transaction_id=$1",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(
+        uuid::Uuid::parse_str(
+            fixture
+                .write
+                .transaction
+                .resource
+                .transaction_id()
+                .as_str()
+                .strip_prefix("ak:transaction:")
+                .unwrap(),
+        )
+        .unwrap(),
+    )
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let accepted = footprint(&fixture).await;
+    let mut response = http_common::TestClient::get(&url)
+        .add_header("authorization", format!("Bearer {SECRET}"), true)
+        .send(&app)
+        .await;
+    assert_eq!(response.status_code, Some(salvo::http::StatusCode::OK));
+    let completed: SecurityTransaction = response.take_json().await.unwrap();
+    assert_eq!(completed, fixture.write.transaction.resource);
+    for (credential, digest) in [("wrong-secret", false), (SECRET, true)] {
+        let mut request = http_common::TestClient::get(&url).add_header(
+            "authorization",
+            format!("Bearer {credential}"),
+            true,
+        );
+        if digest {
+            request = request.add_header("content-digest", "sha-256=:AA==:", true);
+        }
+        let response = request.send(&app).await;
+        assert_ne!(response.status_code, Some(salvo::http::StatusCode::OK));
+    }
+    let unknown = format!(
+        "http://server/_arkret/self/security-transactions/ak:transaction:{}",
+        uuid::Uuid::now_v7()
+    );
+    let response = http_common::TestClient::get(&unknown)
+        .add_header("authorization", format!("Bearer {SECRET}"), true)
+        .send(&app)
+        .await;
+    assert_eq!(
+        response.status_code,
+        Some(salvo::http::StatusCode::NOT_FOUND)
+    );
+    assert_eq!(
+        footprint(&fixture).await,
+        accepted,
+        "evidence reads must not consume or create any state"
+    );
 }

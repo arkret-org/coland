@@ -307,7 +307,7 @@ pub(super) async fn exercise(
     let challenge = KeysBackupsUnlockChallenge {
         challenge_id: random(),
         challenge: random(),
-        nonce: random(),
+
         operation: arkret_wire::ServiceOperationId::SELF_KEYS_BACKUPS_COMMAND_UNLOCK_V1.into(),
         account_id: reader.account_id.clone(),
         requesting_device_id: reader.device_id.clone(),

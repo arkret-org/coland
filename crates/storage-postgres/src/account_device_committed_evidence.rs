@@ -78,6 +78,8 @@ pub(crate) async fn prepare_core(
                 .flatten()
                 .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
         ),
+
+        owner_transfer_acceptance_intent_digest: None,
     })
 }
 

@@ -652,10 +652,22 @@ impl Cut {
                                 .grants
                                 .get(grant_id)
                                 .ok_or_else(|| unavailable("accepted grant parent missing"))?;
-                            depth = depth.max(parent.authority_depth + 1);
-                            roots.extend(parent.authority_root_refs.clone());
+                            parent.validate_authority_shape().map_err(unavailable)?;
+                            depth =
+                                depth.max(parent.authority_depth.checked_add(1).ok_or_else(
+                                    || unavailable("accepted grant depth overflows"),
+                                )?);
+                            roots.push(parent.authority_root_ref.clone());
                         }
                     }
+                }
+                let authority_root_ref = roots
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| unavailable("accepted grant root missing"))?;
+                if roots.iter().any(|root| root != &authority_root_ref) || !(1..=4).contains(&depth)
+                {
+                    return Err(unavailable("accepted grant derived root or depth differs"));
                 }
                 let grant = CapabilityGrant {
                     id: GrantId::from_event_id(&event.event_id),
@@ -668,7 +680,7 @@ impl Cut {
                     constraints: b.constraints,
                     issuer_authority_refs: b.issuer_authority_refs,
                     authority_depth: depth,
-                    authority_root_refs: roots,
+                    authority_root_ref,
                     issued_at: b.issued_at,
                     status: CapabilityGrantStatus::Active,
                     updated_by: None,
@@ -676,6 +688,7 @@ impl Cut {
                     revoked_by: None,
                     revoked_at: None,
                 };
+                grant.validate_authority_shape().map_err(unavailable)?;
                 self.grants.insert(grant.id.clone(), grant);
             }
             EventKind::CapabilityRevoke => {
@@ -801,8 +814,8 @@ impl Cut {
         let facts = OperationFacts::default();
         let effective=self.grants.iter().filter_map(|(id,g)| {
             (matches!(&g.subject,CapabilitySubject::Actor(subject) if subject==actor)
-                && crate::replica_authorization::intact_chain(id,&self.grants,realm,generation,at,&mut BTreeSet::new(),0)
-                && self.root.as_ref().is_none_or(|root|g.authority_root_refs.iter().all(|reference|matches!(reference,AuthorityRootRef::RealmRoot {realm_id,authority_event_ref,authority_generation} if realm_id==realm && authority_event_ref==&root.authority_event_ref && *authority_generation==generation))))
+                && crate::replica_authorization::intact_chain(id,&self.grants,realm,generation,at)
+                && self.root.as_ref().is_none_or(|root|matches!(&g.authority_root_ref,AuthorityRootRef::RealmRoot {realm_id,authority_event_ref,authority_generation} if realm_id==realm && authority_event_ref==&root.authority_event_ref && *authority_generation==generation)))
                 .then_some(g)
         });
         let result = evaluate_grants(
@@ -871,52 +884,43 @@ fn qualified_chain(
     realm: &RealmId,
     at: DateTime<Utc>,
     owned: Option<&IssuerAuthorityRef>,
-    visiting: &mut BTreeSet<GrantId>,
-    depth: usize,
 ) -> bool {
-    if depth > 4 || !visiting.insert(id.clone()) {
+    let Some(grant) = cut.grants.get(id) else {
+        return false;
+    };
+    if grant.validate_authority_shape().is_err()
+        || grant.realm_id.as_ref() != Some(realm)
+        || !crate::capability_grant_current_states::grant_is_active_at(grant, at)
+    {
         return false;
     }
-    let generation = cut
+    if let [
+        reference @ IssuerAuthorityRef::OwnedAgent {
+            controller_account_id,
+            ..
+        },
+    ] = grant.issuer_authority_refs.as_slice()
+    {
+        return owned == Some(reference)
+            && grant.issuer_id.as_account_id() == Some(controller_account_id)
+            && serde_json::to_value(&grant.authority_root_ref).ok()
+                == serde_json::to_value(reference).ok();
+    }
+    let Some(generation) = cut
         .root
         .as_ref()
-        .map(|r| r.authority_generation)
-        .or(cut.snapshot_root_generation);
-    let root_matches = |r: &AuthorityRootRef| match r {
-        AuthorityRootRef::RealmRoot {
-            realm_id,
-            authority_event_ref,
-            authority_generation,
-        } => {
-            realm_id == realm
-                && Some(*authority_generation) == generation
-                && cut
-                    .root
-                    .as_ref()
-                    .is_none_or(|root| &root.authority_event_ref == authority_event_ref)
-        }
-        AuthorityRootRef::OwnedAgent {
-            realm_id,
-            controller_account_id,
-            controller_join_event_id,
-            agent_join_event_id,
-        } => {
-            matches!(owned, Some(IssuerAuthorityRef::OwnedAgent { realm_id: own_realm, controller_account_id: controller, controller_join_event_id: controller_join, agent_join_event_id: agent_join }) if realm_id == own_realm && controller_account_id == controller && controller_join_event_id == controller_join && agent_join_event_id == agent_join)
-        }
+        .map(|root| root.authority_generation)
+        .or(cut.snapshot_root_generation)
+    else {
+        return false;
     };
-    let valid = cut.grants.get(id).is_some_and(|grant| {
-        grant.realm_id.as_ref() == Some(realm)
-        && crate::capability_grant_current_states::grant_is_active_at(grant, at)
-        && !grant.issuer_authority_refs.is_empty() && !grant.authority_root_refs.is_empty()
-        && grant.authority_root_refs.iter().all(root_matches)
-        && grant.issuer_authority_refs.iter().all(|reference| match reference {
-            IssuerAuthorityRef::OwnedAgent { .. } => depth == 0 && Some(reference) == owned && grant.authority_depth == 1,
-            IssuerAuthorityRef::RealmRoot { realm_id, authority_event_ref, authority_generation } => grant.authority_root_refs.iter().any(|r| matches!(r, AuthorityRootRef::RealmRoot { realm_id: root_realm, authority_event_ref: root_event, authority_generation: root_generation } if root_realm == realm_id && root_event == authority_event_ref && root_generation == authority_generation)),
-            IssuerAuthorityRef::Grant { grant_id } => cut.grants.get(grant_id).is_some_and(|parent| matches!(&parent.subject, CapabilitySubject::Actor(subject) if subject == &grant.issuer_id) && !parent.issuer_authority_refs.iter().any(|r| matches!(r, IssuerAuthorityRef::OwnedAgent { .. }))) && qualified_chain(cut, grant_id, realm, at, None, visiting, depth + 1),
+    crate::replica_authorization::intact_chain(id, &cut.grants, realm, generation, at)
+        && cut.root.as_ref().is_none_or(|root| {
+            matches!(&grant.authority_root_ref,
+            AuthorityRootRef::RealmRoot { realm_id, authority_event_ref, authority_generation }
+                if realm_id == realm && authority_event_ref == &root.authority_event_ref
+                    && *authority_generation == root.authority_generation)
         })
-    });
-    visiting.remove(id);
-    valid
 }
 
 fn product_grants(
@@ -934,7 +938,7 @@ fn product_grants(
                     .actions
                     .iter()
                     .any(|action| PRODUCT_ACTIONS.contains(&action.as_str()))
-                && qualified_chain(cut, id, realm, at, owned, &mut BTreeSet::new(), 0)
+                && qualified_chain(cut, id, realm, at, owned)
         })
         .map(|(_, grant)| grant.clone())
         .collect()
@@ -1806,7 +1810,7 @@ mod typed_replay_tests {
         ));
         let root_event = EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [8; 32]);
         let root_ref = json!({"kind":"realm_root", "realm_id":realm_id(), "authority_event_ref":root_event, "authority_generation":"0"});
-        let grant: CapabilityGrant = serde_json::from_value(json!({"id":id,"schema":"ak.schema.capability.v1","realm_id":realm_id(),"issuer_id":actor,"subject":actor,"actions":PRODUCT_ACTIONS,"resources":[{"kind":"realm","realm_id":realm_id()}],"issuer_authority_refs":[root_ref],"authority_root_refs":[root_ref],"authority_depth":1,"status":"active","issued_at":arkret_canonical::format_timestamp_canonical(at())})).unwrap();
+        let grant: CapabilityGrant = serde_json::from_value(json!({"id":id,"schema":"ak.schema.capability.v1","realm_id":realm_id(),"issuer_id":actor,"subject":actor,"actions":PRODUCT_ACTIONS,"resources":[{"kind":"realm","realm_id":realm_id()}],"issuer_authority_refs":[root_ref],"authority_root_ref":root_ref,"authority_depth":1,"status":"active","issued_at":arkret_canonical::format_timestamp_canonical(at())})).unwrap();
         let mut cut = Cut {
             snapshot_root_generation: Some(0),
             snapshot_root_controller: Some(actor.clone()),
@@ -1834,7 +1838,7 @@ mod typed_replay_tests {
             serde_json::from_value(serde_json::to_value(&owned).unwrap()).unwrap();
         let grant = cut.grants.get_mut(&id).unwrap();
         grant.issuer_authority_refs = vec![owned.clone()];
-        grant.authority_root_refs = vec![owned_root];
+        grant.authority_root_ref = owned_root;
         assert_eq!(
             product_grants(&cut, &realm_id(), &actor, at(), Some(&owned)).len(),
             1

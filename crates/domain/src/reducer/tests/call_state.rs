@@ -375,8 +375,72 @@ fn recording_start_requires_consent_before_both_facets_are_written() {
         &serde_json::json!("recording")
     );
     assert_eq!(
-        state.facet_value(realm, &capture_result).unwrap()["retention"]["consent_confirmed"],
+        state.facet_value(realm, &capture_result).unwrap()["details"]["retention"]["consent_confirmed"],
         Value::Bool(true)
+    );
+}
+
+#[test]
+fn accepted_capture_results_do_not_reopen_permission_or_overwrite_pending_on_stop() {
+    // This is the accepted-Event cache boundary. The native authority, tested
+    // separately against PostgreSQL, decides source proof and exact CAS.
+    let mut state = ProjectionState::new();
+    let hlc = ServerHlc::new("test");
+    let call_id = create_call(&mut state, &hlc, TEST_REALM, "ringing");
+    let subject = [call_id.as_str(), "segment"];
+    let capture = FacetRef::composite(facet::CALL_RECORDING, &subject);
+    let result = FacetRef::composite(facet::CALL_RECORDING_RESULT, &subject);
+    let start = call_input(
+        arkret_wire::EventKind::CallRecordingStart.as_str(),
+        TEST_REALM,
+        serde_json::json!({
+        "call_id":call_id,"recording_id":"segment","recording_agent_id":"ak:did_core:web:media.example",
+        "capture_kind":"recording","mode":"audio","visible_notice":true,
+        "capture_metadata":{"retention":{"consent_confirmed":true}}}),
+    );
+    expect_call_state_projected(apply_call(&mut state, &start, &hlc));
+    let pending = state.facet_value(TEST_REALM, &result).unwrap().clone();
+    assert_eq!(pending["status"], "pending");
+    assert_eq!(
+        pending["details"]["recording_start_event_id"],
+        serde_json::json!(start.event_id)
+    );
+    let stop = call_input(
+        arkret_wire::EventKind::CallState.as_str(),
+        TEST_REALM,
+        serde_json::json!({"call_id":call_id,
+        "recording_transition":{"recording_id":"segment","from":"recording","to":"stopped"}}),
+    );
+    expect_call_state_projected(apply_call(&mut state, &stop, &hlc));
+    assert_eq!(state.facet_value(TEST_REALM, &result), Some(&pending));
+    let failed = call_input(
+        arkret_wire::EventKind::CallState.as_str(),
+        TEST_REALM,
+        serde_json::json!({"call_id":call_id,
+        "recording_transition":{"recording_id":"segment","from":"stopped","to":"failed",
+        "expected_commit_id":stop.event_id.as_str().replace("ak:event:","ak:realm_commit:"),
+        "capture_metadata":{"recording_stop_event_id":stop.event_id,"failure_reason_code":"storage_failed"}}}),
+    );
+    expect_call_state_projected(apply_call(&mut state, &failed, &hlc));
+    assert_eq!(
+        state.facet_value(TEST_REALM, &capture),
+        Some(&serde_json::json!("stopped"))
+    );
+    assert_eq!(
+        state.facet_value(TEST_REALM, &result).unwrap()["status"],
+        "failed"
+    );
+    let reused = call_input(
+        arkret_wire::EventKind::CallRecordingStart.as_str(),
+        TEST_REALM,
+        serde_json::json!({
+        "call_id":call_id,"recording_id":"segment","recording_agent_id":"ak:did_core:web:media.example",
+        "capture_kind":"transcript","mode":"audio","visible_notice":true,
+        "capture_metadata":{"retention":{"consent_confirmed":true}}}),
+    );
+    expect_rejected(
+        apply_call(&mut state, &reused, &hlc),
+        arkret_wire::ReasonCode::RECORDING_STATE_TRANSITION_INVALID,
     );
 }
 

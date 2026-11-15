@@ -270,7 +270,7 @@ pub(super) async fn grant_authority_boundaries(
         service.clone(),
         scope.clone(),
         EventKind::CapabilityRelinquish,
-        json!({"grant_id":child,"expected_revision":child_revision,"reason":"subject_request"}),
+        json!({"grant_id":child,"expected_commit_id":child_revision,"reason":"subject_request"}),
         Some(&parent),
         &signer,
     );
@@ -297,7 +297,7 @@ pub(super) async fn grant_authority_boundaries(
         service.clone(),
         scope.clone(),
         EventKind::CapabilityRevoke,
-        json!({"grant_id":child,"expected_revision":child_revision,"reason":"issuer_request"}),
+        json!({"grant_id":child,"expected_commit_id":child_revision,"reason":"issuer_request"}),
         Some(&parent),
         &signer,
     );
@@ -343,7 +343,7 @@ pub(super) async fn grant_authority_boundaries(
         service.clone(),
         scope.clone(),
         EventKind::CapabilityRevoke,
-        json!({"grant_id":child,"expected_revision":child_revision,"reason":"new original with stale revision"}),
+        json!({"grant_id":child,"expected_commit_id":child_revision,"reason":"new original with stale revision"}),
         Some(&parent),
         &signer,
     );

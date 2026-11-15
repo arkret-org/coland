@@ -575,10 +575,7 @@ async fn an_archived_realm_admits_only_its_exemption_set() {
         &founder_actor(),
         serde_json::json!({
             "grant_id": arkret_wire::GrantId::from_event_id(&admin.authority_commit.event.event_id),
-            "expected_revision": {
-                "commit_id": admin.authority_commit.commit.commit_id,
-                "stream_position": admin.authority_commit.commit.stream_position,
-            },
+            "expected_commit_id": admin.authority_commit.commit.commit_id,
         }),
     )
     .await;

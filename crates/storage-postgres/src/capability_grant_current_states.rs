@@ -1,15 +1,25 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
+use arkret_event_draft::EventPayloadExt as _;
 use arkret_models_collaboration::governance::grant_constraint::{
     AuthorityRootRef, CapabilityGrant, CapabilityGrantStatus, CapabilitySubject,
-    GrantConstraintKind, IssuerAuthorityRef,
+    GrantConstraintEffect, GrantConstraintKind, IssuerAuthorityRef,
 };
 use arkret_wire::{
     ActorId, CommitStreamRef, CommittedEventRef, CurrentRevision, EventId, GrantId, RealmCommitId,
-    RealmId, WireResourceSelector,
+    RealmId,
 };
-use coland_storage::{ActorRealmAuthorization, resource_selector_covers};
+use coland_storage::ActorRealmAuthorization;
+
+mod owner_transfer;
+pub(crate) use owner_transfer::{
+    candidate_realms as owner_transfer_candidate_realms,
+    require_author_current as require_owner_transfer_author_current,
+    require_creator as require_native_root_creator,
+    require_deadline as require_owner_transfer_deadline,
+    require_source as require_owner_transfer_source, retain_source as retain_owner_transfer_source,
+};
 
 use super::{
     AsyncConnection, AsyncPgConnection, BigInt, CapabilityGrantCurrentStateRecord,
@@ -65,6 +75,17 @@ pub(crate) struct RealmAuthorityRootCurrent {
     pub(crate) authority_event_ref: EventId,
 }
 
+impl RealmAuthorityRootCurrent {
+    fn value(&self) -> arkret_wire::RealmAuthorityRootValue {
+        arkret_wire::RealmAuthorityRootValue {
+            controller_actor_id: self.controller_actor_id.clone(),
+            controller_epoch: self.controller_epoch,
+            authority_generation: self.authority_generation,
+            authority_event_ref: self.authority_event_ref.clone(),
+        }
+    }
+}
+
 fn corrupt(detail: impl Into<String>) -> PersistenceError {
     PersistenceError::Database(detail.into())
 }
@@ -85,6 +106,14 @@ fn conflict(detail: impl Into<String>) -> PersistenceError {
             "{}: {detail}",
             coland_storage::ConflictCode::FailedPrecondition
         ))
+    }
+}
+
+fn authority_error(error: arkret_policy::grant_authority::AuthorityError) -> PersistenceError {
+    if error == arkret_policy::grant_authority::AuthorityError::Unproved {
+        conflict("temporarily_unavailable: grant authority facts are unavailable")
+    } else {
+        conflict(error.to_string())
     }
 }
 
@@ -148,6 +177,15 @@ pub(crate) async fn commit_realm_authority_root_current_state_in_connection(
 ) -> PersistenceResult<()> {
     let current = match event.kind {
         arkret_wire::EventKind::RealmCreate => {
+            if event
+                .payload
+                .get("object")
+                .and_then(|value| value.get("purpose"))
+                .and_then(serde_json::Value::as_str)
+                == Some("collaboration")
+            {
+                owner_transfer::require_creator(conn, event, commit).await?;
+            }
             if locked_authority_root(conn, &event.realm_id)
                 .await?
                 .is_some()
@@ -179,13 +217,8 @@ pub(crate) async fn commit_realm_authority_root_current_state_in_connection(
             let mut current = locked_authority_root(conn, &event.realm_id)
                 .await?
                 .ok_or_else(|| conflict("realm_authority_root_missing"))?;
-            let digest = arkret_canonical::canonical_sha256(&serde_json::json!({
-                "controller_actor_id": current.controller_actor_id,
-                "controller_epoch": current.controller_epoch,
-                "authority_generation": current.authority_generation,
-                "authority_event_ref": current.authority_event_ref,
-            }))
-            .map_err(PersistenceError::database)?;
+            let digest = arkret_canonical::canonical_sha256(&current.value())
+                .map_err(PersistenceError::database)?;
             if digest.as_str() != payload.expected_state_digest.as_str() {
                 return Err(conflict("realm_authority_root_conflict"));
             }
@@ -211,13 +244,8 @@ pub(crate) async fn commit_realm_authority_root_current_state_in_connection(
             let mut current = locked_authority_root(conn, &event.realm_id)
                 .await?
                 .ok_or_else(|| conflict("realm_authority_root_missing"))?;
-            let digest = arkret_canonical::canonical_sha256(&serde_json::json!({
-                "controller_actor_id": current.controller_actor_id,
-                "controller_epoch": current.controller_epoch,
-                "authority_generation": current.authority_generation,
-                "authority_event_ref": current.authority_event_ref,
-            }))
-            .map_err(PersistenceError::database)?;
+            let digest = arkret_canonical::canonical_sha256(&current.value())
+                .map_err(PersistenceError::database)?;
             if digest.as_str() != payload.expected_state_digest.as_str() {
                 return Err(conflict("realm_authority_root_conflict"));
             }
@@ -304,84 +332,37 @@ pub(crate) fn decode_row(
     )
 }
 
-fn effective_not_before(grant: &CapabilityGrant) -> Option<chrono::DateTime<chrono::Utc>> {
+fn global_not_before(grant: &CapabilityGrant) -> Option<chrono::DateTime<chrono::Utc>> {
     grant
         .constraints
         .iter()
-        .filter(|constraint| constraint.constraint_kind == GrantConstraintKind::Temporal)
+        .filter(|constraint| {
+            constraint.constraint_kind == GrantConstraintKind::Temporal
+                && constraint.effect == GrantConstraintEffect::Allow
+                && constraint.applies_to_actions.is_empty()
+                && constraint.recurrence.is_none()
+        })
         .filter_map(|constraint| constraint.not_before)
         .max()
 }
 
-fn ordinary_authority_control(
-    grant: &CapabilityGrant,
-) -> Option<&arkret_models_collaboration::governance::grant_constraint::GrantConstraint> {
-    grant.constraints.iter().find(|constraint| {
-        constraint.constraint_kind == GrantConstraintKind::AuthorityControl
-            && constraint.constraint_subkind.is_none()
-    })
-}
-
+/// Discover current candidates using only their independent global lifetime.
+/// Local allow windows decide positive paths in the action evaluator; they
+/// cannot erase another action's current deny/quarantine/review contribution.
+/// Use the same global-window predicate as the SDK's canonical expiry helper.
 pub(crate) fn grant_is_active_at(
     grant: &CapabilityGrant,
     accepted_at: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     grant.status == CapabilityGrantStatus::Active
-        && effective_not_before(grant).is_none_or(|value| value <= accepted_at)
+        && global_not_before(grant).is_none_or(|value| value <= accepted_at)
         && coland_storage::capability_grant_expires_at(grant)
             .is_none_or(|value| value > accepted_at)
 }
 
-fn root_sort_key(root: &AuthorityRootRef) -> PersistenceResult<Vec<u8>> {
-    arkret_canonical::canonical_json_bytes(root).map_err(PersistenceError::database)
-}
-
-fn sorted_unique_roots(
-    roots: impl IntoIterator<Item = AuthorityRootRef>,
-) -> PersistenceResult<Vec<AuthorityRootRef>> {
-    let mut keyed = roots
-        .into_iter()
-        .map(|root| Ok((root_sort_key(&root)?, root)))
-        .collect::<PersistenceResult<Vec<_>>>()?;
-    keyed.sort_by(|left, right| left.0.cmp(&right.0));
-    keyed.dedup_by(|left, right| left.0 == right.0);
-    Ok(keyed.into_iter().map(|(_, root)| root).collect())
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Ancestor validation keeps each authority binding and bounded traversal input explicit."
-)]
-pub(crate) fn validate_ancestor_graph(
-    child_id: &GrantId,
-    current_id: &GrantId,
-    rows: &BTreeMap<GrantId, CapabilityGrant>,
-    root: &RealmAuthorityRootCurrent,
-    realm_id: &RealmId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
-    visiting: &mut BTreeSet<GrantId>,
-    depth: u64,
-) -> PersistenceResult<()> {
-    if ancestor_graph_current(
-        child_id,
-        current_id,
-        rows,
-        root,
-        realm_id,
-        accepted_at,
-        visiting,
-        depth,
-        false,
-    )? {
-        Ok(())
-    } else {
-        Err(conflict("grant_revoked_upstream"))
-    }
-}
-
-/// Continuity of an already accepted grant, not permission to exercise an
-/// action or re-issue its profile-specific initial authority. A known closed
-/// lineage is distinct from unavailable current evidence.
+/// Check accepted current lineage using its strictly decreasing derived depth.
+/// Creation Commit ordering is checked only by admission; daily reads never
+/// re-run the original approval or fetch an original below a caller's floor.
 pub(crate) fn accepted_grant_is_current(
     grant_id: &GrantId,
     rows: &BTreeMap<GrantId, CapabilityGrant>,
@@ -389,182 +370,104 @@ pub(crate) fn accepted_grant_is_current(
     realm_id: &RealmId,
     accepted_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<bool> {
-    ancestor_graph_current(
-        // An accepted grant cannot be an ancestor of a new candidate here.
-        // The traversal still detects all actual cycles through `visiting`.
-        grant_id,
-        grant_id,
-        rows,
-        root,
-        realm_id,
-        accepted_at,
-        &mut BTreeSet::new(),
-        0,
-        true,
-    )
+    let expected_root = AuthorityRootRef::RealmRoot {
+        realm_id: root.realm_id.clone(),
+        authority_event_ref: root.authority_event_ref.clone(),
+        authority_generation: root.authority_generation,
+    };
+    accepted_grant_root_is_current(grant_id, rows, &expected_root, realm_id, accepted_at)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "The original grant cut and legacy error mapping remain explicit."
-)]
-fn ancestor_graph_current(
-    child_id: &GrantId,
-    current_id: &GrantId,
+/// Authenticated current replicas already retain the exact scalar root; they
+/// do not synthesize controller or epoch facts that this check never needs.
+pub(crate) fn accepted_grant_root_is_current(
+    grant_id: &GrantId,
+    rows: &BTreeMap<GrantId, CapabilityGrant>,
+    expected_root: &AuthorityRootRef,
+    realm_id: &RealmId,
+    accepted_at: chrono::DateTime<chrono::Utc>,
+) -> PersistenceResult<bool> {
+    let AuthorityRootRef::RealmRoot {
+        realm_id: root_realm,
+        authority_event_ref: root_event,
+        authority_generation: root_generation,
+    } = expected_root
+    else {
+        return Err(conflict("authority_regrant_denied"));
+    };
+    let mut pending = vec![grant_id];
+    let mut checked = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if checked.contains(id) {
+            continue;
+        }
+        let grant = rows.get(id).ok_or_else(|| {
+            conflict("temporarily_unavailable: accepted grant ancestor current is unavailable")
+        })?;
+        grant.validate_authority_shape().map_err(|error| {
+            conflict(format!(
+                "revision_unavailable: invalid accepted grant shape: {error}"
+            ))
+        })?;
+        if grant.realm_id.as_ref() != Some(realm_id)
+            || root_realm != realm_id
+            || &grant.authority_root_ref != expected_root
+            || !grant_is_active_at(grant, accepted_at)
+        {
+            return Ok(false);
+        }
+        require_delegable_parent(grant)?;
+        let mut deepest = 0;
+        for source in &grant.issuer_authority_refs {
+            match source {
+                IssuerAuthorityRef::RealmRoot {
+                    realm_id: source_realm,
+                    authority_event_ref,
+                    authority_generation,
+                } if source_realm == realm_id
+                    && authority_event_ref == root_event
+                    && authority_generation == root_generation => {}
+                IssuerAuthorityRef::Grant {
+                    grant_id: parent_id,
+                } => {
+                    let parent = rows.get(parent_id).ok_or_else(|| {
+                        conflict("temporarily_unavailable: accepted grant ancestor current is unavailable")
+                    })?;
+                    if parent.authority_depth >= grant.authority_depth {
+                        return Err(conflict("authority_depth_exceeded"));
+                    }
+                    if !matches!(&parent.subject, CapabilitySubject::Actor(actor) if actor == &grant.issuer_id)
+                        || parent.realm_id != grant.realm_id
+                        || parent.authority_root_ref != grant.authority_root_ref
+                    {
+                        return Err(conflict("grant_exceeds_issuer_authority"));
+                    }
+                    deepest = deepest.max(parent.authority_depth);
+                    pending.push(parent_id);
+                }
+                _ => return Ok(false),
+            }
+        }
+        if deepest.checked_add(1) != Some(grant.authority_depth) {
+            return Err(conflict("authority_depth_exceeded"));
+        }
+        checked.insert(id);
+    }
+    Ok(true)
+}
+
+pub(crate) fn require_current_grant_lineage(
+    grant_id: &GrantId,
     rows: &BTreeMap<GrantId, CapabilityGrant>,
     root: &RealmAuthorityRootCurrent,
     realm_id: &RealmId,
     accepted_at: chrono::DateTime<chrono::Utc>,
-    visiting: &mut BTreeSet<GrantId>,
-    depth: u64,
-    complete_current: bool,
-) -> PersistenceResult<bool> {
-    if depth > 4
-        || (!complete_current && current_id == child_id)
-        || !visiting.insert(current_id.clone())
-    {
-        return Err(conflict("authority_cycle"));
-    }
-    let parent = rows.get(current_id).ok_or_else(|| {
-        if complete_current {
-            conflict("temporarily_unavailable: accepted grant current is unavailable")
-        } else {
-            conflict("grant_exceeds_issuer_authority")
-        }
-    })?;
-    require_delegable_parent(parent)?;
-    if complete_current
-        && (parent.realm_id.as_ref() != Some(realm_id) || parent.issuer_authority_refs.is_empty())
-    {
-        return Err(conflict(
-            "temporarily_unavailable: accepted grant authority current is incomplete",
-        ));
-    }
-    if parent.realm_id.as_ref() != Some(realm_id) || !grant_is_active_at(parent, accepted_at) {
-        return Ok(false);
-    }
-    for authority_ref in &parent.issuer_authority_refs {
-        match authority_ref {
-            IssuerAuthorityRef::OwnedAgent { .. } => {
-                return Err(conflict("authority_regrant_denied"));
-            }
-            IssuerAuthorityRef::RealmRoot {
-                realm_id: root_realm_id,
-                authority_event_ref,
-                authority_generation,
-            } => {
-                if root_realm_id != realm_id
-                    || root.realm_id != *root_realm_id
-                    || root.authority_event_ref != *authority_event_ref
-                    || root.authority_generation != *authority_generation
-                {
-                    return Ok(false);
-                }
-            }
-            IssuerAuthorityRef::Grant { grant_id } => {
-                let Some(ancestor) = rows.get(grant_id) else {
-                    return if complete_current {
-                        Err(conflict(
-                            "temporarily_unavailable: accepted grant ancestor current is unavailable",
-                        ))
-                    } else {
-                        Ok(false)
-                    };
-                };
-                if !matches!(&ancestor.subject, CapabilitySubject::Actor(actor) if actor == &parent.issuer_id)
-                {
-                    return Err(conflict("grant_exceeds_issuer_authority"));
-                }
-                if !ancestor_graph_current(
-                    child_id,
-                    grant_id,
-                    rows,
-                    root,
-                    realm_id,
-                    accepted_at,
-                    visiting,
-                    depth + 1,
-                    complete_current,
-                )? {
-                    return Ok(false);
-                }
-            }
-        }
-    }
-    visiting.remove(current_id);
-    Ok(true)
-}
-
-fn parent_covers(
-    parent: &CapabilityGrant,
-    child_action: &str,
-    child_resource: &WireResourceSelector,
-) -> bool {
-    parent.actions.iter().any(|action| {
-        arkret_policy::action_grants_authority_for(action, child_action).unwrap_or(false)
-    }) && parent
-        .resources
-        .iter()
-        .any(|resource| resource_selector_covers(resource, child_resource))
-}
-
-fn validate_parent_constraints(
-    parent: &CapabilityGrant,
-    child: &arkret_models_collaboration::events_payloads::CapabilityGrantCreateBody,
 ) -> PersistenceResult<()> {
-    let Some(control) = ordinary_authority_control(parent) else {
-        return Err(conflict("authority_regrant_denied"));
-    };
-    let child_control = child.constraints.iter().find(|constraint| {
-        constraint.constraint_kind == GrantConstraintKind::AuthorityControl
-            && constraint.constraint_subkind.is_none()
-    });
-    let regrant_allowed = control.authority_regrant_allowed.unwrap_or(false);
-    if control.max_authority_depth == Some(0) {
-        return Err(conflict(if regrant_allowed {
-            "authority_depth_exceeded"
-        } else {
-            "authority_regrant_denied"
-        }));
+    if accepted_grant_is_current(grant_id, rows, root, realm_id, accepted_at)? {
+        Ok(())
+    } else {
+        Err(conflict("grant_revoked_upstream"))
     }
-    if !regrant_allowed {
-        if child_control.is_none_or(|child| {
-            child.max_authority_depth != Some(0) || child.authority_regrant_allowed.unwrap_or(false)
-        }) {
-            return Err(conflict("authority_regrant_denied"));
-        }
-    } else if let Some(parent_depth) = control.max_authority_depth
-        && child_control
-            .and_then(|child| child.max_authority_depth)
-            .is_none_or(|child_depth| child_depth > parent_depth.saturating_sub(1))
-    {
-        return Err(conflict("authority_depth_exceeded"));
-    }
-    if let Some(parent_expiry) = coland_storage::capability_grant_expires_at(parent) {
-        let child_expiry = child
-            .constraints
-            .iter()
-            .filter(|constraint| constraint.constraint_kind == GrantConstraintKind::Temporal)
-            .filter_map(|constraint| constraint.expires_at)
-            .min();
-        if child_expiry.is_none_or(|value| value > parent_expiry) {
-            return Err(conflict("authority_expiry_widening"));
-        }
-    }
-    // A complete semantic partial-order over every constraint family belongs
-    // in the policy crate. Until it is available, fail closed unless every
-    // deny/require/quarantine parent constraint is preserved byte-for-byte.
-    for constraint in parent.constraints.iter().filter(|constraint| {
-        !matches!(
-            constraint.effect,
-            arkret_models_collaboration::governance::grant_constraint::GrantConstraintEffect::Allow
-        )
-    }) {
-        if !child.constraints.contains(constraint) {
-            return Err(schema_violation("grant constraints widen parent authority"));
-        }
-    }
-    Ok(())
 }
 
 enum CapabilityGrantCurrentMutation {
@@ -574,7 +477,7 @@ enum CapabilityGrantCurrentMutation {
     },
     Close {
         grant_id: GrantId,
-        expected_revision: CurrentRevision,
+        expected_commit_id: RealmCommitId,
         status: CapabilityGrantCurrentStatus,
     },
 }
@@ -619,7 +522,7 @@ fn mutation_for_event(
             .map_err(|error| invalid("Capability Revoke", error))?;
             Ok(Some(CapabilityGrantCurrentMutation::Close {
                 grant_id: payload.grant_id,
-                expected_revision: payload.expected_revision,
+                expected_commit_id: payload.expected_commit_id,
                 status: CapabilityGrantCurrentStatus::Revoked,
             }))
         }
@@ -630,19 +533,12 @@ fn mutation_for_event(
             .map_err(|error| invalid("Capability Relinquish", error))?;
             Ok(Some(CapabilityGrantCurrentMutation::Close {
                 grant_id: payload.grant_id,
-                expected_revision: payload.expected_revision,
+                expected_commit_id: payload.expected_commit_id,
                 status: CapabilityGrantCurrentStatus::Relinquished,
             }))
         }
         _ => Ok(None),
     }
-}
-
-fn revision_matches(
-    current: &CapabilityGrantCurrentStateRecord,
-    expected: &CurrentRevision,
-) -> bool {
-    current.revision == *expected
 }
 
 fn finite_global_expiry(
@@ -889,10 +785,10 @@ fn require_delegable_parent(parent: &CapabilityGrant) -> PersistenceResult<()> {
         .issuer_authority_refs
         .iter()
         .any(|source| matches!(source, IssuerAuthorityRef::OwnedAgent { .. }))
-        || parent
-            .authority_root_refs
-            .iter()
-            .any(|root| matches!(root, AuthorityRootRef::OwnedAgent { .. }))
+        || matches!(
+            &parent.authority_root_ref,
+            AuthorityRootRef::OwnedAgent { .. }
+        )
     {
         return Err(conflict("authority_regrant_denied"));
     }
@@ -904,7 +800,7 @@ fn materialized_grant(
     grant_id: GrantId,
     body: arkret_models_collaboration::events_payloads::CapabilityGrantCreateBody,
     authority_depth: u64,
-    authority_root_refs: Vec<AuthorityRootRef>,
+    authority_root_ref: AuthorityRootRef,
 ) -> CapabilityGrant {
     CapabilityGrant {
         id: grant_id,
@@ -917,7 +813,7 @@ fn materialized_grant(
         constraints: body.constraints,
         issuer_authority_refs: body.issuer_authority_refs,
         authority_depth,
-        authority_root_refs,
+        authority_root_ref,
         issued_at: body.issued_at,
         status: CapabilityGrantStatus::Active,
         updated_by: None,
@@ -1003,6 +899,136 @@ async fn require_agent_provision_ceiling_in_connection(
     Ok(())
 }
 
+/// The accepted original stays private to native admission. A later close
+/// replaces current metadata but must never replace the creation coordinate.
+async fn load_grant_creation_commits(
+    conn: &mut AsyncPgConnection,
+    rows: &BTreeMap<GrantId, CapabilityGrant>,
+    references: &[IssuerAuthorityRef],
+) -> PersistenceResult<BTreeMap<GrantId, arkret_wire::RealmCommit>> {
+    let mut pending = references
+        .iter()
+        .filter_map(|source| match source {
+            IssuerAuthorityRef::Grant { grant_id } => Some(grant_id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut originals = BTreeMap::new();
+    while let Some(id) = pending.pop() {
+        if originals.contains_key(&id) {
+            continue;
+        }
+        let current = rows.get(&id).ok_or_else(|| {
+            conflict("revision_unavailable: original grant current is unavailable")
+        })?;
+        current
+            .validate_authority_shape()
+            .map_err(|error| corrupt(error.to_string()))?;
+        let event_id =
+            EventId::from_token_bytes(id.token_bytes()).map_err(PersistenceError::database)?;
+        let original =
+            crate::committed_disclosure::accepted_full_event_in_connection(conn, &event_id)
+                .await?
+                .ok_or_else(|| {
+                    conflict("revision_unavailable: grant creation source is unavailable")
+                })?;
+        let body = original
+            .event
+            .as_capability_grant()
+            .map_err(|error| corrupt(format!("grant creation payload is invalid: {error}")))?
+            .grant;
+        let stream = CommitStreamRef::Realm {
+            realm_id: original.event.realm_id.clone(),
+        };
+        let suite = original
+            .event
+            .event_id
+            .event_digest()
+            .digest_suite()
+            .map_err(PersistenceError::database)?;
+        original
+            .event
+            .verify_event_id_matches_content_with_digest_suite(suite)
+            .map_err(PersistenceError::database)?;
+        original
+            .commit
+            .validate_content_address()
+            .map_err(PersistenceError::database)?;
+        if original.event.kind != arkret_wire::EventKind::CapabilityGrant
+            || original.event.actor_id != body.issuer_id
+            || original.commit.stream_ref != stream
+            || CommitStreamRef::from_scope(
+                &original.event.scope_ref,
+                Some(original.event.realm_id.clone()),
+            )
+            .map_err(PersistenceError::database)?
+                != stream
+            || GrantId::from_event_id(&original.event.event_id) != id
+            || current.realm_id.as_ref() != Some(&original.event.realm_id)
+            || body.schema != current.schema
+            || body
+                .realm_id
+                .as_ref()
+                .is_some_and(|realm| Some(realm) != current.realm_id.as_ref())
+            || body.issuer_id != current.issuer_id
+            || arkret_canonical::canonical_json_bytes(&body.subject)
+                .map_err(PersistenceError::database)?
+                != arkret_canonical::canonical_json_bytes(&current.subject)
+                    .map_err(PersistenceError::database)?
+            || body.actions != current.actions
+            || body.resources != current.resources
+            || body.constraints != current.constraints
+            || body.issuer_authority_refs != current.issuer_authority_refs
+            || body.issued_at != current.issued_at
+        {
+            return Err(corrupt(
+                "accepted grant creation source disagrees with current immutable body",
+            ));
+        }
+        for source in &current.issuer_authority_refs {
+            if let IssuerAuthorityRef::Grant { grant_id } = source {
+                let parent = rows.get(grant_id).ok_or_else(|| {
+                    conflict("revision_unavailable: accepted grant ancestor current is unavailable")
+                })?;
+                if parent.authority_depth >= current.authority_depth {
+                    return Err(conflict("authority_depth_exceeded"));
+                }
+                pending.push(grant_id.clone());
+            }
+        }
+        originals.insert(id, original.commit);
+    }
+    Ok(originals)
+}
+
+async fn max_authority_lifetime_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm_id: &RealmId,
+) -> PersistenceResult<u64> {
+    #[derive(QueryableByName)]
+    struct Policy {
+        #[diesel(sql_type = Jsonb)]
+        value: serde_json::Value,
+    }
+    let policy =
+        sql_query("SELECT value FROM realm_policy_bundle_current_states WHERE realm_id=$1")
+            .bind::<Text, _>(realm_id.as_str())
+            .get_result::<Policy>(&mut *conn)
+            .await
+            .optional()
+            .map_err(PersistenceError::database)?
+            .map(|row| {
+                serde_json::from_value::<
+                    arkret_models_collaboration::events_payloads::realm::RealmPolicyBundlePayload,
+                >(row.value)
+                .map_err(PersistenceError::database)
+            })
+            .transpose()?;
+    Ok(policy
+        .and_then(|policy| policy.max_authority_lifetime_ms)
+        .unwrap_or(86_400_000))
+}
+
 async fn materialize_capability_grant_inner(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
@@ -1010,6 +1036,10 @@ async fn materialize_capability_grant_inner(
     grant_id: GrantId,
     body: arkret_models_collaboration::events_payloads::CapabilityGrantCreateBody,
 ) -> PersistenceResult<CapabilityGrant> {
+    let mut body = body;
+    // The optional authoring scope is inherited from the verified envelope;
+    // this changes no signed source bytes and creates no inferred deadline.
+    body.realm_id.get_or_insert_with(|| event.realm_id.clone());
     if body.issuer_authority_refs.is_empty() {
         return Err(schema_violation(
             "Capability Grant authority refs are empty",
@@ -1104,12 +1134,26 @@ async fn materialize_capability_grant_inner(
         crate::boxed_future(|| crate::realm_authorization_cut::RealmAuthorizationCut::require_owned_grant_coverage_in_connection(
             conn, event, &body, commit.committed_at,
         )).await?;
+        let context = arkret_policy::grant_authority::GrantAdmissionContext {
+            accepting_commit: commit,
+            current_root: &owned_root,
+            max_lifetime_ms: max_authority_lifetime_in_connection(conn, &event.realm_id).await?,
+            shorter_lifetime: None,
+            managed_role: None,
+        };
+        let derived = arkret_policy::grant_authority::validate_grant_admission(
+            &body,
+            &context,
+            &BTreeMap::new(),
+            |_| true,
+        )
+        .map_err(authority_error)?;
         return Ok(materialized_grant(
             &event.realm_id,
             grant_id,
             body,
-            1,
-            vec![owned_root],
+            derived.authority_depth,
+            derived.authority_root_ref,
         ));
     }
 
@@ -1137,101 +1181,49 @@ async fn materialize_capability_grant_inner(
         .await?
         .ok_or_else(|| conflict("realm_authority_root_missing"))?;
 
-    let mut seen_refs = BTreeSet::new();
-    let mut parent_ids = Vec::new();
-    let mut roots = Vec::new();
-    let mut deepest = 0_u64;
-    for authority_ref in &body.issuer_authority_refs {
-        let key = arkret_canonical::canonical_json_bytes(authority_ref)
-            .map_err(PersistenceError::database)?;
-        if !seen_refs.insert(key) {
-            return Err(schema_violation(
-                "Capability Grant authority refs are duplicated",
-            ));
-        }
-        match authority_ref {
-            IssuerAuthorityRef::OwnedAgent { .. } => {
-                return Err(schema_violation("owned Agent source must be exclusive"));
-            }
-            IssuerAuthorityRef::RealmRoot {
-                realm_id,
-                authority_event_ref,
-                authority_generation,
-            } => {
-                if realm_id != &event.realm_id {
-                    return Err(conflict("grant_exceeds_issuer_authority"));
-                }
-                if root.realm_id != *realm_id
-                    || root.controller_actor_id != body.issuer_id
-                    || root.authority_event_ref != *authority_event_ref
-                    || root.authority_generation != *authority_generation
-                {
-                    return Err(conflict("realm_authority_controller_mismatch"));
-                }
-                roots.push(AuthorityRootRef::RealmRoot {
-                    realm_id: realm_id.clone(),
-                    authority_event_ref: authority_event_ref.clone(),
-                    authority_generation: *authority_generation,
-                });
-            }
-            IssuerAuthorityRef::Grant {
-                grant_id: parent_id,
-            } => {
-                let parent = rows
-                    .get(parent_id)
-                    .ok_or_else(|| conflict("grant_exceeds_issuer_authority"))?;
-                if parent.realm_id.as_ref() != Some(&event.realm_id)
-                    || !matches!(&parent.subject, CapabilitySubject::Actor(actor) if actor == &body.issuer_id)
-                    || !grant_is_active_at(parent, commit.committed_at)
-                {
-                    return Err(conflict("grant_exceeds_issuer_authority"));
-                }
-                require_delegable_parent(parent)?;
-                if managed_role.is_none() {
-                    validate_parent_constraints(parent, &body)?;
-                }
-                deepest = deepest.max(parent.authority_depth);
-                roots.extend(parent.authority_root_refs.iter().cloned());
-                parent_ids.push(parent_id.clone());
-            }
-        }
+    let current_root = AuthorityRootRef::RealmRoot {
+        realm_id: root.realm_id.clone(),
+        authority_event_ref: root.authority_event_ref.clone(),
+        authority_generation: root.authority_generation,
+    };
+    if body
+        .issuer_authority_refs
+        .iter()
+        .any(|source| matches!(source, IssuerAuthorityRef::RealmRoot { .. }))
+        && root.controller_actor_id != body.issuer_id
+    {
+        return Err(conflict("realm_authority_controller_mismatch"));
     }
-
-    if let Some(role) = managed_role {
-        let parents = parent_ids.iter().map(|id| &rows[id]).collect::<Vec<_>>();
-        validate_managed_sources(&parents, &body, role)?;
-    }
-
-    // capabilities.md §3.2 / §10.3: a closed upstream ancestor refuses the
-    // first grant as `grant_exceeds_issuer_authority`; only a loop keeps its
-    // own `authority_cycle`.
-    for parent_id in &parent_ids {
-        validate_ancestor_graph(
-            &grant_id,
-            parent_id,
-            &rows,
-            &root,
-            &event.realm_id,
-            commit.committed_at,
-            &mut BTreeSet::new(),
-            1,
-        )
-        .map_err(|error| {
-            if error.conflict_code() == Some(coland_storage::ConflictCode::AuthorityCycle) {
-                error
-            } else {
-                conflict("grant_exceeds_issuer_authority")
-            }
-        })?;
-    }
-    let authority_depth = deepest
-        .checked_add(1)
-        .filter(|depth| *depth <= 4)
-        .ok_or_else(|| conflict("authority_depth_exceeded"))?;
-    let authority_root_refs = sorted_unique_roots(roots)?;
-    if authority_root_refs.is_empty() {
-        return Err(conflict("grant_exceeds_issuer_authority"));
-    }
+    let originals = load_grant_creation_commits(conn, &rows, &body.issuer_authority_refs).await?;
+    let sources = originals
+        .iter()
+        .map(|(id, creation_commit)| {
+            (
+                id.clone(),
+                arkret_policy::grant_authority::GrantAdmissionSource {
+                    current: &rows[id],
+                    creation_commit,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let max_lifetime_ms = max_authority_lifetime_in_connection(conn, &event.realm_id).await?;
+    // No narrower pair policy is registered by this implementation. Native
+    // temporal parent bounds remain exact per action/resource in the SDK;
+    // unsupported critical temporal semantics are refused, never ignored.
+    let context = arkret_policy::grant_authority::GrantAdmissionContext {
+        accepting_commit: commit,
+        current_root: &current_root,
+        max_lifetime_ms,
+        shorter_lifetime: None,
+        managed_role,
+    };
+    let derived = arkret_policy::grant_authority::validate_grant_admission(
+        &body, &context, &sources,
+        |source| matches!(source, IssuerAuthorityRef::RealmRoot { realm_id, authority_event_ref, authority_generation }
+            if realm_id == &root.realm_id && authority_event_ref == &root.authority_event_ref
+                && *authority_generation == root.authority_generation),
+    ).map_err(authority_error)?;
 
     // A profile-registered non-event action is grantable only through its
     // `non_event_grant_authority_rules[]` row: the issuer must hold the rule's
@@ -1244,50 +1236,12 @@ async fn materialize_capability_grant_inner(
         }
     }
 
-    let mut ref_contributed = vec![false; body.issuer_authority_refs.len()];
-    for action in &body.actions {
-        let rule = non_event_rules.get(action.as_str()).copied();
-        for resource in &body.resources {
-            let mut covered = false;
-            for (index, authority_ref) in body.issuer_authority_refs.iter().enumerate() {
-                let ref_covers = match (authority_ref, rule) {
-                    (IssuerAuthorityRef::OwnedAgent { .. }, _) => false,
-                    (IssuerAuthorityRef::RealmRoot { .. }, None) => {
-                        arkret_policy::owner_may_grant(action).unwrap_or(false)
-                    }
-                    (IssuerAuthorityRef::RealmRoot { .. }, Some(rule)) => {
-                        rule.issuer_owner_authority_allowed
-                            && arkret_policy::owner_may_grant(rule.issuer_action).unwrap_or(false)
-                    }
-                    (IssuerAuthorityRef::Grant { grant_id }, None) => rows
-                        .get(grant_id)
-                        .is_some_and(|parent| parent_covers(parent, action, resource)),
-                    (IssuerAuthorityRef::Grant { grant_id }, Some(rule)) => rows
-                        .get(grant_id)
-                        .is_some_and(|parent| parent_covers(parent, rule.issuer_action, resource)),
-                };
-                if ref_covers {
-                    covered = true;
-                    ref_contributed[index] = true;
-                }
-            }
-            if !covered {
-                return Err(conflict("grant_exceeds_issuer_authority"));
-            }
-        }
-    }
-    if ref_contributed.iter().any(|contributed| !contributed) {
-        return Err(schema_violation(
-            "Capability Grant carries a redundant authority ref",
-        ));
-    }
-
     Ok(materialized_grant(
         &event.realm_id,
         grant_id,
         body,
-        authority_depth,
-        authority_root_refs,
+        derived.authority_depth,
+        derived.authority_root_ref,
     ))
 }
 
@@ -1326,6 +1280,20 @@ async fn commit_capability_grant_current_state_inner(
     let Some(mutation) = mutation_for_event(event)? else {
         return Ok(());
     };
+    if commit.event_ref != event.event_id
+        || commit.realm_id != event.realm_id
+        || commit.stream_ref
+            != (CommitStreamRef::Realm {
+                realm_id: event.realm_id.clone(),
+            })
+        || CommitStreamRef::from_scope(&event.scope_ref, Some(event.realm_id.clone()))
+            .map_err(PersistenceError::database)?
+            != commit.stream_ref
+    {
+        return Err(schema_violation(
+            "Capability Grant input differs from its accepting Realm Commit",
+        ));
+    }
     crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &event.realm_id).await?;
     let grant_id = match &mutation {
         CapabilityGrantCurrentMutation::Create { grant_id, .. }
@@ -1432,7 +1400,7 @@ async fn commit_capability_grant_current_state_inner(
         (
             CapabilityGrantCurrentMutation::Close {
                 grant_id,
-                expected_revision,
+                expected_commit_id,
                 status,
             },
             Some(current),
@@ -1460,7 +1428,7 @@ async fn commit_capability_grant_current_state_inner(
                 CapabilityGrantCurrentStatus::Active => {}
             }
             if current.status != CapabilityGrantCurrentStatus::Active
-                || !revision_matches(current, &expected_revision)
+                || current.revision.commit_id != expected_commit_id
             {
                 return Err(conflict(
                     "cas_conflict: Capability Grant current revision does not match",
@@ -1719,11 +1687,11 @@ impl CapabilityGrantCurrentStateStore for PgCapabilityGrantCurrentStateStore {
             constraints: grant.constraints.clone(),
             issuer_authority_refs: vec![root_ref],
             authority_depth: 1,
-            authority_root_refs: vec![AuthorityRootRef::RealmRoot {
+            authority_root_ref: AuthorityRootRef::RealmRoot {
                 realm_id: grant.realm_id.clone(),
                 authority_event_ref: root.authority_event_ref,
                 authority_generation: root.authority_generation,
-            }],
+            },
             issued_at: chrono::Utc::now(),
             status: CapabilityGrantStatus::Active,
             updated_by: None,
@@ -1779,6 +1747,9 @@ impl CapabilityGrantCurrentStateStore for PgCapabilityGrantCurrentStateStore {
 
 #[cfg(test)]
 mod tests {
+    use arkret_wire::WireResourceSelector;
+    use coland_storage::resource_selector_covers;
+
     use super::*;
 
     const REALM_ID: &str = "ak:realm:AUGIFvQctz4TjQTmvvO4Wdy-xdc5XP2ZnJ5Qpbh4s8Ru";
@@ -1833,13 +1804,7 @@ mod tests {
                 agent_join_event_id: agent_join_event_id.clone(),
             }
         );
-        let grant = materialized_grant(
-            realm_id,
-            GRANT_ID.parse().unwrap(),
-            body.clone(),
-            1,
-            vec![root],
-        );
+        let grant = materialized_grant(realm_id, GRANT_ID.parse().unwrap(), body.clone(), 1, root);
         assert_eq!(grant.authority_depth, 1);
         assert_eq!(grant.issuer_authority_refs, body.issuer_authority_refs);
         assert_eq!(grant.constraints, body.constraints);
@@ -1901,13 +1866,8 @@ mod tests {
         let body = owned_body();
         let root = owned_authority_root(&body).unwrap().unwrap();
         let realm = body.realm_id.as_ref().unwrap();
-        let mut parent = materialized_grant(
-            realm,
-            GRANT_ID.parse().unwrap(),
-            body.clone(),
-            1,
-            vec![root],
-        );
+        let mut parent =
+            materialized_grant(realm, GRANT_ID.parse().unwrap(), body.clone(), 1, root);
         parent.constraints[0].max_authority_depth = Some(4);
         parent.constraints[0].authority_regrant_allowed = Some(true);
         let refusal = require_delegable_parent(&parent).unwrap_err();
@@ -1990,7 +1950,7 @@ mod tests {
                 "grant_id":"ak:grant:AU1_A5a8MMz_OdxEleQlWPFn-ljdJteaJv3ZZ9APkcrZ"
             }],
             "authority_depth": 2,
-            "authority_root_refs": [{
+            "authority_root_ref": {
                 "kind":"realm_root",
                 "realm_id":REALM_ID,
                 "authority_event_ref":EventId::from_digest(
@@ -1998,10 +1958,261 @@ mod tests {
                     [0x55; 32],
                 ),
                 "authority_generation":"0"
-            }],
+            },
             "issued_at": "2026-09-21T00:00:00.000Z",
             "status": status
         })
+    }
+
+    fn rooted_candidate() -> (CapabilityGrant, RealmAuthorityRootCurrent) {
+        let mut grant: CapabilityGrant = serde_json::from_value(grant_value("active")).unwrap();
+        grant.issuer_id = ActorId::account(arkret_wire::AccountId::new(
+            "ak:did_core:web:owner.example".parse().unwrap(),
+            "ak:did_core:web:station.example".parse().unwrap(),
+        ));
+        grant.actions = vec![
+            arkret_wire::CapabilityActionId::CALL_RECORD.into(),
+            arkret_wire::CapabilityActionId::CALL_JOIN.into(),
+        ];
+        grant.authority_depth = 1;
+        let root = RealmAuthorityRootCurrent {
+            realm_id: REALM_ID.parse().unwrap(),
+            controller_actor_id: grant.issuer_id.clone(),
+            controller_epoch: 0,
+            authority_generation: 0,
+            authority_event_ref: EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [0x55; 32],
+            ),
+        };
+        grant.issuer_authority_refs = vec![IssuerAuthorityRef::RealmRoot {
+            realm_id: root.realm_id.clone(),
+            authority_event_ref: root.authority_event_ref.clone(),
+            authority_generation: root.authority_generation,
+        }];
+        (grant, root)
+    }
+
+    fn temporal_constraint(
+        effect: GrantConstraintEffect,
+        action: Option<&str>,
+        from: Option<&str>,
+        until: Option<&str>,
+    ) -> arkret_models_collaboration::governance::grant_constraint::GrantConstraint {
+        let mut constraint =
+            arkret_models_collaboration::governance::grant_constraint::GrantConstraint::new(
+                GrantConstraintKind::Temporal,
+                effect,
+            );
+        constraint.applies_to_actions = action.into_iter().map(str::to_owned).collect();
+        constraint.not_before = from.map(|value| value.parse().unwrap());
+        constraint.expires_at = until.map(|value| value.parse().unwrap());
+        constraint
+    }
+
+    #[test]
+    fn candidate_lifetime_only_uses_independent_global_allow_windows() {
+        let (mut grant, _) = rooted_candidate();
+        let at = "2026-10-17T00:00:00.000Z".parse().unwrap();
+        let future = "2026-10-17T00:10:00.000Z";
+        let past = "2026-10-16T23:50:00.000Z";
+        for effect in [
+            GrantConstraintEffect::Allow,
+            GrantConstraintEffect::Deny,
+            GrantConstraintEffect::Quarantine,
+            GrantConstraintEffect::RequireReview,
+        ] {
+            grant.constraints = vec![temporal_constraint(
+                effect,
+                Some(arkret_wire::CapabilityActionId::CALL_JOIN),
+                Some(future),
+                None,
+            )];
+            assert!(grant_is_active_at(&grant, at));
+            grant.constraints[0].not_before = None;
+            grant.constraints[0].expires_at = Some(past.parse().unwrap());
+            assert!(grant_is_active_at(&grant, at));
+        }
+        for effect in [
+            GrantConstraintEffect::Deny,
+            GrantConstraintEffect::Quarantine,
+            GrantConstraintEffect::RequireReview,
+        ] {
+            grant.constraints = vec![temporal_constraint(effect, None, Some(future), None)];
+            assert!(grant_is_active_at(&grant, at));
+        }
+        let mut recurring =
+            temporal_constraint(GrantConstraintEffect::Allow, None, Some(future), None);
+        recurring.recurrence = Some(
+            arkret_models_collaboration::governance::grant_constraint::GrantConstraintRecurrence {
+                frequency: Some(arkret_models_collaboration::governance::grant_constraint::GrantConstraintRecurrenceFrequency::Daily),
+                timezone: Some("UTC".into()),
+                ..Default::default()
+            },
+        );
+        grant.constraints = vec![recurring];
+        assert!(grant_is_active_at(&grant, at));
+
+        grant.constraints = vec![temporal_constraint(
+            GrantConstraintEffect::Allow,
+            None,
+            Some(future),
+            None,
+        )];
+        assert!(!grant_is_active_at(&grant, at));
+        grant.constraints[0].not_before = Some(at);
+        grant.constraints[0].expires_at = Some(future.parse().unwrap());
+        assert!(grant_is_active_at(&grant, at));
+        assert!(!grant_is_active_at(&grant, future.parse().unwrap()));
+        grant.status = CapabilityGrantStatus::Revoked;
+        assert!(!grant_is_active_at(&grant, at));
+    }
+
+    #[test]
+    fn unrelated_future_allow_cannot_mask_current_refusals() {
+        use coland_storage::{
+            AuthorizationOperation, GrantEvaluation, OperationFacts, evaluate_grants,
+        };
+
+        let at = "2026-10-17T00:00:00.000Z".parse().unwrap();
+        for (effect, expected) in [
+            (GrantConstraintEffect::Deny, 0),
+            (GrantConstraintEffect::Quarantine, 1),
+            (GrantConstraintEffect::RequireReview, 2),
+        ] {
+            for (actual_action, masked_action) in [
+                (
+                    arkret_wire::CapabilityActionId::CALL_RECORD,
+                    arkret_wire::CapabilityActionId::CALL_JOIN,
+                ),
+                (
+                    arkret_wire::CapabilityActionId::POLICY_SET,
+                    arkret_wire::CapabilityActionId::EVENT_READ,
+                ),
+            ] {
+                let (mut refusal, root) = rooted_candidate();
+                refusal.actions = vec![actual_action.into(), masked_action.into()];
+                refusal.constraints = vec![
+                    temporal_constraint(
+                        GrantConstraintEffect::Allow,
+                        None,
+                        None,
+                        Some("2026-10-17T00:30:00.000Z"),
+                    ),
+                    temporal_constraint(
+                        effect,
+                        Some(actual_action),
+                        Some("2026-10-16T23:50:00.000Z"),
+                        None,
+                    ),
+                    temporal_constraint(
+                        GrantConstraintEffect::Allow,
+                        Some(masked_action),
+                        Some("2026-10-17T00:10:00.000Z"),
+                        None,
+                    ),
+                ];
+                let mut positive = refusal.clone();
+                positive.id = GrantId::from_event_id(&EventId::from_digest(
+                    arkret_canonical::DigestSuite::Sha256,
+                    [0x57; 32],
+                ));
+                positive.actions = vec![actual_action.into()];
+                positive.constraints.truncate(1);
+                let rows = BTreeMap::from([
+                    (positive.id.clone(), positive.clone()),
+                    (refusal.id.clone(), refusal.clone()),
+                ]);
+                let CapabilitySubject::Actor(actor) = &positive.subject else {
+                    unreachable!()
+                };
+                let target = WireResourceSelector::realm(root.realm_id.clone());
+                let facts = OperationFacts::default();
+                let operation = AuthorizationOperation {
+                    actor,
+                    actions: &[actual_action],
+                    target: &target,
+                    at,
+                    facts: &facts,
+                };
+                assert!(matches!(
+                    evaluate_grants(&operation, [&positive]),
+                    GrantEvaluation::Allowed(_)
+                ));
+                let candidates = rows
+                    .iter()
+                    .filter_map(|(id, grant)| {
+                        accepted_grant_is_current(id, &rows, &root, &root.realm_id, at)
+                            .unwrap()
+                            .then_some(grant)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(candidates.len(), 2);
+                match (expected, evaluate_grants(&operation, candidates)) {
+                    (0, GrantEvaluation::Denied)
+                    | (1, GrantEvaluation::Quarantined)
+                    | (2, GrantEvaluation::RequiresReview) => {}
+                    (_, other) => panic!(
+                        "local {masked_action} allow must not hide {actual_action} refusal: {other:?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_discovery_keeps_parent_global_expiry_and_revocation_fences() {
+        let (mut child, root) = rooted_candidate();
+        let mut parent = child.clone();
+        parent.id = GrantId::from_event_id(&EventId::from_digest(
+            arkret_canonical::DigestSuite::Sha256,
+            [0x58; 32],
+        ));
+        parent.subject = CapabilitySubject::Actor(child.issuer_id.clone());
+        parent.constraints = vec![temporal_constraint(
+            GrantConstraintEffect::Allow,
+            None,
+            Some("2026-10-16T23:00:00.000Z"),
+            Some("2026-10-17T00:10:00.000Z"),
+        )];
+        parent.constraints.push(
+            serde_json::from_value(serde_json::json!({
+                "constraint_kind":"authority_control", "effect":"allow",
+                "authority_regrant_allowed":true, "max_authority_depth":1
+            }))
+            .unwrap(),
+        );
+        child.constraints = vec![
+            serde_json::from_value(serde_json::json!({
+                "constraint_kind":"authority_control", "effect":"allow",
+                "authority_regrant_allowed":false, "max_authority_depth":0
+            }))
+            .unwrap(),
+        ];
+        child.authority_depth = 2;
+        child.issuer_authority_refs = vec![IssuerAuthorityRef::Grant {
+            grant_id: parent.id.clone(),
+        }];
+        let mut rows = BTreeMap::from([
+            (child.id.clone(), child.clone()),
+            (parent.id.clone(), parent.clone()),
+        ]);
+        let at = "2026-10-17T00:00:00.000Z".parse().unwrap();
+        assert!(accepted_grant_is_current(&child.id, &rows, &root, &root.realm_id, at).unwrap());
+        assert!(
+            !accepted_grant_is_current(
+                &child.id,
+                &rows,
+                &root,
+                &root.realm_id,
+                "2026-10-17T00:10:00.000Z".parse().unwrap()
+            )
+            .unwrap()
+        );
+        rows.get_mut(&parent.id).unwrap().status = CapabilityGrantStatus::Revoked;
+        assert!(!accepted_grant_is_current(&child.id, &rows, &root, &root.realm_id, at).unwrap());
+        rows.remove(&parent.id);
+        assert!(accepted_grant_is_current(&child.id, &rows, &root, &root.realm_id, at).is_err());
     }
 
     #[test]

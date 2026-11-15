@@ -206,15 +206,18 @@ impl ReadProof {
         // and review paths remain closed until their accepting operation is
         // wired; another explicit unreserved source is a normal alternative.
         for (grant, target) in candidates.into_values() {
-            let mut sources = arkret_policy::grant_authority::current_sources(
+            let mut sources = match arkret_policy::grant_authority::current_sources(
                 grant,
                 action,
                 target,
                 &self.context.grants,
                 at,
                 |source| self.context.root_current(source),
-            )
-            .map_err(|e| PersistenceError::Conflict(e.to_string()))?;
+            ) {
+                Ok(sources) => sources,
+                Err(arkret_policy::grant_authority::AuthorityError::Closed) => continue,
+                Err(error) => return Err(PersistenceError::Conflict(error.to_string())),
+            };
             sources.push(grant);
             let mut allowed = true;
             for source in sources {

@@ -861,7 +861,7 @@ pub(super) async fn build_install_plan(
     registration_epoch_evidence: &AppletRegistrationEpochEvidence,
     scope: &ScopeRef,
     approved_scopes: Vec<ScopeGrant>,
-    expected_revision: Option<arkret_wire::CurrentRevision>,
+    expected_commit_id: Option<arkret_wire::RealmCommitId>,
 ) -> Result<AppletInstallPlan, AppError> {
     let namespace_conflicts =
         namespace_conflicts_for(state, package.applet_id.as_str(), &package.namespaces).await?;
@@ -872,7 +872,7 @@ pub(super) async fn build_install_plan(
     let approved_actions = actions_from_approved_scopes(&approved_scopes);
     let denied_scopes = denied_scope_values(package, &approved_actions);
     let registration_payload =
-        registration_payload_from_package(package, registration_epoch_evidence, expected_revision)?;
+        registration_payload_from_package(package, registration_epoch_evidence, expected_commit_id)?;
     let package_digest = package
         .package_digest
         .clone()
@@ -916,10 +916,10 @@ pub(super) async fn build_install_plan(
 pub(super) fn registration_payload_from_package(
     package: &AppletPackage,
     registration_epoch_evidence: &AppletRegistrationEpochEvidence,
-    expected_revision: Option<arkret_wire::CurrentRevision>,
+    expected_commit_id: Option<arkret_wire::RealmCommitId>,
 ) -> Result<Value, AppError> {
     let registration = package
-        .to_registration(registration_epoch_evidence, expected_revision)
+        .to_registration(registration_epoch_evidence, expected_commit_id)
         .map_err(|error| AppError::schema_violation(error.to_string()))?;
     serde_json::to_value(registration).map_err(|error| {
         AppError::internal(format!("Applet registration cannot be serialized: {error}"))
@@ -1620,11 +1620,11 @@ mod tests {
 
 pub(super) fn registration_revision_from_event(
     event: &Event,
-) -> Result<Option<arkret_wire::CurrentRevision>, AppError> {
+) -> Result<Option<arkret_wire::RealmCommitId>, AppError> {
     let payload: arkret_models_integration::AppletRegistrationPayload = serde_json::from_value(
         serde_json::to_value(&event.payload)
             .map_err(|e| AppError::schema_violation(e.to_string()))?,
     )
     .map_err(|e| AppError::schema_violation(e.to_string()))?;
-    Ok(payload.expected_revision)
+    Ok(payload.expected_commit_id)
 }

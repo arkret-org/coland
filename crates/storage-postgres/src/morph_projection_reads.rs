@@ -1604,7 +1604,7 @@ pub(crate) async fn require_observed_account_status_binding_in_connection(
     // Reuse the original replica writer's exact complete-Account lock, including
     // the first successor. PCR genesis establishes only the initial binding.
     let lock = format!("account-status:{}:{account}", account.station_id);
-    sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+    sql_query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))")
         .bind::<Text, _>(lock)
         .execute(&mut *conn)
         .await
@@ -2021,7 +2021,7 @@ mod tests {
         let value = json!({"id":grant,"schema":"ak.schema.capability.v1","realm_id":opening.realm_id,
             "issuer_id":opening.actor_id,"subject":reader,"actions":actions,
             "resources":[{"kind":"realm","realm_id":opening.realm_id}],
-            "issuer_authority_refs":[root],"authority_depth":1,"authority_root_refs":[root],
+            "issuer_authority_refs":[root],"authority_depth":1,"authority_root_ref":root,
             "issued_at":arkret_canonical::format_timestamp_canonical(at(0)),"status":"active"});
         sql_query("INSERT INTO capability_grant_current_states(realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value,updated_at) VALUES($1,$2,'active',$3,$4,$5,0,$6,$7) ON CONFLICT(realm_id,grant_id) DO UPDATE SET value=EXCLUDED.value")
             .bind::<Text,_>(opening.realm_id.as_str()).bind::<Text,_>(grant.as_str())

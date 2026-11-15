@@ -30,28 +30,15 @@ use arkret_policy::agent_content_ceiling::key_scope_content_selector;
 /// remain independent gates owned by the caller's held transaction cut.
 pub(crate) fn require_session_content_ceiling(
     scopes: &[String],
-    details: &serde_json::Map<String, serde_json::Value>,
+    details: &arkret_models_identity::SessionGrantScope,
     operation: &AuthorizationOperation<'_>,
 ) -> PersistenceResult<()> {
     use arkret_models_collaboration::governance::grant_constraint::{
         GrantConstraint, GrantConstraintEffect, GrantConstraintKind,
     };
     use coland_storage::GrantEvaluation;
-    const REQUIRED: [&str; 8] = [
-        "controller_principal_id",
-        "agent_key_authorization_ref",
-        "realm_ids",
-        "strand_ids",
-        "resources",
-        "constraints",
-        "capability_grant_refs",
-        "policy_refs",
-    ];
-    if REQUIRED.iter().any(|field| !details.contains_key(*field))
-        || details
-            .keys()
-            .any(|field| !REQUIRED.contains(&field.as_str()) && field != "participations")
-        || scopes.is_empty()
+    details.validate().map_err(unavailable)?;
+    if scopes.is_empty()
         || scopes.iter().any(|action| {
             arkret_schema::capability_action(action).is_none()
                 && ServiceOperationId::from_wire(action).is_none()
@@ -69,40 +56,8 @@ pub(crate) fn require_session_content_ceiling(
             "Agent session content ceiling is incomplete or unknown",
         ));
     }
-    serde_json::from_value::<arkret_wire::DidCoreId>(details["controller_principal_id"].clone())
-        .map_err(unavailable)?;
-    serde_json::from_value::<arkret_wire::EventId>(details["agent_key_authorization_ref"].clone())
-        .map_err(unavailable)?;
-    let realms: Vec<RealmId> =
-        serde_json::from_value(details["realm_ids"].clone()).map_err(unavailable)?;
-    let strands: Vec<arkret_wire::StrandId> =
-        serde_json::from_value(details["strand_ids"].clone()).map_err(unavailable)?;
-    if realms
-        .iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
-        != realms.len()
-        || strands
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-            != strands.len()
-    {
-        return Err(unavailable(
-            "Agent session resource ceiling contains duplicates",
-        ));
-    }
-    let resources = details["resources"]
-        .as_object()
-        .ok_or_else(|| unavailable("Agent session resources are not an object"))?;
-    if resources.len() != 2
-        || resources.get("realm_ids") != Some(&details["realm_ids"])
-        || resources.get("strand_ids") != Some(&details["strand_ids"])
-    {
-        return Err(unavailable(
-            "Agent session resources differ from immutable scope IDs",
-        ));
-    }
+    let realms = &details.realm_ids;
+    let strands = &details.strand_ids;
     if !realms.is_empty()
         && !operation
             .target
@@ -140,61 +95,14 @@ pub(crate) fn require_session_content_ceiling(
             ));
         }
     }
-    for field in ["capability_grant_refs", "policy_refs"] {
-        serde_json::from_value::<Vec<String>>(details[field].clone()).map_err(unavailable)?;
-    }
-    if let Some(participation) = details.get("participations") {
-        // Preserved and structurally validated, but never an authority source.
-        // Continuous current participation remains the caller's separate gate.
-        serde_json::from_value::<Vec<arkret_models_collaboration::governance::agent_participation::AgentParticipationView>>(participation.clone())
-            .map_err(unavailable)?;
-    }
-    let constraints = details["constraints"]
-        .as_object()
-        .ok_or_else(|| unavailable("Agent session constraints are not an object"))?;
-    if constraints.keys().any(|field| {
-        !matches!(
-            field.as_str(),
-            "allowed_tracks" | "allowed_data_labels" | "allowed_endpoints" | "allowed_strand_ids"
-        )
-    }) {
-        return Err(unavailable("Agent session constraint member is unknown"));
-    }
-    let strings = |field: &str| -> PersistenceResult<Vec<String>> {
-        let value = constraints
-            .get(field)
-            .ok_or_else(|| unavailable("Agent session canonical constraint is missing"))?;
-        let values: Vec<String> = serde_json::from_value(value.clone()).map_err(unavailable)?;
-        if values.iter().any(String::is_empty)
-            || values
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                != values.len()
-        {
-            return Err(unavailable(
-                "Agent session canonical constraint values are invalid",
-            ));
-        }
-        Ok(values)
-    };
     let mut ceiling = GrantConstraint::new(
         GrantConstraintKind::ScopeLimitation,
         GrantConstraintEffect::Allow,
     );
-    ceiling.allowed_tracks = strings("allowed_tracks")?;
-    ceiling.allowed_data_labels = strings("allowed_data_labels")?;
-    ceiling.allowed_endpoints = strings("allowed_endpoints")?;
-    if let Some(ids) = constraints.get("allowed_strand_ids") {
-        let ids: Vec<arkret_wire::StrandId> =
-            serde_json::from_value(ids.clone()).map_err(unavailable)?;
-        if ids != strands {
-            return Err(unavailable(
-                "Agent session Strand constraint differs from immutable resources",
-            ));
-        }
-        // Actual target/facts were reconciled above. The existing constraint
-        // evaluator also checks the same Strand ceiling against actual facts.
+    ceiling.allowed_tracks = details.constraints.allowed_tracks.clone();
+    ceiling.allowed_data_labels = details.constraints.allowed_data_labels.clone();
+    ceiling.allowed_endpoints = details.constraints.allowed_endpoints.clone();
+    if let Some(ids) = &details.constraints.allowed_strand_ids {
         ceiling.allowed_strand_ids = ids.iter().map(ToString::to_string).collect();
     }
     match coland_storage::evaluate_constraint_ceiling(operation, &[ceiling]) {
@@ -1606,7 +1514,7 @@ pub(crate) async fn require_policy_write_with_approvals(
             serde_json::from_value(serde_json::to_value(&event.payload).map_err(unavailable)?)
                 .map_err(unavailable)?;
         payload.validate().map_err(unavailable)?;
-        if let Some(expected) = payload.expected_revision {
+        if let Some(expected) = payload.expected_commit_id {
             let source = arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, None)
                 .map_err(unavailable)?;
             let actual = crate::policy_current_states::management_policy_scope_target(
@@ -1626,7 +1534,7 @@ pub(crate) async fn require_policy_write_with_approvals(
                 ManagementPolicyCurrentRead::NeverWritten if expected.is_none() => {}
                 ManagementPolicyCurrentRead::Present {
                     source, revision, ..
-                } if expected.as_ref() == Some(&revision) => {
+                } if expected.as_ref() == Some(&revision.commit_id) => {
                     let previous = crate::policy_current_states::management_policy_scope_target(
                         &event.realm_id,
                         &source,
@@ -2063,9 +1971,11 @@ mod session_content_tests {
             "ak:did_core:web:agent.example".parse().unwrap(),
             "ak:did_core:web:station.example".parse().unwrap(),
         ));
+        let details: arkret_models_identity::SessionGrantScope =
+            serde_json::from_value(Value::Object(details.clone())).map_err(unavailable)?;
         require_session_content_ceiling(
             scopes,
-            details,
+            &details,
             &AuthorizationOperation {
                 actor: &actor,
                 actions: &["ak.message.create"],

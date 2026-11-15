@@ -261,7 +261,7 @@ async fn owned_agent_exact_current_is_issuer_only_even_after_membership_ends() {
         "issuer_id":arkret_wire::ActorId::account(controller.clone()),"subject":arkret_wire::ActorId::account(agent.clone()),
         "actions":["ak.message.create"],"resources":[{"kind":"realm","realm_id":realm}],
         "constraints":[{"constraint_kind":"authority_control","effect":"allow","max_authority_depth":0,"authority_regrant_allowed":false}],
-        "issuer_authority_refs":[reference.clone()],"authority_depth":1,"authority_root_refs":[reference],
+        "issuer_authority_refs":[reference.clone()],"authority_depth":1,"authority_root_ref":reference,
         "issued_at":arkret_canonical::format_timestamp_canonical(head.committed_at),"status":"active"
     });
     let mut conn = pool.get().await.unwrap();
@@ -292,7 +292,7 @@ async fn owned_agent_exact_current_is_issuer_only_even_after_membership_ends() {
         &bootstrap_tail(&unit),
         &controller,
         arkret_wire::EventKind::CapabilityRevoke,
-        serde_json::json!({"grant_id":grant_id,"expected_revision":{"commit_id":head.commit_id,"stream_position":0}}),
+        serde_json::json!({"grant_id":grant_id,"expected_commit_id":head.commit_id}),
     );
     assert_refused_with_zero_writes(
         &uow,
@@ -306,7 +306,7 @@ async fn owned_agent_exact_current_is_issuer_only_even_after_membership_ends() {
         &bootstrap_tail(&unit),
         &controller,
         arkret_wire::EventKind::CapabilityRevoke,
-        serde_json::json!({"grant_id":grant_id,"expected_revision":row.revision}),
+        serde_json::json!({"grant_id":grant_id,"expected_commit_id":row.revision}),
     );
     uow.commit_event(revoke.clone()).await.unwrap();
     let SelfExactCurrentRead::Answer(ExactCurrentStateReadResponseBody::Present {
@@ -1310,6 +1310,7 @@ fn strand_create_request(unit: &OrdinaryRealmBootstrapCommitUnit) -> EventCommit
         received_at: at,
     };
     let request = EventCommitRequest {
+        owner_transfer_successor: None,
         verified_media_participant: None,
         authority_commit: AuthorityCommitTransaction {
             expected_authority: previous.expected_authority.clone(),
@@ -5011,7 +5012,7 @@ fn relation_snapshot_fixture(
             &creator,
             EventKind::RelationCreate,
             serde_json::json!({
-                "primary_conflict_domain":domain, "expected_revision":null,
+                "primary_conflict_domain":domain, "expected_commit_id":null,
                 "relation":{"relation_kind":"confidential_discussion_of","scope_circle_id":circle_id,"from_ref":private_id,"to_ref":public_id},
             }),
             scope.clone(),
@@ -5156,7 +5157,7 @@ fn assert_cross_realm_relation_snapshot_disclosure<'a>(
             &creator,
             EventKind::RelationCreate,
             serde_json::json!({
-                "primary_conflict_domain":cross_domain,"expected_revision":null,
+                "primary_conflict_domain":cross_domain,"expected_commit_id":null,
                 "relation":{"relation_kind":"references","from_ref":public_id,"to_ref":foreign.strand_id},
             }),
         );
@@ -5919,10 +5920,7 @@ fn assert_invite_sequenced_revocation<'a>(
             arkret_wire::EventKind::CapabilityRevoke,
             serde_json::json!({
                 "grant_id": grant_id,
-                "expected_revision": {
-                    "commit_id": grant.authority_commit.commit.commit_id,
-                    "stream_position": grant.authority_commit.commit.stream_position,
-                }
+                "expected_commit_id": grant.authority_commit.commit.commit_id
             }),
         );
         let revoke = source_if_human(pool, revoke).await;
@@ -6001,10 +5999,7 @@ fn assert_invite_racing_revocation<'a>(
             arkret_wire::EventKind::CapabilityRevoke,
             serde_json::json!({
                 "grant_id": regrant_id,
-                "expected_revision": {
-                    "commit_id": regrant.authority_commit.commit.commit_id,
-                    "stream_position": regrant.authority_commit.commit.stream_position,
-                }
+                "expected_commit_id": regrant.authority_commit.commit.commit_id
             }),
         );
         let racing_revoke = source_if_human(pool, racing_revoke).await;
@@ -7962,7 +7957,7 @@ async fn relation_exact_current_uses_selector_scope_and_hides_private_domains() 
         &fixture.relation,
         &creator,
         arkret_wire::EventKind::RelationCreate,
-        serde_json::json!({"primary_conflict_domain":hidden_domain, "expected_revision":null,
+        serde_json::json!({"primary_conflict_domain":hidden_domain, "expected_commit_id":null,
             "relation":{"relation_kind":"references", "scope_circle_id":circle, "from_ref":public_id, "to_ref":arkret_wire::ActorId::account(creator.clone())}}),
         fixture.relation.authority_commit.event.scope_ref.clone(),
     );

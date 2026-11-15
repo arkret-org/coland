@@ -451,6 +451,33 @@ impl PersistenceHandle {
             .await
     }
 
+    pub async fn prepare_owner_transfer_current(
+        &self,
+        component: &arkret_models_crypto::realm_owner_transfer::RealmOwnerTransferAcceptance,
+    ) -> PersistenceResult<
+        Option<(
+            arkret_models_crypto::DeviceProjectionAttestationCore,
+            arkret_wire::CommittedEventRef,
+        )>,
+    > {
+        self.persistence
+            .account_device_signer_evidence()
+            .prepare_owner_transfer_current(component)
+            .await
+    }
+
+    pub async fn retain_owner_transfer_current(
+        &self,
+        evidence: &arkret_models_identity::AccountDeviceSignerEvidence,
+        authorization_ref: &arkret_wire::CommittedEventRef,
+        component: &arkret_models_crypto::realm_owner_transfer::RealmOwnerTransferAcceptance,
+    ) -> PersistenceResult<arkret_wire::SignerEvidenceRef> {
+        self.persistence
+            .account_device_signer_evidence()
+            .retain_owner_transfer_current(evidence, authorization_ref, component)
+            .await
+    }
+
     pub async fn account_device_signer_evidence(
         &self,
         account: &arkret_wire::AccountId,

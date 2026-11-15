@@ -430,7 +430,33 @@ async fn replicate_one(
     item: &CommittedEventSubmission,
     receipt: Option<&coland_storage::IdempotencyRecord>,
 ) -> ServiceResult<(CommittedReplicaOutcome, bool)> {
-    prepare_or_replicate_one(state, peer, authorities, item, receipt, None).await
+    let outcome = prepare_or_replicate_one(state, peer, authorities, item, receipt, None).await;
+    if outcome
+        .as_ref()
+        .is_err_and(|error| needs_reaction_baseline(&item.event_submission.event.kind, error))
+    {
+        // The failed native transaction has already rolled back. A fresh
+        // complete governing Snapshot can cover a formerly hidden target;
+        // replaying its old ADD history cannot supply the missing baseline.
+        super::replica_anchor::refresh_reaction_current_baseline(state, &item.source_commit)
+            .await
+            .map_err(temporarily_unavailable)?;
+        authorities.remove(&item.event_submission.event.realm_id);
+        return prepare_or_replicate_one(state, peer, authorities, item, receipt, None)
+            .await.map_err(|error| {
+                if needs_reaction_baseline(&item.event_submission.event.kind, &error) {
+                    temporarily_unavailable("Reaction current still requires a complete governing Snapshot after one refresh")
+                } else { error }
+            });
+    }
+    outcome
+}
+
+fn needs_reaction_baseline(kind: &arkret_wire::EventKind, error: &ServiceError) -> bool {
+    matches!(
+        kind,
+        arkret_wire::EventKind::ReactionAdd | arkret_wire::EventKind::ReactionRemove
+    ) && error.conflict_code() == Some(ConflictCode::DependencyMissing)
 }
 
 pub(super) async fn receive_audit_pair(

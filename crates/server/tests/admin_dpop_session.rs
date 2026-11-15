@@ -84,7 +84,7 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) {
 struct GrantSession {
     state: AppState,
     principal_id: arkret_identifiers::DidCoreId,
-    grant_jwt: String,
+    grant_secret: String,
     holder_key: SigningKey,
 }
 
@@ -92,7 +92,10 @@ struct GrantSession {
 /// loopback Account Authority introspection mock.
 async fn grant_session(slug: &str, configure: impl FnOnce(&mut AppConfig)) -> GrantSession {
     let holder_key = SigningKey::from_bytes(&Sha256::digest(slug.as_bytes()).into());
-    let grant_jwt = format!("admin-dpop-grant.{slug}.{}", uuid::Uuid::now_v7().simple());
+    let grant_secret = arkret_identifiers::SessionGrantSecret::from_bytes(
+        Sha256::digest(uuid::Uuid::now_v7().as_bytes()).into(),
+    )
+    .into_string();
 
     let slot = Arc::new(Mutex::new(Value::Null));
     let origin = spawn_introspection_mock(slot.clone()).await;
@@ -135,10 +138,8 @@ async fn grant_session(slug: &str, configure: impl FnOnce(&mut AppConfig)) -> Gr
         "proof_required": false,
         "one_time_use_consumed": false,
         "grant": {
-            "id": arkret_identifiers::SessionGrantId::from_issuance_digest(
-                Sha256::digest(grant_jwt.as_bytes()).into(),
-            ),
-            "issuer_id": "ak:did_core:web:coauth.example",
+            "id": arkret_identifiers::SessionGrantId::new(format!("ak:session_grant:{}", uuid::Uuid::now_v7())).unwrap(),
+            "issuer_id": state.service_core_id(),
             "account_id": {
                 "principal_id": fixture.history.account.principal_id,
                 "station_id": state.service_id(),
@@ -149,6 +150,8 @@ async fn grant_session(slug: &str, configure: impl FnOnce(&mut AppConfig)) -> Gr
                 arkret_models_identity::admin_grant::admin_scopes::ADMIN_READ,
                 "ak.self.account.read.viewer.v1",
             ],
+            "not_before": arkret_canonical::format_timestamp_canonical(chrono::Utc::now() - chrono::Duration::seconds(1)),
+            "session_id": format!("session-{}", uuid::Uuid::now_v7()),
             "expires_at": arkret_canonical::format_timestamp_canonical(
                 chrono::Utc::now() + chrono::Duration::minutes(5),
             ),
@@ -170,7 +173,7 @@ async fn grant_session(slug: &str, configure: impl FnOnce(&mut AppConfig)) -> Gr
     GrantSession {
         state,
         principal_id: fixture.history.account.principal_id.clone(),
-        grant_jwt,
+        grant_secret,
         holder_key,
     }
 }
@@ -185,11 +188,11 @@ impl GrantSession {
         );
         let proof = arkret_signatures::dpop::build_dpop_proof(
             &arkret_signatures::dpop::DpopProofRequest::new(method, htu)
-                .access_token(self.grant_jwt.clone()),
+                .access_token(self.grant_secret.clone()),
             &self.holder_key,
         )
         .expect("DPoP proof builds");
-        (format!("DPoP {}", self.grant_jwt), proof.header_value)
+        (format!("DPoP {}", self.grant_secret), proof.header_value)
     }
 
     async fn get(&self, path: &str, headers: Option<&(String, String)>) -> (StatusCode, Value) {
@@ -231,7 +234,11 @@ async fn canonical_viewer_rejects_missing_dpop_and_query_credentials() {
 
     let mut missing_proof = TestClient::get(format!("http://server{VIEWER_PATH}"))
         .add_header("Arkret-Operation", "ak.self.account.read.viewer.v1", true)
-        .add_header("authorization", format!("DPoP {}", session.grant_jwt), true)
+        .add_header(
+            "authorization",
+            format!("DPoP {}", session.grant_secret),
+            true,
+        )
         .send(&service(session.state.clone()))
         .await;
     assert_eq!(missing_proof.status_code, Some(StatusCode::UNAUTHORIZED));
@@ -246,7 +253,7 @@ async fn canonical_viewer_rejects_missing_dpop_and_query_credentials() {
         .add_header("Arkret-Operation", "ak.self.account.read.viewer.v1", true)
         .add_header(
             "authorization",
-            format!("Bearer {}", session.grant_jwt),
+            format!("Bearer {}", session.grant_secret),
             true,
         )
         .add_header("dpop", proof, true)
@@ -386,14 +393,14 @@ async fn canonical_viewer_binds_dpop_to_method_url_token_and_holder_key() {
             "method",
             "POST",
             url.clone(),
-            session.grant_jwt.clone(),
+            session.grant_secret.clone(),
             &session.holder_key,
         ),
         (
             "URL authority",
             "GET",
             format!("https://untrusted-origin.example{VIEWER_PATH}"),
-            session.grant_jwt.clone(),
+            session.grant_secret.clone(),
             &session.holder_key,
         ),
         (
@@ -407,7 +414,7 @@ async fn canonical_viewer_binds_dpop_to_method_url_token_and_holder_key() {
             "holder key",
             "GET",
             url,
-            session.grant_jwt.clone(),
+            session.grant_secret.clone(),
             &other_key,
         ),
     ] {
@@ -416,7 +423,7 @@ async fn canonical_viewer_binds_dpop_to_method_url_token_and_holder_key() {
             key,
         )
         .expect("fresh signed DPoP mismatch");
-        let headers = (format!("DPoP {}", session.grant_jwt), proof.header_value);
+        let headers = (format!("DPoP {}", session.grant_secret), proof.header_value);
         let (status, body) = session.get(VIEWER_PATH, Some(&headers)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{label}: {body}");
         let problem: arkret_wire::Problem =

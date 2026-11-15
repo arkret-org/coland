@@ -578,7 +578,7 @@ async fn terminal_child_consumer_case() {
         ),
         (
             arkret_wire::EventKind::CapabilityRevoke,
-            serde_json::json!({"grant_id":grant_id,"expected_revision":grant_revision}),
+            serde_json::json!({"grant_id":grant_id,"expected_commit_id":grant_revision}),
         ),
         (
             arkret_wire::EventKind::MemberState,

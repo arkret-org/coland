@@ -839,6 +839,8 @@ async fn retired_managed_forward_carrier_is_rejected(
             content_backup_sources: None,
             producer_device_evidence: None,
             producer_agent_evidence: None,
+
+            successor_device_evidence: None,
         },
     );
     let mut retired = json!(request);
@@ -1001,8 +1003,9 @@ async fn realm_profile_update_source_failure_and_cas(
         let payload: ActorProfileUpdatePayload = serde_json::from_value(json!({
             "actor_profile_id":arkret_wire::ActorProfileId::from_event_id(&original.event.event_id),
             "patch":{"display_name":label},
-            "expected_revision":{"commit_id":original.commit.commit_id,"stream_position":original.commit.stream_position}
-        })).unwrap();
+            "expected_commit_id":original.commit.commit_id
+        }))
+        .unwrap();
         let intent =
             arkret_event_draft::TypedEventDraft::<arkret_wire::event_spec::ProfileUpdate>::new(
                 ScopeRef::RealmControl {

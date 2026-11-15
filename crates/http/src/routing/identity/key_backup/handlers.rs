@@ -488,11 +488,13 @@ pub(super) async fn unlock_key_backup(
     })?;
     let request_digest = arkret_canonical::canonical_sha256(&body)
         .map_err(|error| AppError::internal(error.to_string()))?;
-    let holder = session
-        .session_grant
-        .as_ref()
-        .map(|grant| format!("{}:{}", grant.grant_id, grant.cnf_jkt))
-        .unwrap_or_else(|| session.require_human_device_id().clone());
+    let holder = match session.session_grant.as_ref() {
+        Some(grant) => arkret_canonical::canonical_json_string(
+            &json!({"session_grant_ref":grant.grant_ref(),"cnf_jkt":grant.cnf_jkt}),
+        )
+        .map_err(|error| AppError::internal(error.to_string()))?,
+        None => session.require_human_device_id().clone(),
+    };
     if let arkret_models_crypto::KeyBackupUnlockAuthority::RecoverySession {
         recovery_session_id,
     } = &body.proof.authority

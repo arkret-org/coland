@@ -1197,20 +1197,24 @@ impl AuthorityCommitApplication {
     /// that one storage transaction rechecks the predecessor and installs both.
     pub fn prepare_recovery_unit_commits(
         &self,
-        events: &[Event; 2],
+        events: &[arkret_wire::EventAdmissionSubmission; 2],
         authority: &CurrentRealmAuthority,
         predecessor: &CommitStreamHead,
         verification_method: DidUrl,
         signing_key: &SigningKey,
         committed_at: DateTime<Utc>,
     ) -> ServiceResult<[AuthorityCommitTransaction; 2]> {
+        for submission in events {
+            submission.validate().map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
+        }
         let expected_stream = CommitStreamRef::Realm {
             realm_id: authority.realm_id.clone(),
         };
         if predecessor.stream_ref != expected_stream
-            || events[0].kind != arkret_wire::EventKind::DeviceReanchor
-            || events[1].kind != arkret_wire::EventKind::DeviceAuthorize
-            || events.iter().any(|event| {
+            || events[0].event.kind != arkret_wire::EventKind::DeviceReanchor
+            || events[1].event.kind != arkret_wire::EventKind::DeviceAuthorize
+            || events.iter().any(|submission| {
+                let event = &submission.event;
                 event.realm_id != authority.realm_id
                     || event.scope_ref.realm_id() != &authority.realm_id
             })
@@ -1220,7 +1224,7 @@ impl AuthorityCommitApplication {
             ));
         }
         let first = build_signed_event_commit(
-            &events[0],
+            &events[0].event,
             authority,
             Some(predecessor),
             verification_method.clone(),
@@ -1234,7 +1238,7 @@ impl AuthorityCommitApplication {
             commit_id: first.commit_id.clone(),
         };
         let second = build_signed_event_commit(
-            &events[1],
+            &events[1].event,
             authority,
             Some(&first_head),
             verification_method,
@@ -1245,7 +1249,7 @@ impl AuthorityCommitApplication {
         Ok([
             AuthorityCommitTransaction {
                 expected_authority: authority.clone(),
-                event: events[0].clone(),
+                event: events[0].event.clone(),
                 commit: first,
                 producer_signer_fact: None,
                 content_backup_source: None,
@@ -1255,7 +1259,7 @@ impl AuthorityCommitApplication {
             },
             AuthorityCommitTransaction {
                 expected_authority: authority.clone(),
-                event: events[1].clone(),
+                event: events[1].event.clone(),
                 commit: second,
                 producer_signer_fact: None,
                 content_backup_source: None,

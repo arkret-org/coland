@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use arkret_models_collaboration::governance::grant_constraint::{
-    AuthorityRootRef, CapabilityGrant, CapabilitySubject, IssuerAuthorityRef,
+    AuthorityRootRef, CapabilityGrant,
 };
 use arkret_wire::{ActorId, CurrentSelector, CurrentState, GrantId, RealmId, ScopeRef};
 use coland_storage::{PersistenceError, PersistenceResult};
@@ -147,61 +147,36 @@ struct StoredRow {
     selector: serde_json::Value,
 }
 
-/// Validate the complete reducer-derived authority chain for a retained grant.
+/// Check current accepted depth/root facts without re-running creation.
 pub(crate) fn intact_chain(
     id: &GrantId,
     grants: &BTreeMap<GrantId, CapabilityGrant>,
     realm: &RealmId,
     generation: u64,
     at: chrono::DateTime<chrono::Utc>,
-    visiting: &mut BTreeSet<GrantId>,
-    depth: usize,
 ) -> bool {
-    if depth > 4 || !visiting.insert(id.clone()) {
+    let Some(grant) = grants.get(id) else {
+        return false;
+    };
+    let AuthorityRootRef::RealmRoot {
+        realm_id,
+        authority_event_ref: _,
+        authority_generation,
+    } = &grant.authority_root_ref
+    else {
+        return false;
+    };
+    if realm_id != realm || *authority_generation != generation {
         return false;
     }
-    let valid = grants.get(id).is_some_and(|grant| {
-        grant.realm_id.as_ref() == Some(realm)
-            && crate::capability_grant_current_states::grant_is_active_at(grant, at)
-            && !grant.issuer_authority_refs.is_empty()
-            && !grant.authority_root_refs.is_empty()
-            && grant.authority_root_refs.iter().all(|root| {
-                matches!(root, AuthorityRootRef::RealmRoot { realm_id, authority_generation, .. }
-                    if realm_id == realm && *authority_generation == generation)
-            })
-            && grant.issuer_authority_refs.iter().all(|reference| match reference {
-                IssuerAuthorityRef::OwnedAgent { .. } => false,
-                IssuerAuthorityRef::RealmRoot {
-                    realm_id,
-                    authority_event_ref,
-                    authority_generation,
-                } => {
-                    realm_id == realm
-                        && *authority_generation == generation
-                        && grant.authority_root_refs.iter().any(|root| {
-                            matches!(root, AuthorityRootRef::RealmRoot { realm_id: root_realm,
-                                authority_event_ref: root_event, authority_generation: root_generation }
-                                if root_realm == realm && root_event == authority_event_ref
-                                    && *root_generation == generation)
-                        })
-                }
-                IssuerAuthorityRef::Grant { grant_id } => {
-                    grants.get(grant_id).is_some_and(|parent| {
-                        matches!(&parent.subject, CapabilitySubject::Actor(subject) if subject == &grant.issuer_id)
-                    }) && intact_chain(
-                        grant_id,
-                        grants,
-                        realm,
-                        generation,
-                        at,
-                        visiting,
-                        depth + 1,
-                    )
-                }
-            })
-    });
-    visiting.remove(id);
-    valid
+    crate::capability_grant_current_states::accepted_grant_root_is_current(
+        id,
+        grants,
+        &grant.authority_root_ref,
+        realm,
+        at,
+    )
+    .unwrap_or(false)
 }
 
 #[derive(diesel::QueryableByName)]

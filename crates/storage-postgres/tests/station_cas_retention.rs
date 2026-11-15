@@ -33,9 +33,9 @@ fn record(
     }
 }
 
-async fn apply(store: &PgAccountDataStore, row: AccountDataRecord, expected_revision: u64) {
+async fn apply(store: &PgAccountDataStore, row: AccountDataRecord, expected_commit_id: u64) {
     assert!(matches!(
-        store.compare_and_set(&row, expected_revision).await.unwrap(),
+        store.compare_and_set(&row, expected_commit_id).await.unwrap(),
         AccountDataCasResult::Applied(applied) if applied.revision == row.revision
     ));
 }

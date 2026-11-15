@@ -607,7 +607,7 @@ mod tests {
                     "from_ref": STRAND,
                     "to_ref": assignee,
                 },
-                "expected_revision": null,
+                "expected_commit_id": null,
                 "relation": {"relation_kind": "assigned_to", "from_ref": STRAND, "to_ref": assignee},
             }),
         )

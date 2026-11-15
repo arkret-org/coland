@@ -6,20 +6,26 @@ use chrono::{Duration, Utc};
 use coland_storage::{
     ActorProfileStore, AgentControlAdmissionWrite, AgentPcrGenesisAdmissionWrite,
     AgentProvisionAdmissionWrite, AuthorityCommitStore, AuthorityCommitTransaction,
+    RecoveryPolicyStore,
 };
 use coland_storage_postgres::{
     PgActorProfileStore, PgAuthorityCommitStore, PgPersistenceStore, PgPool,
 };
 use diesel::sql_types::{BigInt, Text};
 use diesel_async::RunQueryDsl;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer as _, SigningKey};
 use rand_core::SeedableRng;
 
 use super::{
     device_authorization_history as device_history_fixture, pcr_genesis as pcr_genesis_fixture,
 };
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The fixture independently varies envelope time, payload time and accepted custody."
+)]
 pub fn agent_provision_event(
     controller: &device_history_fixture::DeviceHistoryFixture,
+    history_custody: &arkret_models_crypto::AgentHistoryCustody,
     realm_id: &RealmId,
     agent_id: &DidCoreId,
     agent_pcr_id: &RealmId,
@@ -34,18 +40,20 @@ pub fn agent_provision_event(
         },
         controller.account.principal_id.clone(),
         controller.account.station_id.clone(),
-        serde_json::json!({
-            "schema": "ak.schema.agent_provision.v1",
-            "agent_id": agent_id,
-            "controller_principal_id": controller.account.principal_id,
-            "principal_control_realm_id": agent_pcr_id,
-            "controller_authorization_ref": "did:webvh:z6mkfixture:agent.example#managed-controller",
-            "agent_slug": slug,
-            "accountability_scope": "agent_operator",
-            "requested_scope_digest": format!("sha256:{}", "b".repeat(64)),
-            "selector_visibility": "private",
-            "created_at": arkret_canonical::format_timestamp_canonical(payload_created_at)
-        }),
+        serde_json::to_value(arkret_models_collaboration::events_payloads::agent::AgentProvisionPayload {
+            schema: arkret_models_collaboration::events_payloads::agent::AgentProvisionSchema::V1,
+            agent_id: agent_id.clone(),
+            controller_principal_id: controller.account.principal_id.clone(),
+            principal_control_realm_id: agent_pcr_id.clone(),
+            controller_authorization_ref: arkret_wire::DidUrl::new("did:webvh:z6mkfixture:agent.example#managed-controller").unwrap(),
+            agent_slug: slug.to_owned(),
+            accountability_scope: arkret_models_collaboration::events_payloads::agent::AgentProvisionAccountabilityScope::AgentOperator,
+            requested_scope_digest: arkret_wire::Hash::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+            selector_visibility: arkret_models_identity::handle::HandleVisibility::Private,
+            selector_audience: None,
+            created_at: payload_created_at,
+            history_custody: history_custody.clone(),
+        }).unwrap(),
         created_at,
     )
     .unwrap();
@@ -55,6 +63,116 @@ pub fn agent_provision_event(
         controller.device_verification_method.clone(),
         controller.founding_device_signing_seed,
     )
+}
+
+/// Publish a real controller recovery recipient before Agent provisioning.
+/// This uses the native policy transaction, not a self-declared custody ref.
+pub async fn admit_controller_history_custody(
+    pool: &PgPool,
+    principal: &pcr_genesis_fixture::PcrGenesisFixture,
+    station_method: &DidUrl,
+    station_key: &SigningKey,
+) -> (
+    arkret_wire::RealmCommit,
+    arkret_models_crypto::AgentHistoryCustody,
+) {
+    let account = &principal.history.account;
+    let realm = &principal.unit.transactions[0].event.realm_id;
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let policies = coland_storage_postgres::PgRecoveryPolicyStore { pool: pool.clone() };
+    let mut head = store
+        .held_stream_head_commit(&arkret_wire::CommitStreamRef::Realm {
+            realm_id: realm.clone(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let policy = if let Some(accepted) = policies.get_active_for_account(account).await.unwrap() {
+        serde_json::from_value::<arkret_models_crypto::RecoveryPolicy>(accepted.raw_payload)
+            .unwrap()
+    } else {
+        let at = arkret_canonical::normalize_timestamp_canonical(
+            head.committed_at + Duration::seconds(1),
+        );
+        let expires = at + Duration::days(3650);
+        let issued_at = arkret_canonical::format_timestamp_canonical(at);
+        let expires_at = arkret_canonical::format_timestamp_canonical(expires);
+        let material =
+            arkret::identity_root::derive_identity_recovery_key_material(&[149; 32], 0).unwrap();
+        let method = &principal.history.device_verification_method;
+        let did = &principal.history.did;
+        let trust_domain =
+            principal.unit.transactions[0].event.payload["object"]["trust_domain"].clone();
+        let mut policy: arkret_models_crypto::RecoveryPolicy = serde_json::from_value(serde_json::json!({
+            "schema":"ak.schema.recovery_policy.v1","policy_id":format!("ak:policy:{}",uuid::Uuid::now_v7()),
+            "account_id":account,"version":1,"supersedes_id":null,"trust_domain":trust_domain,"issued_at":issued_at,
+            "signature_proof":{"verification_method":method,"signature_algorithm":"Ed25519","signature":"AA"},
+            "methods":[{"kind":"recovery_unlock","keys":[{
+                "verification_method":format!("{did}#recovery-proof-0"),
+                "public_key_multibase":material.recovery_proof_public_key_multikey,
+                "signature_algorithm":"Ed25519","not_before":issued_at,"expires_at":expires_at,
+                "backup_hpke":{"key_agreement_ref":format!("{did}#backup-hpke-0"),
+                    "key_agreement_algorithm":"X25519","public_key_multibase":material.backup_hpke_public_key_multikey,
+                    "hpke_suites":["ak.hpke_x25519_aead_chacha20poly1305.v1"],"use":"backup_hpke",
+                    "not_before":issued_at,"expires_at":expires_at}
+            }]}]
+        })).unwrap();
+        policy.signature_proof.signature =
+            arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
+                SigningKey::from_bytes(&principal.history.founding_device_signing_seed)
+                    .sign(
+                        &arkret_models_crypto::recovery_policy_signature_transcript_bytes(&policy)
+                            .unwrap(),
+                    )
+                    .to_bytes(),
+            ))
+            .unwrap();
+        policy.validate_shape().unwrap();
+        let event = device_history_fixture::sign_event(
+            arkret_wire::test_support::raw_event_for_actor_at(
+                EventKind::PolicySet.as_str(),
+                arkret_wire::ScopeRef::Realm {
+                    realm_id: realm.clone(),
+                },
+                arkret_wire::ActorId::account(account.clone()),
+                serde_json::json!({"policy_id":policy.policy_id,"value":policy}),
+                at,
+            )
+            .unwrap(),
+            method.clone(),
+            principal.history.founding_device_signing_seed,
+        );
+        let mut commit = station_successor(&head, &event, &principal.history.station_did, 1);
+        origin_seal(&mut commit, station_method, station_key);
+        policies
+            .commit_publication(coland_storage::RecoveryPolicyPublicationWrite {
+                commit: origin_tx(event, commit.clone(), &account.station_id),
+                queued_at: commit.committed_at,
+            })
+            .await
+            .unwrap();
+        head = commit;
+        policy
+    };
+    let at = head.committed_at;
+    let recipient = policy.methods.iter().find_map(|method| match method {
+        arkret_models_crypto::RecoveryMethod::RecoveryUnlock { keys } => keys.iter().find(|key| {
+            key.not_before <= at && key.expires_at > at && key.revoked_at.is_none_or(|revoked| revoked > at)
+                && key.backup_hpke.not_before <= at && key.backup_hpke.expires_at > at
+                && key.backup_hpke.revoked_at.is_none_or(|revoked| revoked > at)
+                && key.backup_hpke.hpke_suites.contains(&arkret_models_crypto::RecoveryBackupHpkeSuite::X25519AeadChacha20Poly1305V1)
+        }),
+        _ => None,
+    }).expect("the accepted fixture policy has a live real backup-HPKE recipient");
+    let custody = arkret_models_crypto::AgentHistoryCustody {
+        custodian_actor_id: arkret_wire::ActorId::account(account.clone()),
+        recovery_policy_ref: arkret_models_crypto::RecoveryPolicyRef {
+            policy_id: policy.policy_id.clone(),
+            policy_version: policy.version,
+        },
+        recipient_key_ref: recipient.backup_hpke.key_agreement_ref.clone(),
+    };
+    (head, custody)
 }
 
 pub fn agent_control_event(
@@ -208,6 +326,7 @@ pub struct OriginFixture {
     pub history: arkret_models_identity::AuthenticatedServiceResolution,
     pub inception_log: serde_json::Value,
     pub directory: arkret_models_identity::AccountDeviceSignerEvidence,
+    pub history_custody: arkret_models_crypto::AgentHistoryCustody,
     pub agent: arkret_wire::AccountId,
     pub agent_did: Did,
     pub agent_inception: arkret_signatures::webvh::PreparedPrincipalInception,
@@ -275,6 +394,7 @@ impl OriginFixture {
         let at = parent.committed_at + Duration::seconds(1);
         let event = agent_provision_event(
             &self.controller.history,
+            &self.history_custody,
             &parent.realm_id,
             &agent,
             &pcr,
@@ -368,7 +488,8 @@ impl OriginFixture {
             .admit_into(&PgPersistenceStore::new(pool.clone()))
             .await
             .unwrap();
-        let head = controller.unit.transactions[1].commit.clone();
+        let (head, history_custody) =
+            admit_controller_history_custody(&pool, &controller, &method, &issuer).await;
         let at = head.committed_at;
         let history = arkret_identity::build_authenticated_webvh_service_resolution(
             station.clone(),
@@ -405,6 +526,8 @@ impl OriginFixture {
                         },
                         attested_at: at,
                         expires_at: at + Duration::minutes(5),
+
+                        owner_transfer_acceptance_intent_digest: None,
                     },
                     method.clone(),
                     &issuer,
@@ -471,6 +594,7 @@ impl OriginFixture {
         let realm = RealmId::from_event_id(&genesis.event_id);
         let mut provision = agent_provision_event(
             &controller.history,
+            &history_custody,
             &controller.history.events[0].realm_id,
             &agent.principal_id,
             &realm,
@@ -503,6 +627,7 @@ impl OriginFixture {
             inception_log: inception.log_entry.clone(),
             history,
             directory,
+            history_custody,
             agent,
             agent_did,
             agent_inception,

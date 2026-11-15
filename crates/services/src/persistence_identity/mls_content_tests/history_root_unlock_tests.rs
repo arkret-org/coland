@@ -34,7 +34,6 @@ fn proof(challenge: &KeysBackupsUnlockChallenge, fixture: &RootFixture) -> KeyBa
         schema: SchemaId::KEY_BACKUP_UNLOCK_PROOF_V1.into(),
         authority: KeyBackupUnlockAuthority::CurrentDevice {
             challenge_id: challenge.challenge_id.clone(),
-            nonce: challenge.nonce.clone(),
         },
         account_id: challenge.account_id.clone(),
         requesting_device_id: challenge.requesting_device_id.clone(),
@@ -125,7 +124,7 @@ pub(super) async fn exercise(
     let challenge = KeysBackupsUnlockChallenge {
         challenge_id: random(),
         challenge: random(),
-        nonce: random(),
+
         operation: arkret_wire::ServiceOperationId::SELF_KEYS_BACKUPS_COMMAND_UNLOCK_V1.into(),
         account_id: fixture.pcr.history.account.clone(),
         requesting_device_id: reader.device_id.clone(),
@@ -160,7 +159,7 @@ pub(super) async fn exercise(
     let mut retry = challenge.clone();
     retry.challenge_id = random();
     retry.challenge = random();
-    retry.nonce = random();
+
     assert_eq!(
         serde_json::to_value(
             store
@@ -206,7 +205,7 @@ pub(super) async fn exercise(
             .await
             .is_err()
     );
-    for mutation in ["source", "root", "nonce", "subject", "signature"] {
+    for mutation in ["source", "root", "challenge", "subject", "signature"] {
         let mut bad = valid.clone();
         match mutation {
             "source" => bad.content_history.as_mut().unwrap().source.stream_position += 1,
@@ -214,11 +213,7 @@ pub(super) async fn exercise(
                 bad.content_history.as_mut().unwrap().root_refs[0] =
                     arkret_wire::Hash::new(format!("sha256:{}", "ab".repeat(32))).unwrap()
             }
-            "nonce" => {
-                if let KeyBackupUnlockAuthority::CurrentDevice { nonce, .. } = &mut bad.authority {
-                    *nonce = random();
-                }
-            }
+            "challenge" => bad.challenge = random(),
             "subject" => {
                 bad.subject_actor_id =
                     Some(arkret_wire::ActorId::account(reader.account_id.clone()));
@@ -299,7 +294,7 @@ pub(super) async fn exercise(
     new_challenge.request_id = random();
     new_challenge.challenge_id = random();
     new_challenge.challenge = random();
-    new_challenge.nonce = random();
+
     let new_challenge = store
         .issue_human_pcr_history_unlock_challenge(&new_reader, &new_challenge)
         .await
@@ -326,7 +321,7 @@ pub(super) async fn exercise(
         let mut fresh = new_challenge.clone();
         fresh.challenge_id = random();
         fresh.challenge = random();
-        fresh.nonce = random();
+
         fresh.request_id = random();
         fresh.issued_at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
         fresh.expires_at = fresh.issued_at + chrono::Duration::seconds(300);
@@ -394,7 +389,7 @@ pub(super) async fn exercise(
     replacement_challenge.request_id = random();
     replacement_challenge.challenge_id = random();
     replacement_challenge.challenge = random();
-    replacement_challenge.nonce = random();
+
     replacement_challenge.issued_at =
         arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     replacement_challenge.expires_at =

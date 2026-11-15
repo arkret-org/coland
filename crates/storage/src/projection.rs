@@ -235,22 +235,81 @@ pub struct EffectiveActorGrant {
     pub revision: arkret_wire::CurrentRevision,
 }
 
+/// Verifier-private current facts from one native/verified Realm cut. This
+/// object is never serialized and is not an authority supplied by a caller.
+#[derive(Clone, Debug)]
+pub struct GrantAuthorityCut {
+    realm_id: arkret_wire::RealmId,
+    root: arkret_wire::RealmAuthorityRootValue,
+    grants: BTreeMap<
+        arkret_wire::GrantId,
+        arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+    >,
+    revisions: BTreeMap<arkret_wire::GrantId, arkret_wire::CurrentRevision>,
+}
+
+impl GrantAuthorityCut {
+    pub fn new(
+        realm_id: arkret_wire::RealmId,
+        root: arkret_wire::RealmAuthorityRootValue,
+        grants: BTreeMap<
+            arkret_wire::GrantId,
+            arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+        >,
+        revisions: BTreeMap<arkret_wire::GrantId, arkret_wire::CurrentRevision>,
+    ) -> PersistenceResult<Self> {
+        if grants.len() != revisions.len()
+            || grants.iter().any(|(id, grant)| {
+                &grant.id != id
+                    || grant.realm_id.as_ref() != Some(&realm_id)
+                    || !revisions.contains_key(id)
+                    || grant.validate_authority_shape().is_err()
+            })
+        {
+            return Err(PersistenceError::Conflict(
+                "revision_unavailable: incomplete or invalid current grant cut".into(),
+            ));
+        }
+        Ok(Self {
+            realm_id,
+            root,
+            grants,
+            revisions,
+        })
+    }
+
+    fn root_current(
+        &self,
+        source: &arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef,
+    ) -> bool {
+        matches!(source, arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::RealmRoot {
+            realm_id,authority_event_ref,authority_generation,
+        } if realm_id==&self.realm_id && authority_event_ref==&self.root.authority_event_ref
+            && authority_generation==&self.root.authority_generation)
+    }
+}
+
 /// The Realm authorization inputs of one exact actor, derived from one storage
 /// cut of the Realm-stream typed current results (`realm_authority_root` and
 /// every `capability_grant` of the Realm).
 ///
-/// `grants` holds every active grant whose subject is exactly `actor`, whose
-/// temporal window contains `evaluated_at`, and whose issuer chain descends
-/// intact from the current authority root. Ordinary membership does not grant
-/// actions. An Agent additionally carries verified controller/member/current
-/// backing that bounds every operation of its independent grant paths.
+/// `grants` is the selected flat disclosure/list view. Permission always uses
+/// the mandatory complete `source_cut`, at the actual action and selector;
+/// neither an omitted view row nor a local allow failure can erase a refusal.
+/// An Agent and its verified controller share the same Arc/cut and additionally
+/// retain the independent management/ownership backing.
 #[derive(Clone, Debug)]
 pub struct ActorRealmAuthorization {
     pub realm_id: arkret_wire::RealmId,
     pub actor: arkret_wire::ActorId,
     pub evaluated_at: chrono::DateTime<chrono::Utc>,
-    pub root_controller: bool,
     pub grants: Vec<EffectiveActorGrant>,
+    source_cut: std::sync::Arc<GrantAuthorityCut>,
+    owned_source:
+        Option<arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef>,
+    // Every subject grant, not the display/effective-list subset. Only the
+    // original-fulfillment view may narrow this after live authorization.
+    terminal_ids: std::collections::BTreeSet<arkret_wire::GrantId>,
     /// Verifier-private same-cut backing, never an authority or wire carrier.
     pub agent_ceiling: Option<AgentControllerCeiling>,
 }
@@ -261,7 +320,299 @@ pub struct AgentControllerCeiling {
     pub management_policies: Vec<arkret_models_collaboration::governance::operation_wire::Policy>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuthorizationLayer {
+    Complete,
+    GrantSources,
+}
+
 impl ActorRealmAuthorization {
+    fn source_error(error: arkret_policy::grant_authority::AuthorityError) -> PersistenceError {
+        let code = if error == arkret_policy::grant_authority::AuthorityError::Unproved {
+            "revision_unavailable"
+        } else {
+            "capability_denied"
+        };
+        PersistenceError::Conflict(format!(
+            "{code}: current grant source cannot be proved: {error}"
+        ))
+    }
+    pub fn from_source_cut(
+        actor: arkret_wire::ActorId,
+        evaluated_at: chrono::DateTime<chrono::Utc>,
+        source_cut: std::sync::Arc<GrantAuthorityCut>,
+        view_grant_ids: Vec<arkret_wire::GrantId>,
+        owned_source: Option<
+            arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef,
+        >,
+    ) -> PersistenceResult<Self> {
+        let terminal_ids=source_cut.grants.iter().filter(|(_,grant)|
+            matches!(&grant.subject,arkret_models_collaboration::governance::grant_constraint::CapabilitySubject::Actor(subject) if subject==&actor)
+        ).map(|(id,_)|id.clone()).collect::<std::collections::BTreeSet<_>>();
+        let grants = view_grant_ids
+            .into_iter()
+            .map(|id| {
+                if !terminal_ids.contains(&id) {
+                    return Err(PersistenceError::Conflict(
+                        "revision_unavailable: displayed grant is not this subject's current row"
+                            .into(),
+                    ));
+                }
+                Ok(EffectiveActorGrant {
+                    grant: source_cut.grants[&id].clone(),
+                    revision: source_cut.revisions[&id].clone(),
+                })
+            })
+            .collect::<PersistenceResult<Vec<_>>>()?;
+        Ok(Self {
+            realm_id: source_cut.realm_id.clone(),
+            actor,
+            evaluated_at,
+            grants,
+            source_cut,
+            owned_source,
+            terminal_ids,
+            agent_ceiling: None,
+        })
+    }
+
+    pub fn source_cut(&self) -> &std::sync::Arc<GrantAuthorityCut> {
+        &self.source_cut
+    }
+
+    pub fn root_controller(&self) -> bool {
+        self.realm_id == self.source_cut.realm_id
+            && self.actor == self.source_cut.root.controller_actor_id
+    }
+
+    fn global_active(
+        &self,
+        grant: &arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+    ) -> bool {
+        use arkret_models_collaboration::governance::grant_constraint::{
+            CapabilityGrantStatus, GrantConstraintEffect, GrantConstraintKind,
+        };
+        let from = grant
+            .constraints
+            .iter()
+            .filter(|constraint| {
+                constraint.constraint_kind == GrantConstraintKind::Temporal
+                    && constraint.effect == GrantConstraintEffect::Allow
+                    && constraint.applies_to_actions.is_empty()
+                    && constraint.recurrence.is_none()
+            })
+            .filter_map(|constraint| constraint.not_before)
+            .max();
+        grant.status == CapabilityGrantStatus::Active
+            && from.is_none_or(|from| from <= self.evaluated_at)
+            && crate::capability_grant_expires_at(grant)
+                .is_none_or(|until| self.evaluated_at < until)
+    }
+
+    fn owned_current(
+        &self,
+        grant: &arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+    ) -> bool {
+        grant.owned_agent_issuer().is_some()
+            && grant.issuer_authority_refs.len() == 1
+            && self.owned_source.as_ref() == grant.issuer_authority_refs.first()
+            && self.global_active(grant)
+    }
+
+    fn current_candidates<'a>(
+        &'a self,
+        action: &str,
+        target: &arkret_wire::WireResourceSelector,
+    ) -> PersistenceResult<
+        Vec<&'a arkret_models_collaboration::governance::grant_constraint::CapabilityGrant>,
+    > {
+        if self.realm_id != self.source_cut.realm_id
+            || target.realm_id.as_ref() != Some(&self.realm_id)
+            || target.validate().is_err()
+            || target.kind == arkret_wire::ResourceSelectorKind::All
+        {
+            return Err(PersistenceError::Conflict(
+                "capability_denied: actual target does not bind the current source cut".into(),
+            ));
+        }
+        let mut candidates = Vec::new();
+        for id in &self.terminal_ids {
+            let grant = self.source_cut.grants.get(id).ok_or_else(|| {
+                PersistenceError::Conflict(
+                    "revision_unavailable: current terminal row is missing".into(),
+                )
+            })?;
+            if !matches!(&grant.subject,arkret_models_collaboration::governance::grant_constraint::CapabilitySubject::Actor(subject) if subject==&self.actor)
+            {
+                return Err(PersistenceError::Conflict(
+                    "revision_unavailable: current actor slice changed its bound subject".into(),
+                ));
+            }
+            if !arkret_policy::grant_authority::contributes(grant, action, target) {
+                continue;
+            }
+            if grant.owned_agent_issuer().is_some() {
+                if self.owned_current(grant) {
+                    candidates.push(grant);
+                }
+                continue;
+            }
+            match arkret_policy::grant_authority::current_candidate_sources(
+                grant,
+                action,
+                target,
+                &self.source_cut.grants,
+                self.evaluated_at,
+                |source| self.source_cut.root_current(source),
+            ) {
+                Ok(_) => candidates.push(grant),
+                Err(arkret_policy::grant_authority::AuthorityError::Closed) => {}
+                Err(error) => return Err(Self::source_error(error)),
+            }
+        }
+        Ok(candidates)
+    }
+
+    fn positive_sources<'a>(
+        &'a self,
+        action: &str,
+        target: &arkret_wire::WireResourceSelector,
+        candidates:&[&'a arkret_models_collaboration::governance::grant_constraint::CapabilityGrant],
+    ) -> PersistenceResult<
+        Vec<&'a arkret_models_collaboration::governance::grant_constraint::CapabilityGrant>,
+    > {
+        let mut positive = Vec::new();
+        for grant in candidates {
+            if self.owned_current(grant) {
+                if arkret_policy::grant_authority::current_action_window_is_open(
+                    grant,
+                    action,
+                    self.evaluated_at,
+                ) {
+                    positive.push(*grant);
+                }
+                continue;
+            }
+            match arkret_policy::grant_authority::current_sources(
+                grant,
+                action,
+                target,
+                &self.source_cut.grants,
+                self.evaluated_at,
+                |source| self.source_cut.root_current(source),
+            ) {
+                Ok(_) => positive.push(*grant),
+                Err(arkret_policy::grant_authority::AuthorityError::Closed) => {}
+                Err(error) => return Err(Self::source_error(error)),
+            }
+        }
+        Ok(positive)
+    }
+
+    /// Source qualification only, not a business permission verdict. Actual
+    /// constraint/approval/quota evaluation still uses `evaluate` at admission.
+    pub fn current_positive_grant_source(
+        &self,
+        id: &arkret_wire::GrantId,
+        action: &str,
+        target: &arkret_wire::WireResourceSelector,
+    ) -> PersistenceResult<
+        &arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+    > {
+        self.current_positive_grant_records(action, target)?
+            .into_iter()
+            .find(|grant| &grant.id == id)
+            .ok_or_else(|| {
+                PersistenceError::Conflict(
+                    "capability_denied: selected current source is closed".into(),
+                )
+            })
+    }
+
+    /// Source-qualified candidate records for collecting constraints before
+    /// approval discharge. No business permission or reservation is implied.
+    pub fn current_candidate_grant_records(
+        &self,
+        action: &str,
+        target: &arkret_wire::WireResourceSelector,
+    ) -> PersistenceResult<
+        Vec<&arkret_models_collaboration::governance::grant_constraint::CapabilityGrant>,
+    > {
+        self.current_candidates(action, target)
+    }
+
+    /// Positive lineage/window qualification only. The caller must still
+    /// evaluate business constraints/approvals and reserve any actual quota.
+    pub fn current_positive_grant_records(
+        &self,
+        action: &str,
+        target: &arkret_wire::WireResourceSelector,
+    ) -> PersistenceResult<
+        Vec<&arkret_models_collaboration::governance::grant_constraint::CapabilityGrant>,
+    > {
+        let candidates = self.current_candidates(action, target)?;
+        self.positive_sources(action, target, &candidates)
+    }
+
+    /// A same-cut metadata lookup. It establishes no action permission.
+    pub fn current_grant_record(
+        &self,
+        id: &arkret_wire::GrantId,
+    ) -> Option<&arkret_models_collaboration::governance::grant_constraint::CapabilityGrant> {
+        self.source_cut
+            .grants
+            .get(id)
+            .filter(|grant| self.terminal_ids.contains(id) && self.global_active(grant)
+                && matches!(&grant.subject,arkret_models_collaboration::governance::grant_constraint::CapabilitySubject::Actor(subject) if subject==&self.actor))
+    }
+
+    /// Called only after live current authorization and immutable Start/audit
+    /// verification. This view derives original quota identities, never new
+    /// permission. Keep every ancestor fact and the shared cut intact.
+    fn use_original_fulfillment_time(&mut self, at: chrono::DateTime<chrono::Utc>) {
+        self.evaluated_at = at;
+        self.terminal_ids
+            .retain(|id| self.source_cut.grants[id].issued_at <= at);
+        self.grants
+            .retain(|row| self.terminal_ids.contains(&row.grant.id));
+        if let Some(ceiling) = self.agent_ceiling.as_mut() {
+            ceiling.controller.use_original_fulfillment_time(at);
+        }
+    }
+
+    /// Derive only original reservation identities after live authorization.
+    /// Never return a historical authorization view or a new permission result.
+    pub fn original_quota_reservation_paths(
+        &self,
+        accepted_start: &arkret_wire::RealmCommit,
+        actions: &[&str],
+        target: &arkret_wire::WireResourceSelector,
+        facts: &crate::OperationFacts,
+        approvals: &[crate::VerifiedGrantApproval],
+    ) -> PersistenceResult<Vec<(arkret_wire::GrantId, Vec<crate::QuotaReservation>)>> {
+        let live = self.evaluate_with_approvals_checked(actions, target, facts, approvals)?;
+        if accepted_start.realm_id != self.realm_id
+            || accepted_start.committed_at > self.evaluated_at
+            || accepted_start.validate_content_address().is_err()
+            || !matches!(live, crate::GrantEvaluation::Allowed(_))
+        {
+            return Err(PersistenceError::Conflict("capability_denied: original fulfillment lacks current authorization or a valid accepting cut".into()));
+        }
+        let mut original = self.clone();
+        original.use_original_fulfillment_time(accepted_start.committed_at);
+        let crate::GrantEvaluation::Allowed(paths) =
+            original.evaluate_with_approvals_checked(actions, target, facts, approvals)?
+        else {
+            return Err(PersistenceError::Conflict(
+                "capability_denied: original fulfillment identities cannot be proved".into(),
+            ));
+        };
+        Ok(paths
+            .into_iter()
+            .map(|path| (path.grant.id.clone(), path.reservations))
+            .collect())
+    }
+
     /// `constraint-schema.md` §15.4 over the effective grants for one
     /// operation of this actor.
     pub fn evaluate<'a>(
@@ -280,95 +631,366 @@ impl ActorRealmAuthorization {
         facts: &'a crate::OperationFacts,
         approvals: &[crate::VerifiedGrantApproval],
     ) -> crate::GrantEvaluation<'a> {
+        self.evaluate_with_approvals_checked(actions, target, facts, approvals)
+            .unwrap_or(crate::GrantEvaluation::Denied)
+    }
+
+    pub fn evaluate_with_approvals_checked<'a>(
+        &'a self,
+        actions: &'a [&'a str],
+        target: &'a arkret_wire::WireResourceSelector,
+        facts: &'a crate::OperationFacts,
+        approvals: &[crate::VerifiedGrantApproval],
+    ) -> PersistenceResult<crate::GrantEvaluation<'a>> {
+        self.evaluate_checked(
+            actions,
+            target,
+            facts,
+            approvals,
+            AuthorizationLayer::Complete,
+        )
+    }
+
+    /// Grant/controller-source layer only, for native admission that already
+    /// executes its real asynchronous management policy/review gate. This
+    /// does not claim that empty or caller-supplied policies were verified.
+    /// Merge original-action refusals before selecting a managed positive set.
+    pub fn evaluate_grant_sources_with_approvals_checked<'a>(
+        &'a self,
+        actions: &'a [&'a str],
+        target: &'a arkret_wire::WireResourceSelector,
+        facts: &'a crate::OperationFacts,
+        approvals: &[crate::VerifiedGrantApproval],
+    ) -> PersistenceResult<crate::GrantEvaluation<'a>> {
+        self.evaluate_checked(
+            actions,
+            target,
+            facts,
+            approvals,
+            AuthorizationLayer::GrantSources,
+        )
+    }
+
+    fn evaluate_checked<'a>(
+        &'a self,
+        actions: &'a [&'a str],
+        target: &'a arkret_wire::WireResourceSelector,
+        facts: &'a crate::OperationFacts,
+        approvals: &[crate::VerifiedGrantApproval],
+        layer: AuthorizationLayer,
+    ) -> PersistenceResult<crate::GrantEvaluation<'a>> {
+        let mut results = Vec::new();
+        // Preserve the SDK's applicability gate before splitting alternatives.
+        // A non-applicable `.own` alternative is not a global deny when a
+        // different registered action can authorize the operation.
+        let applicable = actions
+            .iter()
+            .copied()
+            .filter(|action| {
+                self.agent_ceiling.is_none()
+                    || !arkret_schema::capability_action(action).is_some_and(|descriptor| {
+                        descriptor
+                            .required_evaluator_checks
+                            .contains(&"actor_eq_target_author")
+                    })
+                    || facts.target_owner.as_ref() == Some(&self.actor)
+            })
+            .collect::<Vec<_>>();
+        if applicable.is_empty() && self.agent_ceiling.is_some() {
+            return Ok(crate::GrantEvaluation::Denied);
+        }
+        // All matching refusal sets precede every positive-path decision.
+        // Matching is pure; no reservation is consumed by either pass.
+        let original = applicable
+            .iter()
+            .map(|action| self.evaluate_action_refusals(action, target, facts, approvals))
+            .collect::<PersistenceResult<Vec<_>>>()?;
+        if original
+            .iter()
+            .any(|result| matches!(result, crate::GrantEvaluation::Denied))
+        {
+            return Ok(crate::GrantEvaluation::Denied);
+        }
+        if original
+            .iter()
+            .any(|result| matches!(result, crate::GrantEvaluation::Quarantined))
+        {
+            return Ok(crate::GrantEvaluation::Quarantined);
+        }
+        if original
+            .iter()
+            .any(|result| matches!(result, crate::GrantEvaluation::RequiresReview))
+        {
+            return Ok(crate::GrantEvaluation::RequiresReview);
+        }
+        for action in applicable {
+            let (result, source_order) =
+                self.evaluate_action_positive(action, target, facts, approvals, layer)?;
+            if matches!(result, crate::GrantEvaluation::Denied) {
+                return Ok(result);
+            }
+            results.push((result, source_order));
+        }
+        for effect in [0, 1] {
+            if results.iter().any(|(result, _)| {
+                matches!(
+                    (effect, result),
+                    (0, crate::GrantEvaluation::Quarantined)
+                        | (1, crate::GrantEvaluation::RequiresReview)
+                )
+            }) {
+                return Ok(if effect == 0 {
+                    crate::GrantEvaluation::Quarantined
+                } else {
+                    crate::GrantEvaluation::RequiresReview
+                });
+            }
+        }
+        let mut paths: Vec<(Option<arkret_wire::GrantId>, crate::SatisfiedGrant<'a>)> = Vec::new();
+        let mut named = false;
+        for (result, source_order) in results {
+            match result {
+                crate::GrantEvaluation::Allowed(allowed) => {
+                    named = true;
+                    if self.agent_ceiling.is_some() && allowed.len() != source_order.len() {
+                        return Err(PersistenceError::Conflict(
+                            "revision_unavailable: bounded source path identity is missing".into(),
+                        ));
+                    }
+                    for (index, path) in allowed.into_iter().enumerate() {
+                        let source = source_order.get(index).cloned().flatten();
+                        if self.agent_ceiling.is_some() {
+                            // Controller sources remain alternatives, even for
+                            // the same Agent grant. Remove only exact duplicate
+                            // source/constraint/counter/window paths.
+                            if !paths.iter().any(|(existing_source, existing)| {
+                                existing_source == &source
+                                    && existing.grant.id == path.grant.id
+                                    && existing.reservations == path.reservations
+                            }) {
+                                paths.push((source, path));
+                            }
+                            continue;
+                        }
+                        if let Some(existing) = paths
+                            .iter_mut()
+                            .find(|(_, existing)| existing.grant.id == path.grant.id)
+                        {
+                            if path.reservations.len() < existing.1.reservations.len() {
+                                existing.1 = path;
+                            }
+                        } else {
+                            paths.push((source, path));
+                        }
+                    }
+                }
+                crate::GrantEvaluation::Unsatisfied => named = true,
+                _ => {}
+            }
+        }
+        if self.agent_ceiling.is_some() {
+            // The SDK's bounded evaluator orders original parent first.
+            paths.sort_by(|(left_source, left), (right_source, right)| {
+                left_source
+                    .cmp(right_source)
+                    .then_with(|| left.grant.id.cmp(&right.grant.id))
+            });
+        } else {
+            // Preserve the SDK ordering: no quota first, then GrantId. The
+            // number of non-empty quota directives is not a new path weight.
+            paths.sort_by(|(_, left), (_, right)| {
+                left.reservations
+                    .is_empty()
+                    .cmp(&right.reservations.is_empty())
+                    .reverse()
+                    .then_with(|| left.grant.id.cmp(&right.grant.id))
+            });
+        }
+        Ok(if !paths.is_empty() {
+            crate::GrantEvaluation::Allowed(paths.into_iter().map(|(_, path)| path).collect())
+        } else if named {
+            crate::GrantEvaluation::Unsatisfied
+        } else {
+            crate::GrantEvaluation::Unnamed
+        })
+    }
+
+    fn evaluate_action_refusals<'a>(
+        &'a self,
+        action: &str,
+        target: &arkret_wire::WireResourceSelector,
+        facts: &crate::OperationFacts,
+        approvals: &[crate::VerifiedGrantApproval],
+    ) -> PersistenceResult<crate::GrantEvaluation<'a>> {
+        let candidates = self.current_candidates(action, target)?;
         let operation = crate::AuthorizationOperation {
             actor: &self.actor,
-            actions,
+            actions: &[action],
             target,
             at: self.evaluated_at,
             facts,
         };
         let Some(ceiling) = &self.agent_ceiling else {
-            return crate::evaluate_grants_with_verified_approvals(
-                &operation,
-                self.grants.iter().map(|effective| &effective.grant),
-                approvals,
-            );
+            return Ok(crate::evaluate_grants_with_verified_approvals(
+                &operation, candidates, approvals,
+            ));
         };
         let controller = &ceiling.controller;
         if controller.realm_id != self.realm_id
             || controller.actor == self.actor
             || controller.agent_ceiling.is_some()
+            || controller.evaluated_at != self.evaluated_at
+            || !std::sync::Arc::ptr_eq(&controller.source_cut, &self.source_cut)
         {
-            return crate::GrantEvaluation::Unsatisfied;
+            return Err(PersistenceError::Conflict(
+                "revision_unavailable: controller and actor do not share one bound source cut"
+                    .into(),
+            ));
         }
-        let agent_grants = self.grants.iter().map(|row| &row.grant).collect::<Vec<_>>();
-        let controller_grants = controller
-            .grants
-            .iter()
-            .map(|row| &row.grant)
-            .collect::<Vec<_>>();
-        let owner_covers = controller.root_controller
-            && actions.iter().any(|action| {
-                *action == arkret_wire::CapabilityActionId::REALM_OWNER
-                    || arkret_policy::owner_may_author_action(action).unwrap_or(false)
-            });
-        let original = crate::evaluate_controller_bounded_grants(
+        let controller_candidates = controller.current_candidates(action, target)?;
+        let owner_covers = controller.root_controller()
+            && (action == arkret_wire::CapabilityActionId::REALM_OWNER
+                || arkret_policy::owner_may_author_action(action).unwrap_or(false));
+        Ok(crate::evaluate_controller_bounded_grants(
             &operation,
-            &agent_grants,
+            &candidates,
             &controller.actor,
-            &controller_grants,
+            &controller_candidates,
             approvals,
             owner_covers,
-        );
-        if matches!(
-            original,
-            crate::GrantEvaluation::Denied
-                | crate::GrantEvaluation::Quarantined
-                | crate::GrantEvaluation::RequiresReview
-        ) {
-            return original;
+        ))
+    }
+
+    fn evaluate_action_positive<'a>(
+        &'a self,
+        action: &str,
+        target: &arkret_wire::WireResourceSelector,
+        facts: &crate::OperationFacts,
+        approvals: &[crate::VerifiedGrantApproval],
+        layer: AuthorizationLayer,
+    ) -> PersistenceResult<(
+        crate::GrantEvaluation<'a>,
+        Vec<Option<arkret_wire::GrantId>>,
+    )> {
+        let candidates = self.current_candidates(action, target)?;
+        let operation = crate::AuthorizationOperation {
+            actor: &self.actor,
+            actions: &[action],
+            target,
+            at: self.evaluated_at,
+            facts,
+        };
+        let Some(ceiling) = &self.agent_ceiling else {
+            let positive = self.positive_sources(action, target, &candidates)?;
+            return Ok((
+                crate::evaluate_grants_with_verified_approvals(&operation, positive, approvals),
+                Vec::new(),
+            ));
+        };
+        let controller = &ceiling.controller;
+        if controller.realm_id != self.realm_id
+            || controller.actor == self.actor
+            || controller.agent_ceiling.is_some()
+            || controller.evaluated_at != self.evaluated_at
+            || !std::sync::Arc::ptr_eq(&controller.source_cut, &self.source_cut)
+        {
+            return Err(PersistenceError::Conflict(
+                "revision_unavailable: controller and actor do not share one bound source cut"
+                    .into(),
+            ));
         }
+        let controller_candidates = controller.current_candidates(action, target)?;
+        let owner_covers = controller.root_controller()
+            && (action == arkret_wire::CapabilityActionId::REALM_OWNER
+                || arkret_policy::owner_may_author_action(action).unwrap_or(false));
         let (Some(controller_account), Some(agent_account)) =
             (controller.actor.as_account_id(), self.actor.as_account_id())
         else {
-            return crate::GrantEvaluation::Unsatisfied;
+            return Err(PersistenceError::Conflict(
+                "capability_denied: controller ceiling requires complete Account actors".into(),
+            ));
         };
-        let Ok(managed_actions) = crate::agent_management_actions(
-            &ceiling.management_policies,
-            &self.realm_id,
-            controller_account,
-            agent_account,
+        if layer == AuthorizationLayer::Complete {
+            let managed = crate::agent_management_actions(
+                &ceiling.management_policies,
+                &self.realm_id,
+                controller_account,
+                agent_account,
+                &operation,
+                None,
+            )?;
+            if !managed.contains(&action) {
+                return Ok((crate::GrantEvaluation::Unsatisfied, Vec::new()));
+            }
+        }
+        let positive = self.positive_sources(action, target, &candidates)?;
+        let controller_positive =
+            controller.positive_sources(action, target, &controller_candidates)?;
+        let verdict = crate::evaluate_controller_bounded_grants(
             &operation,
-            None,
-        ) else {
-            return crate::GrantEvaluation::Unsatisfied;
-        };
-        let managed_owner_covers = controller.root_controller
-            && managed_actions.iter().any(|action| {
-                *action == arkret_wire::CapabilityActionId::REALM_OWNER
-                    || arkret_policy::owner_may_author_action(action).unwrap_or(false)
-            });
-        crate::evaluate_controller_bounded_grants(
-            &crate::AuthorizationOperation {
-                actions: &managed_actions,
-                ..operation
-            },
-            &agent_grants,
+            &positive,
             &controller.actor,
-            &controller_grants,
+            &controller_positive,
             approvals,
-            managed_owner_covers,
-        )
+            owner_covers,
+        );
+        if !matches!(verdict, crate::GrantEvaluation::Allowed(_)) {
+            return Ok((verdict, Vec::new()));
+        }
+        // Retain the SDK's real parent identity alongside each alternative.
+        // These calls only derive reservation directives; none consumes quota
+        // or discharges a policy. All candidate refusals were already merged.
+        let mut ranked = Vec::new();
+        if owner_covers
+            && let crate::GrantEvaluation::Allowed(paths) =
+                crate::evaluate_controller_bounded_grants(
+                    &operation,
+                    &positive,
+                    &controller.actor,
+                    &[],
+                    approvals,
+                    true,
+                )
+        {
+            ranked.extend(paths.into_iter().map(|path| (None, path)));
+        }
+        for source in &controller_positive {
+            if let crate::GrantEvaluation::Allowed(paths) =
+                crate::evaluate_controller_bounded_grants(
+                    &operation,
+                    &positive,
+                    &controller.actor,
+                    &[*source],
+                    approvals,
+                    false,
+                )
+            {
+                ranked.extend(
+                    paths
+                        .into_iter()
+                        .map(|path| (Some(source.id.clone()), path)),
+                );
+            }
+        }
+        ranked.sort_by(|(left_source, left), (right_source, right)| {
+            left_source
+                .cmp(right_source)
+                .then_with(|| left.grant.id.cmp(&right.grant.id))
+        });
+        let (source_order, paths) = ranked.into_iter().unzip();
+        Ok((crate::GrantEvaluation::Allowed(paths), source_order))
     }
 
     /// The effective grant row of `grant`.
     pub fn effective(
         &self,
         grant: &arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
-    ) -> Option<&EffectiveActorGrant> {
-        self.grants
-            .iter()
-            .find(|effective| effective.grant.id == grant.id)
+    ) -> Option<EffectiveActorGrant> {
+        self.terminal_ids.contains(&grant.id).then_some(())?;
+        Some(EffectiveActorGrant {
+            grant: self.source_cut.grants.get(&grant.id)?.clone(),
+            revision: self.source_cut.revisions.get(&grant.id)?.clone(),
+        })
     }
 
     /// Whether the actor holds the effective `ak.realm.owner` aggregate: it is
@@ -381,7 +1003,7 @@ impl ActorRealmAuthorization {
             return false;
         }
         let realm = arkret_wire::WireResourceSelector::realm(self.realm_id.clone());
-        self.root_controller
+        self.root_controller()
             || !self
                 .evaluate(
                     &[arkret_wire::CapabilityActionId::REALM_OWNER],
@@ -403,6 +1025,10 @@ impl From<EffectiveActorGrant>
         }
     }
 }
+
+#[cfg(test)]
+#[path = "projection/authority_cut_tests.rs"]
+mod authority_cut_tests;
 
 /// Canonical digest of the complete effective-list rows. This binds the list
 /// snapshot only; it is deliberately not a per-grant revision.
@@ -536,7 +1162,7 @@ mod capability_grant_current_state_tests {
             }],
             // Reducer-derived: a re-grant under one root controller grant.
             "authority_depth": 2,
-            "authority_root_refs": [{
+            "authority_root_ref": {
                 "kind":"realm_root",
                 "realm_id":REALM_ID,
                 "authority_event_ref":arkret_wire::EventId::from_digest(
@@ -544,7 +1170,7 @@ mod capability_grant_current_state_tests {
                     [0x55; 32],
                 ),
                 "authority_generation":"0"
-            }],
+            },
             "issued_at": "2026-09-21T00:00:00.000Z",
             "status": status.as_str()
         }))
@@ -625,24 +1251,126 @@ mod capability_grant_current_state_tests {
     }
 
     fn authorization(
-        grants: Vec<arkret_models_collaboration::governance::grant_constraint::CapabilityGrant>,
+        mut grants: Vec<arkret_models_collaboration::governance::grant_constraint::CapabilityGrant>,
     ) -> ActorRealmAuthorization {
-        ActorRealmAuthorization {
-            realm_id: realm(),
-            actor: subject(),
-            evaluated_at: chrono::Utc::now(),
-            root_controller: false,
-            agent_ceiling: None,
-            grants: grants
-                .into_iter()
-                .map(|grant| EffectiveActorGrant {
-                    grant,
-                    revision: arkret_wire::CurrentRevision {
+        // These constraint tests exercise directly accepted root grants. The
+        // record-decoding tests above separately retain the delegated shape.
+        for grant in &mut grants {
+            grant.authority_depth = 1;
+            let arkret_models_collaboration::governance::grant_constraint::AuthorityRootRef::RealmRoot {
+                realm_id,authority_event_ref,authority_generation,
+            }=&grant.authority_root_ref else { unreachable!() };
+            grant.issuer_authority_refs=vec![arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::RealmRoot {
+                realm_id:realm_id.clone(),authority_event_ref:authority_event_ref.clone(),authority_generation:*authority_generation,
+            }];
+        }
+        let actor=grants.first().and_then(|grant| match &grant.subject {
+            arkret_models_collaboration::governance::grant_constraint::CapabilitySubject::Actor(actor)=>Some(actor.clone()),_=>None,
+        }).unwrap_or_else(subject);
+        let ids = grants
+            .iter()
+            .map(|grant| grant.id.clone())
+            .collect::<Vec<_>>();
+        let revisions = grants
+            .iter()
+            .map(|grant| {
+                (
+                    grant.id.clone(),
+                    arkret_wire::CurrentRevision {
                         commit_id: COMMIT_ID.parse().unwrap(),
                         stream_position: 41,
                     },
-                })
+                )
+            })
+            .collect();
+        let cut = GrantAuthorityCut::new(
+            realm(),
+            arkret_wire::RealmAuthorityRootValue {
+                controller_actor_id: arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+                    "ak:did_core:web:current-owner.example".parse().unwrap(),
+                    "ak:did_core:web:station.example".parse().unwrap(),
+                )),
+                controller_epoch: 1,
+                authority_generation: 0,
+                authority_event_ref: arkret_wire::EventId::from_digest(
+                    arkret_canonical::DigestSuite::Sha256,
+                    [0x55; 32],
+                ),
+            },
+            grants
+                .into_iter()
+                .map(|grant| (grant.id.clone(), grant))
                 .collect(),
+            revisions,
+        )
+        .unwrap();
+        ActorRealmAuthorization::from_source_cut(
+            actor,
+            chrono::Utc::now(),
+            std::sync::Arc::new(cut),
+            ids,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn attach_controller(
+        agent: &mut ActorRealmAuthorization,
+        controller: ActorRealmAuthorization,
+        policies: Vec<arkret_models_collaboration::governance::operation_wire::Policy>,
+    ) {
+        let mut cut = (*agent.source_cut).clone();
+        cut.root = controller.source_cut.root.clone();
+        cut.grants.extend(controller.source_cut.grants.clone());
+        cut.revisions
+            .extend(controller.source_cut.revisions.clone());
+        let cut = std::sync::Arc::new(cut);
+        let controller = ActorRealmAuthorization::from_source_cut(
+            controller.actor,
+            agent.evaluated_at,
+            std::sync::Arc::clone(&cut),
+            controller
+                .grants
+                .iter()
+                .map(|row| row.grant.id.clone())
+                .collect(),
+            controller.owned_source,
+        )
+        .unwrap();
+        agent.source_cut = cut;
+        agent.agent_ceiling = Some(AgentControllerCeiling {
+            controller: Box::new(controller),
+            management_policies: policies,
+        });
+    }
+
+    fn set_root_controller(
+        authorization: &mut ActorRealmAuthorization,
+        actor: arkret_wire::ActorId,
+    ) {
+        let mut cut = (*authorization.source_cut).clone();
+        cut.root.controller_actor_id = actor;
+        cut.root.controller_epoch = cut.root.controller_epoch.checked_add(1).unwrap();
+        let cut = std::sync::Arc::new(cut);
+        authorization.source_cut = std::sync::Arc::clone(&cut);
+        if let Some(ceiling) = authorization.agent_ceiling.as_mut() {
+            ceiling.controller.source_cut = cut;
+        }
+    }
+
+    fn change_source(
+        authorization: &mut ActorRealmAuthorization,
+        id: &arkret_wire::GrantId,
+        change: impl FnOnce(
+            &mut arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+        ),
+    ) {
+        let mut cut = (*authorization.source_cut).clone();
+        change(cut.grants.get_mut(id).unwrap());
+        let cut = std::sync::Arc::new(cut);
+        authorization.source_cut = std::sync::Arc::clone(&cut);
+        if let Some(ceiling) = authorization.agent_ceiling.as_mut() {
+            ceiling.controller.source_cut = cut;
         }
     }
 
@@ -709,7 +1437,8 @@ mod capability_grant_current_state_tests {
         assert!(authorization(vec![owner]).holds_realm_owner());
         let mut root = authorization(Vec::new());
         assert!(!root.holds_realm_owner());
-        root.root_controller = true;
+        let actor = root.actor.clone();
+        set_root_controller(&mut root, actor);
         assert!(root.holds_realm_owner());
     }
 
@@ -727,9 +1456,7 @@ mod capability_grant_current_state_tests {
             arkret_models_collaboration::governance::grant_constraint::CapabilitySubject::Actor(
                 controller.clone(),
             );
-        let mut result = authorization(vec![parent_grant]);
-        result.actor = controller;
-        result
+        authorization(vec![parent_grant])
     }
 
     #[test]
@@ -739,19 +1466,17 @@ mod capability_grant_current_state_tests {
         };
         let mut agent = authorization(vec![grant(CapabilityGrantCurrentStatus::Active)]);
         let target = arkret_wire::WireResourceSelector::realm(realm());
-        agent.agent_ceiling = Some(AgentControllerCeiling {
-            controller: Box::new(controller_authorization()),
-            management_policies: Vec::new(),
-        });
+        attach_controller(&mut agent, controller_authorization(), Vec::new());
         assert!(allows(&agent, "ak.message.create", &target));
         let mut deny =
             GrantConstraint::new(GrantConstraintKind::Temporal, GrantConstraintEffect::Deny);
         deny.not_before = Some(chrono::Utc::now() - chrono::TimeDelta::minutes(1));
         deny.expires_at = Some(chrono::Utc::now() + chrono::TimeDelta::minutes(1));
-        agent.agent_ceiling.as_mut().unwrap().controller.grants[0]
+        let parent_id = agent.agent_ceiling.as_ref().unwrap().controller.grants[0]
             .grant
-            .constraints
-            .push(deny);
+            .id
+            .clone();
+        change_source(&mut agent, &parent_id, |grant| grant.constraints.push(deny));
         assert!(matches!(
             agent.evaluate(
                 &["ak.message.create"],
@@ -760,15 +1485,12 @@ mod capability_grant_current_state_tests {
             ),
             crate::GrantEvaluation::Denied
         ));
-        agent
-            .agent_ceiling
-            .as_mut()
-            .unwrap()
-            .controller
-            .grants
-            .clear();
+        change_source(&mut agent, &parent_id, |grant| {
+            grant.status=arkret_models_collaboration::governance::grant_constraint::CapabilityGrantStatus::Revoked
+        });
         assert!(!allows(&agent, "ak.message.create", &target));
-        agent.root_controller = true;
+        let actor = agent.actor.clone();
+        set_root_controller(&mut agent, actor);
         assert!(!agent.holds_realm_owner());
         assert!(!allows(&agent, "ak.message.create", &target));
     }
@@ -786,13 +1508,12 @@ mod capability_grant_current_state_tests {
         quota.max_operation_count = Some(1);
         quota.period = Some("PT1M".into());
         quota.constraint_scope = Some(arkret_models_collaboration::governance::grant_constraint::GrantConstraintScope::PerActor);
-        controller.grants[0].grant.constraints.push(quota);
+        change_source(&mut controller, &parent_id, |grant| {
+            grant.constraints.push(quota)
+        });
         let controller_actor = controller.actor.to_string();
         let mut agent = authorization(vec![grant(CapabilityGrantCurrentStatus::Active)]);
-        agent.agent_ceiling = Some(AgentControllerCeiling {
-            controller: Box::new(controller),
-            management_policies: Vec::new(),
-        });
+        attach_controller(&mut agent, controller, Vec::new());
         let target = arkret_wire::WireResourceSelector::realm(realm());
         let facts = crate::OperationFacts::default();
         let evaluation = agent.evaluate(&["ak.message.create"], &target, &facts);
@@ -824,8 +1545,19 @@ mod capability_grant_current_state_tests {
         child.actions.push("ak.object.read".parse().unwrap());
         let mut agent = authorization(vec![child]);
         let mut controller = controller_authorization();
-        controller.root_controller = true;
+        let actor = controller.actor.clone();
+        set_root_controller(&mut controller, actor);
+        controller.source_cut = std::sync::Arc::new(
+            GrantAuthorityCut::new(
+                realm(),
+                controller.source_cut.root.clone(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+            )
+            .unwrap(),
+        );
         controller.grants.clear();
+        controller.terminal_ids.clear();
         let policy = serde_json::from_value(serde_json::json!({
             "id":"ak:policy:0198ff00-0000-7000-8000-000000000001",
             "schema":"ak.schema.policy.v1", "realm_id":realm(), "policy_kind":"agent",
@@ -835,10 +1567,7 @@ mod capability_grant_current_state_tests {
             "created_at":"2026-10-01T00:00:00.000Z"
         }))
         .unwrap();
-        agent.agent_ceiling = Some(AgentControllerCeiling {
-            controller: Box::new(controller),
-            management_policies: vec![policy],
-        });
+        attach_controller(&mut agent, controller, vec![policy]);
         assert!(!matches!(
             agent.evaluate(
                 &["ak.message.create", "ak.object.read"],

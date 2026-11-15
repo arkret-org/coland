@@ -529,10 +529,13 @@ mod tests {
         AcceptedDevicePossessionProof::Refresh(arkret_wire::AcceptedDeviceRefreshPossessionProof {
             context: arkret_wire::AcceptedDevicePossessionProofContext::V1,
             purpose: arkret_wire::AcceptedDeviceRefreshPossessionPurpose::SessionGrantRefresh,
-            predecessor_session_grant_id: arkret_wire::SessionGrantId::new(
-                "ak:session_grant:Af0GheZX08ev4L1fQoFdngIpe5c_9Lk7SQqfN4jztzDW",
-            )
-            .unwrap(),
+            predecessor_session_grant_ref: arkret_wire::SessionGrantRef::new(
+                arkret_wire::DidCoreId::new(STATION).unwrap(),
+                arkret_wire::SessionGrantId::new(
+                    "ak:session_grant:019a0000-0000-7000-8000-000000000001",
+                )
+                .unwrap(),
+            ),
             account_id: request.account_id.clone(),
             device_id: request.device_id.clone(),
             audience_id: arkret_wire::DidCoreId::new(STATION).unwrap(),

@@ -4,14 +4,11 @@
 //! current factor substitutes for the original accepted two-Event unit.
 
 use arkret_models_collaboration::events_payloads::DeviceAuthorizationBindingKind;
-use arkret_models_crypto::{SecurityTransactionStep, SecurityTransactionTerminalOutcome};
+use arkret_models_crypto::SecurityTransactionCreateRequestBody;
 use arkret_wire::{
-    CommitStreamHead, Event, EventId, RealmCommit, RealmId, RecoveryCompletionAttestation,
+    CommittedEventRef, Event, EventId, RealmCommit, RealmId, RecoveryCompletionAttestation,
 };
-use coland_storage::{
-    AuthorityCommitTransaction, HumanPcrHistoryReader, PersistenceError, PersistenceResult,
-    RecoveryUnitCommitWrite,
-};
+use coland_storage::{HumanPcrHistoryReader, PersistenceError, PersistenceResult};
 use diesel::sql_types::{Binary, Jsonb, Text};
 use diesel::{QueryableByName, sql_query};
 use horme::{OptionalExtension as _, RunQueryDsl as _};
@@ -126,8 +123,7 @@ pub(super) async fn qualify_in_connection(
     let candidates = sql_query(
         "SELECT id::text AS transaction_id FROM security_transactions \
          WHERE kind='recovery' AND principal_id=$1 AND station_id=$2 \
-           AND prepared_plan->'binding'->>'authorize_event_id'=$3 \
-           AND terminal_outcome->>'outcome'='completed' LIMIT 2",
+           AND recovery_completion->'completion_attestation'->'device_authorization_event_ref'->>'event_id'=$3 LIMIT 2",
     )
     .bind::<Text, _>(reader.account_id.principal_id.as_str())
     .bind::<Text, _>(reader.account_id.station_id.as_str())
@@ -144,36 +140,68 @@ pub(super) async fn qualify_in_connection(
     let transaction = super::load_one(conn, &transaction_id, false)
         .await?
         .ok_or_else(|| unavailable("native transaction disappeared"))?;
-    let plan = transaction
-        .resource
-        .recovery_plan()
-        .ok_or_else(|| unavailable("transaction has no recovery plan"))?;
-    let Some(SecurityTransactionTerminalOutcome::Completed {
-        completion_attestation: Some(completion),
-        ..
-    }) = &transaction.resource.terminal_outcome
-    else {
-        return Err(unavailable(
-            "transaction has no completed native attestation",
-        ));
-    };
-    let completion = completion.clone();
-    if transaction.resource.account_id != reader.account_id
-        || plan.binding.replacement_device_id != reader.device_id
-        || plan.binding.authorize_event_id != authorization.event_id
-        || authorization.payload.recovery_session_id.as_ref()
-            != Some(&plan.binding.recovery_session_id)
-        || cut.authority.current_generation != Some(plan.new_model_generation_ref)
-        || authorization.payload.authorized_generation_ref != plan.new_model_generation_ref
+    let completed = transaction.recovery().map_err(unavailable)?;
+    let receipt = &completed.recovery_receipt;
+    let completion = completed.completion_attestation.clone();
+    if completed.account_id != reader.account_id
+        || receipt.new_device_id != reader.device_id
+        || receipt.recovery_unit.events[1].event.event_id != authorization.event_id
+        || authorization.payload.recovery_session_id.as_ref() != Some(&receipt.recovery_session_id)
+        || cut.authority.current_generation != Some(receipt.new_model_generation_ref)
+        || authorization.payload.authorized_generation_ref != receipt.new_model_generation_ref
         || authorization.source_commit_id != completion.device_authorization_event_ref.commit_id
-        || plan.reanchor_commit_intent.realm_id != realm
+        || receipt.recovery_unit.events[0].event.realm_id != realm
     {
         return Err(unavailable(
             "replacement, generation or original authorization differs",
         ));
     }
-    let reanchor = original(conn, &plan.binding.reanchor_event_id, &realm).await?;
-    let authorize = original(conn, &plan.binding.authorize_event_id, &realm).await?;
+    let request: SecurityTransactionCreateRequestBody =
+        serde_json::from_slice(&transaction.canonical_request).map_err(unavailable)?;
+    if arkret_canonical::canonical_json_bytes(&request).map_err(unavailable)?
+        != transaction.canonical_request
+    {
+        return Err(unavailable(
+            "first signed R request bytes are not canonical",
+        ));
+    }
+    let SecurityTransactionCreateRequestBody::Recovery(request) = request else {
+        return Err(unavailable(
+            "accepted request is another transaction branch",
+        ));
+    };
+    completed
+        .validate_for_request(&request)
+        .map_err(unavailable)?;
+    let reanchor = original(
+        conn,
+        &receipt.recovery_unit.events[0].event.event_id,
+        &realm,
+    )
+    .await?;
+    let authorize = original(
+        conn,
+        &receipt.recovery_unit.events[1].event.event_id,
+        &realm,
+    )
+    .await?;
+    let committed_ref = |item: &(Event, RealmCommit)| CommittedEventRef {
+        event_id: item.0.event_id.clone(),
+        commit_id: item.1.commit_id.clone(),
+        stream_ref: item.1.stream_ref.clone(),
+        stream_position: item.1.stream_position,
+    };
+    if reanchor.0 != receipt.recovery_unit.events[0].event
+        || authorize.0 != receipt.recovery_unit.events[1].event
+        || reanchor.1.previous_commit_ref.as_ref() != Some(&receipt.recovery_unit.predecessor_ref)
+        || authorize.1.previous_commit_ref.as_ref() != Some(&reanchor.1.commit_id)
+        || completion.reanchor_event_ref != committed_ref(&reanchor)
+        || completion.device_authorization_event_ref != committed_ref(&authorize)
+    {
+        return Err(unavailable(
+            "original consecutive Commit pair differs from signed R/C",
+        ));
+    }
     arkret_signatures::verify_device_authorize_possession(
         &authorization.payload,
         &reader.account_id,
@@ -217,63 +245,25 @@ pub(super) async fn qualify_in_connection(
         )
         .map_err(unavailable)?;
     }
-    let step_outcome = super::load_step_outcome(
-        conn,
-        &transaction_id,
-        SecurityTransactionStep::CommitRecoveryUnit,
-    )
-    .await?
-    .ok_or_else(|| unavailable("atomic terminal step is absent"))?;
-    let attempt = super::load_step_attempt(
-        conn,
-        &transaction_id,
-        SecurityTransactionStep::CommitRecoveryUnit,
-    )
-    .await?
-    .ok_or_else(|| unavailable("atomic terminal attempt is absent"))?;
-    if attempt.canonical_request != step_outcome.canonical_request {
-        return Err(unavailable(
-            "terminal attempt differs from its accepted outcome",
-        ));
-    }
-    let authority = crate::authority_commit::locked_authority(conn, &realm)
-        .await
-        .map_err(crate::PgTransactionError::into_persistence)?
-        .ok_or_else(|| unavailable("PCR authority disappeared"))?;
     let predecessor = sql_query(
         "SELECT commit_json AS payload FROM realm_commits WHERE commit_id=$1 AND realm_id=$2",
     )
-    .bind::<Text, _>(plan.reanchor_commit_intent.predecessor_ref.as_str())
+    .bind::<Text, _>(receipt.recovery_unit.predecessor_ref.as_str())
     .bind::<Text, _>(realm.as_str())
     .get_result::<crate::JsonPayloadRow>(&mut *conn)
     .await
     .optional()
     .map_err(PersistenceError::database)?
-    .ok_or_else(|| unavailable("accepted predecessor is absent"))?;
+    .ok_or_else(|| unavailable("accepted independent predecessor disappeared"))?;
     let predecessor: RealmCommit =
         serde_json::from_value(predecessor.payload).map_err(unavailable)?;
-    let wrap = |(event, commit)| AuthorityCommitTransaction {
-        expected_authority: authority.clone(),
-        event,
-        commit,
-        producer_signer_fact: None,
-        content_backup_source: None,
-        mls_state: None,
-        welcomes: Vec::new(),
-        recipient_queue_capacity: 0,
-    };
-    let write = RecoveryUnitCommitWrite {
-        queued_at: transaction.resource.created_at,
-        transaction,
-        step_outcome,
-        predecessor: CommitStreamHead {
-            stream_ref: predecessor.stream_ref,
-            stream_position: predecessor.stream_position,
-            commit_id: predecessor.commit_id,
-        },
-        commits: [wrap(reanchor), wrap(authorize)],
-    };
-    write.validate().map_err(unavailable)?;
+    if predecessor.stream_ref != reanchor.1.stream_ref
+        || predecessor.stream_position + 1 != reanchor.1.stream_position
+    {
+        return Err(unavailable(
+            "independent accepted predecessor does not precede the native pair",
+        ));
+    }
     if chrono::Utc::now() >= expires_at {
         return Err(unavailable("current replacement credential expired"));
     }

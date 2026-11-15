@@ -10,10 +10,9 @@
 //! `api-conventions.md` §3.1/§3.3 makes this an **exact-token introspection
 //! authority**: the complete token bytes plus this Station's own `audience_id`
 //! go to the issuer ledger over the deployment-internal channel, and the
-//! returned metadata is the authority. This Station MUST NOT verify the grant
-//! JWT's signature locally, replay the issuer DID history, or recompute the
-//! issuance preimage / suite-tagged id / `jti` as a basis for admission — and
-//! it does none of those.
+//! returned metadata is the authority. This Station MUST NOT derive authority
+//! from the opaque secret locally or interpret it as claims. The issuer-scoped UUID7
+//! reference and all non-secret metadata come from that authenticated result.
 //!
 //! One HTTP request takes **one** authoritative result, at the strictest
 //! freshness any of its consumers needs, and passes it to every later gate
@@ -38,18 +37,20 @@
 //! by the RFC 9421 PoP hoop (`session_pop`).
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration as StdDuration, Instant};
 
-use arkret_identifiers::{DeviceId, DidCoreId};
-use arkret_models_collaboration::session_grants::SessionGrantValidationByJwt;
+use arkret_identifiers::{DeviceId, DidCoreId, SessionGrantSecret};
+use arkret_models_collaboration::session_grants::{
+    SessionGrantValidationBinding, SessionGrantValidationBySecret,
+};
 use arkret_models_identity::session_credential::SessionGrantHolderBinding;
 use arkret_wire::FreshnessState;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration, Utc};
 use coland_services::identity::{
-    AgentSessionState as AgentSessionRecord, SessionEndpointState, SessionGrantAuthorizationState,
+    AgentSessionState as AgentSessionRecord, SessionEndpointState,
     SessionIdentityState as SessionRecord,
 };
 use parking_lot::Mutex;
@@ -63,9 +64,6 @@ use crate::wire::{
     SessionGrantValidationMetadata, SessionGrantValidationResponseBody,
 };
 
-/// Device-scope prefix carried in a `ak.session.grant`'s scope set
-/// (`urn:arkret:client:device:<device_id>`). A grant that drives
-/// `/_arkret/self/*` MUST carry one so the request is device-bound.
 /// TTL for the session-grant introspection cache (api-conventions.md §3.3 D2:
 /// SHOULD ≤ 120s). The revocation-visibility upper bound equals this TTL;
 /// sensitive operations bypass the cache entirely (`force_fresh`).
@@ -87,6 +85,47 @@ fn unauthenticated(message: &'static str) -> AuthError {
     (StatusCode::UNAUTHORIZED, "unauthenticated", message)
 }
 
+fn canonical_session_grant(secret: &str) -> Result<SessionGrantSecret, AuthError> {
+    SessionGrantSecret::new(secret)
+        .map_err(|_| unauthenticated("session grant is not a canonical opaque credential"))
+}
+
+async fn require_introspection_metadata_context(
+    state: &AppState,
+    grant: &SessionGrantValidationMetadata,
+) -> Result<(), AuthError> {
+    let issuer = crate::routing::events::peer::trusted_account_authority_id(state)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "trusted Account Authority binding is unavailable",
+            )
+        })?;
+    if grant.issuer_id != issuer
+        || grant.audience_id != configured_service_audience(state)?
+        || grant.revoked_at.is_some()
+        || grant.validate().is_err()
+    {
+        return Err(unauthenticated(
+            "session grant issuer metadata does not bind this request",
+        ));
+    }
+    let now = crate::wire::now();
+    if grant.not_before > now {
+        return Err(unauthenticated("session grant is not active yet"));
+    }
+    if grant.expires_at <= now {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "auth_expired",
+            "session grant has expired",
+        ));
+    }
+    Ok(())
+}
+
 fn configured_service_audience(state: &AppState) -> Result<DidCoreId, AuthError> {
     DidCoreId::new(state.service_id().clone()).map_err(|_| {
         (
@@ -105,12 +144,24 @@ struct CachedIntrospection {
     inserted_at: Instant,
 }
 
+struct IntrospectionCacheSlot {
+    identity: Arc<()>,
+    last_used_at: Instant,
+    cached: Option<CachedIntrospection>,
+}
+
+#[derive(Clone)]
+struct IntrospectionReadLease {
+    identity: Arc<()>,
+    started_at: Instant,
+}
+
 /// Process-local introspection cache. Same in-memory trade-off as the other
 /// coland reducer projections (`handle_releases`, `account_lifecycle`): a
 /// restart drops the cache and the next request re-introspects. Keyed by a
 /// service-DID-bound hash of the presented grant so cross-audience grants never
 /// collide.
-static INTROSPECTION_CACHE: LazyLock<Mutex<HashMap<String, CachedIntrospection>>> =
+static INTROSPECTION_CACHE: LazyLock<Mutex<HashMap<String, IntrospectionCacheSlot>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone)]
@@ -136,13 +187,13 @@ static INTROSPECTION_HTTP_CLIENTS: LazyLock<Mutex<HashMap<String, CachedIntrospe
 /// token, the expected `audience_id` and the authority configuration context.
 /// It MUST NOT be the `jti` or the grant id — neither identifies the exact
 /// credential that the ledger matched.
-fn introspection_cache_key(grant_jwt: &str, audience: &str, authority_context: &str) -> String {
+fn introspection_cache_key(grant_secret: &str, audience: &str, authority_context: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(audience.as_bytes());
     hasher.update(b":");
     hasher.update(authority_context.as_bytes());
     hasher.update(b":");
-    hasher.update(grant_jwt.as_bytes());
+    hasher.update(grant_secret.as_bytes());
     format!(
         "grant-introspect:{}",
         URL_SAFE_NO_PAD.encode(hasher.finalize())
@@ -154,51 +205,99 @@ fn introspection_cache_key(grant_jwt: &str, audience: &str, authority_context: &
 /// answers never collide with the previous one's in the cache.
 pub(crate) fn introspection_authority_context(state: &AppState) -> String {
     format!(
-        "url={}\nprivate_networks={}",
+        "url={}\nprivate_networks={}\nauthority_url={}\nissuer={}\nauthority_domain={}\nauthority_key={}\nchannel_credential_digest={}",
         state
             .config()
             .session_grant_introspection_url
             .as_deref()
             .unwrap_or_default(),
         crate::security::private_networks_allowed(state.config().development_mode),
+        state
+            .config()
+            .account_authority_url
+            .as_deref()
+            .unwrap_or_default(),
+        state.service_core_id(),
+        state
+            .config()
+            .internal_authority_channel
+            .as_ref()
+            .map(|channel| channel.account_authority_trust_domain().as_str())
+            .unwrap_or_default(),
+        state
+            .config()
+            .account_authority_public_key_multibase
+            .as_deref()
+            .unwrap_or_default(),
+        state
+            .config()
+            .internal_authority_channel
+            .as_ref()
+            .map(
+                |channel| arkret_canonical::sha256_digest(channel.credential().as_bytes())
+                    .to_string()
+            )
+            .unwrap_or_default(),
     )
 }
 
-fn introspection_cache_key_for(state: &AppState, grant_jwt: &str) -> String {
+fn introspection_cache_key_for(state: &AppState, grant_secret: &str) -> String {
     introspection_cache_key(
-        grant_jwt,
+        grant_secret,
         state.service_id(),
         &introspection_authority_context(state),
     )
 }
 
-fn cache_lookup(key: &str) -> Option<SessionGrantValidationMetadata> {
+fn cache_lookup(key: &str) -> Option<(SessionGrantValidationMetadata, IntrospectionReadLease)> {
     cache_lookup_at(key, Instant::now())
 }
 
-fn cache_lookup_at(key: &str, now: Instant) -> Option<SessionGrantValidationMetadata> {
+fn cache_lookup_at(
+    key: &str,
+    now: Instant,
+) -> Option<(SessionGrantValidationMetadata, IntrospectionReadLease)> {
     let mut cache = INTROSPECTION_CACHE.lock();
-    prune_introspection_cache_locked(&mut cache, now);
-    match cache.get(key) {
-        Some(entry) if now.duration_since(entry.inserted_at) < INTROSPECTION_CACHE_TTL => {
-            Some(entry.grant.clone())
-        }
-        Some(_) => {
-            cache.remove(key);
-            None
-        }
-        None => None,
-    }
+    cache_lookup_locked(&mut cache, key, now)
 }
 
-fn cache_store(key: String, grant: SessionGrantValidationMetadata) {
+fn cache_lookup_locked(
+    cache: &mut HashMap<String, IntrospectionCacheSlot>,
+    key: &str,
+    now: Instant,
+) -> Option<(SessionGrantValidationMetadata, IntrospectionReadLease)> {
+    prune_introspection_cache_locked(cache, now);
+    let entry = cache.get_mut(key)?;
+    let cached = entry.cached.as_ref()?;
+    if !now
+        .checked_duration_since(cached.inserted_at)
+        .is_some_and(|age| age < INTROSPECTION_CACHE_TTL)
     {
-        let mut cache = INTROSPECTION_CACHE.lock();
-        prune_introspection_cache_locked(&mut cache, Instant::now());
-        while cache.len() >= INTROSPECTION_CACHE_MAX_ENTRIES {
+        entry.cached = None;
+        return None;
+    }
+    Some((
+        cached.grant.clone(),
+        IntrospectionReadLease {
+            identity: Arc::clone(&entry.identity),
+            started_at: cached.inserted_at,
+        },
+    ))
+}
+
+fn begin_introspection_read_locked(
+    cache: &mut HashMap<String, IntrospectionCacheSlot>,
+    key: &str,
+    now: Instant,
+    capacity: usize,
+) -> IntrospectionReadLease {
+    assert!(capacity > 0, "the introspection cache capacity is nonzero");
+    prune_introspection_cache_locked(cache, now);
+    if !cache.contains_key(key) {
+        while cache.len() >= capacity {
             let Some(oldest_key) = cache
                 .iter()
-                .min_by_key(|(_, entry)| entry.inserted_at)
+                .min_by_key(|(_, entry)| entry.last_used_at)
                 .map(|(key, _)| key.clone())
             else {
                 break;
@@ -206,20 +305,74 @@ fn cache_store(key: String, grant: SessionGrantValidationMetadata) {
             cache.remove(&oldest_key);
         }
         cache.insert(
-            key,
-            CachedIntrospection {
-                grant,
-                inserted_at: Instant::now(),
+            key.to_owned(),
+            IntrospectionCacheSlot {
+                identity: Arc::new(()),
+                last_used_at: now,
+                cached: None,
             },
         );
     }
+    let entry = cache
+        .get_mut(key)
+        .expect("the bounded read slot was inserted");
+    entry.last_used_at = now;
+    entry.cached = None;
+    IntrospectionReadLease {
+        identity: Arc::clone(&entry.identity),
+        started_at: now,
+    }
+}
+
+fn introspection_read_is_current_locked(
+    cache: &mut HashMap<String, IntrospectionCacheSlot>,
+    key: &str,
+    lease: &IntrospectionReadLease,
+    now: Instant,
+) -> bool {
+    prune_introspection_cache_locked(cache, now);
+    now.checked_duration_since(lease.started_at)
+        .is_some_and(|age| age < INTROSPECTION_CACHE_TTL)
+        && cache
+            .get(key)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.identity, &lease.identity))
+}
+
+fn publish_introspection_locked(
+    cache: &mut HashMap<String, IntrospectionCacheSlot>,
+    key: &str,
+    lease: &IntrospectionReadLease,
+    grant: SessionGrantValidationMetadata,
+    now: Instant,
+) -> bool {
+    if !introspection_read_is_current_locked(cache, key, lease, now) {
+        return false;
+    }
+    let entry = cache.get_mut(key).expect("the checked read slot exists");
+    // A delayed response must not reset the lifetime of an older observation
+    // or replace an already newer positive observation in this same epoch.
+    if entry
+        .cached
+        .as_ref()
+        .is_none_or(|cached| cached.inserted_at <= lease.started_at)
+    {
+        entry.cached = Some(CachedIntrospection {
+            grant,
+            inserted_at: lease.started_at,
+        });
+    }
+    entry.last_used_at = now;
+    true
 }
 
 fn prune_introspection_cache_locked(
-    cache: &mut HashMap<String, CachedIntrospection>,
+    cache: &mut HashMap<String, IntrospectionCacheSlot>,
     now: Instant,
 ) {
-    cache.retain(|_, entry| now.duration_since(entry.inserted_at) < INTROSPECTION_CACHE_TTL);
+    cache.retain(|_, entry| {
+        now.checked_duration_since(entry.last_used_at)
+            .is_some_and(|age| age < INTROSPECTION_CACHE_TTL)
+    });
 }
 
 fn introspection_http_client(
@@ -274,11 +427,11 @@ fn invalidate_introspection_http_client(raw_url: &str, development_mode: bool) {
     INTROSPECTION_HTTP_CLIENTS.lock().remove(&cache_key);
 }
 
-/// Drop any cached introspection entry for `grant_jwt`. Called by logout so the
+/// Drop any cached introspection entry for `grant_secret`. Called by logout so the
 /// next introspection of that grant goes to coauth and observes `active=false`
 /// (account-lifecycle.md §4.1 step 3 — the local-side invalidation).
-pub(crate) fn invalidate_cached_grant(state: &AppState, grant_jwt: &str) {
-    let key = introspection_cache_key_for(state, grant_jwt);
+pub(crate) fn invalidate_cached_grant(state: &AppState, grant_secret: &str) {
+    let key = introspection_cache_key_for(state, grant_secret);
     {
         let mut cache = INTROSPECTION_CACHE.lock();
         cache.remove(&key);
@@ -294,25 +447,55 @@ pub(crate) fn invalidate_cached_grant(state: &AppState, grant_jwt: &str) {
 /// is an `unauthenticated` error, not `Ok(None)`.
 pub(crate) async fn introspect_session_grant_cached(
     state: &AppState,
-    grant_jwt: &str,
+    grant_secret: &str,
     force_fresh: bool,
 ) -> Result<SessionGrantValidationMetadata, AuthError> {
-    let key = introspection_cache_key_for(state, grant_jwt);
-    if !force_fresh && let Some(grant) = cache_lookup(&key) {
+    canonical_session_grant(grant_secret)?;
+    let key = introspection_cache_key_for(state, grant_secret);
+    if !force_fresh && let Some((grant, lease)) = cache_lookup(&key) {
         // Cached grants can still expire between introspection and use.
-        if grant.expires_at <= crate::wire::now() {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                "auth_expired",
-                "session grant has expired",
-            ));
+        require_introspection_metadata_context(state, &grant).await?;
+        if !introspection_read_is_current_locked(
+            &mut INTROSPECTION_CACHE.lock(),
+            &key,
+            &lease,
+            Instant::now(),
+        ) {
+            return Err(retired_introspection_read());
         }
         return Ok(grant);
     }
-
-    let grant = introspect_session_grant_remote(state, grant_jwt).await?;
-    cache_store(key, grant.clone());
+    let lease = begin_introspection_read_locked(
+        &mut INTROSPECTION_CACHE.lock(),
+        &key,
+        Instant::now(),
+        INTROSPECTION_CACHE_MAX_ENTRIES,
+    );
+    let Some(grant) = introspect_session_grant_remote(state, grant_secret).await? else {
+        // A typed, authenticated inactive observation retires every earlier
+        // read of this exact key, regardless of response arrival order. There
+        // is no tombstone: a later read creates a distinct Arc identity.
+        INTROSPECTION_CACHE.lock().remove(&key);
+        return Err(unauthenticated("session grant is not active"));
+    };
+    if !publish_introspection_locked(
+        &mut INTROSPECTION_CACHE.lock(),
+        &key,
+        &lease,
+        grant.clone(),
+        Instant::now(),
+    ) {
+        return Err(retired_introspection_read());
+    }
     Ok(grant)
+}
+
+fn retired_introspection_read() -> AuthError {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "temporarily_unavailable",
+        "session grant introspection result was retired while in flight",
+    )
 }
 
 // ── One authoritative result per request ─────────────────────────────────────
@@ -332,11 +515,12 @@ pub(crate) async fn introspect_session_grant_cached(
 #[derive(Clone)]
 struct RequestAuthoritativeGrant {
     /// The exact presented token these metadata belong to.
-    grant_jwt: String,
+    grant_secret: String,
     /// Whether the result was taken with the cache bypassed. A memo taken
     /// fresh also satisfies a later consumer that only needs the cached
     /// freshness; the reverse is not true and re-introspects.
     taken_fresh: bool,
+    authority_context: String,
     grant: SessionGrantValidationMetadata,
 }
 
@@ -345,16 +529,18 @@ struct RequestAuthoritativeGrant {
 pub(crate) async fn take_request_authoritative_grant(
     state: &AppState,
     req: &mut Request,
-    grant_jwt: &str,
+    grant_secret: &str,
     force_fresh: bool,
 ) -> Result<SessionGrantValidationMetadata, AuthError> {
-    if let Some(grant) = memoized_grant(req, grant_jwt, force_fresh) {
+    if let Some(grant) = memoized_grant(state, req, grant_secret, force_fresh) {
+        require_introspection_metadata_context(state, &grant).await?;
         return Ok(grant);
     }
-    let grant = introspect_session_grant_cached(state, grant_jwt, force_fresh).await?;
+    let grant = introspect_session_grant_cached(state, grant_secret, force_fresh).await?;
     req.extensions_mut().insert(RequestAuthoritativeGrant {
-        grant_jwt: grant_jwt.to_owned(),
+        grant_secret: grant_secret.to_owned(),
         taken_fresh: force_fresh,
+        authority_context: introspection_authority_context(state),
         grant: grant.clone(),
     });
     Ok(grant)
@@ -365,24 +551,29 @@ pub(crate) async fn take_request_authoritative_grant(
 async fn request_authoritative_grant(
     state: &AppState,
     req: &Request,
-    grant_jwt: &str,
+    grant_secret: &str,
     force_fresh: bool,
 ) -> Result<SessionGrantValidationMetadata, AuthError> {
-    if let Some(grant) = memoized_grant(req, grant_jwt, force_fresh) {
+    if let Some(grant) = memoized_grant(state, req, grant_secret, force_fresh) {
+        require_introspection_metadata_context(state, &grant).await?;
         return Ok(grant);
     }
-    introspect_session_grant_cached(state, grant_jwt, force_fresh).await
+    introspect_session_grant_cached(state, grant_secret, force_fresh).await
 }
 
 fn memoized_grant(
+    state: &AppState,
     req: &Request,
-    grant_jwt: &str,
+    grant_secret: &str,
     force_fresh: bool,
 ) -> Option<SessionGrantValidationMetadata> {
     let memo = req.extensions().get::<RequestAuthoritativeGrant>()?;
     // The memo belongs to the exact token it was taken for. A request that
     // somehow presents a different credential gets its own authoritative read.
-    if memo.grant_jwt != grant_jwt || (force_fresh && !memo.taken_fresh) {
+    if memo.grant_secret != grant_secret
+        || (force_fresh && !memo.taken_fresh)
+        || memo.authority_context != introspection_authority_context(state)
+    {
         return None;
     }
     Some(memo.grant.clone())
@@ -392,8 +583,8 @@ fn memoized_grant(
 /// scopes, subject, device_id and expiry off the introspection response.
 async fn introspect_session_grant_remote(
     state: &AppState,
-    grant_jwt: &str,
-) -> Result<SessionGrantValidationMetadata, AuthError> {
+    grant_secret: &str,
+) -> Result<Option<SessionGrantValidationMetadata>, AuthError> {
     let Some(introspection_url) = state.config().session_grant_introspection_url.as_deref() else {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -408,9 +599,20 @@ async fn introspect_session_grant_remote(
             "session grant introspection internal channel is not configured",
         ));
     };
-    let request = SessionGrantValidationInput::ByJwt(SessionGrantValidationByJwt {
-        grant_jwt: grant_jwt.to_owned(),
-        audience_id: Some(configured_service_audience(state)?),
+    let presented = canonical_session_grant(grant_secret)?;
+    let audience = configured_service_audience(state)?;
+    let expected_issuer = crate::routing::events::peer::trusted_account_authority_id(state)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                "trusted Account Authority binding is unavailable",
+            )
+        })?;
+    let request = SessionGrantValidationInput::BySecret(SessionGrantValidationBySecret {
+        session_grant: presented.clone(),
+        audience_id: audience.clone(),
         // The Account Authority returns non-secret grant metadata over this
         // authenticated S2S channel; holder possession is verified below by the
         // request's DPoP proof against the returned `cnf_jkt`.
@@ -478,14 +680,38 @@ async fn introspect_session_grant_remote(
                 "session grant introspection response was invalid",
             )
         })?;
+    let binding = SessionGrantValidationBinding::from_authenticated_response(
+        &request,
+        &expected_issuer,
+        outcome,
+    )
+    .map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "issuer returned inconsistent exact credential metadata",
+        )
+    })?;
+    let outcome = binding.response();
     if !outcome.active || outcome.status != SessionGrantAdminIntrospectionStatus::Active {
-        return Err(unauthenticated("session grant is not active"));
+        return Ok(None);
     }
-    outcome.grant.ok_or((
+    let grant = outcome.grant.clone().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "temporarily_unavailable",
         "session grant introspection omitted grant metadata",
-    ))
+    ))?;
+    require_introspection_metadata_context(state, &grant).await?;
+    binding
+        .validate_request_binding(
+            &presented,
+            &expected_issuer,
+            &grant.account_id,
+            &audience,
+            crate::wire::now(),
+        )
+        .map_err(|_| unauthenticated("exact credential result does not bind this request"))?;
+    Ok(Some(grant))
 }
 
 fn require_successful_introspection(
@@ -602,12 +828,7 @@ fn session_binding_from_introspection(
             "session grant authority context does not match its subject/audience",
         ));
     }
-    if let SessionGrantHolderBinding::AgentRuntime {
-        agent_id,
-        agent_key_authorization_ref,
-        verification_method,
-    } = &grant.holder_binding
-    {
+    if let SessionGrantHolderBinding::AgentRuntime { agent_id, .. } = &grant.holder_binding {
         // The wire DTO closes agent grants to the self-contained typed holder
         // binding: top-level `device_id`/`device_binding` are the human-device
         // shape and MUST be absent. Agent authority is the exact principal,
@@ -619,14 +840,7 @@ fn session_binding_from_introspection(
         }
         return Ok(SessionEndpointState::AgentRuntime {
             state: AgentSessionRecord {
-                granted_scope: grant.scopes.clone(),
-                scope_details: serde_json::json!({
-                    "session_grant_id": grant.id,
-                    "session_grant_revocation_ref": grant.revocation_ref,
-                    "agent_key_authorization_ref": agent_key_authorization_ref,
-                    "verification_method": verification_method,
-                    "scope_details": grant.scope_details,
-                }),
+                metadata: grant.metadata.clone(),
                 freshness_state: FreshnessState::Fresh,
             },
         });
@@ -680,7 +894,7 @@ fn session_binding_from_introspection(
 
 pub(crate) fn session_record_from_introspected_grant_for_logout(
     state: &AppState,
-    grant_jwt: &str,
+    grant_secret: &str,
     grant: &SessionGrantValidationMetadata,
 ) -> Result<SessionRecord, AuthError> {
     if grant.audience_id.as_str() != state.service_id() {
@@ -690,7 +904,7 @@ pub(crate) fn session_record_from_introspected_grant_for_logout(
     }
     let endpoint = session_binding_from_introspection(grant)?;
     let token_hash =
-        crate::routing::identity::auth::session_credential_hash(grant_jwt, state.service_id());
+        crate::routing::identity::auth::session_credential_hash(grant_secret, state.service_id());
     Ok(SessionRecord {
         token_hash,
         account_pk: None,
@@ -698,17 +912,7 @@ pub(crate) fn session_record_from_introspected_grant_for_logout(
         endpoint,
         audience: state.service_id().clone(),
         session_public_key: Some(grant.session_public_key.as_str().to_owned()),
-        session_grant: Some(SessionGrantAuthorizationState {
-            grant_id: grant.id.clone(),
-            revocation_ref: grant.revocation_ref.clone(),
-            account_id: grant.account_id.clone(),
-            issuer_id: grant.issuer_id.clone(),
-            scopes: grant.scopes.clone(),
-            credential_class: grant.credential_class,
-            holder_binding: grant.holder_binding.clone(),
-            device_binding: grant.device_binding.clone(),
-            cnf_jkt: grant.cnf_jkt.clone(),
-        }),
+        session_grant: Some(grant.clone()),
         expires_at: grant.expires_at,
         created_at: crate::wire::now(),
         revoked_at: None,
@@ -718,15 +922,15 @@ pub(crate) fn session_record_from_introspected_grant_for_logout(
 pub(crate) fn verify_grant_dpop_request(
     state: &AppState,
     req: &Request,
-    grant_jwt: &str,
+    grant_secret: &str,
     cnf_jkt: Option<&str>,
 ) -> Result<(), AuthError> {
-    verify_grant_dpop_request_at_base(req, grant_jwt, cnf_jkt, &state.config().public_base_url)
+    verify_grant_dpop_request_at_base(req, grant_secret, cnf_jkt, &state.config().public_base_url)
 }
 
 pub(crate) fn verify_grant_dpop_request_at_base(
     req: &Request,
-    grant_jwt: &str,
+    grant_secret: &str,
     cnf_jkt: Option<&str>,
     public_base_url: &str,
 ) -> Result<(), AuthError> {
@@ -745,7 +949,7 @@ pub(crate) fn verify_grant_dpop_request_at_base(
             proof_jwt: &dpop,
             method: req.method().as_str(),
             htu: &expected_htu,
-            access_token: Some(grant_jwt),
+            access_token: Some(grant_secret),
             now,
             max_age: Duration::seconds(DPOP_MAX_AGE_SECONDS),
             max_future_skew: Duration::seconds(DPOP_MAX_FUTURE_SKEW_SECONDS),
@@ -788,7 +992,7 @@ pub(crate) fn verify_grant_dpop_request_at_base(
 pub(crate) async fn grant_dpop_session(
     state: &AppState,
     req: &Request,
-    grant_jwt: &str,
+    grant_secret: &str,
     force_fresh: bool,
 ) -> Result<SessionRecord, AuthError> {
     // 1. grant active (cached ≤120s; sensitive ops force fresh). Reads cnf_jkt, session_public_key,
@@ -797,7 +1001,7 @@ pub(crate) async fn grant_dpop_session(
     //    This is the request's single authoritative result: when the RFC 9421
     //    PoP hoop already took one for this request at this freshness or
     //    stricter, that exact result is reused instead of introspecting again.
-    let grant = request_authoritative_grant(state, req, grant_jwt, force_fresh).await?;
+    let grant = request_authoritative_grant(state, req, grant_secret, force_fresh).await?;
 
     // 5. audience == this service's service_id.
     if grant.audience_id.as_str() != state.service_id() {
@@ -819,10 +1023,13 @@ pub(crate) async fn grant_dpop_session(
     }
 
     // 2. DPoP signature valid against the grant's cnf.jkt.
-    verify_grant_dpop_request(state, req, grant_jwt, Some(&grant.cnf_jkt))?;
+    verify_grant_dpop_request(state, req, grant_secret, Some(&grant.cnf_jkt))?;
 
     Ok(session_from_verified_grant(
-        state, grant_jwt, grant, endpoint,
+        state,
+        grant_secret,
+        grant,
+        endpoint,
     ))
 }
 
@@ -841,13 +1048,13 @@ impl NativeReplyAuthenticatedSession {
 pub(crate) async fn authenticate_native_reply_session(
     state: &AppState,
     req: &mut Request,
-    grant_jwt: &str,
+    grant_secret: &str,
 ) -> Result<NativeReplyAuthenticatedSession, AuthError> {
     // The standard RFC 9421 request hoop must already have verified the request.
     // This takes (or reuses) the same strict request memo for DPoP and downstream
     // actor/ceiling checks, rather than independently parsing a JWT locally.
-    take_request_authoritative_grant(state, req, grant_jwt, true).await?;
-    let session = grant_dpop_session(state, req, grant_jwt, true).await?;
+    take_request_authoritative_grant(state, req, grant_secret, true).await?;
+    let session = grant_dpop_session(state, req, grant_secret, true).await?;
     if session.agent_session().is_none()
         || session.revoked_at.is_some()
         || !matches!(
@@ -870,31 +1077,21 @@ pub(crate) async fn authenticate_native_reply_session(
 /// to this grant.
 pub(crate) fn session_from_verified_grant(
     state: &AppState,
-    grant_jwt: &str,
+    grant_secret: &str,
     grant: SessionGrantValidationMetadata,
     endpoint: SessionEndpointState,
 ) -> SessionRecord {
-    let grant_context = SessionGrantAuthorizationState {
-        grant_id: grant.id.clone(),
-        revocation_ref: grant.revocation_ref.clone(),
-        account_id: grant.account_id.clone(),
-        issuer_id: grant.issuer_id.clone(),
-        scopes: grant.scopes.clone(),
-        credential_class: grant.credential_class,
-        holder_binding: grant.holder_binding.clone(),
-        device_binding: grant.device_binding.clone(),
-        cnf_jkt: grant.cnf_jkt.clone(),
-    };
+    let grant_context = grant.clone();
     SessionRecord {
         token_hash: crate::routing::identity::auth::session_credential_hash(
-            grant_jwt,
+            grant_secret,
             state.service_id(),
         ),
         account_pk: None,
         actor: grant.account_id.principal_id.to_string(),
         endpoint,
         audience: state.service_id().clone(),
-        session_public_key: Some(grant.session_public_key.into_string()),
+        session_public_key: Some(grant.session_public_key.as_str().to_owned()),
         session_grant: Some(grant_context),
         expires_at: grant.expires_at,
         created_at: crate::wire::now(),
@@ -956,7 +1153,7 @@ pub(crate) fn grant_session_binding(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -965,7 +1162,7 @@ mod tests {
 
     use super::*;
 
-    async fn read_mock_http_request(stream: &mut tokio::net::TcpStream) {
+    async fn read_mock_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
         let mut request = Vec::new();
         let mut content_length = None;
         let mut header_end = None;
@@ -995,27 +1192,48 @@ mod tests {
                 .zip(content_length)
                 .is_some_and(|(end, length)| request.len() >= end + length)
             {
-                return;
+                let (end, length) = header_end.zip(content_length).unwrap();
+                return request[end..end + length].to_vec();
             }
         }
     }
 
     async fn spawn_counting_introspection_mock(
         outcome: SessionGrantValidationResponseBody,
-    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        expected_secret: SessionGrantSecret,
+    ) -> (
+        String,
+        Arc<AtomicUsize>,
+        Arc<Mutex<SessionGrantValidationResponseBody>>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind introspection mock");
         let address = listener.local_addr().expect("mock address");
         let count = Arc::new(AtomicUsize::new(0));
         let observed = count.clone();
-        let body = Arc::new(serde_json::to_vec(&outcome).expect("serialize mock outcome"));
+        let expected_audience = outcome.grant.as_ref().unwrap().audience_id.clone();
+        let slot = Arc::new(Mutex::new(outcome));
+        let answers = slot.clone();
         let task = tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     return;
                 };
-                read_mock_http_request(&mut stream).await;
+                let request = read_mock_http_request(&mut stream).await;
+                let SessionGrantValidationInput::BySecret(input) =
+                    serde_json::from_slice(&request).unwrap()
+                else {
+                    panic!("request must introspect the exact opaque secret");
+                };
+                assert_eq!(input.session_grant, expected_secret);
+                assert_eq!(input.audience_id, expected_audience);
+                assert!(
+                    input.proof.is_none(),
+                    "holder proof is verified at the request gate"
+                );
+                let body = serde_json::to_vec(&*answers.lock()).unwrap();
                 observed.fetch_add(1, Ordering::SeqCst);
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -1028,7 +1246,95 @@ mod tests {
                 stream.write_all(&body).await.expect("write body");
             }
         });
-        (format!("http://{address}/introspect"), count, task)
+        (format!("http://{address}/introspect"), count, slot, task)
+    }
+
+    enum GatedIntrospectionReply {
+        Outcome(Box<SessionGrantValidationResponseBody>),
+        Failure(u16),
+        Close,
+    }
+
+    async fn spawn_gated_introspection_mock(
+        expected_secret: SessionGrantSecret,
+        expected_audience: DidCoreId,
+    ) -> (
+        String,
+        tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<GatedIntrospectionReply>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (observed, requests) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    connection = listener.accept() => {
+                        let (mut stream, _) = connection.unwrap();
+                        let observed = observed.clone();
+                        let expected_secret = expected_secret.clone();
+                        let expected_audience = expected_audience.clone();
+                        handlers.spawn(async move {
+                            let request = tokio::time::timeout(
+                                StdDuration::from_secs(5),
+                                read_mock_http_request(&mut stream),
+                            ).await.unwrap();
+                            let SessionGrantValidationInput::BySecret(input) =
+                                serde_json::from_slice(&request).unwrap()
+                            else {
+                                panic!("the real reader must send the exact opaque secret");
+                            };
+                            assert_eq!(input.session_grant, expected_secret);
+                            assert_eq!(input.audience_id, expected_audience);
+                            assert!(input.proof.is_none());
+                            let (reply, response) = tokio::sync::oneshot::channel();
+                            observed.send(reply).unwrap();
+                            let reply = tokio::time::timeout(StdDuration::from_secs(10), response)
+                                .await.unwrap().unwrap();
+                            let (status, body) = match reply {
+                                GatedIntrospectionReply::Outcome(outcome) =>
+                                    (200, serde_json::to_vec(&outcome).unwrap()),
+                                GatedIntrospectionReply::Failure(status) => (status, Vec::new()),
+                                GatedIntrospectionReply::Close => return,
+                            };
+                            let headers = format!(
+                                "HTTP/1.1 {status} mock\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                                body.len(),
+                            );
+                            stream.write_all(headers.as_bytes()).await.unwrap();
+                            stream.write_all(&body).await.unwrap();
+                        });
+                    }
+                    completed = handlers.join_next(), if !handlers.is_empty() => {
+                        completed.unwrap().unwrap();
+                    }
+                }
+            }
+        });
+        (format!("http://{address}/introspect"), requests, task)
+    }
+
+    async fn next_gated_introspection_reply(
+        requests: &mut tokio::sync::mpsc::UnboundedReceiver<
+            tokio::sync::oneshot::Sender<GatedIntrospectionReply>,
+        >,
+    ) -> tokio::sync::oneshot::Sender<GatedIntrospectionReply> {
+        tokio::time::timeout(StdDuration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .expect("the real HTTP reader must reach the issuer")
+    }
+
+    fn start_gated_introspection(
+        state: &Arc<AppState>,
+        secret: &SessionGrantSecret,
+    ) -> tokio::task::JoinHandle<Result<SessionGrantValidationMetadata, AuthError>> {
+        let state = Arc::clone(state);
+        let secret = secret.clone();
+        tokio::spawn(
+            async move { introspect_session_grant_cached(&state, secret.as_str(), true).await },
+        )
     }
 
     #[test]
@@ -1109,30 +1415,36 @@ mod tests {
     /// a cached result never satisfies a force-fresh consumer.
     #[test]
     fn request_memo_reuses_only_the_same_token_at_sufficient_freshness() {
+        let state = AppState::new(
+            crate::config::AppConfig::test_default(),
+            coland_storage_postgres::Db { pool: None },
+        );
         let grant = test_introspection_grant();
         let mut cached = Request::default();
         cached.extensions_mut().insert(RequestAuthoritativeGrant {
-            grant_jwt: "token-a".to_owned(),
+            grant_secret: "token-a".to_owned(),
             taken_fresh: false,
+            authority_context: introspection_authority_context(&state),
             grant: grant.clone(),
         });
-        assert!(memoized_grant(&cached, "token-a", false).is_some());
+        assert!(memoized_grant(&state, &cached, "token-a", false).is_some());
         assert!(
-            memoized_grant(&cached, "token-a", true).is_none(),
+            memoized_grant(&state, &cached, "token-a", true).is_none(),
             "a cached result must not be reused for a force-fresh consumer",
         );
-        assert!(memoized_grant(&cached, "token-b", false).is_none());
+        assert!(memoized_grant(&state, &cached, "token-b", false).is_none());
 
         let mut fresh = Request::default();
         fresh.extensions_mut().insert(RequestAuthoritativeGrant {
-            grant_jwt: "token-a".to_owned(),
+            grant_secret: "token-a".to_owned(),
             taken_fresh: true,
+            authority_context: introspection_authority_context(&state),
             grant,
         });
-        assert!(memoized_grant(&fresh, "token-a", true).is_some());
-        assert!(memoized_grant(&fresh, "token-a", false).is_some());
-        assert!(memoized_grant(&fresh, "token-b", true).is_none());
-        assert!(memoized_grant(&Request::default(), "token-a", false).is_none());
+        assert!(memoized_grant(&state, &fresh, "token-a", true).is_some());
+        assert!(memoized_grant(&state, &fresh, "token-a", false).is_some());
+        assert!(memoized_grant(&state, &fresh, "token-b", true).is_none());
+        assert!(memoized_grant(&state, &Request::default(), "token-a", false).is_none());
     }
 
     #[tokio::test]
@@ -1145,7 +1457,11 @@ mod tests {
             one_time_use_consumed: false,
             grant: Some(grant),
         };
-        let (url, count, mock) = spawn_counting_introspection_mock(outcome).await;
+        let secret = SessionGrantSecret::from_bytes(
+            sha2::Sha256::digest(uuid::Uuid::now_v7().as_bytes()).into(),
+        );
+        let (url, count, _, mock) =
+            spawn_counting_introspection_mock(outcome, secret.clone()).await;
         let mut config = crate::config::AppConfig::test_default();
         config.development_mode = true;
         config.seed_demo_data = false;
@@ -1153,7 +1469,7 @@ mod tests {
         config.account_authority_url = Some(url.trim_end_matches("/introspect").to_owned());
         config.register_test_internal_authority_channel("counting-mock-secret");
         let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
-        let token = format!("counting-grant-{}", url.rsplit(':').next().unwrap());
+        let token = secret.into_string();
         let key = introspection_cache_key_for(&state, &token);
         INTROSPECTION_CACHE.lock().remove(&key);
         invalidate_introspection_http_client(&url, true);
@@ -1190,26 +1506,404 @@ mod tests {
         mock.abort();
     }
 
+    fn state_for_introspection(url: &str) -> AppState {
+        let mut config = crate::config::AppConfig::test_default();
+        config.development_mode = true;
+        config.seed_demo_data = false;
+        config.session_grant_introspection_url = Some(url.to_owned());
+        config.account_authority_url = Some(url.trim_end_matches("/introspect").to_owned());
+        config.register_test_internal_authority_channel("opaque-consumer-test");
+        AppState::new(config, coland_storage_postgres::Db { pool: None })
+    }
+
+    fn active_outcome(grant: SessionGrantValidationMetadata) -> SessionGrantValidationResponseBody {
+        SessionGrantValidationResponseBody {
+            active: true,
+            status: SessionGrantAdminIntrospectionStatus::Active,
+            proof_required: false,
+            one_time_use_consumed: false,
+            grant: Some(grant),
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_revocation_removes_the_previous_positive_cache_entry() {
+        let grant = test_introspection_grant();
+        let secret = SessionGrantSecret::from_bytes(
+            sha2::Sha256::digest(uuid::Uuid::now_v7().as_bytes()).into(),
+        );
+        let (url, count, slot, task) =
+            spawn_counting_introspection_mock(active_outcome(grant.clone()), secret.clone()).await;
+        let state = state_for_introspection(&url);
+        introspect_session_grant_cached(&state, secret.as_str(), false)
+            .await
+            .unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        let mut revoked = grant;
+        revoked.revoked_at = Some(crate::wire::now());
+        *slot.lock() = SessionGrantValidationResponseBody {
+            active: false,
+            status: SessionGrantAdminIntrospectionStatus::Revoked,
+            proof_required: false,
+            one_time_use_consumed: false,
+            grant: Some(revoked),
+        };
+        assert_eq!(
+            introspect_session_grant_cached(&state, secret.as_str(), true)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(
+            !INTROSPECTION_CACHE
+                .lock()
+                .contains_key(&introspection_cache_key_for(&state, secret.as_str()))
+        );
+        assert_eq!(
+            introspect_session_grant_cached(&state, secret.as_str(), false)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            3,
+            "an ordinary read cannot resurrect the old positive result"
+        );
+        invalidate_introspection_http_client(&url, true);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn issuer_response_cannot_establish_its_own_trust_or_bypass_validity() {
+        for (case, expected_status) in [
+            ("issuer", StatusCode::SERVICE_UNAVAILABLE),
+            ("future", StatusCode::UNAUTHORIZED),
+            ("expired", StatusCode::UNAUTHORIZED),
+        ] {
+            let mut grant = test_introspection_grant();
+            match case {
+                "issuer" => {
+                    grant.metadata.issuer_id =
+                        DidCoreId::new("ak:did_core:web:untrusted.example").unwrap()
+                }
+                "future" => grant.metadata.not_before = crate::wire::now() + Duration::minutes(1),
+                "expired" => {
+                    grant.metadata.not_before = crate::wire::now() - Duration::minutes(2);
+                    grant.metadata.expires_at = crate::wire::now() - Duration::minutes(1);
+                }
+                _ => unreachable!(),
+            }
+            let secret = SessionGrantSecret::from_bytes(
+                sha2::Sha256::digest(uuid::Uuid::now_v7().as_bytes()).into(),
+            );
+            let (url, count, _, task) =
+                spawn_counting_introspection_mock(active_outcome(grant), secret.clone()).await;
+            let state = state_for_introspection(&url);
+            let error = introspect_session_grant_cached(&state, secret.as_str(), false)
+                .await
+                .unwrap_err();
+            assert_eq!(error.0, expected_status, "{case}");
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+            assert!(cache_lookup(&introspection_cache_key_for(&state, secret.as_str())).is_none());
+            invalidate_introspection_http_client(&url, true);
+            task.abort();
+        }
+    }
+
+    #[test]
+    fn dpop_ath_binds_the_canonical_ascii_secret() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0x71; 32]);
+        let secret = SessionGrantSecret::from_bytes([0xf1; 32]);
+        let jwk = arkret_signatures::JsonWebKey::from_ed25519_verifying_key(&key.verifying_key());
+        let thumbprint = arkret_signatures::dpop::dpop_jwk_thumbprint(&jwk).unwrap();
+        let proof = arkret_signatures::dpop::build_dpop_proof(
+            &arkret_signatures::dpop::DpopProofRequest::new(
+                "GET",
+                "https://station.example/_arkret/self/account/viewer",
+            )
+            .access_token(secret.as_str()),
+            &key,
+        )
+        .unwrap();
+        let claims: serde_json::Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(proof.header_value.split('.').nth(1).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            claims["ath"],
+            URL_SAFE_NO_PAD.encode(Sha256::digest(secret.as_str().as_bytes()))
+        );
+        assert_ne!(
+            claims["ath"],
+            URL_SAFE_NO_PAD.encode(Sha256::digest([0xf1; 32])),
+            "ath hashes the ASCII representation rather than decoded secret bytes"
+        );
+        let mut request = Request::default();
+        request
+            .uri_mut()
+            .clone_from(&"/_arkret/self/account/viewer".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("dpop", proof.header_value.parse().unwrap());
+        verify_grant_dpop_request_at_base(
+            &request,
+            secret.as_str(),
+            Some(&thumbprint),
+            "https://station.example",
+        )
+        .unwrap();
+        assert!(
+            verify_grant_dpop_request_at_base(
+                &request,
+                SessionGrantSecret::from_bytes([0xf2; 32]).as_str(),
+                Some(&thumbprint),
+                "https://station.example"
+            )
+            .is_err(),
+            "the proof cannot bind another opaque secret"
+        );
+    }
+
     #[test]
     fn self_introspection_cache_expires_at_exact_120_second_boundary() {
         let key = "controlled-self-ttl";
         let inserted_at = Instant::now();
-        INTROSPECTION_CACHE.lock().insert(
-            key.to_owned(),
-            CachedIntrospection {
-                grant: test_introspection_grant(),
-                inserted_at,
-            },
-        );
+        let mut cache = HashMap::new();
+        let lease = begin_introspection_read_locked(&mut cache, key, inserted_at, 2);
+        assert!(publish_introspection_locked(
+            &mut cache,
+            key,
+            &lease,
+            test_introspection_grant(),
+            inserted_at,
+        ));
         assert!(
-            cache_lookup_at(
+            cache_lookup_locked(
+                &mut cache,
                 key,
                 inserted_at + INTROSPECTION_CACHE_TTL - StdDuration::from_nanos(1)
             )
             .is_some()
         );
-        assert!(cache_lookup_at(key, inserted_at + INTROSPECTION_CACHE_TTL).is_none());
-        INTROSPECTION_CACHE.lock().remove(key);
+        assert!(
+            cache_lookup_locked(&mut cache, key, inserted_at + INTROSPECTION_CACHE_TTL,).is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_terminal_observation_retires_every_older_inflight_active_result() {
+        for status in [
+            SessionGrantAdminIntrospectionStatus::Revoked,
+            SessionGrantAdminIntrospectionStatus::Superseded,
+        ] {
+            let grant = test_introspection_grant();
+            let secret = SessionGrantSecret::from_bytes(
+                sha2::Sha256::digest(uuid::Uuid::now_v7().as_bytes()).into(),
+            );
+            let (url, mut requests, mock) =
+                spawn_gated_introspection_mock(secret.clone(), grant.audience_id.clone()).await;
+            let state = Arc::new(state_for_introspection(&url));
+            let first = start_gated_introspection(&state, &secret);
+            let first_reply = next_gated_introspection_reply(&mut requests).await;
+            let terminal = start_gated_introspection(&state, &secret);
+            let terminal_reply = next_gated_introspection_reply(&mut requests).await;
+            // This third read starts later but also sampled active before the
+            // terminal observation. A request-start counter alone is insufficient.
+            let later = start_gated_introspection(&state, &secret);
+            let later_reply = next_gated_introspection_reply(&mut requests).await;
+            let mut inactive = grant.clone();
+            if status == SessionGrantAdminIntrospectionStatus::Revoked {
+                inactive.revoked_at = Some(crate::wire::now());
+            }
+            terminal_reply
+                .send(GatedIntrospectionReply::Outcome(Box::new(
+                    SessionGrantValidationResponseBody {
+                        active: false,
+                        status,
+                        proof_required: false,
+                        one_time_use_consumed: false,
+                        grant: Some(inactive),
+                    },
+                )))
+                .unwrap_or_else(|_| panic!("terminal reader closed early"));
+            assert_eq!(
+                terminal.await.unwrap().unwrap_err().0,
+                StatusCode::UNAUTHORIZED
+            );
+            first_reply
+                .send(GatedIntrospectionReply::Outcome(Box::new(active_outcome(
+                    grant.clone(),
+                ))))
+                .unwrap_or_else(|_| panic!("first reader closed early"));
+            later_reply
+                .send(GatedIntrospectionReply::Outcome(Box::new(active_outcome(
+                    grant,
+                ))))
+                .unwrap_or_else(|_| panic!("later reader closed early"));
+            for read in [first, later] {
+                assert_eq!(
+                    read.await.unwrap().unwrap_err().1,
+                    "temporarily_unavailable",
+                    "retired active bytes cannot be returned or cached",
+                );
+            }
+            assert!(cache_lookup(&introspection_cache_key_for(&state, secret.as_str())).is_none());
+            invalidate_introspection_http_client(&url, true);
+            mock.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_invalidation_cannot_be_undone_after_a_new_slot_is_created() {
+        let grant = test_introspection_grant();
+        let secret = SessionGrantSecret::from_bytes(
+            sha2::Sha256::digest(uuid::Uuid::now_v7().as_bytes()).into(),
+        );
+        let (url, mut requests, mock) =
+            spawn_gated_introspection_mock(secret.clone(), grant.audience_id.clone()).await;
+        let state = Arc::new(state_for_introspection(&url));
+        let old = start_gated_introspection(&state, &secret);
+        let old_reply = next_gated_introspection_reply(&mut requests).await;
+        invalidate_cached_grant(&state, secret.as_str());
+        let current = start_gated_introspection(&state, &secret);
+        let current_reply = next_gated_introspection_reply(&mut requests).await;
+        current_reply
+            .send(GatedIntrospectionReply::Outcome(Box::new(active_outcome(
+                grant.clone(),
+            ))))
+            .unwrap_or_else(|_| panic!("current reader closed early"));
+        current.await.unwrap().unwrap();
+        old_reply
+            .send(GatedIntrospectionReply::Outcome(Box::new(active_outcome(
+                grant,
+            ))))
+            .unwrap_or_else(|_| panic!("old reader closed early"));
+        assert_eq!(old.await.unwrap().unwrap_err().1, "temporarily_unavailable");
+        assert!(cache_lookup(&introspection_cache_key_for(&state, secret.as_str())).is_some());
+        invalidate_cached_grant(&state, secret.as_str());
+        invalidate_introspection_http_client(&url, true);
+        mock.abort();
+    }
+
+    #[tokio::test]
+    async fn transport_and_protocol_failures_do_not_invent_a_terminal_observation() {
+        for close_transport in [false, true] {
+            let grant = test_introspection_grant();
+            let secret = SessionGrantSecret::from_bytes(
+                sha2::Sha256::digest(uuid::Uuid::now_v7().as_bytes()).into(),
+            );
+            let (url, mut requests, mock) =
+                spawn_gated_introspection_mock(secret.clone(), grant.audience_id.clone()).await;
+            let state = Arc::new(state_for_introspection(&url));
+            let active = start_gated_introspection(&state, &secret);
+            let active_reply = next_gated_introspection_reply(&mut requests).await;
+            let failed = start_gated_introspection(&state, &secret);
+            for _ in 0..if close_transport { 2 } else { 1 } {
+                let reply = next_gated_introspection_reply(&mut requests).await;
+                reply
+                    .send(if close_transport {
+                        GatedIntrospectionReply::Close
+                    } else {
+                        GatedIntrospectionReply::Failure(503)
+                    })
+                    .unwrap_or_else(|_| panic!("failing reader closed early"));
+            }
+            assert_eq!(
+                failed.await.unwrap().unwrap_err().1,
+                "temporarily_unavailable"
+            );
+            active_reply
+                .send(GatedIntrospectionReply::Outcome(Box::new(active_outcome(
+                    grant,
+                ))))
+                .unwrap_or_else(|_| panic!("active reader closed early"));
+            active.await.unwrap().unwrap();
+            assert!(cache_lookup(&introspection_cache_key_for(&state, secret.as_str())).is_some());
+            invalidate_cached_grant(&state, secret.as_str());
+            invalidate_introspection_http_client(&url, true);
+            mock.abort();
+        }
+    }
+
+    #[test]
+    fn cache_eviction_and_expiry_never_allow_an_old_lease_to_recreate_a_slot() {
+        let mut cache = HashMap::new();
+        let now = Instant::now();
+        let old = begin_introspection_read_locked(&mut cache, "a", now, 1);
+        let _other =
+            begin_introspection_read_locked(&mut cache, "b", now + StdDuration::from_millis(1), 1);
+        let current =
+            begin_introspection_read_locked(&mut cache, "a", now + StdDuration::from_millis(2), 1);
+        assert_eq!(cache.len(), 1);
+        assert!(!publish_introspection_locked(
+            &mut cache,
+            "a",
+            &old,
+            test_introspection_grant(),
+            now + StdDuration::from_millis(3),
+        ));
+        assert!(publish_introspection_locked(
+            &mut cache,
+            "a",
+            &current,
+            test_introspection_grant(),
+            now + StdDuration::from_millis(4),
+        ));
+        assert!(!publish_introspection_locked(
+            &mut cache,
+            "a",
+            &current,
+            test_introspection_grant(),
+            now + StdDuration::from_millis(2) + INTROSPECTION_CACHE_TTL,
+        ));
+        assert!(
+            cache_lookup_locked(
+                &mut cache,
+                "a",
+                now + StdDuration::from_millis(2) + INTROSPECTION_CACHE_TTL,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_late_active_result_preserves_the_newer_observation_and_original_ttl() {
+        let mut cache = HashMap::new();
+        let now = Instant::now();
+        let old = begin_introspection_read_locked(&mut cache, "a", now, 2);
+        let current =
+            begin_introspection_read_locked(&mut cache, "a", now + StdDuration::from_secs(1), 2);
+        assert!(publish_introspection_locked(
+            &mut cache,
+            "a",
+            &current,
+            test_introspection_grant(),
+            now + StdDuration::from_secs(2),
+        ));
+        assert!(publish_introspection_locked(
+            &mut cache,
+            "a",
+            &old,
+            test_introspection_grant(),
+            now + StdDuration::from_secs(3),
+        ));
+        assert_eq!(
+            cache["a"].cached.as_ref().unwrap().inserted_at,
+            current.started_at
+        );
+        assert!(
+            cache_lookup_locked(
+                &mut cache,
+                "a",
+                current.started_at + INTROSPECTION_CACHE_TTL,
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1267,60 +1961,84 @@ mod tests {
         INTROSPECTION_HTTP_CLIENTS.lock().remove(&cache_key);
     }
 
-    fn test_introspection_grant() -> SessionGrantValidationMetadata {
+    pub(crate) fn test_introspection_grant() -> SessionGrantValidationMetadata {
+        let session_public_key = arkret_models_identity::session_credential::CanonicalSessionPublicJwk::new(
+            r#"{"crv":"Ed25519","kty":"OKP","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+        ).unwrap();
+        let station = crate::test_event::station_id();
+        let device_id = DeviceId::new("ak:device:0196419b-0000-7000-8000-000000000001").unwrap();
         SessionGrantValidationMetadata {
-            scope_details: None,
-            id: SessionGrantId::new(
-                "ak:session_grant:Aepgr15HbtERKfqPAh9SrfWBdihSvX_c94JvujvBS2f-",
-            )
-            .unwrap(),
-            issuer_id: DidCoreId::new("ak:did_core:web:coauth.local").unwrap(),
-            account_id: arkret_wire::AccountId::new(
-                DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
-                crate::test_event::station_id(),
-            ),
-            device_id: Some(
-                DeviceId::new("ak:device:0196419b-0000-7000-8000-000000000001").unwrap(),
-            ),
-            device_binding: Some(
-                arkret_models_identity::session_credential::SessionGrantDeviceBinding {
-                    device_id: DeviceId::new(
-                        "ak:device:0196419b-0000-7000-8000-000000000001",
-                    )
+            metadata: arkret_models_identity::SessionGrantMetadata {
+                id: SessionGrantId::new("ak:session_grant:0196419b-0000-7000-8000-000000000001")
                     .unwrap(),
+                issuer_id: station.clone(),
+                account_id: arkret_wire::AccountId::new(
+                    DidCoreId::new("ak:did_core:web:alice.example").unwrap(),
+                    station.clone(),
+                ),
+                device_id: Some(device_id.clone()),
+                audience_id: station,
+                scopes: vec!["ak.self.committed_event.read.scan.v1".to_owned()],
+                not_before: crate::wire::now() - Duration::seconds(1),
+                expires_at: crate::wire::now() + Duration::minutes(5),
+                session_id: "fixture-session-1".to_owned(),
+                cnf_jkt: session_public_key.thumbprint_sha256().unwrap(),
+                session_public_key,
+                credential_class: arkret_models_identity::SessionGrantCredentialClass::Standard,
+                holder_binding: SessionGrantHolderBinding::HumanDevice {
+                    device_binding: device_id.to_string(),
+                },
+                device_binding: Some(arkret_models_identity::SessionGrantDeviceBinding {
+                    device_id,
                     authorization_event_id: arkret_identifiers::EventId::from_digest(
                         arkret_canonical::DigestSuite::Sha256,
                         [0x42; 32],
                     ),
                     model_generation_ref: 1,
-                },
-            ),
-            audience_id: arkret_wire::project_did_to_core_id(
-                    &arkret_wire::Did::new("did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service").unwrap(),
-                )
-                .unwrap(),
-            scopes: vec!["ak.self.committed_event.read.scan.v1".to_owned()],
-            expires_at: crate::wire::now() + Duration::minutes(5),
-            revoked_at: None,
-            revocation_ref: "ak:session:grant-1".to_owned(),
-            session_public_key:
-                arkret_models_identity::session_credential::CanonicalSessionPublicJwk::new(
-                    r#"{"crv":"Ed25519","kty":"OKP","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
-                )
-                .unwrap(),
-            cnf_jkt: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
-            credential_class:
-                arkret_models_identity::session_credential::SessionGrantCredentialClass::Standard,
-            holder_binding: SessionGrantHolderBinding::HumanDevice {
-                device_binding: "ak:device:0196419b-0000-7000-8000-000000000001".to_owned(),
+                }),
+                proof_kind: None,
+                scope_details: None,
             },
+            revoked_at: None,
+            revocation_ref: "fixture-revocation-1".to_owned(),
         }
+    }
+
+    pub(crate) fn test_agent_metadata(
+        scopes: &[&str],
+    ) -> arkret_models_identity::SessionGrantMetadata {
+        let mut metadata = test_introspection_grant().metadata;
+        metadata.device_id = None;
+        metadata.device_binding = None;
+        metadata.account_id.principal_id = DidCoreId::new("ak:did_core:web:agent.example").unwrap();
+        metadata.scopes = scopes.iter().map(|value| (*value).to_owned()).collect();
+        metadata.scopes.sort();
+        metadata.scopes.dedup();
+        metadata.holder_binding = SessionGrantHolderBinding::AgentRuntime {
+            agent_id: metadata.account_id.principal_id.clone(),
+            agent_key_authorization_ref: arkret_identifiers::EventId::from_digest(
+                arkret_canonical::DigestSuite::Sha256,
+                [0x43; 32],
+            ),
+            verification_method: arkret_wire::DidUrl::new(
+                "did:web:agent.example#runtime-1".to_owned(),
+            )
+            .unwrap(),
+        };
+        metadata.scope_details = Some(serde_json::from_value(serde_json::json!({
+            "controller_principal_id":"ak:did_core:web:alice.example",
+            "agent_key_authorization_ref": arkret_identifiers::EventId::from_digest(arkret_canonical::DigestSuite::Sha256,[0x43;32]),
+            "realm_ids":[],"strand_ids":[],"resources":{"realm_ids":[],"strand_ids":[]},
+            "constraints":{"allowed_tracks":["discussion"],"allowed_data_labels":[],"allowed_endpoints":[]},
+            "capability_grant_refs":[],"policy_refs":[]
+        })).unwrap());
+        metadata
     }
 
     #[test]
     fn device_session_binding_rejects_metadata_mismatch() {
         let mut grant = test_introspection_grant();
-        grant.device_id =
+        grant.metadata.device_id =
             Some(DeviceId::new("ak:device:0196419b-0000-7000-8000-000000000002").unwrap());
 
         let err = session_binding_from_introspection(&grant).unwrap_err();
@@ -1339,9 +2057,10 @@ mod tests {
         config.seed_demo_data = false;
         let state = AppState::new(config, coland_storage_postgres::Db { pool: None });
         let mut grant = test_introspection_grant();
-        grant.account_id.station_id = DidCoreId::new("ak:did_core:web:origin.example").unwrap();
+        grant.metadata.account_id.station_id =
+            DidCoreId::new("ak:did_core:web:origin.example").unwrap();
         assert!(session_binding_from_introspection(&grant).is_err());
-        grant.audience_id = grant.account_id.station_id.clone();
+        grant.metadata.audience_id = grant.account_id.station_id.clone();
         let expected = grant.account_id.clone();
         let endpoint = session_binding_from_introspection(&grant).unwrap();
         let mut session = session_from_verified_grant(&state, "test-grant", grant, endpoint);
@@ -1372,68 +2091,24 @@ mod tests {
     #[test]
     fn agent_holder_binding_materializes_closed_authorization_context() {
         let mut grant = test_introspection_grant();
-        // Wire-valid Agent grants omit human device metadata and retain the
-        // immutable issuer scope alongside their typed holder binding.
-        grant.device_id = None;
-        grant.device_binding = None;
-        grant.account_id = arkret_wire::AccountId::new(
-            DidCoreId::new("ak:did_core:web:agent.example").unwrap(),
-            grant.audience_id.clone(),
-        );
-        grant.scopes = vec!["ak.self.committed_event.read.scan.v1".to_owned()];
-        grant.holder_binding = SessionGrantHolderBinding::AgentRuntime {
-            agent_id: DidCoreId::new("ak:did_core:web:agent.example").unwrap(),
-            agent_key_authorization_ref: arkret_identifiers::EventId::new(
-                "ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
-            )
-            .unwrap(),
-            verification_method: arkret_wire::DidUrl::new(
-                "did:web:agent.example#runtime-1".to_owned(),
-            )
-            .unwrap(),
-        };
-        grant.scope_details = Some(
-            serde_json::json!({
-                "controller_principal_id": "ak:did_core:web:alice.example",
-                "agent_key_authorization_ref": "ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                "realm_ids": [],
-                "strand_ids": [],
-                "resources": {"realm_ids": [], "strand_ids": []},
-                "constraints": {
-                    "allowed_tracks": ["discussion"], "allowed_data_labels": [], "allowed_endpoints": []
-                },
-                "capability_grant_refs": [],
-                "policy_refs": []
-            })
-            .as_object()
-            .unwrap()
-            .clone(),
-        );
+        grant.metadata = test_agent_metadata(&["ak.self.committed_event.read.scan.v1"]);
         grant.validate().unwrap();
-
         let SessionEndpointState::AgentRuntime {
             state: agent_session,
         } = session_binding_from_introspection(&grant).unwrap()
         else {
             panic!("Agent grant must produce an Agent endpoint");
         };
-        assert_eq!(
-            agent_session.granted_scope,
-            vec!["ak.self.committed_event.read.scan.v1"]
-        );
+        assert_eq!(agent_session.metadata, grant.metadata);
         assert_eq!(agent_session.freshness_state, FreshnessState::Fresh);
-        assert_eq!(
-            agent_session.scope_details["scope_details"],
-            serde_json::to_value(grant.scope_details.as_ref().unwrap()).unwrap()
-        );
-        assert_eq!(
-            agent_session.scope_details["session_grant_revocation_ref"],
-            "ak:session:grant-1"
-        );
-        grant.scope_details.as_mut().unwrap().remove("resources");
+        let mut incomplete = serde_json::to_value(&grant).unwrap();
+        incomplete["scope_details"]
+            .as_object_mut()
+            .unwrap()
+            .remove("resources");
         assert!(
-            session_binding_from_introspection(&grant).is_err(),
-            "missing resource metadata cannot become an unrestricted Agent session"
+            serde_json::from_value::<SessionGrantValidationMetadata>(incomplete).is_err(),
+            "missing resources cannot become an unrestricted Agent session"
         );
     }
 }

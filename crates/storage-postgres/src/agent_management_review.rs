@@ -446,8 +446,16 @@ async fn pins(
     if request.management_operation == ManagementOperation::Publish {
         let payload: arkret_models_collaboration::agent_interaction::AgentInteractionSetPayload =
             serde_json::from_value(json!(&event.payload)).map_err(invalid)?;
-        let revision = mode.as_ref().map(|row| serde_json::from_value::<arkret_wire::CurrentRevision>(json!({"commit_id":row.value["current_commit_id"],"stream_position":row.value["current_stream_position"]}))).transpose().map_err(invalid)?;
-        if revision != payload.expected_revision {
+        let revision = mode
+            .as_ref()
+            .map(|row| {
+                serde_json::from_value::<arkret_wire::RealmCommitId>(
+                    row.value["current_commit_id"].clone(),
+                )
+            })
+            .transpose()
+            .map_err(invalid)?;
+        if revision != payload.expected_commit_id {
             return Err(refused(
                 "failed_precondition",
                 "public interaction CAS changed",
@@ -1520,6 +1528,18 @@ pub(crate) async fn lock_candidate_current_realms_in_connection(
         }
         _ => Vec::new(),
     });
+    extra_realms.extend(
+        crate::realm_authorization_cut::call_delegated_account_candidate_realms(conn, event)
+            .await?,
+    );
+    extra_realms.extend(
+        crate::agent_producer_signer_keys::human_author_candidate_realms_in_connection(conn, event)
+            .await?,
+    );
+    extra_realms.extend(
+        crate::capability_grant_current_states::owner_transfer_candidate_realms(conn, event)
+            .await?,
+    );
     let configuration_account = crate::applet_configuration::candidate_account(conn, event).await?;
     let Some(prepared) = prepared else {
         if configuration_account.is_some() {

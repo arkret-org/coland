@@ -66,7 +66,7 @@ pub(super) async fn commit_revoke_command_terminal_in_connection(
     use arkret_models_crypto::{SecurityRotationRevokeCommandDecision, SecurityTransactionStep};
 
     write.validate()?;
-    let resource = &write.transaction.resource;
+    let resource = write.transaction.rotation()?;
     let proposal = resource.revoke_proposal.as_ref().expect("validated");
     let outcome = resource.revoke_command_outcome.as_ref().expect("validated");
     let existing = load_one(conn, resource.transaction_id.as_str(), true)
@@ -108,7 +108,7 @@ pub(super) async fn commit_revoke_command_terminal_in_connection(
                 "rotation terminal has no immutable proposal dot",
             )
         })?;
-    let plan = resource.security_rotation_plan().expect("validated");
+    let plan = &resource.prepared_plan;
     if dot.commit_id != proposal.covering_commit_id.as_str()
         || accepted.commit_json["commit_id"].as_str() != Some(proposal.covering_commit_id.as_str())
         || accepted.commit_json["event_ref"].as_str() != Some(proposal.proposal_event_id.as_str())
@@ -121,7 +121,7 @@ pub(super) async fn commit_revoke_command_terminal_in_connection(
             "rotation terminal differs from its accepted proposal",
         ));
     }
-    if existing.resource == *resource {
+    if existing.rotation()? == resource {
         let durable = load_step_outcome(
             conn,
             resource.transaction_id.as_str(),
@@ -151,7 +151,7 @@ pub(super) async fn commit_revoke_command_terminal_in_connection(
     initial.revoke_command_outcome = None;
     initial.accepted_steps.clear();
     initial.terminal_outcome = None;
-    if existing.resource != initial {
+    if *existing.rotation()? != initial {
         return Err(rejected(
             ConflictCode::DuplicateConflict,
             "rotation terminal changed its accepted proposal or first result",
@@ -192,15 +192,10 @@ pub(super) async fn commit_revoke_proposal_in_connection(
     write: RevokeProposalCommitWrite,
 ) -> Result<RealmCommit, PgTransactionError> {
     write.validate()?;
-    let resource = &write.transaction.resource;
+    let resource = write.transaction.rotation()?;
     let event = &write.commit.event;
     let commit = &write.commit.commit;
-    let authorizer = resource.authorizing_device_id.as_ref().ok_or_else(|| {
-        rejected(
-            ConflictCode::FailedPrecondition,
-            "rotation authorizing device is absent",
-        )
-    })?;
+    let authorizer = &resource.authorizing_device_id;
     let payload: DeviceRevokePayload = serde_json::from_value(
         serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
     )
@@ -260,7 +255,7 @@ pub(super) async fn commit_revoke_proposal_in_connection(
             "rotation transaction is absent",
         )
     })?;
-    let mut proposal_state = existing.resource.clone();
+    let mut proposal_state = existing.rotation()?.clone();
     proposal_state.revoke_command_outcome = None;
     proposal_state.accepted_steps.clear();
     proposal_state.terminal_outcome = None;
@@ -376,7 +371,7 @@ pub(super) async fn commit_revoke_proposal_in_connection(
 
     let mut initial = resource.clone();
     initial.revoke_proposal = None;
-    if existing.resource != initial
+    if *existing.rotation()? != initial
         || existing.canonical_request != write.transaction.canonical_request
     {
         return Err(rejected(

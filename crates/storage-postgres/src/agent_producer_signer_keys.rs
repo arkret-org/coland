@@ -35,6 +35,100 @@ struct AccountDeviceSourceRole {
     human: bool,
 }
 
+#[derive(QueryableByName)]
+struct NativeHumanPcr {
+    #[diesel(sql_type = Text)]
+    realm_id: String,
+}
+
+#[derive(QueryableByName)]
+struct NativeGovernor {
+    #[diesel(sql_type = Text)]
+    service_id: String,
+}
+
+/// Immutable accepted inception selects a lock, never a current permission.
+pub(crate) async fn immutable_human_pcr_in_connection(
+    conn: &mut AsyncPgConnection,
+    account: &arkret_wire::AccountId,
+) -> PersistenceResult<Option<arkret_wire::RealmId>> {
+    let rows =
+        sql_query("SELECT realm_id FROM pcr_genesis_units WHERE principal_id=$1 AND station_id=$2")
+            .bind::<Text, _>(account.principal_id.as_str())
+            .bind::<Text, _>(account.station_id.as_str())
+            .get_results::<NativeHumanPcr>(&mut *conn)
+            .await
+            .map_err(PersistenceError::database)?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    if rows.len() != 1 {
+        return Err(PersistenceError::Conflict(
+            "temporarily_unavailable: native Human inception is not unique".into(),
+        ));
+    }
+    let realm = arkret_wire::RealmId::new(row.realm_id.clone())
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    if !matches!(crate::pcr_private_authority::accepted_governance(conn, &realm).await?,
+        arkret_wire::GenesisGovernance::Human(ref holder) if holder == account)
+    {
+        return Err(PersistenceError::Conflict(
+            "temporarily_unavailable: native Human PCR differs from its accepted inception".into(),
+        ));
+    }
+    Ok(Some(realm))
+}
+
+pub(crate) async fn governor_for_lock_plan_in_connection(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+) -> PersistenceResult<Option<arkret_wire::DidCoreId>> {
+    sql_query("SELECT service_id FROM realm_authorities WHERE realm_id=$1")
+        .bind::<Text, _>(realm.as_str())
+        .get_result::<NativeGovernor>(&mut *conn)
+        .await
+        .optional()
+        .map_err(PersistenceError::database)?
+        .map(|row| {
+            arkret_wire::DidCoreId::new(row.service_id)
+                .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))
+        })
+        .transpose()
+}
+
+/// All ordinary local Human primary sources use this same pre-lock plan.
+/// Missing role/current never establishes a positive source, and exact replay
+/// still precedes the actual mutable Device admission gate.
+pub(crate) async fn human_author_candidate_realms_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+) -> PersistenceResult<Vec<arkret_wire::RealmId>> {
+    let Some(producer) = event
+        .account_device_producer()
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
+    else {
+        return Ok(Vec::new());
+    };
+    let Some(governor) = governor_for_lock_plan_in_connection(conn, &event.realm_id).await? else {
+        return Ok(Vec::new());
+    };
+    if producer.account_id.station_id != governor {
+        return Ok(Vec::new());
+    }
+    // Mirror prepare_local_account_device_source_inner's native-unit branch.
+    // Those units own their PCR locking; this selects locks only and cannot
+    // authorize an Event or turn a replaceable role index into authority.
+    if native_control_target_in_connection(conn, &event.realm_id).await? {
+        return Ok(Vec::new());
+    }
+    Ok(
+        immutable_human_pcr_in_connection(conn, &producer.account_id)
+            .await?
+            .into_iter()
+            .collect(),
+    )
+}
+
 pub(crate) async fn retain_in_connection(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
@@ -436,48 +530,47 @@ async fn prepare_local_account_device_source_inner(
         .map(Some)
 }
 
-pub(crate) async fn prepare_account_device_source_in_connection(
+/// Exact native source material. It carries no target Event or authorization verdict.
+pub(crate) struct AccountDeviceSignerKeySource {
+    pub(crate) key: ResolvedSignerKey,
+    pub(crate) accepted_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Read the single current Human Device source under its original PCR lock.
+/// Purpose-specific signatures and action ceilings remain with their callers.
+pub(crate) async fn native_current_human_device_source_in_connection(
     conn: &mut AsyncPgConnection,
-    event: &arkret_wire::Event,
+    account: &arkret_wire::AccountId,
+    device: &arkret_wire::DeviceId,
     admitted_at: chrono::DateTime<chrono::Utc>,
-    guard: &coland_storage::DeviceRevocationGateSelector,
-) -> PersistenceResult<
-    arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
-> {
+) -> PersistenceResult<(
+    AccountDeviceSignerKeySource,
+    arkret_models_collaboration::events_payloads::DeviceAuthorizePayload,
+)> {
     let reject = |message: &str| PersistenceError::Conflict(message.to_owned());
-    let producer = event
-        .verify_producer_proof_self_consistency(event.realm_id.digest_suite_code().digest_suite())
-        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
-        .ok_or_else(|| reject("Account Device historical producer is not an account device"))?;
-    let proof = event
-        .producer_proof
-        .as_ref()
-        .ok_or_else(|| reject("Account Device historical producer proof is missing"))?;
-    if producer.account_id.principal_id != guard.principal_id
-        || producer.account_id.station_id != guard.station_id
-        || producer.device_id.as_str() != guard.device_id
-    {
-        return Err(reject(
-            "Account Device historical producer differs from admission guard or target",
-        ));
-    }
-    let device = &producer.device_id;
+    let original_pcr = immutable_human_pcr_in_connection(conn, account)
+        .await?
+        .ok_or_else(|| reject("Account Device native Human inception is unavailable"))?;
     // Resolve only the local accepted PCR of this exact Account. A forwarded
     // foreign attestation is not local PCR lineage and cannot enter here.
     let first = crate::pcr_device_status_reader::confirmed_pcr_device_status_cut_in_connection(
         conn,
-        &producer.account_id,
+        account,
         device,
         admitted_at,
     )
     .await
     .map_err(PgTransactionError::into_persistence)?
     .ok_or_else(|| reject("Account Device historical local PCR cut is unavailable"))?;
-    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &first.authority.realm_id)
-        .await?;
+    if first.authority.realm_id != original_pcr {
+        return Err(reject(
+            "Account Device PCR locator differs from its immutable Human inception",
+        ));
+    }
+    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &original_pcr).await?;
     let cut = crate::pcr_device_status_reader::confirmed_pcr_device_status_cut_in_connection(
         conn,
-        &producer.account_id,
+        account,
         device,
         admitted_at,
     )
@@ -496,17 +589,14 @@ pub(crate) async fn prepare_account_device_source_in_connection(
         .authorization
         .as_ref()
         .ok_or_else(|| reject("Account Device historical authorization is unavailable"))?;
-    if accepted.event_id != guard.authorization_ref.event_id
-        || accepted.source_commit_id != guard.authorization_ref.commit_id
-        || cut.authority.current_generation != Some(accepted.payload.authorized_generation_ref)
-    {
+    if cut.authority.current_generation != Some(accepted.payload.authorized_generation_ref) {
         return Err(reject(
-            "Account Device historical authorization differs from admission guard",
+            "Account Device native source generation is not current",
         ));
     }
     let role = sql_query("SELECT EXISTS(SELECT 1 FROM pcr_genesis_units g WHERE g.realm_id=p.pcr_realm_id AND g.principal_id=p.principal_id AND g.station_id=p.station_id) AS human FROM principal_resolutions p WHERE p.principal_id=$1 AND p.station_id=$2 AND p.pcr_realm_id=$3")
-        .bind::<Text,_>(producer.account_id.principal_id.as_str())
-        .bind::<Text,_>(producer.account_id.station_id.as_str())
+        .bind::<Text,_>(account.principal_id.as_str())
+        .bind::<Text,_>(account.station_id.as_str())
         .bind::<Text,_>(cut.authority.realm_id.as_str())
         .get_result::<AccountDeviceSourceRole>(&mut *conn).await.optional()
         .map_err(PersistenceError::database)?
@@ -517,7 +607,7 @@ pub(crate) async fn prepare_account_device_source_in_connection(
         ));
     }
     let source = sql_query("SELECT e.envelope,c.commit_json FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.envelope->>'event_id'=$1 AND c.commit_id=$2 AND e.state='committed'")
-        .bind::<Text,_>(guard.authorization_ref.event_id.as_str()).bind::<Text,_>(guard.authorization_ref.commit_id.as_str())
+        .bind::<Text,_>(accepted.event_id.as_str()).bind::<Text,_>(accepted.source_commit_id.as_str())
         .get_result::<SourceRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let source_event: arkret_wire::Event =
         serde_json::from_value(source.envelope).map_err(PersistenceError::database)?;
@@ -542,13 +632,16 @@ pub(crate) async fn prepare_account_device_source_in_connection(
         )
         .map_err(PersistenceError::database)?;
     if source_event.kind != arkret_wire::EventKind::DeviceAuthorize
-        || source_event.actor_id != arkret_wire::ActorId::account(producer.account_id.clone())
-        || source_event.event_id != guard.authorization_ref.event_id
+        || source_event.actor_id != arkret_wire::ActorId::account(account.clone())
+        || source_event.event_id != accepted.event_id
         || source_event.realm_id != cut.authority.realm_id
         || source_commit.event_ref != source_event.event_id
-        || source_commit.commit_id != guard.authorization_ref.commit_id
-        || source_commit.stream_ref != guard.authorization_ref.stream_ref
-        || source_commit.stream_position != guard.authorization_ref.stream_position
+        || source_commit.commit_id != accepted.source_commit_id
+        || source_commit.realm_id != cut.authority.realm_id
+        || source_commit.stream_ref
+            != (arkret_wire::CommitStreamRef::Realm {
+                realm_id: cut.authority.realm_id.clone(),
+            })
         || serde_json::to_value(&payload).map_err(PersistenceError::database)?
             != serde_json::to_value(&accepted.payload).map_err(PersistenceError::database)?
         || payload.device_id != *device
@@ -591,7 +684,86 @@ pub(crate) async fn prepare_account_device_source_in_connection(
             "Account Device historical PCR revision does not cover authorization",
         ));
     }
-    if [event.created_at, proof.created_at, admitted_at]
+    if admitted_at < payload.not_before
+        || payload
+            .expires_at
+            .flatten()
+            .is_some_and(|expiry| admitted_at >= expiry)
+    {
+        return Err(reject(
+            "Account Device native source is outside its authorization window",
+        ));
+    }
+    let multibase = payload
+        .device_public_key_did
+        .as_str()
+        .strip_prefix("did:key:")
+        .ok_or_else(|| reject("Account Device native source key is not did:key"))?;
+    let raw = arkret_canonical::decode_ed25519_multibase(multibase)
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    Ok((
+        AccountDeviceSignerKeySource {
+            key: ResolvedSignerKey {
+                public_key_base64url: arkret_wire::Base64UrlString::new(
+                    arkret_canonical::base64url_encode(raw),
+                )
+                .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?,
+                authorization_ref: arkret_wire::CommittedEventRef {
+                    event_id: source_event.event_id,
+                    commit_id: source_commit.commit_id,
+                    stream_ref: source_commit.stream_ref,
+                    stream_position: source_commit.stream_position,
+                },
+                revision: arkret_wire::CurrentRevision {
+                    commit_id: revision_commit.commit_id,
+                    stream_position: revision_commit.stream_position,
+                },
+                governance_generation: revision_commit.governance_generation,
+            },
+            accepted_at: source_commit.committed_at,
+        },
+        payload,
+    ))
+}
+
+pub(crate) async fn prepare_account_device_source_in_connection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+    admitted_at: chrono::DateTime<chrono::Utc>,
+    guard: &coland_storage::DeviceRevocationGateSelector,
+) -> PersistenceResult<
+    arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact,
+> {
+    let reject = |message: &str| PersistenceError::Conflict(message.to_owned());
+    let producer = event
+        .verify_producer_proof_self_consistency(event.realm_id.digest_suite_code().digest_suite())
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
+        .ok_or_else(|| reject("Account Device historical producer is not an account device"))?;
+    let proof = event
+        .producer_proof
+        .as_ref()
+        .ok_or_else(|| reject("Account Device historical producer proof is missing"))?;
+    if producer.account_id.principal_id != guard.principal_id
+        || producer.account_id.station_id != guard.station_id
+        || producer.device_id.as_str() != guard.device_id
+    {
+        return Err(reject(
+            "Account Device historical producer differs from admission guard or target",
+        ));
+    }
+    let (source, payload) = native_current_human_device_source_in_connection(
+        conn,
+        &producer.account_id,
+        &producer.device_id,
+        admitted_at,
+    )
+    .await?;
+    if source.key.authorization_ref != guard.authorization_ref {
+        return Err(reject(
+            "Account Device historical authorization differs from admission guard",
+        ));
+    }
+    if [event.created_at, proof.created_at]
         .into_iter()
         .any(|instant| {
             instant < payload.not_before
@@ -605,26 +777,17 @@ pub(crate) async fn prepare_account_device_source_in_connection(
             "Account Device historical producer is outside its accepted authorization window",
         ));
     }
-    let multibase = payload
-        .device_public_key_did
-        .as_str()
-        .strip_prefix("did:key:")
-        .ok_or_else(|| reject("Account Device historical accepted key is not did:key"))?;
-    let raw = arkret_canonical::decode_ed25519_multibase(multibase)
-        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    let key = arkret_signatures::PublicKeyMaterial::Ed25519Multibase {
-        value: multibase.to_owned(),
-    };
-    let suite = event.realm_id.digest_suite_code().digest_suite();
     let bytes = arkret_signatures::EventProofBuilder::new()
         .envelope_bytes(event)
+        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+    let raw = arkret_canonical::base64url_decode(source.key.public_key_base64url.as_str())
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
     arkret_signatures::verify_ed25519_detached_jws_proof_with_digest_suite(
         proof,
         &bytes,
         &event.actor_id,
-        &key,
-        suite,
+        &arkret_signatures::PublicKeyMaterial::Ed25519Raw { bytes: raw },
+        event.realm_id.digest_suite_code().digest_suite(),
     )
     .map_err(|_| {
         reject("Account Device historical producer signature differs from accepted authorization")
@@ -633,21 +796,10 @@ pub(crate) async fn prepare_account_device_source_in_connection(
         arkret_models_collaboration::authority_commit::AccountDeviceHistoricalSignerFact {
             event_id: event.event_id.clone(),
             actor: event.actual_signer().clone(),
-            device_id: device.clone(),
+            device_id: producer.device_id,
             verification_method: proof.verification_method.clone(),
-            key: ResolvedSignerKey {
-                public_key_base64url: arkret_wire::Base64UrlString::new(
-                    arkret_canonical::base64url_encode(raw),
-                )
-                .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?,
-                authorization_ref: guard.authorization_ref.clone(),
-                revision: arkret_wire::CurrentRevision {
-                    commit_id: revision_commit.commit_id,
-                    stream_position: revision_commit.stream_position,
-                },
-                governance_generation: revision_commit.governance_generation,
-            },
-            accepted_at: source_commit.committed_at,
+            key: source.key,
+            accepted_at: source.accepted_at,
         },
     )
 }

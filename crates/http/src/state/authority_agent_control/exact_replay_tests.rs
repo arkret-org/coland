@@ -285,6 +285,7 @@ impl Fixture {
                         },
                         attested_at: tx.commit.committed_at,
                         expires_at: tx.commit.committed_at + Duration::minutes(5),
+                        owner_transfer_acceptance_intent_digest: None,
                     },
                     self.method.clone(),
                     self.state.notary_signing_key().as_ref(),

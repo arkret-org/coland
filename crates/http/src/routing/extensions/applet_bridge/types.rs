@@ -258,7 +258,7 @@ impl AppletRecord {
             .initial_package
             .to_registration(
                 &initial_evidence,
-                initial_registration.expected_revision.clone(),
+                initial_registration.expected_commit_id.clone(),
             )
             .map_err(|error| {
                 format!("stored initial Applet package cannot derive registration: {error}")
@@ -288,7 +288,7 @@ impl AppletRecord {
             .map_err(|error| format!("stored Applet package is invalid: {error}"))?;
         let expected_registration = self
             .package
-            .to_registration(&evidence, registration.expected_revision.clone())
+            .to_registration(&evidence, registration.expected_commit_id.clone())
             .map_err(|error| {
                 format!("stored Applet package cannot derive registration: {error}")
             })?;

@@ -105,7 +105,7 @@ fn replacement(
     revision: Option<arkret_wire::CurrentRevision>,
     scopes: &[&str],
 ) -> serde_json::Value {
-    serde_json::json!({"peer":{"kind":"actor","actor_id":peer},"expected_current": revision.map_or(serde_json::json!({"state":"never_written"}), |revision| serde_json::json!({"state":"present","revision":revision})),"permissions":scopes.iter().map(|scope|serde_json::json!({"consent_scope":scope})).collect::<Vec<_>>()})
+    serde_json::json!({"peer":{"kind":"actor","actor_id":peer},"expected_current": revision.map_or(serde_json::json!({"state":"never_written"}), |revision| serde_json::json!({"state":"present","commit_id":revision.commit_id})),"permissions":scopes.iter().map(|scope|serde_json::json!({"consent_scope":scope})).collect::<Vec<_>>()})
 }
 
 #[derive(diesel::QueryableByName, Debug, PartialEq)]

@@ -311,11 +311,15 @@ async fn guard_snapshot_revisions(
             }
             S::CallFocus { call_id }
             | S::CallRoster { call_id }
-            | S::CallModeration { call_id } => {
+            | S::CallModeration { call_id }
+            | S::CallRecordingState { call_id, .. }
+            | S::CallRecordingArtifact { call_id, .. }
+            | S::CallTranscriptState { call_id, .. }
+            | S::CallTranscriptArtifact { call_id, .. } => {
                 let old=diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM call_component_current_states WHERE realm_id=$1 AND call_id=$2 AND selector=$3 FOR UPDATE")
                     .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(call_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(selector).map_err(malformed)?)
                     .get_result::<ExistingCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-                if !matches!(selector, S::CallFocus { .. }) {
+                if matches!(selector, S::CallRoster { .. } | S::CallModeration { .. }) {
                     verify_retained_call_projection(
                         conn,
                         realm_id,
@@ -370,6 +374,41 @@ async fn guard_snapshot_revisions(
                     {
                         return Err(PersistenceError::Conflict("failed_precondition: Sidecar controls snapshot changes its source, revision or retained assertions".into()));
                     }
+                }
+            }
+            S::MessageReactions { target_ref } => {
+                use arkret_models_collaboration::events_payloads::reaction::MessageReactionsCurrentValue;
+                let incoming: MessageReactionsCurrentValue =
+                    serde_json::from_value(value.clone()).map_err(malformed)?;
+                let old = diesel::sql_query("SELECT current_commit_id,current_stream_position,source_stream_ref,value FROM message_reactions_current_states WHERE realm_id=$1 AND target_ref=$2 FOR UPDATE")
+                    .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(target_ref)
+                    .get_result::<ExistingCurrent>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+                if let Some(old) = old {
+                    if old.source_stream_ref != source {
+                        return Err(malformed(
+                            "reaction snapshot changes its target source stream",
+                        ));
+                    }
+                    let retained: MessageReactionsCurrentValue =
+                        serde_json::from_value(old.value).map_err(malformed)?;
+                    let previous = arkret_wire::CurrentRevision {
+                        commit_id: old.current_commit_id.parse().map_err(malformed)?,
+                        stream_position: u64::try_from(old.current_stream_position)
+                            .map_err(malformed)?,
+                    };
+                    incoming
+                        .validate_installation(
+                            target_ref,
+                            source_stream_ref,
+                            revision,
+                            &arkret_wire::CommitStreamHead {
+                                stream_ref: source_stream_ref.clone(),
+                                commit_id: revision.commit_id.clone(),
+                                stream_position: revision.stream_position,
+                            },
+                            Some((&retained, &previous)),
+                        )
+                        .map_err(malformed)?;
                 }
             }
             S::Pin { pin_scope } => {
@@ -756,6 +795,7 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
     entries: &[arkret_wire::CurrentState],
     installed_at: chrono::DateTime<chrono::Utc>,
 ) -> PersistenceResult<()> {
+    crate::call_state_current_states::validate_capture_current_pairs(entries)?;
     arkret_models_collaboration::exact_current_state::validate_calendar_current_pairs(
         realm_id, entries,
     )
@@ -772,6 +812,50 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
         return Err(malformed(
             "snapshot target head is not in its verified visible heads",
         ));
+    }
+    // Validate complete Reaction rows before replacing any prior state. The
+    // target's visible current carrier is part of this same authenticated
+    // Snapshot, while old reaction-add originals may be below its floor.
+    for entry in entries {
+        if let arkret_wire::CurrentState::Value {
+            selector: arkret_wire::CurrentSelector::MessageReactions { target_ref },
+            source_stream_ref,
+            revision,
+            value,
+        } = entry
+        {
+            let current: arkret_models_collaboration::events_payloads::reaction::MessageReactionsCurrentValue =
+                serde_json::from_value(value.clone()).map_err(malformed)?;
+            let source_head = visible_heads
+                .iter()
+                .find(|candidate| &candidate.stream_ref == source_stream_ref)
+                .ok_or_else(|| malformed("reaction snapshot source stream is not disclosed"))?;
+            current
+                .validate_installation(target_ref, source_stream_ref, revision, source_head, None)
+                .map_err(malformed)?;
+            let target = arkret_wire::MessageId::new(target_ref).map_err(malformed)?;
+            if !entries.iter().any(|entry| {
+                matches!(entry,
+                    arkret_wire::CurrentState::Value {
+                        selector: arkret_wire::CurrentSelector::MessageRevision { message_id },
+                        source_stream_ref: target_stream,
+                        ..
+                    } if message_id == &target && target_stream == source_stream_ref
+                )
+            }) {
+                return Err(malformed(
+                    "reaction snapshot target is not currently disclosed in its scope",
+                ));
+            }
+            if entries.iter().any(|entry| matches!(entry,
+                arkret_wire::CurrentState::Value {
+                    selector: arkret_wire::CurrentSelector::ObjectRedaction { target_ref: redacted },
+                    ..
+                } if redacted == target_ref
+            )) {
+                return Err(malformed("reaction snapshot target is redacted"));
+            }
+        }
     }
     let replaces_realm = visible_heads.iter().any(|head| {
         head.stream_ref
@@ -816,7 +900,7 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
         #[diesel(sql_type=diesel::sql_types::Bool)]
         present: bool,
     }
-    let missing=diesel::sql_query("SELECT EXISTS(SELECT 1 FROM call_component_current_states c WHERE c.realm_id=$1 AND c.selector->>'kind' IN ('call_roster','call_moderation') AND EXISTS(SELECT 1 FROM jsonb_array_elements($3) h WHERE h->'stream_ref'=c.source_stream_ref) AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) incoming WHERE incoming->'selector'=c.selector)) AS present")
+    let missing=diesel::sql_query("SELECT EXISTS(SELECT 1 FROM call_component_current_states c WHERE c.realm_id=$1 AND c.selector->>'kind' IN ('call_roster','call_moderation','call_recording_state','call_recording_artifact','call_transcript_state','call_transcript_artifact') AND EXISTS(SELECT 1 FROM jsonb_array_elements($3) h WHERE h->'stream_ref'=c.source_stream_ref) AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements($2) incoming WHERE incoming->'selector'=c.selector)) AS present")
         .bind::<Text,_>(realm_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(entries).map_err(malformed)?)
         .bind::<Jsonb,_>(serde_json::to_value(visible_heads).map_err(malformed)?)
         .get_result::<MissingCall>(&mut *conn).await.map_err(PersistenceError::database)?.present;
@@ -857,6 +941,15 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                 *table,
                 "circle_current_states" | "circle_member_state_current_states"
             ) {
+                continue;
+            }
+            if *table == "message_reactions_current_states" {
+                // A tail may have advanced a row beyond its last Snapshot
+                // observation. Its retained source stream, not a historical
+                // covering Commit or stale observation revision, owns it.
+                diesel::sql_query("DELETE FROM message_reactions_current_states WHERE realm_id=$1 AND source_stream_ref=$2")
+                    .bind::<Text, _>(realm_id.as_str()).bind::<Jsonb, _>(&source)
+                    .execute(&mut *conn).await.map_err(PersistenceError::database)?;
                 continue;
             }
             diesel::sql_query(format!("DELETE FROM {table} WHERE realm_id=$1 AND current_commit_id IN (SELECT current_commit_id FROM replica_authorization_rows WHERE realm_id=$1 AND source_stream_ref=$2)"))
@@ -1030,7 +1123,9 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                 upsert_call_genesis(conn, realm_id, call_id, source_stream_ref, &row, value)
                     .await?;
             }
-            S::CallFocus{call_id} | S::CallRoster{call_id} | S::CallModeration{call_id} => {
+            S::CallFocus{call_id} | S::CallRoster{call_id} | S::CallModeration{call_id}
+            | S::CallRecordingState { call_id, .. } | S::CallRecordingArtifact { call_id, .. }
+            | S::CallTranscriptState { call_id, .. } | S::CallTranscriptArtifact { call_id, .. } => {
                 match selector {
                     S::CallRoster{..}=>{
                         let roster=serde_json::from_value::<arkret_models_collaboration::events_payloads::call::CallRosterCurrentValue>(value.clone()).map_err(malformed)?;
@@ -1038,7 +1133,8 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
                         crate::call_participant_issuer_sources::install_roster(conn,realm_id,call_id,&roster).await?;
                     },
                     S::CallModeration{..}=>serde_json::from_value::<arkret_models_collaboration::events_payloads::call::CallModerationCurrentValue>(value.clone()).map_err(malformed)?.validate_sources(source_stream_ref,revision).map_err(malformed)?,
-                    _=>{let _:arkret_models_collaboration::events_payloads::call::CallFocus=serde_json::from_value(value.clone()).map_err(malformed)?;},
+                    S::CallFocus { .. }=>{let _:arkret_models_collaboration::events_payloads::call::CallFocus=serde_json::from_value(value.clone()).map_err(malformed)?;},
+                    _=>crate::call_state_current_states::validate_capture_current(realm_id, selector, value)?,
                 }
                 let changed=diesel::sql_query("INSERT INTO call_component_current_states(realm_id,call_id,selector,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(realm_id,call_id,selector) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE call_component_current_states.source_stream_ref=EXCLUDED.source_stream_ref AND (call_component_current_states.current_stream_position<EXCLUDED.current_stream_position OR (call_component_current_states.current_stream_position=EXCLUDED.current_stream_position AND call_component_current_states.current_commit_id=EXCLUDED.current_commit_id AND call_component_current_states.value=EXCLUDED.value))")
                     .bind::<Text,_>(realm_id.as_str()).bind::<Text,_>(call_id.as_str()).bind::<Jsonb,_>(serde_json::to_value(selector).map_err(malformed)?)
@@ -1254,17 +1350,16 @@ pub(crate) async fn install_snapshot_at_heads_in_connection(
             S::MessageReactions { target_ref } => {
                 let set: arkret_models_collaboration::events_payloads::reaction::MessageReactionsCurrentValue =
                     serde_json::from_value(value.clone()).map_err(malformed)?;
-                set.validate_for_target(target_ref).map_err(malformed)?;
+                set.validate_installation(target_ref, source_stream_ref, revision, source_head, None)
+                    .map_err(malformed)?;
                 arkret_wire::MessageId::new(target_ref.as_str()).map_err(malformed)?;
-                upsert_keyed(
-                    conn,
-                    realm_id,
-                    "message_reactions_current_states",
-                    Some(("target_ref", target_ref.as_str())),
-                    &row,
-                    value,
-                )
-                .await?;
+                let changed = diesel::sql_query("INSERT INTO message_reactions_current_states(realm_id,target_ref,source_stream_ref,current_commit_id,current_stream_position,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(realm_id,target_ref) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE message_reactions_current_states.source_stream_ref=EXCLUDED.source_stream_ref AND (message_reactions_current_states.current_stream_position<EXCLUDED.current_stream_position OR (message_reactions_current_states.current_stream_position=EXCLUDED.current_stream_position AND message_reactions_current_states.current_commit_id=EXCLUDED.current_commit_id AND message_reactions_current_states.value=EXCLUDED.value))")
+                    .bind::<Text, _>(realm_id.as_str()).bind::<Text, _>(target_ref)
+                    .bind::<Jsonb, _>(serde_json::to_value(source_stream_ref).map_err(malformed)?)
+                    .bind::<Text, _>(row.commit_id).bind::<BigInt, _>(row.stream_position)
+                    .bind::<Jsonb, _>(value).bind::<Timestamptz, _>(installed_at)
+                    .execute(&mut *conn).await.map_err(PersistenceError::database)?;
+                require_one_current_write(changed)?;
             }
             // Governing admission inputs a member Station never keeps.
             S::RealmAuthorityRoot
@@ -1972,6 +2067,9 @@ mod current_integrity_tests;
 mod call_effective_tests;
 
 #[cfg(test)]
+mod reaction_current_tests;
+
+#[cfg(test)]
 mod tests {
     #[derive(diesel::QueryableByName)]
     struct ValueRow {
@@ -2288,7 +2386,7 @@ mod tests {
         next_value["rules"][0]["effect"] = json!("allow");
         let mut body = json!({"policy_id":id,"value":next_value});
         if kind == "agent" {
-            body["expected_revision"] = json!({"commit_id":head.commit_id,"stream_position":7});
+            body["expected_commit_id"] = json!(head.commit_id);
         }
         let event = arkret_wire::test_support::raw_event_for_actor_at(
             "ak.policy.set",

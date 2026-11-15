@@ -234,14 +234,21 @@ impl Fixture {
             wire::Hash::new(arkret_canonical::canonical_sha256(&publication_context).unwrap())
                 .unwrap();
         let cnf = arkret_canonical::base64url_encode([3u8; 32]);
-        let grant = arkret_wire::SessionGrantId::from_issuance_digest([4u8; 32]);
-        let holder = format!("{grant}:{cnf}");
+        let grant = wire::SessionGrantRef {
+            issuer_id: wire::DidCoreId::new(STATION).unwrap(),
+            id: wire::SessionGrantId::new("ak:session_grant:01904100-0000-7000-8000-000000000024")
+                .unwrap(),
+        };
+        let holder = arkret_canonical::canonical_json_string(
+            &json!({"session_grant_ref":grant,"cnf_jkt":cnf}),
+        )
+        .unwrap();
         let public_session = crypto::RecoverySession {
             schema: wire::SchemaId::RECOVERY_SESSION_V1.to_owned(),
             request_id: wire::RequestId::new("ak:request:01904100-0000-7000-8000-000000000025")
                 .unwrap(),
             recovery_session_id: wire::RecoverySessionId::new(SESSION).unwrap(),
-            session_grant_id: grant,
+            session_grant_ref: grant.clone(),
             session_grant_cnf_jkt: wire::Base64UrlString::new(cnf.clone()).unwrap(),
             account_id: typed_policy.account_id.clone(),
             requesting_device_id: device,
@@ -275,7 +282,7 @@ impl Fixture {
             }),
             transaction_id: None,
             rejection_reason_code: None,
-            expires_at: now + chrono::Duration::hours(1),
+            expires_at: now + chrono::Duration::minutes(15),
             created_at: now,
             updated_at: now,
         };
@@ -297,6 +304,9 @@ impl Fixture {
             .unwrap()
             .remove("realm_stream_head")
             .unwrap();
+        session.as_object_mut().unwrap().remove("session_grant_ref");
+        session["session_grant_issuer_id"] = json!(grant.issuer_id);
+        session["session_grant_id"] = json!(grant.id);
         session["accepted_stream_head"] = accepted_stream_head.clone();
         session["authority_context"] =
             serde_json::to_value(coland_storage::RecoveryAuthorityContext {

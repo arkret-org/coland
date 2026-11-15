@@ -3,10 +3,10 @@
 //! pass the production closed aggregate, never a synthetic verified flag.
 
 mod applet_widget_inventory_fixture;
+pub mod call_capture_fixture;
 mod management_archive_fixture;
 pub mod native_read_evidence;
 mod realm_actor_mls_fixture;
-
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -185,7 +185,10 @@ impl Fixture {
             .await
             .expect("production account directory prerequisite after accepted PCR");
         let holder_key = SigningKey::from_bytes(&[88; 32]);
-        let token = format!("applet-standard.{}", uuid::Uuid::now_v7());
+        let token = arkret_identifiers::SessionGrantSecret::from_bytes(
+            Sha256::digest(uuid::Uuid::now_v7().as_bytes()).into(),
+        )
+        .into_string();
         let jwk =
             arkret_signatures::JsonWebKey::from_ed25519_verifying_key(&holder_key.verifying_key());
         let jkt = arkret_signatures::dpop::dpop_jwk_thumbprint(&jwk).unwrap();
@@ -200,10 +203,9 @@ impl Fixture {
             .expect("canonical public holder JWK");
         assert_eq!(session_public_key.thumbprint_sha256().unwrap(), jkt);
         let grant = arkret_models_collaboration::session_grants::SessionGrantValidationMetadata {
-            id: arkret_identifiers::SessionGrantId::from_issuance_digest(
-                Sha256::digest(token.as_bytes()).into(),
-            ),
-            issuer_id: arkret_wire::DidCoreId::new("ak:did_core:web:coauth.example").unwrap(),
+            metadata: arkret_models_identity::SessionGrantMetadata {
+            id: arkret_identifiers::SessionGrantId::new(format!("ak:session_grant:{}",uuid::Uuid::now_v7())).unwrap(),
+            issuer_id: state.service_core_id(),
             account_id: pcr.history.account.clone(),
             device_id: Some(pcr.history.founding_device_id.clone()),
             audience_id: state.service_core_id(),
@@ -225,10 +227,10 @@ impl Fixture {
             ]
             .into_iter()
             .map(str::to_owned)
-            .collect(),
+            .collect::<std::collections::BTreeSet<_>>().into_iter().collect(),
+            not_before: chrono::Utc::now() - chrono::Duration::seconds(1),
+            session_id: uuid::Uuid::now_v7().to_string(), proof_kind: None,
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
-            revoked_at: None,
-            revocation_ref: format!("ak:session:{}", uuid::Uuid::now_v7()),
             session_public_key,
             cnf_jkt: jkt,
             credential_class:
@@ -245,6 +247,8 @@ impl Fixture {
                 },
             ),
             scope_details: None,
+        },
+            revoked_at: None, revocation_ref: format!("session-revocation-{}",uuid::Uuid::now_v7()),
         };
         grant
             .validate()
@@ -711,6 +715,11 @@ fn signed_applet_package(
             "ak.strand.watch.set.others".to_owned(),
             "ak.audit.accessed".to_owned(),
         ]);
+    }
+    if namespace.starts_with("call-capture-") {
+        package
+            .requested_scopes
+            .extend(["ak.call.record".to_owned()]);
     }
     package.claimed_profiles = vec![
         "ak.profile.applet_bridge.v1".to_owned(),
@@ -1433,6 +1442,8 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
                     "{}contract.{}",
                     if scope_label.contains("registered-audit") {
                         "registered-audit-"
+                    } else if scope_label.contains("call-capture") {
+                        "call-capture-"
                     } else {
                         ""
                     },
@@ -1461,10 +1472,10 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
             "registration exact current: {current}"
         );
         let current: arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody = serde_json::from_value(current).unwrap();
-        let expected_revision = match current {
+        let expected_commit_id = match current {
             arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody::Present {
                 current_state: arkret_models_collaboration::exact_current_state::ExactCurrentState::AppletRegistration(row), ..
-            } => Some(row.revision),
+            } => Some(row.revision.commit_id),
             arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody::NeverWritten { .. } => None,
             _ => panic!("wrong registration current family"),
         };
@@ -1473,7 +1484,7 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
             ScopeRef::realm(self.fixture.realm.clone()),
             serde_json::to_value(
                 package
-                    .to_registration(&evidence, expected_revision)
+                    .to_registration(&evidence, expected_commit_id)
                     .unwrap(),
             )
             .unwrap(),
@@ -1489,6 +1500,9 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
         }
         if scope_label.contains("registered-audit") {
             actions.extend(["ak.strand.watch.set.others", "ak.audit.accessed"]);
+        }
+        if scope_label.contains("call-capture") {
+            actions.push("ak.call.record");
         }
         if package
             .requested_scopes
@@ -2970,8 +2984,8 @@ mod realm_native_fixture {
             "expires_at":arkret_canonical::format_timestamp_canonical(expires_at),
             "authorization_binding_kind":"realm_managed_delegation", "authorized_generation_ref":1,
             "device_signature":"unsigned", "applet_id":candidate.applet_id,
-            "expected_control_revision":{"commit_id":creation_commit.commit_id,"stream_position":creation_commit.stream_position},
-            "expected_device_revision":null
+            "expected_control_commit_id":creation_commit.commit_id,
+            "expected_device_commit_id":null
         })).unwrap();
         let possession = payload
             .realm_device_possession_signature_input(&candidate.actor_id)
@@ -3365,9 +3379,9 @@ mod realm_native_fixture {
         };
         let mut value = json!({
             "target_actor_id":creation.actor_id,"request_id":"0123456789012345678901",
-            "manager_ref":source,"recovery_ref":source,"expected_control_revision":revision,
-            "expected_owner_status_revision":revision,"expected_governance_status_revision":revision,
-            "expected_device_generation_revision":revision,"expected_generation":1,"new_generation":2,
+            "manager_ref":source,"recovery_ref":source,"expected_control_commit_id":revision,
+            "expected_owner_status_commit_id":revision,"expected_governance_status_commit_id":revision,
+            "expected_device_generation_commit_id":revision,"expected_generation":1,"new_generation":2,
             "replaces_recovery_ref":null,"next_resolution":resolution,
             "method_history_evidence":{"log_entries":entries,"witness_records":[]},
             "next_control_method_kid":next_method,"expires_at":arkret_canonical::format_timestamp_canonical(at + chrono::Duration::minutes(5))
@@ -3425,10 +3439,7 @@ mod realm_native_fixture {
         let payload = RealmActorStatusSetPayload {
             target_actor_id: candidate.actor_id.clone(),
             gate: RealmActorStatusSetPayloadGate::Owner,
-            expected_revision: CurrentRevision {
-                commit_id: source.commit_id.clone(),
-                stream_position: source.stream_position,
-            },
+            expected_commit_id: source.commit_id.clone(),
             state,
         };
         let intent = arkret_event_draft::TypedEventDraft::<
@@ -3531,10 +3542,7 @@ mod realm_native_fixture {
         };
         let transcript = RealmActorControlAcceptanceTranscript {
             actor_id: candidate.actor_id.clone(),
-            expected_revision: CurrentRevision {
-                commit_id: current.commit_id.clone(),
-                stream_position: current.stream_position,
-            },
+            expected_commit_id: current.commit_id.clone(),
             next_resolution: ResolutionCommitment {
                 did: did.clone(),
                 method_history_head: head,
@@ -3552,7 +3560,7 @@ mod realm_native_fixture {
         )
         .unwrap();
         RealmActorControlUpdatePayload {
-            expected_revision: transcript.expected_revision,
+            expected_commit_id: transcript.expected_commit_id,
             next_resolution: transcript.next_resolution,
             method_history_evidence: transcript.method_history_evidence,
             next_control_method_kid: transcript.next_control_method_kid,
@@ -4104,10 +4112,14 @@ mod realm_native_fixture {
             .await
             .unwrap()
             .unwrap();
-        let revoke = fixture.admin_event(EventKind::CapabilityRevoke, candidate.creation_scope.clone(), json!({
-            "grant_id":candidate.creation_authorization_ref,
-            "expected_revision":{"commit_id":grant_source.commit.commit_id,"stream_position":grant_source.commit.stream_position}
-        }));
+        let revoke = fixture.admin_event(
+            EventKind::CapabilityRevoke,
+            candidate.creation_scope.clone(),
+            json!({
+                "grant_id":candidate.creation_authorization_ref,
+                "expected_commit_id":grant_source.commit.commit_id
+            }),
+        );
         eprintln!("recovery: revoking business grant");
         let authority_path = format!(
             "/_arkret/self/applets/{}/authority/material",
@@ -4217,10 +4229,14 @@ mod realm_native_fixture {
                 .await
                 .unwrap()
                 .unwrap();
-            let revoke = fixture.admin_event(EventKind::CapabilityRevoke, candidate.creation_scope.clone(), json!({
-                "grant_id":grant_id,
-                "expected_revision":{"commit_id":source.commit.commit_id,"stream_position":source.commit.stream_position}
-            }));
+            let revoke = fixture.admin_event(
+                EventKind::CapabilityRevoke,
+                candidate.creation_scope.clone(),
+                json!({
+                    "grant_id":grant_id,
+                    "expected_commit_id":source.commit.commit_id
+                }),
+            );
             let request = SelfAuthoritySubmitRequestBody::Event(
                 arkret_wire::EventAdmissionSubmission::new(revoke),
             );
@@ -4350,7 +4366,7 @@ mod realm_native_fixture {
         };
         let original = snapshot(fixture, &candidate.actor_id).await;
         let mut bad_plan = plan.clone();
-        bad_plan.expected_control_revision.stream_position += 1;
+        bad_plan.expected_control_commit_id = arkret_wire::RealmCommitId::from_digest([191; 32]);
         let bad = make_begin(bad_plan);
         let request = SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(bad.clone()),
@@ -4479,10 +4495,10 @@ mod realm_native_fixture {
         let payload = RealmActorControlResetPayload {
             target_actor_id: candidate.actor_id.clone(),
             recovery_begin_ref: begin_ref.clone(),
-            expected_recovery_revision: begin_revision.clone(),
-            expected_manager_revision: plan.expected_control_revision.clone(),
-            expected_control_revision: plan.expected_control_revision.clone(),
-            expected_device_generation_revision: begin_revision,
+            expected_recovery_commit_id: begin_revision.commit_id.clone(),
+            expected_manager_commit_id: plan.expected_control_commit_id.clone(),
+            expected_control_commit_id: plan.expected_control_commit_id.clone(),
+            expected_device_generation_commit_id: begin_revision.commit_id,
             published_method_history_evidence: published.clone(),
         };
         let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
@@ -4652,10 +4668,7 @@ mod realm_native_fixture {
         assert!(fenced_device.unwrap_err().to_string().contains("fenced"));
         let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
         let reset_devices = RealmActorDevicesResetPayload {
-            expected_revision: CurrentRevision {
-                commit_id: accepted.commit.commit_id.clone(),
-                stream_position: accepted.commit.stream_position,
-            },
+            expected_commit_id: accepted.commit.commit_id.clone(),
             expected_generation: 2,
             new_generation: 3,
         };
@@ -5014,10 +5027,6 @@ mod realm_native_fixture {
             witness_records: vec![],
         };
         *native.actor_log.lock().unwrap() = entries;
-        let revision = |reference: &CommittedEventRef| CurrentRevision {
-            commit_id: reference.commit_id.clone(),
-            stream_position: reference.stream_position,
-        };
         let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
         let inventory_digest = inventory.inventory_digest().unwrap();
         let offer =
@@ -5133,9 +5142,9 @@ mod realm_native_fixture {
         let transcript = RealmActorManagerAcceptanceTranscript {
             actor_id: actor.clone(),
             applet_id: candidate.applet_id.clone(),
-            expected_manager_revision: revision(&manager_ref),
-            expected_control_revision: revision(&control_ref),
-            expected_device_generation_revision: revision(&generation_ref),
+            expected_manager_commit_id: manager_ref.commit_id.clone(),
+            expected_control_commit_id: control_ref.commit_id.clone(),
+            expected_device_generation_commit_id: generation_ref.commit_id.clone(),
             expected_generation: generation,
             new_generation: generation + 1,
             new_service_id: receiving.package.service_id.clone(),
@@ -5196,7 +5205,7 @@ mod realm_native_fixture {
         };
         let before = snapshot(fixture, actor).await;
         let mut wrong = payload.clone();
-        wrong.expected_manager_revision.stream_position += 1;
+        wrong.expected_manager_commit_id = arkret_wire::RealmCommitId::from_digest([192; 32]);
         let rejected = author(wrong);
         let request = SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(rejected.clone()),
@@ -5432,7 +5441,7 @@ mod realm_native_fixture {
             EventKind::RealmActorStatusSet,
             json!({
                 "target_actor_id":candidate.actor_id,"gate":"governance","state":"paused",
-                "expected_revision":{"commit_id":creation.commit_id,"stream_position":creation.stream_position}
+                "expected_commit_id":creation.commit_id
             }),
         );
         let send = |event: Event| async move {
@@ -5520,7 +5529,7 @@ mod realm_native_fixture {
             EventKind::RealmActorStatusSet,
             json!({
                 "target_actor_id":candidate.actor_id,"gate":"owner","state":"paused",
-                "expected_revision":{"commit_id":creation.commit_id,"stream_position":creation.stream_position}
+                "expected_commit_id":creation.commit_id
             }),
         );
         let (status, _) = send(owner_attempt.clone()).await;
@@ -5544,8 +5553,8 @@ mod realm_native_fixture {
         let disable = command(
             EventKind::RealmActorRecoverySet,
             json!({
-                "target_actor_id":candidate.actor_id,"enabled":false,"expected_recovery_revision":recovery_revision,
-                "expected_manager_revision":{"commit_id":creation.commit_id,"stream_position":creation.stream_position}
+                "target_actor_id":candidate.actor_id,"enabled":false,"expected_recovery_commit_id":recovery_revision,
+                "expected_manager_commit_id":creation.commit_id
             }),
         );
         let (status, response) = send(disable.clone()).await;
@@ -5557,8 +5566,8 @@ mod realm_native_fixture {
         let repeated_value = command(
             EventKind::RealmActorRecoverySet,
             json!({
-                "target_actor_id":candidate.actor_id,"enabled":false,"expected_recovery_revision":updated_revision,
-                "expected_manager_revision":{"commit_id":creation.commit_id,"stream_position":creation.stream_position}
+                "target_actor_id":candidate.actor_id,"enabled":false,"expected_recovery_commit_id":updated_revision,
+                "expected_manager_commit_id":creation.commit_id
             }),
         );
         let (status, _) = send(repeated_value.clone()).await;
@@ -5587,8 +5596,8 @@ mod realm_native_fixture {
         let enable = command(
             EventKind::RealmActorRecoverySet,
             json!({
-                "target_actor_id":candidate.actor_id,"enabled":true,"expected_recovery_revision":updated_revision,
-                "expected_manager_revision":{"commit_id":creation.commit_id,"stream_position":creation.stream_position}
+                "target_actor_id":candidate.actor_id,"enabled":true,"expected_recovery_commit_id":updated_revision,
+                "expected_manager_commit_id":creation.commit_id
             }),
         );
         let (status, response) = send(enable.clone()).await;
@@ -5601,7 +5610,7 @@ mod realm_native_fixture {
             EventKind::RealmActorStatusSet,
             json!({
                 "target_actor_id":candidate.actor_id,"gate":"governance","state":"active",
-                "expected_revision":{"commit_id":source.commit.commit_id,"stream_position":source.commit.stream_position}
+                "expected_commit_id":source.commit.commit_id
             }),
         );
         let (status, response) = send(resume).await;
@@ -5833,6 +5842,8 @@ mod realm_native_fixture {
                 account_id: account_station.pcr.history.account.clone(),
                 device_ids: vec![account_station.pcr.history.founding_device_id.clone()],
             }],
+
+            owner_transfer_acceptance: None,
         };
         let (status, value) = peer_keys_post(governor, account_station, &request).await;
         assert_eq!(
@@ -6219,9 +6230,13 @@ mod realm_native_fixture {
             .await
             .unwrap()
             .unwrap();
-        let revoke = fixture.admin_event(EventKind::CapabilityRevoke, scope, json!({
-            "grant_id":grant_id,"expected_revision":{"commit_id":original.commit.commit_id,"stream_position":original.commit.stream_position}
-        }));
+        let revoke = fixture.admin_event(
+            EventKind::CapabilityRevoke,
+            scope,
+            json!({
+                "grant_id":grant_id,"expected_commit_id":original.commit.commit_id
+            }),
+        );
         let (status, response) = fixture
             .admin_post(
                 "/_arkret/self/events",
@@ -7240,12 +7255,17 @@ mod realm_native_fixture {
                 enabled: bool,
             ) {
                 let revision = current_revision(fixture, actor, "realm_actor_recovery").await;
-                let mut event = fixture.admin_event(EventKind::RealmActorRecoverySet,
-                    ScopeRef::RealmControl { realm_id: fixture.realm.clone() }, json!({
+                let mut event = fixture.admin_event(
+                    EventKind::RealmActorRecoverySet,
+                    ScopeRef::RealmControl {
+                        realm_id: fixture.realm.clone(),
+                    },
+                    json!({
                         "target_actor_id":actor,"enabled":enabled,
-                        "expected_recovery_revision":revision,
-                        "expected_manager_revision":{"commit_id":creation.commit_id,"stream_position":creation.stream_position}
-                    }));
+                        "expected_recovery_commit_id":revision,
+                        "expected_manager_commit_id":creation.commit_id
+                    }),
+                );
                 event.authorization_ref = Some(grant.clone().into());
                 let event = fixture.sign_admin(event);
                 let body = arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(

@@ -395,7 +395,7 @@ async fn audit_read_freezes_written_current_and_revoked_permission_hides_replay(
         grant_tx.event.actor_id.signing_principal_id(),
         &ordinary_realm::station(),
         json!({"grant_id":arkret_wire::GrantId::from_event_id(&grant_tx.event.event_id),
-            "expected_revision":{"commit_id":grant_tx.commit.commit_id,"stream_position":grant_tx.commit.stream_position}}),
+            "expected_commit_id":grant_tx.commit.commit_id}),
         discussion.committed_at(),
     );
     let revoke = ordinary_realm::source_request(

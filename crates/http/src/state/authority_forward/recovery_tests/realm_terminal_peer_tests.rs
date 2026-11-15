@@ -103,6 +103,7 @@ async fn peer_forwarded_destroy_reaches_the_shared_cut_and_leaves_zero_writes() 
                 .clone(),
         ),
         producer_agent_evidence: None,
+        successor_device_evidence: None,
         mls_group_state_material: None,
     };
     request.validate().unwrap();

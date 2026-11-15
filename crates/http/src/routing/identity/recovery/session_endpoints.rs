@@ -4,14 +4,13 @@ use super::*;
 
 fn verify_recovery_device_possession(
     payload: &RecoverySessionCreateRequestBody,
-    session_grant_id: &str,
+    session_grant_ref: &arkret_wire::SessionGrantRef,
     session_grant_cnf_jkt: &str,
 ) -> Result<(), AppError> {
     let possession = arkret_models_crypto::RecoveryDevicePossessionTranscript {
         schema: arkret_models_crypto::RECOVERY_DEVICE_POSSESSION_DOMAIN.to_owned(),
         request_id: payload.request_id.clone(),
-        session_grant_id: arkret_wire::SessionGrantId::new(session_grant_id.to_owned())
-            .map_err(|error| AppError::internal(error.to_string()))?,
+        session_grant_ref: session_grant_ref.clone(),
         session_grant_cnf_jkt: arkret_wire::Base64UrlString::new(session_grant_cnf_jkt.to_owned())
             .map_err(|error| crate::app_error!(SchemaViolation, error.to_string()))?,
         account_id: payload.account_id.clone(),
@@ -100,7 +99,7 @@ mod possession_tests {
         let transcript: arkret_models_crypto::RecoveryDevicePossessionTranscript = serde_json::from_value(serde_json::json!({
             "schema":"ak.identity.recovery_device_possession.v1",
             "request_id":"ak:request:01904100-0000-7000-8000-000000000001",
-            "session_grant_id":"ak:session_grant:Af0GheZX08ev4L1fQoFdngIpe5c_9Lk7SQqfN4jztzDW",
+            "session_grant_ref":{"issuer_id":"ak:did_core:web:auth.example","id":"ak:session_grant:01904100-0000-7000-8000-000000000081"},
             "session_grant_cnf_jkt":"A".repeat(43),
             "account_id":{"principal_id":"ak:did_core:web:alice.example","station_id":"ak:did_core:web:station.example"},
             "requesting_device_id":"ak:device:01904100-0000-7000-8000-000000000071",
@@ -122,14 +121,14 @@ mod possession_tests {
         };
         verify_recovery_device_possession(
             &request,
-            transcript.session_grant_id.as_str(),
+            &transcript.session_grant_ref,
             &transcript.session_grant_cnf_jkt,
         )
         .unwrap();
         assert!(
             verify_recovery_device_possession(
                 &request,
-                transcript.session_grant_id.as_str(),
+                &transcript.session_grant_ref,
                 &"B".repeat(43)
             )
             .is_err()
@@ -147,7 +146,7 @@ mod possession_tests {
         assert!(
             verify_recovery_device_possession(
                 &changed,
-                transcript.session_grant_id.as_str(),
+                &transcript.session_grant_ref,
                 &transcript.session_grant_cnf_jkt
             )
             .is_err()
@@ -263,7 +262,7 @@ fn recovery_proof_summary_transcript(
 #[derive(Clone)]
 struct RecoveryTranscriptContext {
     request_id: RequestId,
-    session_grant_id: SessionGrantId,
+    session_grant_ref: arkret_wire::SessionGrantRef,
     session_grant_cnf_jkt: Challenge,
     account_id: AccountId,
     requesting_device_id: DeviceId,
@@ -286,8 +285,7 @@ fn typed_recovery_transcript_context(
     Ok(RecoveryTranscriptContext {
         request_id: RequestId::new(record.request_id.clone())
             .map_err(|error| stored_recovery_type_error("request_id", error))?,
-        session_grant_id: SessionGrantId::new(record.session_grant_id.clone())
-            .map_err(|error| stored_recovery_type_error("session_grant_id", error))?,
+        session_grant_ref: record.session_grant_ref.clone(),
         session_grant_cnf_jkt: Challenge::new(record.session_grant_cnf_jkt.clone())
             .map_err(|error| stored_recovery_type_error("session_grant_cnf_jkt", error))?,
         account_id: AccountId::new(record.principal_id.clone(), record.station_id.clone()),
@@ -322,7 +320,7 @@ pub(super) fn typed_recovery_session_state(
         schema: SchemaId::RECOVERY_SESSION_V1.to_owned(),
         request_id: transcript.request_id,
         recovery_session_id: transcript.recovery_session_id,
-        session_grant_id: transcript.session_grant_id,
+        session_grant_ref: transcript.session_grant_ref,
         session_grant_cnf_jkt: transcript.session_grant_cnf_jkt,
         account_id: transcript.account_id,
         requesting_device_id: transcript.requesting_device_id,
@@ -771,7 +769,7 @@ pub(super) async fn load_owned_recovery_session(
     recovery_session_id: &str,
 ) -> Result<RecoverySessionServiceState, AppError> {
     let session = aa.authenticated_session(state, req).await?;
-    let (grant_id, grant_jkt, candidate_device_id) = recovery_grant_coordinates(&session)?;
+    let (grant_ref, grant_jkt, candidate_device_id) = recovery_grant_coordinates(&session)?;
     let principal = session.actor;
     let record = state
         .recovery_sessions()
@@ -786,7 +784,7 @@ pub(super) async fn load_owned_recovery_session(
     if record.principal_id.as_str() != principal
         || record.station_id.as_str() != session.audience
         || record.requesting_device_id != candidate_device_id
-        || record.session_grant_id != grant_id
+        || record.session_grant_ref != grant_ref
         || record.session_grant_cnf_jkt != grant_jkt
     {
         return Err(crate::app_error!(
@@ -803,7 +801,7 @@ pub(super) async fn load_owned_recovery_session(
 
 fn recovery_grant_coordinates(
     session: &SessionRecord,
-) -> Result<(String, String, String), AppError> {
+) -> Result<(arkret_wire::SessionGrantRef, String, String), AppError> {
     let grant = session.session_grant.as_ref().ok_or_else(|| {
         AppError::unauthenticated("recovery operation requires a recovery_session SessionGrant")
     })?;
@@ -829,7 +827,10 @@ fn recovery_grant_coordinates(
         ));
     }
     Ok((
-        grant.grant_id.to_string(),
+        arkret_wire::SessionGrantRef {
+            issuer_id: grant.issuer_id.clone(),
+            id: grant.id.clone(),
+        },
         grant.cnf_jkt.clone(),
         device_id.to_string(),
     ))
@@ -852,11 +853,11 @@ pub(super) async fn recovery_session_create(
 ) -> JsonResult<RecoverySessionState> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let session = aa.authenticated_session(state, req).await?;
-    let (session_grant_id, session_grant_cnf_jkt, candidate_device_id) =
+    let (session_grant_ref, session_grant_cnf_jkt, candidate_device_id) =
         recovery_grant_coordinates(&session)?;
     let principal = session.actor.clone();
     let payload = body.into_inner();
-    verify_recovery_device_possession(&payload, &session_grant_id, &session_grant_cnf_jkt)?;
+    verify_recovery_device_possession(&payload, &session_grant_ref, &session_grant_cnf_jkt)?;
     let create_intent_digest = Hash::new(arkret_canonical::canonical_sha256(&payload).map_err(
         |error| AppError::internal(format!("recovery create canonicalization failed: {error}")),
     )?)
@@ -870,7 +871,7 @@ pub(super) async fn recovery_session_create(
     }
     if let Some(existing) = state
         .recovery_sessions()
-        .session_for_request(&session_grant_id, payload.request_id.as_str())
+        .session_for_request(&session_grant_ref, payload.request_id.as_str())
         .await
         .map_err(recovery_session_store_error)?
     {
@@ -891,7 +892,7 @@ pub(super) async fn recovery_session_create(
     }
     if state
         .recovery_sessions()
-        .session_for_grant(&session_grant_id)
+        .session_for_grant(&session_grant_ref)
         .await
         .map_err(recovery_session_store_error)?
         .is_some()
@@ -1061,7 +1062,7 @@ pub(super) async fn recovery_session_create(
         request_id: payload.request_id.to_string(),
         create_intent_digest: create_intent_digest.to_string(),
         recovery_session_id: crate::ids::generate("recovery_session"),
-        session_grant_id,
+        session_grant_ref,
         session_grant_cnf_jkt,
         principal_id: account_id.principal_id.clone(),
         station_id: account_id.station_id.clone(),
@@ -1096,7 +1097,7 @@ pub(super) async fn recovery_session_create(
         {
             if let Some(existing) = state
                 .recovery_sessions()
-                .session_for_request(&record.session_grant_id, record.request_id.as_str())
+                .session_for_request(&record.session_grant_ref, record.request_id.as_str())
                 .await
                 .map_err(recovery_session_store_error)?
             {
@@ -1110,7 +1111,7 @@ pub(super) async fn recovery_session_create(
             }
             if state
                 .recovery_sessions()
-                .session_for_grant(&record.session_grant_id)
+                .session_for_grant(&record.session_grant_ref)
                 .await
                 .map_err(recovery_session_store_error)?
                 .is_some()
@@ -1764,7 +1765,7 @@ pub(super) fn did_root_recovery_proof_transcript(
         schema: arkret_wire::DomainSeparationId::IDENTITY_RECOVERY_PROOF_V1.to_owned(),
         kind: RecoveryProofKind::DidRoot,
         request_id: context.request_id,
-        session_grant_id: context.session_grant_id,
+        session_grant_ref: context.session_grant_ref,
         session_grant_cnf_jkt: context.session_grant_cnf_jkt,
         account_id: context.account_id,
         requesting_device_id: context.requesting_device_id,
@@ -1801,7 +1802,7 @@ pub(super) fn generic_recovery_proof_transcript(
         schema: arkret_wire::DomainSeparationId::IDENTITY_RECOVERY_PROOF_V1.to_owned(),
         kind: proof_body.proof_kind(),
         request_id: context.request_id,
-        session_grant_id: context.session_grant_id,
+        session_grant_ref: context.session_grant_ref,
         session_grant_cnf_jkt: context.session_grant_cnf_jkt,
         account_id: context.account_id,
         requesting_device_id: context.requesting_device_id,

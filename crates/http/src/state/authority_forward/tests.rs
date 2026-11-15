@@ -73,6 +73,7 @@ fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequestBody {
         content_backup_sources: None,
         producer_device_evidence: None,
         producer_agent_evidence: None,
+        successor_device_evidence: None,
     };
     let body_digest =
         arkret_models_collaboration::authority_commit::authority_forward_body_digest(&draft)

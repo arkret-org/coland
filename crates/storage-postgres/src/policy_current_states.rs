@@ -73,7 +73,7 @@ struct ManagementPolicyHistory {
     #[diesel(sql_type=Jsonb)]
     event_scope: Value,
     #[diesel(sql_type=diesel::sql_types::Nullable<Jsonb>)]
-    expected_revision: Option<Value>,
+    expected_commit_id: Option<Value>,
     #[diesel(sql_type=Jsonb)]
     value: Value,
 }
@@ -172,19 +172,19 @@ fn management_chain<'a>(
             ));
         }
         let revision = policy_revision(row)?;
-        let key = (revision.commit_id.to_string(), revision.stream_position);
+        let key = revision.commit_id.to_string();
         if by_revision.insert(key, index).is_some() || !events.insert(row.current_event_id.clone())
         {
             return Err(refused("Management Policy accepted pointer is duplicated"));
         }
-        let expected: Option<CurrentRevision> = serde_json::from_value(
-            row.expected_revision
+        let expected: Option<arkret_wire::RealmCommitId> = serde_json::from_value(
+            row.expected_commit_id
                 .clone()
-                .ok_or_else(|| refused("Accepted management Policy omitted expected_revision"))?,
+                .ok_or_else(|| refused("Accepted management Policy omitted expected_commit_id"))?,
         )
         .map_err(schema)?;
         if let Some(previous) = expected {
-            let key = (previous.commit_id.to_string(), previous.stream_position);
+            let key = previous.to_string();
             if children.insert(key.clone(), index).is_some() {
                 return Err(refused("Management Policy accepted CAS chain is forked"));
             }
@@ -207,7 +207,7 @@ fn management_chain<'a>(
         let row = &rows[index];
         chain.push(row);
         let revision = policy_revision(row)?;
-        let key = (revision.commit_id.to_string(), revision.stream_position);
+        let key = revision.commit_id.to_string();
         let Some(next) = children.get(&key) else {
             break;
         };
@@ -300,7 +300,7 @@ async fn require_complete_policy_stream(
 const MANAGEMENT_HISTORY_SELECT: &str = "SELECT e.envelope->'payload'->>'policy_id' AS policy_id,c.realm_id, \
     c.commit_id AS current_commit_id,c.stream_position AS current_stream_position, \
     e.envelope->>'event_id' AS current_event_id,c.stream_ref AS source_stream, \
-    e.envelope->'scope_ref' AS event_scope,e.envelope->'payload'->'expected_revision' AS expected_revision, \
+    e.envelope->'scope_ref' AS event_scope,e.envelope->'payload'->'expected_commit_id' AS expected_commit_id, \
     e.envelope->'payload'->'value' AS value FROM realm_commits c \
     JOIN canonical_events e ON e.pk=c.event_pk WHERE e.kind='ak.policy.set' AND e.state='committed'";
 
@@ -759,9 +759,9 @@ pub(crate) async fn read_management_policy_exact_in_connection(
         .get_result::<Head>(&mut *conn).await.map_err(PersistenceError::database)?;
     let payload = PolicySetStatePayload {
         policy_id: id.clone(),
-        expected_revision: Some(
+        expected_commit_id: Some(
             serde_json::from_value(
-                leaf.expected_revision
+                leaf.expected_commit_id
                     .clone()
                     .ok_or_else(|| refused("Policy expected revision is missing"))?,
             )
@@ -938,10 +938,10 @@ async fn check_policy_cas_in_connection(
             ));
         }
     }
-    let revision = chain.last().map(|row| policy_revision(row)).transpose()?;
-    if payload.expected_revision.as_ref() != Some(&revision) {
+    let revision = chain.last().map(|row| policy_revision(row).map(|r| r.commit_id)).transpose()?;
+    if payload.expected_commit_id.as_ref() != Some(&revision) {
         return Err(refused(
-            "Management Policy expected_revision differs from current",
+            "Management Policy expected_commit_id differs from current",
         ));
     }
     Ok(())
@@ -1028,7 +1028,7 @@ mod admission_tests {
     fn agent_policy_is_refused_even_without_an_agent_rule() {
         let payload: PolicySetStatePayload = serde_json::from_value(serde_json::json!({
             "policy_id": "ak:policy:0198ff00-0000-7000-8000-000000000001",
-            "expected_revision": null,
+            "expected_commit_id": null,
             "value": {
                 "schema": "ak.schema.policy.v1",
                 "id": "ak:policy:0198ff00-0000-7000-8000-000000000001",
@@ -1532,29 +1532,23 @@ async fn commit_in_connection_inner(
             payload.validate().map_err(schema)?;
             let value = serde_json::to_value(&payload.value).map_err(schema)?;
             let count = if context == PolicyWriteContext::Admission
-                && let Some(expected) = &payload.expected_revision
+                && let Some(expected) = &payload.expected_commit_id
             {
                 // CAS predecessors order writes even when the new accepted
                 // stream position is lower than the previous stream's value.
-                let expected_position = expected
-                    .as_ref()
-                    .map(|r| i64::try_from(r.stream_position))
-                    .transpose()
-                    .map_err(schema)?;
                 sql_query("INSERT INTO policy_current_states(realm_id,policy_id,current_commit_id,current_stream_position,current_event_id,value,updated_at) \
                     SELECT $1,$2,$3,$4,$5,$6,$7 WHERE $8 IS NULL OR EXISTS(SELECT 1 FROM policy_current_states \
-                    WHERE policy_id=$2 AND realm_id=$1 AND current_commit_id=$8 AND current_stream_position=$9) \
+                    WHERE policy_id=$2 AND realm_id=$1 AND current_commit_id=$8) \
                     ON CONFLICT(policy_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id, \
                     current_stream_position=EXCLUDED.current_stream_position,current_event_id=EXCLUDED.current_event_id, \
                     value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE policy_current_states.realm_id=EXCLUDED.realm_id \
-                    AND policy_current_states.current_commit_id=$8 AND policy_current_states.current_stream_position=$9 \
+                    AND policy_current_states.current_commit_id=$8 \
                     AND policy_current_states.value->>'schema'='ak.schema.policy.v1' \
                     AND policy_current_states.value->>'policy_kind'=EXCLUDED.value->>'policy_kind'")
                     .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(payload.policy_id.as_str())
                     .bind::<Text,_>(commit.commit_id.as_str()).bind::<BigInt,_>(i64::try_from(commit.stream_position).map_err(schema)?)
                     .bind::<Text,_>(event.event_id.as_str()).bind::<Jsonb,_>(&value).bind::<Timestamptz,_>(commit.committed_at)
-                    .bind::<diesel::sql_types::Nullable<Text>,_>(expected.as_ref().map(|r| r.commit_id.as_str()))
-                    .bind::<diesel::sql_types::Nullable<BigInt>,_>(expected_position)
+                    .bind::<diesel::sql_types::Nullable<Text>,_>(expected.as_ref().map(|r| r.as_str()))
                     .execute(&mut *conn).await.map_err(PersistenceError::database)?
             } else {
                 sql_query("INSERT INTO policy_current_states(realm_id,policy_id,current_commit_id,current_stream_position,current_event_id,value,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(policy_id) DO UPDATE SET current_commit_id=EXCLUDED.current_commit_id,current_stream_position=EXCLUDED.current_stream_position,current_event_id=EXCLUDED.current_event_id,value=EXCLUDED.value,updated_at=EXCLUDED.updated_at WHERE policy_current_states.realm_id=EXCLUDED.realm_id AND policy_current_states.current_stream_position<EXCLUDED.current_stream_position AND (policy_current_states.value->>'schema' IS DISTINCT FROM 'ak.schema.policy.v1' OR COALESCE(policy_current_states.value->>'policy_kind','') NOT IN ('agent','applet') OR (EXCLUDED.value->>'schema'='ak.schema.policy.v1' AND EXCLUDED.value->>'policy_kind'=policy_current_states.value->>'policy_kind'))")
@@ -1700,7 +1694,7 @@ mod scoped_current_tests {
     fn policy(previous: Option<&RealmCommit>, suffix: &str) -> PolicySetStatePayload {
         serde_json::from_value(json!({
             "policy_id":format!("ak:policy:0198ff00-0000-7000-8000-00000000000{suffix}"),
-            "expected_revision":previous.map(|p| CurrentRevision { commit_id:p.commit_id.clone(), stream_position:p.stream_position }),
+            "expected_commit_id":previous.map(|p| p.commit_id.clone()),
             "value": {
                 "schema":"ak.schema.policy.v1", "id":format!("ak:policy:0198ff00-0000-7000-8000-00000000000{suffix}"),
                 "realm_id":realm(),"policy_kind":"agent","default_effect":"allow",
@@ -1743,13 +1737,13 @@ mod scoped_current_tests {
             current_event_id: event.event_id.to_string(),
             source_stream: json!(commit.stream_ref),
             event_scope: json!(event.scope_ref),
-            expected_revision: Some(json!(payload.expected_revision.as_ref().unwrap())),
+            expected_commit_id: Some(json!(payload.expected_commit_id.as_ref().unwrap())),
             value: json!(payload.value),
         }
     }
 
     #[test]
-    fn accepted_cas_chain_rejects_forks_missing_predecessors_cycles_and_wrong_positions() {
+    fn accepted_cas_chain_rejects_forks_missing_predecessors_cycles_and_legacy_guards() {
         let first = history(
             &policy(None, "1"),
             arkret_wire::ScopeRef::Realm { realm_id: realm() },
@@ -1758,7 +1752,7 @@ mod scoped_current_tests {
         );
         let pointer = policy_revision(&first).unwrap();
         let mut next_payload = policy(None, "1");
-        next_payload.expected_revision = Some(Some(pointer.clone()));
+        next_payload.expected_commit_id = Some(Some(pointer.commit_id.clone()));
         let next = history(
             &next_payload,
             arkret_wire::ScopeRef::Circle {
@@ -1786,13 +1780,13 @@ mod scoped_current_tests {
         rows.push(fork);
         assert!(management_chain(&rows, &realm(), &PolicyKind::Agent).is_err());
         rows.pop();
-        rows[0].expected_revision = Some(
+        rows[0].expected_commit_id = Some(
             json!({"commit_id":pointer.commit_id,"stream_position":pointer.stream_position+1}),
         );
         assert!(management_chain(&rows, &realm(), &PolicyKind::Agent).is_err());
-        rows[0].expected_revision = None;
+        rows[0].expected_commit_id = None;
         assert!(management_chain(&rows, &realm(), &PolicyKind::Agent).is_err());
-        rows[0].expected_revision = Some(json!(policy_revision(&rows[0]).unwrap()));
+        rows[0].expected_commit_id = Some(json!(policy_revision(&rows[0]).unwrap().commit_id));
         assert!(management_chain(&rows, &realm(), &PolicyKind::Agent).is_err());
     }
 

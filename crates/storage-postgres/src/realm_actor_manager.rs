@@ -1,7 +1,7 @@
 //! Management handover keeps the Realm identity and transfers native control.
 use arkret_models_crypto::DeviceGenerationState;
 use arkret_models_integration::*;
-use arkret_wire::{CommittedEventRef, CurrentRevision, EventKind};
+use arkret_wire::{CommittedEventRef, EventKind};
 use coland_storage::{
     AppletEventProducerGuard, AuthorityCommitTransaction, EventApprovalCommit, PersistenceError,
 };
@@ -18,12 +18,6 @@ fn invalid(detail: impl std::fmt::Display) -> PgTransactionError {
 }
 fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, PgTransactionError> {
     serde_json::from_value(value).map_err(invalid)
-}
-fn revision(source: &CommittedEventRef) -> CurrentRevision {
-    CurrentRevision {
-        commit_id: source.commit_id.clone(),
-        stream_position: source.stream_position,
-    }
 }
 
 pub(crate) async fn admit(
@@ -69,9 +63,9 @@ pub(crate) async fn admit(
         || recovery.pending.is_some()
         || manager.service_id == payload.new_service_id
         || manager.binding_ref != manager_ref
-        || payload.expected_manager_revision != revision(&manager_ref)
-        || payload.expected_control_revision != revision(&control.source)
-        || payload.expected_device_generation_revision != revision(&generation_ref)
+        || payload.expected_manager_commit_id != manager_ref.commit_id
+        || payload.expected_control_commit_id != control.source.commit_id
+        || payload.expected_device_generation_commit_id != generation_ref.commit_id
         || payload.expected_generation != generation.current_device_generation_ref
         || payload.expected_generation.checked_add(1) != Some(payload.new_generation)
         || control.source.stream_position <= manager_ref.stream_position

@@ -47,7 +47,8 @@ pub(crate) fn require_agent_session_scope(
         return Ok(());
     };
     if agent_session
-        .granted_scope
+        .metadata
+        .scopes
         .iter()
         .any(|scope| scope == required_scope)
     {
@@ -113,17 +114,7 @@ mod tests {
             audience: "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service".to_owned(),
             session_public_key: Some("{}".to_owned()),
             endpoint: coland_services::identity::SessionEndpointState::AgentRuntime { state: AgentSessionRecord {
-                granted_scope: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
-                scope_details: serde_json::json!({
-                    "controller_principal_id": "ak:did_core:web:alice.example",
-                    "resources": {
-                        "realm_refs": [],
-                        "strand_refs": [],
-                    },
-                    "constraints": {},
-                    "capability_grant_refs": [],
-                    "policy_refs": [],
-                }),
+                metadata: crate::routing::identity::auth_grant_dpop::tests::test_agent_metadata(scopes),
                 freshness_state: FreshnessState::Fresh,
             } },
             session_grant: None,

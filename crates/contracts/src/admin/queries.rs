@@ -367,7 +367,7 @@ mod tests {
                 "realm_id":realm,"issuer_id":actor,"subject":actor,
                 "actions":[arkret_wire::CapabilityActionId::MESSAGE_CREATE],
                 "resources":[{"kind":"realm","realm_id":realm}],
-                "issuer_authority_refs":[root],"authority_depth":1,"authority_root_refs":[root],
+                "issuer_authority_refs":[root],"authority_depth":1,"authority_root_ref":root,
                 "issued_at":"2026-10-14T00:00:00.000Z","status":"active"}
         });
         let summary: CapabilitySummary = serde_json::from_value(wire.clone()).unwrap();

@@ -105,7 +105,7 @@ fn relation_create_waits_for_unknown_endpoint() {
                 "from_ref": STRAND,
                 "to_ref": RELATION_TARGET
             },
-            "expected_revision": null,
+            "expected_commit_id": null,
             "relation": {
                 "relation_kind": "references",
                 "from_ref": STRAND,
@@ -142,10 +142,7 @@ fn relation_update_for_missing_current_value_is_not_queued_for_replay() {
                 "from_ref": STRAND,
                 "to_ref": RELATION_TARGET
             },
-            "expected_revision": {
-                "commit_id": "ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4",
-                "stream_position": 1
-            },
+            "expected_commit_id": "ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4",
             "relation_id": RELATION,
             "patch": { "fields.label": "m" }
         }),

@@ -451,7 +451,7 @@ pub(crate) async fn read_visibility_in_connection(
             let actions = [action.as_str()];
             let evaluation = bounded.evaluate_with_approvals(&actions, &resource, &facts, &markers);
             let owner = matches!(evaluation, coland_storage::GrantEvaluation::Unsatisfied)
-                && bounded.root_controller
+                && bounded.root_controller()
                 && bounded.agent_ceiling.is_none()
                 && arkret_policy::owner_may_author_action(action.as_str()).unwrap_or(false);
             if !matches!(evaluation, coland_storage::GrantEvaluation::Allowed(_)) && !owner {
@@ -470,17 +470,20 @@ pub(crate) async fn read_visibility_in_connection(
         )
         .await?
     {
-        let explicit = cut.effective_grants(chrono::Utc::now()).any(|(_, grant)| {
-            grant
-                .resources
-                .iter()
-                .any(|selector| selector.circle_id.as_ref() == Some(circle_id))
-                && coland_storage::grant_names_target(
-                    grant,
-                    &[CapabilityActionId::CircleAudit.as_str()],
-                    &resource,
-                )
-        });
+        let explicit = bounded
+            .current_positive_grant_records(CapabilityActionId::CircleAudit.as_str(), &resource)?
+            .into_iter()
+            .any(|grant| {
+                grant
+                    .resources
+                    .iter()
+                    .any(|selector| selector.circle_id.as_ref() == Some(circle_id))
+                    && coland_storage::grant_names_target(
+                        grant,
+                        &[CapabilityActionId::CircleAudit.as_str()],
+                        &resource,
+                    )
+            });
         let actions = [CapabilityActionId::CircleAudit.as_str()];
         let markers = read_approval_markers_in_connection(conn, request).await?;
         if !explicit

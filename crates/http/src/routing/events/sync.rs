@@ -144,9 +144,9 @@ async fn content_delivery_guard_inner(
         })?;
         input.credential_expires_at = Some(session.expires_at);
         let details = agent_session
+            .metadata
             .scope_details
-            .get("scope_details")
-            .and_then(Value::as_object)
+            .as_ref()
             .ok_or_else(|| {
                 crate::error::AppError::capability_denied(
                     "Agent current session resource ceiling is unavailable",
@@ -247,7 +247,7 @@ async fn content_delivery_guard_inner(
 pub async fn acquire_native_message_reply_cut(
     state: &AppState,
     req: &mut Request,
-    grant_jwt: &str,
+    grant_secret: &str,
     agent: &arkret_wire::AccountId,
     controller: &arkret_wire::AccountId,
     caller: &arkret_wire::AccountId,
@@ -273,21 +273,26 @@ pub async fn acquire_native_message_reply_cut(
             .headers()
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            != Some(format!("DPoP {grant_jwt}").as_str())
+            != Some(format!("DPoP {grant_secret}").as_str())
     {
         return Err(invalid());
     }
     // Obtain one force-fresh authoritative result before PoP verification so
     // both original credential checks use the same exact request memo.
     crate::routing::identity::auth_grant_dpop::take_request_authoritative_grant(
-        state, req, grant_jwt, true,
+        state,
+        req,
+        grant_secret,
+        true,
     )
     .await
     .map_err(|(_, code, _)| native_reply_auth_error(code))?;
     crate::routing::identity::session_pop::enforce_native_reply_session_pop(state, req).await?;
     let authenticated =
         crate::routing::identity::auth_grant_dpop::authenticate_native_reply_session(
-            state, req, grant_jwt,
+            state,
+            req,
+            grant_secret,
         )
         .await
         .map_err(|(_, code, _)| native_reply_auth_error(code))?;
@@ -370,9 +375,9 @@ pub(crate) async fn native_message_reply_preparation_guard(
         return Err(denied());
     }
     let details = agent_session
+        .metadata
         .scope_details
-        .get("scope_details")
-        .and_then(Value::as_object)
+        .as_ref()
         .ok_or_else(denied)?;
     let mut input = coland_storage::AccountContentDeliveryInput::committed(&[
         arkret_wire::CommittedEventView::Full(source.clone()),

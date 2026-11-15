@@ -85,7 +85,7 @@ fn push_route_payload(expected: u64, revoked: bool) -> serde_json::Value {
             "device_id": DEVICE,
             "push_route": ROUTE,
             "revoked": true,
-            "expected_server_revision": expected,
+            "expected_server_commit_id": expected,
         })
     } else {
         json!({
@@ -96,7 +96,7 @@ fn push_route_payload(expected: u64, revoked: bool) -> serde_json::Value {
             "push_gateway_id": GATEWAY,
             "encryption_key": "base64url-public-key",
             "capabilities": ["chat"],
-            "expected_server_revision": expected,
+            "expected_server_commit_id": expected,
         })
     }
 }

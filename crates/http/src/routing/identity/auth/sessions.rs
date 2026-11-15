@@ -161,10 +161,10 @@ async fn bind_session_account(
 /// bearer session or HTTP DPoP replay entry is created by this read.
 pub(crate) async fn websocket_session(
     state: &AppState,
-    grant_jwt: &str,
+    grant_secret: &str,
 ) -> Result<SessionRecord, (StatusCode, &'static str, &'static str)> {
     let grant =
-        super::super::auth_grant_dpop::introspect_session_grant_cached(state, grant_jwt, true)
+        super::super::auth_grant_dpop::introspect_session_grant_cached(state, grant_secret, true)
             .await?;
     if grant.audience_id.as_str() != state.service_id() || grant.expires_at <= now() {
         return Err((
@@ -175,7 +175,10 @@ pub(crate) async fn websocket_session(
     }
     let endpoint = super::super::auth_grant_dpop::grant_session_binding(&grant)?;
     let mut session = super::super::auth_grant_dpop::session_from_verified_grant(
-        state, grant_jwt, grant, endpoint,
+        state,
+        grant_secret,
+        grant,
+        endpoint,
     );
     if is_recovery_session_grant(&session) {
         return Err((
@@ -196,23 +199,23 @@ pub(crate) async fn websocket_session(
 pub(crate) async fn revalidate_stream_session(
     state: &AppState,
     original: &SessionRecord,
-    grant_jwt: Option<&str>,
+    grant_secret: Option<&str>,
 ) -> Result<(), (StatusCode, &'static str, &'static str)> {
-    revalidate_session(state, original, grant_jwt, false).await
+    revalidate_session(state, original, grant_secret, false).await
 }
 
 pub(crate) async fn revalidate_current_read_session(
     state: &AppState,
     original: &SessionRecord,
-    grant_jwt: Option<&str>,
+    grant_secret: Option<&str>,
 ) -> Result<(), (StatusCode, &'static str, &'static str)> {
-    revalidate_session(state, original, grant_jwt, true).await
+    revalidate_session(state, original, grant_secret, true).await
 }
 
 async fn revalidate_session(
     state: &AppState,
     original: &SessionRecord,
-    grant_jwt: Option<&str>,
+    grant_secret: Option<&str>,
     force_fresh: bool,
 ) -> Result<(), (StatusCode, &'static str, &'static str)> {
     let rejected = (
@@ -224,21 +227,14 @@ async fn revalidate_session(
         return Err(rejected);
     }
     let mut current = if let Some(context) = original.session_grant.as_ref() {
-        let grant_jwt = grant_jwt.ok_or(rejected)?;
+        let grant_secret = grant_secret.ok_or(rejected)?;
         let grant = super::super::auth_grant_dpop::introspect_session_grant_cached(
             state,
-            grant_jwt,
+            grant_secret,
             force_fresh,
         )
         .await?;
-        if grant.id != context.grant_id
-            || grant.account_id != context.account_id
-            || grant.issuer_id != context.issuer_id
-            || grant.credential_class != context.credential_class
-            || grant.holder_binding != context.holder_binding
-            || grant.device_binding != context.device_binding
-            || grant.cnf_jkt != context.cnf_jkt
-            || grant.scopes != context.scopes
+        if grant.metadata != context.metadata
             || grant.audience_id.as_str() != original.audience
             || grant.expires_at != original.expires_at
             || Some(grant.session_public_key.as_str()) != original.session_public_key.as_deref()
@@ -247,7 +243,10 @@ async fn revalidate_session(
         }
         let endpoint = super::super::auth_grant_dpop::grant_session_binding(&grant)?;
         super::super::auth_grant_dpop::session_from_verified_grant(
-            state, grant_jwt, grant, endpoint,
+            state,
+            grant_secret,
+            grant,
+            endpoint,
         )
     } else {
         state
@@ -338,7 +337,7 @@ async fn enforce_recovery_session_grant_operation(
     }
     let recovery = state
         .recovery_sessions()
-        .session_for_grant(grant.grant_id.as_str())
+        .session_for_grant(&grant.grant_ref())
         .await
         .map_err(|_| {
             (
@@ -357,7 +356,7 @@ async fn enforce_recovery_session_grant_operation(
         || recovery.principal_id.as_str() != session.actor
         || recovery.station_id.as_str() != session.audience
         || recovery.requesting_device_id.as_str() != session.require_human_device_id()
-        || recovery.session_grant_id != grant.grant_id.as_str()
+        || recovery.session_grant_ref != grant.grant_ref()
         || recovery.session_grant_cnf_jkt != grant.cnf_jkt
     {
         return Err((
@@ -980,27 +979,7 @@ fn method_path_requires_fresh_introspection(method: &salvo::http::Method, path: 
 }
 
 fn bearer_looks_like_session_grant(token: &str) -> bool {
-    let mut parts = token.split('.');
-    let (_header, payload, _signature) =
-        match (parts.next(), parts.next(), parts.next(), parts.next()) {
-            (Some(header), Some(payload), Some(signature), None) => (header, payload, signature),
-            _ => return false,
-        };
-
-    let Some(payload) = decode_jwt_payload_json(payload) else {
-        return false;
-    };
-    payload.get("kind").and_then(serde_json::Value::as_str)
-        == Some(arkret_models_identity::SESSION_GRANT_CREDENTIAL_KIND)
-}
-
-fn decode_jwt_payload_json(payload: &str) -> Option<serde_json::Value> {
-    use base64::Engine as _;
-
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload.as_bytes())
-        .ok()?;
-    serde_json::from_slice(&bytes).ok()
+    arkret_identifiers::SessionGrantSecret::new(token).is_ok()
 }
 
 #[cfg(test)]
@@ -1509,32 +1488,24 @@ mod tests {
     }
 
     #[test]
-    fn bare_session_grant_jwt_is_classified_from_the_kind_claim() {
-        let token = compact_jwt(serde_json::json!({
-            "kind": "ak.session.grant",
-            "subject": "did:web:alice.example",
-        }));
-
-        assert!(bearer_looks_like_session_grant(&token));
-    }
-
-    #[test]
-    fn non_grant_bearers_are_not_classified_as_session_grants() {
-        let other = compact_jwt(serde_json::json!({
-            "kind": "other",
-            "sub": "did:web:alice.example",
-        }));
-        // `SignedSessionGrantClaims` carries the credential name in `kind`
-        // only; a `type` claim is not a session-grant discriminator.
-        let mislabelled = compact_jwt(serde_json::json!({
-            "type": "ak.session.grant",
-            "subject": "did:web:alice.example",
-        }));
-
-        assert!(!bearer_looks_like_session_grant(&other));
-        assert!(!bearer_looks_like_session_grant(&mislabelled));
-        assert!(!bearer_looks_like_session_grant("opaque-dev-bearer"));
-        assert!(!bearer_looks_like_session_grant("not.valid.base64"));
+    fn bare_session_grant_is_only_a_canonical_opaque_secret() {
+        let secret = arkret_identifiers::SessionGrantSecret::from_bytes([17; 32]);
+        assert!(bearer_looks_like_session_grant(secret.as_str()));
+        for token in [
+            "",
+            "test-grant",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "éAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ] {
+            assert!(!bearer_looks_like_session_grant(token));
+        }
+        let retired = compact_jwt(
+            serde_json::json!({"kind":"ak.session.grant","sub":"ak:did_core:web:alice.example"}),
+        );
+        assert!(
+            !bearer_looks_like_session_grant(&retired),
+            "JWT claims cannot classify an opaque grant"
+        );
     }
 
     fn compact_jwt(payload: serde_json::Value) -> String {

@@ -1534,6 +1534,7 @@ pub async fn assert_applet_formal_commit_transaction_contract(
         )
         .unwrap();
         batch.push(EventCommitRequest {
+            owner_transfer_successor: None,
             verified_media_participant: None,
             event: CanonicalEventRecord { event_id: event.event_id.to_string(), actor_id: event.actor_id.to_string(),
                 realm_id: Some(event.realm_id.to_string()), kind: event.kind.as_str().to_owned(),
@@ -2078,6 +2079,7 @@ pub async fn assert_event_commit_unit_of_work_contract(
         updated_at: now,
     };
     let contact_commit = EventCommitRequest {
+        owner_transfer_successor: None,
         verified_media_participant: None,
         authority_commit: stream.accept(&contact_event),
         self_producer_guard: None,
@@ -2180,6 +2182,7 @@ pub async fn assert_event_commit_unit_of_work_contract(
     let failed_contact_commit = stores
         .unit_of_work
         .commit_event(EventCommitRequest {
+            owner_transfer_successor: None,
             verified_media_participant: None,
             authority_commit: stream.accept(&failed_contact_event),
             self_producer_guard: None,

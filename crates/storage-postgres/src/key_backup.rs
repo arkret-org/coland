@@ -656,6 +656,24 @@ impl KeyBackupStore for PgKeyBackupStore {
         record: KeyBackupDeleteChallengeRecord,
         now: chrono::DateTime<Utc>,
     ) -> PersistenceResult<KeyBackupDeleteChallengeRecord> {
+        let challenge: arkret_models_crypto::KeysBackupsDeleteChallenge =
+            serde_json::from_value(record.challenge.clone())
+                .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+        challenge
+            .validate_at(now)
+            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
+        if challenge.challenge_id.as_str() != record.challenge_id
+            || challenge.account_id != record.account_id
+            || challenge.backup_id.as_str() != record.backup_id
+            || challenge.request_id.as_str() != record.request_id
+            || challenge.issued_at != record.issued_at
+            || challenge.expires_at != record.expires_at
+            || record.consumed_at.is_some()
+        {
+            return Err(PersistenceError::SchemaViolation(
+                "delete challenge ledger columns differ from its exact closed challenge".into(),
+            ));
+        }
         let mut conn = crate::pg_db(&self.pool);
         // The row is unique on `(principal_id, station_id, backup_id, request_id)`, and the
         // `DO UPDATE ... WHERE` guard only replaces it once the held challenge

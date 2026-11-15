@@ -10,7 +10,9 @@ use super::{
 #[derive(Clone, Debug)]
 pub struct RecoveryUnitCommitWrite {
     pub transaction: SecurityTransactionRecord,
-    pub step_outcome: SecurityTransactionStepOutcomeRecord,
+    /// Independently verified Session snapshot; storage re-reads and compares
+    /// it under the policy/PCR/session locks before the first write.
+    pub verified_session: RecoverySessionRecord,
     pub predecessor: arkret_wire::CommitStreamHead,
     pub commits: [AuthorityCommitTransaction; 2],
     pub queued_at: chrono::DateTime<chrono::Utc>,
@@ -41,15 +43,10 @@ impl RevokeCommandTerminalWrite {
             SecurityTransactionTerminalOutcome,
         };
 
-        let resource = &self.transaction.resource;
+        let resource = self.transaction.rotation()?;
         resource
             .validate_structural()
             .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        resource.security_rotation_plan().ok_or_else(|| {
-            PersistenceError::SchemaViolation(
-                "revoke terminal requires SecurityRotation".to_owned(),
-            )
-        })?;
         let outcome = resource.revoke_command_outcome.as_ref().ok_or_else(|| {
             PersistenceError::SchemaViolation("revoke command outcome is missing".to_owned())
         })?;
@@ -97,15 +94,11 @@ impl RevokeCommandTerminalWrite {
 
 impl RevokeProposalCommitWrite {
     pub fn validate(&self) -> PersistenceResult<()> {
-        let resource = &self.transaction.resource;
+        let resource = self.transaction.rotation()?;
         resource
             .validate_structural()
             .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        let plan = resource.security_rotation_plan().ok_or_else(|| {
-            PersistenceError::SchemaViolation(
-                "revoke proposal requires SecurityRotation".to_owned(),
-            )
-        })?;
+        let plan = &resource.prepared_plan;
         let proposal = resource.revoke_proposal.as_ref().ok_or_else(|| {
             PersistenceError::SchemaViolation("revoke proposal binding is missing".to_owned())
         })?;
@@ -192,7 +185,7 @@ fn validate_worker_step_outcome(
     step: arkret_models_crypto::SecurityTransactionStep,
     index: usize,
 ) -> PersistenceResult<()> {
-    let resource = &transaction.resource;
+    let resource = transaction.rotation()?;
     let accepted = resource.accepted_steps.get(index);
     if resource.accepted_steps.len() != index + 1
         || resource.terminal_outcome.is_some()
@@ -225,15 +218,10 @@ fn validate_worker_step_outcome(
 
 impl RotationUploadCommitWrite {
     pub fn validate(&self) -> PersistenceResult<()> {
-        let resource = &self.transaction.resource;
+        let resource = self.transaction.rotation()?;
         resource
             .validate_structural()
             .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        resource.security_rotation_plan().ok_or_else(|| {
-            PersistenceError::SchemaViolation(
-                "rotation upload requires SecurityRotation".to_owned(),
-            )
-        })?;
         validate_worker_step_outcome(
             &self.transaction,
             &self.step_outcome,
@@ -248,25 +236,17 @@ impl RotationLocalCommitWrite {
     /// appended step. Signature and device status are durable-state checks
     /// and belong to the unit.
     pub fn validate(&self) -> PersistenceResult<()> {
-        use arkret_models_crypto::{
-            ClientStepAttestationArtifact, SecurityTransactionStep,
-            SecurityTransactionTerminalOutcome,
-        };
+        use arkret_models_crypto::{SecurityTransactionStep, SecurityTransactionTerminalOutcome};
         let invalid = |reason: &str| PersistenceError::SchemaViolation(reason.to_owned());
-        let resource = &self.transaction.resource;
+        let resource = self.transaction.rotation()?;
         resource
             .validate_structural()
             .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        let plan = resource
-            .security_rotation_plan()
-            .ok_or_else(|| invalid("rotation local commit requires SecurityRotation"))?;
+        let plan = &resource.prepared_plan;
         self.attestation
             .validate()
             .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        let ClientStepAttestationArtifact::SecurityRotation(artifact) = &self.attestation.artifact
-        else {
-            return Err(invalid("local commit requires SecurityRotationLocalCommit"));
-        };
+        let artifact = &self.attestation.artifact;
         let accepted = resource.accepted_steps.get(4);
         if resource.accepted_steps.len() != 5
             || resource.step_order().ok().and_then(|order| order.get(4).copied())
@@ -316,15 +296,11 @@ impl RotationLocalCommitWrite {
 
 impl RotationPointerSwitchWrite {
     pub fn validate(&self) -> PersistenceResult<()> {
-        let resource = &self.transaction.resource;
+        let resource = self.transaction.rotation()?;
         resource
             .validate_structural()
             .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        let plan = resource.security_rotation_plan().ok_or_else(|| {
-            PersistenceError::SchemaViolation(
-                "rotation switch requires SecurityRotation".to_owned(),
-            )
-        })?;
+        let plan = &resource.prepared_plan;
         let rotation = single_backup_rotation(plan)?;
         if !matches!(rotation.active_series_unit.request.events.as_slice(), [slot] if slot.event == self.commit.event)
             || self.commit.event.event_id != rotation.binding.active_series_event_id
@@ -350,167 +326,120 @@ impl RotationPointerSwitchWrite {
 
 impl RecoveryUnitCommitWrite {
     pub fn validate(&self) -> PersistenceResult<()> {
-        self.transaction
-            .resource
+        let completion = self.transaction.recovery()?;
+        completion
             .validate_structural()
-            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        let plan = self.transaction.resource.recovery_plan().ok_or_else(|| {
-            PersistenceError::SchemaViolation(
-                "recovery unit requires a RecoveryTransaction plan".to_owned(),
-            )
-        })?;
-        let intent = &plan.reanchor_commit_intent;
-        let [planned_reanchor_submission, planned_authorize_submission] =
-            plan.reanchor_unit.request.events.as_slice()
-        else {
-            return Err(PersistenceError::SchemaViolation(
-                "recovery plan must contain exactly two ordered Events".to_owned(),
-            ));
-        };
-        let (planned_reanchor, planned_authorize) = (
-            &planned_reanchor_submission.event,
-            &planned_authorize_submission.event,
-        );
-        let [reanchor, authorize] = &self.commits;
-        let reanchor_payload: arkret_models_collaboration::events_payloads::DeviceReanchorPayload =
-            serde_json::from_value(
-                serde_json::to_value(&reanchor.event.payload)
-                    .map_err(PersistenceError::database)?,
-            )
-            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        let authorize_payload: arkret_models_collaboration::events_payloads::DeviceAuthorizePayload = serde_json::from_value(
-            serde_json::to_value(&authorize.event.payload).map_err(PersistenceError::database)?,
-        ).map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        let request: arkret_models_crypto::SecurityTransactionContinueRequestBody =
-            serde_json::from_slice(&self.step_outcome.canonical_request).map_err(|error| {
-                PersistenceError::SchemaViolation(format!(
-                    "invalid recovery terminal request: {error}"
-                ))
+            .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+        let request: arkret_models_crypto::SecurityTransactionCreateRequestBody =
+            serde_json::from_slice(&self.transaction.canonical_request).map_err(|e| {
+                PersistenceError::SchemaViolation(format!("invalid single Recovery request: {e}"))
             })?;
-        request
-            .client_attestation
-            .validate()
-            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        let arkret_models_crypto::ClientStepAttestationArtifact::Recovery(terminal) =
-            &request.client_attestation.artifact
+        let arkret_models_crypto::SecurityTransactionCreateRequestBody::Recovery(request) =
+            &request
         else {
             return Err(PersistenceError::SchemaViolation(
-                "recovery terminal request has no recovery receipt".to_owned(),
+                "Recovery unit contains another request branch".into(),
             ));
         };
-        let receipt = &terminal.recovery_receipt;
-        let Some(arkret_models_crypto::SecurityTransactionTerminalOutcome::Completed {
-            completion_attestation: Some(completion),
-            ..
-        }) = &self.transaction.resource.terminal_outcome
-        else {
-            return Err(PersistenceError::SchemaViolation(
-                "recovery unit requires a completed terminal attestation".to_owned(),
-            ));
-        };
-        let expected_stream = arkret_wire::CommitStreamRef::Realm {
-            realm_id: intent.realm_id.clone(),
-        };
-        let committed_ref = |commit: &AuthorityCommitTransaction| arkret_wire::CommittedEventRef {
-            event_id: commit.event.event_id.clone(),
-            commit_id: commit.commit.commit_id.clone(),
-            stream_ref: commit.commit.stream_ref.clone(),
-            stream_position: commit.commit.stream_position,
-        };
-        let resource = &self.transaction.resource;
-        let canonical =
-            arkret_canonical::canonical_json_bytes(&request).map_err(PersistenceError::database)?;
-        let receipt_digest = arkret_wire::Hash::new(
-            arkret_canonical::canonical_sha256(receipt).map_err(PersistenceError::database)?,
+        completion
+            .validate_for_request(request)
+            .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+        let canonical = arkret_canonical::canonical_json_bytes(
+            &arkret_models_crypto::SecurityTransactionCreateRequestBody::Recovery(request.clone()),
         )
-        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        let authorize_digest =
-            arkret_models_collaboration::events_payloads::device_authorize_payload_digest(
-                &serde_json::to_value(&authorize_payload).map_err(PersistenceError::database)?,
-                arkret_canonical::DigestSuite::Sha256,
-            )
-            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        if self.step_outcome.step
-            != arkret_models_crypto::SecurityTransactionStep::CommitRecoveryUnit
-            || self.step_outcome.transaction_id != self.transaction.resource.transaction_id.as_str()
-            || self.predecessor.stream_ref != expected_stream
-            || self.predecessor.commit_id != intent.predecessor_ref
-            || reanchor.event != *planned_reanchor
-            || authorize.event != *planned_authorize
-            || reanchor.commit.stream_ref != expected_stream
-            || authorize.commit.stream_ref != expected_stream
-            || reanchor.expected_authority != authorize.expected_authority
-            || reanchor.commit.previous_commit_ref.as_ref() != Some(&self.predecessor.commit_id)
-            || authorize.commit.previous_commit_ref.as_ref() != Some(&reanchor.commit.commit_id)
-            || reanchor.commit.stream_position
-                != self
-                    .predecessor
-                    .stream_position
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        PersistenceError::SchemaViolation("PCR stream position overflow".to_owned())
-                    })?
-            || authorize.commit.stream_position
-                != reanchor
-                    .commit
-                    .stream_position
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        PersistenceError::SchemaViolation("PCR stream position overflow".to_owned())
-                    })?
-            || self.transaction.resource.terminal_outcome.is_none()
-            || canonical != self.step_outcome.canonical_request
-            || self.step_outcome.response != serde_json::to_value(resource).map_err(PersistenceError::database)?
-            || self.step_outcome.participant_outcome.as_ref() != Some(&serde_json::to_value(terminal).map_err(PersistenceError::database)?)
-            || request.request_digest != resource.request_digest
-            || request.prepared_plan_digest != resource.prepared_plan_digest
-            || request.expected_accepted_step_count.checked_add(1) != Some(resource.accepted_steps.len() as u64)
-            || request.client_attestation.transaction_id != resource.transaction_id
-            || request.client_attestation.transaction_request_digest != resource.request_digest
-            || request.client_attestation.prepared_plan_digest != resource.prepared_plan_digest
-            || request.client_attestation.output_ref != receipt.receipt_id.as_str()
-            || receipt.transaction_id != resource.transaction_id
-            || receipt.transaction_request_digest != resource.request_digest
-            || receipt.prepared_plan_digest != resource.prepared_plan_digest
-            || receipt.account_id != resource.account_id
-            || receipt.receipt_id != plan.binding.terminal_receipt_id
-            || receipt.recovery_session_id != plan.binding.recovery_session_id
-            || receipt.new_device_id != plan.binding.replacement_device_id
-            || receipt.reanchor_event_id != reanchor.event.event_id
-            || receipt.authorization_event_id != authorize.event.event_id
-            || receipt.previous_model_generation_ref != plan.previous_model_generation_ref
-            || receipt.new_model_generation_ref != plan.new_model_generation_ref
-            || receipt.proof_summary.proof_digest != plan.proof_digest
-            || receipt.recovery_authority_kind != arkret_models_crypto::RecoveryAuthorityKind::PcrPolicy
-            || receipt.outcome != arkret_models_crypto::RecoveryReceiptOutcome::Completed
-            || receipt.policy_id != reanchor_payload.recovery_policy_id
-            || receipt.policy_version != reanchor_payload.recovery_policy_version
-            || completion.terminal_receipt_digest != receipt_digest
-            || completion.reanchor_event_ref != committed_ref(reanchor)
-            || completion.device_authorization_event_ref != committed_ref(authorize)
-            || reanchor_payload.account_id != resource.account_id
-            || reanchor_payload.recovery_authority_kind != arkret_models_crypto::RecoveryAuthorityKind::PcrPolicy
-            || reanchor_payload.recovery_session_id != plan.binding.recovery_session_id
-            || reanchor_payload.previous_device_generation != plan.previous_model_generation_ref
-            || reanchor_payload.new_device_generation != plan.new_model_generation_ref
-            || reanchor_payload.replacement_authorize_payload_digest != authorize_digest
-            || authorize_payload.device_id != plan.binding.replacement_device_id
-            || authorize_payload.recovery_session_id.as_ref() != Some(&plan.binding.recovery_session_id)
-            || authorize_payload.authorization_binding_kind != arkret_models_collaboration::events_payloads::DeviceAuthorizationBindingKind::PcrRecovery
-            || authorize_payload.authorized_generation_ref != plan.new_model_generation_ref
-            || reanchor.event.producer_proof.as_ref().is_none_or(|proof|
-                proof.verification_method != request.client_attestation.signature_proof.verification_method
-                || proof.verification_method != receipt.signature_proof.verification_method)
+        .map_err(PersistenceError::database)?;
+        let receipt = &completion.recovery_receipt;
+        let session = &self.verified_session;
+        if session.state != super::RecoverySessionLifecycle::Verified
+            || session.transaction_id.is_some()
+            || session.principal_id != receipt.account_id.principal_id
+            || session.station_id != receipt.account_id.station_id
+            || session.recovery_session_id != receipt.recovery_session_id.as_str()
+            || session.session_grant_ref != receipt.session_grant_ref
+            || session.session_grant_cnf_jkt != receipt.session_grant_cnf_jkt.as_str()
+            || session.requesting_device_id != receipt.new_device_id.as_str()
+            || session.policy_id != receipt.policy_id.as_str()
+            || u64::from(session.policy_version) != receipt.policy_version
+            || session.trust_domain != receipt.trust_domain.as_str()
+            || session.current_device_generation_ref != receipt.previous_model_generation_ref
+            || session.identity_model != receipt.identity_model
+            || session.accepted_stream_head != self.predecessor
+            || receipt.expires_at > session.expires_at
+            || receipt.expires_at <= self.queued_at
         {
             return Err(PersistenceError::SchemaViolation(
-                "recovery unit does not bind the exact ordered Event/Commit pair and terminal result"
-                    .to_owned(),
+                "Recovery receipt changed its independently verified Session basis".into(),
             ));
         }
-        for commit in &self.commits {
-            commit.validate().map_err(|error| {
-                PersistenceError::SchemaViolation(format!("invalid recovery Commit: {error}"))
+        let expected_stream = arkret_wire::CommitStreamRef::Realm {
+            realm_id: receipt.recovery_unit.events[0].event.realm_id.clone(),
+        };
+        let committed_ref = |item: &AuthorityCommitTransaction| arkret_wire::CommittedEventRef {
+            event_id: item.event.event_id.clone(),
+            commit_id: item.commit.commit_id.clone(),
+            stream_ref: item.commit.stream_ref.clone(),
+            stream_position: item.commit.stream_position,
+        };
+        if canonical != self.transaction.canonical_request
+            || self.predecessor.stream_ref != expected_stream
+            || self.predecessor.commit_id != receipt.recovery_unit.predecessor_ref
+            || self.commits[0].event != receipt.recovery_unit.events[0].event
+            || self.commits[1].event != receipt.recovery_unit.events[1].event
+            || self.commits[0].commit.previous_commit_ref.as_ref()
+                != Some(&self.predecessor.commit_id)
+            || self.commits[0].commit.stream_position != self.predecessor.stream_position + 1
+            || self.commits[1].commit.previous_commit_ref.as_ref()
+                != Some(&self.commits[0].commit.commit_id)
+            || self.commits[1].commit.stream_position != self.commits[0].commit.stream_position + 1
+            || self
+                .commits
+                .iter()
+                .any(|item| item.commit.stream_ref != expected_stream)
+            || self.commits[0].expected_authority != self.commits[1].expected_authority
+            || completion.completion_attestation.reanchor_event_ref
+                != committed_ref(&self.commits[0])
+            || completion
+                .completion_attestation
+                .device_authorization_event_ref
+                != committed_ref(&self.commits[1])
+            || self.queued_at != completion.created_at
+        {
+            return Err(PersistenceError::SchemaViolation("Recovery unit changed its full signed R, accepted predecessor or actual consecutive Commit pair".into()));
+        }
+        // These native candidate-produced Events have no threshold approval
+        // carrier. Keep the full signed submissions in R and reject inapplicable
+        // material explicitly instead of silently throwing it away.
+        for slot in &receipt.recovery_unit.events {
+            slot.validate()
+                .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+            if slot.approval_signatures.is_some() {
+                return Err(PersistenceError::SchemaViolation(
+                    "native Recovery Event does not admit approval_signatures".into(),
+                ));
+            }
+        }
+        let candidate = session
+            .requesting_device_public_key_did
+            .strip_prefix("did:key:")
+            .ok_or_else(|| {
+                PersistenceError::SchemaViolation("verified candidate is not did:key".into())
             })?;
+        arkret_signatures::recovery::verify_recovery_receipt(
+            receipt,
+            &receipt.signature_proof.verification_method,
+            &arkret_signatures::PublicKeyMaterial::Ed25519Multibase {
+                value: candidate.to_owned(),
+            },
+        )
+        .map_err(|e| {
+            PersistenceError::SchemaViolation(format!(
+                "invalid Recovery original signature or possession: {e}"
+            ))
+        })?;
+        for commit in &self.commits {
+            commit
+                .validate()
+                .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
         }
         Ok(())
     }
@@ -573,11 +502,11 @@ pub trait RecoverySessionStore: Send + Sync {
     ) -> PersistenceResult<Option<RecoverySessionRecord>>;
     async fn get_by_grant_id(
         &self,
-        session_grant_id: &str,
+        session_grant_ref: &arkret_wire::SessionGrantRef,
     ) -> PersistenceResult<Option<RecoverySessionRecord>>;
     async fn get_by_grant_request(
         &self,
-        session_grant_id: &str,
+        session_grant_ref: &arkret_wire::SessionGrantRef,
         request_id: &str,
     ) -> PersistenceResult<Option<RecoverySessionRecord>>;
     async fn insert(&self, record: RecoverySessionRecord) -> PersistenceResult<()>;
@@ -628,16 +557,15 @@ pub trait SecurityTransactionStore: Send + Sync {
         write: RevokeProposalCommitWrite,
     ) -> PersistenceResult<arkret_wire::RealmCommit>;
     /// Atomically queues and commits the ordered PCR recovery Event pair and
-    /// accepts the terminal step. An error leaves zero accepted Event, Commit,
-    /// session consumption or terminal ledger writes visible.
+    /// installs the immutable completed Recovery resource. An error leaves zero accepted Event,
+    /// Commit, session consumption or terminal ledger writes visible.
     async fn commit_recovery_unit(
         &self,
         write: RecoveryUnitCommitWrite,
-    ) -> PersistenceResult<SecurityTransactionStepOutcomeRecord>;
+    ) -> PersistenceResult<SecurityTransactionRecord>;
     /// Persists the canonical request and initial resource atomically.
     ///
-    /// Recovery transactions additionally CAS-bind their already verified
-    /// recovery session in the same durable commit.
+    /// Rotation-only preparation. Recovery must use the indivisible unit.
     async fn create(
         &self,
         record: SecurityTransactionRecord,
@@ -814,8 +742,8 @@ pub fn validate_security_transaction_update(
     existing: &SecurityTransactionRecord,
     proposed: &SecurityTransactionRecord,
 ) -> PersistenceResult<()> {
-    let current = &existing.resource;
-    let next = &proposed.resource;
+    let current = existing.rotation()?;
+    let next = proposed.rotation()?;
     if existing.canonical_request != proposed.canonical_request
         || current.transaction_id != next.transaction_id
         || current.kind != next.kind
@@ -872,7 +800,7 @@ pub fn validate_security_transaction_step_accept(
         .resource
         .validate_structural()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    let transaction_id = proposed.resource.transaction_id.as_str();
+    let transaction_id = proposed.resource.transaction_id().as_str();
     if attempt.transaction_id != transaction_id
         || outcome.transaction_id != transaction_id
         || attempt.step != outcome.step
@@ -889,9 +817,9 @@ pub fn validate_security_transaction_step_accept(
         )));
     }
     validate_security_transaction_update(existing, proposed)?;
-    if proposed.resource.accepted_steps.len() != existing.resource.accepted_steps.len() + 1
+    if proposed.rotation()?.accepted_steps.len() != existing.rotation()?.accepted_steps.len() + 1
         || existing
-            .resource
+            .rotation()?
             .next_required_step()
             .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?
             != Some(outcome.step)

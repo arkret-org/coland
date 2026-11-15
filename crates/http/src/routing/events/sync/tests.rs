@@ -1239,6 +1239,7 @@ impl CommittedRealm {
         };
         store
             .commit_event(coland_storage::EventCommitRequest {
+                owner_transfer_successor: None,
                 verified_media_participant: None,
                 authority_commit: transaction.clone(),
                 self_producer_guard: None,
@@ -1280,8 +1281,8 @@ async fn admit_sync_revoke_terminal(
         BackupRotationKind, BackupRotationPlan, PreparedEventUnit,
         SecurityRotationRevokeCommandDecision, SecurityRotationRevokeCommandOutcome,
         SecurityRotationRevokeProposal, SecurityRotationTransactionCreateRequestBody,
-        SecurityTransactionAcceptor, SecurityTransactionCreateRequestBody,
-        SecurityTransactionPreparedPlan, SecurityTransactionStep,
+        SecurityTransaction, SecurityTransactionAcceptor, SecurityTransactionCreateRequestBody,
+        SecurityTransactionStep,
     };
     use arkret_wire::{
         BackupId, BackupSeriesId, Base64UrlString, DeviceId, EventKind, Hash, TransactionId,
@@ -1408,12 +1409,11 @@ async fn admit_sync_revoke_terminal(
         }],
     )
     .unwrap();
-    let plan = SecurityTransactionPreparedPlan::SecurityRotation(request.prepared_plan.clone());
     let (initial, canonical_request) =
         SecurityTransactionCreateRequestBody::SecurityRotation(request)
-            .into_initial_resource(plan, at)
+            .into_rotation_resource(at)
             .unwrap();
-    let transaction_id = initial.transaction_id.clone();
+    let transaction_id = initial.transaction_id().clone();
     let transactions = store.security_transactions();
     transactions
         .create(SecurityTransactionRecord {
@@ -1423,7 +1423,10 @@ async fn admit_sync_revoke_terminal(
         .await
         .unwrap();
     let mut proposed = initial;
-    proposed.revoke_proposal = Some(SecurityRotationRevokeProposal {
+    let SecurityTransaction::SecurityRotation(rotation) = &mut proposed else {
+        panic!("Rotation create returned a Recovery completion")
+    };
+    rotation.revoke_proposal = Some(SecurityRotationRevokeProposal {
         proposal_event_id: revoke.event_id.clone(),
         covering_commit_id: covering.commit_id.clone(),
     });
@@ -1454,7 +1457,8 @@ async fn admit_sync_revoke_terminal(
         .unwrap();
     let decided_at = at + chrono::TimeDelta::seconds(1);
     accepted
-        .resource
+        .rotation_mut()
+        .unwrap()
         .accepted_steps
         .push(AcceptedSecurityTransactionStep {
             acceptor: SecurityTransactionAcceptor::Principal {
@@ -1462,16 +1466,17 @@ async fn admit_sync_revoke_terminal(
             },
             accepted_at: decided_at,
         });
-    accepted.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
-        proposal_event_id: revoke.event_id,
-        covering_commit_id: covering.commit_id,
-        outcome: SecurityRotationRevokeCommandDecision::Accepted,
-        decided_at,
-    });
+    accepted.rotation_mut().unwrap().revoke_command_outcome =
+        Some(SecurityRotationRevokeCommandOutcome {
+            proposal_event_id: revoke.event_id,
+            covering_commit_id: covering.commit_id,
+            outcome: SecurityRotationRevokeCommandDecision::Accepted,
+            decided_at,
+        });
     transactions
         .commit_revoke_command_terminal(RevokeCommandTerminalWrite {
             step_outcome: Some(SecurityTransactionStepOutcomeRecord {
-                transaction_id: accepted.resource.transaction_id.to_string(),
+                transaction_id: accepted.resource.transaction_id().to_string(),
                 step: SecurityTransactionStep::Revoke,
                 canonical_request: b"sync-revoke-terminal".to_vec(),
                 response: serde_json::to_value(&accepted.resource).unwrap(),

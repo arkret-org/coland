@@ -384,6 +384,67 @@ pub(crate) async fn refresh_account_snapshot(
     Ok(issued)
 }
 
+/// Recover missing Reaction current from the exact held reader's current
+/// governing Snapshot. This is a native Station baseline install, not a
+/// history scan and not an ordinary client's Event reducer.
+pub(crate) async fn refresh_reaction_current_baseline(
+    state: &AppState,
+    required: &arkret_wire::RealmCommit,
+) -> Result<(), String> {
+    let commits = state.authority_commits();
+    let anchor = commits
+        .replica_anchor_for_stream(&required.stream_ref)
+        .await
+        .map_err(temporary)?
+        .ok_or("Reaction current has no held reader anchor")?;
+    if anchor.realm_id != required.realm_id
+        || anchor.member_account_id.station_id != state.service_core_id()
+    {
+        return Err("Reaction baseline reader does not bind this hosted Realm".into());
+    }
+    let readers = commits
+        .replica_bootstrap_readers(&required.stream_ref, &state.service_core_id())
+        .await
+        .map_err(temporary)?;
+    if !readers.iter().any(|(account, join)| {
+        account == &anchor.member_account_id && join.commit_id == anchor.join_commit.commit_id
+    }) {
+        return Err("Reaction baseline's exact hosted opening join is no longer current".into());
+    }
+    let governance = commits
+        .current_authority(&required.realm_id)
+        .await
+        .map_err(temporary)?
+        .ok_or("Reaction baseline has no governing authority")?
+        .service_id;
+    let mut located = crate::routing::realm_join::resolve_verified_authority_of_service(
+        state,
+        &required.realm_id,
+        &governance,
+    )
+    .await
+    .map_err(|error| error.message)?;
+    // The existing bootstrap validates this exact Account's membership,
+    // scope, floors, authority tenure and whole original before atomically
+    // installing current plus its stream cut. It does not first replay the
+    // unknown reaction whose current is precisely what needs recovery.
+    anchor_stream(state, &anchor, &governance, &mut located).await?;
+    let head = commits
+        .replica_authorization_head(&required.stream_ref)
+        .await
+        .map_err(temporary)?
+        .ok_or("Reaction complete Snapshot did not establish this stream's current cut")?;
+    if head.stream_position < required.stream_position
+        || (head.stream_position == required.stream_position
+            && head.commit_id != required.commit_id)
+    {
+        return Err(
+            "Reaction complete Snapshot does not cover the required accepted Commit".into(),
+        );
+    }
+    Ok(())
+}
+
 /// Optional history preparation must not delay a valid full recovery response.
 /// Coalesce by complete Account and Realm; later reads may retry a failed cut.
 fn spawn_history_originals(

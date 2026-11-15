@@ -11,7 +11,7 @@
 //! The replacement is a three-step protocol, and the steps only work together:
 //!
 //! 1. the client asks for a challenge (`issue_key_backup_delete_challenge`). The server mints every
-//!    freshness value — §7.8.1 forbids accepting a caller-minted nonce — and stores it durably,
+//!    challenge value — §7.8.1 forbids accepting caller-minted freshness — and stores it durably,
 //!    single-use, with a TTL of at most 300 s.
 //! 2. the client signs the **canonical delete-intent transcript**, which embeds every field of that
 //!    challenge verbatim. So a replay, an expired challenge, a different backup, a different
@@ -110,13 +110,11 @@ pub(super) async fn issue_key_backup_delete_challenge(
     let audience = NonEmptyString::new(service_audience(state)?)
         .map_err(|error| AppError::internal(format!("service audience is invalid: {error}")))?;
 
-    let issued_at = Utc::now();
+    let issued_at = arkret_canonical::normalize_timestamp_canonical(Utc::now());
     let challenge = KeysBackupsDeleteChallenge {
         challenge_id: random_base64url(16),
-        // Two independent freshness values, as §7.8.1 requires: forging the
-        // transcript needs both, and neither is client-supplied.
+        // One exact 32-byte server challenge supplies all random freshness.
         challenge: random_base64url(32),
-        nonce: random_base64url(16),
         operation: KEY_BACKUP_DELETE_OPERATION.to_owned(),
         account_id: arkret_wire::AccountId::new(principal_id, state.service_core_id()),
         backup_id: typed_backup_id,
@@ -127,6 +125,9 @@ pub(super) async fn issue_key_backup_delete_challenge(
         expires_at: issued_at + Duration::seconds(DELETE_CHALLENGE_TTL_SECONDS),
     };
 
+    challenge
+        .validate_at(issued_at)
+        .map_err(|error| AppError::internal(error.to_string()))?;
     let record = coland_services::identity::KeyBackupDeleteChallengeRecord {
         challenge_id: challenge.challenge_id.as_str().to_owned(),
         account_id: challenge.account_id.clone(),
@@ -340,6 +341,9 @@ async fn load_valid_challenge(
         serde_json::from_value(record.challenge).map_err(|error| {
             AppError::internal(format!("stored delete challenge is corrupt: {error}"))
         })?;
+    challenge
+        .validate_at(now)
+        .map_err(|error| AppError::capability_denied(error.to_string()))?;
     let caller_account = arkret_wire::AccountId::new(
         arkret_wire::DidCoreId::new(actor_id.to_owned()).map_err(|error| {
             AppError::capability_denied(format!("authenticated actor is invalid: {error}"))

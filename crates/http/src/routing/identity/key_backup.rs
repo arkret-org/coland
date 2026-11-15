@@ -404,9 +404,11 @@ mod tests {
 
     fn delete_challenge_fixture() -> arkret_models_crypto::KeysBackupsDeleteChallenge {
         arkret_models_crypto::KeysBackupsDeleteChallenge {
-            challenge_id: arkret_wire::Base64UrlString::new("Y2hhbGxlbmdlLWlk").unwrap(),
-            challenge: arkret_wire::Base64UrlString::new("Y2hhbGxlbmdlLWJ5dGVz").unwrap(),
-            nonce: arkret_wire::Base64UrlString::new("bm9uY2UtYnl0ZXM").unwrap(),
+            challenge_id: arkret_wire::Base64UrlString::new("AQEBAQEBAQEBAQEBAQEBAQ").unwrap(),
+            challenge: arkret_wire::Base64UrlString::new(
+                "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio",
+            )
+            .unwrap(),
             operation: "ak.self.keys.backups.resource.delete.v1".to_owned(),
             account_id: arkret_wire::AccountId::new(
                 DidCoreId::new(ACTOR.to_owned()).unwrap(),
@@ -415,10 +417,45 @@ mod tests {
             backup_id: BackupId::new(BACKUP_ID.to_owned()).unwrap(),
             audience: arkret_wire::NonEmptyString::new("https://coland.test").unwrap(),
             service_id: DidCoreId::new("ak:did_core:web:coland.test".to_owned()).unwrap(),
-            request_id: arkret_wire::Base64UrlString::new("cmVxdWVzdC1pZA").unwrap(),
+            request_id: arkret_wire::Base64UrlString::new("AgICAgICAgICAgICAgICAg").unwrap(),
             issued_at: "2026-08-01T00:00:00.000Z".parse().unwrap(),
             expires_at: "2026-08-01T00:05:00.000Z".parse().unwrap(),
         }
+    }
+
+    #[test]
+    fn delete_challenge_uses_one_canonical_32_byte_value_and_rejects_legacy_nonce() {
+        let challenge = delete_challenge_fixture();
+        challenge.validate_at(challenge.issued_at).unwrap();
+        let original = serde_json::to_value(&challenge).unwrap();
+        for (field, value) in [
+            ("nonce", json!("legacy-extra")),
+            ("challenge", json!("A".repeat(42) + "B")),
+            ("challenge", json!("A".repeat(44))),
+            ("challenge", json!("A".repeat(42) + "=")),
+            (
+                "expires_at",
+                json!(arkret_canonical::format_timestamp_canonical(
+                    challenge.issued_at
+                        + chrono::Duration::seconds(300)
+                        + chrono::Duration::milliseconds(1)
+                )),
+            ),
+        ] {
+            let mut changed = original.clone();
+            changed[field] = value;
+            if let Ok(changed) =
+                serde_json::from_value::<arkret_models_crypto::KeysBackupsDeleteChallenge>(changed)
+            {
+                assert!(changed.validate_at(challenge.issued_at).is_err(), "{field}");
+            }
+        }
+        let bytes = arkret_canonical::base64url_decode(challenge.challenge.as_str()).unwrap();
+        assert_eq!(bytes, vec![42; 32]);
+        assert_eq!(
+            arkret_canonical::base64url_encode(&bytes),
+            challenge.challenge.as_str()
+        );
     }
 
     /// §7.8.1 step 2: the transcript's key set is fixed, and an absent `reason`
@@ -444,7 +481,6 @@ mod tests {
                 "context",
                 "expires_at",
                 "issued_at",
-                "nonce",
                 "operation",
                 "reason",
                 "request_id",
@@ -495,9 +531,14 @@ mod tests {
             tampered_audience.delete_intent_digest(None).unwrap()
         );
 
-        let mut tampered_nonce = base.clone();
-        tampered_nonce.nonce = arkret_wire::Base64UrlString::new("b3RoZXItbm9uY2U").unwrap();
-        assert_ne!(baseline, tampered_nonce.delete_intent_digest(None).unwrap());
+        let mut tampered_challenge = base.clone();
+        tampered_challenge.challenge =
+            arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode([43; 32]))
+                .unwrap();
+        assert_ne!(
+            baseline,
+            tampered_challenge.delete_intent_digest(None).unwrap()
+        );
 
         let mut tampered_service = base.clone();
         tampered_service.service_id =

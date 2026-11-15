@@ -28,6 +28,15 @@ use crate::wire::{
     KeysUploadResponseBody, PeerDeviceKeyView,
 };
 
+mod owner_transfer;
+
+pub(crate) async fn owner_transfer_successor_evidence(
+    state: &AppState,
+    component: &arkret_models_crypto::realm_owner_transfer::RealmOwnerTransferAcceptance,
+) -> coland_services::ServiceResult<arkret_models_identity::AccountDeviceSignerEvidence> {
+    owner_transfer::successor_evidence(state, component).await
+}
+
 pub(crate) fn peer_router() -> Router {
     Router::with_path("keys/query").post(peer_keys_query)
 }
@@ -360,6 +369,7 @@ pub(crate) async fn prepare_current_account_device_signer_evidence(
             },
             attested_at,
             expires_at,
+            owner_transfer_acceptance_intent_digest: None,
         },
         state
             .service_verification_method("notary-key")
@@ -591,6 +601,7 @@ async fn keys_query(
                 purpose: arkret_models_crypto::PeerKeysQueryPurpose::E2eeMessageEncryption,
                 relationship_basis,
                 device_keys: selectors.clone(),
+                owner_transfer_acceptance: None,
             };
             match proxy_peer_keys_query(state, &peer_request, &destination).await {
                 Ok(outcome) => {
@@ -696,7 +707,7 @@ async fn peer_relationship_basis_for_target(
         .map(|_| arkret_models_crypto::PeerKeysRelationshipBasis::Contact {}))
 }
 
-async fn proxy_peer_keys_query(
+pub(crate) async fn proxy_peer_keys_query(
     state: &AppState,
     request: &arkret_models_crypto::PeerKeysQueryRequestBody,
     destination: &arkret_wire::DidCoreId,
@@ -804,6 +815,7 @@ pub(crate) async fn realm_mls_device_projection(
             account_id: account.clone(),
             device_ids: vec![device.clone()],
         }],
+        owner_transfer_acceptance: None,
     };
     let outcome = proxy_peer_keys_query(state, &request, &account.station_id).await?;
     let unavailable =
@@ -885,6 +897,7 @@ pub(crate) async fn current_device_projection_for_signer(
             account_id: account.clone(),
             device_ids: vec![device.clone()],
         }],
+        owner_transfer_acceptance: None,
     };
     let outcome = proxy_peer_keys_query(state, &request, &account.station_id)
         .await
@@ -981,6 +994,34 @@ async fn peer_keys_query(
     for selector in &body.device_keys {
         let target = arkret_wire::ActorId::account(selector.account_id.clone());
         if !peer_keys_relationship_authorized(state, &body, &requester, &target).await? {
+            continue;
+        }
+        if let Some(component) = &body.owner_transfer_acceptance {
+            if let Some((evidence, reference, trust_algorithms)) =
+                owner_transfer::issue_current(state, component)
+                    .await
+                    .map_err(directory_evidence_service_error)?
+            {
+                let core = &evidence.device_projection_attestation.attestation;
+                device_generations.push(arkret_models_crypto::AccountDeviceGenerationEntry {
+                    account_id: core.account_id.clone(),
+                    generation_state: arkret_models_crypto::keys::DeviceGenerationState {
+                        current_device_generation_ref: core.authorized_generation_ref,
+                    },
+                });
+                device_keys.push(arkret_models_crypto::PeerQueryAccountDeviceEntry {
+                    account_id: core.account_id.clone(),
+                    device_keys: BTreeMap::from([(
+                        core.device_id.clone(),
+                        PeerDeviceKeyView {
+                            signer_evidence_ref: reference,
+                            algorithms: BTreeMap::new(),
+                            trust_algorithms,
+                            device_projection_attestation: evidence.device_projection_attestation,
+                        },
+                    )]),
+                });
+            }
             continue;
         }
         if state
@@ -1104,6 +1145,7 @@ async fn peer_keys_relationship_authorized(
                 arkret_models_crypto::PeerKeysQueryPurpose::CallMedia => scopes
                     .iter()
                     .any(|scope| matches!(scope.as_str(), "voice_call" | "video_call")),
+                arkret_models_crypto::PeerKeysQueryPurpose::RealmOwnerTransferAcceptance => false,
             })
         }
     }

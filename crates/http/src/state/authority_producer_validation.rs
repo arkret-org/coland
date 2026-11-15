@@ -497,24 +497,23 @@ mod tests {
             },
             audience: account.station_id.as_str().to_owned(),
             session_public_key: None,
-            session_grant: Some(SessionGrantAuthorizationState {
-                grant_id: arkret_identifiers::SessionGrantId::from_issuance_digest([0x42; 32]),
-                revocation_ref: "fixture".to_owned(),
-                account_id: account.clone(),
-                issuer_id: account.station_id.clone(),
-                scopes: Vec::new(),
-                credential_class: SessionGrantCredentialClass::Standard,
-                holder_binding: SessionGrantHolderBinding::HumanDevice {
-                    device_binding: "fixture".to_owned(),
-                },
-                device_binding: Some(
-                    arkret_models_identity::session_credential::SessionGrantDeviceBinding {
+            session_grant: Some({
+                let mut grant =
+                    crate::routing::identity::auth_grant_dpop::tests::test_introspection_grant();
+                grant.metadata.account_id = account.clone();
+                grant.metadata.issuer_id = account.station_id.clone();
+                grant.metadata.audience_id = account.station_id.clone();
+                grant.metadata.device_id = Some(device_id.clone());
+                grant.metadata.holder_binding = SessionGrantHolderBinding::HumanDevice {
+                    device_binding: device_id.to_string(),
+                };
+                grant.metadata.device_binding =
+                    Some(arkret_models_identity::SessionGrantDeviceBinding {
                         device_id: device_id.clone(),
                         authorization_event_id: authorization_event_id.clone(),
                         model_generation_ref: 1,
-                    },
-                ),
-                cnf_jkt: "fixture".to_owned(),
+                    });
+                grant
             }),
             expires_at: now + chrono::Duration::hours(1),
             created_at: now,

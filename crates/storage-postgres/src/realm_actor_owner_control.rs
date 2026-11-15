@@ -1,7 +1,7 @@
 //! Owner status and Device generation writes by the current control method.
 use arkret_models_crypto::DeviceGenerationState;
 use arkret_models_integration::*;
-use arkret_wire::{CommittedEventRef, CurrentRevision, EventKind, ScopeRef};
+use arkret_wire::{CommittedEventRef, EventKind, ScopeRef};
 use coland_storage::{AppletControlCarrier, AuthorityCommitTransaction, PersistenceError};
 use serde_json::json;
 
@@ -15,12 +15,6 @@ fn decode<T: serde::de::DeserializeOwned>(
     value: serde_json::Value,
 ) -> Result<T, PgTransactionError> {
     serde_json::from_value(value).map_err(invalid)
-}
-fn revision(source: &CommittedEventRef) -> CurrentRevision {
-    CurrentRevision {
-        commit_id: source.commit_id.clone(),
-        stream_position: source.stream_position,
-    }
 }
 
 pub(crate) async fn admit(
@@ -147,7 +141,7 @@ pub(crate) async fn admit(
             if recovery.pending.is_some()
                 || owner == "retired"
                 || governance == "retired"
-                || payload.expected_revision != revision(&control.source)
+                || payload.expected_commit_id != control.source.commit_id
                 || publication != Some(&payload.next_resolution)
             {
                 return Err(invalid(
@@ -180,7 +174,7 @@ pub(crate) async fn admit(
             let payload: RealmActorStatusSetPayload = decode(json!(event.payload))?;
             if payload.target_actor_id != *actor
                 || payload.gate != RealmActorStatusSetPayloadGate::Owner
-                || payload.expected_revision != revision(&owner_ref)
+                || payload.expected_commit_id != owner_ref.commit_id
                 || owner == "retired"
                 || (payload.state == RealmActorStatusSetPayloadState::Active
                     && (recovery.pending.is_some() || governance == "retired"))
@@ -217,7 +211,7 @@ pub(crate) async fn admit(
             if recovery.pending.is_some()
                 || owner == "retired"
                 || governance == "retired"
-                || payload.expected_revision != revision(&source)
+                || payload.expected_commit_id != source.commit_id
                 || payload.expected_generation != generation.current_device_generation_ref
                 || payload.expected_generation.checked_add(1) != Some(payload.new_generation)
             {

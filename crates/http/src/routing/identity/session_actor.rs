@@ -182,8 +182,9 @@ mod tests {
         let mut session = session(&state);
         session.endpoint = coland_services::identity::SessionEndpointState::AgentRuntime {
             state: coland_services::identity::AgentSessionState {
-                granted_scope: vec![],
-                scope_details: serde_json::json!({}),
+                metadata: crate::routing::identity::auth_grant_dpop::tests::test_agent_metadata(&[
+                    "ak.self.committed_event.read.scan.v1",
+                ]),
                 freshness_state: arkret_wire::FreshnessState::Fresh,
             },
         };

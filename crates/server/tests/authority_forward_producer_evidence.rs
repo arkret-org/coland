@@ -262,6 +262,8 @@ fn forward_with_material(
         content_backup_sources: None,
         producer_device_evidence: None,
         producer_agent_evidence: None,
+
+        successor_device_evidence: None,
     };
     if let Some(mut evidence) = evidence {
         let method = evidence

@@ -330,6 +330,7 @@ diesel::table! {
         schema_id -> Text,
         canonical_bytes -> Bytea,
         envelope -> Jsonb,
+        successor_device_evidence_json -> Nullable<Jsonb>,
         state -> Text,
         received_at -> Timestamptz,
         committed_at -> Nullable<Timestamptz>,

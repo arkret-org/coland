@@ -48,7 +48,7 @@ async fn consent_full_holder_current_and_call_cut_keep_exact_peers_empty_and_ind
             .unwrap()
             .unwrap()
     );
-    let payload = |revision: Option<arkret_wire::CurrentRevision>, scopes: &[&str]| serde_json::json!({"peer":full_request.peer,"expected_current":revision.map_or(serde_json::json!({"state":"never_written"}),|r|serde_json::json!({"state":"present","revision":r})),"permissions":scopes.iter().map(|s|serde_json::json!({"consent_scope":s})).collect::<Vec<_>>()});
+    let payload = |revision: Option<arkret_wire::CurrentRevision>, scopes: &[&str]| serde_json::json!({"peer":full_request.peer,"expected_current":revision.map_or(serde_json::json!({"state":"never_written"}),|r|serde_json::json!({"state":"present","commit_id":r.commit_id})),"permissions":scopes.iter().map(|s|serde_json::json!({"consent_scope":s})).collect::<Vec<_>>()});
     let first = support::write(
         &f,
         &f.unit.transactions[1].commit,

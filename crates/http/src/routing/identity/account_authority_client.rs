@@ -1,6 +1,7 @@
 use arkret_models_collaboration::session_grants::{
     AuthenticationSessionTerminationInput, AuthenticationSessionTerminationReason,
-    AuthenticationSessionTerminationResponseBody, SessionGrantValidationByJwt,
+    AuthenticationSessionTerminationResponseBody, SessionGrantValidationBinding,
+    SessionGrantValidationBySecret,
 };
 use chrono::{DateTime, Utc};
 use coland_http::error::AppError;
@@ -51,7 +52,7 @@ impl<'a> AccountAuthorityClient<'a> {
 
     pub(crate) async fn introspect_logout_grant(
         &self,
-        grant_jwt: &str,
+        grant_secret: &str,
     ) -> Result<SessionGrantValidationResponseBody, AppError> {
         let audience = arkret_identifiers::DidCoreId::new(self.state.service_id().clone())
             .map_err(|error| {
@@ -59,26 +60,50 @@ impl<'a> AccountAuthorityClient<'a> {
                     "runtime principal service_id is not a core_id: {error}"
                 ))
             })?;
-        let request = SessionGrantValidationInput::ByJwt(SessionGrantValidationByJwt {
-            grant_jwt: grant_jwt.to_owned(),
-            audience_id: Some(audience),
+        let secret = arkret_identifiers::SessionGrantSecret::new(grant_secret).map_err(|_| {
+            crate::app_error!(
+                Unauthenticated,
+                "session grant is not a canonical opaque credential"
+            )
+        })?;
+        let issuer = crate::routing::events::peer::trusted_account_authority_id(self.state).await?;
+        let request = SessionGrantValidationInput::BySecret(SessionGrantValidationBySecret {
+            session_grant: secret,
+            audience_id: audience,
             proof: None,
         });
-        self.post_json(
-            self.introspection_url,
-            "session grant logout introspection",
-            &request,
-        )
-        .await
+        let response = self
+            .post_json(
+                self.introspection_url,
+                "session grant logout introspection",
+                &request,
+            )
+            .await?;
+        let binding =
+            SessionGrantValidationBinding::from_authenticated_response(&request, &issuer, response)
+                .map_err(|_| {
+                    crate::app_error!(
+                        TemporarilyUnavailable,
+                        "Account Authority returned inconsistent logout metadata"
+                    )
+                })?;
+        Ok(binding.response().clone())
     }
 
     pub(crate) async fn logout_auth_session(
         &self,
-        grant_jwt: &str,
+        grant_secret: &str,
         validated_at: DateTime<Utc>,
     ) -> Result<AuthenticationSessionTerminationResponseBody, AppError> {
         let request = AuthenticationSessionTerminationInput {
-            grant_jwt: grant_jwt.to_owned(),
+            session_grant: arkret_identifiers::SessionGrantSecret::new(grant_secret).map_err(
+                |_| {
+                    crate::app_error!(
+                        Unauthenticated,
+                        "session grant is not a canonical opaque credential"
+                    )
+                },
+            )?,
             logout_request_digest: None,
             validated_at: Some(validated_at),
             reason_code: Some(AuthenticationSessionTerminationReason::AccountLogout),

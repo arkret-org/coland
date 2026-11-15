@@ -216,35 +216,44 @@ async fn account_grant_session_at(
     base: Option<String>,
 ) -> GrantSession {
     let holder_key = SigningKey::from_bytes(&Sha256::digest(b"account-data-sync").into());
-    let token = format!("account-data-grant.{}", uuid::Uuid::now_v7().simple());
+    let token = arkret_identifiers::SessionGrantSecret::from_bytes(
+        Sha256::digest(uuid::Uuid::now_v7().as_bytes()).into(),
+    )
+    .into_string();
     let holder_jwk =
         arkret_signatures::JsonWebKey::from_ed25519_verifying_key(&holder_key.verifying_key());
     let cnf_jkt = arkret_signatures::dpop::dpop_jwk_thumbprint(&holder_jwk).expect("holder jkt");
     let device_id = fixture.history.founding_device_id.clone();
+    let scopes = {
+        let mut scopes = vec![
+            arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_RESOURCE_REPLACE_V1,
+            arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_RESOURCE_GET_V1,
+            arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_RESOURCE_DELETE_V1,
+            arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_READ_LIST_V1,
+            "ak.self.realm.resource.get.v1",
+            "ak.self.realm.read.export.v1",
+            "ak.self.realm_link.read.list.v1",
+            "ak.self.read_cursor.command.advance.v1",
+            "ak.self.read_cursor.read.list.v1",
+        ];
+        scopes.sort();
+        scopes.dedup();
+        scopes
+    };
     let origin = spawn_introspection_mock(json!({
         "active": true,
         "status": "active",
         "proof_required": false,
         "one_time_use_consumed": false,
         "grant": {
-            "id": arkret_identifiers::SessionGrantId::from_issuance_digest(
-                Sha256::digest(token.as_bytes()).into(),
-            ),
-            "issuer_id": "ak:did_core:web:coauth.example",
+            "id": arkret_identifiers::SessionGrantId::new(format!("ak:session_grant:{}", uuid::Uuid::now_v7())).unwrap(),
+            "issuer_id": fixture.history.account.station_id,
             "account_id": fixture.history.account,
             "device_id": device_id,
             "audience_id": fixture.history.account.station_id,
-            "scopes": [
-                arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_RESOURCE_REPLACE_V1,
-                arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_RESOURCE_GET_V1,
-                arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_RESOURCE_DELETE_V1,
-                arkret_wire::ServiceOperationId::SELF_ACCOUNT_DATA_READ_LIST_V1,
-                "ak.self.realm.resource.get.v1",
-                "ak.self.realm.read.export.v1",
-                "ak.self.realm_link.read.list.v1",
-                "ak.self.read_cursor.command.advance.v1",
-                "ak.self.read_cursor.read.list.v1",
-            ],
+            "scopes": scopes,
+            "not_before": arkret_canonical::format_timestamp_canonical(chrono::Utc::now() - chrono::Duration::seconds(1)),
+            "session_id": format!("session-{}",uuid::Uuid::now_v7()),
             "expires_at": arkret_canonical::format_timestamp_canonical(
                 chrono::Utc::now() + chrono::Duration::minutes(5),
             ),

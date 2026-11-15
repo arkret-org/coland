@@ -708,7 +708,7 @@ async fn verify_mimi_consent_requester_proof(
         if actor.as_account_id() != Some(&grant.account_id)
             || agent_id != actor.signing_principal_id()
             || session.agent_session().is_none_or(|agent| {
-                !agent.granted_scope.iter().any(|scope| {
+                !agent.metadata.scopes.iter().any(|scope| {
                     scope == arkret_wire::ServiceOperationId::OPEN_MIMI_COMMAND_REQUEST_CONSENT_V1
                 })
             })
@@ -994,11 +994,11 @@ async fn verify_mimi_consent_correlation(
     let old = match (&replacement.expected_current, cut.current) {
         (ConsentExpectedCurrent::NeverWritten, ConsentCurrentReadState::NeverWritten) => Vec::new(),
         (
-            ConsentExpectedCurrent::Present { revision },
+            ConsentExpectedCurrent::Present { commit_id },
             ConsentCurrentReadState::Present {
                 current_state: result,
             },
-        ) if *revision == result.revision => result.value.permissions,
+        ) if *commit_id == result.revision.commit_id => result.value.permissions,
         _ => {
             return Err(mimi_consent_correlation_unavailable());
         }
@@ -1706,7 +1706,7 @@ mod consent_proof_tests {
         );
         video.consent_event = replace(
             json!([{"consent_scope":"voice_call"},{"consent_scope":"video_call"}]),
-            json!({"state":"present","revision":revision}),
+            json!({"state":"present","commit_id":revision.commit_id}),
         );
         sign_operation(
             &mut video,
@@ -1882,12 +1882,11 @@ mod consent_proof_tests {
             }],
         )
         .unwrap();
-        let plan = SecurityTransactionPreparedPlan::SecurityRotation(request.prepared_plan.clone());
         let (mut resource, canonical_request) =
             SecurityTransactionCreateRequestBody::SecurityRotation(request)
-                .into_initial_resource(plan, at)
+                .into_rotation_resource(at)
                 .unwrap();
-        let transaction_id = resource.transaction_id.clone();
+        let transaction_id = resource.transaction_id().clone();
         state
             .security_transactions()
             .create(SecurityTransactionRecord {
@@ -1914,7 +1913,10 @@ mod consent_proof_tests {
             .await
             .unwrap();
         let covering = transaction.commit.clone();
-        resource.revoke_proposal = Some(SecurityRotationRevokeProposal {
+        let SecurityTransaction::SecurityRotation(rotation) = &mut resource else {
+            panic!("Rotation create returned a Recovery completion")
+        };
+        rotation.revoke_proposal = Some(SecurityRotationRevokeProposal {
             proposal_event_id: revoke.event_id.clone(),
             covering_commit_id: covering.commit_id.clone(),
         });
@@ -1937,7 +1939,8 @@ mod consent_proof_tests {
             .unwrap()
             .unwrap();
         accepted
-            .resource
+            .rotation_mut()
+            .unwrap()
             .accepted_steps
             .push(AcceptedSecurityTransactionStep {
                 acceptor: SecurityTransactionAcceptor::Principal {
@@ -1945,17 +1948,18 @@ mod consent_proof_tests {
                 },
                 accepted_at: at,
             });
-        accepted.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
-            proposal_event_id: revoke.event_id,
-            covering_commit_id: covering.commit_id,
-            outcome: SecurityRotationRevokeCommandDecision::Accepted,
-            decided_at: at,
-        });
+        accepted.rotation_mut().unwrap().revoke_command_outcome =
+            Some(SecurityRotationRevokeCommandOutcome {
+                proposal_event_id: revoke.event_id,
+                covering_commit_id: covering.commit_id,
+                outcome: SecurityRotationRevokeCommandDecision::Accepted,
+                decided_at: at,
+            });
         state
             .security_transactions()
             .commit_revoke_command_terminal(RevokeCommandTerminalWrite {
                 step_outcome: Some(SecurityTransactionStepOutcomeRecord {
-                    transaction_id: accepted.resource.transaction_id.to_string(),
+                    transaction_id: accepted.resource.transaction_id().to_string(),
                     step: SecurityTransactionStep::Revoke,
                     canonical_request: b"revoke-worker-request".to_vec(),
                     response: serde_json::to_value(&accepted.resource).unwrap(),
@@ -1978,11 +1982,9 @@ mod consent_proof_tests {
     #[tokio::test]
     async fn accepted_original_replays_with_current_holder_after_original_device_revocation() {
         use arkret_models_identity::session_credential::{
-            SessionGrantCredentialClass, SessionGrantDeviceBinding, SessionGrantHolderBinding,
+            SessionGrantDeviceBinding, SessionGrantHolderBinding,
         };
-        use coland_services::identity::{
-            SessionEndpointState, SessionGrantAuthorizationState, SessionIdentityState,
-        };
+        use coland_services::identity::{SessionEndpointState, SessionIdentityState};
         let (state, pool, mut fixture) = native_state().await;
         // Both devices were genuinely accepted before the original Consent.
         let replacement = fixture
@@ -2086,22 +2088,22 @@ mod consent_proof_tests {
             },
             audience: fixture.history.account.station_id.to_string(),
             session_public_key: None,
-            session_grant: Some(SessionGrantAuthorizationState {
-                grant_id: arkret_identifiers::SessionGrantId::from_issuance_digest([0x43; 32]),
-                revocation_ref: "current-holder".into(),
-                account_id: fixture.history.account.clone(),
-                issuer_id: fixture.history.account.station_id.clone(),
-                scopes: vec![],
-                credential_class: SessionGrantCredentialClass::Standard,
-                holder_binding: SessionGrantHolderBinding::HumanDevice {
+            session_grant: Some({
+                let mut grant =
+                    crate::routing::identity::auth_grant_dpop::tests::test_introspection_grant();
+                grant.metadata.account_id = fixture.history.account.clone();
+                grant.metadata.issuer_id = fixture.history.account.station_id.clone();
+                grant.metadata.audience_id = fixture.history.account.station_id.clone();
+                grant.metadata.device_id = Some(replacement_id.clone());
+                grant.metadata.holder_binding = SessionGrantHolderBinding::HumanDevice {
                     device_binding: replacement_id.to_string(),
-                },
-                device_binding: Some(SessionGrantDeviceBinding {
+                };
+                grant.metadata.device_binding = Some(SessionGrantDeviceBinding {
                     device_id: replacement_id,
                     authorization_event_id: replacement.authorization.authorization_ref.event_id,
                     model_generation_ref: 1,
-                }),
-                cnf_jkt: "current-holder".into(),
+                });
+                grant
             }),
             expires_at: now() + chrono::Duration::hours(1),
             created_at: now(),
@@ -2129,12 +2131,13 @@ mod consent_proof_tests {
             device_id: fixture.history.founding_device_id.to_string(),
         };
         let grant = revoked_session.session_grant.as_mut().unwrap();
-        grant.holder_binding = SessionGrantHolderBinding::HumanDevice {
+        grant.metadata.holder_binding = SessionGrantHolderBinding::HumanDevice {
             device_binding: fixture.history.founding_device_id.to_string(),
         };
-        grant.device_binding.as_mut().unwrap().device_id =
+        grant.metadata.device_binding.as_mut().unwrap().device_id =
             fixture.history.founding_device_id.clone();
         grant
+            .metadata
             .device_binding
             .as_mut()
             .unwrap()
@@ -2370,7 +2373,7 @@ mod consent_proof_tests {
                 EventKind::ConsentReplace,
                 json!({
                     "peer":{"kind":"actor","actor_id":test_requester_actor(&state)},
-                    "expected_current":{"state":"present","revision":granted.view().revision},
+                    "expected_current":{"state":"present","commit_id":granted.view().revision.commit_id},
                     "permissions":[{"consent_scope":"presence"}]
                 }),
             ));
@@ -2399,7 +2402,7 @@ mod consent_proof_tests {
             widened.consent_event = EventAdmissionSubmission::new(signed_event(
                 EventKind::ConsentReplace,
                 json!({"peer":{"kind":"actor","actor_id":test_requester_actor(&state)},
-                    "expected_current":{"state":"present","revision":granted.view().revision},
+                    "expected_current":{"state":"present","commit_id":granted.view().revision.commit_id},
                     "permissions":[{"consent_scope":"presence","reason":"changed outside voice correlation"}]}),
             ));
             widened.validate_consent_event().unwrap();
@@ -2432,7 +2435,7 @@ mod consent_proof_tests {
                 EventKind::ConsentReplace,
                 json!({
                     "peer":{"kind":"actor","actor_id":test_requester_actor(&state)},
-                    "expected_current":{"state":"present","revision":stale_revision},
+                    "expected_current":{"state":"present","commit_id":stale_revision.commit_id},
                     "permissions":[{"consent_scope":"presence"}]
                 }),
             ));
@@ -2492,7 +2495,7 @@ mod consent_proof_tests {
                 EventKind::ConsentReplace,
                 json!({
                     "peer":{"kind":"actor","actor_id":test_requester_actor(&state)},
-                    "expected_current":{"state":"present","revision":granted.view().revision},
+                    "expected_current":{"state":"present","commit_id":granted.view().revision.commit_id},
                     "permissions":[{"consent_scope":"presence","reason":"another_event"}]
                 }),
             ));
@@ -2518,7 +2521,7 @@ mod consent_proof_tests {
                 EventKind::ConsentReplace,
                 json!({
                     "peer":{"kind":"actor","actor_id":test_requester_actor(&state)},
-                    "expected_current":{"state":"present","revision":revoked.view().revision},
+                    "expected_current":{"state":"present","commit_id":revoked.view().revision.commit_id},
                     "permissions":[{"consent_scope":"presence","reason":"later native edit"}]
                 }),
             ));

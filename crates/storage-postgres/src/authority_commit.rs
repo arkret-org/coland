@@ -767,7 +767,13 @@ fn authority_from_row(row: AuthorityRow) -> PersistenceResult<CurrentRealmAuthor
 // this into a hash join can read the Realm's entire immutable history just
 // to materialize a small current cut. LIMIT 1 preserves the unique-id lookup
 // and the LEFT JOIN still exposes missing provenance as NULL for validation.
-pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, covering.stream_ref AS source_stream_ref FROM ( \
+pub(crate) const SNAPSHOT_CURRENT_SQL: &str = "SELECT result.*, \
+         CASE WHEN result.selector_kind='message_reactions' THEN ( \
+           SELECT r.source_stream_ref FROM message_reactions_current_states r \
+           WHERE r.realm_id=$1 AND to_jsonb(r.target_ref)=result.selector_subject \
+             AND r.current_commit_id=result.current_commit_id \
+             AND r.current_stream_position=result.current_stream_position AND r.value=result.value \
+         ) ELSE covering.stream_ref END AS source_stream_ref FROM ( \
          SELECT state_family AS selector_kind, NULL::jsonb AS selector_subject, \
                 current_commit_id, current_stream_position, value \
            FROM realm_bootstrap_current_states WHERE realm_id = $1 \
@@ -1093,7 +1099,7 @@ pub(crate) async fn realm_state_snapshot_material_in_connection(
                 },
                 ("circle_member_state", Some(selector)) => serde_json::from_value::<arkret_wire::CurrentSelector>(selector)
                     .map_err(|error| PersistenceError::Internal(format!("stored Circle member selector is invalid: {error}")))?,
-                ("call_focus"|"call_roster"|"call_moderation",Some(selector)) => serde_json::from_value::<arkret_wire::CurrentSelector>(selector).map_err(PersistenceError::database)?,
+                ("call_focus"|"call_roster"|"call_moderation"|"call_recording_state"|"call_recording_artifact"|"call_transcript_state"|"call_transcript_artifact",Some(selector)) => serde_json::from_value::<arkret_wire::CurrentSelector>(selector).map_err(PersistenceError::database)?,
                 ("realm_media_service",None)=>arkret_wire::CurrentSelector::RealmMediaService,
                 ("call_state", Some(call_id)) => arkret_wire::CurrentSelector::CallState {
                     call_id: serde_json::from_value(call_id).map_err(PersistenceError::database)?,
@@ -1693,6 +1699,29 @@ pub(crate) async fn commit_transaction_with_approvals_in_connection(
     .await
 }
 
+/// The ordinary owner-transfer unit carries the actual finite successor
+/// source, not a boolean that another path may use as authority.
+pub(crate) async fn commit_owner_transfer_in_connection(
+    conn: &mut AsyncPgConnection,
+    transaction: &AuthorityCommitTransaction,
+    prepared: Option<&coland_storage::EventApprovalCommit>,
+    source: &coland_storage::OwnerTransferSuccessorSource,
+) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
+    if transaction.event.kind != arkret_wire::EventKind::RealmOwnerTransfer {
+        return Err(invalid("owner transfer source entered another Event unit").into());
+    }
+    crate::boxed_future(|| {
+        commit_transaction_with_device_guard_inner(
+            conn,
+            transaction,
+            VerifiedPcrUnit::None,
+            prepared,
+            Some(source),
+        )
+    })
+    .await
+}
+
 /// The native scope Profile unit is the only ordinary writer of these kinds.
 pub(crate) async fn commit_managed_scope_profile_in_connection(
     conn: &mut AsyncPgConnection,
@@ -1958,7 +1987,7 @@ fn commit_transaction_in_connection_with_device_guard<'a>(
     >,
 > {
     crate::boxed_future(|| {
-        commit_transaction_with_device_guard_inner(conn, transaction, verified_unit, prepared)
+        commit_transaction_with_device_guard_inner(conn, transaction, verified_unit, prepared, None)
     })
 }
 
@@ -1967,6 +1996,7 @@ async fn commit_transaction_with_device_guard_inner(
     transaction: &AuthorityCommitTransaction,
     verified_unit: VerifiedPcrUnit,
     prepared: Option<&coland_storage::EventApprovalCommit>,
+    owner_transfer_source: Option<&coland_storage::OwnerTransferSuccessorSource>,
 ) -> Result<AuthorityCommitWriteOutcome, PgTransactionError> {
     if transaction.event.kind == arkret_wire::EventKind::MlsHistoryRecovery
         || (transaction.event.kind == arkret_wire::EventKind::MlsHistoryGrant
@@ -2189,6 +2219,11 @@ async fn commit_transaction_with_device_guard_inner(
         ))
         .into());
     }
+    if transaction.event.kind == arkret_wire::EventKind::RealmOwnerTransfer
+        && owner_transfer_source.is_none()
+    {
+        return Err(invalid("owner transfer requires its native successor-source unit").into());
+    }
 
     crate::boxed_future(|| {
         crate::content_history_admission::require_in_connection(conn, transaction)
@@ -2248,6 +2283,14 @@ async fn commit_transaction_with_device_guard_inner(
         }
     }
 
+    if let Some(source) = owner_transfer_source {
+        crate::capability_grant_current_states::require_owner_transfer_source(
+            conn,
+            transaction,
+            source,
+        )
+        .await?;
+    }
     sql_query(
         "INSERT INTO realm_commits \
          (commit_id, realm_id, stream_key, stream_ref, stream_position, previous_commit_ref, event_pk, governance_generation, commit_json, committed_at) \
@@ -2274,6 +2317,14 @@ async fn commit_transaction_with_device_guard_inner(
     .execute(&mut *conn)
     .await?;
 
+    if let Some(source) = owner_transfer_source {
+        crate::capability_grant_current_states::retain_owner_transfer_source(
+            conn,
+            transaction,
+            source,
+        )
+        .await?;
+    }
     crate::agent_origin::accept_staged_control_source_in_connection(
         conn,
         &transaction.event,
@@ -2764,6 +2815,9 @@ impl PgAuthorityCommitStore {
                 &authority.realm_id,
             )
             .await?;
+            crate::capability_grant_current_states::require_native_root_creator(
+                conn,&unit.transactions[0].event,&unit.transactions[0].commit,
+            ).await?;
             sql_query(
                 "UPDATE ordinary_realm_bootstrap_units SET commits_json=$2 WHERE realm_id=$1",
             )
@@ -5215,17 +5269,47 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             .ok_or_else(|| invalid("invalid Event token"))?;
         #[derive(QueryableByName)]
         struct Frozen {
-            #[diesel(sql_type=Jsonb)]
-            body: Value,
+            #[diesel(sql_type=Nullable<Jsonb>)]
+            body: Option<Value>,
+            #[diesel(sql_type=Nullable<Jsonb>)]
+            accepted: Option<Value>,
         }
-        let mut conn = crate::pg_db(&self.pool);
-        let frozen = sql_query("UPDATE authority_forward_attempts f SET peer_request_json=CASE WHEN f.peer_request_json IS NULL OR f.status='rejected' THEN $2 ELSE f.peer_request_json END,status='forwarding',reason_code=NULL,attempted_at=$3 FROM canonical_events e WHERE f.event_pk=e.pk AND e.id=$1 AND f.original_submission_json=$4 AND e.envelope=$5 AND f.accepted_commit_json IS NULL RETURNING f.peer_request_json AS body")
-            .bind::<Binary,_>(token.to_vec()).bind::<Jsonb,_>(serde_json::to_value(request).map_err(PersistenceError::database)?)
-            .bind::<Timestamptz,_>(at).bind::<Jsonb,_>(serde_json::to_value(&original).map_err(PersistenceError::database)?)
-            .bind::<Jsonb,_>(serde_json::to_value(event).map_err(PersistenceError::database)?)
-            .get_result::<Frozen>(&mut conn).await.optional().map_err(PersistenceError::database)?
-            .ok_or_else(|| forward_original_conflict("frozen peer request has no exact unacknowledged original"))?;
-        Ok(Box::new(decode_json(frozen.body, "frozen peer request")?))
+        let incoming = serde_json::to_value(request).map_err(PersistenceError::database)?;
+        let stable =
+            arkret_models_collaboration::authority_commit::authority_forward_business_bytes(
+                &incoming,
+            )
+            .map_err(invalid)?;
+        let original = serde_json::to_value(&original).map_err(PersistenceError::database)?;
+        let event = serde_json::to_value(event).map_err(PersistenceError::database)?;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_,PgTransactionError,_>(async |conn| {
+            let frozen=sql_query("SELECT f.peer_request_json AS body,f.accepted_commit_json AS accepted FROM authority_forward_attempts f JOIN canonical_events e ON f.event_pk=e.pk WHERE e.id=$1 AND f.original_submission_json=$2 AND e.envelope=$3 FOR UPDATE OF f")
+                .bind::<Binary,_>(token.to_vec()).bind::<Jsonb,_>(&original).bind::<Jsonb,_>(&event)
+                .get_result::<Frozen>(&mut *conn).await.optional()?
+                .ok_or_else(||forward_original_conflict("frozen peer request has no exact original"))?;
+            if let Some(previous)=frozen.body.as_ref() {
+                let previous_stable=arkret_models_collaboration::authority_commit::authority_forward_business_bytes(previous)
+                    .map_err(invalid)?;
+                if previous_stable!=stable {
+                    return Err(forward_original_conflict("forward retry changed its complete stable business body").into());
+                }
+            }
+            if frozen.accepted.is_some() {
+                // This row is an origin transport attempt, not G's source
+                // archive. An acknowledgement never turns its newer W2 into
+                // the W1 that G actually froze at first acceptance.
+                let body=frozen.body.ok_or_else(||PersistenceError::Conflict(
+                    "temporarily_unavailable: accepted forward requires original result recovery".into()))?;
+                return Ok(Box::new(decode_json(body,"accepted frozen peer request")?));
+            }
+            // The same unaccepted business Event may refresh only registered
+            // dynamic evidence even after a timeout left status=forwarding.
+            sql_query("UPDATE authority_forward_attempts SET peer_request_json=$2,status='forwarding',reason_code=NULL,attempted_at=$3 WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1) AND accepted_commit_json IS NULL")
+                .bind::<Binary,_>(token.to_vec()).bind::<Jsonb,_>(&incoming).bind::<Timestamptz,_>(at)
+                .execute(&mut *conn).await?;
+            Ok(Box::new(decode_json(incoming.clone(),"fresh frozen peer request")?))
+        }).await.map_err(PgTransactionError::into_persistence)
     }
 
     async fn retain_forwarded_acceptance(
@@ -5530,6 +5614,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         transaction.validate().map_err(invalid)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            crate::agent_management_review::lock_candidate_current_realms_in_connection(
+                conn,
+                &transaction.event,
+                None,
+                Some(guard),
+                &transaction.welcomes,
+            )
+            .await?;
             crate::realm_authorization_cut::lock_realm_authorization_cut(
                 conn,
                 &transaction.event.realm_id,

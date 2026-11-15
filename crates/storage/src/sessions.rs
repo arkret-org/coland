@@ -40,6 +40,10 @@ mod tests {
 
     #[test]
     fn session_payload_round_trips_agent_session() {
+        let key = arkret_models_identity::session_credential::CanonicalSessionPublicJwk::new(
+            r#"{"crv":"Ed25519","kty":"OKP","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+        )
+        .unwrap();
         let record = SessionRecord {
             token_hash: "grant".to_owned(),
             account_pk: AccountPk(1),
@@ -48,14 +52,22 @@ mod tests {
             audience: "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service".to_owned(),
             session_public_key: Some("{}".to_owned()),
             agent_session: Some(AgentSessionRecord {
-                granted_scope: vec![
-                    "ak.self.committed_event.stream.subscribe.v1".to_owned(),
-                    "ak.self.committed_event.read.scan.v1".to_owned(),
-                ],
-                scope_details: serde_json::json!({
-                    "agent_id": "ak:did_core:web:agent.example",
-                    "applet_id": "ak:applet:01904100-0000-7000-8000-000000000001"
-                }),
+                metadata: serde_json::from_value(serde_json::json!({
+                    "id":"ak:session_grant:0196419b-0000-7000-8000-000000000001",
+                    "issuer_id":"ak:did_core:web:station.example",
+                    "account_id":{"principal_id":"ak:did_core:web:agent.example","station_id":"ak:did_core:web:station.example"},
+                    "audience_id":"ak:did_core:web:station.example",
+                    "scopes":["ak.self.committed_event.read.scan.v1","ak.self.committed_event.stream.subscribe.v1"],
+                    "not_before":"2026-11-14T00:00:00.000Z","expires_at":"2026-11-14T01:00:00.000Z","session_id":"local-metadata-test",
+                    "session_public_key": key.as_str(), "cnf_jkt": key.thumbprint_sha256().unwrap(),
+                    "credential_class":"standard", "holder_binding":{"kind":"agent_runtime","agent_id":"ak:did_core:web:agent.example",
+                        "agent_key_authorization_ref":"ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","verification_method":"did:web:agent.example#key-1"},
+                    "scope_details":{"controller_principal_id":"ak:did_core:web:alice.example",
+                        "agent_key_authorization_ref":"ak:event:AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        "realm_ids":[],"strand_ids":[],"resources":{"realm_ids":[],"strand_ids":[]},
+                        "constraints":{"allowed_tracks":[],"allowed_data_labels":[],"allowed_endpoints":[]},
+                        "capability_grant_refs":[],"policy_refs":[]}
+                })).unwrap(),
                 freshness_state: FreshnessState::Fresh,
             }),
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
@@ -68,15 +80,11 @@ mod tests {
 
         assert_eq!(restored.freshness_state, FreshnessState::Fresh);
         assert_eq!(
-            restored.granted_scope,
-            vec![
-                "ak.self.committed_event.stream.subscribe.v1".to_owned(),
-                "ak.self.committed_event.read.scan.v1".to_owned()
-            ]
+            restored.metadata,
+            record.agent_session.as_ref().unwrap().metadata
         );
-        assert_eq!(
-            restored.scope_details["applet_id"],
-            "ak:applet:01904100-0000-7000-8000-000000000001"
-        );
+        let encoded = serde_json::to_string(&payload).unwrap();
+        assert!(!encoded.contains("session_grant_secret"));
+        assert!(!encoded.contains("refresh_token"));
     }
 }

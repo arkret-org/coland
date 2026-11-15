@@ -220,6 +220,8 @@ async fn exact_signed_root_is_immutable_and_scoped_after_real_pcr_genesis() {
             },
             attested_at,
             expires_at: attested_at + Duration::minutes(5),
+
+            owner_transfer_acceptance_intent_digest: None,
         },
         DidUrl::new(inception.did_key_id.clone()).unwrap(),
         &SigningKey::from_bytes(&inception.did_key_seed),

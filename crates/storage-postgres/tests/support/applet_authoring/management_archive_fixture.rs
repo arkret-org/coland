@@ -152,6 +152,11 @@ async fn seed_ordinary_material(
                 .get_results::<Row>(&mut *source).await.unwrap();
             let projection=names.iter().map(|n| {
                 let name=n.as_str().unwrap();
+                // Ordinary Full originals do not disclose the private successor
+                // wrapper. Only the authenticated management import supplies it.
+                if table.name=="canonical_events" && name=="successor_device_evidence_json" {
+                    return "NULL::jsonb".to_owned();
+                }
                 if json_names.contains(n) {
                     format!("CASE WHEN src->'nulls' ? '{name}' THEN NULL::jsonb ELSE src->'row'->'{name}' END")
                 } else {format!("r.{}",quoted(name))}

@@ -480,7 +480,7 @@ impl Fixture {
                         serde_json::to_value(
                             arkret_models_collaboration::events_payloads::CapabilityRevokePayload {
                                 grant_id: intent.grant_id.clone(),
-                                expected_revision: intent.expected_revision.clone(),
+                                expected_commit_id: intent.expected_commit_id.clone(),
                                 reason: Some(intent.reason_code.as_str().to_owned()),
                             },
                         )

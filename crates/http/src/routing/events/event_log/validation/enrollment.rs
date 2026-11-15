@@ -186,8 +186,8 @@ mod realm_device_enrollment_isolation_tests {
             "not_before":"2026-10-20T00:00:00.000Z","expires_at":"2026-12-15T00:00:00.000Z",
             "authorization_binding_kind":"realm_managed_delegation","authorized_generation_ref":1,
             "device_signature":"AA","applet_id":applet,
-            "expected_control_revision":{"commit_id":arkret_wire::RealmCommitId::from_digest([42;32]),"stream_position":0},
-            "expected_device_revision":null
+            "expected_control_commit_id":{"commit_id":arkret_wire::RealmCommitId::from_digest([42;32]),"stream_position":0},
+            "expected_device_commit_id":null
         })).unwrap();
         let input = payload
             .realm_device_possession_signature_input(&native)

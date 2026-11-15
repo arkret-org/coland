@@ -726,10 +726,7 @@ async fn member_state_join_leave_and_kick_follow_join_rule_and_capability_case()
             "grant_id": arkret_wire::GrantId::from_event_id(
                 &admin_grant.authority_commit.event.event_id
             ),
-            "expected_revision": {
-                "commit_id": admin_grant.authority_commit.commit.commit_id,
-                "stream_position": admin_grant.authority_commit.commit.stream_position,
-            },
+            "expected_commit_id": admin_grant.authority_commit.commit.commit_id,
         }),
         kick.authority_commit.commit.committed_at,
     ));
@@ -2890,10 +2887,7 @@ fn close_grant_request(
         actor.clone(),
         serde_json::json!({
             "grant_id": arkret_wire::GrantId::from_event_id(&grant.authority_commit.event.event_id),
-            "expected_revision": {
-                "commit_id": revision.commit_id,
-                "stream_position": revision.stream_position,
-            },
+            "expected_commit_id": revision.commit_id,
         }),
         previous.commit.committed_at,
     ))
@@ -7699,7 +7693,7 @@ async fn circle_own_opening_join_anchors_remote_stream_and_membership_basis_expi
     let scoped_revoke = circle_event(
         &scoped_grant.authority_commit,
         arkret_wire::EventKind::CapabilityRevoke,
-        serde_json::json!({"grant_id":grant_id,"expected_revision":grant_revision,"reason":"scoped_source_closed"}),
+        serde_json::json!({"grant_id":grant_id,"expected_commit_id":grant_revision,"reason":"scoped_source_closed"}),
     );
     let scoped_revoke = heap_future(|| ordinary_realm::source_request(&pool, scoped_revoke)).await;
     heap_future(|| uow.commit_event(scoped_revoke.clone()))

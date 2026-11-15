@@ -31,6 +31,8 @@ async fn source(
         content_backup_sources: None,
         producer_device_evidence: None,
         producer_agent_evidence: None,
+
+        successor_device_evidence: None,
     };
     let account = event.actual_signer().as_account_id().unwrap();
     let key = ed25519_dalek::SigningKey::from_bytes(&inception.did_key_seed);

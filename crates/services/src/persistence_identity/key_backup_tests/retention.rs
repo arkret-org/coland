@@ -426,7 +426,7 @@ fn unlock_issuance(
     let challenge = arkret_models_crypto::KeysBackupsUnlockChallenge {
         challenge_id: random(),
         challenge: random(),
-        nonce: random(),
+
         operation: arkret_wire::ServiceOperationId::SELF_KEYS_BACKUPS_COMMAND_UNLOCK_V1.into(),
         account_id: fixture.pcr.history.account.clone(),
         requesting_device_id: fixture.pcr.history.founding_device_id.clone(),

@@ -18,6 +18,47 @@ fn root_digest(state: &ProjectionState) -> String {
     arkret_canonical::canonical_sha256(state.realm_authority_root(REALM).unwrap()).unwrap()
 }
 
+// A reducer consumes an already accepted Event. This fixture supplies the
+// actual closed DTO and finite signature shape, never native Device/C
+// eligibility or a mathematical signature-verification claim.
+fn transfer_payload(successor: arkret_wire::ActorId, expected: String) -> Value {
+    use arkret_models_crypto::realm_owner_transfer::{
+        RealmOwnerTransferAcceptanceIntent, RealmOwnerTransferPatch,
+        RealmOwnerTransferUnsignedPayload,
+    };
+    let intent = RealmOwnerTransferAcceptanceIntent {
+        scope_ref: arkret_wire::ScopeRef::Realm {
+            realm_id: REALM.parse().unwrap(),
+        },
+        actor_id: account_actor(OWNER),
+        payload_without_successor_acceptance: RealmOwnerTransferUnsignedPayload {
+            realm_id: REALM.parse().unwrap(),
+            expected_state_digest: arkret_wire::Hash::new(expected).unwrap(),
+            patch: RealmOwnerTransferPatch {
+                controller_actor_id: successor,
+            },
+        },
+    };
+    let principal = intent.successor_account().unwrap().principal_id.as_str();
+    let did = principal.replacen("ak:did_core:", "did:", 1);
+    let acceptance = arkret_wire::DetachedObjectSignature {
+        context: arkret_wire::DetachedSignatureContext::RealmOwnerTransferAcceptance,
+        signature_algorithm: arkret_wire::DetachedSignatureAlgorithm::Ed25519,
+        verification_method: arkret_wire::DidUrl::new(format!(
+            "{did}#ak:device:01904100-0000-7000-8000-000000000001"
+        ))
+        .unwrap(),
+        signed_digest: intent.digest().unwrap(),
+        created_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
+        signature: arkret_wire::Base64UrlString::new("A".repeat(86)).unwrap(),
+    };
+    intent.validate_acceptance(&acceptance).unwrap();
+    let mut payload = serde_json::to_value(&intent.payload_without_successor_acceptance).unwrap();
+    payload["successor_acceptance"] = serde_json::to_value(acceptance).unwrap();
+    payload["sender"] = serde_json::json!(OWNER);
+    payload
+}
+
 fn controller(state: &ProjectionState) -> arkret_wire::ActorId {
     serde_json::from_value(
         state
@@ -88,15 +129,7 @@ fn transfer_changes_only_controller_and_epoch() {
     let effect = state.apply_realm_authority_transition(
         &operation(
             arkret_wire::EventKind::RealmOwnerTransfer,
-            serde_json::json!({
-                "realm_id": REALM,
-                "expected_state_digest": root_digest(&state),
-                "patch": {
-                    "controller_actor_id": account_actor(SUCCESSOR)
-                },
-                "successor_acceptance": { "proof": "accepted" },
-                "sender": OWNER
-            }),
+            transfer_payload(account_actor(SUCCESSOR), root_digest(&state)),
         ),
         arkret_wire::EventKind::RealmOwnerTransfer,
     );
@@ -120,15 +153,7 @@ fn transfer_rejects_nonmember_and_stale_expected_state() {
     let nonmember = state.apply_realm_authority_transition(
         &operation(
             arkret_wire::EventKind::RealmOwnerTransfer,
-            serde_json::json!({
-                "realm_id": REALM,
-                "expected_state_digest": expected,
-                "patch": {
-                    "controller_actor_id": account_actor("ak:did_core:web:outsider.example")
-                },
-                "successor_acceptance": "accepted",
-                "sender": OWNER
-            }),
+            transfer_payload(account_actor("ak:did_core:web:outsider.example"), expected),
         ),
         arkret_wire::EventKind::RealmOwnerTransfer,
     );
@@ -141,15 +166,10 @@ fn transfer_rejects_nonmember_and_stale_expected_state() {
     let stale = state.apply_realm_authority_transition(
         &operation(
             arkret_wire::EventKind::RealmOwnerTransfer,
-            serde_json::json!({
-                "realm_id": REALM,
-                "expected_state_digest": format!("sha256:{}", "0".repeat(64)),
-                "patch": {
-                    "controller_actor_id": account_actor(SUCCESSOR)
-                },
-                "successor_acceptance": "accepted",
-                "sender": OWNER
-            }),
+            transfer_payload(
+                account_actor(SUCCESSOR),
+                format!("sha256:{}", "0".repeat(64)),
+            ),
         ),
         arkret_wire::EventKind::RealmOwnerTransfer,
     );
@@ -241,7 +261,7 @@ fn governance_station_change_is_explicit_without_mutating_projection_state() {
 fn successor_counter_overflow_fails_closed_without_mutation() {
     let mut state = state_with_successor();
     let mut root = state.realm_authority_root(REALM).unwrap().clone();
-    root["authority_generation"] = serde_json::json!(9_007_199_254_740_991u64);
+    root["authority_generation"] = serde_json::json!(u64::MAX.to_string());
     state.set_realm_facet(REALM, facet::REALM_AUTHORITY_ROOT, root.clone());
     let effect = state.apply_realm_authority_transition(
         &operation(
@@ -256,8 +276,8 @@ fn successor_counter_overflow_fails_closed_without_mutation() {
     );
     // `authz/capabilities.md` section 3.2 and the `ak.realm.authority.reset`
     // row of `event-kind-registry.json` both name `realm_authority_root_conflict`
-    // as the fail-closed verdict when the successor counter would cross the
-    // JSON safe-integer ceiling: no wrap, no saturation, no silent old value.
+    // as the fail-closed verdict when the full-width decimal counter is
+    // exhausted: no wrap, no saturation, no silent old value.
     assert!(
         matches!(
             effect,
@@ -265,5 +285,27 @@ fn successor_counter_overflow_fails_closed_without_mutation() {
         ),
         "exhausted authority generation must fail closed: {effect:?}"
     );
+    assert_eq!(state.realm_authority_root(REALM), Some(&root));
+}
+
+#[test]
+fn numeric_authority_generation_is_refused_without_mutation() {
+    let mut state = state_with_successor();
+    let mut root = state.realm_authority_root(REALM).unwrap().clone();
+    root["authority_generation"] = serde_json::json!(0);
+    state.set_realm_facet(REALM, facet::REALM_AUTHORITY_ROOT, root.clone());
+    let effect = state.apply_realm_authority_transition(
+        &operation(
+            arkret_wire::EventKind::RealmAuthorityReset,
+            serde_json::json!({
+                "realm_id": REALM,
+                "expected_state_digest": arkret_canonical::canonical_sha256(&root).unwrap(),
+                "sender": OWNER,
+            }),
+        ),
+        arkret_wire::EventKind::RealmAuthorityReset,
+    );
+    assert!(matches!(effect, ProjectionEffect::Rejected { reason }
+        if reason == "realm_authority_root_conflict"));
     assert_eq!(state.realm_authority_root(REALM), Some(&root));
 }

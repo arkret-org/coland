@@ -7,6 +7,141 @@ use diesel::{QueryableByName, sql_query};
 use diesel_async::AsyncPgConnection;
 use horme::{OptionalExtension, RunQueryDsl};
 
+mod capture;
+
+pub(crate) fn validate_capture_current(
+    realm: &arkret_wire::RealmId,
+    selector: &arkret_wire::CurrentSelector,
+    value: &serde_json::Value,
+) -> PersistenceResult<()> {
+    use arkret_wire::CurrentSelector as S;
+    match selector {
+        S::CallRecordingState { .. } => {
+            let state: CallRecordingState =
+                serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+            if !matches!(
+                state,
+                CallRecordingState::Recording | CallRecordingState::Stopped
+            ) {
+                return Err(invalid("Result status cannot replace capture permission"));
+            }
+        }
+        S::CallTranscriptState { .. } => {
+            let state: CallTranscriptState =
+                serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+            if !matches!(
+                state,
+                CallTranscriptState::Transcribing | CallTranscriptState::Stopped
+            ) {
+                return Err(invalid("Result status cannot replace capture permission"));
+            }
+        }
+        S::CallRecordingArtifact {
+            call_id,
+            recording_id,
+        } => {
+            let current: CallRecordingArtifactCurrentValue =
+                serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+            current.validate(call_id, recording_id).map_err(invalid)?;
+            if current
+                .details
+                .artifact
+                .as_ref()
+                .is_some_and(|artifact| &artifact.realm_id != realm)
+            {
+                return Err(invalid("Recording artifact belongs to another Realm"));
+            }
+        }
+        S::CallTranscriptArtifact { .. } => {
+            let current: CallTranscriptArtifactCurrentValue =
+                serde_json::from_value(value.clone()).map_err(PersistenceError::database)?;
+            current.validate().map_err(invalid)?;
+        }
+        _ => return Err(invalid("Not a capture current selector")),
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_capture_current_pairs(
+    entries: &[arkret_wire::CurrentState],
+) -> PersistenceResult<()> {
+    use arkret_wire::CurrentSelector as S;
+    for entry in entries {
+        let arkret_wire::CurrentState::Value {
+            selector,
+            source_stream_ref,
+            value,
+            ..
+        } = entry;
+        let (counterpart, is_artifact) = match selector {
+            S::CallRecordingState {
+                call_id,
+                recording_id,
+            } => (
+                S::CallRecordingArtifact {
+                    call_id: call_id.clone(),
+                    recording_id: recording_id.clone(),
+                },
+                false,
+            ),
+            S::CallRecordingArtifact {
+                call_id,
+                recording_id,
+            } => (
+                S::CallRecordingState {
+                    call_id: call_id.clone(),
+                    recording_id: recording_id.clone(),
+                },
+                true,
+            ),
+            S::CallTranscriptState {
+                call_id,
+                recording_id,
+            } => (
+                S::CallTranscriptArtifact {
+                    call_id: call_id.clone(),
+                    recording_id: recording_id.clone(),
+                },
+                false,
+            ),
+            S::CallTranscriptArtifact {
+                call_id,
+                recording_id,
+            } => (
+                S::CallTranscriptState {
+                    call_id: call_id.clone(),
+                    recording_id: recording_id.clone(),
+                },
+                true,
+            ),
+            _ => continue,
+        };
+        let paired = entries
+            .iter()
+            .find_map(|candidate| {
+                let arkret_wire::CurrentState::Value {
+                    selector,
+                    source_stream_ref: stream,
+                    value,
+                    ..
+                } = candidate;
+                (selector == &counterpart && stream == source_stream_ref).then_some(value)
+            })
+            .ok_or_else(|| {
+                invalid("Complete capture current omits its permission or result counterpart")
+            })?;
+        if is_artifact
+            && value.get("status").and_then(|s| s.as_str()) != Some("pending")
+            && paired != "stopped"
+        {
+            return Err(invalid(
+                "Published capture result has no stopped permission current",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn invalid(detail: &str) -> PersistenceError {
     PersistenceError::SchemaViolation(detail.to_owned())
 }
@@ -41,6 +176,9 @@ pub(crate) async fn commit_in_connection(
     }
     if event.kind == EventKind::CallState {
         return commit_state(conn, event, commit, prepared, verified_media).await;
+    }
+    if event.kind == EventKind::CallRecordingStart {
+        return capture::start(conn, event, commit, prepared).await;
     }
     if event.kind != EventKind::CallCreate {
         return Ok(());
@@ -481,19 +619,27 @@ async fn commit_state(
     .await?
     .ok_or_else(|| conflict("Call is not visible in exact scope"))?;
     if current.scope_ref != event.scope_ref
+        || commit.realm_id != event.realm_id
+        || commit.event_ref != event.event_id
         || CommitStreamRef::from_scope(&event.scope_ref, None)
             .map_err(PersistenceError::database)?
             != commit.stream_ref
     {
         return Err(invalid("Call delta scope differs"));
     }
-    if matches!(
-        current.lifecycle,
-        CallLifecycleState::Ended
-            | CallLifecycleState::Missed
-            | CallLifecycleState::Cancelled
-            | CallLifecycleState::Failed
-    ) {
+    let writes_capture_only = payload.state_transition.is_none()
+        && payload.focus.is_none()
+        && payload.roster_delta.is_none()
+        && payload.moderation_delta.is_none();
+    if !writes_capture_only
+        && matches!(
+            current.lifecycle,
+            CallLifecycleState::Ended
+                | CallLifecycleState::Missed
+                | CallLifecycleState::Cancelled
+                | CallLifecycleState::Failed
+        )
+    {
         return Err(conflict("call_state_terminal"));
     }
     let media = media_in_connection(conn, &event.realm_id).await?;
@@ -559,7 +705,7 @@ async fn commit_state(
             CallRosterDelta::Leave {
                 actor_id,
                 device_id,
-                expected_revision,
+                expected_commit_id,
             } => {
                 if !current
                     .participants
@@ -568,7 +714,9 @@ async fn commit_state(
                 {
                     return Err(conflict("active roster leg is absent"));
                 }
-                if current.roster_revision.as_ref() != Some(expected_revision) {
+                if current.roster_revision.as_ref().map(|r| &r.commit_id)
+                    != Some(expected_commit_id)
+                {
                     return Err(conflict("roster revision changed"));
                 }
             }
@@ -576,10 +724,10 @@ async fn commit_state(
     }
     if let Some(CallModerationDelta::RestoreParticipant {
         actor_id,
-        expected_revision,
+        expected_commit_id,
         ..
     }) = &payload.moderation_delta
-        && (current.moderation_revision.as_ref() != Some(expected_revision)
+        && (current.moderation_revision.as_ref().map(|r| &r.commit_id) != Some(expected_commit_id)
             || !current
                 .moderation
                 .iter()
@@ -587,11 +735,7 @@ async fn commit_state(
     {
         return Err(conflict("active ban or moderation revision changed"));
     }
-    if payload.recording_transition.is_some() || payload.transcript_transition.is_some() {
-        return Err(conflict(
-            "capture current and stop-source admission are unavailable",
-        ));
-    }
+    capture::transitions(conn, event, commit, &payload, &current).await?;
     if let Some(t) = &payload.state_transition {
         use CallLifecycleState::*;
         let legal = match t.from {

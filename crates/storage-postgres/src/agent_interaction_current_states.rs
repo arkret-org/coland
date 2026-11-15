@@ -1114,16 +1114,13 @@ pub(crate) async fn admit_in_connection(
     }
     let current = prior
         .as_ref()
-        .map(|row| -> PersistenceResult<CurrentRevision> {
-            Ok(CurrentRevision {
-                commit_id: row.current_commit_id.parse().map_err(invalid)?,
-                stream_position: u64::try_from(row.current_stream_position).map_err(invalid)?,
-            })
+        .map(|row| -> PersistenceResult<arkret_wire::RealmCommitId> {
+            row.current_commit_id.parse().map_err(invalid)
         })
         .transpose()?;
-    if current != payload.expected_revision {
+    if current != payload.expected_commit_id {
         return Err(precondition(
-            "Agent mode expected_revision differs from current",
+            "Agent mode expected_commit_id differs from current",
         ));
     }
     if payload.interaction_mode == AgentInteractionMode::Public {

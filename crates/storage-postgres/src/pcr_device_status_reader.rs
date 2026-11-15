@@ -161,10 +161,10 @@ pub(crate) async fn confirmed_pcr_device_status_from_authority(
         let stored = crate::security_transactions::load_one(conn, &transaction_id, false)
             .await?
             .ok_or_else(|| incomplete("PCR revoke transaction is absent"))?;
-        let resource = stored.resource;
-        let plan = resource
-            .security_rotation_plan()
-            .ok_or_else(|| incomplete("PCR revoke transaction is not SecurityRotation"))?;
+        let resource = stored
+            .rotation()
+            .map_err(|_| incomplete("PCR revoke transaction is not SecurityRotation"))?;
+        let plan = &resource.prepared_plan;
         let durable_step = crate::security_transactions::load_step_outcome(
             conn,
             &transaction_id,

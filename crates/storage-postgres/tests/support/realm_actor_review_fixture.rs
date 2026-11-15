@@ -337,7 +337,7 @@ async fn realm_review_policy(
     let id = format!("ak:policy:{}", uuid::Uuid::now_v7());
     let account = ActorId::account(fixture.pcr.history.account.clone());
     let event = fixture.admin_event(EventKind::PolicySet, ScopeRef::Realm { realm_id:fixture.realm.clone() }, json!({
-        "policy_id":id,"expected_revision":null,"value":{"schema":"ak.schema.policy.v1","id":id,"realm_id":fixture.realm,
+        "policy_id":id,"expected_commit_id":null,"value":{"schema":"ak.schema.policy.v1","id":id,"realm_id":fixture.realm,
         "policy_kind":"applet","default_effect":"allow","created_by":account,"created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),
         "rules":[{"rule_id":"current_realm_review","kind":"applet","effect":"require_review","applet_target":target,"applet_operations":operations,
             "review_requirement":{"approver_actor_ids":[account],"threshold":1,"max_age_seconds":3600}}]}
@@ -846,7 +846,7 @@ async fn realm_review_governance_only_creation(pool: PgPool) {
     let revoke = fixture.admin_event(
         EventKind::CapabilityRevoke,
         ScopeRef::Realm { realm_id: fixture.realm.clone() },
-        json!({"grant_id":permission,"expected_revision":current.revision,"reason":"current approver qualification withdrawn"}),
+        json!({"grant_id":permission,"expected_commit_id":current.revision,"reason":"current approver qualification withdrawn"}),
     );
     boxed_step(|| realm_review_admin_event(fixture, revoke)).await;
     let before = boxed_step(|| realm_review_footprint(fixture)).await;
@@ -1153,7 +1153,7 @@ fn realm_review_profile_update(
         ScopeRef::RealmControl {
             realm_id: context.factory.fixture.realm.clone(),
         },
-        json!({"actor_profile_id":profile_id,"patch":patch,"expected_revision":{"commit_id":original.commit.commit_id,"stream_position":original.commit.stream_position}}),
+        json!({"actor_profile_id":profile_id,"patch":patch,"expected_commit_id":original.commit.commit_id}),
         None,
     )
 }

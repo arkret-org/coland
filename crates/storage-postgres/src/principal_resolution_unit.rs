@@ -170,9 +170,7 @@ pub(crate) async fn admit_in_connection(
     let payload: PrincipalResolutionUpdatePayload =
         serde_json::from_value(serde_json::to_value(&event.payload).map_err(corrupt)?)
             .map_err(corrupt)?;
-    if payload.expected_revision.commit_id != source.commit_id
-        || payload.expected_revision.stream_position != source.stream_position
-    {
+    if payload.expected_commit_id != source.commit_id {
         return Err(rejected(
             ConflictCode::FailedPrecondition,
             "identity resolution revision changed",

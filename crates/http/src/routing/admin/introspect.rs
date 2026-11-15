@@ -84,7 +84,7 @@ pub(crate) async fn introspect_admin_scopes(
             session.expires_at,
         )),
         device_id: session.human_device_id().cloned(),
-        audit_context: serde_json::json!({"source":"request_authoritative_session_grant", "grant_id":grant.grant_id, "audience":session.audience}),
+        audit_context: serde_json::json!({"source":"request_authoritative_session_grant", "session_grant_ref":grant.grant_ref(), "audience":session.audience}),
     })
 }
 

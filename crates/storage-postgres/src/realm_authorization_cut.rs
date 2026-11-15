@@ -52,8 +52,8 @@ use arkret_wire::{
     WireResourceSelector,
 };
 use coland_storage::{
-    ActorRealmAuthorization, AuthorizationOperation, EffectiveActorGrant, GrantEvaluation,
-    OperationFacts, evaluate_grants,
+    ActorRealmAuthorization, AuthorizationOperation, GrantAuthorityCut, GrantEvaluation,
+    OperationFacts,
 };
 
 use super::{
@@ -62,9 +62,20 @@ use super::{
 };
 use crate::capability_grant_current_states::{
     CapabilityGrantCurrentStateReadRow, RealmAuthorityRootCurrent, RealmAuthorityRootReadRow,
-    decode_authority_root, decode_row, grant_is_active_at, validate_ancestor_graph,
+    decode_authority_root, decode_row, grant_is_active_at,
 };
 use crate::direct_conversation_admission::ProfileAuthority;
+
+mod call_delegated_account;
+
+/// Locate the narrow delegated Call PCR for the shared, globally sorted lock plan.
+/// Current lifecycle refusal is deferred until after immutable replay lookup.
+pub(crate) async fn call_delegated_account_candidate_realms(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+) -> PersistenceResult<Vec<RealmId>> {
+    call_delegated_account::candidate_realms(conn, event).await
+}
 
 /// The value members of the closed `realm-profile.schema.json` object, the
 /// `schema` discriminator excepted (`models/realm-and-space.md` section 2.3.A:
@@ -98,6 +109,18 @@ struct LockedAuthorityRow {
 
 fn capability_denied(detail: impl std::fmt::Display) -> PersistenceError {
     PersistenceError::Conflict(format!("capability_denied: {detail}"))
+}
+
+fn current_authority_error(
+    error: arkret_policy::grant_authority::AuthorityError,
+) -> PersistenceError {
+    if error == arkret_policy::grant_authority::AuthorityError::Unproved {
+        PersistenceError::Conflict(format!(
+            "revision_unavailable: current grant source is unproved: {error}"
+        ))
+    } else {
+        capability_denied(format!("current grant source is invalid: {error}"))
+    }
 }
 
 /// Classification survives missing lifecycle/current projections and binds the
@@ -531,14 +554,6 @@ pub(crate) async fn owned_agent_authorization_check_in_connection(
             at,
             facts: &facts,
         };
-        let agent_grants = agent_cut
-            .effective_grants_with_owned_source(at, Some(source.clone()))
-            .map(|(_, grant)| grant)
-            .collect::<Vec<_>>();
-        let owner_grants = owner_cut
-            .effective_grants(at)
-            .map(|(_, grant)| grant)
-            .collect::<Vec<_>>();
         let circle = match scope {
             arkret_wire::ScopeRef::Circle { circle_id, .. } => Some(circle_id),
             _ => None,
@@ -566,16 +581,12 @@ pub(crate) async fn owned_agent_authorization_check_in_connection(
             },
         )
         .map_err(capability_denied)?;
-        let owner_covers = owner_cut.actor_is_root_controller()
-            && arkret_policy::owner_may_author_action(&request.action).unwrap_or(false);
-        let evaluation = coland_storage::evaluate_controller_bounded_grants(
+        let evaluation = agent_cut.evaluate_current_controller_sources(
+            &owner_cut,
             &operation,
-            &agent_grants,
-            &controller,
-            &owner_grants,
             &[],
-            owner_covers,
-        );
+            Some(source.clone()),
+        )?;
         let membership_read = descriptor.event_mapping_kind == "non_event_surface"
             && matches!(
                 action,
@@ -586,15 +597,7 @@ pub(crate) async fn owned_agent_authorization_check_in_connection(
                     | CapabilityActionId::ObjectReadHistory
                     | CapabilityActionId::ObjectReadMetadata
             )
-            && !evaluate_grants(&operation, agent_grants.iter().copied()).is_refusal()
-            && !evaluate_grants(
-                &AuthorizationOperation {
-                    actor: &controller,
-                    ..operation
-                },
-                owner_grants.iter().copied(),
-            )
-            .is_refusal();
+            && !evaluation.is_refusal();
         decision = match (effect, &evaluation) {
             (PolicyEffect::Deny, _) | (_, GrantEvaluation::Denied) => {
                 AuthorizationDecision::HardDeny
@@ -829,6 +832,25 @@ impl RealmAuthorizationCut {
         event: &arkret_wire::Event,
     ) -> PersistenceResult<Self> {
         let mut cut = Self::read(conn, &event.realm_id, &event.actor_id).await?;
+        if event.kind == EventKind::CallRecordingStart {
+            let payload: arkret_models_collaboration::events_payloads::call::CallRecordingStartPayload = serde_json::from_value(serde_json::json!(event.payload)).map_err(PersistenceError::database)?;
+            let action = match payload.capture_kind {
+                arkret_models_collaboration::events_payloads::call::RecordingCaptureKind::Recording => CapabilityActionId::CallRecord,
+                arkret_models_collaboration::events_payloads::call::RecordingCaptureKind::Transcript => CapabilityActionId::CallTranscribe,
+            };
+            cut.selected_grant = Some(
+                event
+                    .authorization_ref
+                    .as_ref()
+                    .ok_or_else(|| capability_denied("capture start has no signed selected grant"))?
+                    .as_str()
+                    .parse()
+                    .map_err(PersistenceError::database)?,
+            );
+            // Reuse the native positive-path selection while retaining every
+            // current grant's global deny/quarantine/review contribution.
+            cut.native_operation = Some((action, cut.event_operation(event).0));
+        }
         cut.direct_conversation =
             crate::direct_conversation_admission::profile_authority_in_connection(conn, event)
                 .await?;
@@ -891,7 +913,7 @@ impl RealmAuthorizationCut {
         facts: &'a OperationFacts,
         at: chrono::DateTime<chrono::Utc>,
     ) -> GrantEvaluation<'a> {
-        evaluate_grants(
+        self.evaluate_current_sources(
             &AuthorizationOperation {
                 actor: &self.actor,
                 actions,
@@ -899,8 +921,121 @@ impl RealmAuthorizationCut {
                 at,
                 facts,
             },
-            self.effective_grants(at).map(|(_, grant)| grant),
+            &[],
+            None,
         )
+        .unwrap_or(GrantEvaluation::Denied)
+    }
+
+    fn rebind_evaluation<'a>(
+        &'a self,
+        evaluation: GrantEvaluation<'_>,
+    ) -> PersistenceResult<GrantEvaluation<'a>> {
+        Ok(match evaluation {
+            GrantEvaluation::Allowed(paths) => {
+                let paths = paths.into_iter()
+                .filter(|path| self.selected_grant.as_ref().is_none_or(|selected| selected == &path.grant.id))
+                .map(|path| Ok(coland_storage::SatisfiedGrant {
+                    grant: self.grants.get(&path.grant.id).ok_or_else(|| PersistenceError::Conflict(
+                        "revision_unavailable: evaluated path is absent from its original source cut".into(),
+                    ))?,
+                    reservations: path.reservations,
+                })).collect::<PersistenceResult<Vec<_>>>()?;
+                if paths.is_empty() {
+                    GrantEvaluation::Unsatisfied
+                } else {
+                    GrantEvaluation::Allowed(paths)
+                }
+            }
+            GrantEvaluation::Denied => GrantEvaluation::Denied,
+            GrantEvaluation::Quarantined => GrantEvaluation::Quarantined,
+            GrantEvaluation::RequiresReview => GrantEvaluation::RequiresReview,
+            GrantEvaluation::Unsatisfied => GrantEvaluation::Unsatisfied,
+            GrantEvaluation::Unnamed => GrantEvaluation::Unnamed,
+        })
+    }
+
+    fn evaluate_current_sources<'a>(
+        &'a self,
+        operation: &AuthorizationOperation<'_>,
+        approvals: &[coland_storage::VerifiedGrantApproval],
+        owned_source: Option<IssuerAuthorityRef>,
+    ) -> PersistenceResult<GrantEvaluation<'a>> {
+        if operation.actor != &self.actor {
+            return Err(capability_denied(
+                "source operation actor differs from its cut",
+            ));
+        }
+        let authorization =
+            self.actor_authorization_with_owned_source(operation.at, owned_source)?;
+        self.rebind_evaluation(authorization.evaluate_with_approvals_checked(
+            operation.actions,
+            operation.target,
+            operation.facts,
+            approvals,
+        )?)
+    }
+
+    fn require_same_grant_cut(&self, other: &Self) -> PersistenceResult<()> {
+        if self.realm_id != other.realm_id
+            || self.root != other.root
+            || self.revisions != other.revisions
+            || arkret_canonical::canonical_json_bytes(&self.grants)
+                .map_err(PersistenceError::database)?
+                != arkret_canonical::canonical_json_bytes(&other.grants)
+                    .map_err(PersistenceError::database)?
+        {
+            return Err(PersistenceError::Conflict(
+                "revision_unavailable: actor and controller source snapshots differ".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Only the grant/controller layer. The caller retains the native
+    /// asynchronous management policy/review gate and its exact action set.
+    fn evaluate_current_controller_sources<'a>(
+        &'a self,
+        controller: &Self,
+        operation: &AuthorizationOperation<'_>,
+        approvals: &[coland_storage::VerifiedGrantApproval],
+        owned_source: Option<IssuerAuthorityRef>,
+    ) -> PersistenceResult<GrantEvaluation<'a>> {
+        if operation.actor != &self.actor {
+            return Err(capability_denied(
+                "bounded source actor differs from its cut",
+            ));
+        }
+        let authorization =
+            self.controller_source_authorization(controller, operation.at, owned_source)?;
+        self.rebind_evaluation(authorization.evaluate_grant_sources_with_approvals_checked(
+            operation.actions,
+            operation.target,
+            operation.facts,
+            approvals,
+        )?)
+    }
+
+    fn controller_source_authorization(
+        &self,
+        controller: &Self,
+        at: chrono::DateTime<chrono::Utc>,
+        owned_source: Option<IssuerAuthorityRef>,
+    ) -> PersistenceResult<ActorRealmAuthorization> {
+        self.require_same_grant_cut(controller)?;
+        let source_cut = self.grant_source_cut()?;
+        let mut authorization = self.actor_authorization_on_source_cut(
+            at,
+            owned_source,
+            std::sync::Arc::clone(&source_cut),
+        )?;
+        authorization.agent_ceiling = Some(coland_storage::AgentControllerCeiling {
+            controller: Box::new(
+                controller.actor_authorization_on_source_cut(at, None, source_cut)?,
+            ),
+            management_policies: Vec::new(),
+        });
+        Ok(authorization)
     }
 
     /// Pure native MLS qualification preserves the Account's complete global
@@ -926,7 +1061,17 @@ impl RealmAuthorizationCut {
                 "native MLS action has no registered Event mapping",
             ));
         }
-        match self.evaluate(&actions, target, facts, at) {
+        match self.evaluate_current_sources(
+            &AuthorizationOperation {
+                actor: &self.actor,
+                actions: &actions,
+                target,
+                at,
+                facts,
+            },
+            &[],
+            None,
+        )? {
             GrantEvaluation::Allowed(paths) => paths
                 .into_iter()
                 .find(|path| self.selected_grant.as_ref() == Some(&path.grant.id))
@@ -973,6 +1118,10 @@ impl RealmAuthorizationCut {
 
     /// A remote receipt cannot overrule a later observed withdrawal in the
     /// exact auditor's grant graph. Missing replica grants are not denials.
+    /// This is only an additive veto after the caller independently verifies
+    /// the remote issuer, original signature, exact scope and response expiry.
+    /// Partial observations never mint a local root/source cut or permission;
+    /// absence means no additional observation, not a new current allow.
     pub(crate) async fn require_no_observed_audit_revocation(
         &mut self,
         conn: &mut AsyncPgConnection,
@@ -1105,7 +1254,6 @@ impl RealmAuthorizationCut {
         event: &arkret_wire::Event,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<ActionAdmission> {
-        let evaluation = self.evaluate(actions, target, facts, at);
         let operation = AuthorizationOperation {
             actor: &self.actor,
             actions,
@@ -1113,6 +1261,7 @@ impl RealmAuthorizationCut {
             at,
             facts,
         };
+        let evaluation = self.evaluate_current_sources(&operation, &[], None)?;
         Box::pin(crate::boxed_future(|| {
             self.admit_evaluation_in_connection(
                 conn,
@@ -1165,14 +1314,6 @@ impl RealmAuthorizationCut {
             None => None,
         };
         let bounded = controller_cut.is_some();
-        let controller_root_covers = controller_cut.as_ref().is_some_and(|cut| {
-            cut.actor_is_root_controller()
-                && !operation.actions.is_empty()
-                && operation
-                    .actions
-                    .iter()
-                    .all(|action| arkret_policy::owner_may_author_action(action).unwrap_or(false))
-        });
         let mut managed_actions = match &controller {
             Some(controller) => Some(
                 Box::pin(
@@ -1227,13 +1368,8 @@ impl RealmAuthorizationCut {
                 true,
             ))
             .await?;
-            let mut producer_evaluation = coland_storage::evaluate_grants_with_verified_approvals(
-                &producer_operation,
-                producer_cut
-                    .effective_grants_with_owned_source(operation.at, source)
-                    .map(|(_, grant)| grant),
-                approvals,
-            );
+            let mut producer_evaluation =
+                producer_cut.evaluate_current_sources(&producer_operation, approvals, source)?;
             if matches!(producer_evaluation, GrantEvaluation::RequiresReview)
                 && missing_grant_approvals
             {
@@ -1336,47 +1472,34 @@ impl RealmAuthorizationCut {
                 true,
             ))
             .await?;
-            let agent_grants = self
-                .effective_grants_with_owned_source(operation.at, owned_source)
-                .map(|(_, grant)| grant)
-                .collect::<Vec<_>>();
-            let controller_grants = controller_cut
-                .effective_grants(operation.at)
-                .map(|(_, grant)| grant)
-                .collect::<Vec<_>>();
+            let authorization =
+                self.controller_source_authorization(controller_cut, operation.at, owned_source)?;
             // Filtering a forbidden allow path must not discard an existing
             // global grant deny/quarantine/review on the original operation.
-            let original = coland_storage::evaluate_controller_bounded_grants(
-                operation,
-                &agent_grants,
-                &controller_cut.actor,
-                &controller_grants,
+            let original = authorization.evaluate_grant_sources_with_approvals_checked(
+                operation.actions,
+                operation.target,
+                operation.facts,
                 approvals,
-                controller_root_covers,
-            );
-            match original {
+            )?;
+            let evaluated = match original {
                 GrantEvaluation::Denied
                 | GrantEvaluation::Quarantined
                 | GrantEvaluation::RequiresReview => original,
-                _ => coland_storage::evaluate_controller_bounded_grants(
-                    &managed_operation,
-                    &agent_grants,
-                    &controller_cut.actor,
-                    &controller_grants,
+                _ => authorization.evaluate_grant_sources_with_approvals_checked(
+                    managed_operation.actions,
+                    managed_operation.target,
+                    managed_operation.facts,
                     approvals,
-                    controller_root_covers,
-                ),
-            }
+                )?,
+            };
+            self.rebind_evaluation(evaluated)?
         } else if attributed_agent {
             match evaluation {
                 GrantEvaluation::Denied
                 | GrantEvaluation::Quarantined
                 | GrantEvaluation::RequiresReview => evaluation,
-                _ => coland_storage::evaluate_grants_with_verified_approvals(
-                    &managed_operation,
-                    self.effective_grants(operation.at).map(|(_, grant)| grant),
-                    approvals,
-                ),
+                _ => self.evaluate_current_sources(&managed_operation, approvals, None)?,
             }
         } else {
             evaluation
@@ -1388,22 +1511,6 @@ impl RealmAuthorizationCut {
                     .actions
                     .iter()
                     .any(|action| arkret_policy::owner_may_author_action(action).unwrap_or(false)));
-        // A signed reference selects the positive authority path, never the
-        // global refusal set of the actual Account's effective grants.
-        let evaluation = match evaluation {
-            GrantEvaluation::Allowed(paths) if self.native_operation.is_some() => {
-                let paths = paths
-                    .into_iter()
-                    .filter(|path| self.selected_grant.as_ref() == Some(&path.grant.id))
-                    .collect::<Vec<_>>();
-                if paths.is_empty() {
-                    GrantEvaluation::Unsatisfied
-                } else {
-                    GrantEvaluation::Allowed(paths)
-                }
-            }
-            other => other,
-        };
         match evaluation {
             GrantEvaluation::Denied => Err(capability_denied(
                 "a deny constraint of an effective grant matches the operation",
@@ -1454,14 +1561,15 @@ impl RealmAuthorizationCut {
         }
     }
 
-    /// Every active grant whose subject is exactly the actor, whose temporal
-    /// window contains `at`, and whose issuer chain descends intact from the
-    /// current authority root. Actions, resources and non-temporal
-    /// constraints are not decided here.
-    pub(crate) fn effective_grants(
+    /// Current subject candidates and their complete accepted authority graph.
+    /// Native operations retain the terminal global window, require every
+    /// contributing ancestor's actual-action window, then merge all refusals
+    /// before a terminal positive path can be selected.
+    #[cfg(test)]
+    fn effective_grants(
         &self,
         at: chrono::DateTime<chrono::Utc>,
-    ) -> impl Iterator<Item = (&GrantId, &CapabilityGrant)> + '_ {
+    ) -> PersistenceResult<impl Iterator<Item = (&GrantId, &CapabilityGrant)> + '_> {
         self.effective_grants_with_owned_source(at, None)
     }
 
@@ -1469,64 +1577,82 @@ impl RealmAuthorizationCut {
         &self,
         at: chrono::DateTime<chrono::Utc>,
         owned_source: Option<IssuerAuthorityRef>,
-    ) -> impl Iterator<Item = (&GrantId, &CapabilityGrant)> + '_ {
-        let root = self.root.as_ref();
-        self.grants.iter().filter(move |(grant_id, grant)| {
-            let Some(root) = root else {
-                return false;
-            };
-            (self.native_operation.is_some() || self.selected_grant.as_ref().is_none_or(|selected| selected == *grant_id))
-                && matches!(&grant.subject, CapabilitySubject::Actor(subject) if subject == &self.actor)
-                && grant.realm_id.as_ref() == Some(&self.realm_id)
-                && (self.native_operation.is_some() || grant_is_active_at(grant, at))
-                && !grant.issuer_authority_refs.is_empty()
-                && if let Some((action,target)) = &self.native_operation {
-                    arkret_policy::grant_authority::current_sources(grant,
-                        action.as_str(), target, &self.grants, at,
-                        |source| matches!(source, IssuerAuthorityRef::RealmRoot { realm_id, authority_event_ref, authority_generation }
-                            if realm_id==&self.realm_id && authority_event_ref==&root.authority_event_ref
-                                && authority_generation==&root.authority_generation)).is_ok()
-                } else { grant
-                    .issuer_authority_refs
-                    .iter()
-                    .all(|authority_ref| match authority_ref {
-                        IssuerAuthorityRef::OwnedAgent { controller_account_id, .. } => {
-                            grant.issuer_authority_refs.len() == 1
-                                && owned_source.as_ref() == Some(authority_ref)
-                                && grant.issuer_id.as_account_id() == Some(controller_account_id)
-                                && grant.authority_depth == 1
-                                && grant.authority_root_refs.len() == 1
-                                && serde_json::to_value(&grant.authority_root_refs[0]).ok()
-                                    == serde_json::to_value(authority_ref).ok()
-                        },
-                        IssuerAuthorityRef::RealmRoot {
-                            realm_id: root_realm_id,
-                            authority_event_ref,
-                            authority_generation,
-                        } => {
-                            root_realm_id == &self.realm_id
-                                && root.authority_event_ref == *authority_event_ref
-                                && root.authority_generation == *authority_generation
-                        }
-                        IssuerAuthorityRef::Grant {
-                            grant_id: parent_id,
-                        } => {
-                            self.grants.get(parent_id).is_some_and(|parent| {
-                                matches!(&parent.subject, CapabilitySubject::Actor(subject) if subject == &grant.issuer_id)
-                            }) && validate_ancestor_graph(
-                                grant_id,
-                                parent_id,
-                                &self.grants,
-                                root,
-                                &self.realm_id,
-                                at,
-                                &mut std::collections::BTreeSet::new(),
-                                1,
-                            )
-                            .is_ok()
-                        }
-                    }) }
-        })
+    ) -> PersistenceResult<impl Iterator<Item = (&GrantId, &CapabilityGrant)> + '_> {
+        let mut effective = Vec::new();
+        let Some(root) = self.root.as_ref() else {
+            return Ok(effective.into_iter());
+        };
+        for (grant_id, grant) in &self.grants {
+            if !(self.native_operation.is_some()
+                || self
+                    .selected_grant
+                    .as_ref()
+                    .is_none_or(|selected| selected == grant_id))
+                || !matches!(&grant.subject, CapabilitySubject::Actor(subject) if subject == &self.actor)
+                || grant.realm_id.as_ref() != Some(&self.realm_id)
+            {
+                continue;
+            }
+            if self
+                .native_operation
+                .as_ref()
+                .is_some_and(|(action, target)| {
+                    !arkret_policy::grant_authority::contributes(grant, action.as_str(), target)
+                })
+            {
+                continue;
+            }
+            grant.validate_authority_shape().map_err(|error| {
+                PersistenceError::Conflict(format!(
+                    "revision_unavailable: current grant authority is unproved: {error}"
+                ))
+            })?;
+            if let [
+                reference @ IssuerAuthorityRef::OwnedAgent {
+                    controller_account_id,
+                    ..
+                },
+            ] = grant.issuer_authority_refs.as_slice()
+            {
+                if grant_is_active_at(grant, at)
+                    && owned_source.as_ref() == Some(reference)
+                    && grant.issuer_id.as_account_id() == Some(controller_account_id)
+                    && serde_json::to_value(&grant.authority_root_ref)
+                        .map_err(PersistenceError::database)?
+                        == serde_json::to_value(reference).map_err(PersistenceError::database)?
+                {
+                    effective.push((grant_id, grant));
+                }
+                continue;
+            }
+            if let Some((action, target)) = &self.native_operation {
+                match arkret_policy::grant_authority::current_candidate_sources(
+                    grant,
+                    action.as_str(),
+                    target,
+                    &self.grants,
+                    at,
+                    |source| {
+                        matches!(source, IssuerAuthorityRef::RealmRoot { realm_id, authority_event_ref, authority_generation }
+                        if realm_id==&self.realm_id && authority_event_ref==&root.authority_event_ref
+                            && authority_generation==&root.authority_generation)
+                    },
+                ) {
+                    Ok(_) => effective.push((grant_id, grant)),
+                    Err(arkret_policy::grant_authority::AuthorityError::Closed) => {}
+                    Err(error) => return Err(current_authority_error(error)),
+                }
+            } else if crate::capability_grant_current_states::accepted_grant_is_current(
+                grant_id,
+                &self.grants,
+                root,
+                &self.realm_id,
+                at,
+            )? {
+                effective.push((grant_id, grant));
+            }
+        }
+        Ok(effective.into_iter())
     }
 
     /// Issuing an owned source expresses current execution/read authority,
@@ -1569,10 +1695,7 @@ impl RealmAuthorizationCut {
         }
         let cut = Self::read(conn, &event.realm_id, &event.actor_id).await?;
         cut.require_governed_member(&EventKind::CapabilityGrant)?;
-        let grants = cut
-            .effective_grants(at)
-            .map(|(_, grant)| grant)
-            .collect::<Vec<_>>();
+        let authorization = cut.actor_authorization(at)?;
         let child_expiry = body
             .constraints
             .iter()
@@ -1588,7 +1711,10 @@ impl RealmAuthorizationCut {
                     at,
                     facts: &facts,
                 };
-                if evaluate_grants(&operation, grants.iter().copied()).is_refusal() {
+                if authorization
+                    .evaluate_with_approvals_checked(operation.actions, resource, &facts, &[])?
+                    .is_refusal()
+                {
                     return Err(capability_denied(
                         "current controller sources refuse owned confirmation",
                     ));
@@ -1619,7 +1745,8 @@ impl RealmAuthorizationCut {
                 };
                 let owner = cut.actor_is_root_controller()
                     && arkret_policy::owner_may_author_action(action).unwrap_or(false);
-                let parent = grants.iter().any(|grant| {
+                let parents = authorization.current_positive_grant_records(action, resource)?;
+                let parent = parents.iter().any(|grant| {
                     grant.actions.iter().any(|held| {
                         arkret_policy::action_covers_event_kinds(held, action).unwrap_or(false)
                     }) && grant
@@ -1720,10 +1847,7 @@ impl RealmAuthorizationCut {
         let mut event_target = WireResourceSelector::realm(self.realm_id.clone());
         event_target.kind = arkret_wire::ResourceSelectorKind::Event;
         event_target.event_id = Some(event.event_id.clone());
-        let grants = self
-            .effective_grants_with_owned_source(at, source)
-            .map(|(_, grant)| grant)
-            .collect::<Vec<_>>();
+        let authorization = self.actor_authorization_with_owned_source(at, source)?;
         let resources = crate::agent_management_admission::event_content_resources(event)?;
         let mut targets = crate::agent_management_admission::content_capability_targets(
             &self.realm_id,
@@ -1742,12 +1866,9 @@ impl RealmAuthorizationCut {
                 at,
                 facts: &facts,
             };
-            if coland_storage::evaluate_grants_with_verified_approvals(
-                &operation,
-                grants.iter().copied(),
-                approvals,
-            )
-            .is_refusal()
+            if authorization
+                .evaluate_with_approvals_checked(operation.actions, target, &facts, approvals)?
+                .is_refusal()
             {
                 return Err(capability_denied(
                     "a current grant refuses canonical Event disclosure",
@@ -1839,11 +1960,7 @@ impl RealmAuthorizationCut {
             facts,
             at,
         };
-        let evaluation = evaluate_grants(
-            &operation,
-            self.effective_grants_with_owned_source(at, source)
-                .map(|(_, grant)| grant),
-        );
+        let evaluation = self.evaluate_current_sources(&operation, &[], source)?;
         let owner = self.actor_is_root_controller()
             && arkret_policy::owner_may_author_action(action.as_str()).unwrap_or(false);
         if evaluation.is_refusal() || (!owner && evaluation.unreserved().is_empty()) {
@@ -1904,24 +2021,12 @@ impl RealmAuthorizationCut {
             facts: &facts,
             at,
         };
-        let agent_grants = self
-            .effective_grants_with_owned_source(at, Some(source.clone()))
-            .map(|(_, grant)| grant)
-            .collect::<Vec<_>>();
-        let controller_grants = controller
-            .effective_grants(at)
-            .map(|(_, grant)| grant)
-            .collect::<Vec<_>>();
-        let root_covers = controller.actor_is_root_controller()
-            && arkret_policy::owner_may_author_action(action.as_str()).unwrap_or(false);
-        let evaluation = coland_storage::evaluate_controller_bounded_grants(
+        let evaluation = self.evaluate_current_controller_sources(
+            controller,
             &operation,
-            &agent_grants,
-            &controller.actor,
-            &controller_grants,
             &[],
-            root_covers,
-        );
+            Some(source.clone()),
+        )?;
         if evaluation.is_refusal() || evaluation.unreserved().is_empty() {
             return Err(capability_denied(
                 "native reply body lacks independent unreserved read_content",
@@ -1980,14 +2085,6 @@ impl RealmAuthorizationCut {
             facts,
             at,
         };
-        let agent_grants = self
-            .effective_grants_with_owned_source(at, Some(source.clone()))
-            .map(|(_, grant)| grant)
-            .collect::<Vec<_>>();
-        let controller_grants = controller
-            .effective_grants(at)
-            .map(|(_, grant)| grant)
-            .collect::<Vec<_>>();
         // Refusals on every known actual alias remain additive. Only the
         // canonical Strand target can supply a positive MessageCreate path.
         let resources =
@@ -2000,32 +2097,31 @@ impl RealmAuthorizationCut {
                 target: &alias,
                 ..operation
             };
-            if evaluate_grants(&alias_operation, agent_grants.iter().copied()).is_refusal()
-                || evaluate_grants(
-                    &AuthorizationOperation {
-                        actor: &controller.actor,
-                        ..alias_operation
-                    },
-                    controller_grants.iter().copied(),
-                )
+            if self
+                .evaluate_current_sources(&alias_operation, &[], Some(source.clone()))?
                 .is_refusal()
+                || controller
+                    .evaluate_current_sources(
+                        &AuthorizationOperation {
+                            actor: &controller.actor,
+                            ..alias_operation
+                        },
+                        &[],
+                        None,
+                    )?
+                    .is_refusal()
             {
                 return Err(capability_denied(
                     "native reply is refused on an actual resource alias",
                 ));
             }
         }
-        let root_covers = controller.actor_is_root_controller()
-            && arkret_policy::owner_may_author_action(CapabilityActionId::MessageCreate.as_str())
-                .unwrap_or(false);
-        let evaluation = coland_storage::evaluate_controller_bounded_grants(
+        let evaluation = self.evaluate_current_controller_sources(
+            controller,
             &operation,
-            &agent_grants,
-            &controller.actor,
-            &controller_grants,
             &[],
-            root_covers,
-        );
+            Some(source.clone()),
+        )?;
         if evaluation.is_refusal() || evaluation.unreserved().is_empty() {
             return Err(capability_denied(
                 "native reply lacks a complete unreserved controller-bounded path",
@@ -2124,28 +2220,50 @@ impl RealmAuthorizationCut {
         at: chrono::DateTime<chrono::Utc>,
         owned_source: Option<IssuerAuthorityRef>,
     ) -> PersistenceResult<ActorRealmAuthorization> {
-        let grants = self
-            .effective_grants_with_owned_source(at, owned_source)
-            .map(|(grant_id, grant)| {
-                let revision = self.revisions.get(grant_id).cloned().ok_or_else(|| {
-                    PersistenceError::Database(
-                        "Capability Grant current revision is missing from its cut".to_owned(),
-                    )
-                })?;
-                Ok(EffectiveActorGrant {
-                    grant: grant.clone(),
-                    revision,
-                })
-            })
-            .collect::<PersistenceResult<Vec<_>>>()?;
-        Ok(ActorRealmAuthorization {
-            realm_id: self.realm_id.clone(),
-            actor: self.actor.clone(),
-            evaluated_at: at,
-            root_controller: self.actor_is_root_controller(),
-            grants,
-            agent_ceiling: None,
-        })
+        self.actor_authorization_on_source_cut(at, owned_source, self.grant_source_cut()?)
+    }
+
+    fn grant_source_cut(&self) -> PersistenceResult<std::sync::Arc<GrantAuthorityCut>> {
+        let root = self.root.as_ref().ok_or_else(|| {
+            PersistenceError::Conflict(
+                "revision_unavailable: ordinary authorization has no current Realm root".into(),
+            )
+        })?;
+        if root.realm_id != self.realm_id {
+            return Err(PersistenceError::Conflict(
+                "revision_unavailable: current root belongs to another Realm".into(),
+            ));
+        }
+        Ok(std::sync::Arc::new(GrantAuthorityCut::new(
+            self.realm_id.clone(),
+            arkret_wire::RealmAuthorityRootValue {
+                controller_actor_id: root.controller_actor_id.clone(),
+                controller_epoch: root.controller_epoch,
+                authority_generation: root.authority_generation,
+                authority_event_ref: root.authority_event_ref.clone(),
+            },
+            self.grants.clone(),
+            self.revisions.clone(),
+        )?))
+    }
+
+    fn actor_authorization_on_source_cut(
+        &self,
+        at: chrono::DateTime<chrono::Utc>,
+        owned_source: Option<IssuerAuthorityRef>,
+        source_cut: std::sync::Arc<GrantAuthorityCut>,
+    ) -> PersistenceResult<ActorRealmAuthorization> {
+        let ids = self
+            .effective_grants_with_owned_source(at, owned_source.clone())?
+            .map(|(id, _)| id.clone())
+            .collect();
+        ActorRealmAuthorization::from_source_cut(
+            self.actor.clone(),
+            at,
+            source_cut,
+            ids,
+            owned_source,
+        )
     }
 
     /// Read-only consumers need the same dynamic ceiling as Event admission.
@@ -2193,9 +2311,15 @@ impl RealmAuthorizationCut {
             Self::read_accepted(conn, &self.realm_id, &controller).await?
         };
         controller_cut.require_governed_member(&EventKind::CapabilityGrant)?;
+        self.require_same_grant_cut(&controller_cut)?;
         let owned_source =
             owned_source_in_connection(conn, &self.realm_id, &self.actor, at, lock).await?;
-        authorization = self.actor_authorization_with_owned_source(at, owned_source)?;
+        let source_cut = std::sync::Arc::clone(authorization.source_cut());
+        authorization = self.actor_authorization_on_source_cut(
+            at,
+            owned_source,
+            std::sync::Arc::clone(&source_cut),
+        )?;
         let policies = if lock {
             crate::policy_current_states::read_scoped_agent_management_policies_in_connection(
                 conn,
@@ -2207,7 +2331,9 @@ impl RealmAuthorizationCut {
             crate::policy_current_states::read_scoped_agent_management_policy_snapshot_in_connection(conn, &self.realm_id, None).await?
         };
         authorization.agent_ceiling = Some(coland_storage::AgentControllerCeiling {
-            controller: Box::new(controller_cut.actor_authorization(at)?),
+            controller: Box::new(
+                controller_cut.actor_authorization_on_source_cut(at, None, source_cut)?,
+            ),
             management_policies: policies,
         });
         Ok(authorization)
@@ -2238,11 +2364,9 @@ impl RealmAuthorizationCut {
             facts: &facts,
             at,
         };
-        if evaluate_grants(
-            &operation,
-            self.effective_grants(at).map(|(_, grant)| grant),
-        )
-        .is_refusal()
+        if self
+            .evaluate_current_sources(&operation, &[], None)?
+            .is_refusal()
         {
             return Err(capability_denied(
                 "a current grant refuses Realm projection disclosure",
@@ -2463,7 +2587,17 @@ impl RealmAuthorizationCut {
         let owner =
             self.actor_is_root_controller() && actions.contains(&CapabilityActionId::REALM_OWNER);
         let (target, facts) = self.event_operation(create);
-        match self.evaluate(&actions, &target, &facts, at) {
+        match self.evaluate_current_sources(
+            &AuthorizationOperation {
+                actor: &self.actor,
+                actions: &actions,
+                target: &target,
+                at,
+                facts: &facts,
+            },
+            &[],
+            None,
+        )? {
             GrantEvaluation::Allowed(satisfied) if !satisfied.is_empty() => Ok(()),
             GrantEvaluation::Allowed(_)
             | GrantEvaluation::Unsatisfied
@@ -2502,7 +2636,17 @@ impl RealmAuthorizationCut {
         facts.from_container_id = source.map(ToString::to_string);
         facts.to_container_id = Some(destination.to_string());
         if matches!(
-            self.evaluate(&actions, &target, &facts, at),
+            self.evaluate_current_sources(
+                &AuthorizationOperation {
+                    actor: &self.actor,
+                    actions: &actions,
+                    target: &target,
+                    at,
+                    facts: &facts,
+                },
+                &[],
+                None
+            )?,
             GrantEvaluation::Denied | GrantEvaluation::Quarantined
         ) {
             self.admit_actions_in_connection(conn, &actions, &target, &facts, owner, event, at)
@@ -2539,16 +2683,9 @@ impl RealmAuthorizationCut {
             at,
             facts: &facts,
         };
-        let evaluate = || {
-            coland_storage::evaluate_grants_with_verified_approvals(
-                &operation,
-                self.effective_grants_with_owned_source(at, owned_source.clone())
-                    .map(|(_, grant)| grant),
-                &discharges,
-            )
-        };
-        let mut dependencies = match evaluate() {
-            GrantEvaluation::Allowed(ref grants) => grants
+        let evaluation = self.evaluate_current_sources(&operation, &discharges, owned_source)?;
+        let mut dependencies = match &evaluation {
+            GrantEvaluation::Allowed(grants) => grants
                 .iter()
                 .map(|row| row.grant.id.clone())
                 .collect::<Vec<_>>(),
@@ -2562,7 +2699,7 @@ impl RealmAuthorizationCut {
         match crate::boxed_future(|| {
             self.admit_evaluation_in_connection(
                 conn,
-                evaluate(),
+                evaluation.clone(),
                 owner,
                 event,
                 &operation,
@@ -2596,7 +2733,7 @@ impl RealmAuthorizationCut {
         // Only a grant that names this action and exact Strand, admits the
         // durable source/target List facts, and owes no quota reservation may
         // override the List policy. Root ownership alone does not imply it.
-        let override_allowed=evaluate()
+        let override_allowed=evaluation
             .unreserved()
             .iter()
             .any(|grant| {
@@ -2653,11 +2790,12 @@ impl RealmAuthorizationCut {
         } else {
             None
         };
-        for (_, grant) in self
-            .effective_grants_with_owned_source(commit.committed_at, owned_source)
-            .filter(|(_, grant)| {
-                coland_storage::grant_names_target(grant, &[action.as_str()], target)
-            })
+        let authorization =
+            self.actor_authorization_with_owned_source(commit.committed_at, owned_source)?;
+        for grant in authorization
+            .current_candidate_grant_records(action.as_str(), target)?
+            .into_iter()
+            .filter(|grant| coland_storage::grant_names_target(grant, &[action.as_str()], target))
         {
             let requirements = match crate::grant_approval_admission::require_grant_approvals(
                 conn, event, commit, prepared, grant, action, target, facts,
@@ -3064,7 +3202,7 @@ impl RealmAuthorizationCut {
             })
             .await?;
             let service_actions = [action.as_str()];
-            let global = coland_storage::evaluate_grants_with_verified_approvals(
+            let global = service.evaluate_current_sources(
                 &AuthorizationOperation {
                     actor: event.actual_signer(),
                     actions: &service_actions,
@@ -3072,11 +3210,9 @@ impl RealmAuthorizationCut {
                     at: commit.committed_at,
                     facts: &facts,
                 },
-                service
-                    .effective_grants(commit.committed_at)
-                    .map(|(_, grant)| grant),
                 &global_markers,
-            );
+                None,
+            )?;
             if matches!(global, GrantEvaluation::RequiresReview) && global_missing {
                 return Err(PersistenceError::Conflict(
                     "approval_required: Service grant approval is not satisfied".into(),
@@ -3211,13 +3347,7 @@ impl RealmAuthorizationCut {
                 facts,
             };
             if let GrantEvaluation::Allowed(grants) =
-                coland_storage::evaluate_grants_with_verified_approvals(
-                    &operation,
-                    contributor
-                        .effective_grants_with_owned_source(commit.committed_at, source)
-                        .map(|(_, grant)| grant),
-                    &markers,
-                )
+                contributor.evaluate_current_sources(&operation, &markers, source)?
             {
                 dependencies.extend(grants.iter().map(|row| row.grant.id.clone()));
             }
@@ -3287,8 +3417,19 @@ impl RealmAuthorizationCut {
     )> {
         let owner =
             self.actor_is_root_controller() && actions.contains(&CapabilityActionId::REALM_OWNER);
+        let initial = self.evaluate_current_sources(
+            &AuthorizationOperation {
+                actor: &self.actor,
+                actions,
+                target,
+                at: commit.committed_at,
+                facts,
+            },
+            &[],
+            None,
+        )?;
         if !self.needs_grant_approval_preparation(actions, target, prepared) {
-            let dependencies = match self.evaluate(actions, target, facts, commit.committed_at) {
+            let dependencies = match initial {
                 GrantEvaluation::Allowed(grants) => {
                     grants.iter().map(|row| row.grant.id.clone()).collect()
                 }
@@ -3309,7 +3450,7 @@ impl RealmAuthorizationCut {
             return Ok((admission, Vec::new(), dependencies));
         }
         if matches!(
-            self.evaluate(actions, target, facts, commit.committed_at),
+            initial,
             GrantEvaluation::Denied | GrantEvaluation::Quarantined
         ) {
             self.admit_actions_in_connection(
@@ -3351,12 +3492,7 @@ impl RealmAuthorizationCut {
             at: commit.committed_at,
             facts,
         };
-        let evaluation = coland_storage::evaluate_grants_with_verified_approvals(
-            &operation,
-            self.effective_grants_with_owned_source(commit.committed_at, owned_source)
-                .map(|(_, grant)| grant),
-            &markers,
-        );
+        let evaluation = self.evaluate_current_sources(&operation, &markers, owned_source)?;
         let mut dependencies = match &evaluation {
             GrantEvaluation::Allowed(grants) => grants
                 .iter()
@@ -3667,7 +3803,9 @@ impl RealmAuthorizationCut {
             let registered = CapabilityActionId::from_wire(action)
                 .ok_or_else(|| capability_denied("Call axis action is unregistered"))?;
             let mut alternatives = vec![*action];
-            if matches!(event.scope_ref, arkret_wire::ScopeRef::Realm { .. }) {
+            if event.kind != EventKind::CallRecordingStart
+                && matches!(event.scope_ref, arkret_wire::ScopeRef::Realm { .. })
+            {
                 alternatives.push(CapabilityActionId::REALM_OWNER);
             }
             approved.extend(
@@ -3694,6 +3832,70 @@ impl RealmAuthorizationCut {
             &serde_json::json!({"call_axes":actions,"scope_ref":event.scope_ref}),
         )
         .await
+    }
+
+    /// An installed Service's explicit delegated Call result retains the
+    /// complete Service refusal set and actually exercises its selected grant.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The original Service producer, selected grant and every Call axis share one accepting transaction."
+    )]
+    pub(crate) async fn require_call_service_producer(
+        conn: &mut AsyncPgConnection,
+        event: &arkret_wire::Event,
+        commit: &arkret_wire::RealmCommit,
+        prepared: Option<&coland_storage::EventApprovalCommit>,
+        grant: &CapabilityGrant,
+        target: &WireResourceSelector,
+        facts: &OperationFacts,
+        actions: &[&str],
+    ) -> PersistenceResult<Vec<crate::approval_admission::QualifiedApproval>> {
+        call_delegated_account::require_active(conn, event).await?;
+        let service = Self::read(conn, &event.realm_id, event.actual_signer()).await?;
+        let mut accepted = Vec::new();
+        for action in actions {
+            let action = CapabilityActionId::from_wire(action)
+                .ok_or_else(|| capability_denied("Call producer action is unregistered"))?;
+            let (markers, approvals, missing) = service
+                .prepare_grant_approvals(conn, event, commit, prepared, action, target, facts)
+                .await?;
+            let current = service
+                .bounded_actor_authorization_in_connection(conn, commit.committed_at)
+                .await?;
+            let requested = [action.as_str()];
+            let global = current.evaluate_with_approvals(&requested, target, facts, &markers);
+            if matches!(global, GrantEvaluation::RequiresReview) && missing {
+                return Err(PersistenceError::Conflict(
+                    "approval_required: Call Service has an unresolved current grant review".into(),
+                ));
+            }
+            if matches!(
+                global,
+                GrantEvaluation::Denied
+                    | GrantEvaluation::Quarantined
+                    | GrantEvaluation::RequiresReview
+            ) {
+                return Err(capability_denied(
+                    "Call Service has a current global refusal",
+                ));
+            }
+            accepted.extend(approvals);
+            accepted.extend(
+                crate::managed_message_actor::require_producer_grant(
+                    conn,
+                    event,
+                    commit,
+                    prepared,
+                    grant,
+                    event.actual_signer(),
+                    &requested,
+                    target,
+                    facts,
+                )
+                .await?,
+            );
+        }
+        Ok(accepted)
     }
 
     /// Native join and public Profile intent retain their original subject.
@@ -4235,6 +4437,17 @@ mod operation_fact_tests {
 
     use super::*;
 
+    fn complete_current_revisions(cut: &mut RealmAuthorizationCut) {
+        for (index, id) in cut.grants.keys().enumerate() {
+            cut.revisions
+                .entry(id.clone())
+                .or_insert_with(|| CurrentRevision {
+                    commit_id: arkret_wire::RealmCommitId::from_digest([index as u8 + 1; 32]),
+                    stream_position: index as u64 + 1,
+                });
+        }
+    }
+
     #[test]
     fn native_message_cut_uses_action_windows_and_keeps_global_refusals() {
         let realm: RealmId = "ak:realm:AY6DJbBwavsGTQuBZZiqqw9MVcqPZ8QX8invQ3i2kpi7"
@@ -4256,8 +4469,8 @@ mod operation_fact_tests {
         let parent_id = GrantId::from_event_id(&event(0x71));
         let child_id = GrantId::from_event_id(&event(0x72));
         let root_ref = json!({"kind":"realm_root","realm_id":realm,"authority_event_ref":root_event,"authority_generation":"0"});
-        let parent:CapabilityGrant=serde_json::from_value(json!({"id":parent_id,"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":owner,"subject":service,"actions":["ak.message.create","ak.event.read"],"resources":[{"kind":"realm","realm_id":realm}],"constraints":[{"constraint_kind":"authority_control","effect":"allow","authority_regrant_allowed":false,"max_authority_depth":0}],"issuer_authority_refs":[root_ref],"authority_depth":1,"authority_root_refs":[root_ref],"issued_at":"2026-09-21T00:00:00.000Z","status":"active"})).unwrap();
-        let mut child:CapabilityGrant=serde_json::from_value(json!({"id":child_id,"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":service,"subject":actor,"actions":["ak.message.create","ak.event.read"],"resources":[{"kind":"realm","realm_id":realm}],"constraints":[{"constraint_kind":"temporal","effect":"allow","applies_to_actions":["ak.event.read"],"expires_at":"2026-09-22T00:00:00.000Z"}],"issuer_authority_refs":[{"kind":"grant","grant_id":parent_id}],"authority_depth":2,"authority_root_refs":[root_ref],"issued_at":"2026-09-21T00:00:00.000Z","status":"active"})).unwrap();
+        let parent:CapabilityGrant=serde_json::from_value(json!({"id":parent_id,"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":owner,"subject":service,"actions":["ak.message.create","ak.event.read"],"resources":[{"kind":"realm","realm_id":realm}],"constraints":[{"constraint_kind":"authority_control","effect":"allow","authority_regrant_allowed":false,"max_authority_depth":0}],"issuer_authority_refs":[root_ref],"authority_depth":1,"authority_root_ref":root_ref,"issued_at":"2026-09-21T00:00:00.000Z","status":"active"})).unwrap();
+        let mut child:CapabilityGrant=serde_json::from_value(json!({"id":child_id,"schema":"ak.schema.capability.v1","realm_id":realm,"issuer_id":service,"subject":actor,"actions":["ak.message.create","ak.event.read"],"resources":[{"kind":"realm","realm_id":realm}],"constraints":[{"constraint_kind":"temporal","effect":"allow","applies_to_actions":["ak.event.read"],"expires_at":"2026-09-22T00:00:00.000Z"}],"issuer_authority_refs":[{"kind":"grant","grant_id":parent_id}],"authority_depth":2,"authority_root_ref":root_ref,"issued_at":"2026-09-21T00:00:00.000Z","status":"active"})).unwrap();
         let target = WireResourceSelector::realm(realm.clone());
         let at = "2026-09-23T00:00:00Z".parse().unwrap();
         assert!(
@@ -4274,7 +4487,10 @@ mod operation_fact_tests {
                 authority_generation: 0,
                 authority_event_ref: root_event,
             }),
-            grants: BTreeMap::from([(parent_id, parent), (child_id.clone(), child.clone())]),
+            grants: BTreeMap::from([
+                (parent_id.clone(), parent),
+                (child_id.clone(), child.clone()),
+            ]),
             revisions: BTreeMap::new(),
             policy_bundle: None,
             actor_membership: Some("join".into()),
@@ -4283,7 +4499,8 @@ mod operation_fact_tests {
             selected_grant: Some(child_id),
             native_operation: Some((CapabilityActionId::MessageCreate, target.clone())),
         };
-        assert_eq!(cut.effective_grants(at).count(), 1);
+        complete_current_revisions(&mut cut);
+        assert_eq!(cut.effective_grants(at).unwrap().count(), 1);
         assert!(matches!(
             cut.evaluate(
                 &[CapabilityActionId::MESSAGE_CREATE],
@@ -4295,9 +4512,9 @@ mod operation_fact_tests {
         ));
         cut.native_operation = Some((CapabilityActionId::EventRead, target.clone()));
         assert_eq!(
-            cut.effective_grants(at).count(),
-            0,
-            "the expired EventRead window closes that exact native action at the same cut"
+            cut.effective_grants(at).unwrap().count(),
+            1,
+            "a local allow expiry preserves the current refusal candidate"
         );
         assert!(matches!(
             cut.evaluate(
@@ -4306,7 +4523,7 @@ mod operation_fact_tests {
                 &OperationFacts::default(),
                 at
             ),
-            GrantEvaluation::Unnamed
+            GrantEvaluation::Unsatisfied
         ));
         cut.native_operation = Some((CapabilityActionId::MessageCreate, target.clone()));
         let circle_target = WireResourceSelector::circle(
@@ -4315,7 +4532,7 @@ mod operation_fact_tests {
         );
         cut.native_operation = Some((CapabilityActionId::CircleMemberAdd, circle_target.clone()));
         assert_eq!(
-            cut.effective_grants(at).count(),
+            cut.effective_grants(at).unwrap().count(),
             0,
             "message-only sources cannot authorize Circle membership"
         );
@@ -4324,7 +4541,7 @@ mod operation_fact_tests {
                 .actions
                 .push(CapabilityActionId::CircleMemberAdd.as_str().into());
         }
-        assert_eq!(cut.effective_grants(at).count(), 1);
+        assert_eq!(cut.effective_grants(at).unwrap().count(), 1);
         assert!(matches!(
             cut.evaluate(
                 &[CapabilityActionId::CircleMemberAdd.as_str()],
@@ -4336,9 +4553,14 @@ mod operation_fact_tests {
         ));
         cut.native_operation = Some((CapabilityActionId::MessageCreate, target.clone()));
         child.id = GrantId::from_event_id(&event(0x73));
-        child.constraints=vec![serde_json::from_value(json!({"constraint_kind":"scope_limitation","effect":"deny","denied_strand_ids":["ak:strand:AZ6GqZWWvnQ2KFwbBD-MenomzWNz-31MUAuKzBXIP0zv"]})).unwrap()];
+        child.constraints=vec![
+            serde_json::from_value(json!({"constraint_kind":"scope_limitation","effect":"deny","denied_strand_ids":["ak:strand:AZ6GqZWWvnQ2KFwbBD-MenomzWNz-31MUAuKzBXIP0zv"]})).unwrap(),
+            serde_json::from_value(json!({"constraint_kind":"temporal","effect":"allow","applies_to_actions":["ak.message.create"],"expires_at":"2026-09-22T00:00:00.000Z"})).unwrap(),
+        ];
+        let refusal_id = child.id.clone();
         cut.grants.insert(child.id.clone(), child);
-        assert_eq!(cut.effective_grants(at).count(), 2);
+        complete_current_revisions(&mut cut);
+        assert_eq!(cut.effective_grants(at).unwrap().count(), 2);
         assert!(matches!(
             cut.evaluate(
                 &[CapabilityActionId::MESSAGE_CREATE],
@@ -4348,6 +4570,86 @@ mod operation_fact_tests {
             ),
             GrantEvaluation::Denied
         ));
+        cut.native_operation = None;
+        cut.selected_grant = None;
+        assert!(
+            matches!(
+                cut.evaluate(
+                    &[CapabilityActionId::MESSAGE_CREATE],
+                    &target,
+                    &OperationFacts::default(),
+                    at
+                ),
+                GrantEvaluation::Denied
+            ),
+            "ordinary cuts also retain a terminal refusal after its local allow expired"
+        );
+        let expired_parent: arkret_models_collaboration::governance::grant_constraint::GrantConstraint = serde_json::from_value(json!({"constraint_kind":"temporal","effect":"allow","applies_to_actions":["ak.message.create"],"expires_at":"2026-09-22T00:00:00.000Z"})).unwrap();
+        cut.grants
+            .get_mut(&parent_id)
+            .unwrap()
+            .constraints
+            .push(expired_parent);
+        assert!(
+            matches!(
+                cut.evaluate(
+                    &[CapabilityActionId::MESSAGE_CREATE],
+                    &target,
+                    &OperationFacts::default(),
+                    at
+                ),
+                GrantEvaluation::Unnamed
+            ),
+            "an expired actual parent source closes its children in ordinary cuts"
+        );
+        cut.grants
+            .get_mut(&parent_id)
+            .unwrap()
+            .constraints
+            .last_mut()
+            .unwrap()
+            .applies_to_actions = vec![CapabilityActionId::EventRead.as_str().to_owned()];
+        cut.grants.get_mut(&refusal_id).unwrap().constraints[0].applies_to_actions =
+            vec![CapabilityActionId::EventRead.as_str().to_owned()];
+        assert!(
+            matches!(
+                cut.evaluate(
+                    &[
+                        CapabilityActionId::MESSAGE_CREATE,
+                        CapabilityActionId::EVENT_READ
+                    ],
+                    &target,
+                    &OperationFacts::default(),
+                    at
+                ),
+                GrantEvaluation::Allowed(_)
+            ),
+            "a current Message source must not revive a closed EventRead refusal through an action union"
+        );
+        let missing = GrantId::from_event_id(&event(0x75));
+        cut.grants
+            .get_mut(&refusal_id)
+            .unwrap()
+            .issuer_authority_refs = vec![IssuerAuthorityRef::Grant { grant_id: missing }];
+        assert!(
+            cut.effective_grants(at).is_err(),
+            "an unknown independent source cannot be dropped before another allow"
+        );
+        assert!(matches!(
+            cut.evaluate(
+                &[CapabilityActionId::MESSAGE_CREATE],
+                &target,
+                &OperationFacts::default(),
+                at
+            ),
+            GrantEvaluation::Denied
+        ));
+        cut.native_operation = None;
+        cut.selected_grant = None;
+        assert!(
+            cut.effective_grants(at).is_err(),
+            "ordinary current-source errors also propagate"
+        );
     }
 
     #[test]
@@ -4379,7 +4681,7 @@ mod operation_fact_tests {
             "id":grant_id,"schema":"ak.schema.capability.v1","realm_id":realm,
             "issuer_id":controller,"subject":actor,"actions":[CapabilityActionId::POLICY_SET],
             "resources":[{"kind":"realm","realm_id":realm}],
-            "issuer_authority_refs":[root_ref],"authority_depth":1,"authority_root_refs":[root_ref],
+            "issuer_authority_refs":[root_ref],"authority_depth":1,"authority_root_ref":root_ref,
             "issued_at":"2026-09-21T00:00:00.000Z","status":"active"
         }))
         .unwrap();
@@ -4395,7 +4697,7 @@ mod operation_fact_tests {
             ..Default::default()
         });
         grant.constraints.push(temporal);
-        let cut = RealmAuthorizationCut {
+        let mut cut = RealmAuthorizationCut {
             realm_id: realm.clone(),
             actor,
             root: Some(RealmAuthorityRootCurrent {
@@ -4415,6 +4717,7 @@ mod operation_fact_tests {
             native_operation: None,
         };
         let before = "2026-09-21T01:00:00Z".parse().unwrap();
+        complete_current_revisions(&mut cut);
         let after = "2026-09-21T09:30:00Z".parse().unwrap();
         let target = WireResourceSelector::realm(realm);
         assert!(cut.time_sources_unchanged(before, after));
@@ -4458,7 +4761,7 @@ mod operation_fact_tests {
             "id":child,"schema":"ak.schema.capability.v1","realm_id":realm,
             "issuer_id":actor,"subject":actor,"actions":["ak.realm.actor.audit"],"resources":[target],
             "constraints":[],"issuer_authority_refs":[{"kind":"grant","grant_id":parent}],
-            "authority_depth":2,"authority_root_refs":[root],"issued_at":"2026-09-21T00:00:00.000Z","status":"revoked"
+            "authority_depth":2,"authority_root_ref":root,"issued_at":"2026-09-21T00:00:00.000Z","status":"revoked"
         })).unwrap();
         let mut cut = RealmAuthorizationCut {
             realm_id: realm,

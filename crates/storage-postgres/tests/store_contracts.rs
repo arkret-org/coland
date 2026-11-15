@@ -735,12 +735,6 @@ async fn postgres_key_backup_pages_are_ordered_bounded_and_revisioned() {
 static DB_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(diesel::QueryableByName)]
-struct TimestampRow {
-    #[diesel(sql_type = diesel::sql_types::Timestamptz)]
-    value: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(diesel::QueryableByName)]
 struct LedgerCountRow {
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     value: i64,
@@ -895,24 +889,6 @@ fn fixture_authority_signature(
     }
 }
 
-/// One idempotency row bound to a fixture Event's own authenticated actor.
-fn fixture_idempotency_record(
-    request: &coland_storage::EventCommitRequest,
-    idempotency_key: String,
-    created_at: chrono::DateTime<chrono::Utc>,
-) -> coland_storage::IdempotencyRecord {
-    coland_storage::IdempotencyRecord {
-        authenticated_actor: request.authority_commit.event.actor_id.clone(),
-        operation_id: "ak.peer.events.command.submit.v1".to_owned(),
-        idempotency_key,
-        request_hash: request.event.canonical_digest.clone(),
-        response_status: 202,
-        response_body: serde_json::json!({"event_id": request.event.event_id}),
-        created_at,
-        expires_at: created_at + chrono::TimeDelta::hours(24),
-    }
-}
-
 #[allow(
     clippy::too_many_arguments,
     reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
@@ -964,6 +940,7 @@ fn signed_event_request(
         arkret_canonical::canonical_json_bytes(&event.digest_payload().unwrap()).unwrap();
     let authority_commit = stream.order(settlement, &event, received_at);
     coland_storage::EventCommitRequest {
+        owner_transfer_successor: None,
         verified_media_participant: None,
         authority_commit,
         self_producer_guard: None,
@@ -1215,7 +1192,7 @@ async fn postgres_relation_current_state_is_exact_commit_cas_and_atomic() {
         arkret_wire::EventKind::RelationCreate,
         serde_json::json!({
             "primary_conflict_domain":domain,
-            "expected_revision":null,
+            "expected_commit_id":null,
             "relation":definition
         }),
         now,
@@ -1262,10 +1239,7 @@ async fn postgres_relation_current_state_is_exact_commit_cas_and_atomic() {
         arkret_wire::EventKind::RelationCreate,
         serde_json::json!({
             "primary_conflict_domain":domain,
-            "expected_revision":{
-                "commit_id":create_commit.commit_id,
-                "stream_position":create_commit.stream_position
-            },
+            "expected_commit_id":create_commit.commit_id,
             "relation":definition
         }),
         now + chrono::TimeDelta::seconds(1),
@@ -1285,10 +1259,7 @@ async fn postgres_relation_current_state_is_exact_commit_cas_and_atomic() {
         arkret_wire::EventKind::RelationUpdate,
         serde_json::json!({
             "primary_conflict_domain":domain,
-            "expected_revision":{
-                "commit_id":arkret_wire::RealmCommitId::from_digest([0x55;32]),
-                "stream_position":create_commit.stream_position
-            },
+            "expected_commit_id":arkret_wire::RealmCommitId::from_digest([0x55;32]),
             "patch":{"fields.note":"stale"},
             "relation_id":first_relation_id
         }),
@@ -1315,10 +1286,7 @@ async fn postgres_relation_current_state_is_exact_commit_cas_and_atomic() {
         arkret_wire::EventKind::RelationUpdate,
         serde_json::json!({
             "primary_conflict_domain":missing_domain,
-            "expected_revision":{
-                "commit_id":create_commit.commit_id,
-                "stream_position":create_commit.stream_position
-            },
+            "expected_commit_id":create_commit.commit_id,
             "patch":{"fields.note":"missing"},
             "relation_id":first_relation_id
         }),
@@ -1338,10 +1306,7 @@ async fn postgres_relation_current_state_is_exact_commit_cas_and_atomic() {
         arkret_wire::EventKind::RelationUpdate,
         serde_json::json!({
             "primary_conflict_domain":domain,
-            "expected_revision":{
-                "commit_id":create_commit.commit_id,
-                "stream_position":create_commit.stream_position
-            },
+            "expected_commit_id":create_commit.commit_id,
             "patch":{"fields.note":"updated"},
             "relation_id":first_relation_id
         }),
@@ -1357,10 +1322,7 @@ async fn postgres_relation_current_state_is_exact_commit_cas_and_atomic() {
         arkret_wire::EventKind::RelationTombstone,
         serde_json::json!({
             "primary_conflict_domain":domain,
-            "expected_revision":{
-                "commit_id":update_commit.commit_id,
-                "stream_position":update_commit.stream_position
-            },
+            "expected_commit_id":update_commit.commit_id,
             "relation_id":first_relation_id,
             "reason":"superseded"
         }),
@@ -1391,10 +1353,7 @@ async fn postgres_relation_current_state_is_exact_commit_cas_and_atomic() {
         arkret_wire::EventKind::RelationCreate,
         serde_json::json!({
             "primary_conflict_domain":domain,
-            "expected_revision":{
-                "commit_id":tombstone_commit.commit_id,
-                "stream_position":tombstone_commit.stream_position
-            },
+            "expected_commit_id":tombstone_commit.commit_id,
             "relation":definition
         }),
         now + chrono::TimeDelta::seconds(7),
@@ -1451,10 +1410,7 @@ async fn postgres_relation_current_state_is_exact_commit_cas_and_atomic() {
         arkret_wire::EventKind::RelationUpdate,
         serde_json::json!({
             "primary_conflict_domain":domain,
-            "expected_revision":{
-                "commit_id":row.current_commit_id,
-                "stream_position":row.current_stream_position
-            },
+            "expected_commit_id":row.current_commit_id,
             "patch":{"fields.note":"must-not-land"},
             "relation_id":replacement_id
         }),
@@ -1494,10 +1450,7 @@ async fn postgres_relation_current_state_is_exact_commit_cas_and_atomic() {
         arkret_wire::EventKind::RelationUpdate,
         serde_json::json!({
             "primary_conflict_domain":domain,
-            "expected_revision":{
-                "commit_id":row.current_commit_id,
-                "stream_position":row.current_stream_position
-            },
+            "expected_commit_id":row.current_commit_id,
             "patch":{"fields.note":"must-not-heal"},
             "relation_id":replacement_id
         }),

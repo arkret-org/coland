@@ -34,7 +34,7 @@ pub(crate) fn is_approval_constraint(constraint: &GrantConstraint) -> bool {
         )
 }
 
-fn approval_deadline(
+pub(crate) fn approval_deadline(
     approved_at: chrono::DateTime<chrono::Utc>,
     committed_at: chrono::DateTime<chrono::Utc>,
     timeout: Option<chrono::TimeDelta>,
@@ -48,7 +48,7 @@ fn approval_deadline(
     })
 }
 
-fn approval_not_before(grant: &CapabilityGrant) -> chrono::DateTime<chrono::Utc> {
+pub(crate) fn approval_not_before(grant: &CapabilityGrant) -> chrono::DateTime<chrono::Utc> {
     grant
         .constraints
         .iter()

@@ -24,8 +24,6 @@ struct StateRow {
     stream_ref: Value,
     #[diesel(sql_type = Text)]
     current_commit_id: String,
-    #[diesel(sql_type = BigInt)]
-    current_stream_position: i64,
 }
 
 fn conflict(detail: impl Into<String>) -> PersistenceError {
@@ -53,7 +51,7 @@ async fn locked_state(
     target_ref: &str,
 ) -> PersistenceResult<Option<StateRow>> {
     diesel::sql_query(
-        "SELECT s.value, s.current_commit_id, s.current_stream_position, c.stream_ref \
+        "SELECT s.value, s.current_commit_id, c.stream_ref \
          FROM moderation_state_current_states s JOIN realm_commits c ON c.commit_id=s.current_commit_id \
          WHERE s.realm_id=$1 AND s.target_ref=$2 FOR UPDATE OF s",
     )
@@ -164,10 +162,7 @@ pub(crate) async fn commit_moderation_state_current_state_in_connection(
         let Some(row) = current.as_ref() else {
             return Err(target_not_found());
         };
-        if typed.expected_revision.commit_id.as_str() != row.current_commit_id
-            || i64::try_from(typed.expected_revision.stream_position).ok()
-                != Some(row.current_stream_position)
-        {
+        if typed.expected_commit_id.as_str() != row.current_commit_id {
             return Err(conflict(
                 "cas_conflict: moderation_state moved past the expected revision",
             ));

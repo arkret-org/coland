@@ -6,8 +6,8 @@ use arkret_models_crypto::{
     BackupRotationKind, BackupRotationPlan, PreparedEventUnit,
     SecurityRotationRevokeCommandDecision, SecurityRotationRevokeCommandOutcome,
     SecurityRotationRevokeProposal, SecurityRotationTransactionCreateRequestBody,
-    SecurityTransactionAcceptor, SecurityTransactionCreateRequestBody,
-    SecurityTransactionPreparedPlan, SecurityTransactionStep,
+    SecurityTransaction, SecurityTransactionAcceptor, SecurityTransactionCreateRequestBody,
+    SecurityTransactionStep,
 };
 use arkret_wire::{ActorId, BackupSeriesId, CommittedEventRef, EventKind, Hash, TransactionId};
 use coland_storage::{
@@ -242,12 +242,13 @@ async fn erase_fixture() -> EraseFixture {
         }],
     )
     .unwrap();
-    let prepared_plan =
-        SecurityTransactionPreparedPlan::SecurityRotation(create.prepared_plan.clone());
-    let (mut resource, canonical_request) =
+    let (resource, canonical_request) =
         SecurityTransactionCreateRequestBody::SecurityRotation(create)
-            .into_initial_resource(prepared_plan, chrono::Utc::now())
+            .into_rotation_resource(chrono::Utc::now())
             .unwrap();
+    let SecurityTransaction::SecurityRotation(mut resource) = resource else {
+        panic!("Rotation create returned a Recovery completion")
+    };
     let now = chrono::Utc::now();
     resource.revoke_proposal = Some(SecurityRotationRevokeProposal {
         proposal_event_id: revoke.event_id.clone(),
@@ -269,7 +270,7 @@ async fn erase_fixture() -> EraseFixture {
         .collect();
     resource.validate_structural().unwrap();
     let record = SecurityTransactionRecord {
-        resource,
+        resource: SecurityTransaction::SecurityRotation(resource),
         canonical_request,
     };
     coland_storage_postgres::PgSecurityTransactionStore { pool }
@@ -277,13 +278,13 @@ async fn erase_fixture() -> EraseFixture {
         .await
         .unwrap();
     let request = coland_storage::BackupSeriesEraseWorkerRequest {
-        transaction_id: record.resource.transaction_id.clone(),
-        transaction_request_digest: record.resource.request_digest.clone(),
-        prepared_plan_digest: record.resource.prepared_plan_digest.clone(),
+        transaction_id: record.resource.transaction_id().clone(),
+        transaction_request_digest: record.rotation().unwrap().request_digest.clone(),
+        prepared_plan_digest: record.rotation().unwrap().prepared_plan_digest.clone(),
         erase_confirmation_digest: record
-            .resource
-            .security_rotation_plan()
+            .rotation()
             .unwrap()
+            .prepared_plan
             .erase_confirmation_digest
             .clone(),
         series: vec![binding],
@@ -423,16 +424,18 @@ async fn propose_authorizer_revocation(fixture: &mut EraseFixture) -> SecurityTr
         }],
     )
     .unwrap();
-    let plan = SecurityTransactionPreparedPlan::SecurityRotation(request.prepared_plan.clone());
     let (initial, canonical_request) =
         SecurityTransactionCreateRequestBody::SecurityRotation(request)
-            .into_initial_resource(plan, covering.committed_at)
+            .into_rotation_resource(covering.committed_at)
             .unwrap();
+    let SecurityTransaction::SecurityRotation(initial) = initial else {
+        panic!("Rotation create returned a Recovery completion")
+    };
     let transaction_id = initial.transaction_id.clone();
     let transactions = persistence.security_transactions();
     transactions
         .create(SecurityTransactionRecord {
-            resource: initial.clone(),
+            resource: SecurityTransaction::SecurityRotation(initial.clone()),
             canonical_request: canonical_request.clone(),
         })
         .await
@@ -445,7 +448,7 @@ async fn propose_authorizer_revocation(fixture: &mut EraseFixture) -> SecurityTr
     transactions
         .commit_revoke_proposal(RevokeProposalCommitWrite {
             transaction: SecurityTransactionRecord {
-                resource: proposed,
+                resource: SecurityTransaction::SecurityRotation(proposed),
                 canonical_request,
             },
             commit: AuthorityCommitTransaction {
@@ -475,21 +478,32 @@ async fn accept_authorizer_revocation(
     mut accepted: SecurityTransactionRecord,
 ) {
     let persistence = fixture.state.test_persistence();
-    let proposal = accepted.resource.revoke_proposal.as_ref().unwrap().clone();
+    let proposal = accepted
+        .rotation()
+        .unwrap()
+        .revoke_proposal
+        .as_ref()
+        .unwrap()
+        .clone();
     let decided_at = chrono::Utc::now();
-    let transaction_id = accepted.resource.transaction_id.clone();
-    accepted.resource.accepted_steps.push(AcceptedStep {
-        acceptor: SecurityTransactionAcceptor::Principal {
-            principal_id: fixture.state.service_core_id(),
-        },
-        accepted_at: decided_at,
-    });
-    accepted.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
-        proposal_event_id: proposal.proposal_event_id,
-        covering_commit_id: proposal.covering_commit_id,
-        outcome: SecurityRotationRevokeCommandDecision::Accepted,
-        decided_at,
-    });
+    let transaction_id = accepted.resource.transaction_id().clone();
+    accepted
+        .rotation_mut()
+        .unwrap()
+        .accepted_steps
+        .push(AcceptedStep {
+            acceptor: SecurityTransactionAcceptor::Principal {
+                principal_id: fixture.state.service_core_id(),
+            },
+            accepted_at: decided_at,
+        });
+    accepted.rotation_mut().unwrap().revoke_command_outcome =
+        Some(SecurityRotationRevokeCommandOutcome {
+            proposal_event_id: proposal.proposal_event_id,
+            covering_commit_id: proposal.covering_commit_id,
+            outcome: SecurityRotationRevokeCommandDecision::Accepted,
+            decided_at,
+        });
     persistence
         .security_transactions()
         .commit_revoke_command_terminal(RevokeCommandTerminalWrite {
@@ -520,7 +534,7 @@ async fn assert_old_backup_was_not_touched(fixture: &EraseFixture) {
     assert!(
         persistence
             .security_transactions()
-            .backup_erase_progress(fixture.record.resource.transaction_id.as_str())
+            .backup_erase_progress(fixture.record.resource.transaction_id().as_str())
             .await
             .unwrap()
             .is_none(),

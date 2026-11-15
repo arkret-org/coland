@@ -276,6 +276,8 @@ pub async fn test_fresh_producer_forward_request(
             .await?,
             producer_device_evidence: None,
             producer_agent_evidence: None,
+
+            successor_device_evidence: None,
         },
     );
     crate::state::fresh_device_request(state, destination, &mut request).await?;

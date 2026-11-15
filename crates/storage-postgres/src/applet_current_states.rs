@@ -17,7 +17,7 @@ pub(crate) fn registration_security_value(value: &serde_json::Value) -> serde_js
     let mut value = value.clone();
     if let Some(object) = value.as_object_mut() {
         object.remove("proof");
-        object.remove("expected_revision");
+        object.remove("expected_commit_id");
     }
     value
 }
@@ -41,27 +41,21 @@ pub(crate) async fn project_applet_event_in_connection(
             instance_event_ref: String,
             #[diesel(sql_type = Text)]
             current_commit_id: String,
-            #[diesel(sql_type = BigInt)]
-            current_stream_position: i64,
         }
-        let prior = sql_query("SELECT value,instance_event_ref,current_commit_id,current_stream_position FROM applet_registration_current_states WHERE realm_id=$1 AND applet_id=$2 AND service_id=$3 FOR UPDATE")
+        let prior = sql_query("SELECT value,instance_event_ref,current_commit_id FROM applet_registration_current_states WHERE realm_id=$1 AND applet_id=$2 AND service_id=$3 FOR UPDATE")
             .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(payload.applet_id.as_str())
             .bind::<Text,_>(payload.service_id.as_str())
             .get_result::<PriorRegistration>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
         let actual_revision = prior
             .as_ref()
-            .map(|prior| -> PersistenceResult<arkret_wire::CurrentRevision> {
-                Ok(arkret_wire::CurrentRevision {
-                    commit_id: prior
-                        .current_commit_id
-                        .parse()
-                        .map_err(PersistenceError::database)?,
-                    stream_position: u64::try_from(prior.current_stream_position)
-                        .map_err(PersistenceError::database)?,
-                })
+            .map(|prior| -> PersistenceResult<arkret_wire::RealmCommitId> {
+                prior
+                    .current_commit_id
+                    .parse()
+                    .map_err(PersistenceError::database)
             })
             .transpose()?;
-        if payload.expected_revision != actual_revision {
+        if payload.expected_commit_id != actual_revision {
             return Err(PersistenceError::Conflict(
                 "cas_conflict: Applet registration revision changed".into(),
             ));

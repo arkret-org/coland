@@ -33,6 +33,8 @@ use coland_storage::{ConflictCode, ForwardAttemptStatus, ForwardedProducerDevice
 
 use super::AppState;
 
+pub(super) mod owner_transfer;
+
 fn temporarily_unavailable(detail: impl std::fmt::Display) -> ServiceError {
     ServiceError::Conflict(format!(
         "{}: {detail}",
@@ -351,6 +353,11 @@ pub(crate) async fn admit_forwarded_event(
         &request.event_submission,
         producer,
         super::authority_self_event_unit::SelfEventUnitEffects {
+            owner_transfer_successor: request
+                .successor_device_evidence
+                .clone()
+                .map(|evidence| owner_transfer::received(event, evidence, now))
+                .transpose()?,
             content_backup_source: request
                 .content_backup_sources
                 .as_ref()
@@ -1178,6 +1185,18 @@ async fn forward_self_event_inner(
             .await?,
         producer_device_evidence: None,
         producer_agent_evidence: None,
+        successor_device_evidence: if submission.event.kind
+            == arkret_wire::EventKind::RealmOwnerTransfer
+        {
+            Some(
+                owner_transfer::acquire(state, &submission.event)
+                    .await?
+                    .evidence()
+                    .clone(),
+            )
+        } else {
+            None
+        },
     };
     request.producer_agent_evidence =
         fresh_producer_agent_evidence(state, &submission.event).await?;
@@ -1289,10 +1308,20 @@ async fn prepare_native_forward_request_inner(
         refuse_bare_native_mls(event)?;
     }
     let content_sources = content_backup_sources(state, governance, &[event]).await?;
+    let successor_device_evidence = if event.kind == arkret_wire::EventKind::RealmOwnerTransfer {
+        Some(
+            owner_transfer::acquire(state, event)
+                .await?
+                .evidence()
+                .clone(),
+        )
+    } else {
+        None
+    };
     let mut request=match submission {
         SelfAuthoritySubmitRequestBody::Event(v)=>PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(PeerAuthorityForwardEventRequestBody{
             branch:arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,event_submission:v.clone(),
-            mls_group_state_material:forwarded_mls_public_material(state,event).await?,content_backup_sources:content_sources,producer_device_evidence:None,producer_agent_evidence:None,
+            mls_group_state_material:forwarded_mls_public_material(state,event).await?,content_backup_sources:content_sources,producer_device_evidence:None,producer_agent_evidence:None,successor_device_evidence,
         }),
         SelfAuthoritySubmitRequestBody::MlsCommit(v)=>PeerAuthoritySubmitRequestBody::AuthorityForwardMls(PeerAuthorityForwardMlsRequestBody{
             branch:arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,mls_submission:v.clone().for_origin_forward(None),

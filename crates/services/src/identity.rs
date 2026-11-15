@@ -1308,11 +1308,11 @@ pub trait RecoverySessionPort: Send + Sync {
     ) -> ServiceResult<Option<RecoverySessionState>>;
     async fn session_for_grant(
         &self,
-        session_grant_id: &str,
+        session_grant_ref: &arkret_wire::SessionGrantRef,
     ) -> ServiceResult<Option<RecoverySessionState>>;
     async fn session_for_request(
         &self,
-        session_grant_id: &str,
+        session_grant_ref: &arkret_wire::SessionGrantRef,
         request_id: &str,
     ) -> ServiceResult<Option<RecoverySessionState>>;
     async fn insert_session(&self, session: RecoverySessionState) -> ServiceResult<()>;
@@ -1343,18 +1343,18 @@ impl RecoverySessionService {
 
     pub async fn session_for_grant(
         &self,
-        session_grant_id: &str,
+        session_grant_ref: &arkret_wire::SessionGrantRef,
     ) -> ServiceResult<Option<RecoverySessionState>> {
-        self.sessions.session_for_grant(session_grant_id).await
+        self.sessions.session_for_grant(session_grant_ref).await
     }
 
     pub async fn session_for_request(
         &self,
-        session_grant_id: &str,
+        session_grant_ref: &arkret_wire::SessionGrantRef,
         request_id: &str,
     ) -> ServiceResult<Option<RecoverySessionState>> {
         self.sessions
-            .session_for_request(session_grant_id, request_id)
+            .session_for_request(session_grant_ref, request_id)
             .await
     }
 
@@ -1450,7 +1450,7 @@ pub trait SecurityTransactionPort: Send + Sync {
     async fn commit_recovery_unit(
         &self,
         write: RecoveryUnitCommitWrite,
-    ) -> ServiceResult<SecurityTransactionStepOutcomeState>;
+    ) -> ServiceResult<SecurityTransactionRecord>;
     async fn backup_erase_progress(
         &self,
         transaction_id: &str,
@@ -1581,7 +1581,7 @@ impl SecurityTransactionService {
     pub async fn commit_recovery_unit(
         &self,
         write: RecoveryUnitCommitWrite,
-    ) -> ServiceResult<SecurityTransactionStepOutcomeState> {
+    ) -> ServiceResult<SecurityTransactionRecord> {
         self.transactions.commit_recovery_unit(write).await
     }
 
@@ -1762,29 +1762,14 @@ pub struct KeyBackupService {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentSessionState {
-    pub granted_scope: Vec<String>,
-    pub scope_details: Value,
+    pub metadata: arkret_models_identity::SessionGrantMetadata,
     pub freshness_state: arkret_wire::FreshnessState,
 }
 
-#[derive(Clone, Debug)]
-pub struct SessionGrantAuthorizationState {
-    pub grant_id: arkret_identifiers::SessionGrantId,
-    pub revocation_ref: String,
-    pub account_id: AccountId,
-    pub issuer_id: arkret_identifiers::DidCoreId,
-    /// Scopes the Account Authority bound into the presented grant. They are
-    /// the only wire-visible statement about what the grant was authorized
-    /// for, so deployment policies that gate a high-risk self-service action
-    /// on a step-up authentication (`account-lifecycle.md` §8.1) read them
-    /// here rather than re-deriving authentication strength locally.
-    pub scopes: Vec<String>,
-    pub credential_class: arkret_models_identity::session_credential::SessionGrantCredentialClass,
-    pub holder_binding: arkret_models_identity::session_credential::SessionGrantHolderBinding,
-    pub device_binding:
-        Option<arkret_models_identity::session_credential::SessionGrantDeviceBinding>,
-    pub cnf_jkt: String,
-}
+/// The immutable issuer fields retain their single SDK owner. This native
+/// request context adds no second wire schema or independently editable claims.
+pub type SessionGrantAuthorizationState =
+    arkret_models_collaboration::session_grants::SessionGrantValidationMetadata;
 
 #[derive(Clone, Debug)]
 pub struct SessionIdentityState {

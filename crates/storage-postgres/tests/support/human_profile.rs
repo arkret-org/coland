@@ -71,7 +71,10 @@ pub fn fixture(station: &DidCoreId, label: &str) -> pcr_genesis::PcrGenesisFixtu
     )
 }
 
-fn fixture_for_did(station_did: arkret_wire::Did, label: &str) -> pcr_genesis::PcrGenesisFixture {
+pub(crate) fn fixture_for_did(
+    station_did: arkret_wire::Did,
+    label: &str,
+) -> pcr_genesis::PcrGenesisFixture {
     let device_identity = arkret_canonical::canonical_json_bytes(&(&station_did, label)).unwrap();
     pcr_genesis::PcrGenesisFixture::new_with(
         station_did,

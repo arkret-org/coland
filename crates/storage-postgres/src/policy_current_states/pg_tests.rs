@@ -23,7 +23,7 @@ fn policy(revision: Option<CurrentRevision>, agent: bool) -> PolicySetStatePaylo
         }
     });
     if agent {
-        value["expected_revision"] = json!(revision);
+        value["expected_commit_id"] = json!(revision.map(|r| r.commit_id));
     }
     serde_json::from_value(value).unwrap()
 }
@@ -667,7 +667,7 @@ async fn management_reader_waits_for_policy_writer_and_observes_committed_deny()
             .clone(),
         interaction_mode:
             arkret_models_collaboration::agent_interaction::AgentInteractionMode::Public,
-        expected_revision: None,
+        expected_commit_id: None,
     };
     let mode = event(EventKind::AgentInteractionSet, json!(mode_payload), 1);
     let mode_commit = commit(&mode, 1);
@@ -808,22 +808,7 @@ async fn exact_revision_last_accepted_row_and_terminal_policy_binding_are_requir
         .unwrap();
     assert!(check(&mut conn, &policy(None, true), 2).await.is_err());
     let mut wrong = exact.clone();
-    wrong
-        .expected_revision
-        .as_mut()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .stream_position = 0;
-    assert!(check(&mut conn, &wrong, 2).await.is_err());
-    wrong = exact.clone();
-    wrong
-        .expected_revision
-        .as_mut()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .commit_id = arkret_wire::RealmCommitId::from_digest([99; 32]);
+    wrong.expected_commit_id = Some(Some(arkret_wire::RealmCommitId::from_digest([99; 32])));
     assert!(check(&mut conn, &wrong, 2).await.is_err());
     let other_family = policy(None, false);
     assert!(check(&mut conn, &other_family, 2).await.is_err());
@@ -927,7 +912,7 @@ async fn concurrent_stale_editor_observes_the_winners_revision_after_the_lock() 
         .unwrap()
         .unwrap_err();
     assert!(
-        error.to_string().contains("expected_revision differs"),
+        error.to_string().contains("expected_commit_id differs"),
         "{error}"
     );
     let latest = sql_query("SELECT realm_id,current_commit_id,current_stream_position,current_event_id,value FROM policy_current_states")
@@ -1169,7 +1154,7 @@ async fn management_join_rechecks_current_ban_and_explicit_lifting_without_membe
     .await
     .unwrap_err();
     assert!(error.to_string().contains("forbids joining"), "{error}");
-    payload.expected_revision = Some(Some(revision(&basis)));
+    payload.expected_commit_id = Some(Some(basis.commit_id.clone()));
     let PolicySetValue::Governance(document) = &mut payload.value else {
         unreachable!()
     };

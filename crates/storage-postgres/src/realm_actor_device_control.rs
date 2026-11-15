@@ -2,7 +2,7 @@
 use arkret_models_collaboration::events_payloads::DeviceAuthorizePayload;
 use arkret_models_crypto::DeviceGenerationState;
 use arkret_models_integration::{RealmActorDeviceAuthorizationValue, RealmActorRecoveryValue};
-use arkret_wire::{ActorId, CurrentRevision, EventKind, ScopeRef};
+use arkret_wire::{ActorId, EventKind, ScopeRef};
 use coland_storage::{
     AcceptedDeviceAuthorizationOutcome, AuthorityCommitTransaction, AuthorityCommitWriteOutcome,
     PersistenceError,
@@ -25,12 +25,6 @@ fn invalid(error: impl std::fmt::Display) -> PgTransactionError {
 }
 fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, PgTransactionError> {
     serde_json::from_value(value).map_err(invalid)
-}
-fn revision(source: &arkret_wire::CommittedEventRef) -> CurrentRevision {
-    CurrentRevision {
-        commit_id: source.commit_id.clone(),
-        stream_position: source.stream_position,
-    }
 }
 
 pub(crate) async fn admit(
@@ -122,7 +116,7 @@ pub(crate) async fn admit(
     let generation: DeviceGenerationState = decode(generation)?;
     if recovery.pending.is_some()
         || value.authorized_generation_ref != generation.current_device_generation_ref
-        || payload.expected_control_revision.as_ref() != Some(&revision(&control.source))
+        || payload.expected_control_commit_id.as_ref() != Some(&control.source.commit_id)
         || value.expires_at <= commit.committed_at
         || value.expires_at <= value.not_before
     {
@@ -132,8 +126,8 @@ pub(crate) async fn admit(
     }
     let selector = json!({"kind":"realm_actor_device_authorization","actor_id":actor,"device_id":payload.device_id});
     let previous = optional_current_source(conn, actor, selector.clone()).await?;
-    let expected = previous.as_ref().map(|(_, source)| revision(source));
-    if payload.expected_device_revision.as_ref() != Some(&expected) {
+    let expected = previous.as_ref().map(|(_, source)| source.commit_id.clone());
+    if payload.expected_device_commit_id.as_ref() != Some(&expected) {
         return Err(invalid("Device authorization CAS differs"));
     }
     if let Some((previous, _)) = previous {

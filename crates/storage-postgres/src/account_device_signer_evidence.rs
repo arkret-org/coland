@@ -23,6 +23,7 @@ use crate::{
 };
 
 pub(crate) mod forward_source;
+mod owner_transfer;
 
 fn retention_transaction_error(error: PgTransactionError) -> PersistenceError {
     match error {
@@ -81,6 +82,27 @@ pub struct PgAccountDeviceSignerEvidenceArchive {
 
 #[async_trait::async_trait]
 impl AccountDeviceSignerEvidenceStore for PgAccountDeviceSignerEvidenceArchive {
+    async fn prepare_owner_transfer_current(
+        &self,
+        component: &arkret_models_crypto::realm_owner_transfer::RealmOwnerTransferAcceptance,
+    ) -> PersistenceResult<
+        Option<(
+            arkret_models_crypto::DeviceProjectionAttestationCore,
+            CommittedEventRef,
+        )>,
+    > {
+        owner_transfer::prepare(&self.pool, component).await
+    }
+
+    async fn retain_owner_transfer_current(
+        &self,
+        evidence: &AccountDeviceSignerEvidence,
+        authorization_ref: &CommittedEventRef,
+        component: &arkret_models_crypto::realm_owner_transfer::RealmOwnerTransferAcceptance,
+    ) -> PersistenceResult<SignerEvidenceRef> {
+        owner_transfer::retain(&self.pool, evidence, authorization_ref, component).await
+    }
+
     async fn prepare_non_managed_forward_current(
         &self,
         event: &arkret_wire::Event,
@@ -450,6 +472,16 @@ impl PgAccountDeviceSignerEvidenceArchive {
         evidence: &AccountDeviceSignerEvidence,
         authorization_ref: &CommittedEventRef,
     ) -> PersistenceResult<SignerEvidenceRef> {
+        if evidence
+            .device_projection_attestation
+            .attestation
+            .owner_transfer_acceptance_intent_digest
+            .is_some()
+        {
+            return Err(PersistenceError::SchemaViolation(
+                "ordinary current evidence forbids owner-transfer consent material".into(),
+            ));
+        }
         self.retain_inner(evidence, authorization_ref, true).await
     }
 

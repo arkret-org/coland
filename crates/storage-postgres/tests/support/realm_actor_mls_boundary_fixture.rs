@@ -176,9 +176,11 @@ async fn boundary_publish_human(fixture: &Fixture) -> arkret_wire::KeyPackageRef
     .await;
     assert_eq!(status, StatusCode::OK, "real Human publication: {value}");
     assert_eq!(
-        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(value.clone())
-            .unwrap()
-            .accepted_count,
+        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(
+            value.clone()
+        )
+        .unwrap()
+        .accepted_count,
         1
     );
     reference
@@ -659,9 +661,11 @@ async fn boundary_claim_native_recipient(
         "genuine native recipient publication: {value}"
     );
     assert_eq!(
-        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(value.clone())
-            .unwrap()
-            .accepted_count,
+        serde_json::from_value::<arkret_models_crypto::KeyPackagesUploadResponseBody>(
+            value.clone()
+        )
+        .unwrap()
+        .accepted_count,
         1
     );
     let history = &fixture.pcr.history;
@@ -759,10 +763,20 @@ async fn boundary_encrypted_message(
             "Real native encrypted bytes before independent E2EE consent expiry",
         ),
     );
-    let signer = Ed25519PayloadSigner::new(SigningKey::from_bytes(&[79;32]),authority.native_did.clone(),
-        DidUrl::new(format!("{}#{}",authority.native_did,authority.device_id)).unwrap());
-    let mut original = signed_event(package,candidate.actor_id.clone(),scope.clone(),EventKind::MessageCreate,
-        json!(payload),Some(child),&signer);
+    let signer = Ed25519PayloadSigner::new(
+        SigningKey::from_bytes(&[79; 32]),
+        authority.native_did.clone(),
+        DidUrl::new(format!("{}#{}", authority.native_did, authority.device_id)).unwrap(),
+    );
+    let mut original = signed_event(
+        package,
+        candidate.actor_id.clone(),
+        scope.clone(),
+        EventKind::MessageCreate,
+        json!(payload),
+        Some(child),
+        &signer,
+    );
     let content = arkret_canonical::canonical_json_bytes(&payload.content.take().unwrap()).unwrap();
     let current = coland_storage_postgres::PgMlsGroupCurrentStore {
         pool: fixture.pool.clone(),
@@ -782,7 +796,13 @@ async fn boundary_encrypted_message(
         current.current_mls_commit_event_ref.clone(),
         group.local_content_sender_domain().unwrap(),
         arkret::EventContentRoutingContext::None,
-        super::realm_actor_mls_fixture::content_material(fixture,group,&original,&current.current_mls_commit_event_ref).await,
+        super::realm_actor_mls_fixture::content_material(
+            fixture,
+            group,
+            &original,
+            &current.current_mls_commit_event_ref,
+        )
+        .await,
     )
     .unwrap();
     payload.encrypted_content = Some(
@@ -792,7 +812,7 @@ async fn boundary_encrypted_message(
         .unwrap(),
     );
     original.payload = serde_json::from_value(json!(payload)).unwrap();
-    coland_test_support::mls_content::resign(&mut original,[79;32]).unwrap();
+    coland_test_support::mls_content::resign(&mut original, [79; 32]).unwrap();
     let event = original;
     let (status, value) = boxed_step(|| {
         device_post(
@@ -1664,12 +1684,10 @@ async fn boundary_terminal_human_revoke(
         }],
     )
     .unwrap();
-    let prepared = SecurityTransactionPreparedPlan::SecurityRotation(plan.prepared_plan.clone());
-    let (mut initial, canonical_request) =
-        SecurityTransactionCreateRequestBody::SecurityRotation(plan)
-            .into_initial_resource(prepared, at)
-            .unwrap();
-    let id = initial.transaction_id.clone();
+    let (initial, canonical_request) = SecurityTransactionCreateRequestBody::SecurityRotation(plan)
+        .into_rotation_resource(at)
+        .unwrap();
+    let id = initial.transaction_id().clone();
     persistence
         .security_transactions()
         .create(SecurityTransactionRecord {
@@ -1678,6 +1696,9 @@ async fn boundary_terminal_human_revoke(
         })
         .await
         .unwrap();
+    let arkret_models_crypto::SecurityTransaction::SecurityRotation(mut initial) = initial else {
+        unreachable!("this fixture created a Rotation resource");
+    };
     initial.revoke_proposal = Some(SecurityRotationRevokeProposal {
         proposal_event_id: revoke.event_id.clone(),
         covering_commit_id: covering.commit_id.clone(),
@@ -1686,7 +1707,7 @@ async fn boundary_terminal_human_revoke(
         .security_transactions()
         .commit_revoke_proposal(RevokeProposalCommitWrite {
             transaction: SecurityTransactionRecord {
-                resource: initial,
+                resource: arkret_models_crypto::SecurityTransaction::SecurityRotation(initial),
                 canonical_request,
             },
             queued_at: covering.committed_at,
@@ -1702,7 +1723,8 @@ async fn boundary_terminal_human_revoke(
         .unwrap();
     let decided_at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     terminal
-        .resource
+        .rotation_mut()
+        .unwrap()
         .accepted_steps
         .push(AcceptedSecurityTransactionStep {
             acceptor: SecurityTransactionAcceptor::Principal {
@@ -1710,12 +1732,13 @@ async fn boundary_terminal_human_revoke(
             },
             accepted_at: decided_at,
         });
-    terminal.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
-        proposal_event_id: revoke.event_id,
-        covering_commit_id: covering.commit_id,
-        outcome: SecurityRotationRevokeCommandDecision::Accepted,
-        decided_at,
-    });
+    terminal.rotation_mut().unwrap().revoke_command_outcome =
+        Some(SecurityRotationRevokeCommandOutcome {
+            proposal_event_id: revoke.event_id,
+            covering_commit_id: covering.commit_id,
+            outcome: SecurityRotationRevokeCommandDecision::Accepted,
+            decided_at,
+        });
     persistence
         .security_transactions()
         .commit_revoke_command_terminal(RevokeCommandTerminalWrite {

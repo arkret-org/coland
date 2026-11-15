@@ -1631,7 +1631,7 @@ fn agent_message_send_gate_scenario() -> std::pin::Pin<Box<impl std::future::Fut
             controller_account_id: agent.controller.account.clone(),
             interaction_mode:
                 arkret_models_collaboration::agent_interaction::AgentInteractionMode::Public,
-            expected_revision: None,
+            expected_commit_id: None,
         };
         let mode = ordinary_realm::next_human_request_for_actor(
             &join.authority_commit,

@@ -296,6 +296,9 @@ pub(super) async fn issue_unlock(
         .issue_native_backup_unlock(&reader, &id, &body, &audience, &state.service_core_id())
         .await
         .map_err(storage_error)?;
+    result
+        .validate_for_native_request(&body, &id)
+        .map_err(|error| super::schema_error(error.to_string()))?;
     json_ok(arkret_models_crypto::KeysBackupsIssueUnlockChallengeResponseBody::Native(result))
 }
 

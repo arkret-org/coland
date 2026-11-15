@@ -40,6 +40,9 @@ use diesel_async::RunQueryDsl;
 use ed25519_dalek::SigningKey;
 use origin_fixture::*;
 
+#[path = "agent_origin/target_binding.rs"]
+mod target_binding;
+
 struct BootstrapReaderFixture {
     origin: Box<OriginFixture>,
     head: AuthorityCommitTransaction,
@@ -464,10 +467,12 @@ async fn different_controllers_can_reserve_the_same_agent_slug() {
         arkret_canonical::DigestSuite::Sha256,
         arkret_canonical::sha256_bytes(agent.as_str().as_bytes()),
     ));
-    let parent = &other.unit.transactions.last().unwrap().commit;
+    let (parent, custody) =
+        admit_controller_history_custody(&f.pool, &other, &f.method, &f.issuer).await;
     let at = parent.committed_at + Duration::seconds(1);
     let event = agent_provision_event(
         &other.history,
+        &custody,
         &parent.realm_id,
         &agent,
         &pcr,
@@ -475,7 +480,7 @@ async fn different_controllers_can_reserve_the_same_agent_slug() {
         at,
         at,
     );
-    let mut commit = station_successor(parent, &event, &f.station_did, 1);
+    let mut commit = station_successor(&parent, &event, &f.station_did, 1);
     origin_seal(&mut commit, &f.method, &f.issuer);
     let tx = origin_tx(event, commit, &f.station);
     let outcome = PgActorProfileStore {

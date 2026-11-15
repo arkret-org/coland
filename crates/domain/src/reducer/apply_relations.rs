@@ -593,13 +593,13 @@ mod relation_primary_domain_tests {
         )
     }
 
-    fn create(suffix: &str, expected_revision: Value) -> Operation {
+    fn create(suffix: &str, expected_commit_id: Value) -> Operation {
         operation(
             arkret_wire::EventKind::RelationCreate,
             suffix,
             json!({
                 "primary_conflict_domain": domain(),
-                "expected_revision": expected_revision,
+                "expected_commit_id": expected_commit_id,
                 "relation": {
                     "relation_kind": "references",
                     "from_ref": FROM,
@@ -611,8 +611,8 @@ mod relation_primary_domain_tests {
         )
     }
 
-    fn revision(position: u64) -> Value {
-        json!({"commit_id": REVISION_COMMIT, "stream_position": position})
+    fn commit_id() -> Value {
+        json!(REVISION_COMMIT)
     }
 
     #[test]
@@ -690,7 +690,7 @@ mod relation_primary_domain_tests {
             "000000000004",
             json!({
                 "primary_conflict_domain": domain(),
-                "expected_revision": revision(1),
+                "expected_commit_id": commit_id(),
                 "patch": {"fields.label": "changed"},
                 "relation_id": relation_id
             }),
@@ -706,7 +706,7 @@ mod relation_primary_domain_tests {
             "000000000005",
             json!({
                 "primary_conflict_domain": domain(),
-                "expected_revision": revision(1),
+                "expected_commit_id": commit_id(),
                 "relation_id": relation_id
             }),
         );
@@ -731,7 +731,7 @@ mod relation_primary_domain_tests {
                 "000000000009",
                 json!({
                     "primary_conflict_domain": domain(),
-                    "expected_revision": revision(1),
+                    "expected_commit_id": commit_id(),
                     "patch": {"fields.label": "changed"},
                     "relation_id": missing_id
                 }),
@@ -741,7 +741,7 @@ mod relation_primary_domain_tests {
                 "000000000010",
                 json!({
                     "primary_conflict_domain": domain(),
-                    "expected_revision": revision(1),
+                    "expected_commit_id": commit_id(),
                     "relation_id": missing_id
                 }),
             ),
@@ -768,7 +768,7 @@ mod relation_primary_domain_tests {
             "000000000007",
             json!({
                 "primary_conflict_domain": domain(),
-                "expected_revision": revision(1),
+                "expected_commit_id": commit_id(),
                 "relation_id": first_id
             }),
         );
@@ -777,7 +777,7 @@ mod relation_primary_domain_tests {
             ProjectionEffect::RelationDeleted { .. }
         ));
 
-        let replacement = create("000000000008", revision(2));
+        let replacement = create("000000000008", commit_id());
         let replacement_id =
             arkret_identifiers::RelationId::from_event_id(&replacement.context.event_id)
                 .to_string();

@@ -1455,8 +1455,7 @@ async fn read_principal_resolution_audit(
             .await
             .map_err(|e| AppError::internal(e.to_string()))?
             .ok_or_else(|| AppError::internal("audit predecessor Commit missing"))?;
-        if accepted.commit.commit_id != payload.expected_revision.commit_id
-            || accepted.commit.stream_position != payload.expected_revision.stream_position
+        if accepted.commit.commit_id != payload.expected_commit_id
             || accepted.commit.realm_id != record.pcr_realm_id
             || next.actor_id.as_account_id() != Some(&record.account_id)
         {

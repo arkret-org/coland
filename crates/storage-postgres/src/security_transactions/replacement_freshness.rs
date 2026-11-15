@@ -63,7 +63,7 @@ pub(super) async fn require_fresh(
     conn: &mut AsyncPgConnection,
     write: &RecoveryUnitCommitWrite,
 ) -> PersistenceResult<()> {
-    let account = &write.transaction.resource.account_id;
+    let account = write.transaction.resource.account_id();
     let actor = ActorId::account(account.clone());
     let actor_json = serde_json::to_value(&actor).map_err(unavailable)?;
     let authorize: DeviceAuthorizePayload = serde_json::from_value(

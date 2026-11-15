@@ -262,11 +262,7 @@ pub(crate) async fn verify_proof(
     backup: &KeyBackup,
 ) -> PersistenceResult<()> {
     proof.validate().map_err(denied)?;
-    let KeyBackupUnlockAuthority::CurrentDevice {
-        challenge_id,
-        nonce,
-    } = &proof.authority
-    else {
+    let KeyBackupUnlockAuthority::CurrentDevice { challenge_id } = &proof.authority else {
         return Err(denied("requires current Device PoP"));
     };
     let stored = sql_query("SELECT challenge AS payload FROM key_backup_unlock_authorities WHERE authority_id=$1 AND kind='current_device'")
@@ -277,6 +273,7 @@ pub(crate) async fn verify_proof(
     challenge
         .validate_for_request(&challenge.request_body(), &backup.backup_id)
         .map_err(denied)?;
+    proof.validate_for_challenge(&challenge).map_err(denied)?;
     if proof.account_id != reader.account_id
         || proof.requesting_device_id != reader.device_id
         || challenge.account_id != proof.account_id
@@ -288,7 +285,6 @@ pub(crate) async fn verify_proof(
         || backup.backup_kind != proof.backup_kind
         || challenge.ciphertext_digest != proof.ciphertext_digest
         || backup.ciphertext_digest != proof.ciphertext_digest
-        || challenge.nonce != *nonce
         || challenge.challenge != proof.challenge
         || challenge.audience != proof.audience
         || challenge.service_id != proof.service_id

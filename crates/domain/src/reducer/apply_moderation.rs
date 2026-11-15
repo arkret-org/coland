@@ -251,7 +251,7 @@ impl ProjectionState {
     ///
     /// `content-moderation.md` §2.6 — the lift removes exactly the entry whose
     /// tag the referenced decision wrote, so lifting one review never
-    /// implicitly lifts another issuer's decision. `expected_revision` is the
+    /// implicitly lifts another issuer's decision. `expected_commit_id` is the
     /// exact moderation-target revision the producer observed; a different
     /// current revision rejects the Event as stale, while an exact retry stays
     /// idempotent.
@@ -270,14 +270,15 @@ impl ProjectionState {
                 reason: "moderation_lift_target_ref_missing".to_owned(),
             };
         };
-        // `expected_revision` is the typed `{commit_id, stream_position}` of
+        // `expected_commit_id` is the exact source Commit identity of
         // the durable `moderation_state` result. The governing Station
         // compares it at the accepting Commit cut; this cache only removes the
         // lifted decision from the active set it folds.
         if operation
             .payload
-            .get("expected_revision")
-            .and_then(Value::as_object)
+            .get("expected_commit_id")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<arkret_wire::RealmCommitId>().ok())
             .is_none()
         {
             return ProjectionEffect::Rejected {

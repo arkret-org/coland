@@ -403,15 +403,12 @@ pub(crate) async fn require_installation_source(
     }
     let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1")
         .bind::<Text,_>(event.realm_id.as_str()).get_result::<crate::capability_grant_current_states::RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    crate::capability_grant_current_states::validate_ancestor_graph(
-        &GrantId::from_event_id(&event.event_id),
+    crate::capability_grant_current_states::require_current_grant_lineage(
         &id,
         &grants,
         &crate::capability_grant_current_states::decode_authority_root(root)?,
         &event.realm_id,
         at,
-        &mut std::collections::BTreeSet::new(),
-        0,
     )?;
     Ok(())
 }

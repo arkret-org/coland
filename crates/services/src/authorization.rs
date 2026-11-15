@@ -77,7 +77,7 @@ pub fn evaluate(
             let granted = evaluation
                 .unreserved()
                 .into_iter()
-                .filter_map(|grant| authorization.effective(grant).cloned())
+                .filter_map(|grant| authorization.effective(grant))
                 .collect::<Vec<_>>();
             if !granted.is_empty() {
                 CapabilityVerdict::Granted(granted)
@@ -133,7 +133,7 @@ mod tests {
             "resources": [{"kind":"realm", "realm_id":REALM_ID}],
             "issuer_authority_refs": [root_ref()],
             "authority_depth": 1,
-            "authority_root_refs": [root_ref()],
+            "authority_root_ref": root_ref(),
             "issued_at": "2026-09-21T00:00:00.000Z",
             "status": "active"
         }))
@@ -144,25 +144,58 @@ mod tests {
         root_controller: bool,
         grants: Vec<CapabilityGrant>,
     ) -> ActorRealmAuthorization {
-        ActorRealmAuthorization {
-            realm_id: REALM_ID.parse().unwrap(),
-            actor: actor(),
-            evaluated_at: chrono::Utc::now(),
-            root_controller,
-            agent_ceiling: None,
-            grants: grants
-                .into_iter()
-                .map(|grant| EffectiveActorGrant {
-                    grant,
-                    revision: arkret_wire::CurrentRevision {
+        let ids = grants
+            .iter()
+            .map(|grant| grant.id.clone())
+            .collect::<Vec<_>>();
+        let revisions = grants
+            .iter()
+            .map(|grant| {
+                (
+                    grant.id.clone(),
+                    arkret_wire::CurrentRevision {
                         commit_id: "ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4"
                             .parse()
                             .unwrap(),
                         stream_position: 3,
                     },
-                })
+                )
+            })
+            .collect();
+        let current_owner = if root_controller {
+            actor()
+        } else {
+            arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+                "ak:did_core:web:current-owner.example".parse().unwrap(),
+                "ak:did_core:web:station.example".parse().unwrap(),
+            ))
+        };
+        let sources = coland_storage::GrantAuthorityCut::new(
+            REALM_ID.parse().unwrap(),
+            arkret_wire::RealmAuthorityRootValue {
+                controller_actor_id: current_owner,
+                controller_epoch: 1,
+                authority_generation: 0,
+                authority_event_ref: arkret_wire::EventId::from_digest(
+                    arkret_canonical::DigestSuite::Sha256,
+                    [0x55; 32],
+                ),
+            },
+            grants
+                .into_iter()
+                .map(|grant| (grant.id.clone(), grant))
                 .collect(),
-        }
+            revisions,
+        )
+        .unwrap();
+        ActorRealmAuthorization::from_source_cut(
+            actor(),
+            chrono::Utc::now(),
+            std::sync::Arc::new(sources),
+            ids,
+            None,
+        )
+        .unwrap()
     }
 
     fn realm() -> WireResourceSelector {
@@ -231,24 +264,63 @@ mod tests {
 
     #[test]
     fn service_verdict_does_not_restore_an_agent_owner_after_controller_rights_disappear() {
-        let mut agent = authorization(true, vec![grant(&[CapabilityActionId::MESSAGE_CREATE])]);
-        let mut controller = authorization(false, Vec::new());
-        controller.actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+        let agent_actor = actor();
+        let controller_actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
             "ak:did_core:web:controller.example".parse().unwrap(),
             "ak:did_core:web:station.example".parse().unwrap(),
         ));
-        agent.agent_ceiling = Some(coland_storage::AgentControllerCeiling {
-            controller: Box::new(controller),
-            management_policies: Vec::new(),
-        });
+        let make = |root_actor: arkret_wire::ActorId| {
+            let grant = grant(&[CapabilityActionId::MESSAGE_CREATE]);
+            let id = grant.id.clone();
+            let sources = coland_storage::GrantAuthorityCut::new(
+                REALM_ID.parse().unwrap(),
+                arkret_wire::RealmAuthorityRootValue {
+                    controller_actor_id: root_actor,
+                    controller_epoch: 1,
+                    authority_generation: 0,
+                    authority_event_ref: arkret_wire::EventId::from_digest(
+                        arkret_canonical::DigestSuite::Sha256,
+                        [0x55; 32],
+                    ),
+                },
+                std::collections::BTreeMap::from([(id.clone(), grant)]),
+                std::collections::BTreeMap::from([(
+                    id.clone(),
+                    arkret_wire::CurrentRevision {
+                        commit_id: arkret_wire::RealmCommitId::from_digest([1; 32]),
+                        stream_position: 3,
+                    },
+                )]),
+            )
+            .unwrap();
+            let sources = std::sync::Arc::new(sources);
+            let at = chrono::Utc::now();
+            let controller = ActorRealmAuthorization::from_source_cut(
+                controller_actor.clone(),
+                at,
+                std::sync::Arc::clone(&sources),
+                Vec::new(),
+                None,
+            )
+            .unwrap();
+            let mut agent = ActorRealmAuthorization::from_source_cut(
+                agent_actor.clone(),
+                at,
+                sources,
+                vec![id],
+                None,
+            )
+            .unwrap();
+            agent.agent_ceiling = Some(coland_storage::AgentControllerCeiling {
+                controller: Box::new(controller),
+                management_policies: Vec::new(),
+            });
+            agent
+        };
         let actions = [CapabilityActionId::MESSAGE_CREATE];
+        let agent = make(agent_actor.clone());
         assert!(!evaluate(&agent, &actions, &realm(), &OperationFacts::default()).allowed());
-        agent
-            .agent_ceiling
-            .as_mut()
-            .unwrap()
-            .controller
-            .root_controller = true;
+        let agent = make(controller_actor.clone());
         assert!(matches!(
             evaluate(&agent, &actions, &realm(), &OperationFacts::default()),
             CapabilityVerdict::Granted(_)

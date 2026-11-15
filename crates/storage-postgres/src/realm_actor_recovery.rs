@@ -173,10 +173,10 @@ pub(crate) async fn admit(
             let payload: RealmActorRecoveryBeginPayload = decode(json!(event.payload))?;
             if payload.manager_ref != manager_ref
                 || payload.recovery_ref != recovery_ref
-                || payload.expected_control_revision != revision(&control.source)
-                || payload.expected_owner_status_revision != revision(&owner_ref)
-                || payload.expected_governance_status_revision != revision(&governance_ref)
-                || payload.expected_device_generation_revision != revision(&generation_ref)
+                || payload.expected_control_commit_id != control.source.commit_id
+                || payload.expected_owner_status_commit_id != owner_ref.commit_id
+                || payload.expected_governance_status_commit_id != governance_ref.commit_id
+                || payload.expected_device_generation_commit_id != generation_ref.commit_id
                 || payload.expected_generation != generation.current_device_generation_ref
                 || payload.replaces_recovery_ref.as_ref()
                     != recovery.pending.as_ref().map(|pending| &pending.begin_ref)
@@ -261,12 +261,12 @@ pub(crate) async fn admit(
             if owner != "paused"
                 || payload.recovery_begin_ref != pending.begin_ref
                 || recovery_ref != pending.begin_ref
-                || payload.expected_recovery_revision != revision(&recovery_ref)
-                || payload.expected_manager_revision != revision(&manager_ref)
+                || payload.expected_recovery_commit_id != recovery_ref.commit_id
+                || payload.expected_manager_commit_id != manager_ref.commit_id
                 || pending.manager_revision != revision(&manager_ref)
-                || payload.expected_control_revision != revision(&control.source)
+                || payload.expected_control_commit_id != control.source.commit_id
                 || pending.control_revision != revision(&control.source)
-                || payload.expected_device_generation_revision != revision(&generation_ref)
+                || payload.expected_device_generation_commit_id != generation_ref.commit_id
                 || generation.current_device_generation_ref != pending.device_generation_ref
             {
                 return Err(invalid("recovery reset current CAS differs"));

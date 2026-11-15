@@ -114,7 +114,7 @@ fn builtin_operation_conformance_vectors_cover_registry() {
                     "from_ref": "ak:strand:AUtQ1IrDq4bUl2tchpqyVaLFC99If4UbReAATcBFDUhp",
                     "to_ref": "ak:morph:AQ-DRvjAp7PmXKkjoqk8vbmRDFZoSMbThbqNN0j6guzb"
                 },
-                "expected_revision": null,
+                "expected_commit_id": null,
                 "relation": {
                     "relation_kind": "blocks",
                     "from_ref": "ak:strand:AUtQ1IrDq4bUl2tchpqyVaLFC99If4UbReAATcBFDUhp",
@@ -148,10 +148,7 @@ fn builtin_operation_conformance_vectors_cover_registry() {
                     "from_ref": "ak:strand:AUtQ1IrDq4bUl2tchpqyVaLFC99If4UbReAATcBFDUhp",
                     "to_ref": "ak:morph:AQ-DRvjAp7PmXKkjoqk8vbmRDFZoSMbThbqNN0j6guzb"
                 },
-                "expected_revision": {
-                    "commit_id": "ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4",
-                    "stream_position": 4
-                },
+                "expected_commit_id": "ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4",
                 "relation_id": "ak:relation:AQwWjzRLsPZDMwr_k34oj279cixhgwgnqTCDF9OPB6aA",
                 "patch": {"fields.weight": 1}
             }),
@@ -168,10 +165,7 @@ fn builtin_operation_conformance_vectors_cover_registry() {
                     "from_ref": "ak:strand:AUtQ1IrDq4bUl2tchpqyVaLFC99If4UbReAATcBFDUhp",
                     "to_ref": "ak:morph:AQ-DRvjAp7PmXKkjoqk8vbmRDFZoSMbThbqNN0j6guzb"
                 },
-                "expected_revision": {
-                    "commit_id": "ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4",
-                    "stream_position": 4
-                },
+                "expected_commit_id": "ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4",
                 "relation_id": "ak:relation:AQwWjzRLsPZDMwr_k34oj279cixhgwgnqTCDF9OPB6aA"
             }),
             valid: true,
@@ -414,7 +408,7 @@ fn builtin_operation_conformance_vectors_cover_registry() {
             payload: json!({
                 "applet_id": "ak:applet:01904100-0000-7000-8000-aa55aa55aa55",
                 "service_id": "ak:did_core:web:applet.example",
-                "expected_revision": null,
+                "expected_commit_id": null,
                 "controller_principal_id": "ak:did_core:web:applet.example",
                 "base_url": "https://applet.example/runtime",
                 "protocols": ["http_custom"],
@@ -479,7 +473,7 @@ fn builtin_operation_conformance_vectors_cover_registry() {
             payload: json!({
                 "applet_id": "ak:applet:01904100-0000-7000-8000-aa55aa55aa55",
                 "service_id": "ak:did_core:web:applet.example",
-                "expected_revision": null,
+                "expected_commit_id": null,
                 "controller_principal_id": "ak:did_core:web:applet.example",
                 "base_url": "https://applet.example/runtime",
                 "protocols": ["http_custom"],

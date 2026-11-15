@@ -447,7 +447,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
     let policy_id = format!("ak:policy:{}", uuid::Uuid::now_v7());
     let policy = factory.fixture.admin_event(EventKind::PolicySet,
         ScopeRef::Realm { realm_id: factory.fixture.realm.clone() }, json!({
-            "policy_id":policy_id,"expected_revision":null,
+            "policy_id":policy_id,"expected_commit_id":null,
             "value":{"schema":"ak.schema.policy.v1","id":policy_id,"realm_id":factory.fixture.realm,
                 "policy_kind":"applet","default_effect":"allow","created_by":administrator,
                 "created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),
@@ -1656,7 +1656,7 @@ async fn cross_station_configuration(
     let revoke = governor.admin_event(EventKind::CapabilityRevoke,
         ScopeRef::Realm { realm_id: governor.realm.clone() }, json!({
             "grant_id": grant_id,
-            "expected_revision": {"commit_id": original.commit.commit_id, "stream_position": original.commit.stream_position}
+            "expected_commit_id": original.commit.commit_id
         }));
     boxed_step(|| configuration_admin_event(governor, revoke)).await;
     let (status, refused) = boxed_step(|| submit(request)).await;

@@ -379,7 +379,7 @@ impl ProjectionState {
             let to = call_recording_wire(transition.to);
             if !matches!(
                 (from, to),
-                ("recording", "stopped" | "ready" | "failed") | ("stopped", "ready")
+                ("recording", "stopped") | ("stopped", "ready" | "failed")
             ) || self
                 .facet_value(&realm_id, &capture)
                 .and_then(Value::as_str)
@@ -389,8 +389,12 @@ impl ProjectionState {
                     reason: arkret_wire::ReasonCode::RECORDING_STATE_TRANSITION_INVALID.to_owned(),
                 };
             }
-            writes.push((capture, Value::String(to.to_owned())));
-            if let Some(result) = &transition.capture_metadata {
+            if to == "stopped" {
+                writes.push((capture, Value::String(to.to_owned())));
+            }
+            if to != "stopped"
+                && let Some(result) = &transition.capture_metadata
+            {
                 let Ok(value) = serde_json::to_value(result) else {
                     return ProjectionEffect::Rejected {
                         reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
@@ -398,7 +402,7 @@ impl ProjectionState {
                 };
                 writes.push((
                     FacetRef::composite(facet::CALL_RECORDING_RESULT, &subject),
-                    value,
+                    serde_json::json!({"status":to,"details":value}),
                 ));
             }
         }
@@ -410,7 +414,7 @@ impl ProjectionState {
             let to = call_transcript_wire(transition.to);
             if !matches!(
                 (from, to),
-                ("transcribing", "stopped" | "ready" | "failed") | ("stopped", "ready")
+                ("transcribing", "stopped") | ("stopped", "ready" | "failed")
             ) || self
                 .facet_value(&realm_id, &capture)
                 .and_then(Value::as_str)
@@ -420,8 +424,12 @@ impl ProjectionState {
                     reason: arkret_wire::ReasonCode::RECORDING_STATE_TRANSITION_INVALID.to_owned(),
                 };
             }
-            writes.push((capture, Value::String(to.to_owned())));
-            if let Some(result) = &transition.capture_metadata {
+            if to == "stopped" {
+                writes.push((capture, Value::String(to.to_owned())));
+            }
+            if to != "stopped"
+                && let Some(result) = &transition.capture_metadata
+            {
                 let Ok(value) = serde_json::to_value(result) else {
                     return ProjectionEffect::Rejected {
                         reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
@@ -429,7 +437,7 @@ impl ProjectionState {
                 };
                 writes.push((
                     FacetRef::composite(facet::CALL_TRANSCRIPT_RESULT, &subject),
-                    value,
+                    serde_json::json!({"status":to,"details":value}),
                 ));
             }
         }
@@ -547,18 +555,40 @@ impl ProjectionState {
                 "transcribing",
             ),
         };
-        if self.facet_value(&realm_id, &capture).is_some() {
+        if self
+            .facet_value(
+                &realm_id,
+                &FacetRef::composite(facet::CALL_RECORDING, &subject),
+            )
+            .is_some()
+            || self
+                .facet_value(
+                    &realm_id,
+                    &FacetRef::composite(facet::CALL_TRANSCRIPT, &subject),
+                )
+                .is_some()
+        {
             return ProjectionEffect::Rejected {
                 reason: arkret_wire::ReasonCode::RECORDING_STATE_TRANSITION_INVALID.to_owned(),
             };
         }
-        let Ok(outcome) = serde_json::to_value(&payload.capture_metadata) else {
+        let Ok(mut outcome) = serde_json::to_value(&payload.capture_metadata) else {
             return ProjectionEffect::Rejected {
                 reason: arkret_wire::ErrorCode::SCHEMA_VIOLATION.to_owned(),
             };
         };
+        let start_key = if payload.capture_kind == RecordingCaptureKind::Transcript {
+            "transcript_start_event_id"
+        } else {
+            "recording_start_event_id"
+        };
+        outcome[start_key] = serde_json::json!(operation.context.event_id);
         self.set_facet(&realm_id, capture, Value::String(opening.to_owned()));
-        self.set_facet(&realm_id, result, outcome);
+        self.set_facet(
+            &realm_id,
+            result,
+            serde_json::json!({"status":"pending","details":outcome}),
+        );
         ProjectionEffect::CallStateProjected { call_id }
     }
 

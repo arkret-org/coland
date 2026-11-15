@@ -172,20 +172,23 @@ async fn agent_grant_covers_operation(
         tracing::error!(?error, realm_id = %operation.realm_id, "agent grant read failed");
         arkret_wire::ErrorCode::INTERNAL_ERROR
     })?;
-    let grant = authorization
-        .grants
-        .iter()
-        .find(|effective| effective.grant.id.as_str() == authorization_ref)
-        .ok_or(reasons.inactive)?;
     let resource = operation
         .object_id
         .as_deref()
         .unwrap_or_else(|| operation.realm_id.as_str());
     let target =
         crate::authz::resource_selector(&operation.realm_id, resource).ok_or(reasons.scope)?;
-    if !coland_storage::grant_names_target(&grant.grant, &[action], &target) {
+    let grant_id =
+        arkret_wire::GrantId::new(authorization_ref.to_owned()).map_err(|_| reasons.inactive)?;
+    let grant = authorization
+        .current_grant_record(&grant_id)
+        .ok_or(reasons.inactive)?;
+    if !coland_storage::grant_names_target(grant, &[action], &target) {
         return Err(reasons.scope);
     }
+    authorization
+        .current_positive_grant_source(&grant_id, action, &target)
+        .map_err(|_| reasons.inactive)?;
     Ok(())
 }
 

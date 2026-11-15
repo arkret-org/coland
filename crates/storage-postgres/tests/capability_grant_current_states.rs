@@ -66,7 +66,7 @@ async fn postgres_reads_capability_value_and_revision_from_one_current_row() {
         "resources": [{"kind":"realm", "realm_id":REALM_ID}],
         "issuer_authority_refs": [root.clone()],
         "authority_depth": 1,
-        "authority_root_refs": [root],
+        "authority_root_ref": root,
         "issued_at": "2026-09-21T00:00:00.000Z",
         "status": "active"
     });
@@ -199,7 +199,7 @@ fn transaction(
     let commit_id = arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
         format!("{}:{stream_position}", event.event_id).as_bytes(),
     ));
-    AuthorityCommitTransaction {
+    let mut transaction = AuthorityCommitTransaction {
         expected_authority: authority.clone(),
         commit: arkret_wire::RealmCommit {
             producer_signer_fact_digest: None,
@@ -222,7 +222,11 @@ fn transaction(
         mls_state: None,
         welcomes: Vec::new(),
         recipient_queue_capacity: 0,
-    }
+    };
+    transaction.commit.commit_id = arkret_wire::RealmCommitId::from_digest(
+        arkret_canonical::sha256_bytes(transaction.commit.canonical_id_bytes().unwrap()),
+    );
+    transaction
 }
 
 #[tokio::test]
@@ -408,10 +412,7 @@ async fn authority_transaction_admits_grants_without_subject_kind_branches() {
         &station_id,
         serde_json::json!({
             "grant_id": grant_id.clone(),
-            "expected_revision": {
-                "commit_id": COMMIT_ID,
-                "stream_position": 999
-            }
+            "expected_commit_id": COMMIT_ID
         }),
         now + chrono::TimeDelta::seconds(1),
     );
@@ -453,7 +454,7 @@ async fn authority_transaction_admits_grants_without_subject_kind_branches() {
         &station_id,
         serde_json::json!({
             "grant_id": grant_id,
-            "expected_revision": created.revision
+            "expected_commit_id": created.revision.commit_id
         }),
         now + chrono::TimeDelta::seconds(2),
     );
@@ -675,4 +676,263 @@ async fn authority_transaction_admits_grants_without_subject_kind_branches() {
         );
         head = candidate_tx.commit.commit_id.clone();
     }
+
+    // This is the actual PostgreSQL native acceptance path. Fixtures above
+    // use structural producer signatures; these assertions establish atomic
+    // storage/admission behavior, not a second cryptographic verification gate.
+    let parent_at = now + chrono::TimeDelta::seconds(20);
+    let parent_expiry = now + chrono::TimeDelta::seconds(120);
+    let mut parent_body = grant_body(
+        serde_json::to_value(&actor).unwrap(),
+        "ak.message.mention.broadcast",
+    );
+    parent_body["constraints"] = serde_json::json!([
+        {"constraint_kind":"authority_control","effect":"allow","authority_regrant_allowed":true,"max_authority_depth":3},
+        {"constraint_kind":"temporal","effect":"allow","expires_at":arkret_canonical::format_timestamp_canonical(parent_expiry)}
+    ]);
+    let parent = producer_event(
+        arkret_wire::EventKind::CapabilityGrant,
+        &realm_id,
+        &actor_id,
+        &station_id,
+        serde_json::json!({"grant":parent_body}),
+        parent_at,
+    );
+    let parent_tx = transaction(&authority, &parent, 8, Some(head.clone()), parent_at);
+    assert_eq!(
+        authority_store
+            .admit_event_transaction(&parent_tx, now)
+            .await
+            .unwrap(),
+        AuthorityCommitWriteOutcome::Committed
+    );
+
+    // Lowering L affects only fresh unbounded-source contributions. It never
+    // clips or refreshes an explicitly finite accepted parent window.
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("UPDATE realm_policy_bundle_current_states SET value=jsonb_set(value,'{max_authority_lifetime_ms}','10000'::jsonb) WHERE realm_id=$1")
+        .bind::<Text,_>(realm_id.as_str()).execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let child_at = now + chrono::TimeDelta::seconds(30);
+    let mut child_body = grant_body(
+        serde_json::to_value(&actor).unwrap(),
+        "ak.message.mention.broadcast",
+    );
+    child_body["issuer_authority_refs"] = serde_json::json!([{"kind":"grant","grant_id":arkret_wire::GrantId::from_event_id(&parent.event_id)}]);
+    child_body["constraints"] = serde_json::json!([
+        {"constraint_kind":"authority_control","effect":"allow","authority_regrant_allowed":true,"max_authority_depth":2},
+        {"constraint_kind":"temporal","effect":"allow","expires_at":arkret_canonical::format_timestamp_canonical(parent_expiry)}
+    ]);
+    let child = producer_event(
+        arkret_wire::EventKind::CapabilityGrant,
+        &realm_id,
+        &actor_id,
+        &station_id,
+        serde_json::json!({"grant":child_body}),
+        child_at,
+    );
+    let child_tx = transaction(
+        &authority,
+        &child,
+        9,
+        Some(parent_tx.commit.commit_id.clone()),
+        child_at,
+    );
+    assert_eq!(
+        authority_store
+            .admit_event_transaction(&child_tx, now)
+            .await
+            .unwrap(),
+        AuthorityCommitWriteOutcome::Committed
+    );
+    let child_current = current_store
+        .get(
+            &realm_id,
+            &arkret_wire::GrantId::from_event_id(&child.event_id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(child_current.value.authority_depth, 2);
+    assert_eq!(
+        child_current.value.authority_root_ref,
+        current_store
+            .get(
+                &realm_id,
+                &arkret_wire::GrantId::from_event_id(&parent.event_id)
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .value
+            .authority_root_ref
+    );
+
+    let root_at = now + chrono::TimeDelta::seconds(40);
+    let mut too_long = grant_body(
+        serde_json::to_value(&actor).unwrap(),
+        "ak.message.mention.broadcast",
+    );
+    too_long["constraints"] = serde_json::json!([{"constraint_kind":"temporal","effect":"allow",
+        "expires_at":arkret_canonical::format_timestamp_canonical(root_at + chrono::TimeDelta::milliseconds(10001))}]);
+    let refused = producer_event(
+        arkret_wire::EventKind::CapabilityGrant,
+        &realm_id,
+        &actor_id,
+        &station_id,
+        serde_json::json!({"grant":too_long}),
+        now - chrono::TimeDelta::seconds(1),
+    );
+    let refused_tx = transaction(
+        &authority,
+        &refused,
+        10,
+        Some(child_tx.commit.commit_id.clone()),
+        root_at,
+    );
+    assert!(
+        authority_store
+            .admit_event_transaction(&refused_tx, now)
+            .await
+            .is_err()
+    );
+    assert!(
+        authority_store
+            .queued_event(&refused.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        current_store
+            .get(
+                &realm_id,
+                &arkret_wire::GrantId::from_event_id(&refused.event_id)
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        authority_store
+            .stream_head(&child_tx.commit.stream_ref)
+            .await
+            .unwrap()
+            .unwrap()
+            .commit_id,
+        child_tx.commit.commit_id
+    );
+
+    too_long["constraints"][0]["expires_at"] =
+        serde_json::json!(arkret_canonical::format_timestamp_canonical(
+            root_at + chrono::TimeDelta::milliseconds(10000)
+        ));
+    let exact = producer_event(
+        arkret_wire::EventKind::CapabilityGrant,
+        &realm_id,
+        &actor_id,
+        &station_id,
+        serde_json::json!({"grant":too_long}),
+        now - chrono::TimeDelta::seconds(1),
+    );
+    let exact_tx = transaction(
+        &authority,
+        &exact,
+        10,
+        Some(child_tx.commit.commit_id.clone()),
+        root_at,
+    );
+    assert_eq!(
+        authority_store
+            .admit_event_transaction(&exact_tx, now)
+            .await
+            .unwrap(),
+        AuthorityCommitWriteOutcome::Committed
+    );
+
+    // Revoking the accepted parent closes the descendant at the next actual
+    // authority cut; the child's immutable creation source remains unchanged.
+    let parent_id = arkret_wire::GrantId::from_event_id(&parent.event_id);
+    let revoke_parent = producer_event(
+        arkret_wire::EventKind::CapabilityRevoke,
+        &realm_id,
+        &actor_id,
+        &station_id,
+        serde_json::json!({"grant_id":parent_id,"expected_commit_id":parent_tx.commit.commit_id}),
+        root_at + chrono::TimeDelta::seconds(1),
+    );
+    let revoke_parent_tx = transaction(
+        &authority,
+        &revoke_parent,
+        11,
+        Some(exact_tx.commit.commit_id.clone()),
+        root_at + chrono::TimeDelta::seconds(1),
+    );
+    assert_eq!(
+        authority_store
+            .admit_event_transaction(&revoke_parent_tx, now)
+            .await
+            .unwrap(),
+        AuthorityCommitWriteOutcome::Committed
+    );
+    child_body["issuer_authority_refs"] =
+        serde_json::json!([{"kind":"grant","grant_id":child_current.grant_id}]);
+    child_body["constraints"][0]["max_authority_depth"] = serde_json::json!(1);
+    let after_revoke_at = root_at + chrono::TimeDelta::seconds(2);
+    let after_revoke = producer_event(
+        arkret_wire::EventKind::CapabilityGrant,
+        &realm_id,
+        &actor_id,
+        &station_id,
+        serde_json::json!({"grant":child_body}),
+        after_revoke_at,
+    );
+    let after_revoke_tx = transaction(
+        &authority,
+        &after_revoke,
+        12,
+        Some(revoke_parent_tx.commit.commit_id.clone()),
+        after_revoke_at,
+    );
+    assert!(
+        authority_store
+            .admit_event_transaction(&after_revoke_tx, now)
+            .await
+            .is_err()
+    );
+    assert!(
+        authority_store
+            .queued_event(&after_revoke.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        current_store
+            .get(
+                &realm_id,
+                &arkret_wire::GrantId::from_event_id(&after_revoke.event_id)
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        current_store
+            .get(&realm_id, &child_current.grant_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        child_current.revision
+    );
+    assert_eq!(
+        authority_store
+            .stream_head(&revoke_parent_tx.commit.stream_ref)
+            .await
+            .unwrap()
+            .unwrap()
+            .commit_id,
+        revoke_parent_tx.commit.commit_id
+    );
 }

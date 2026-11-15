@@ -276,8 +276,7 @@ impl PrincipalResolutionStore for PgPrincipalResolutionStore {
             JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' WHERE r.principal_id=$1 AND r.station_id=$2 \
             UNION ALL \
             SELECT c.commit_json,e.envelope,chain.depth+1 FROM chain \
-            JOIN realm_commits c ON c.commit_id=chain.event_json #>> '{payload,expected_revision,commit_id}' \
-              AND c.stream_position=(chain.event_json #>> '{payload,expected_revision,stream_position}')::bigint \
+            JOIN realm_commits c ON c.commit_id=chain.event_json #>> '{payload,expected_commit_id}' \
               AND c.realm_id=chain.event_json->>'realm_id' \
             JOIN canonical_events e ON e.pk=c.event_pk AND e.state='committed' AND e.envelope->'actor_id'=chain.event_json->'actor_id' \
               AND e.kind IN ('ak.realm.create','ak.identity.resolution.update') \

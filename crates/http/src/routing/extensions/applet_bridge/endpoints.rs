@@ -17,9 +17,7 @@ use arkret_models_integration::{
     AppletRevokeSubmittedEventStatus, AppletRevokeSubmittedEventStep, AppletTransactionRequestBody,
     AppletTransactionResponseBody, GhostPreviewRequestBody, GhostPreviewResponseBody,
 };
-use arkret_wire::{
-    AppletRevokeMode, CommittedEventRef, CurrentRevision, EventId, EventKind, ProtocolOperationId,
-};
+use arkret_wire::{AppletRevokeMode, CommittedEventRef, EventId, EventKind, ProtocolOperationId};
 use coland_http::error::AppError;
 use coland_http::result::{JsonResult, json_ok};
 use salvo::http::StatusCode;
@@ -1088,11 +1086,11 @@ async fn build_revoke_plan(
             &response.capability_grant_refs,
         )?;
         for grant_id in &response.capability_grant_refs {
-            if let Some(expected_revision) = active_grant_revisions.get(grant_id) {
+            if let Some(expected_commit_id) = active_grant_revisions.get(grant_id) {
                 capability_revocations.push(AppletCapabilityRevokeIntent {
                     event_kind: EventKind::CapabilityRevoke.as_str().to_owned(),
                     grant_id: grant_id.clone(),
-                    expected_revision: expected_revision.clone(),
+                    expected_commit_id: expected_commit_id.clone(),
                     registration_epoch: package.registration_epoch.clone(),
                     reason_code: preview.reason_code.clone(),
                 });
@@ -1124,7 +1122,8 @@ fn active_applet_grant_revisions(
     applet_service_id: &arkret_wire::DidCoreId,
     target_station_id: &arkret_wire::DidCoreId,
     installed_grant_refs: &[arkret_wire::GrantId],
-) -> Result<std::collections::BTreeMap<arkret_wire::GrantId, CurrentRevision>, AppError> {
+) -> Result<std::collections::BTreeMap<arkret_wire::GrantId, arkret_wire::RealmCommitId>, AppError>
+{
     let installed = installed_grant_refs
         .iter()
         .cloned()
@@ -1152,7 +1151,10 @@ fn active_applet_grant_revisions(
                 "active Applet Capability Grant current row disagrees with its canonical value",
             ));
         }
-        if active.insert(row.grant_id, row.revision).is_some() {
+        if active
+            .insert(row.grant_id, row.revision.commit_id)
+            .is_some()
+        {
             return Err(AppError::internal(
                 "governing-Station Capability Grant snapshot contains a duplicate Grant id",
             ));
@@ -1331,15 +1333,15 @@ fn validate_revoke_submissions(
                 .with_wire_code("failed_precondition")
         })?;
         let submitted_revision = payload
-            .get("expected_revision")
+            .get("expected_commit_id")
             .cloned()
-            .and_then(|value| serde_json::from_value::<CurrentRevision>(value).ok())
+            .and_then(|value| serde_json::from_value::<arkret_wire::RealmCommitId>(value).ok())
             .ok_or_else(|| {
-                AppError::param_invalid("capability revoke payload lacks expected_revision")
+                AppError::param_invalid("capability revoke payload lacks expected_commit_id")
             })?;
-        if submitted_revision != expected.expected_revision {
+        if submitted_revision != expected.expected_commit_id {
             return Err(AppError::conflict(
-                "capability revoke expected_revision does not match the current plan",
+                "capability revoke expected_commit_id does not match the current plan",
             )
             .with_wire_code("failed_precondition"));
         }
@@ -1972,7 +1974,7 @@ mod revoke_saga_tests {
     fn stale_capability_revision_is_rejected_before_the_saga_can_apply_an_effect() {
         let actor = admin_actor("ak:did_core:web:service-a.example");
         let scope = realm_scope();
-        let expected_revision = json!({
+        let expected_commit_id = json!({
             "commit_id": "ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4",
             "stream_position": 41
         });
@@ -1986,7 +1988,7 @@ mod revoke_saga_tests {
             "capability_revocations": [{
                 "event_kind": "ak.capability.revoke",
                 "grant_id": TARGET_GRANT,
-                "expected_revision": expected_revision,
+                "expected_commit_id": expected_commit_id,
                 "registration_epoch": format!("sha256:{}", "a".repeat(64)),
                 "reason_code": "requested_by_admin"
             }],
@@ -2001,7 +2003,7 @@ mod revoke_saga_tests {
             actor.as_account_id().unwrap().station_id.clone(),
             json!({
                 "grant_id": TARGET_GRANT,
-                "expected_revision": expected_revision,
+                "expected_commit_id": expected_commit_id,
                 "reason": "requested_by_admin"
             }),
         )
@@ -2019,7 +2021,7 @@ mod revoke_saga_tests {
         assert!(validate_revoke_submissions(&actor, &plan, &request).is_ok());
 
         request.capability_revoke_events[0].event.payload.insert(
-            "expected_revision".to_owned(),
+            "expected_commit_id".to_owned(),
             json!({
                 "commit_id": "ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4",
                 "stream_position": 40

@@ -96,7 +96,7 @@ async fn signed_resolution_cas_is_atomic_and_survives_cache_eviction_and_reopen(
             .unwrap();
     }
     let payload = serde_json::json!({
-        "expected_revision":{"commit_id":unit.transactions[0].commit.commit_id,"stream_position":0},
+        "expected_commit_id":unit.transactions[0].commit.commit_id,
         "next":{"did":target,"method_history_head":arkret_canonical::canonical_sha256(entries.last().unwrap()).unwrap(),"version_id":entries.last().unwrap()["versionId"]},
     });
     let prepare = |nonce: i64| {

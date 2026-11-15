@@ -30,7 +30,7 @@ use arkret_models_crypto::{
 };
 use arkret_wire::{
     AccountId, AuthoritySetId, AuthoritySetPolicyKind, Base64UrlString as Challenge, DeviceId,
-    DidUrl, RequestId, SchemaId, SessionGrantId, TransactionId,
+    DidUrl, RequestId, SchemaId, TransactionId,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};

@@ -472,75 +472,97 @@ impl ProjectionState {
     pub(crate) fn apply_reaction_add(
         &mut self,
         operation: &Operation,
-        now: chrono::DateTime<chrono::Utc>,
+        _now: chrono::DateTime<chrono::Utc>,
     ) -> ProjectionEffect {
-        let event_id = reaction_target_event_id(operation).unwrap_or_default();
-        let actor = operation
-            .payload
-            .get("actor")
-            .and_then(|v| v.as_str())
-            .map_or_else(|| operation.context.sender.to_string(), ToOwned::to_owned);
-        let key = operation
-            .payload
-            .get("key")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_owned();
-
-        if event_id.is_empty() || actor.is_empty() || key.is_empty() {
-            return ProjectionEffect::Ignored;
-        }
-
-        let reaction = ReactionState {
-            actor: actor.clone(),
-            key: key.clone(),
-            active: true,
-            created_at: now,
-        };
-        self.reactions
-            .entry(event_id.clone())
-            .or_default()
-            .entry(actor.clone())
-            .or_default()
-            .insert(key.clone(), reaction);
-
-        ProjectionEffect::ReactionChanged {
-            event_id,
-            actor,
-            key,
-            active: true,
-        }
+        self.apply_reaction_current(operation, true)
     }
 
     pub(crate) fn apply_reaction_remove(&mut self, operation: &Operation) -> ProjectionEffect {
-        let event_id = reaction_target_event_id(operation).unwrap_or_default();
-        let actor = operation
-            .payload
-            .get("actor")
-            .and_then(|v| v.as_str())
-            .map_or_else(|| operation.context.sender.to_string(), ToOwned::to_owned);
-        let key = operation
-            .payload
-            .get("key")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_owned();
+        self.apply_reaction_current(operation, false)
+    }
 
-        if event_id.is_empty() || actor.is_empty() || key.is_empty() {
-            return ProjectionEffect::Ignored;
-        }
-
-        if let Some(event_reactions) = self.reactions.get_mut(&event_id)
-            && let Some(actor_reactions) = event_reactions.get_mut(&actor)
+    fn apply_reaction_current(&mut self, operation: &Operation, add: bool) -> ProjectionEffect {
+        use arkret_models_collaboration::events_payloads::{
+            MessageReactionsCurrentValue, ReactionCurrentEntry, ReactionPayload,
+        };
+        let reject = |reason: &str| ProjectionEffect::Rejected {
+            reason: reason.to_owned(),
+        };
+        let Ok(payload) = serde_json::from_value::<ReactionPayload>(operation.payload.clone())
+        else {
+            return reject(arkret_wire::ErrorCode::SCHEMA_VIOLATION);
+        };
+        let Some(source) = operation.context.committed_ref.as_ref() else {
+            return reject("reaction_commit_source_missing");
+        };
+        let Ok(stream) = arkret_wire::CommitStreamRef::from_scope(
+            &operation.context.accepted_scope_ref,
+            Some(operation.realm_id.clone()),
+        ) else {
+            return reject(arkret_wire::ErrorCode::SCHEMA_VIOLATION);
+        };
+        if source.event_id != operation.context.event_id
+            || source.event_id != operation.context.accepted_event_id
+            || source.stream_ref != stream
         {
-            actor_reactions.remove(&key);
+            return reject("reaction_commit_source_mismatch");
         }
-
+        let Some(event_id) = reaction_target_event_id(operation) else {
+            return reject(arkret_wire::ErrorCode::SCHEMA_VIOLATION);
+        };
+        if let Some(previous) = self.reaction_revisions.get(&event_id) {
+            if previous.stream_ref != source.stream_ref {
+                return reject("reaction_commit_stream_mismatch");
+            }
+            if source.stream_position < previous.stream_position {
+                return ProjectionEffect::Ignored;
+            }
+            if source.stream_position == previous.stream_position {
+                return if source == previous {
+                    ProjectionEffect::Ignored
+                } else {
+                    reject("reaction_commit_source_mismatch")
+                };
+            }
+            if source.commit_id == previous.commit_id {
+                return reject("reaction_commit_source_mismatch");
+            }
+        }
+        let actor = operation.context.sender.clone();
+        let key = payload.key;
+        let mut entries = self
+            .reactions
+            .get(&event_id)
+            .map(|value| value.entries().to_vec())
+            .unwrap_or_default();
+        entries.retain(|entry| entry.actor_id != actor || entry.key != key);
+        if add {
+            entries.push(ReactionCurrentEntry {
+                actor_id: actor.clone(),
+                key: key.clone(),
+                source: source.clone(),
+            });
+        }
+        // Full actor JCS bytes include its Station identity. A payload field
+        // can never override the accepted envelope actor.
+        entries.sort_by_cached_key(|entry| {
+            (
+                arkret_canonical::canonical_json_bytes(&entry.actor_id)
+                    .expect("validated actor canonicalizes"),
+                entry.key.as_bytes().to_vec(),
+            )
+        });
+        let Ok(value) = MessageReactionsCurrentValue::new(entries) else {
+            return reject(arkret_wire::ErrorCode::SCHEMA_VIOLATION);
+        };
+        self.reactions.insert(event_id.clone(), value);
+        self.reaction_revisions
+            .insert(event_id.clone(), source.clone());
         ProjectionEffect::ReactionChanged {
             event_id,
-            actor,
+            actor: actor.to_string(),
             key,
-            active: false,
+            active: add,
         }
     }
 

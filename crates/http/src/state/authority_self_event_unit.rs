@@ -106,6 +106,7 @@ impl AdmittedProducer {
 /// Kind-specific durable effects committed atomically with the Event.
 #[derive(Default)]
 pub(super) struct SelfEventUnitEffects {
+    pub(super) owner_transfer_successor: Option<coland_storage::OwnerTransferSuccessorSource>,
     /// The verified public MLS transition and Welcomes of an `ak.mls.genesis`
     /// or `ak.mls.commit` (`authority_mls_unit`).
     pub(super) mls: Option<super::authority_mls_unit::MlsUnitInstallation>,
@@ -453,6 +454,29 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             }
         }
         let origin_source = super::authority_forward::prepare_control_source(state, event).await?;
+        let SelfEventUnitEffects {
+            mls,
+            content_backup_source,
+            owner_transfer_successor,
+        } = effects;
+        let owner_transfer_successor = match (&event.kind, owner_transfer_successor) {
+            (arkret_wire::EventKind::RealmOwnerTransfer, Some(source)) => {
+                Some(super::authority_forward::owner_transfer::received(
+                    event,
+                    source.evidence().clone(),
+                    Utc::now(),
+                )?)
+            }
+            (arkret_wire::EventKind::RealmOwnerTransfer, None) => {
+                Some(super::authority_forward::owner_transfer::acquire(state, event).await?)
+            }
+            (_, Some(_)) => {
+                return Err(ServiceError::SchemaViolation(
+                    "successor evidence is confined to owner transfer".into(),
+                ));
+            }
+            (_, None) => None,
+        };
         let committed_at = Utc::now();
         let method = arkret_wire::DidUrl::new(
             crate::routing::federation::federation_service_signature_key_id(
@@ -460,10 +484,6 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             ),
         )
         .map_err(|error| ServiceError::Internal(error.to_string()))?;
-        let SelfEventUnitEffects {
-            mls,
-            content_backup_source,
-        } = effects;
         let is_mls = matches!(
             event.kind,
             arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit
@@ -581,6 +601,7 @@ fn commit_event_unit_with_idempotency_impl<'a>(
             None => idempotency,
         };
         let command = coland_services::events::CommitAcceptedEventCommand {
+            owner_transfer_successor,
             verified_media_participant:
                 crate::routing::interop::webrtc::prepare_verified_roster_participant(state, event)
                     .await?,

@@ -517,22 +517,7 @@ pub fn request_for_event(
             arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact::AccountDevice(fact)
         });
     commit.producer_signer_fact_digest = fact.as_ref().map(|f| f.digest().unwrap());
-    if fact.is_some() {
-        let identity =
-            arkret_canonical::canonical::unsigned_value(&commit, &["commit_id", "signature"])
-                .unwrap();
-        commit.commit_id = arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-            arkret_canonical::canonical_json_bytes(&identity).unwrap(),
-        ));
-        commit.signature = arkret_signatures::detached_object::sign_detached_object(
-            &arkret_canonical::canonical::unsigned_value(&commit, &["signature"]).unwrap(),
-            arkret_wire::DetachedSignatureContext::RealmCommit,
-            previous.commit.signature.verification_method.clone(),
-            at,
-            &ed25519_dalek::SigningKey::from_bytes(&[83; 32]),
-        )
-        .unwrap();
-    }
+    seal_final_commit(&mut commit);
     let projection = coland_storage::ProjectionEventRecord {
         event_id: event.event_id.to_string(),
         realm_id: realm_id.to_string(),
@@ -560,6 +545,7 @@ pub fn request_for_event(
         received_at: at,
     };
     EventCommitRequest {
+        owner_transfer_successor: None,
         verified_media_participant: None,
         authority_commit: AuthorityCommitTransaction {
             expected_authority: previous.expected_authority.clone(),

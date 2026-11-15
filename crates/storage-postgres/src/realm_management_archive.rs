@@ -13,6 +13,8 @@ use serde_json::{Value, json};
 
 use crate::{PgAuthorityCommitStore, PgTransactionError, pg_conn};
 
+mod owner_transfer;
+
 // Predicates are static SQL. Every exported row must survive the same scoped
 // query after import; unknown tables, columns and out-of-scope rows are rejected.
 const TABLES: &[(&str, &str)] = &[
@@ -400,7 +402,10 @@ async fn state(conn: &mut AsyncPgConnection, realm: &RealmId) -> PersistenceResu
             Value::Array(normalized.into_iter().map(|(_, value)| value).collect()),
         );
     }
-    Ok(json!({"format":"realm-management-postgres-v1","realm_id":realm,"tables":tables}))
+    let owner_transfer_acceptances = owner_transfer::export(conn, realm).await?;
+    Ok(
+        json!({"format":"realm-management-postgres-v1","realm_id":realm,"tables":tables,"owner_transfer_acceptances":owner_transfer_acceptances}),
+    )
 }
 
 /// Handoff preserves historical upload authority, even after that Device expires
@@ -535,7 +540,7 @@ impl PgAuthorityCommitStore {
             || arkret_canonical::sha256_digest(bytes) != manifest.state_digest.as_str()
             || archive["format"] != "realm-management-postgres-v1"
             || archive["realm_id"] != json!(manifest.realm_id)
-            || archive.as_object().is_none_or(|value| value.len() != 3)
+            || archive.as_object().is_none_or(|value| value.len() != 4)
         {
             return Err(invalid(
                 "archive identity, canonical bytes or digest mismatch",
@@ -591,6 +596,7 @@ impl PgAuthorityCommitStore {
                     sql_query(query).bind::<Jsonb,_>(&row).execute(&mut *conn).await?;
                 }
             }
+            owner_transfer::import(conn, &manifest.realm_id, &archive["owner_transfer_acceptances"]).await?;
             verify_import(conn,manifest).await?;
             Ok(())
         }).await.map_err(PgTransactionError::into_persistence)

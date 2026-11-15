@@ -26,8 +26,8 @@ use arkret_models_crypto::{
     BackupRotationBinding, BackupRotationKind, BackupRotationPlan, PreparedEventUnit,
     SecurityRotationRevokeCommandDecision, SecurityRotationRevokeCommandOutcome,
     SecurityRotationRevokeProposal, SecurityRotationTransactionCreateRequestBody,
-    SecurityTransactionAcceptor, SecurityTransactionCreateRequestBody,
-    SecurityTransactionPreparedPlan, SecurityTransactionStep, SecurityTransactionTerminalOutcome,
+    SecurityTransactionAcceptor, SecurityTransactionCreateRequestBody, SecurityTransactionStep,
+    SecurityTransactionTerminalOutcome,
 };
 use arkret_models_identity::{
     IdentityBindingPurpose, IdentityCreationControlProofKind, PCR_GENESIS_UNIT_KINDS,
@@ -1292,16 +1292,15 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         vec![rotation],
     )
     .unwrap();
-    let plan = SecurityTransactionPreparedPlan::SecurityRotation(request.prepared_plan.clone());
     let (initial, canonical_request) =
         SecurityTransactionCreateRequestBody::SecurityRotation(request)
-            .into_initial_resource(plan, at)
+            .into_rotation_resource(at)
             .unwrap();
     let initial_record = SecurityTransactionRecord {
         resource: initial.clone(),
         canonical_request: canonical_request.clone(),
     };
-    let transaction_id = initial.transaction_id.clone();
+    let transaction_id = initial.transaction_id().clone();
     let transactions = PgSecurityTransactionStore { pool: pool.clone() };
     transactions.create(initial_record).await.unwrap();
     let awaiting = |ids: Vec<String>| ids.contains(&transaction_id.to_string());
@@ -1309,14 +1308,16 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         awaiting(transactions.rotations_awaiting_worker(1000).await.unwrap()),
         "a created rotation awaits its coordinator-owned revoke"
     );
-    let mut proposed = initial;
+    let arkret_models_crypto::SecurityTransaction::SecurityRotation(mut proposed) = initial else {
+        unreachable!("this fixture created a Rotation resource");
+    };
     proposed.revoke_proposal = Some(SecurityRotationRevokeProposal {
         proposal_event_id: revoke.event_id.clone(),
         covering_commit_id: covering.commit_id.clone(),
     });
     let write = RevokeProposalCommitWrite {
         transaction: SecurityTransactionRecord {
-            resource: proposed,
+            resource: arkret_models_crypto::SecurityTransaction::SecurityRotation(proposed),
             canonical_request,
         },
         commit: AuthorityCommitTransaction {
@@ -1333,7 +1334,11 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
     };
     let mut conn = pool.get().await.unwrap();
     let mut bad_authorizer = write.clone();
-    bad_authorizer.transaction.resource.authorizing_device_id = Some(target.clone());
+    bad_authorizer
+        .transaction
+        .rotation_mut()
+        .unwrap()
+        .authorizing_device_id = target.clone();
     assert_eq!(
         transactions
             .commit_revoke_proposal(bad_authorizer)
@@ -1407,7 +1412,11 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         covering
     );
     let mut changed_proposal = write;
-    changed_proposal.transaction.resource.created_at += chrono::TimeDelta::seconds(1);
+    changed_proposal
+        .transaction
+        .rotation_mut()
+        .unwrap()
+        .created_at += chrono::TimeDelta::seconds(1);
     assert_eq!(
         reopened_transactions
             .commit_revoke_proposal(changed_proposal)
@@ -1435,7 +1444,13 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        stored.resource.revoke_proposal.unwrap().covering_commit_id,
+        stored
+            .rotation()
+            .unwrap()
+            .revoke_proposal
+            .as_ref()
+            .unwrap()
+            .covering_commit_id,
         covering.commit_id
     );
 
@@ -1445,7 +1460,8 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         .unwrap()
         .unwrap();
     accepted
-        .resource
+        .rotation_mut()
+        .unwrap()
         .accepted_steps
         .push(AcceptedSecurityTransactionStep {
             acceptor: SecurityTransactionAcceptor::Principal {
@@ -1453,12 +1469,13 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
             },
             accepted_at: at + chrono::TimeDelta::seconds(2),
         });
-    accepted.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
-        proposal_event_id: revoke.event_id.clone(),
-        covering_commit_id: covering.commit_id.clone(),
-        outcome: SecurityRotationRevokeCommandDecision::Accepted,
-        decided_at: at + chrono::TimeDelta::seconds(2),
-    });
+    accepted.rotation_mut().unwrap().revoke_command_outcome =
+        Some(SecurityRotationRevokeCommandOutcome {
+            proposal_event_id: revoke.event_id.clone(),
+            covering_commit_id: covering.commit_id.clone(),
+            outcome: SecurityRotationRevokeCommandDecision::Accepted,
+            decided_at: at + chrono::TimeDelta::seconds(2),
+        });
     let terminal = RevokeCommandTerminalWrite {
         step_outcome: Some(SecurityTransactionStepOutcomeRecord {
             transaction_id: transaction_id.to_string(),
@@ -1491,7 +1508,8 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
     );
     assert_eq!(
         decided
-            .resource
+            .rotation()
+            .unwrap()
             .revoke_command_outcome
             .as_ref()
             .unwrap()
@@ -1524,7 +1542,8 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
     let mut changed = terminal;
     changed
         .transaction
-        .resource
+        .rotation_mut()
+        .unwrap()
         .revoke_command_outcome
         .as_mut()
         .unwrap()
@@ -1608,20 +1627,18 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         .unwrap(),
         hash("second-secret"),
         decided
-            .resource
-            .security_rotation_plan()
+            .rotation()
             .unwrap()
+            .prepared_plan
             .backup_rotations
             .clone(),
     )
     .unwrap();
-    let reject_plan =
-        SecurityTransactionPreparedPlan::SecurityRotation(reject_request.prepared_plan.clone());
     let (reject_initial, reject_request_bytes) =
         SecurityTransactionCreateRequestBody::SecurityRotation(reject_request)
-            .into_initial_resource(reject_plan, at)
+            .into_rotation_resource(at)
             .unwrap();
-    let reject_id = reject_initial.transaction_id.clone();
+    let reject_id = reject_initial.transaction_id().clone();
     transactions
         .create(SecurityTransactionRecord {
             resource: reject_initial.clone(),
@@ -1629,7 +1646,11 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         })
         .await
         .unwrap();
-    let mut reject_proposed = reject_initial;
+    let arkret_models_crypto::SecurityTransaction::SecurityRotation(mut reject_proposed) =
+        reject_initial
+    else {
+        unreachable!("this fixture created a Rotation resource");
+    };
     reject_proposed.revoke_proposal = Some(SecurityRotationRevokeProposal {
         proposal_event_id: reject_event.event_id.clone(),
         covering_commit_id: reject_commit.commit_id.clone(),
@@ -1637,7 +1658,9 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
     transactions
         .commit_revoke_proposal(RevokeProposalCommitWrite {
             transaction: SecurityTransactionRecord {
-                resource: reject_proposed,
+                resource: arkret_models_crypto::SecurityTransaction::SecurityRotation(
+                    reject_proposed,
+                ),
                 canonical_request: reject_request_bytes,
             },
             commit: AuthorityCommitTransaction {
@@ -1655,16 +1678,18 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
         .await
         .unwrap();
     let mut rejected = transactions.get(reject_id.as_str()).await.unwrap().unwrap();
-    rejected.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
-        proposal_event_id: reject_event.event_id,
-        covering_commit_id: reject_commit.commit_id.clone(),
-        outcome: SecurityRotationRevokeCommandDecision::Rejected,
-        decided_at: at + chrono::TimeDelta::seconds(3),
-    });
-    rejected.resource.terminal_outcome = Some(SecurityTransactionTerminalOutcome::Aborted {
-        completed_at: at + chrono::TimeDelta::seconds(3),
-        reason_code: Some("rejected".to_owned()),
-    });
+    rejected.rotation_mut().unwrap().revoke_command_outcome =
+        Some(SecurityRotationRevokeCommandOutcome {
+            proposal_event_id: reject_event.event_id,
+            covering_commit_id: reject_commit.commit_id.clone(),
+            outcome: SecurityRotationRevokeCommandDecision::Rejected,
+            decided_at: at + chrono::TimeDelta::seconds(3),
+        });
+    rejected.rotation_mut().unwrap().terminal_outcome =
+        Some(SecurityTransactionTerminalOutcome::Aborted {
+            completed_at: at + chrono::TimeDelta::seconds(3),
+            reason_code: Some("rejected".to_owned()),
+        });
     let rejected_write = RevokeCommandTerminalWrite {
         transaction: rejected,
         step_outcome: None,
@@ -1692,7 +1717,8 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
     );
     assert_eq!(
         rejected_result
-            .resource
+            .rotation()
+            .unwrap()
             .revoke_command_outcome
             .as_ref()
             .unwrap()
@@ -1730,7 +1756,8 @@ async fn security_rotation_revoke_proposal_is_one_atomic_pcr_write() {
     let mut changed_terminal = rejected_write;
     changed_terminal
         .transaction
-        .resource
+        .rotation_mut()
+        .unwrap()
         .revoke_command_outcome
         .as_mut()
         .unwrap()
@@ -2918,12 +2945,11 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
         }],
     )
     .unwrap();
-    let plan = SecurityTransactionPreparedPlan::SecurityRotation(request.prepared_plan.clone());
     let (initial, canonical_request) =
         SecurityTransactionCreateRequestBody::SecurityRotation(request)
-            .into_initial_resource(plan, now)
+            .into_rotation_resource(now)
             .unwrap();
-    let transaction_id = initial.transaction_id.clone();
+    let transaction_id = initial.transaction_id().clone();
     transactions
         .create(SecurityTransactionRecord {
             resource: initial.clone(),
@@ -2931,7 +2957,9 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
         })
         .await
         .unwrap();
-    let mut proposed = initial;
+    let arkret_models_crypto::SecurityTransaction::SecurityRotation(mut proposed) = initial else {
+        unreachable!("this fixture created a Rotation resource");
+    };
     proposed.revoke_proposal = Some(SecurityRotationRevokeProposal {
         proposal_event_id: revoke.event_id.clone(),
         covering_commit_id: covering.commit_id.clone(),
@@ -2939,7 +2967,7 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
     transactions
         .commit_revoke_proposal(RevokeProposalCommitWrite {
             transaction: SecurityTransactionRecord {
-                resource: proposed,
+                resource: arkret_models_crypto::SecurityTransaction::SecurityRotation(proposed),
                 canonical_request,
             },
             commit: tx(revoke.clone(), covering.clone()),
@@ -3033,7 +3061,8 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
         .unwrap();
     let decided_at = pending_at + chrono::TimeDelta::seconds(1);
     accepted
-        .resource
+        .rotation_mut()
+        .unwrap()
         .accepted_steps
         .push(AcceptedSecurityTransactionStep {
             acceptor: SecurityTransactionAcceptor::Principal {
@@ -3041,12 +3070,13 @@ async fn accepted_revoke_terminal_stops_only_the_target_of_two_active_devices() 
             },
             accepted_at: decided_at,
         });
-    accepted.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
-        proposal_event_id: revoke.event_id.clone(),
-        covering_commit_id: covering.commit_id.clone(),
-        outcome: SecurityRotationRevokeCommandDecision::Accepted,
-        decided_at,
-    });
+    accepted.rotation_mut().unwrap().revoke_command_outcome =
+        Some(SecurityRotationRevokeCommandOutcome {
+            proposal_event_id: revoke.event_id.clone(),
+            covering_commit_id: covering.commit_id.clone(),
+            outcome: SecurityRotationRevokeCommandDecision::Accepted,
+            decided_at,
+        });
     let terminal = RevokeCommandTerminalWrite {
         step_outcome: Some(SecurityTransactionStepOutcomeRecord {
             transaction_id: transaction_id.to_string(),
@@ -3310,7 +3340,8 @@ fn with_rotation_step(
     SecurityTransactionStepOutcomeRecord,
 ) {
     let mut next = record.clone();
-    next.resource
+    next.rotation_mut()
+        .unwrap()
         .accepted_steps
         .push(AcceptedSecurityTransactionStep {
             acceptor: SecurityTransactionAcceptor::Principal {
@@ -3319,7 +3350,7 @@ fn with_rotation_step(
             accepted_at,
         });
     let outcome = SecurityTransactionStepOutcomeRecord {
-        transaction_id: next.resource.transaction_id.to_string(),
+        transaction_id: next.rotation().unwrap().transaction_id.to_string(),
         step,
         canonical_request: next.canonical_request.clone(),
         response: serde_json::to_value(&next.resource).unwrap(),
@@ -3572,10 +3603,9 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             }],
         )
         .unwrap();
-        let plan = SecurityTransactionPreparedPlan::SecurityRotation(request.prepared_plan.clone());
         let (initial, canonical_request) =
             SecurityTransactionCreateRequestBody::SecurityRotation(request)
-                .into_initial_resource(plan, now)
+                .into_rotation_resource(now)
                 .unwrap();
         let record = transactions
             .create(SecurityTransactionRecord {
@@ -3586,7 +3616,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             .unwrap();
         // The revoke proposal and its accepted terminal, as the worker does.
         let mut proposed = record.clone();
-        proposed.resource.revoke_proposal = Some(SecurityRotationRevokeProposal {
+        proposed.rotation_mut().unwrap().revoke_proposal = Some(SecurityRotationRevokeProposal {
             proposal_event_id: revoke.event_id.clone(),
             covering_commit_id: covering.commit_id.clone(),
         });
@@ -3601,7 +3631,8 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         let decided_at = covering.committed_at;
         let mut accepted = proposed;
         accepted
-            .resource
+            .rotation_mut()
+            .unwrap()
             .accepted_steps
             .push(AcceptedSecurityTransactionStep {
                 acceptor: SecurityTransactionAcceptor::Principal {
@@ -3609,16 +3640,17 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
                 },
                 accepted_at: decided_at,
             });
-        accepted.resource.revoke_command_outcome = Some(SecurityRotationRevokeCommandOutcome {
-            proposal_event_id: revoke.event_id.clone(),
-            covering_commit_id: covering.commit_id.clone(),
-            outcome: SecurityRotationRevokeCommandDecision::Accepted,
-            decided_at,
-        });
+        accepted.rotation_mut().unwrap().revoke_command_outcome =
+            Some(SecurityRotationRevokeCommandOutcome {
+                proposal_event_id: revoke.event_id.clone(),
+                covering_commit_id: covering.commit_id.clone(),
+                outcome: SecurityRotationRevokeCommandDecision::Accepted,
+                decided_at,
+            });
         let decided = transactions
             .commit_revoke_command_terminal(RevokeCommandTerminalWrite {
                 step_outcome: Some(SecurityTransactionStepOutcomeRecord {
-                    transaction_id: accepted.resource.transaction_id.to_string(),
+                    transaction_id: accepted.rotation().unwrap().transaction_id.to_string(),
                     step: SecurityTransactionStep::Revoke,
                     canonical_request: accepted.canonical_request.clone(),
                     response: serde_json::to_value(&accepted.resource).unwrap(),
@@ -3641,7 +3673,12 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         now,
         SecurityTransactionStep::UploadNewMaterial,
     );
-    let before = rotation_footprint(&pool, &forged_series, &forged.resource.transaction_id).await;
+    let before = rotation_footprint(
+        &pool,
+        &forged_series,
+        &forged.rotation().unwrap().transaction_id,
+    )
+    .await;
     let refused = transactions
         .commit_rotation_upload(RotationUploadCommitWrite {
             transaction: forged_next,
@@ -3655,27 +3692,33 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         "{refused}"
     );
     assert_eq!(
-        rotation_footprint(&pool, &forged_series, &forged.resource.transaction_id).await,
+        rotation_footprint(
+            &pool,
+            &forged_series,
+            &forged.rotation().unwrap().transaction_id
+        )
+        .await,
         before
     );
     let unchanged = transactions
-        .get(forged.resource.transaction_id.as_str())
+        .get(forged.rotation().unwrap().transaction_id.as_str())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(unchanged.resource.accepted_steps.len(), 1);
+    assert_eq!(unchanged.rotation().unwrap().accepted_steps.len(), 1);
     // The worker then stops the rotation; its accepted revoke stays.
     let mut aborted = unchanged;
-    aborted.resource.terminal_outcome = Some(SecurityTransactionTerminalOutcome::Aborted {
-        completed_at: now,
-        reason_code: Some("proof_invalid".to_owned()),
-    });
+    aborted.rotation_mut().unwrap().terminal_outcome =
+        Some(SecurityTransactionTerminalOutcome::Aborted {
+            completed_at: now,
+            reason_code: Some("proof_invalid".to_owned()),
+        });
     transactions.update(aborted).await.unwrap();
 
     // The genuine rotation revokes B.
     let (decided, series, pointer, covering) = rotation(&device_b, author_a.seed).await;
-    let transaction_id = decided.resource.transaction_id.clone();
-    let plan = decided.resource.security_rotation_plan().unwrap().clone();
+    let transaction_id = decided.rotation().unwrap().transaction_id.clone();
+    let plan = decided.rotation().unwrap().prepared_plan.clone();
     assert!(
         status
             .pcr_device_admission(&account, &device_b, covering.committed_at)
@@ -3767,7 +3810,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         })
         .await
         .unwrap();
-    assert_eq!(uploaded.resource.accepted_steps.len(), 2);
+    assert_eq!(uploaded.rotation().unwrap().accepted_steps.len(), 2);
     assert_eq!(
         rotation_footprint(&pool, &series, &transaction_id).await,
         (2, 2, 2)
@@ -3851,9 +3894,9 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         })
         .await
         .unwrap();
-    assert_eq!(switched.resource.accepted_steps.len(), 3);
+    assert_eq!(switched.rotation().unwrap().accepted_steps.len(), 3);
     assert_eq!(
-        switched.resource.accepted_steps[2].accepted_at,
+        switched.rotation().unwrap().accepted_steps[2].accepted_at,
         switch_commit.committed_at
     );
     let (events, commits, pointer_rows) = pointers;
@@ -3895,7 +3938,8 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             .await
             .unwrap()
             .unwrap()
-            .resource
+            .rotation()
+            .unwrap()
             .next_required_step()
             .unwrap(),
         Some(SecurityTransactionStep::EraseOldMaterial)
@@ -3909,8 +3953,12 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         .unwrap();
     let erase_request = coland_storage::BackupSeriesEraseWorkerRequest {
         transaction_id: transaction_id.clone(),
-        transaction_request_digest: switched_record.resource.request_digest.clone(),
-        prepared_plan_digest: switched_record.resource.prepared_plan_digest.clone(),
+        transaction_request_digest: switched_record.rotation().unwrap().request_digest.clone(),
+        prepared_plan_digest: switched_record
+            .rotation()
+            .unwrap()
+            .prepared_plan_digest
+            .clone(),
         erase_confirmation_digest: plan.erase_confirmation_digest.clone(),
         series: vec![plan.backup_rotations[0].binding.clone()],
         authority_commit_id: after.authority_commit_id.clone(),
@@ -3974,13 +4022,14 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         .unwrap();
     let mut erased = switched_record.clone();
     erased
-        .resource
+        .rotation_mut()
+        .unwrap()
         .accepted_steps
         .push(AcceptedSecurityTransactionStep {
             acceptor: SecurityTransactionAcceptor::Principal {
                 principal_id: station.clone(),
             },
-            accepted_at: switched_record.resource.accepted_steps[2].accepted_at
+            accepted_at: switched_record.rotation().unwrap().accepted_steps[2].accepted_at
                 + chrono::TimeDelta::seconds(1),
         });
     transactions
@@ -4002,7 +4051,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        erased.resource.next_required_step().unwrap(),
+        erased.rotation().unwrap().next_required_step().unwrap(),
         Some(SecurityTransactionStep::LocalCommit)
     );
 
@@ -4018,8 +4067,8 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         let artifact = arkret_models_crypto::SecurityRotationLocalCommit {
             schema: arkret_wire::SchemaId::SECURITY_ROTATION_LOCAL_COMMIT_V1.to_owned(),
             transaction_id: transaction_id.clone(),
-            transaction_request_digest: erased.resource.request_digest.clone(),
-            prepared_plan_digest: erased.resource.prepared_plan_digest.clone(),
+            transaction_request_digest: erased.rotation().unwrap().request_digest.clone(),
+            prepared_plan_digest: erased.rotation().unwrap().prepared_plan_digest.clone(),
             local_commit_digest: plan.local_commit_digest.clone(),
             device_id: device.clone(),
             committed_at,
@@ -4028,11 +4077,9 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             step: SecurityTransactionStep::LocalCommit,
             output_ref: plan.local_commit_digest.to_string(),
             transaction_id: transaction_id.clone(),
-            transaction_request_digest: erased.resource.request_digest.clone(),
-            prepared_plan_digest: erased.resource.prepared_plan_digest.clone(),
-            artifact: arkret_models_crypto::ClientStepAttestationArtifact::SecurityRotation(
-                artifact.clone(),
-            ),
+            transaction_request_digest: erased.rotation().unwrap().request_digest.clone(),
+            prepared_plan_digest: erased.rotation().unwrap().prepared_plan_digest.clone(),
+            artifact: artifact.clone(),
             signature_proof: arkret_models_crypto::ClientStepAttestationSignatureProof {
                 verification_method: method,
                 signature_algorithm: "Ed25519".to_owned(),
@@ -4046,7 +4093,8 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
             arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(signature))
                 .unwrap();
         let mut next = erased.clone();
-        next.resource
+        next.rotation_mut()
+            .unwrap()
             .accepted_steps
             .push(AcceptedSecurityTransactionStep {
                 acceptor: SecurityTransactionAcceptor::Principal {
@@ -4054,15 +4102,16 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
                 },
                 accepted_at: committed_at,
             });
-        next.resource.terminal_outcome = Some(SecurityTransactionTerminalOutcome::Completed {
-            completed_at: committed_at,
-            receipt_id: None,
-            completion_attestation: None,
-        });
+        next.rotation_mut().unwrap().terminal_outcome =
+            Some(SecurityTransactionTerminalOutcome::Completed {
+                completed_at: committed_at,
+                receipt_id: None,
+                completion_attestation: None,
+            });
         let security_transaction_continue_request_body =
             arkret_models_crypto::SecurityTransactionContinueRequestBody {
-                request_digest: erased.resource.request_digest.clone(),
-                prepared_plan_digest: erased.resource.prepared_plan_digest.clone(),
+                request_digest: erased.rotation().unwrap().request_digest.clone(),
+                prepared_plan_digest: erased.rotation().unwrap().prepared_plan_digest.clone(),
                 expected_accepted_step_count: 4,
                 client_attestation: attestation.clone(),
             };
@@ -4159,7 +4208,7 @@ async fn security_rotation_worker_units_and_local_commit_are_atomic() {
         .unwrap();
     assert_eq!(completed.resource, genuine.transaction.resource);
     assert!(matches!(
-        completed.resource.terminal_outcome,
+        completed.rotation().unwrap().terminal_outcome,
         Some(SecurityTransactionTerminalOutcome::Completed { .. })
     ));
     let (backups_n, outcomes, attempts) = footprint;

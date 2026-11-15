@@ -30,7 +30,7 @@ async fn current_permission(
 ) -> PersistenceResult<()> {
     use crate::capability_grant_current_states::{
         CapabilityGrantCurrentStateReadRow, RealmAuthorityRootReadRow, decode_authority_root,
-        decode_row, grant_is_active_at, validate_ancestor_graph,
+        decode_row, grant_is_active_at,
     };
     let current=sql_query("SELECT value AS record FROM applet_registration_current_states WHERE realm_id=$1 AND applet_id=$2 AND instance_event_ref=(SELECT instance_event_ref FROM applet_registration_instances WHERE realm_id=$1 AND applet_id=$2 AND registration_event_ref=$3) FOR SHARE")
         .bind::<Text,_>(install.effective_scope.realm_id().as_str()).bind::<Text,_>(install.applet_id.as_str()).bind::<Text,_>(install.registration_event_ref.as_str())
@@ -46,8 +46,10 @@ async fn current_permission(
     let rows=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_states WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
         .bind::<Text,_>(install.effective_scope.realm_id().as_str()).load::<CapabilityGrantCurrentStateReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
     let mut grants = std::collections::BTreeMap::new();
+    let mut revisions = std::collections::BTreeMap::new();
     for row in rows {
         let record = decode_row(row)?;
+        revisions.insert(record.grant_id.clone(), record.revision);
         grants.insert(record.grant_id, record.value);
     }
     let grant = grants
@@ -60,17 +62,25 @@ async fn current_permission(
             "widget grant is no longer active for its exact actor",
         ));
     }
-    let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1")
+    let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1 FOR SHARE")
         .bind::<Text,_>(install.effective_scope.realm_id().as_str()).get_result::<RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    validate_ancestor_graph(
-        &arkret_wire::GrantId::from_event_id(&install.registration_event_ref),
-        grant_id,
-        &grants,
-        &decode_authority_root(root)?,
-        install.effective_scope.realm_id(),
+    let root = decode_authority_root(root)?;
+    let authorization = coland_storage::ActorRealmAuthorization::from_source_cut(
+        actor.clone(),
         at,
-        &mut std::collections::BTreeSet::new(),
-        0,
+        std::sync::Arc::new(coland_storage::GrantAuthorityCut::new(
+            root.realm_id,
+            arkret_wire::RealmAuthorityRootValue {
+                controller_actor_id: root.controller_actor_id,
+                controller_epoch: root.controller_epoch,
+                authority_generation: root.authority_generation,
+                authority_event_ref: root.authority_event_ref,
+            },
+            grants,
+            revisions,
+        )?),
+        vec![grant_id.clone()],
+        None,
     )?;
     let facts = coland_storage::OperationFacts {
         applet_id: Some(install.applet_id.to_string()),
@@ -80,16 +90,11 @@ async fn current_permission(
     for action in actions {
         for target in resources {
             let actions = [action.as_str()];
-            let operation = coland_storage::AuthorizationOperation {
-                actor,
-                actions: &actions,
-                target,
-                at,
-                facts: &facts,
-            };
-            if coland_storage::evaluate_grants(&operation, std::iter::once(grant))
+            if !authorization
+                .evaluate_with_approvals_checked(&actions, target, &facts, &[])?
                 .unreserved()
-                .is_empty()
+                .iter()
+                .any(|grant| &grant.id == grant_id)
             {
                 return Err(denied(
                     "widget current grant does not authorize its narrowed scope",

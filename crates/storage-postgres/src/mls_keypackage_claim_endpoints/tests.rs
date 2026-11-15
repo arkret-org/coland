@@ -72,6 +72,8 @@ fn fixture() -> (KeyPackageClaimRecord, MlsClaimRemoteDeviceEvidence) {
             not_before: at,
             expires_at: None,
         },
+
+        owner_transfer_acceptance_intent_digest: None,
     };
     let attestation = arkret_signatures::device_projection::sign_device_projection_attestation(
         core,

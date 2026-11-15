@@ -684,8 +684,7 @@ async fn call_current_handoff_scenario() {
         &next_tail,
         EventKind::CallState,
         serde_json::json!({"call_id":call_id,"roster_delta":{"op":"leave","actor_id":watcher,
-            "device_id":device,"expected_revision":{"commit_id":joined.authority_commit.commit.commit_id,
-                "stream_position":joined.authority_commit.commit.stream_position}}}),
+            "device_id":device,"expected_commit_id":joined.authority_commit.commit.commit_id}}),
     ))
     .await;
     fresh.authority_commit.commit.governance_generation = 1;

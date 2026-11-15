@@ -58,6 +58,35 @@ pub fn forwarded_producer_device_evidence_ref(
 /// historical reads require the caller to authorize disclosure separately.
 #[async_trait]
 pub trait AccountDeviceSignerEvidenceStore: Send + Sync {
+    /// Finite successor consent uses the native Human Device source, never a
+    /// fabricated Event or a broad directory projection. Prepare has no writes.
+    async fn prepare_owner_transfer_current(
+        &self,
+        _component: &arkret_models_crypto::realm_owner_transfer::RealmOwnerTransferAcceptance,
+    ) -> PersistenceResult<
+        Option<(
+            arkret_models_crypto::DeviceProjectionAttestationCore,
+            CommittedEventRef,
+        )>,
+    > {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: owner-transfer native source is unavailable".into(),
+        ))
+    }
+
+    /// Re-prove the finite purpose and exact current source at the final locked
+    /// writer before retaining the complete signed historical root.
+    async fn retain_owner_transfer_current(
+        &self,
+        _evidence: &AccountDeviceSignerEvidence,
+        _authorization_ref: &CommittedEventRef,
+        _component: &arkret_models_crypto::realm_owner_transfer::RealmOwnerTransferAcceptance,
+    ) -> PersistenceResult<SignerEvidenceRef> {
+        Err(PersistenceError::Conflict(
+            "temporarily_unavailable: owner-transfer native source is unavailable".into(),
+        ))
+    }
+
     async fn prepare_non_managed_forward_current(
         &self,
         event: &arkret_wire::Event,

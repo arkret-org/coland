@@ -248,10 +248,7 @@ pub(super) async fn verify_key_backup_unlock_proof(
     }
     let method = typed.signature_proof.verification_method.as_str();
     let key = match &typed.authority {
-        KeyBackupUnlockAuthority::CurrentDevice {
-            challenge_id,
-            nonce,
-        } => {
+        KeyBackupUnlockAuthority::CurrentDevice { challenge_id } => {
             if session.session_grant.as_ref().is_some_and(|grant| {
                 grant.credential_class
                     == arkret_models_identity::SessionGrantCredentialClass::RecoverySession
@@ -278,26 +275,9 @@ pub(super) async fn verify_key_backup_unlock_proof(
             let challenge: arkret_models_crypto::KeysBackupsUnlockChallenge =
                 serde_json::from_value(stored)
                     .map_err(|error| AppError::internal(error.to_string()))?;
-            if challenge.account_id != typed.account_id
-                || challenge.requesting_device_id != typed.requesting_device_id
-                || challenge.backup_id != typed.backup_id
-                || challenge.series_id != typed.series_id
-                || challenge.ciphertext_digest != typed.ciphertext_digest
-                || challenge.challenge != typed.challenge
-                || &challenge.nonce != nonce
-                || challenge.service_id != typed.service_id
-                || challenge.audience != typed.audience
-                || challenge.subject_actor_id != typed.subject_actor_id
-                || challenge.custody_authorization_ref != typed.custody_authorization_ref
-                || challenge.content_history != typed.content_history
-                || typed.issued_at < challenge.issued_at
-                || typed.issued_at >= challenge.expires_at
-                || typed.expires_at != challenge.expires_at
-            {
-                return Err(AppError::capability_denied(
-                    "unlock proof does not match exact server challenge",
-                ));
-            }
+            typed
+                .validate_for_challenge(&challenge)
+                .map_err(|error| AppError::capability_denied(error.to_string()))?;
             // Consumption enforces first-use expiry; an exact durable retry may outlive this
             // challenge.
             let device = crate::routing::identity::device_signing::current_device_identity(
@@ -341,7 +321,7 @@ pub(super) async fn verify_key_backup_unlock_proof(
                 .ok_or_else(|| AppError::capability_denied("recovery grant required"))?;
             if grant.credential_class
                 != arkret_models_identity::SessionGrantCredentialClass::RecoverySession
-                || grant.grant_id.as_str() != record.session_grant_id
+                || grant.grant_ref() != record.session_grant_ref
                 || grant.cnf_jkt != record.session_grant_cnf_jkt
                 || record.state != coland_storage::RecoverySessionLifecycle::Verified
                 || record.expires_at <= now
@@ -455,7 +435,7 @@ pub(super) async fn issue_key_backup_unlock_challenge(
         rand::rng().fill(bytes.as_mut_slice());
         arkret_wire::Base64UrlString::new(URL_SAFE_NO_PAD.encode(bytes)).expect("base64url")
     };
-    let now = Utc::now();
+    let now = arkret_canonical::normalize_timestamp_canonical(Utc::now());
     let request_id = request.request_id;
     if !(22..=128).contains(&request_id.as_str().len()) {
         return Err(AppError::param_invalid("invalid unlock request_id"));
@@ -463,7 +443,6 @@ pub(super) async fn issue_key_backup_unlock_challenge(
     let challenge = arkret_models_crypto::KeysBackupsUnlockChallenge {
         challenge_id: random(16),
         challenge: random(32),
-        nonce: random(16),
         operation: arkret_wire::ServiceOperationId::SELF_KEYS_BACKUPS_COMMAND_UNLOCK_V1.to_owned(),
         account_id: arkret_wire::AccountId::new(
             arkret_wire::DidCoreId::new(session.actor.clone())
@@ -485,6 +464,9 @@ pub(super) async fn issue_key_backup_unlock_challenge(
         issued_at: now,
         expires_at: now + chrono::Duration::seconds(300),
     };
+    challenge
+        .validate_for_request(&challenge.request_body(), &challenge.backup_id)
+        .map_err(|error| AppError::internal(error.to_string()))?;
     if challenge.content_history.is_some() {
         let reader = crate::routing::events::pcr_history::current_reader(state, &session).await?;
         let stored = state

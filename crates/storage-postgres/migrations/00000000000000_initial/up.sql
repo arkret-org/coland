@@ -870,11 +870,20 @@ CREATE TABLE public.canonical_events (
     schema_id text DEFAULT 'ak.schema.event.v1' NOT NULL,
     canonical_bytes bytea NOT NULL,
     envelope jsonb NOT NULL,
+    successor_device_evidence_json jsonb,
     state text DEFAULT 'queued' NOT NULL,
     received_at timestamp with time zone DEFAULT now() NOT NULL,
     committed_at timestamp with time zone,
     rejection_reason text,
     CONSTRAINT canonical_events_state_check CHECK (state IN ('queued', 'committed', 'rejected')),
+    CONSTRAINT canonical_events_successor_evidence_check CHECK (
+        successor_device_evidence_json IS NULL
+        OR (
+            kind = 'ak.realm.owner.transfer'
+            AND state = 'committed'
+            AND jsonb_typeof(successor_device_evidence_json) = 'object'
+        )
+    ),
     CONSTRAINT canonical_events_state_fields_check CHECK (
         (state = 'queued' AND committed_at IS NULL AND rejection_reason IS NULL)
         OR (state = 'committed' AND committed_at IS NOT NULL AND rejection_reason IS NULL)
@@ -2967,6 +2976,7 @@ CREATE TABLE public.recovery_sessions (
     id uuid PRIMARY KEY,
     request_id text NOT NULL,
     create_intent_digest text NOT NULL,
+    session_grant_issuer_id text NOT NULL CHECK (session_grant_issuer_id LIKE 'ak:did_core:%'),
     session_grant_id text NOT NULL,
     session_grant_cnf_jkt text NOT NULL,
     principal_id text NOT NULL CHECK (principal_id LIKE 'ak:did_core:%'),
@@ -2997,7 +3007,7 @@ CREATE TABLE public.recovery_sessions (
     CONSTRAINT recovery_sessions_generation_shape_check CHECK ((current_device_generation_ref > 0)),
     CONSTRAINT recovery_sessions_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'verified'::text, 'completed'::text, 'rejected'::text, 'expired'::text]))),
     CONSTRAINT recovery_sessions_trust_domain_check CHECK ((trust_domain ~ '^ak:trust_domain:[a-z0-9][-a-z0-9._:]{0,127}$')),
-    CONSTRAINT recovery_sessions_session_grant_id_key UNIQUE (session_grant_id),
+    CONSTRAINT recovery_sessions_session_grant_id_key UNIQUE (session_grant_issuer_id, session_grant_id),
     CONSTRAINT recovery_sessions_transaction_id_key UNIQUE (transaction_id)
 );
 
@@ -3009,22 +3019,36 @@ CREATE TABLE public.security_transactions (
     principal_id text NOT NULL CHECK (principal_id LIKE 'ak:did_core:%'),
     station_id text NOT NULL,
     authorizing_device_id text CHECK (authorizing_device_id IS NULL OR authorizing_device_id LIKE 'ak:device:%'),
-    expires_at timestamp with time zone NOT NULL,
+    expires_at timestamp with time zone,
     created_at timestamp with time zone NOT NULL,
-    request_digest text NOT NULL,
-    prepared_plan jsonb NOT NULL,
-    prepared_plan_digest text NOT NULL,
-    accepted_steps jsonb NOT NULL,
+    request_digest text,
+    prepared_plan jsonb,
+    prepared_plan_digest text,
+    accepted_steps jsonb,
     revoke_proposal jsonb,
     revoke_command_outcome jsonb,
     terminal_outcome jsonb,
+    recovery_completion jsonb,
     canonical_request bytea NOT NULL,
     CONSTRAINT security_transactions_pkey PRIMARY KEY (id),
     CONSTRAINT security_transactions_kind_check CHECK ((kind = ANY (ARRAY['recovery'::text, 'security_rotation'::text]))),
-    CONSTRAINT security_transactions_authorizing_device_check CHECK (
-        (kind = 'recovery' AND authorizing_device_id IS NULL)
-        OR (kind = 'security_rotation' AND authorizing_device_id IS NOT NULL)
-    ),
+    CONSTRAINT security_transactions_branch_check CHECK ((
+        (kind = 'recovery' AND authorizing_device_id IS NULL
+            AND expires_at IS NULL AND request_digest IS NULL
+            AND prepared_plan IS NULL AND prepared_plan_digest IS NULL AND accepted_steps IS NULL
+            AND revoke_proposal IS NULL AND revoke_command_outcome IS NULL AND terminal_outcome IS NULL
+            AND recovery_completion IS NOT NULL AND jsonb_typeof(recovery_completion)='object'
+            AND recovery_completion ?& ARRAY['transaction_id','kind','account_id','created_at','recovery_receipt','completion_attestation']
+            AND recovery_completion->>'transaction_id'='ak:transaction:' || id::text
+            AND recovery_completion->>'kind'='recovery'
+            AND recovery_completion->'account_id'=jsonb_build_object('principal_id',principal_id,'station_id',station_id)
+            AND (recovery_completion->>'created_at')::timestamptz=created_at
+            AND recovery_completion #>> '{completion_attestation,device_authorization_event_ref,event_id}' IS NOT NULL)
+        OR (kind = 'security_rotation' AND authorizing_device_id IS NOT NULL
+            AND expires_at IS NOT NULL AND request_digest IS NOT NULL
+            AND prepared_plan IS NOT NULL AND prepared_plan_digest IS NOT NULL AND accepted_steps IS NOT NULL
+            AND recovery_completion IS NULL)
+    ) IS TRUE),
     CONSTRAINT security_transactions_revoke_fields_check CHECK (
         (kind = 'recovery' AND revoke_proposal IS NULL AND revoke_command_outcome IS NULL)
         OR (kind = 'security_rotation' AND
@@ -3036,9 +3060,10 @@ ALTER TABLE ONLY public.recovery_sessions
     ADD CONSTRAINT recovery_sessions_transaction_id_fkey FOREIGN KEY (transaction_id) REFERENCES public.security_transactions(id);
 
 CREATE INDEX security_transactions_principal_created_idx ON public.security_transactions USING btree (principal_id, created_at DESC);
-CREATE INDEX security_transactions_content_recovery_source_idx
- ON public.security_transactions (principal_id, station_id, (prepared_plan->'binding'->>'authorize_event_id'))
- WHERE kind='recovery' AND terminal_outcome->>'outcome'='completed';
+CREATE UNIQUE INDEX security_transactions_content_recovery_source_idx
+ ON public.security_transactions (principal_id, station_id,
+    (recovery_completion #>> '{completion_attestation,device_authorization_event_ref,event_id}'))
+ WHERE kind='recovery';
 
 -- Native recovery intents survive process loss before the inventory worker.
 -- Material preparation and release of the membership fence are independent.
@@ -4806,20 +4831,21 @@ CREATE TABLE moderation_state_current_states (
 -- `message_reactions` typed current: the canonically sorted keyed set of
 -- committed `ak.reaction.add` / `ak.reaction.remove` assertions on one target
 -- Message, each tagged by its accepting Event's `<event_id>:0` dot with the
--- complete payload. A remove is an asserted element; no element is ever
--- removed. Membership, deduplication and counts are read-side folds.
+-- complete active entries. A remove deletes its actor/key entry; an empty
+-- current retains its revision to prevent an old prefix from restoring it.
 CREATE TABLE message_reactions_current_states (
  realm_id TEXT NOT NULL,
  target_ref TEXT NOT NULL,
+ source_stream_ref JSONB NOT NULL,
  current_commit_id TEXT NOT NULL,
  current_stream_position BIGINT NOT NULL CHECK(current_stream_position BETWEEN 0 AND 9007199254740991),
  value JSONB NOT NULL,
  updated_at TIMESTAMPTZ NOT NULL,
  PRIMARY KEY(realm_id,target_ref),
  CHECK(jsonb_typeof(value)='object'),
- CHECK((value - 'assertions')='{}'::jsonb),
- CHECK(jsonb_typeof(value->'assertions')='array'),
- CHECK(jsonb_array_length(value->'assertions')>0)
+ CHECK(jsonb_typeof(source_stream_ref)='object'),
+ CHECK((value - 'entries')='{}'::jsonb),
+ CHECK(jsonb_typeof(value->'entries')='array')
 );
 
 -- `invite_lifecycle` typed current: the process-state register of one Invite,

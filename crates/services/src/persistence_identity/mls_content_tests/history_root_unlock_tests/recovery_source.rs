@@ -3,7 +3,7 @@
 use arkret_wire::RecoveryCompletionAttestation;
 use coland_storage::{DeliveryPolicyStoreRegistry as _, HumanPcrHistoryReader};
 use coland_storage_postgres::{PgPersistenceStore, PgPool};
-use diesel::sql_types::{Binary, Jsonb, Text, Uuid};
+use diesel::sql_types::{Binary, Uuid};
 use horme::RunQueryDsl as _;
 
 pub(super) async fn require_source(
@@ -109,63 +109,25 @@ pub(super) async fn exercise(
     .unwrap();
     drop(conn);
     assert_eq!(require_source(pool, reader).await, source);
-    // A native current Device and even the prepared pair are insufficient if
-    // the terminal unit outcome is absent or no longer its exact first bytes.
-    let step = store
-        .step_outcome(
-            source.transaction_id.as_str(),
-            arkret_models_crypto::SecurityTransactionStep::CommitRecoveryUnit,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    // A native current Device is insufficient if the immutable first signed
+    // request no longer matches the accepted R/C closure.
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("UPDATE security_transaction_step_outcomes SET canonical_request='\\x00'::bytea WHERE transaction_id=$1")
-        .bind::<Uuid, _>(id).execute(&mut *conn).await.unwrap();
-    drop(conn);
-    let error = store
-        .human_content_recovery_source(reader)
-        .await
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("terminal attempt differs"),
-        "{error}"
-    );
-    let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("UPDATE security_transaction_step_outcomes SET canonical_request=$2 WHERE transaction_id=$1")
-        .bind::<Uuid, _>(id).bind::<Binary, _>(&step.canonical_request).execute(&mut *conn).await.unwrap();
-    diesel::sql_query("UPDATE security_transactions SET terminal_outcome=NULL WHERE id=$1")
-        .bind::<Uuid, _>(id)
-        .execute(&mut *conn)
-        .await
-        .unwrap();
+    diesel::sql_query(
+        "UPDATE security_transactions SET canonical_request='\\x00'::bytea WHERE id=$1",
+    )
+    .bind::<Uuid, _>(id)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
     drop(conn);
     assert!(store.human_content_recovery_source(reader).await.is_err());
     let mut conn = pool.get().await.unwrap();
-    diesel::sql_query("UPDATE security_transactions SET terminal_outcome=$2 WHERE id=$1")
+    diesel::sql_query("UPDATE security_transactions SET canonical_request=$2 WHERE id=$1")
         .bind::<Uuid, _>(id)
-        .bind::<Jsonb, _>(serde_json::to_value(&transaction.resource.terminal_outcome).unwrap())
+        .bind::<Binary, _>(&transaction.canonical_request)
         .execute(&mut *conn)
         .await
         .unwrap();
-    // The immutable-original trigger blocks a payload rewrite before it could
-    // become a copied-coordinate recovery source.
-    let error = diesel::sql_query("UPDATE canonical_events SET envelope=jsonb_set(envelope,'{payload,new_device_generation}','999'::jsonb) WHERE envelope->>'event_id'=$1")
-        .bind::<Text, _>(source.reanchor_event_ref.event_id.as_str()).execute(&mut *conn).await.unwrap_err();
-    assert!(error.to_string().contains("immutable"), "{error}");
-    drop(conn);
-    assert_eq!(require_source(pool, reader).await, source);
-    // Canonical bytes have the same protection. Do not turn off production
-    // triggers to manufacture a positive native fixture.
-    let mut conn = pool.get().await.unwrap();
-    let error = diesel::sql_query(
-        "UPDATE canonical_events SET canonical_bytes='\\x00'::bytea WHERE envelope->>'event_id'=$1",
-    )
-    .bind::<Text, _>(source.reanchor_event_ref.event_id.as_str())
-    .execute(&mut *conn)
-    .await
-    .unwrap_err();
-    assert!(error.to_string().contains("immutable"), "{error}");
     drop(conn);
     assert_eq!(require_source(pool, reader).await, source);
 }

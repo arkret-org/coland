@@ -23,10 +23,8 @@ pub(crate) async fn retain_recovery_unit_in_connection(
     write: &RecoveryUnitCommitWrite,
 ) -> PersistenceResult<()> {
     write.validate()?;
-    let resource = &write.transaction.resource;
-    let plan = resource
-        .recovery_plan()
-        .ok_or_else(|| rejected("original recovery plan is absent"))?;
+    let resource = write.transaction.recovery()?;
+    let receipt = &resource.recovery_receipt;
     let [reanchor, authorize] = &write.commits;
     let account = &resource.account_id;
     let payload: DeviceAuthorizePayload =
@@ -64,7 +62,7 @@ pub(crate) async fn retain_recovery_unit_in_connection(
     let provenance = serde_json::json!({
         "accepted_pcr_realm_id": authorize.event.realm_id,
         "recovery_transaction_id": resource.transaction_id,
-        "recovery_session_id": plan.binding.recovery_session_id,
+        "recovery_session_id": receipt.recovery_session_id,
         "reanchor_event_ref": reference(reanchor),
         "device_authorization_event_ref": authorization_ref,
     });

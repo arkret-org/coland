@@ -24,8 +24,14 @@ use crate::hlc::ServerHlc;
 pub struct ProjectionState {
     /// Messages keyed by event_id. LWW by created_at.
     pub messages: BTreeMap<String, MessageState>,
-    /// Reactions keyed by (event_id, actor, reaction_key). OR-Set.
-    pub reactions: BTreeMap<String, BTreeMap<String, BTreeMap<String, ReactionState>>>,
+    /// Display cache of active entries, keyed by the target Message Event.
+    /// Accepted source facts come from the durable native current projection.
+    pub reactions: BTreeMap<
+        String,
+        arkret_models_collaboration::events_payloads::MessageReactionsCurrentValue,
+    >,
+    /// The latest accepted row revision is retained even for an empty value.
+    pub reaction_revisions: BTreeMap<String, arkret_wire::CommittedEventRef>,
     /// Calendar RSVP projection keyed by the registered composite cell subject
     /// `(event_ref, occurrence, actor_id)`, where `occurrence` keeps the signed
     /// JSON null as `None` rather than a sentinel string.

@@ -218,6 +218,7 @@ async fn admit_mls_event_inner(
         &EventAdmissionSubmission::new(event.clone()),
         producer,
         SelfEventUnitEffects {
+            owner_transfer_successor: None,
             mls: Some(MlsUnitInstallation {
                 state: installation,
                 welcomes,

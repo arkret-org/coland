@@ -1,7 +1,7 @@
 //! Account Device governance commands on the private Realm control stream.
 use arkret_models_integration::*;
 use arkret_wire::{
-    ActorId, CommittedEventRef, CurrentRevision, Event, EventKind, RealmCommit, ScopeRef,
+    ActorId, CommittedEventRef, Event, EventKind, RealmCommit, ScopeRef,
 };
 use coland_storage::{EventApprovalCommit, PersistenceError};
 use serde_json::{Value, json};
@@ -14,12 +14,6 @@ fn invalid(detail: impl std::fmt::Display) -> PgTransactionError {
 }
 fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, PgTransactionError> {
     serde_json::from_value(value).map_err(invalid)
-}
-fn revision(source: &CommittedEventRef) -> CurrentRevision {
-    CurrentRevision {
-        commit_id: source.commit_id.clone(),
-        stream_position: source.stream_position,
-    }
 }
 pub(crate) fn is_command(event: &Event) -> bool {
     matches!(
@@ -85,7 +79,7 @@ pub(crate) async fn commit(
         EventKind::RealmActorStatusSet => {
             let payload: RealmActorStatusSetPayload = decode(json!(event.payload))?;
             if payload.gate != RealmActorStatusSetPayloadGate::Governance
-                || payload.expected_revision != revision(&governance_ref)
+                || payload.expected_commit_id != governance_ref.commit_id
                 || governance == "retired"
                 || (owner == "retired" && payload.state != RealmActorStatusSetPayloadState::Retired)
             {
@@ -109,8 +103,8 @@ pub(crate) async fn commit(
                 json!({"kind":"realm_actor_manager","actor_id":actor}),
             )
             .await?;
-            if payload.expected_recovery_revision != revision(&recovery_ref)
-                || payload.expected_manager_revision != revision(&manager_ref)
+            if payload.expected_recovery_commit_id != recovery_ref.commit_id
+                || payload.expected_manager_commit_id != manager_ref.commit_id
                 || payload.enabled == recovery.enabled
                 || ((owner == "retired" || governance == "retired") && payload.enabled)
             {

@@ -196,6 +196,10 @@ impl PersistenceError {
 /// into a caller-facing reason.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ConflictCode {
+    /// A new Account act targets an accepted deactivated Account checkpoint.
+    AccountDeactivated,
+    /// A new Account act targets the terminal erasure checkpoint.
+    AccountErased,
     /// A Agent act-on-behalf approval nonce was already consumed.
     ApprovalNonceReused,
     /// A List WIP review is required but no verified approval reached this unit.
@@ -358,8 +362,6 @@ pub enum ConflictCode {
     /// A Capability Grant names authority its issuer does not hold at the
     /// accepting cut (`capabilities.md` §3.2).
     GrantExceedsIssuerAuthority,
-    /// A Capability Grant's issuer chain loops back on itself.
-    AuthorityCycle,
     /// A child Capability Grant outlives its issuer's authority.
     AuthorityExpiryWidening,
     /// `ak.capability.relinquish` by an actor other than the grant subject.
@@ -401,7 +403,9 @@ pub enum ConflictCode {
 
 impl ConflictCode {
     /// Every registered code, in the order the variants are declared.
-    pub const ALL: [Self; 91] = [
+    pub const ALL: [Self; 92] = [
+        Self::AccountDeactivated,
+        Self::AccountErased,
         Self::ApprovalNonceReused,
         Self::ApprovalRequired,
         Self::AppletRevoked,
@@ -475,7 +479,6 @@ impl ConflictCode {
         Self::InviteDirectedInviteeMismatch,
         Self::InviteAlreadyTerminal,
         Self::GrantExceedsIssuerAuthority,
-        Self::AuthorityCycle,
         Self::AuthorityExpiryWidening,
         Self::GrantRelinquishNotSubject,
         Self::DirectConversationFoundingUnitInvalid,
@@ -531,6 +534,8 @@ impl ConflictCode {
             Self::EventIdDigestMismatch => "event_id_digest_mismatch",
             Self::EventNotAccepted => "event_not_accepted",
             Self::DidMethodSuccessorInvalid => "did_method_successor_invalid",
+            Self::AccountDeactivated => arkret_wire::ErrorCode::ACCOUNT_DEACTIVATED,
+            Self::AccountErased => arkret_wire::ErrorCode::ACCOUNT_ERASED,
             Self::FailedPrecondition => "failed_precondition",
             Self::StrandNotActive => arkret_wire::ReasonCode::STRAND_NOT_ACTIVE,
             Self::StrandNotArchived => arkret_wire::ReasonCode::STRAND_NOT_ARCHIVED,
@@ -597,7 +602,6 @@ impl ConflictCode {
             Self::GrantExceedsIssuerAuthority => {
                 arkret_wire::ReasonCode::GRANT_EXCEEDS_ISSUER_AUTHORITY
             }
-            Self::AuthorityCycle => arkret_wire::ReasonCode::AUTHORITY_CYCLE,
             Self::AuthorityExpiryWidening => arkret_wire::ReasonCode::AUTHORITY_EXPIRY_WIDENING,
             Self::GrantRelinquishNotSubject => {
                 arkret_wire::ReasonCode::GRANT_RELINQUISH_NOT_SUBJECT
@@ -861,3 +865,5 @@ mod conflict_code_tests {
 
 mod registered_audit;
 pub use registered_audit::*;
+mod realm_owner_transfer;
+pub use realm_owner_transfer::OwnerTransferSuccessorSource;

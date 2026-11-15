@@ -1,4 +1,7 @@
-use arkret_models_crypto::{SecurityTransaction, SecurityTransactionKind, SecurityTransactionStep};
+use arkret_models_crypto::{
+    SecurityRotationTransaction, SecurityTransaction, SecurityTransactionKind,
+    SecurityTransactionStep,
+};
 use arkret_wire::{DeviceId, DidCoreId, Hash, TransactionId};
 
 use super::{
@@ -53,24 +56,26 @@ struct SecurityTransactionRow {
     station_id: DidCoreId,
     #[diesel(sql_type = Nullable<Text>)]
     authorizing_device_id: Option<String>,
-    #[diesel(sql_type = Timestamptz)]
-    expires_at: chrono::DateTime<chrono::Utc>,
+    #[diesel(sql_type = Nullable<Timestamptz>) ]
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
     #[diesel(sql_type = Timestamptz)]
     created_at: chrono::DateTime<chrono::Utc>,
-    #[diesel(sql_type = Text)]
-    request_digest: String,
-    #[diesel(sql_type = Jsonb)]
-    prepared_plan: Value,
-    #[diesel(sql_type = Text)]
-    prepared_plan_digest: String,
-    #[diesel(sql_type = Jsonb)]
-    accepted_steps: Value,
+    #[diesel(sql_type = Nullable<Text>) ]
+    request_digest: Option<String>,
+    #[diesel(sql_type = Nullable<Jsonb>) ]
+    prepared_plan: Option<Value>,
+    #[diesel(sql_type = Nullable<Text>) ]
+    prepared_plan_digest: Option<String>,
+    #[diesel(sql_type = Nullable<Jsonb>) ]
+    accepted_steps: Option<Value>,
     #[diesel(sql_type = Nullable<Jsonb>)]
     revoke_proposal: Option<Value>,
     #[diesel(sql_type = Nullable<Jsonb>)]
     revoke_command_outcome: Option<Value>,
     #[diesel(sql_type = Nullable<Jsonb>)]
     terminal_outcome: Option<Value>,
+    #[diesel(sql_type = Nullable<Jsonb>)]
+    recovery_completion: Option<Value>,
     #[diesel(sql_type = Binary)]
     canonical_request: Vec<u8>,
 }
@@ -151,36 +156,78 @@ impl TryFrom<SecurityTransactionRow> for SecurityTransactionRecord {
     type Error = PersistenceError;
 
     fn try_from(row: SecurityTransactionRow) -> Result<Self, Self::Error> {
-        let resource = SecurityTransaction {
-            transaction_id: TransactionId::new(ids::format_typed_uuid("transaction", &row.id))
-                .map_err(|error| PersistenceError::Internal(error.to_string()))?,
-            kind: parse_stored("kind", Value::String(row.kind))?,
-            account_id: arkret_wire::AccountId::new(row.principal_id, row.station_id),
-            authorizing_device_id: row
-                .authorizing_device_id
-                .map(DeviceId::new)
-                .transpose()
-                .map_err(|error| PersistenceError::Internal(error.to_string()))?,
-            expires_at: row.expires_at,
-            created_at: row.created_at,
-            request_digest: Hash::new(row.request_digest)
-                .map_err(|error| PersistenceError::Internal(error.to_string()))?,
-            prepared_plan: parse_stored("prepared_plan", row.prepared_plan)?,
-            prepared_plan_digest: Hash::new(row.prepared_plan_digest)
-                .map_err(|error| PersistenceError::Internal(error.to_string()))?,
-            accepted_steps: parse_stored("accepted_steps", row.accepted_steps)?,
-            revoke_proposal: row
-                .revoke_proposal
-                .map(|value| parse_stored("revoke_proposal", value))
-                .transpose()?,
-            revoke_command_outcome: row
-                .revoke_command_outcome
-                .map(|value| parse_stored("revoke_command_outcome", value))
-                .transpose()?,
-            terminal_outcome: row
-                .terminal_outcome
-                .map(|result| parse_stored("terminal_outcome", result))
-                .transpose()?,
+        let missing =
+            |name: &str| PersistenceError::Internal(format!("stored Rotation missing {name}"));
+        let transaction_id = TransactionId::new(ids::format_typed_uuid("transaction", &row.id))
+            .map_err(|e| PersistenceError::Internal(e.to_string()))?;
+        let account_id = arkret_wire::AccountId::new(row.principal_id, row.station_id);
+        let resource = match row.kind.as_str() {
+            "recovery" => {
+                let completed: arkret_models_crypto::RecoveryTransactionCompletion = parse_stored(
+                    "recovery_completion",
+                    row.recovery_completion
+                        .ok_or_else(|| missing("recovery_completion"))?,
+                )?;
+                if completed.transaction_id != transaction_id
+                    || completed.account_id != account_id
+                    || completed.created_at != row.created_at
+                {
+                    return Err(PersistenceError::Internal(
+                        "stored Recovery identity differs from its immutable closure".into(),
+                    ));
+                }
+                SecurityTransaction::Recovery(completed)
+            }
+            "security_rotation" => {
+                SecurityTransaction::SecurityRotation(SecurityRotationTransaction {
+                    transaction_id,
+                    kind: SecurityTransactionKind::SecurityRotation,
+                    account_id,
+                    authorizing_device_id: DeviceId::new(
+                        row.authorizing_device_id
+                            .ok_or_else(|| missing("authorizing_device_id"))?,
+                    )
+                    .map_err(|e| PersistenceError::Internal(e.to_string()))?,
+                    expires_at: row.expires_at.ok_or_else(|| missing("expires_at"))?,
+                    created_at: row.created_at,
+                    request_digest: Hash::new(
+                        row.request_digest
+                            .ok_or_else(|| missing("request_digest"))?,
+                    )
+                    .map_err(|e| PersistenceError::Internal(e.to_string()))?,
+                    prepared_plan: parse_stored(
+                        "prepared_plan",
+                        row.prepared_plan.ok_or_else(|| missing("prepared_plan"))?,
+                    )?,
+                    prepared_plan_digest: Hash::new(
+                        row.prepared_plan_digest
+                            .ok_or_else(|| missing("prepared_plan_digest"))?,
+                    )
+                    .map_err(|e| PersistenceError::Internal(e.to_string()))?,
+                    accepted_steps: parse_stored(
+                        "accepted_steps",
+                        row.accepted_steps
+                            .ok_or_else(|| missing("accepted_steps"))?,
+                    )?,
+                    revoke_proposal: row
+                        .revoke_proposal
+                        .map(|v| parse_stored("revoke_proposal", v))
+                        .transpose()?,
+                    revoke_command_outcome: row
+                        .revoke_command_outcome
+                        .map(|v| parse_stored("revoke_command_outcome", v))
+                        .transpose()?,
+                    terminal_outcome: row
+                        .terminal_outcome
+                        .map(|v| parse_stored("terminal_outcome", v))
+                        .transpose()?,
+                })
+            }
+            _ => {
+                return Err(PersistenceError::Internal(
+                    "stored security transaction has unknown branch".into(),
+                ));
+            }
         };
         resource
             .validate_structural()
@@ -202,7 +249,19 @@ fn parse_stored<T: serde::de::DeserializeOwned>(name: &str, value: Value) -> Per
 
 const COLUMNS: &str = "id, kind, principal_id, station_id, authorizing_device_id, expires_at, created_at, \
     request_digest, prepared_plan, prepared_plan_digest, accepted_steps, \
-    revoke_proposal, revoke_command_outcome, terminal_outcome, canonical_request";
+    revoke_proposal, revoke_command_outcome, terminal_outcome, recovery_completion, canonical_request";
+
+async fn lock_transaction_identity(
+    conn: &mut AsyncPgConnection,
+    transaction_id: &str,
+) -> Result<(), PgTransactionError> {
+    sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind::<Text, _>(format!("security-transaction:{transaction_id}"))
+        .execute(conn)
+        .await
+        .map_err(PersistenceError::database)?;
+    Ok(())
+}
 
 pub(crate) async fn load_one(
     conn: &mut AsyncPgConnection,
@@ -259,69 +318,35 @@ async fn insert_one(
     record: &SecurityTransactionRecord,
 ) -> PersistenceResult<()> {
     let resource = &record.resource;
-    sql_query(
-        "INSERT INTO security_transactions \
-         (id, kind, principal_id, station_id, authorizing_device_id, expires_at, created_at, request_digest, \
-           prepared_plan, prepared_plan_digest, accepted_steps, \
-           revoke_proposal, revoke_command_outcome, terminal_outcome, canonical_request) \
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
-    )
-    .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(
-        resource.transaction_id.as_str(),
-    ))
-    .bind::<Text, _>(match resource.kind {
-        SecurityTransactionKind::Recovery => "recovery",
-        SecurityTransactionKind::SecurityRotation => "security_rotation",
-    })
-    .bind::<Text, _>(resource.account_id.principal_id.as_str())
-    .bind::<Text, _>(resource.account_id.station_id.as_str())
-    .bind::<Nullable<Text>, _>(
-        resource
-            .authorizing_device_id
-            .as_ref()
-            .map(|device_id| device_id.as_str()),
-    )
-    .bind::<Timestamptz, _>(resource.expires_at)
-    .bind::<Timestamptz, _>(resource.created_at)
-    .bind::<Text, _>(resource.request_digest.as_str())
-    .bind::<Jsonb, _>(
-        serde_json::to_value(&resource.prepared_plan)
-            .map_err(|error| PersistenceError::Internal(error.to_string()))?,
-    )
-    .bind::<Text, _>(resource.prepared_plan_digest.as_str())
-    .bind::<Jsonb, _>(
-        serde_json::to_value(&resource.accepted_steps)
-            .map_err(|error| PersistenceError::Internal(error.to_string()))?,
-    )
-    .bind::<Nullable<Jsonb>, _>(
-        resource
-            .revoke_proposal
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(|error| PersistenceError::Internal(error.to_string()))?,
-    )
-    .bind::<Nullable<Jsonb>, _>(
-        resource
-            .revoke_command_outcome
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(|error| PersistenceError::Internal(error.to_string()))?,
-    )
-    .bind::<Nullable<Jsonb>, _>(
-        resource
-            .terminal_outcome
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(|error| PersistenceError::Internal(error.to_string()))?,
-    )
-    .bind::<Binary, _>(&record.canonical_request)
-    .execute(conn)
-    .await
-    .map(|_| ())
-    .map_err(PersistenceError::database)
+    let rotation = match resource {
+        SecurityTransaction::SecurityRotation(r) => Some(r),
+        _ => None,
+    };
+    let completion = match resource {
+        SecurityTransaction::Recovery(c) => Some(c),
+        _ => None,
+    };
+    let created_at = match resource {
+        SecurityTransaction::SecurityRotation(r) => r.created_at,
+        SecurityTransaction::Recovery(c) => c.created_at,
+    };
+    sql_query("INSERT INTO security_transactions (id,kind,principal_id,station_id,authorizing_device_id,expires_at,created_at,request_digest,prepared_plan,prepared_plan_digest,accepted_steps,revoke_proposal,revoke_command_outcome,terminal_outcome,recovery_completion,canonical_request) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)")
+        .bind::<sql_types::Uuid,_>(ids::typed_uuid_part_expect_internal(resource.transaction_id().as_str()))
+        .bind::<Text,_>(if completion.is_some() { "recovery" } else { "security_rotation" })
+        .bind::<Text,_>(resource.account_id().principal_id.as_str())
+        .bind::<Text,_>(resource.account_id().station_id.as_str())
+        .bind::<Nullable<Text>,_>(rotation.map(|r| r.authorizing_device_id.as_str()))
+        .bind::<Nullable<Timestamptz>,_>(rotation.map(|r| r.expires_at))
+        .bind::<Timestamptz,_>(created_at)
+        .bind::<Nullable<Text>,_>(rotation.map(|r| r.request_digest.as_str()))
+        .bind::<Nullable<Jsonb>,_>(rotation.map(|r| serde_json::to_value(&r.prepared_plan)).transpose().map_err(PersistenceError::database)?)
+        .bind::<Nullable<Text>,_>(rotation.map(|r| r.prepared_plan_digest.as_str()))
+        .bind::<Nullable<Jsonb>,_>(rotation.map(|r| serde_json::to_value(&r.accepted_steps)).transpose().map_err(PersistenceError::database)?)
+        .bind::<Nullable<Jsonb>,_>(rotation.and_then(|r| r.revoke_proposal.as_ref()).map(serde_json::to_value).transpose().map_err(PersistenceError::database)?)
+        .bind::<Nullable<Jsonb>,_>(rotation.and_then(|r| r.revoke_command_outcome.as_ref()).map(serde_json::to_value).transpose().map_err(PersistenceError::database)?)
+        .bind::<Nullable<Jsonb>,_>(rotation.and_then(|r| r.terminal_outcome.as_ref()).map(serde_json::to_value).transpose().map_err(PersistenceError::database)?)
+        .bind::<Nullable<Jsonb>,_>(completion.map(serde_json::to_value).transpose().map_err(PersistenceError::database)?)
+        .bind::<Binary,_>(&record.canonical_request).execute(conn).await.map(|_|()).map_err(PersistenceError::database)
 }
 
 pub(crate) async fn load_step_outcome(
@@ -378,21 +403,21 @@ async fn update_mutable_fields(
     conn: &mut AsyncPgConnection,
     record: &SecurityTransactionRecord,
 ) -> PersistenceResult<()> {
+    let rotation = record.rotation()?;
     sql_query(
         "UPDATE security_transactions SET accepted_steps = $2, \
          revoke_proposal = $3, revoke_command_outcome = $4, \
          terminal_outcome = $5 WHERE id = $1",
     )
     .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(
-        record.resource.transaction_id.as_str(),
+        record.resource.transaction_id().as_str(),
     ))
     .bind::<Jsonb, _>(
-        serde_json::to_value(&record.resource.accepted_steps)
+        serde_json::to_value(&rotation.accepted_steps)
             .map_err(|error| PersistenceError::Internal(error.to_string()))?,
     )
     .bind::<Nullable<Jsonb>, _>(
-        record
-            .resource
+        rotation
             .revoke_proposal
             .as_ref()
             .map(serde_json::to_value)
@@ -400,8 +425,7 @@ async fn update_mutable_fields(
             .map_err(|error| PersistenceError::Internal(error.to_string()))?,
     )
     .bind::<Nullable<Jsonb>, _>(
-        record
-            .resource
+        rotation
             .revoke_command_outcome
             .as_ref()
             .map(serde_json::to_value)
@@ -409,8 +433,7 @@ async fn update_mutable_fields(
             .map_err(|error| PersistenceError::Internal(error.to_string()))?,
     )
     .bind::<Nullable<Jsonb>, _>(
-        record
-            .resource
+        rotation
             .terminal_outcome
             .as_ref()
             .map(serde_json::to_value)
@@ -431,54 +454,11 @@ fn enum_text<T: serde::Serialize>(value: T) -> PersistenceResult<String> {
         .ok_or_else(|| PersistenceError::Internal("wire enum did not serialize as text".to_owned()))
 }
 
-#[derive(QueryableByName)]
-struct RecoverySessionBindingRow {
-    #[diesel(sql_type = Text)]
-    principal_id: DidCoreId,
-    #[diesel(sql_type = Text)]
-    state: String,
-    #[diesel(sql_type = Timestamptz)]
-    expires_at: chrono::DateTime<chrono::Utc>,
-    #[diesel(sql_type = Nullable<sql_types::Uuid>)]
-    transaction_id: Option<Uuid>,
-}
-
-async fn lock_transaction_recovery_authority(
-    conn: &mut AsyncPgConnection,
-    record: &SecurityTransactionRecord,
-) -> Result<(), PgTransactionError> {
-    if record.resource.terminal_outcome.is_some() {
-        return Ok(());
-    }
-    if let Some(binding) = record.resource.recovery_plan().map(|plan| &plan.binding) {
-        let session = crate::recovery::lock_recovery_session_authority(
-            conn,
-            binding.recovery_session_id.as_str(),
-        )
-        .await?;
-        if session["principal_id"].as_str()
-            != Some(record.resource.account_id.principal_id.as_str())
-            || session["station_id"].as_str()
-                != Some(record.resource.account_id.station_id.as_str())
-        {
-            return Err(PersistenceError::Conflict(
-                "recovery transaction account mismatch".to_owned(),
-            )
-            .into());
-        }
-    }
-    Ok(())
-}
-
 /// Where the durable step attempt for an accepted step comes from.
 ///
-/// Steps a coordinator drives on its own still freeze their canonical request
-/// bytes before the participant side effect, so their attempt row must already
-/// exist. `security-transactions.md` sections 2.2 and 2.5 forbid that shape for
-/// `commit_recovery_unit`: a failed re-verification MUST NOT freeze any step
-/// outcome and a corrected receipt MUST still be accepted, so its attempt row
-/// is written in the same transaction as the outcome it belongs to and
-/// disappears with it on rollback.
+/// Rotation workers freeze request bytes before participant side effects.
+/// A local co-transaction Rotation unit may create its attempt with its outcome.
+/// Recovery does not create step records.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StepAttemptSource {
     DurablyBegun,
@@ -488,8 +468,7 @@ pub(crate) enum StepAttemptSource {
 /// Accept one security-transaction step inside a transaction the caller owns.
 ///
 /// This is the whole terminal ledger write: the first response bytes, the
-/// mutable resource fields and, for a completed recovery transaction, the
-/// recovery session consumption.
+/// mutable Rotation resource fields. Recovery has its own indivisible unit.
 pub(crate) async fn accept_step_in_transaction(
     conn: &mut AsyncPgConnection,
     record: SecurityTransactionRecord,
@@ -500,15 +479,12 @@ pub(crate) async fn accept_step_in_transaction(
         .resource
         .validate_structural()
         .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-    let transaction_id = record.resource.transaction_id.as_str().to_owned();
+    let transaction_id = record.resource.transaction_id().as_str().to_owned();
     if outcome.transaction_id != transaction_id {
         return Err(PersistenceError::SchemaViolation(
             "security transaction step outcome belongs to a different transaction".to_owned(),
         )
         .into());
-    }
-    if let Some(existing) = load_one(conn, &transaction_id, false).await? {
-        lock_transaction_recovery_authority(conn, &existing).await?;
     }
     let existing = load_one(conn, &transaction_id, true)
         .await?
@@ -553,29 +529,6 @@ pub(crate) async fn accept_step_in_transaction(
     .await
     .map_err(PersistenceError::database)?;
     update_mutable_fields(conn, &record).await?;
-    if matches!(
-        record.resource.terminal_outcome,
-        Some(arkret_models_crypto::SecurityTransactionTerminalOutcome::Completed { .. })
-    ) && let Some(binding) = record.resource.recovery_plan().map(|plan| &plan.binding)
-    {
-        let affected = sql_query(
-            "UPDATE recovery_sessions SET state = 'completed', updated_at = NOW() \
-             WHERE id = $1 AND transaction_id = $2 AND state = 'verified'",
-        )
-        .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(
-            binding.recovery_session_id.as_str(),
-        ))
-        .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(&transaction_id))
-        .execute(&mut *conn)
-        .await
-        .map_err(PersistenceError::database)?;
-        if affected != 1 {
-            return Err(PersistenceError::Conflict(
-                "terminal recovery transaction does not own a verified recovery session".to_owned(),
-            )
-            .into());
-        }
-    }
     Ok(outcome)
 }
 
@@ -726,8 +679,7 @@ impl SecurityTransactionStore for PgSecurityTransactionStore {
     async fn commit_recovery_unit(
         &self,
         write: RecoveryUnitCommitWrite,
-    ) -> PersistenceResult<SecurityTransactionStepOutcomeRecord> {
-        write.validate()?;
+    ) -> PersistenceResult<SecurityTransactionRecord> {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             recovery_unit::commit_recovery_unit_in_connection(conn, write).await
@@ -740,104 +692,34 @@ impl SecurityTransactionStore for PgSecurityTransactionStore {
         &self,
         record: SecurityTransactionRecord,
     ) -> PersistenceResult<SecurityTransactionRecord> {
-        record
-            .resource
+        let rotation = record.rotation()?;
+        rotation
             .validate_structural()
-            .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        if record.resource.revoke_proposal.is_some()
-            || record.resource.revoke_command_outcome.is_some()
-        {
+            .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+        if rotation.revoke_proposal.is_some() || rotation.revoke_command_outcome.is_some() {
             return Err(PersistenceError::Conflict(
-                "security rotation proposal and result require their guarded durable unit"
-                    .to_owned(),
+                "Rotation proposal/result require their guarded unit".into(),
             ));
         }
         arkret_canonical::canonical::verify_digest(
             &record.canonical_request,
-            record.resource.request_digest.as_str(),
+            rotation.request_digest.as_str(),
         )
-        .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        let recovery_session_id = record
-            .resource
-            .recovery_plan()
-            .map(|plan| &plan.binding)
-            .map(|binding| binding.recovery_session_id.as_str().to_owned());
-        let transaction_id = record.resource.transaction_id.as_str().to_owned();
-        let principal_id = record.resource.account_id.principal_id.clone();
+        .map_err(|e| PersistenceError::SchemaViolation(e.to_string()))?;
+        let transaction_id = rotation.transaction_id.to_string();
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            if let Some(existing)=load_one(conn,&transaction_id,false).await? {
-                lock_transaction_recovery_authority(conn,&existing).await?;
-            } else {
-                lock_transaction_recovery_authority(conn,&record).await?;
-            }
-            let existing = load_one(conn, &transaction_id, true).await?;
-            match super::classify_security_transaction_first_write(
-                existing
-                    .as_ref()
-                    .map(|stored| stored.canonical_request.as_slice()),
-                &record.canonical_request,
-            )? {
-                super::SecurityTransactionFirstWriteDecision::ExactRetry => {
-                    return Ok(existing.expect("exact retry has an existing record"));
-                }
-                super::SecurityTransactionFirstWriteDecision::Insert => {}
-            }
-            if let Some(recovery_session_id) = &recovery_session_id {
-                let session = sql_query(
-                    "SELECT principal_id, state, expires_at, transaction_id FROM recovery_sessions \
-                     WHERE id = $1 FOR UPDATE",
-                )
-                .bind::<sql_types::Uuid, _>(
-                    ids::parse_typed_uuid(recovery_session_id, "recovery_session").ok_or_else(
-                        || {
-                            PersistenceError::SchemaViolation(format!(
-                                "malformed recovery_session_id `{recovery_session_id}`"
-                            ))
-                        },
-                    )?,
-                )
-                .get_result::<RecoverySessionBindingRow>(conn)
-                .await
-                .optional()
-                .map_err(PersistenceError::database)?
-                .ok_or_else(|| {
-                    PersistenceError::NotFound(format!(
-                        "recovery_session_id `{recovery_session_id}` not found"
-                    ))
-                })?;
-                if session.principal_id != principal_id
-                    || session.state != "verified"
-                    || session.expires_at <= chrono::Utc::now()
-                    || session.transaction_id.is_some()
-                {
-                    return Err(PersistenceError::Conflict(
-                        "recovery session is not an unbound current verified session for the transaction principal"
-                            .to_owned(),
-                    )
-                    .into());
-                }
+            // The advisory lock covers absence as well as existing rows. The
+            // accepted identity is never overwritten by a racing first writer.
+            lock_transaction_identity(conn, &transaction_id).await?;
+            if let Some(existing) = load_one(conn, &transaction_id, true).await? {
+                super::classify_security_transaction_first_write(
+                    Some(&existing.canonical_request),
+                    &record.canonical_request,
+                )?;
+                return Ok(existing);
             }
             insert_one(conn, &record).await?;
-            if let Some(recovery_session_id) = recovery_session_id {
-                sql_query(
-                    "UPDATE recovery_sessions SET transaction_id = $2, updated_at = NOW() \
-                     WHERE id = $1 AND transaction_id IS NULL",
-                )
-                .bind::<sql_types::Uuid, _>(
-                    ids::parse_typed_uuid(&recovery_session_id, "recovery_session").ok_or_else(
-                        || {
-                            PersistenceError::SchemaViolation(format!(
-                                "malformed recovery_session_id `{recovery_session_id}`"
-                            ))
-                        },
-                    )?,
-                )
-                .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(&transaction_id))
-                .execute(conn)
-                .await
-                .map_err(PersistenceError::database)?;
-            }
             Ok(record)
         })
         .await
@@ -858,11 +740,8 @@ impl SecurityTransactionStore for PgSecurityTransactionStore {
             .validate_structural()
             .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
         let mut conn = pg_conn(&self.pool).await?;
-        let transaction_id = record.resource.transaction_id.as_str().to_owned();
+        let transaction_id = record.resource.transaction_id().as_str().to_owned();
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            if let Some(existing) = load_one(conn, &transaction_id, false).await? {
-                lock_transaction_recovery_authority(conn, &existing).await?;
-            }
             let existing = load_one(conn, &transaction_id, true)
                 .await?
                 .ok_or_else(|| {
@@ -871,13 +750,15 @@ impl SecurityTransactionStore for PgSecurityTransactionStore {
                     ))
                 })?;
             super::validate_security_transaction_update(&existing, &record)?;
-            if existing.resource.revoke_command_outcome != record.resource.revoke_command_outcome {
+            if existing.rotation()?.revoke_command_outcome
+                != record.rotation()?.revoke_command_outcome
+            {
                 return Err(PersistenceError::Conflict(
                     "revoke command result requires its guarded terminal unit".to_owned(),
                 )
                 .into());
             }
-            if record.resource.accepted_steps != existing.resource.accepted_steps {
+            if record.rotation()?.accepted_steps != existing.rotation()?.accepted_steps {
                 return Err(PersistenceError::Conflict(
                     "security transaction accepted step requires its durable outcome unit"
                         .to_owned(),
@@ -917,7 +798,7 @@ impl SecurityTransactionStore for PgSecurityTransactionStore {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
             if let Some(record) = load_one(conn, &transaction_id, false).await? {
-                lock_transaction_recovery_authority(conn, &record).await?;
+                record.rotation()?;
             }
             if load_one(conn, &transaction_id, true).await?.is_none() {
                 return Err(PersistenceError::NotFound(format!(
@@ -974,7 +855,7 @@ impl SecurityTransactionStore for PgSecurityTransactionStore {
             .resource
             .validate_structural()
             .map_err(|error| PersistenceError::SchemaViolation(error.to_string()))?;
-        let transaction_id = record.resource.transaction_id.as_str().to_owned();
+        let transaction_id = record.resource.transaction_id().as_str().to_owned();
         if outcome.transaction_id != transaction_id {
             return Err(PersistenceError::SchemaViolation(
                 "security transaction step outcome belongs to a different transaction".to_owned(),

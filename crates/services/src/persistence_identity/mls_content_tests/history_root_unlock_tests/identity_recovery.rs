@@ -13,7 +13,7 @@ use arkret_models_crypto::*;
 use arkret_wire::*;
 use coland_storage::{
     PersistenceStore, RecoveryAuthorityContext, RecoverySessionLifecycle, RecoverySessionRecord,
-    RecoveryUnitCommitWrite, SecurityTransactionRecord, SecurityTransactionStepOutcomeRecord,
+    RecoveryUnitCommitWrite, SecurityTransactionRecord,
 };
 use coland_storage_postgres::{PgPersistenceStore, PgPool};
 use device_authorization_history::{DeviceAuthorizationSpec, possession_with, sign_event};
@@ -52,7 +52,6 @@ pub(super) async fn recover(
     let store: Arc<dyn PersistenceStore> = Arc::new(PgPersistenceStore::new(pool.clone()));
     let pcr = &mut fixture.pcr;
     let account = pcr.history.account.clone();
-    let station = account.station_id.clone();
     let realm = pcr.history.events[0].realm_id.clone();
     let policy_id = policy.policy_id.clone();
     let policy_commit = pcr
@@ -129,9 +128,10 @@ pub(super) async fn recover(
     context.validate_shape().unwrap();
     let context_digest = hash(&context);
     let request_id = RequestId::new(format!("ak:request:{}", uuid::Uuid::now_v7())).unwrap();
-    let grant_id = SessionGrantId::from_issuance_digest(arkret_canonical::sha256_bytes(
-        session_id.as_str().as_bytes(),
-    ));
+    let grant_ref = SessionGrantRef {
+        issuer_id: account.station_id.clone(),
+        id: SessionGrantId::new(format!("ak:session_grant:{}", uuid::Uuid::now_v7())).unwrap(),
+    };
     let challenge =
         Base64UrlString::new(arkret_crypto::content_history::fresh_content_key_salt().unwrap())
             .unwrap();
@@ -139,7 +139,7 @@ pub(super) async fn recover(
         schema: RECOVERY_PROOF_TRANSCRIPT_SCHEMA.to_owned(),
         kind: RecoveryProofKind::RecoveryUnlock,
         request_id: request_id.clone(),
-        session_grant_id: grant_id.clone(),
+        session_grant_ref: grant_ref.clone(),
         session_grant_cnf_jkt: Base64UrlString::new("A".repeat(43)).unwrap(),
         account_id: account.clone(),
         requesting_device_id: device_id.clone(),
@@ -189,7 +189,7 @@ pub(super) async fn recover(
             request_id: request_id.to_string(),
             create_intent_digest: hash(&transcript).to_string(),
             recovery_session_id: session_id.to_string(),
-            session_grant_id: grant_id.to_string(),
+            session_grant_ref: grant_ref.clone(),
             session_grant_cnf_jkt: "A".repeat(43),
             principal_id: account.principal_id.clone(),
             station_id: account.station_id.clone(),
@@ -250,78 +250,61 @@ pub(super) async fn recover(
         replacement_method.clone(),
         replacement_seed,
     );
-    let unit = PreparedEventUnit::new(
-        arkret_canonical::DigestSuite::Sha256,
-        arkret_wire::EventsSubmitBatchRequestBody {
-            events: (vec![reanchor.clone(), authorize.clone()])
-                .into_iter()
-                .map(arkret_wire::EventAdmissionSubmission::new)
-                .collect(),
-        },
-    )
-    .unwrap();
-    let intent = RecoveryCommitIntent {
-        realm_id: realm,
+    let recovery_unit = RecoveryUnit {
         predecessor_ref: predecessor.commit_id.clone(),
-        unit_event_digests: [
-            Hash::new(
-                reanchor
-                    .event_digest_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
-                    .unwrap(),
-            )
-            .unwrap(),
-            Hash::new(
-                authorize
-                    .event_digest_with_digest_suite(arkret_canonical::DigestSuite::Sha256)
-                    .unwrap(),
-            )
-            .unwrap(),
+        events: [
+            EventAdmissionSubmission::new(reanchor),
+            EventAdmissionSubmission::new(authorize),
         ],
     };
+    let transaction_id =
+        TransactionId::new(format!("ak:transaction:{}", uuid::Uuid::now_v7())).unwrap();
     let receipt_id = ReceiptId::new(format!("ak:receipt:{}", uuid::Uuid::now_v7())).unwrap();
-    let plan = PcrPolicyRecoveryPlan {
-        binding: PcrPolicyRecoveryBinding {
-            identity_model: RecoveryIdentityModel::PcrPolicy,
-            recovery_session_id: session_id.clone(),
-            replacement_device_id: device_id.clone(),
-            reanchor_event_id: reanchor.event_id.clone(),
-            authorize_event_id: authorize.event_id.clone(),
-            terminal_receipt_id: receipt_id.clone(),
-        },
-        recovery_session_snapshot_digest: hash(&transcript),
-        proof_digest: hash(&proof),
+    let mut receipt = RecoveryReceipt {
+        schema: SchemaId::RECOVERY_RECEIPT_V1.to_owned(),
+        receipt_id: receipt_id.clone(),
+        transaction_id: transaction_id.clone(),
+        account_id: account.clone(),
+        expires_at: expires,
+        recovery_session_id: session_id.clone(),
+        session_grant_ref: grant_ref.clone(),
+        session_grant_cnf_jkt: Base64UrlString::new("A".repeat(43)).unwrap(),
+        policy_id: policy_id.clone(),
+        policy_version: policy.version,
+        trust_domain: policy.trust_domain.clone(),
+        new_device_id: device_id.clone(),
+        identity_model: RecoveryIdentityModel::PcrPolicy,
+        recovery_authority_kind: RecoveryAuthorityKind::PcrPolicy,
         previous_model_generation_ref: 1,
         new_model_generation_ref: 2,
-        reanchor_unit: unit.clone(),
-        reanchor_commit_intent: intent.clone(),
-    };
-    let request = RecoveryTransactionCreateRequestBody::new(
-        TransactionId::new(format!("ak:transaction:{}", uuid::Uuid::now_v7())).unwrap(),
-        account.clone(),
-        expires,
-        PcrPolicyRecoveryIntent {
-            recovery_session_id: session_id.clone(),
-            replacement_device_id: device_id.clone(),
-            previous_model_generation_ref: 1,
-            new_model_generation_ref: 2,
-            terminal_receipt_id: receipt_id.clone(),
-            reanchor_unit: unit,
-            reanchor_commit_intent: intent,
+        proof_summary: RecoveryProofSummary {
+            kind: transcript.kind,
+            proof_digest: hash(&transcript),
+            quorum_participant_count: None,
         },
+        recovery_unit,
+        unlocked_backups: Vec::new(),
+        welcome_count: 0,
+        welcome_realm_summaries: None,
+        outcome: RecoveryReceiptOutcome::Completed,
+        outcome_reason_code: None,
+        started_at: now,
+        completed_at: now,
+        signature_proof: RecoveryReceiptSignatureProof {
+            verification_method: replacement_method.clone(),
+            signature_algorithm: "Ed25519".into(),
+            signature: Base64UrlString::new(arkret_canonical::base64url_encode([0; 64])).unwrap(),
+        },
+    };
+    arkret_signatures::recovery::sign_recovery_receipt(
+        &mut receipt,
+        &SigningKey::from_bytes(&replacement_seed),
     )
     .unwrap();
-    let (resource, canonical_request) = SecurityTransactionCreateRequestBody::Recovery(request)
-        .into_initial_resource(SecurityTransactionPreparedPlan::Recovery(plan), now)
-        .unwrap();
-    let initial = SecurityTransactionRecord {
-        resource,
-        canonical_request,
-    };
-    store
-        .security_transactions()
-        .create(initial.clone())
-        .await
-        .unwrap();
+    let request = SecurityTransactionCreateRequestBody::Recovery(
+        RecoveryTransactionCreateRequestBody::new(receipt.clone()).unwrap(),
+    );
+    let canonical_request = arkret_canonical::canonical_json_bytes(&request).unwrap();
     let authority = store
         .authority_commits()
         .current_authority(&pcr.history.events[0].realm_id)
@@ -333,7 +316,7 @@ pub(super) async fn recover(
         0,
     )
     .prepare_recovery_unit_commits(
-        &[reanchor, authorize],
+        &receipt.recovery_unit.events,
         &authority,
         &predecessor,
         pcr.history.authority_method(),
@@ -347,86 +330,14 @@ pub(super) async fn recover(
         stream_ref: commits[index].commit.stream_ref.clone(),
         stream_position: commits[index].commit.stream_position,
     };
-    let mut receipt = RecoveryReceipt {
-        schema: SchemaId::RECOVERY_RECEIPT_V1.to_owned(),
-        receipt_id: receipt_id.clone(),
-        transaction_id: initial.resource.transaction_id.clone(),
-        transaction_request_digest: initial.resource.request_digest.clone(),
-        prepared_plan_digest: initial.resource.prepared_plan_digest.clone(),
-        account_id: account.clone(),
-        recovery_session_id: session_id.clone(),
-        policy_id,
-        policy_version: policy.version,
-        trust_domain: policy.trust_domain.clone(),
-        new_device_id: device_id.clone(),
-        identity_model: RecoveryIdentityModel::PcrPolicy,
-        recovery_authority_kind: RecoveryAuthorityKind::PcrPolicy,
-        previous_model_generation_ref: 1,
-        new_model_generation_ref: 2,
-        authorization_event_id: commits[1].event.event_id.clone(),
-        reanchor_event_id: commits[0].event.event_id.clone(),
-        proof_summary: RecoveryProofSummary {
-            kind: RecoveryProofKind::RecoveryUnlock,
-            proof_digest: hash(&proof),
-            quorum_participant_count: None,
-        },
-        unlocked_backups: Vec::new(),
-        welcome_count: 0,
-        welcome_realm_summaries: None,
-        outcome: RecoveryReceiptOutcome::Completed,
-        outcome_reason_code: None,
-        started_at: now,
-        completed_at: now,
-        signature_proof: RecoveryReceiptSignatureProof {
-            verification_method: replacement_method.clone(),
-            signature_algorithm: "Ed25519".to_owned(),
-            signature: Base64UrlString::new("AA").unwrap(),
-        },
-        extra: Default::default(),
-    };
-    receipt.signature_proof.signature = signature(
-        replacement_seed,
-        &receipt.signature_transcript_bytes().unwrap(),
-    );
-    let terminal = RecoveryTerminalCommit {
-        recovery_receipt: receipt.clone(),
-    };
-    let mut client_attestation = ClientStepAttestation {
-        step: SecurityTransactionStep::CommitRecoveryUnit,
-        output_ref: receipt_id.to_string(),
-        transaction_id: initial.resource.transaction_id.clone(),
-        transaction_request_digest: initial.resource.request_digest.clone(),
-        prepared_plan_digest: initial.resource.prepared_plan_digest.clone(),
-        artifact: ClientStepAttestationArtifact::Recovery(terminal.clone()),
-        signature_proof: ClientStepAttestationSignatureProof {
-            verification_method: replacement_method,
-            signature_algorithm: "Ed25519".to_owned(),
-            signature: Base64UrlString::new("AA").unwrap(),
-        },
-    };
-    client_attestation.signature_proof.signature = signature(
-        replacement_seed,
-        &client_attestation.signing_bytes().unwrap(),
-    );
-    let terminal_request = SecurityTransactionContinueRequestBody {
-        request_digest: initial.resource.request_digest.clone(),
-        prepared_plan_digest: initial.resource.prepared_plan_digest.clone(),
-        expected_accepted_step_count: 0,
-        client_attestation,
-    };
-    terminal_request
-        .validate_for_transaction(&initial.resource)
-        .unwrap();
     let unsigned = UnsignedRecoveryCompletionAttestation::new(
         UnsignedRecoveryCompletionAttestationBody {
-            transaction_id: initial.resource.transaction_id.clone(),
-            transaction_request_digest: initial.resource.request_digest.clone(),
-            prepared_plan_digest: initial.resource.prepared_plan_digest.clone(),
+            transaction_id: transaction_id.clone(),
             account_id: account.clone(),
-            recovery_session_id: session_id,
-            terminal_receipt_id: receipt_id.clone(),
-            terminal_receipt_digest: hash(&receipt),
-            replacement_device_id: device_id,
+            recovery_session_id: session_id.clone(),
+            terminal_receipt_id: receipt_id,
+            terminal_receipt_digest: receipt.receipt_digest().unwrap(),
+            replacement_device_id: device_id.clone(),
             new_model_generation_ref: 2,
             completed_at: now,
             reanchor_event_ref: committed_ref(0),
@@ -440,30 +351,26 @@ pub(super) async fn recover(
         &unsigned.signing_bytes().unwrap(),
     );
     let completion = unsigned.attach_signature(completion_signature).unwrap();
-    let mut completed = initial.clone();
-    completed
-        .resource
-        .accepted_steps
-        .push(AcceptedSecurityTransactionStep {
-            acceptor: SecurityTransactionAcceptor::Principal {
-                principal_id: station.clone(),
-            },
-            accepted_at: now,
-        });
-    completed.resource.terminal_outcome = Some(SecurityTransactionTerminalOutcome::Completed {
-        completed_at: now,
-        receipt_id: Some(receipt_id),
-        completion_attestation: Some(completion),
-    });
+    let initial = SecurityTransactionRecord {
+        canonical_request,
+        resource: SecurityTransaction::Recovery(RecoveryTransactionCompletion {
+            transaction_id,
+            kind: SecurityTransactionKind::Recovery,
+            account_id: account.clone(),
+            created_at: now,
+            recovery_receipt: receipt,
+            completion_attestation: completion,
+        }),
+    };
+    let verified_session = store
+        .recovery_sessions()
+        .get(session_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
     let write = RecoveryUnitCommitWrite {
-        step_outcome: SecurityTransactionStepOutcomeRecord {
-            transaction_id: completed.resource.transaction_id.to_string(),
-            step: SecurityTransactionStep::CommitRecoveryUnit,
-            canonical_request: arkret_canonical::canonical_json_bytes(&terminal_request).unwrap(),
-            response: serde_json::to_value(&completed.resource).unwrap(),
-            participant_outcome: Some(serde_json::to_value(terminal).unwrap()),
-        },
-        transaction: completed,
+        transaction: initial.clone(),
+        verified_session,
         predecessor,
         commits,
         queued_at: now,
@@ -512,10 +419,9 @@ pub(super) async fn recover(
 fn plan_session_id(write: &RecoveryUnitCommitWrite) -> RecoverySessionId {
     write
         .transaction
-        .resource
-        .recovery_plan()
+        .recovery()
         .unwrap()
-        .binding
+        .recovery_receipt
         .recovery_session_id
         .clone()
 }

@@ -196,7 +196,7 @@ pub(crate) fn validate_input(
                     serde_json::to_value(&basis.registration_event.payload).map_err(rejected)?,
                 )
                 .map_err(rejected)?
-                .expected_revision,
+                .expected_commit_id,
             )
             .map_err(rejected)?;
         if serde_json::to_value(derived).map_err(rejected)?
@@ -372,17 +372,29 @@ async fn admit_in_connection(
             replayed: true,
         });
     }
-    crate::realm_authorization_cut::lock_realm_authorization_cut(
-        conn,
-        effective_scope(input)?.realm_id(),
-    )
-    .await?;
+    // The closed original Events select this whole lock set. Do not lock a
+    // portal/business Realm before discovering its native Human PCR source.
+    let planning = validate_candidate(input).await?;
+    let mut realms = std::collections::BTreeSet::from([
+        effective_scope(input)?.realm_id().clone(),
+        planning.portal_realm.clone(),
+    ]);
+    for event in &planning.events {
+        realms.insert(event.realm_id.clone());
+        realms.extend(
+            crate::agent_producer_signer_keys::human_author_candidate_realms_in_connection(
+                conn, event,
+            )
+            .await?,
+        );
+    }
+    for realm in realms {
+        crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &realm).await?;
+    }
     let mut current_input = input.clone();
     current_input.accepted_at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let input = &current_input;
     let validated = validate_candidate(input).await?;
-    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &validated.portal_realm)
-        .await?;
     let admin_count = input.admin_producer_guards.len();
     if admin_count > 0 {
         let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(

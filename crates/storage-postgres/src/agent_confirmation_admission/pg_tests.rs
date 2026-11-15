@@ -551,7 +551,7 @@ async fn private_draft_confirmation_uses_consumed_encrypted_source_without_share
         &f,
         EventKind::AccountDataSet,
         &owner(&f),
-        json!({"key":key,"expected_server_revision":0,
+        json!({"key":key,"expected_server_commit_id":0,
         "encrypted_payload":encrypted,"source_pending_event_id":proposal.event_id}),
         3,
     );

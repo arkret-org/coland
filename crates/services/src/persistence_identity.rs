@@ -1454,24 +1454,24 @@ impl crate::identity::RecoverySessionPort for PersistenceRecoverySessions {
 
     async fn session_for_grant(
         &self,
-        session_grant_id: &str,
+        session_grant_ref: &arkret_wire::SessionGrantRef,
     ) -> crate::ServiceResult<Option<crate::identity::RecoverySessionState>> {
         Ok(self
             .0
             .recovery_sessions()
-            .get_by_grant_id(session_grant_id)
+            .get_by_grant_id(session_grant_ref)
             .await?)
     }
 
     async fn session_for_request(
         &self,
-        session_grant_id: &str,
+        session_grant_ref: &arkret_wire::SessionGrantRef,
         request_id: &str,
     ) -> crate::ServiceResult<Option<crate::identity::RecoverySessionState>> {
         Ok(self
             .0
             .recovery_sessions()
-            .get_by_grant_request(session_grant_id, request_id)
+            .get_by_grant_request(session_grant_ref, request_id)
             .await?)
     }
 
@@ -1648,7 +1648,7 @@ impl crate::identity::SecurityTransactionPort for PersistenceSecurityTransaction
     async fn commit_recovery_unit(
         &self,
         write: crate::identity::RecoveryUnitCommitWrite,
-    ) -> crate::ServiceResult<crate::identity::SecurityTransactionStepOutcomeState> {
+    ) -> crate::ServiceResult<SecurityTransactionRecord> {
         Ok(self
             .0
             .security_transactions()

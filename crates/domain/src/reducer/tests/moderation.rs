@@ -56,13 +56,13 @@ fn seed_decision(state: &mut ProjectionState, hlc: &ServerHlc, issuer: &str) {
     );
 }
 
-fn lift_operation(decision_id: &str, expected_revision: Value) -> Operation {
+fn lift_operation(decision_id: &str, expected_commit_id: Value) -> Operation {
     make_operation(
         arkret_wire::EventKind::ModerationDecisionLift,
         MOD_REALM,
         serde_json::json!({
             "decision_ref": decision_id,
-            "expected_revision": expected_revision,
+            "expected_commit_id": expected_commit_id,
             "target_ref": MOD_TARGET_REF,
             "realm_id": MOD_REALM,
         }),

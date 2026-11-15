@@ -575,6 +575,7 @@ pub struct CommitAcceptedEventCommand {
     /// Verified `producer_device_evidence` of a cross-Station human-device
     /// producer, retained for audit with the Event's first Commit.
     pub forwarded_producer_evidence: Option<coland_storage::ForwardedProducerDeviceEvidence>,
+    pub owner_transfer_successor: Option<coland_storage::OwnerTransferSuccessorSource>,
     pub forwarded_agent_producer:
         Option<arkret_identity::agent_authority_evidence::VerifiedAgentProducer>,
     pub agent_deployment_ceiling:
@@ -2042,6 +2043,7 @@ mod tests {
         let service = EventService::new(Arc::new(RecordingCommitter));
         let result = service
             .commit_accepted_event(CommitAcceptedEventCommand {
+                owner_transfer_successor: None,
                 verified_media_participant: None,
                 authority_commit,
                 self_producer_guard: None,

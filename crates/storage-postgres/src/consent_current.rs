@@ -192,9 +192,8 @@ async fn admit(
     let previous = existing.map(record).transpose()?;
     let expected_matches = match (&replacement.expected_current, &previous) {
         (ConsentExpectedCurrent::NeverWritten, None) => true,
-        (ConsentExpectedCurrent::Present { revision }, Some(current)) => {
-            revision.commit_id == current.commit.commit_id
-                && revision.stream_position == current.commit.stream_position
+        (ConsentExpectedCurrent::Present { commit_id }, Some(current)) => {
+            commit_id == &current.commit.commit_id
         }
         _ => false,
     };

@@ -292,7 +292,7 @@ async fn session_signing_key_jwk(state: &AppState, req: &mut Request) -> Result<
         )
         .await
         .map_err(auth_rejection)?;
-        return Ok(grant.session_public_key.into_string());
+        return Ok(grant.session_public_key.as_str().to_owned());
     }
     let token = bearer_token(req)
         .ok_or_else(|| AppError::unauthenticated("PoP presentation requires a session token"))?

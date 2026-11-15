@@ -208,48 +208,77 @@ fn mal14_late_arriving_redaction_still_takes_effect() {
     assert!(post_author.content.is_some());
 }
 
+fn accepted_reaction(kind: arkret_wire::EventKind, position: u64) -> Operation {
+    let operation = make_operation(
+        kind,
+        "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb",
+        serde_json::json!({
+            "target_ref":"ak:message:AR8FzptqPhujyMqtDIr2CTaKC301-QQGktovEDdHy_6R", "key":"👍"
+        }),
+    );
+    let source = arkret_wire::CommittedEventRef {
+        event_id: operation.context.event_id.clone(),
+        commit_id: arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
+            format!("reaction:{position}").as_bytes(),
+        )),
+        stream_ref: arkret_wire::CommitStreamRef::from_scope(
+            &operation.context.accepted_scope_ref,
+            Some(operation.realm_id.clone()),
+        )
+        .unwrap(),
+        stream_position: position,
+    };
+    operation.with_committed_ref(source).unwrap()
+}
+
 #[test]
-fn reaction_or_set_convergence() {
+fn reaction_active_current_preserves_empty_revision_and_ignores_old_prefix() {
     let mut state = ProjectionState::new();
     let hlc = ServerHlc::new("test");
+    let add = accepted_reaction(arkret_wire::EventKind::ReactionAdd, 2);
+    let remove = accepted_reaction(arkret_wire::EventKind::ReactionRemove, 3);
+    state.apply(&add, &hlc);
+    let target = "ak:event:AR8FzptqPhujyMqtDIr2CTaKC301-QQGktovEDdHy_6R";
+    assert_eq!(state.reactions_for_event(target).len(), 1);
+    let entry = state.reactions_for_event(target)[0];
+    assert_eq!(entry.actor_id, add.context.sender);
+    assert_eq!(Some(&entry.source), add.context.committed_ref.as_ref());
+    state.apply(&remove, &hlc);
+    assert!(state.reactions_for_event(target).is_empty());
+    assert!(state.reactions.contains_key(target));
+    assert_eq!(state.reaction_revisions[target].stream_position, 3);
+    assert!(matches!(state.apply(&add, &hlc), ProjectionEffect::Ignored));
+    assert!(state.reactions_for_event(target).is_empty());
+    assert_eq!(state.reaction_revisions[target].stream_position, 3);
+}
 
-    state.apply(
-        &make_operation(
-            arkret_wire::EventKind::ReactionAdd,
-            "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb",
-            serde_json::json!({
-                "target_ref": "ak:message:AR8FzptqPhujyMqtDIr2CTaKC301-QQGktovEDdHy_6R",
-                "sender": "ak:did_core:web:alice",
-                "key": "👍"
-            }),
-        ),
-        &hlc,
-    );
-    assert_eq!(
-        state
-            .reactions_for_event("ak:event:AR8FzptqPhujyMqtDIr2CTaKC301-QQGktovEDdHy_6R")
-            .len(),
-        1
-    );
-
-    state.apply(
-        &make_operation(
-            arkret_wire::EventKind::ReactionRemove,
-            "ak:realm:AZpEa1TBWdyQensfzl-MJg8_sdcSNKSeAKHbyCN5ZXjb",
-            serde_json::json!({
-                "target_ref": "ak:message:AR8FzptqPhujyMqtDIr2CTaKC301-QQGktovEDdHy_6R",
-                "sender": "ak:did_core:web:alice",
-                "key": "👍"
-            }),
-        ),
-        &hlc,
-    );
-    assert_eq!(
-        state
-            .reactions_for_event("ak:event:AR8FzptqPhujyMqtDIr2CTaKC301-QQGktovEDdHy_6R")
-            .len(),
-        0
-    );
+#[test]
+fn reaction_cache_requires_accepted_source_and_full_actor_identity() {
+    let mut state = ProjectionState::new();
+    let hlc = ServerHlc::new("test");
+    let first = accepted_reaction(arkret_wire::EventKind::ReactionAdd, 1);
+    let mut missing = first.clone();
+    missing.context.committed_ref = None;
+    assert!(matches!(
+        state.apply(&missing, &hlc),
+        ProjectionEffect::Rejected { .. }
+    ));
+    state.apply(&first, &hlc);
+    let mut second = accepted_reaction(arkret_wire::EventKind::ReactionAdd, 2);
+    let account = second.context.sender.as_account_id().unwrap();
+    second.context.sender = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
+        account.principal_id.clone(),
+        "ak:did_core:web:other-station.example".parse().unwrap(),
+    ));
+    state.apply(&second, &hlc);
+    let target = "ak:event:AR8FzptqPhujyMqtDIr2CTaKC301-QQGktovEDdHy_6R";
+    assert_eq!(state.reactions_for_event(target).len(), 2);
+    let mut remove = accepted_reaction(arkret_wire::EventKind::ReactionRemove, 3);
+    remove.context.sender = second.context.sender.clone();
+    state.apply(&remove, &hlc);
+    let remaining = state.reactions_for_event(target);
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].actor_id, first.context.sender);
 }
 
 #[test]

@@ -170,6 +170,8 @@ struct RecoverySessionRow {
     #[diesel(sql_type = Text)]
     create_intent_digest: String,
     #[diesel(sql_type = Text)]
+    session_grant_issuer_id: arkret_identifiers::DidCoreId,
+    #[diesel(sql_type = Text)]
     session_grant_id: String,
     #[diesel(sql_type = Text)]
     session_grant_cnf_jkt: String,
@@ -299,7 +301,11 @@ impl TryFrom<RecoverySessionRow> for RecoverySessionRecord {
                 "recovery_session",
                 &row.recovery_session_id,
             ),
-            session_grant_id: row.session_grant_id,
+            session_grant_ref: arkret_wire::SessionGrantRef {
+                issuer_id: row.session_grant_issuer_id,
+                id: arkret_wire::SessionGrantId::new(row.session_grant_id)
+                    .map_err(|e| PersistenceError::Internal(e.to_string()))?,
+            },
             session_grant_cnf_jkt: row.session_grant_cnf_jkt,
             principal_id: row.principal_id,
             station_id: row.station_id,
@@ -327,7 +333,7 @@ impl TryFrom<RecoverySessionRow> for RecoverySessionRecord {
         })
     }
 }
-const RECOVERY_SESSION_COLUMNS: &str = "id AS recovery_session_id, request_id, create_intent_digest, session_grant_id, session_grant_cnf_jkt, principal_id, station_id, requesting_device_id, requesting_device_public_key_did, \
+const RECOVERY_SESSION_COLUMNS: &str = "id AS recovery_session_id, request_id, create_intent_digest, session_grant_issuer_id, session_grant_id, session_grant_cnf_jkt, principal_id, station_id, requesting_device_id, requesting_device_public_key_did, \
      trust_domain, policy_id, policy_version, identity_model, \
      current_device_generation_ref, accepted_stream_head, \
      policy_payload, authority_context, publication_authority_context, publication_authority_context_digest, \
@@ -366,14 +372,15 @@ impl RecoverySessionStore for PgRecoverySessionStore {
 
     async fn get_by_grant_id(
         &self,
-        session_grant_id: &str,
+        session_grant_ref: &arkret_wire::SessionGrantRef,
     ) -> PersistenceResult<Option<RecoverySessionRecord>> {
         let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {RECOVERY_SESSION_COLUMNS} FROM recovery_sessions \
-             WHERE session_grant_id = $1 ORDER BY created_at DESC LIMIT 1"
+             WHERE session_grant_issuer_id = $1 AND session_grant_id = $2 ORDER BY created_at DESC LIMIT 1"
         ))
-        .bind::<Text, _>(session_grant_id)
+        .bind::<Text, _>(session_grant_ref.issuer_id.as_str())
+        .bind::<Text, _>(session_grant_ref.id.as_str())
         .get_result::<RecoverySessionRow>(&mut conn)
         .await
         .optional()
@@ -384,15 +391,16 @@ impl RecoverySessionStore for PgRecoverySessionStore {
 
     async fn get_by_grant_request(
         &self,
-        session_grant_id: &str,
+        session_grant_ref: &arkret_wire::SessionGrantRef,
         request_id: &str,
     ) -> PersistenceResult<Option<RecoverySessionRecord>> {
         let mut conn = crate::pg_db(&self.pool);
         sql_query(format!(
             "SELECT {RECOVERY_SESSION_COLUMNS} FROM recovery_sessions \
-             WHERE session_grant_id = $1 AND request_id = $2 LIMIT 1"
+             WHERE session_grant_issuer_id = $1 AND session_grant_id = $2 AND request_id = $3 LIMIT 1"
         ))
-        .bind::<Text, _>(session_grant_id)
+        .bind::<Text, _>(session_grant_ref.issuer_id.as_str())
+        .bind::<Text, _>(session_grant_ref.id.as_str())
         .bind::<Text, _>(request_id)
         .get_result::<RecoverySessionRow>(&mut conn)
         .await
@@ -418,19 +426,20 @@ impl RecoverySessionStore for PgRecoverySessionStore {
         }
         sql_query(
             "INSERT INTO recovery_sessions \
-             (id, request_id, create_intent_digest, session_grant_id, session_grant_cnf_jkt, principal_id, station_id, requesting_device_id, requesting_device_public_key_did, trust_domain, policy_id, \
+             (id, request_id, create_intent_digest, session_grant_issuer_id, session_grant_id, session_grant_cnf_jkt, principal_id, station_id, requesting_device_id, requesting_device_public_key_did, trust_domain, policy_id, \
               policy_version, identity_model, current_device_generation_ref, \
               accepted_stream_head, policy_payload, \
               authority_context, publication_authority_context, publication_authority_context_digest, challenge, \
               state, proof_payload, transaction_id, created_at, updated_at, expires_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)",
         )
         .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(
             &record.recovery_session_id,
         ))
         .bind::<Text, _>(&record.request_id)
         .bind::<Text, _>(&record.create_intent_digest)
-        .bind::<Text, _>(&record.session_grant_id)
+        .bind::<Text, _>(record.session_grant_ref.issuer_id.as_str())
+        .bind::<Text, _>(record.session_grant_ref.id.as_str())
         .bind::<Text, _>(&record.session_grant_cnf_jkt)
         .bind::<Text, _>(&record.principal_id)
         .bind::<Text, _>(&record.station_id)
@@ -625,6 +634,22 @@ fn recovery_policy_session_value(record: &RecoverySessionRecord) -> Value {
 }
 
 /// Lock policy authority before the session row, shared by every recovery consumer.
+pub(crate) async fn load_session_in_connection(
+    conn: &mut crate::AsyncPgConnection,
+    session_id: &str,
+) -> PersistenceResult<Option<RecoverySessionRecord>> {
+    sql_query(format!(
+        "SELECT {RECOVERY_SESSION_COLUMNS} FROM recovery_sessions WHERE id=$1"
+    ))
+    .bind::<sql_types::Uuid, _>(ids::typed_uuid_part_expect_internal(session_id))
+    .get_result::<RecoverySessionRow>(conn)
+    .await
+    .optional()
+    .map_err(PersistenceError::database)?
+    .map(RecoverySessionRecord::try_from)
+    .transpose()
+}
+
 pub(crate) async fn lock_recovery_session_authority(
     conn: &mut crate::AsyncPgConnection,
     session_id: &str,
@@ -642,7 +667,7 @@ pub(crate) async fn lock_recovery_session_authority(
         .payload;
     crate::key_backup_unlock::validate_recovery_unlock_policy(conn, &before, chrono::Utc::now())
         .await?;
-    let locked = sql_query("SELECT to_jsonb(s) AS payload FROM recovery_sessions s WHERE id=$1 AND state='verified' AND expires_at>clock_timestamp() FOR SHARE")
+    let locked = sql_query("SELECT to_jsonb(s) AS payload FROM recovery_sessions s WHERE id=$1 AND state='verified' AND expires_at>clock_timestamp() FOR UPDATE")
         .bind::<sql_types::Uuid,_>(id).get_result::<crate::JsonPayloadRow>(&mut *conn)
         .await.optional().map_err(PersistenceError::database)?
         .ok_or_else(|| PersistenceError::Conflict("recovery session no longer verified or current".to_owned()))?.payload;

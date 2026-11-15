@@ -161,6 +161,7 @@ pub(crate) async fn issue_native_unlock(
             .get_result::<ChallengeRow>(&mut *conn).await.optional()?;
         if let Some(existing)=existing {
             let issued:RealmActorBackupUnlockChallenge=serde_json::from_value(existing.challenge).map_err(unavailable)?;
+            issued.validate_at(chrono::Utc::now()).map_err(unavailable)?;
             let original_request=RealmActorBackupIssueUnlockChallengeRequestBody{
                 request_id:arkret_wire::Base64UrlString::new(issued.request_id.to_string()).map_err(unavailable)?,
                 kind:issued.kind.clone(),purpose:issued.purpose.clone(),realm_actor_id:issued.realm_actor_id.clone(),
@@ -181,13 +182,14 @@ pub(crate) async fn issue_native_unlock(
             RealmActorBackupReader::Manager(_)=>(None,None,None),
         };
         let challenge=RealmActorBackupUnlockChallenge{
-            challenge_id:random()?,challenge:random()?,nonce:random()?,operation:arkret_models_crypto::RealmActorBackupUnlockChallengeOperation::Value,
+            challenge_id:random()?,challenge:random()?,operation:arkret_models_crypto::RealmActorBackupUnlockChallengeOperation::Value,
             backup_id:id.clone(),audience:arkret_wire::NonEmptyString::new(audience.to_owned()).map_err(unavailable)?,service_id:service_id.clone(),
             request_id:arkret_wire::NonEmptyString::new(request.request_id.to_string()).map_err(unavailable)?,issued_at:now,expires_at:now+chrono::Duration::seconds(300),
             series_id:backup.series_id,ciphertext_digest:backup.ciphertext_digest,kind:request.kind.clone(),purpose:request.purpose.clone(),
             realm_actor_id:request.realm_actor_id.clone(),effective_scope:request.effective_scope.clone(),manager_ref,recovery_ref,
             recipient_ref:source.admission.recipient_ref,requesting_device_id,device_authorize_event_id,device_generation,envelope_digest:request.envelope_digest.clone(),
         };
+        challenge.validate_at(now).map_err(unavailable)?;
         sql_query("INSERT INTO realm_actor_backup_unlocks(realm_id,actor_id,challenge_id,request_identity,purpose,effective_scope,requester,challenge,backup_id,envelope_digest,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
             .bind::<Text,_>(request.realm_actor_id.realm_id.as_str()).bind::<Jsonb,_>(json!(subject)).bind::<Text,_>(challenge.challenge_id.as_str())
             .bind::<Text,_>(&identity).bind::<Text,_>(match request.purpose{Purpose::SeriesPredecessor=>"series_predecessor",Purpose::ArchiveRecovery=>"archive_recovery"})
@@ -243,7 +245,6 @@ fn verify_proof(
                 || p.audience != challenge.audience
                 || p.service_id != challenge.service_id
                 || p.challenge_id != challenge.challenge_id
-                || p.nonce != challenge.nonce
                 || p.realm_actor_id != challenge.realm_actor_id
                 || p.effective_scope != challenge.effective_scope
                 || p.manager_ref != challenge.manager_ref
@@ -261,6 +262,9 @@ fn verify_proof(
     }
     let (method, key, bytes, signature) = match (reader, proof) {
         (RealmActorBackupReader::Device(context), KeyBackupUnlockProofBody::Device(proof)) => {
+            proof
+                .validate_for_challenge(challenge)
+                .map_err(unavailable)?;
             exact!(proof);
             let current = &context.endpoint.authority;
             if challenge.requesting_device_id.as_ref() != Some(&current.device_id)
@@ -285,6 +289,9 @@ fn verify_proof(
             )
         }
         (RealmActorBackupReader::Manager(reader), KeyBackupUnlockProofBody::Manager(proof)) => {
+            proof
+                .validate_for_challenge(challenge)
+                .map_err(unavailable)?;
             exact!(proof);
             let key = arkret_identity::public_key_material_from_document(
                 &reader.service_did_document,
@@ -331,6 +338,9 @@ async fn consume_in_connection(
         .ok_or_else(||unavailable("native unlock challenge is absent for exact requester"))?;
     let challenge: RealmActorBackupUnlockChallenge =
         serde_json::from_value(row.challenge).map_err(unavailable)?;
+    challenge
+        .validate_at(chrono::Utc::now())
+        .map_err(unavailable)?;
     if challenge.expires_at <= chrono::Utc::now()
         || challenge.issued_at > chrono::Utc::now()
         || expiry(reader) <= chrono::Utc::now()

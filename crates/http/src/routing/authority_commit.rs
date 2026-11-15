@@ -219,6 +219,12 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
             return crate::error::render_error_code(code, res, detail);
         }
         match error.conflict_code() {
+            Some(coland_storage::ConflictCode::AccountDeactivated) => {
+                return crate::error::render_error_code(ErrorCode::AccountDeactivated, res, detail);
+            }
+            Some(coland_storage::ConflictCode::AccountErased) => {
+                return crate::error::render_error_code(ErrorCode::AccountErased, res, detail);
+            }
             Some(coland_storage::ConflictCode::EventIdDigestMismatch) => {
                 return crate::error::render_error_with_reason_code(
                     res,
@@ -409,7 +415,6 @@ pub(crate) fn render_service_error(res: &mut Response, error: ServiceError) {
                 | coland_storage::ConflictCode::SpaceRealmMismatch
                 | coland_storage::ConflictCode::CrossRealmStructuralRelation
                 | coland_storage::ConflictCode::GrantExceedsIssuerAuthority
-                | coland_storage::ConflictCode::AuthorityCycle
                 | coland_storage::ConflictCode::AuthorityExpiryWidening
                 | coland_storage::ConflictCode::AccountabilityGrantMissing
                 | coland_storage::ConflictCode::AgentGrantExceedsRequestedScope

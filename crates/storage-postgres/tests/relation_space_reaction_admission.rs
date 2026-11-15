@@ -15,6 +15,12 @@ use diesel_async::RunQueryDsl;
 use ordinary_realm::{next_request, open_discussion};
 use serde_json::{Value, json};
 
+#[path = "relation_space_reaction_admission/reaction_scale.rs"]
+mod reaction_scale;
+
+#[path = "relation_space_reaction_admission/reaction_capacity.rs"]
+mod reaction_capacity;
+
 #[tokio::test]
 async fn pin_grants_are_explicit_and_assertions_preserve_removals_with_atomic_cas() {
     let cases = ordinary_realm::case_future(
@@ -65,6 +71,12 @@ async fn space_write_footprint(pool: &PgPool, realm: &arkret_wire::RealmId) -> V
         .bind::<Text,_>(realm.as_str()).get_result::<ValueRow>(&mut conn).await.unwrap().value
 }
 
+async fn reaction_write_footprint(pool: &PgPool, realm: &arkret_wire::RealmId) -> Value {
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("SELECT jsonb_build_object('events',(SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY to_jsonb(e)::text),'[]') FROM canonical_events e WHERE realm_id=$1),'commits',(SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY to_jsonb(c)::text),'[]') FROM realm_commits c WHERE realm_id=$1),'reactions',(SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY target_ref),'[]') FROM message_reactions_current_states r WHERE realm_id=$1),'outbox',(SELECT coalesce(jsonb_agg(to_jsonb(o) ORDER BY to_jsonb(o)::text),'[]') FROM federation_outbox o),'event_outbox',(SELECT coalesce(jsonb_agg(to_jsonb(o) ORDER BY to_jsonb(o)::text),'[]') FROM event_federation_outbox o)) AS value")
+        .bind::<Text,_>(realm.as_str()).get_result::<ValueRow>(&mut conn).await.unwrap().value
+}
+
 fn founder_actor() -> arkret_wire::ActorId {
     arkret_wire::ActorId::account(arkret_wire::AccountId::new(
         founder(),
@@ -109,7 +121,7 @@ fn relation_create(relation_kind: &str, domain_kind: &str, from: Value, to: Valu
     }
     json!({
         "primary_conflict_domain": domain,
-        "expected_revision": null,
+        "expected_commit_id": null,
         "relation": {"relation_kind": relation_kind, "from_ref": from, "to_ref": to},
     })
 }
@@ -529,7 +541,7 @@ async fn space_terminal_cases(
 }
 
 #[tokio::test]
-async fn reactions_join_one_keyed_set_per_target_message() {
+async fn reactions_keep_only_active_sources_and_empty_rows_at_the_accepting_revision() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
     Box::pin(ordinary_realm::human_profile::admit(
@@ -600,10 +612,48 @@ async fn reactions_join_one_keyed_set_per_target_message() {
     ))
     .await;
     uow.commit_event(add.clone()).await.unwrap();
-    let remove = Box::pin(ordinary_realm::source_request(
+    let set = value(&pool, set_query, message_id.as_str()).await;
+    assert_eq!(
+        set,
+        json!({"entries": [{
+            "actor_id": founder_actor(), "key": "+1", "source": {
+                "event_id": add.authority_commit.event.event_id,
+                "commit_id": add.authority_commit.commit.commit_id,
+                "stream_ref": add.authority_commit.commit.stream_ref,
+                "stream_position": add.authority_commit.commit.stream_position
+            }
+        }]})
+    );
+    let replacement = Box::pin(ordinary_realm::source_request(
         &pool,
         next_request(
             &add.authority_commit,
+            arkret_wire::EventKind::ReactionAdd,
+            &founder(),
+            json!({"target_ref": message_id, "key": "+1", "annotation":"new source"}),
+            at,
+        ),
+    ))
+    .await;
+    uow.commit_event(replacement.clone()).await.unwrap();
+    let replaced = value(&pool, set_query, message_id.as_str()).await;
+    assert_eq!(replaced["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        replaced["entries"][0]["source"]["event_id"],
+        json!(replacement.authority_commit.event.event_id)
+    );
+    assert!(replaced["entries"][0].get("annotation").is_none());
+    assert!(
+        !uow.commit_event(replacement.clone())
+            .await
+            .unwrap()
+            .event_inserted
+    );
+    assert_eq!(value(&pool, set_query, message_id.as_str()).await, replaced);
+    let remove = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &replacement.authority_commit,
             arkret_wire::EventKind::ReactionRemove,
             &founder(),
             json!({"target_ref": message_id, "key": "+1"}),
@@ -613,24 +663,42 @@ async fn reactions_join_one_keyed_set_per_target_message() {
     .await;
     uow.commit_event(remove.clone()).await.unwrap();
     let set = value(&pool, set_query, message_id.as_str()).await;
-    let assertions = set["assertions"].as_array().unwrap();
-    assert_eq!(assertions.len(), 2, "{set}");
-    let mut tags = [
-        format!("{}:0", add.authority_commit.event.event_id),
-        format!("{}:0", remove.authority_commit.event.event_id),
-    ];
-    tags.sort();
-    assert_eq!(assertions[0]["tag_id"], tags[0]);
-    assert_eq!(assertions[1]["tag_id"], tags[1]);
-    for assertion in assertions {
-        assert_eq!(
-            assertion["value"],
-            json!({"target_ref": message_id, "key": "+1"})
-        );
-    }
+    assert_eq!(set, json!({"entries":[]}));
+    let revision_query = "SELECT jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position,'source_stream_ref',source_stream_ref) AS value FROM message_reactions_current_states WHERE target_ref=$1";
+    let removed_revision = value(&pool, revision_query, message_id.as_str()).await;
+    assert_eq!(
+        removed_revision["commit_id"],
+        json!(remove.authority_commit.commit.commit_id)
+    );
+    assert_eq!(
+        removed_revision["stream_position"],
+        json!(remove.authority_commit.commit.stream_position)
+    );
+    let absent_remove = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &remove.authority_commit,
+            arkret_wire::EventKind::ReactionRemove,
+            &founder(),
+            json!({"target_ref": message_id, "key": "+1"}),
+            at + chrono::Duration::milliseconds(1),
+        ),
+    ))
+    .await;
+    assert!(
+        uow.commit_event(absent_remove.clone())
+            .await
+            .unwrap()
+            .event_inserted
+    );
+    assert_eq!(value(&pool, set_query, message_id.as_str()).await, set);
+    assert_eq!(
+        value(&pool, revision_query, message_id.as_str()).await["commit_id"],
+        json!(absent_remove.authority_commit.commit.commit_id)
+    );
 
     // The reaction set is a state family: the founder's signed snapshot
-    // carries it keyed by its target, with the stored dot set verbatim.
+    // carries the empty value and its real accepting revision verbatim.
     let founder_account = arkret_wire::AccountId::new(founder(), ordinary_realm::station());
     let material =
         coland_storage_postgres::account_snapshot_material(&pool, &realm_id, &founder_account)
@@ -660,6 +728,57 @@ async fn reactions_join_one_keyed_set_per_target_message() {
     let typed: arkret_models_collaboration::events_payloads::reaction::MessageReactionsCurrentValue =
         serde_json::from_value(disclosed.1.clone()).unwrap();
     typed.validate_for_target(message_id.as_str()).unwrap();
+
+    let redaction = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &absent_remove.authority_commit,
+            arkret_wire::EventKind::MessageRedact,
+            &founder(),
+            json!({"message_id": message_id}),
+            at + chrono::Duration::milliseconds(2),
+        ),
+    ))
+    .await;
+    uow.commit_event(redaction.clone()).await.unwrap();
+    let after_redaction =
+        coland_storage_postgres::account_snapshot_material(&pool, &realm_id, &founder_account)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(
+        !after_redaction
+            .current_state_entries
+            .iter()
+            .any(|entry| matches!(
+                entry,
+                arkret_wire::CurrentState::Value {
+                    selector: arkret_wire::CurrentSelector::MessageReactions { .. },
+                    ..
+                }
+            ))
+    );
+    let refused = Box::pin(ordinary_realm::source_request(
+        &pool,
+        next_request(
+            &redaction.authority_commit,
+            arkret_wire::EventKind::ReactionAdd,
+            &founder(),
+            json!({"target_ref": message_id, "key":"hidden"}),
+            at + chrono::Duration::milliseconds(3),
+        ),
+    ))
+    .await;
+    let before_refusal = reaction_write_footprint(&pool, &realm_id).await;
+    let error = uow.commit_event(refused).await.unwrap_err();
+    assert!(
+        matches!(error, coland_storage::PersistenceError::NotFound(_)),
+        "{error}"
+    );
+    assert_eq!(
+        reaction_write_footprint(&pool, &realm_id).await,
+        before_refusal
+    );
 }
 
 #[tokio::test]

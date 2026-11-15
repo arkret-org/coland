@@ -1190,10 +1190,7 @@ async fn exercise_wip_override_global_deny(
                 .signing_principal_id(),
             json!({"grant_id":arkret_wire::GrantId::from_event_id(
             &denial_grant.authority_commit.event.event_id),
-            "expected_revision":{
-                "commit_id":denial_grant.authority_commit.commit.commit_id,
-                "stream_position":denial_grant.authority_commit.commit.stream_position
-            }}),
+            "expected_commit_id":denial_grant.authority_commit.commit.commit_id}),
             at,
         ),
     ))
@@ -1254,10 +1251,7 @@ async fn exercise_wip_after_override_revocation(
                 .signing_principal_id(),
             json!({"grant_id":arkret_wire::GrantId::from_event_id(
                 &override_grant.authority_commit.event.event_id),
-            "expected_revision":{
-                "commit_id":override_grant.authority_commit.commit.commit_id,
-                "stream_position":override_grant.authority_commit.commit.stream_position
-            }}),
+            "expected_commit_id":override_grant.authority_commit.commit.commit_id}),
             at,
         ),
     ))

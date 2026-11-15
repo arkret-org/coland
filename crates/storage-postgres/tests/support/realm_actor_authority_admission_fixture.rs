@@ -269,7 +269,7 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
     let close = factory.fixture.admin_event(
         EventKind::CapabilityRevoke,
         ScopeRef::Realm { realm_id: factory.fixture.realm.clone() },
-        json!({"grant_id":ghost_grant,"expected_commit_id":current.revision,"reason":"creation source closed after candidate signing"}),
+        json!({"grant_id":ghost_grant,"expected_commit_id":current.revision.commit_id,"reason":"creation source closed after candidate signing"}),
     );
     let (status, value) = factory
         .fixture
@@ -286,6 +286,7 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
         .await;
     assert_eq!(status, StatusCode::OK, "close real creation grant: {value}");
     let before = boxed_step(|| native_business_footprint(&factory.fixture)).await;
+    let source_before = boxed_step(|| source_tuple_footprint(&factory.fixture)).await;
     let (status, problem) =
         boxed_step(|| authority_admission_send(&factory.fixture, package, &fresh)).await;
     assert_eq!(
@@ -293,14 +294,32 @@ pub(super) async fn run_authority_admission(pool: PgPool) {
         StatusCode::FORBIDDEN,
         "fresh signed candidate: {problem}"
     );
+    let problem: arkret_wire::problem_details::Problem = serde_json::from_value(problem).unwrap();
+    assert_eq!(problem.status, StatusCode::FORBIDDEN.as_u16());
     assert_eq!(
-        problem["type"],
-        "https://arkret.org/problems/capability_denied"
+        problem.error_code(),
+        Some(arkret_wire::ErrorCode::AppletRevoked)
     );
+    assert_eq!(
+        problem.problem_type,
+        "https://arkret.org/problems/applet_revoked"
+    );
+    assert_eq!(problem.title, arkret_wire::ErrorCode::AppletRevoked.title());
+    assert_eq!(
+        problem.detail,
+        "Applet authorization grant is no longer active"
+    );
+    assert!(problem.extensions.is_empty());
+    arkret_wire::RequestId::new(problem.instance.as_deref().unwrap()).unwrap();
     assert_eq!(
         boxed_step(|| native_business_footprint(&factory.fixture)).await,
         before,
         "a previously signed fresh candidate must recheck its exact creation grant"
+    );
+    assert_eq!(
+        boxed_step(|| source_tuple_footprint(&factory.fixture)).await,
+        source_before,
+        "a closed creation source must not reserve delivery identity or alter installation/grant provenance"
     );
     let (status, value) =
         boxed_step(|| authority_admission_send(&factory.fixture, package, &accepted)).await;

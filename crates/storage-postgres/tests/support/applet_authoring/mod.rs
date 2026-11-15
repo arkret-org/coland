@@ -1338,6 +1338,63 @@ impl AppletAuthoringFactory {
         (author, attester)
     }
 
+    /// A genuine independently-issued generic parent. Its two exact resources
+    /// intentionally cannot identify one finite terminal installation instance.
+    pub async fn registration_only_parent(
+        &self,
+        template: &AppletFormalCommitUnit,
+        extra_scope: &ScopeRef,
+    ) -> arkret_wire::GrantId {
+        use coland_storage::EventCommitUnitOfWork as _;
+        let coland_storage::AppletAdmissionRequest::Install(body) = &template.input.request;
+        let original = body
+            .authoring_request_basis
+            .capability_grant_events
+            .iter()
+            .find(|event| {
+                event
+                    .payload
+                    .get("grant")
+                    .and_then(|g| g.get("actions"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|actions| {
+                        actions
+                            .iter()
+                            .any(|a| a.as_str() == Some("ak.message.create"))
+                    })
+            })
+            .unwrap();
+        let mut payload: CapabilityGrantPayload =
+            serde_json::from_value(serde_json::to_value(&original.payload).unwrap()).unwrap();
+        let ScopeRef::Circle {
+            realm_id,
+            circle_id,
+        } = extra_scope
+        else {
+            panic!("the independent generic parent needs a second actual Circle scope");
+        };
+        payload.grant.resources = vec![
+            arkret_wire::WireResourceSelector::realm(self.fixture.realm.clone()),
+            arkret_wire::WireResourceSelector::circle(realm_id.clone(), circle_id.clone()),
+        ];
+        payload.grant.issued_at = chrono::Utc::now();
+        let event = self.fixture.admin_event(
+            EventKind::CapabilityGrant,
+            ScopeRef::realm(self.fixture.realm.clone()),
+            serde_json::to_value(payload).unwrap(),
+        );
+        let id = arkret_wire::GrantId::from_event_id(&event.event_id);
+        let request =
+            realm_native_fixture::boxed_step(|| admin_domain_request(&self.fixture, event)).await;
+        let writer =
+            coland_storage_postgres::PgEventCommitUnitOfWork::new(self.fixture.pool.clone());
+        let result = realm_native_fixture::boxed_step(|| writer.commit_event(request))
+            .await
+            .unwrap();
+        assert!(result.event_inserted);
+        id
+    }
+
     fn input(
         &self,
         request: coland_storage::AppletAdmissionRequest,
@@ -1588,7 +1645,9 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
                 };
                 self.fixture.admin_event(
                     EventKind::CapabilityGrant,
-                    scope.clone(),
+                    ScopeRef::Realm {
+                        realm_id: self.fixture.realm.clone(),
+                    },
                     serde_json::to_value(CapabilityGrantPayload { grant }).unwrap(),
                 )
             })
@@ -1672,7 +1731,7 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
             .collect();
         let frozen = input.clone();
         let finalize: AppletFormalFinalizer = Arc::new(
-            move |refs, expected_identity, expected_record| {
+            move |refs, install_id, expected_identity, expected_record| {
                 let registration = &body.authoring_request_basis.registration_event;
                 let grants = &body.authoring_request_basis.capability_grant_events;
                 for event in std::iter::once(registration).chain(grants) {
@@ -1683,7 +1742,7 @@ impl AppletFormalCommitFactory for AppletAuthoringFactory {
                     .map(|event| arkret_wire::GrantId::from_event_id(&event.event_id))
                     .collect::<Vec<_>>();
                 let outcome = AppletInstallResponseBody {
-                    install_id: format!("install-{}", frozen.idempotency_key),
+                    install_id: install_id.to_owned(),
                     applet_id: package.applet_id.clone(),
                     service_id: package.service_id.clone(),
                     registration_event_ref: accepted_ref(refs, registration)?.event_id,
@@ -2108,6 +2167,9 @@ mod realm_native_fixture {
     include!("../realm_manager_runtime_fixture.rs");
     include!("../realm_actor_install_admission_fixture.rs");
     include!("../realm_actor_authority_admission_fixture.rs");
+    include!("../realm_actor_source_tuple_fixture.rs");
+    include!("../realm_actor_epoch_revoke_fixture.rs");
+    include!("../realm_actor_bridge_epoch_recovery_fixture.rs");
     include!("../realm_actor_revoke_boundary_fixture.rs");
     include!("../realm_actor_review_fixture.rs");
     include!("../native_applet_read_fixture.rs");
@@ -3346,6 +3408,7 @@ mod realm_native_fixture {
     }
 
     async fn recovery_plan(
+        fixture: &Fixture,
         creation: &RealmActorCreatePayload,
         commit: &arkret_wire::RealmCommit,
     ) -> (
@@ -3402,15 +3465,19 @@ mod realm_native_fixture {
             stream_ref: CommitStreamRef::RealmControl { realm_id: realm },
             stream_position: commit.stream_position,
         };
-        let revision = CurrentRevision {
-            commit_id: source.commit_id.clone(),
-            stream_position: commit.stream_position,
-        };
+        let control_revision =
+            current_revision(fixture, &creation.actor_id, "realm_actor_control").await;
+        let owner_revision =
+            current_revision(fixture, &creation.actor_id, "realm_actor_statusowner").await;
+        let governance_revision =
+            current_revision(fixture, &creation.actor_id, "realm_actor_statusgovernance").await;
+        let generation_revision =
+            current_revision(fixture, &creation.actor_id, "realm_actor_device_generation").await;
         let mut value = json!({
             "target_actor_id":creation.actor_id,"request_id":"0123456789012345678901",
-            "manager_ref":source,"recovery_ref":source,"expected_control_commit_id":revision,
-            "expected_owner_status_commit_id":revision,"expected_governance_status_commit_id":revision,
-            "expected_device_generation_commit_id":revision,"expected_generation":1,"new_generation":2,
+            "manager_ref":source,"recovery_ref":source,"expected_control_commit_id":control_revision["commit_id"],
+            "expected_owner_status_commit_id":owner_revision["commit_id"],"expected_governance_status_commit_id":governance_revision["commit_id"],
+            "expected_device_generation_commit_id":generation_revision["commit_id"],"expected_generation":1,"new_generation":2,
             "replaces_recovery_ref":null,"next_resolution":resolution,
             "method_history_evidence":{"log_entries":entries,"witness_records":[]},
             "next_control_method_kid":next_method,"expires_at":arkret_canonical::format_timestamp_canonical(at + chrono::Duration::minutes(5))
@@ -4366,7 +4433,7 @@ mod realm_native_fixture {
         );
         boxed_step(|| installation_business_revocation(fixture, native, candidate)).await;
         eprintln!("recovery: authoring native plan");
-        let (plan, published) = recovery_plan(candidate, creation).await;
+        let (plan, published) = recovery_plan(fixture, candidate, creation).await;
         let make_begin = |payload: RealmActorRecoveryBeginPayload| {
             let at = payload.control_signature.created_at;
             let intent = arkret_event_draft::TypedEventDraft::<
@@ -5436,7 +5503,7 @@ mod realm_native_fixture {
             value: Value,
         }
         let mut conn = fixture.pool.get().await.unwrap();
-        sql_query("SELECT jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position) AS value FROM realm_actor_current_states WHERE realm_id=$1 AND actor_id=$2 AND selector->>'kind'=$3")
+        sql_query("SELECT jsonb_build_object('commit_id',current_commit_id,'stream_position',current_stream_position) AS value FROM realm_actor_current_states WHERE realm_id=$1 AND actor_id=$2 AND selector->>'kind'||COALESCE(selector->>'gate','')=$3")
             .bind::<Text,_>(fixture.realm.as_str()).bind::<Jsonb,_>(json!(actor)).bind::<Text,_>(kind).get_result::<Row>(&mut conn).await.unwrap().value
     }
 
@@ -5582,7 +5649,7 @@ mod realm_native_fixture {
         let disable = command(
             EventKind::RealmActorRecoverySet,
             json!({
-                "target_actor_id":candidate.actor_id,"enabled":false,"expected_recovery_commit_id":recovery_revision,
+                "target_actor_id":candidate.actor_id,"enabled":false,"expected_recovery_commit_id":recovery_revision["commit_id"],
                 "expected_manager_commit_id":creation.commit_id
             }),
         );
@@ -5595,7 +5662,7 @@ mod realm_native_fixture {
         let repeated_value = command(
             EventKind::RealmActorRecoverySet,
             json!({
-                "target_actor_id":candidate.actor_id,"enabled":false,"expected_recovery_commit_id":updated_revision,
+                "target_actor_id":candidate.actor_id,"enabled":false,"expected_recovery_commit_id":updated_revision["commit_id"],
                 "expected_manager_commit_id":creation.commit_id
             }),
         );
@@ -5625,7 +5692,7 @@ mod realm_native_fixture {
         let enable = command(
             EventKind::RealmActorRecoverySet,
             json!({
-                "target_actor_id":candidate.actor_id,"enabled":true,"expected_recovery_commit_id":updated_revision,
+                "target_actor_id":candidate.actor_id,"enabled":true,"expected_recovery_commit_id":updated_revision["commit_id"],
                 "expected_manager_commit_id":creation.commit_id
             }),
         );
@@ -6833,7 +6900,7 @@ mod realm_native_fixture {
     }
 
     pub(super) async fn run_bridge_recipient_mode(pool: PgPool, circle: bool, mode: u8) {
-        run_bridge_case(pool, circle, false, false, None, false, mode, false).await;
+        boxed_step(|| run_bridge_case(pool, circle, false, false, None, false, mode, false)).await;
     }
 
     #[allow(
@@ -7291,7 +7358,7 @@ mod realm_native_fixture {
                     },
                     json!({
                         "target_actor_id":actor,"enabled":enabled,
-                        "expected_recovery_commit_id":revision,
+                        "expected_recovery_commit_id":revision["commit_id"],
                         "expected_manager_commit_id":creation.commit_id
                     }),
                 );
@@ -7945,6 +8012,13 @@ mod realm_native_fixture {
             return;
         }
         if recipient_mode == 4 {
+            // Complete the real initial manager series before measuring the
+            // Device-only outcome failure. A still-pending first maintenance
+            // submission can then only replay that same accepted original.
+            assert_eq!(candidate.creation_scope, content_scope);
+            boxed_step(|| manager.maintain_backup_series(&actor, &content_scope))
+                .await
+                .unwrap();
             drop(author);
             drop(edge);
             boxed_step(|| {
@@ -9435,6 +9509,10 @@ mod realm_native_fixture {
                 )
             ) {
                 actions.push("ak.object.read_content");
+                actions.extend([
+                    arkret_wire::CapabilityActionId::SelfKeysBackupsReadListV1.as_str(),
+                    arkret_wire::CapabilityActionId::SelfKeysBackupsResourceReplaceV1.as_str(),
+                ]);
             }
             boxed_step(|| {
                 authorize_device_with_actions(&factory.fixture, &candidate, &before, 79, &actions)
@@ -9484,6 +9562,7 @@ mod realm_native_fixture {
                     boxed_step(|| {
                         realm_actor_mls_fixture::run_boundary(
                             &factory.fixture,
+                            &native,
                             &package,
                             &candidate,
                             &device,
@@ -9557,6 +9636,20 @@ pub async fn realm_native_install_admission(pool: PgPool) {
 
 pub async fn realm_native_authority_admission(pool: PgPool) {
     realm_native_fixture::run_authority_admission(pool).await;
+}
+
+pub async fn realm_native_service_epoch_revoke(pool: PgPool) {
+    realm_native_fixture::boxed_step(|| {
+        realm_native_fixture::service_epoch_revoke_and_original_recovery(pool)
+    })
+    .await;
+}
+
+pub async fn realm_native_continuous_registration_sources(pool: PgPool) {
+    realm_native_fixture::boxed_step(|| {
+        realm_native_fixture::continuous_registration_sources(pool)
+    })
+    .await;
 }
 
 pub async fn realm_native_mls_admission(pool: PgPool) {
@@ -9760,4 +9853,11 @@ pub async fn realm_bridge_cross_circle_queue_boundaries(pool: PgPool) {
 
 pub async fn realm_bridge_welcome_recovery_boundaries(pool: PgPool) {
     realm_native_fixture::run_bridge_recipient_mode(pool, false, 1).await;
+}
+
+pub async fn realm_native_bridge_epoch_ack_recovery(pool: PgPool) {
+    realm_native_fixture::boxed_step(|| {
+        realm_native_fixture::bridge_epoch_ack_loss_recovers_original(pool)
+    })
+    .await;
 }

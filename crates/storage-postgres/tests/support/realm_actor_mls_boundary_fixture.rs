@@ -845,6 +845,368 @@ async fn boundary_encrypted_message(
     event
 }
 
+// Only this fixture's accepted native Device can publish the exact live
+// group root. The manager selects the series; it never gives this Device an
+// archive private key. Frozen root/packet bytes are encrypted and made durable
+// before PUT, and the positive read starts only after the real ACK.
+async fn boundary_publish_first_root(
+    fixture: &Fixture,
+    native: &super::realm_native_fixture::NativeService,
+    candidate: &RealmActorCreatePayload,
+    authority: &coland_storage::AppletManagedDeviceAuthority,
+    group: &arkret_mls::ArkretMlsGroup,
+) -> tempfile::TempDir {
+    use arkret_bridge_runtime::AuthoringStore as _;
+    use arkret_event_draft::EventPayloadExt as _;
+    use arkret_http_client::own_station_device_results::{
+        OwnStationDeviceBinding, OwnStationDeviceClient, OwnStationDeviceInstance,
+        OwnStationDeviceSnapshot, OwnStationDeviceSource,
+    };
+    use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
+    use ed25519_dalek::Signer as _;
+
+    struct AcceptedBoundaryDevice(OwnStationDeviceSnapshot);
+    impl OwnStationDeviceSource for AcceptedBoundaryDevice {
+        fn snapshot(&self) -> arkret_http_client::Result<OwnStationDeviceSnapshot> {
+            Ok(self.0.clone())
+        }
+    }
+    let scope = &candidate.creation_scope;
+    assert_eq!(&authority.actor_id, &candidate.actor_id);
+    assert_eq!(authority.applet_id, native.package.applet_id);
+    let selected = super::realm_native_fixture::fixture_select_native_series(
+        fixture,
+        native,
+        &candidate.actor_id,
+        scope,
+    )
+    .await;
+    let (_, governance, keys, resolution) = super::realm_native_fixture::fixture_archive_inventory(
+        fixture,
+        native,
+        &candidate.actor_id,
+    )
+    .await;
+    let key = SigningKey::from_bytes(&[79; 32]);
+    assert_eq!(
+        key.verifying_key().to_bytes().as_slice(),
+        authority.public_key.as_slice()
+    );
+    let metadata = AppletManagedDeviceMetadata {
+        actor_id: candidate.actor_id.clone(),
+        device_id: authority.device_id.clone(),
+        authorization_event_id: authority.authorization_ref.event_id.clone(),
+        applet_id: authority.applet_id.clone(),
+        effective_scope: scope.clone(),
+        nonce: arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
+    };
+    let fingerprint = arkret_canonical::ed25519_pubkey_to_did_key_multibase(&authority.public_key);
+    let base: url::Url = fixture.state.config().public_base_url.parse().unwrap();
+    let client = arkret_http_client::Client::builder(base)
+        .http_client(super::realm_native_fixture::native_http_client(
+            std::time::Duration::from_secs(30),
+        ))
+        .retry(arkret_http_client::RetryConfig::disabled())
+        .build()
+        .unwrap()
+        .with_managed_device_http_signer(
+            metadata.clone(),
+            fixture.state.service_core_id(),
+            arkret_http_client::HttpMessageSigner::new(
+                format!("did:key:{fingerprint}#{fingerprint}"),
+                key.clone(),
+            ),
+        )
+        .unwrap();
+    let description = client.describe().await.unwrap();
+    let binding =
+        OwnStationDeviceBinding::from_description(client.base_url(), &description).unwrap();
+    let source = OwnStationDeviceSnapshot::new(
+        binding,
+        &governance,
+        &metadata,
+        key.verifying_key().to_bytes(),
+        authority.not_before,
+        authority.expires_at,
+        0,
+        OwnStationDeviceInstance::default(),
+    )
+    .unwrap();
+    let client =
+        OwnStationDeviceClient::new(client, Arc::new(AcceptedBoundaryDevice(source))).unwrap();
+    let input = client
+        .realm_actor_backup_prepare_input(
+            arkret_canonical::base64url_encode(rand::random::<[u8; 32]>()),
+            &governance,
+            &resolution,
+            &keys,
+        )
+        .await
+        .unwrap();
+    let input = input.value().unwrap().clone();
+    assert_eq!(input.active_series_id, selected.active_series_id);
+    let head = client
+        .native_key_backup_head(&arkret_models_crypto::RealmActorBackupHeadQuery::new(
+            candidate.actor_id.as_realm_actor_id().unwrap().clone(),
+            match scope {
+                ScopeRef::Circle { circle_id, .. } => Some(circle_id.clone()),
+                ScopeRef::Realm { .. } => None,
+                _ => panic!("this native publication needs its exact Realm or Circle scope"),
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(
+        head.value().unwrap().items.is_empty(),
+        "this is genuine first publication, not repair"
+    );
+    assert_eq!(
+        head.value()
+            .unwrap()
+            .active_series
+            .secret_storage
+            .series_id(),
+        Some(&input.active_series_id)
+    );
+    let current = coland_storage_postgres::PgMlsGroupCurrentStore {
+        pool: fixture.pool.clone(),
+    }
+    .current(scope)
+    .await
+    .unwrap()
+    .unwrap()
+    .value;
+    assert_eq!(current.epoch, group.epoch());
+    assert_eq!(&current.effective_scope, group.scope());
+    let accepted = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&current.current_mls_commit_event_ref)
+        .await
+        .unwrap()
+        .unwrap();
+    let accepted = arkret_wire::CommittedEventFullView {
+        event: accepted.event,
+        commit: accepted.commit,
+    };
+    let accepted_governor = governance
+        .authority_service_at(accepted.commit.governance_generation)
+        .unwrap();
+    let accepted_document = arkret_identity::authenticated_service_document_at(
+        &resolution,
+        accepted_governor,
+        accepted.commit.committed_at,
+    )
+    .unwrap();
+    arkret_identity::validate_verification_method_relationship(
+        &accepted_document,
+        &accepted.commit.signature.verification_method,
+        &accepted_document.id,
+        arkret_identity::DidVerificationRelationship::AssertionMethod,
+    )
+    .unwrap();
+    let mut accepted_keys = keys.clone();
+    accepted_keys.insert_at(
+        &accepted.commit.signature.verification_method,
+        accepted.commit.signature.created_at,
+        arkret_identity::public_key_material_from_document(
+            &accepted_document,
+            &accepted.commit.signature.verification_method,
+        )
+        .unwrap(),
+    );
+    governance
+        .verify_commit(&accepted.commit, &accepted_keys)
+        .unwrap();
+    group
+        .verify_installed_historical_base(&accepted, &accepted.event.event_id)
+        .unwrap();
+    let founding = fixture
+        .state
+        .test_persistence()
+        .authority_commits()
+        .committed_event(&fixture.realm.event_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(founding.event.kind, EventKind::RealmCreate);
+    let context = arkret_models_crypto::ContentRootContext {
+        effective_scope: scope.clone(),
+        genesis_event_ref: current.genesis_event_ref,
+        epoch: current.epoch,
+        group_state_ref: current.current_mls_commit_event_ref,
+        cipher_suite: group.group_ciphersuite_canonical_id().unwrap().to_owned(),
+        encryption_backup_strategy: founding
+            .event
+            .as_realm_create()
+            .unwrap()
+            .object
+            .initial_encryption_backup_strategy,
+        backup_strategy_ref: founding.event.event_id,
+    };
+    let secret = group.export_content_root(&context).unwrap();
+    let root_ref = arkret::crypto::content_history::content_root_ref(&secret, &context).unwrap();
+    let root = arkret_models_crypto::ContentRootBackupEntry {
+        item_kind: arkret_models_crypto::ContentRootItemKind::ContentEpochRoot,
+        secret_id: format!("root_{}", root_ref.as_str().trim_start_matches("sha256:")),
+        root_context: context,
+        root_ref,
+        root_base64url: secret,
+    };
+    let packet = arkret::crypto::content_history::RealmActorContentRootBackupDraft {
+        backup_id: arkret_wire::BackupId::new(format!("ak:backup:{}", uuid::Uuid::now_v7()))
+            .unwrap(),
+        realm_actor_id: candidate.actor_id.as_realm_actor_id().unwrap().clone(),
+        created_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
+        author: arkret::crypto::backup::KeyBackupAuthBinding {
+            device_id: authority.device_id.clone(),
+            verification_method: DidUrl::new(format!(
+                "{}#{}",
+                authority.native_did, authority.device_id
+            ))
+            .unwrap(),
+            signature_algorithm: arkret_models_crypto::KeyBackupSignatureAlgorithm::Ed25519,
+            device_authorize_event_id: authority.authorization_ref.event_id.clone(),
+        },
+        prepare_input: input,
+        domain_separation: arkret_models_crypto::KeyBackupDomainSeparation {
+            subdomain: "key_backup".into(),
+            aead_aad_extensions: Default::default(),
+        },
+        series_sequence: 0,
+        supersedes: None,
+    }
+    .seal(root.clone(), |bytes| {
+        Ok(key.sign(bytes).to_bytes().to_vec())
+    })
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let journal_path = directory.path().join("first-root.redb");
+    let slot = arkret_canonical::canonical_sha256(&(
+        &candidate.actor_id,
+        &root.root_context,
+        &packet.backup_id,
+    ))
+    .unwrap();
+    let frozen =
+        arkret::KeyBytes::new(arkret_canonical::canonical_json_bytes(&(&root, &packet)).unwrap());
+    // Explicit fixture-owned daily KEK, recoverable on reopen and independent
+    // of the actual manager-only vault. No manager secret enters this helper.
+    let wrapping_key = [0x53; 32];
+    let nonce = rand::random::<[u8; 24]>();
+    let cipher = chacha20poly1305::XChaCha20Poly1305::new_from_slice(&wrapping_key).unwrap();
+    let encrypted = cipher
+        .encrypt(
+            &chacha20poly1305::XNonce::from(nonce),
+            Payload {
+                msg: frozen.as_slice(),
+                aad: slot.as_bytes(),
+            },
+        )
+        .unwrap();
+    let frozen_record = format!(
+        "{}.{}",
+        arkret_canonical::base64url_encode(nonce),
+        arkret_canonical::base64url_encode(&encrypted)
+    );
+    let store = arkret_bridge_runtime::FileAuthoringStore::new(journal_path.clone()).unwrap();
+    assert!(
+        store
+            .compare_exchange_batch(
+                &[(slot.clone(), None)],
+                &[(slot.clone(), Some(frozen_record.clone()))]
+            )
+            .unwrap()
+    );
+    drop(store);
+    let store = arkret_bridge_runtime::FileAuthoringStore::new(journal_path).unwrap();
+    let reopened_record = store.load(&slot).unwrap().unwrap();
+    assert_eq!(reopened_record, frozen_record);
+    let (stored_nonce, stored_ciphertext) = reopened_record.split_once('.').unwrap();
+    let stored_nonce = arkret_canonical::base64url_decode(stored_nonce).unwrap();
+    let stored_ciphertext = arkret_canonical::base64url_decode(stored_ciphertext).unwrap();
+    let reopened = cipher
+        .decrypt(
+            &chacha20poly1305::XNonce::try_from(stored_nonce.as_slice()).unwrap(),
+            Payload {
+                msg: &stored_ciphertext,
+                aad: slot.as_bytes(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        reopened.as_slice(),
+        frozen.as_slice(),
+        "exact root and signed first-PUT packet survive real close/open before the network"
+    );
+    let idempotency = format!(
+        "arkret-key-backup-{}",
+        arkret_canonical::canonical_sha256(&packet)
+            .unwrap()
+            .trim_start_matches("sha256:")
+    );
+    let response = client
+        .put_native_key_backup(&packet, &idempotency)
+        .await
+        .unwrap();
+    let response = response.value().unwrap();
+    assert_eq!(response.backup_id, packet.backup_id);
+    assert_eq!(response.ciphertext_digest, packet.ciphertext_digest);
+    let document = arkret_identity::authenticated_service_document_at(
+        &resolution,
+        governance.current_service_id(),
+        response.admission.accepted_at,
+    )
+    .unwrap();
+    arkret_identity::validate_verification_method_relationship(
+        &document,
+        &response.admission.signature.verification_method,
+        &document.id,
+        arkret_identity::DidVerificationRelationship::AssertionMethod,
+    )
+    .unwrap();
+    let receipt_key = arkret_identity::public_key_material_from_document(
+        &document,
+        &response.admission.signature.verification_method,
+    )
+    .unwrap();
+    arkret_signatures::realm_actor_content_backup::verify_realm_actor_content_backup_admission_signature(&response.admission, &receipt_key).unwrap();
+    arkret_signatures::realm_actor_content_backup::verify_realm_actor_backup_packet(
+        &packet,
+        &response.admission,
+    )
+    .unwrap();
+    let accepted_slot = format!("{slot}/accepted");
+    assert!(
+        store
+            .compare_exchange_batch(
+                &[(slot, Some(frozen_record)), (accepted_slot.clone(), None)],
+                &[(
+                    accepted_slot,
+                    Some(serde_json::to_string(response).unwrap())
+                )],
+            )
+            .unwrap()
+    );
+    let retained = super::realm_actor_mls_fixture::retained_backups(fixture).await;
+    let retained = retained
+        .iter()
+        .find(|backup| backup.backup_id == packet.backup_id)
+        .unwrap();
+    assert_eq!(
+        arkret_canonical::canonical_json_bytes(retained).unwrap(),
+        arkret_canonical::canonical_json_bytes(&packet).unwrap()
+    );
+    assert_eq!(retained.actor_id, candidate.actor_id);
+    assert_eq!(
+        retained.contents[0].root_context.as_ref(),
+        Some(&root.root_context)
+    );
+    assert_eq!(retained.contents[0].root_ref.as_ref(), Some(&root.root_ref));
+    directory
+}
+
 // #80: original encrypted Message, live separate read parent and live Device,
 // but all original installation authorization grants expire before body read.
 async fn boundary_encrypted_read_expiry(
@@ -1083,6 +1445,7 @@ async fn boundary_exact_floor_expiry(
 )]
 pub(super) async fn realm_actor_mls_boundary(
     fixture: &Fixture,
+    native: &super::realm_native_fixture::NativeService,
     package: &AppletPackage,
     candidate: &RealmActorCreatePayload,
     device: &DeviceId,
@@ -1109,6 +1472,10 @@ pub(super) async fn realm_actor_mls_boundary(
             boxed_step(|| boundary_claim_expiry(fixture, package, authority, child, true)).await
         }
         BoundaryCase::EncryptedReadExpiry => {
+            let _publication_journal = boxed_step(|| {
+                boundary_publish_first_root(fixture, native, candidate, authority, &group)
+            })
+            .await;
             boxed_step(|| {
                 boundary_encrypted_read_expiry(
                     fixture, package, candidate, authority, child, &source.0, &mut group,
@@ -1124,6 +1491,7 @@ pub(super) async fn realm_actor_mls_boundary(
 
 pub(super) async fn run_boundary(
     fixture: &Fixture,
+    native: &super::realm_native_fixture::NativeService,
     package: &AppletPackage,
     candidate: &RealmActorCreatePayload,
     device: &DeviceId,
@@ -1141,7 +1509,7 @@ pub(super) async fn run_boundary(
     let child = boxed_step(|| business_grant(fixture, package, &candidate.actor_id)).await;
     boxed_step(|| {
         realm_actor_mls_boundary(
-            fixture, package, candidate, device, &authority, &child, source, case,
+            fixture, native, package, candidate, device, &authority, &child, source, case,
         )
     })
     .await;
@@ -1307,10 +1675,26 @@ async fn boundary_human_pcr_handoff(
         pid: i32,
     }
     #[derive(diesel::QueryableByName)]
-    struct Waiting {
-        #[diesel(sql_type=diesel::sql_types::Bool)]
-        waiting: bool,
+    struct PcrWriter {
+        #[diesel(sql_type=diesel::sql_types::Integer)]
+        pid: i32,
+        #[diesel(sql_type=diesel::sql_types::Array<diesel::sql_types::Integer>)]
+        blocked_by: Vec<i32>,
+        #[diesel(sql_type=diesel::sql_types::Text)]
+        realm_id: String,
+        #[diesel(sql_type=diesel::sql_types::Text)]
+        row_ctid: String,
+        #[diesel(sql_type=diesel::sql_types::Text)]
+        tuple_lock_mode: String,
+        #[diesel(sql_type=diesel::sql_types::Text)]
+        query: String,
     }
+    #[derive(diesel::QueryableByName)]
+    struct LockGraph {
+        #[diesel(sql_type=diesel::sql_types::Jsonb)]
+        payload: Value,
+    }
+    const IDLE_TRANSACTIONS: &str = "SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND usename=current_user AND pid<>pg_backend_pid() AND state='idle in transaction'";
     let mut human = boxed_step(|| {
         Fixture::new_at(
             fixture.pool.clone(),
@@ -1378,6 +1762,14 @@ async fn boundary_human_pcr_handoff(
         reference.as_str(),
         chrono::Duration::minutes(4),
     );
+    let mut monitor = fixture.pool.get().await.unwrap();
+    let before_body = diesel::sql_query(IDLE_TRANSACTIONS)
+        .load::<ReaderPid>(&mut monitor)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.pid)
+        .collect::<std::collections::BTreeSet<_>>();
     let mut response = boxed_step(|| {
         boundary_native_response(
             fixture,
@@ -1390,15 +1782,26 @@ async fn boundary_human_pcr_handoff(
     })
     .await;
     assert_eq!(response.status_code, Some(StatusCode::OK));
-    let mut monitor = fixture.pool.get().await.unwrap();
-    let readers=diesel::sql_query("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND usename=current_user AND pid<>pg_backend_pid() AND state='idle in transaction'")
-        .load::<ReaderPid>(&mut monitor).await.unwrap();
-    let readers: Vec<i32> = readers.into_iter().map(|row| row.pid).collect();
+    let readers = diesel::sql_query(IDLE_TRANSACTIONS)
+        .load::<ReaderPid>(&mut monitor)
+        .await
+        .unwrap();
+    let readers: Vec<i32> = readers
+        .into_iter()
+        .map(|row| row.pid)
+        .filter(|pid| !before_body.contains(pid))
+        .collect();
     assert!(
         !readers.is_empty(),
         "real prepared response must retain its DB cut"
     );
-    let revoke = boxed_step(|| boundary_terminal_human_revoke(&human, &revoker));
+    let counterpart_pcr = human.pcr.history.events[0].realm_id.clone();
+    assert_eq!(
+        counterpart_pcr,
+        human.pcr.unit.transactions[0].event.realm_id
+    );
+    let (writer_phase, writer_phase_rx) = tokio::sync::watch::channel("not_started");
+    let revoke = boxed_step(|| boundary_terminal_human_revoke(&human, &revoker, &writer_phase));
     tokio::pin!(revoke);
     let until = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut revoke_finished = false;
@@ -1411,16 +1814,40 @@ async fn boundary_human_pcr_handoff(
             revoke_finished = true;
             break Err("actual Human revocation completed before body handoff");
         }
-        let row=diesel::sql_query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND a.wait_event_type='Lock' AND a.query ILIKE '%realm_authorities%' AND a.query ILIKE '%FOR UPDATE%' AND pg_blocking_pids(a.pid) && $1::integer[]) AS waiting")
-            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>,_>(&readers)
-            .get_result::<Waiting>(&mut monitor).await.unwrap();
-        if row.waiting {
-            break Ok(());
+        let phase = *writer_phase_rx.borrow();
+        // A real first PUT reaches the same PCR row with FOR SHARE before
+        // the later revoke's UPDATE. Match the exact tuple, phase and body
+        // blocker, never an unrelated wait or just the word FOR UPDATE.
+        let writers = diesel::sql_query("SELECT a.pid,pg_blocking_pids(a.pid) AS blocked_by,t.realm_id,t.ctid::text AS row_ctid,l.mode AS tuple_lock_mode,a.query FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid CROSS JOIN realm_authorities t WHERE a.datname=current_database() AND a.usename=current_user AND a.pid<>pg_backend_pid() AND a.wait_event_type='Lock' AND t.realm_id=$2 AND l.locktype='tuple' AND l.relation='realm_authorities'::regclass AND l.page=split_part(trim(both '()' from t.ctid::text),',',1)::integer AND l.tuple=split_part(trim(both '()' from t.ctid::text),',',2)::integer AND pg_blocking_pids(a.pid) && $1::integer[] AND (($3='backup_put' AND a.query ILIKE '%FROM pcr_genesis_units p JOIN realm_authorities a%' AND a.query ILIKE '%FOR SHARE OF a%') OR ($3 IN ('pointer_commit','proposal_commit') AND a.query ILIKE '%SELECT realm_id FROM realm_authorities%' AND a.query ILIKE '%FOR UPDATE%'))")
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&readers)
+            .bind::<diesel::sql_types::Text, _>(counterpart_pcr.as_str())
+            .bind::<diesel::sql_types::Text, _>(phase)
+            .load::<PcrWriter>(&mut monitor).await.unwrap();
+        if writers.len() > 1 {
+            break Err("multiple writers matched the exact counterpart PCR/body cut");
+        }
+        if let Some(writer) = writers.into_iter().next() {
+            assert_eq!(writer.realm_id, counterpart_pcr.as_str());
+            assert!(writer.blocked_by.iter().any(|pid| readers.contains(pid)));
+            break Ok(json!({"writer_pid":writer.pid,"phase":phase,
+                "body_pids":readers,"blocked_by":writer.blocked_by,
+                "counterpart_pcr":writer.realm_id,"row_ctid":writer.row_ctid,
+                "tuple_lock_mode":writer.tuple_lock_mode,"query":writer.query}));
         }
         if tokio::time::Instant::now() >= until {
             break Err("actual counterpart PCR writer never reached the held response cut");
         }
     };
+    let graph = diesel::sql_query("SELECT jsonb_build_object('activity',coalesce((SELECT jsonb_agg(jsonb_build_object('pid',a.pid,'state',a.state,'wait_event_type',a.wait_event_type,'wait_event',a.wait_event,'query',a.query,'blocked_by',pg_blocking_pids(a.pid)) ORDER BY a.pid) FROM pg_stat_activity a WHERE a.datname=current_database() AND a.usename=current_user AND a.pid<>pg_backend_pid()),'[]'::jsonb),'locks',coalesce((SELECT jsonb_agg(jsonb_build_object('pid',l.pid,'locktype',l.locktype,'mode',l.mode,'granted',l.granted,'relation',l.relation::regclass::text,'page',l.page,'tuple',l.tuple,'transactionid',l.transactionid::text) ORDER BY l.pid,l.locktype,l.mode) FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE a.datname=current_database() AND a.usename=current_user AND a.pid<>pg_backend_pid()),'[]'::jsonb)) AS payload")
+        .get_result::<LockGraph>(&mut monitor).await.unwrap();
+    let phase = *writer_phase_rx.borrow();
+    eprintln!(
+        "W07 PCR body-handoff evidence: {}",
+        json!({"phase":phase,
+        "counterpart_pcr":counterpart_pcr,"body_pids":readers,
+        "matched_writer":blocked.as_ref().ok(),"error":blocked.as_ref().err(),
+        "graph":graph.payload})
+    );
     drop(monitor);
     let received = response.take_json::<KeyPackagesClaimResponseBody>().await;
     drop(response);
@@ -1484,6 +1911,7 @@ async fn boundary_human_pcr_handoff(
 async fn boundary_terminal_human_revoke(
     fixture: &Fixture,
     other: &coland_test_support::pcr_genesis::AcceptedDevice,
+    writer_phase: &tokio::sync::watch::Sender<&'static str>,
 ) {
     use arkret_models_collaboration::events_payloads::{
         ControllerBackupTrustAnchor, DeviceAuthorizePayload, UnsignedKeyBackupActiveSeries,
@@ -1535,6 +1963,7 @@ async fn boundary_terminal_human_revoke(
     let old = backup(&old_series);
     let new = backup(&new_series);
     let persistence = fixture.state.test_persistence();
+    let _ = writer_phase.send_replace("backup_put");
     persistence
         .key_backups()
         .put(
@@ -1581,7 +2010,9 @@ async fn boundary_terminal_human_revoke(
         pool: fixture.pool.clone(),
     };
     let stream = fixture.pcr.unit.transactions[1].commit.stream_ref.clone();
+    let _ = writer_phase.send_replace("pointer_read_head");
     let head = store.stream_head(&stream).await.unwrap().unwrap();
+    let _ = writer_phase.send_replace("pointer_prepare");
     let initial_pointer = pointer(&old_series, 1, vec![], head.commit_id);
     let transaction = coland_services::authority_commit::AuthorityCommitApplication::new(
         coland_services::persistence::PersistenceHandle::from_shared(
@@ -1601,6 +2032,7 @@ async fn boundary_terminal_human_revoke(
     )
     .await
     .unwrap();
+    let _ = writer_phase.send_replace("pointer_commit");
     persistence
         .key_backups()
         .commit_active_series_pointer(KeyBackupActiveSeriesCommitWrite {
@@ -1609,6 +2041,7 @@ async fn boundary_terminal_human_revoke(
         })
         .await
         .unwrap();
+    let _ = writer_phase.send_replace("revoke_prepare");
     let revoke = sign_as_other(fixture.admin_event(EventKind::DeviceRevoke,ScopeRef::Realm {realm_id:stream.realm_id().clone()},json!({"device_id":device,"revoked_by":authorizer,"revoked_at":arkret_canonical::format_timestamp_canonical(at),"reason":"security_rotation"})));
     let transaction = coland_services::authority_commit::AuthorityCommitApplication::new(
         coland_services::persistence::PersistenceHandle::from_shared(
@@ -1688,6 +2121,7 @@ async fn boundary_terminal_human_revoke(
         .into_rotation_resource(at)
         .unwrap();
     let id = initial.transaction_id().clone();
+    let _ = writer_phase.send_replace("rotation_create");
     persistence
         .security_transactions()
         .create(SecurityTransactionRecord {
@@ -1703,6 +2137,7 @@ async fn boundary_terminal_human_revoke(
         proposal_event_id: revoke.event_id.clone(),
         covering_commit_id: covering.commit_id.clone(),
     });
+    let _ = writer_phase.send_replace("proposal_commit");
     persistence
         .security_transactions()
         .commit_revoke_proposal(RevokeProposalCommitWrite {
@@ -1715,6 +2150,7 @@ async fn boundary_terminal_human_revoke(
         })
         .await
         .unwrap();
+    let _ = writer_phase.send_replace("read_terminal");
     let mut terminal = persistence
         .security_transactions()
         .get(id.as_str())
@@ -1739,6 +2175,7 @@ async fn boundary_terminal_human_revoke(
             outcome: SecurityRotationRevokeCommandDecision::Accepted,
             decided_at,
         });
+    let _ = writer_phase.send_replace("terminal_commit");
     persistence
         .security_transactions()
         .commit_revoke_command_terminal(RevokeCommandTerminalWrite {
@@ -1753,4 +2190,5 @@ async fn boundary_terminal_human_revoke(
         })
         .await
         .unwrap();
+    let _ = writer_phase.send_replace("completed");
 }

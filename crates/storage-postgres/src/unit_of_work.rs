@@ -208,12 +208,6 @@ struct AppletNamespaceClaimRow {
 }
 
 #[derive(diesel::QueryableByName)]
-struct AppletAdmissionRecordRow {
-    #[diesel(sql_type = Jsonb)]
-    record: serde_json::Value,
-}
-
-#[derive(diesel::QueryableByName)]
 struct RelationCurrentStateRow {
     #[diesel(sql_type = Text)]
     relation_id: String,
@@ -1250,20 +1244,11 @@ pub(crate) async fn commit_parent_membership_current_states(
 
 /// Refuse an Applet-authored Event once its installation or managed identity is
 /// fenced. The identity row is the same linearization point installation
-/// revocation takes, and the exact Events a closed first install carries are
-/// admitted by that aggregate rather than by the fence they are creating.
+/// revocation takes. Installation belongs only to its authoring aggregate.
 async fn ensure_applet_admission_in_transaction(
     conn: &mut AsyncPgConnection,
     event: &arkret_wire::Event,
-    applet_record: Option<&coland_storage::AppletRecordCommit>,
 ) -> PersistenceResult<()> {
-    if closed_applet_install_contains_event(
-        event.event_id.as_str(),
-        event.applet_id.as_ref().map(arkret_wire::AppletId::as_str),
-        applet_record,
-    ) {
-        return Ok(());
-    }
     let fail = || conflict("applet_revoked");
     let grant_id = if matches!(
         event.kind,
@@ -1288,93 +1273,47 @@ async fn ensure_applet_admission_in_transaction(
     let Some(applet_id) = &event.applet_id else {
         return Ok(());
     };
-    let scope_key = coland_storage::applet_effective_scope_key(
-        &crate::realm_actor_control::effective_scope(event)?,
-    )?;
-    let install = sql_query(
-        "SELECT record FROM applet_installations \
-         WHERE applet_id = $1 AND effective_scope_key = $2 AND service_id = $3 FOR UPDATE",
-    )
-    .bind::<Text, _>(applet_id.as_str())
-    .bind::<Text, _>(&scope_key)
-    .bind::<Text, _>(
-        crate::managed_message_actor::service_for_event(conn, event)
-            .await?
-            .as_str(),
-    )
-    .get_result::<AppletAdmissionRecordRow>(&mut *conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)?
-    .ok_or_else(fail)?;
-    // The shared identity belongs to this hosting Station, not to the
-    // remote Service which signs its terminal grants and management Events.
-    let target = install
-        .record
-        .get("target_station_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(fail)?;
-    let identity = sql_query(
-        "SELECT record FROM applet_managed_identities \
-         WHERE applet_id = $1 AND target_station_id = $2 FOR UPDATE",
-    )
-    .bind::<Text, _>(applet_id.as_str())
-    .bind::<Text, _>(target)
-    .get_result::<AppletAdmissionRecordRow>(&mut *conn)
-    .await
-    .optional()
-    .map_err(PersistenceError::database)?
-    .ok_or_else(fail)?;
+    let grants =
+        crate::managed_message_actor::load_current_grants(conn, &event.realm_id, false).await?;
+    let finite =
+        crate::applet_current_states::finite_source_for_event(conn, event, &grants).await?;
+    // Original-issuer cleanup is sourced by the accepted child and frozen
+    // parents. A closed business installation cannot block its revocation.
+    // The Service producer/current pair and Realm lifecycle are independently
+    // rechecked later in this same locked accepting transaction.
+    if finite.is_some() && event.kind == arkret_wire::EventKind::CapabilityRevoke {
+        return Ok(());
+    }
+    let scope = match &finite {
+        Some(source) => source.scope.clone(),
+        None => crate::realm_actor_control::effective_scope(event)?,
+    };
+    let service = crate::managed_message_actor::service_for_event(conn, event).await?;
+    let (identity, install) =
+        crate::applet_current_states::lock_existing_installation(conn, applet_id, &service, &scope)
+            .await?;
+    if finite.as_ref().is_some_and(|source| {
+        install
+            .get("install_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(source.install_id.as_str())
+    }) {
+        return Err(fail());
+    }
     if identity
-        .record
         .get("globally_fenced_at")
         .is_some_and(|value| !value.is_null())
         || install
-            .record
             .get("revoked_at")
             .is_some_and(|value| !value.is_null())
         || !matches!(
-            install
-                .record
-                .get("status")
-                .and_then(serde_json::Value::as_str),
+            install.get("status").and_then(serde_json::Value::as_str),
             Some("installed" | "partially_installed")
         )
     {
         return Err(fail());
     }
     Ok(())
-}
-
-/// A first install is a closed aggregate: the Events it carries are admitted by
-/// the same mutation that creates the fence, so they are not measured against
-/// an installation row that does not exist yet.
-fn closed_applet_install_contains_event(
-    event_id: &str,
-    event_applet_id: Option<&str>,
-    mutation: Option<&coland_storage::AppletRecordCommit>,
-) -> bool {
-    let Some(mutation) = mutation.filter(|mutation| mutation.expected_record.is_none()) else {
-        return false;
-    };
-    if event_applet_id != Some(mutation.applet_id.as_str()) {
-        return false;
-    }
-    mutation
-        .record
-        .get("registration_event")
-        .and_then(|event| event.get("event_id"))
-        .and_then(serde_json::Value::as_str)
-        == Some(event_id)
-        || mutation
-            .record
-            .get("capability_grant_events")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|events| {
-                events.iter().any(|event| {
-                    event.get("event_id").and_then(serde_json::Value::as_str) == Some(event_id)
-                })
-            })
 }
 
 fn contact_event_ref(
@@ -2221,11 +2160,6 @@ pub(crate) async fn commit_applet_record(
         coland_storage::validate_applet_installation_record(expected)?;
     }
     let replacing = mutation.expected_record.is_some();
-    sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind::<Text, _>(mutation.applet_id.as_str())
-        .execute(&mut *conn)
-        .await
-        .map_err(PersistenceError::database)?;
     let effective_scope_key =
         coland_storage::applet_effective_scope_key_from_record(&mutation.record)?;
     if mutation
@@ -2406,7 +2340,6 @@ pub(crate) async fn commit_applet_record(
 fn commit_one_in_connection<'a>(
     conn: &'a mut AsyncPgConnection,
     request: EventCommitRequest,
-    applet_record: Option<&'a coland_storage::AppletRecordCommit>,
     realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
     event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
     outcome: &'a mut EventCommitOutcome,
@@ -2418,7 +2351,6 @@ fn commit_one_in_connection<'a>(
     Box::pin(commit_one_inner(
         conn,
         request,
-        applet_record,
         realm_organization_proof,
         event_approvals,
         outcome,
@@ -2445,7 +2377,6 @@ fn managed_device_source(
 async fn commit_one_inner(
     conn: &mut AsyncPgConnection,
     request: EventCommitRequest,
-    applet_record: Option<&coland_storage::AppletRecordCommit>,
     realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
     event_approvals: Option<&coland_storage::EventApprovalCommit>,
     outcome: &mut EventCommitOutcome,
@@ -2719,7 +2650,6 @@ async fn commit_one_inner(
     Box::pin(commit_prepared_event(
         conn,
         request,
-        applet_record,
         realm_organization_proof,
         event_approvals,
         outcome,
@@ -2739,7 +2669,6 @@ async fn commit_one_inner(
 fn commit_prepared_event<'a>(
     conn: &'a mut AsyncPgConnection,
     request: EventCommitRequest,
-    applet_record: Option<&'a coland_storage::AppletRecordCommit>,
     realm_organization_proof: Option<&'a coland_storage::RealmOrganizationProofCommit>,
     event_approvals: Option<&'a coland_storage::EventApprovalCommit>,
     outcome: &'a mut EventCommitOutcome,
@@ -2757,7 +2686,6 @@ fn commit_prepared_event<'a>(
     Box::pin(commit_prepared_event_inner(
         conn,
         request,
-        applet_record,
         realm_organization_proof,
         event_approvals,
         outcome,
@@ -2776,7 +2704,6 @@ fn commit_prepared_event<'a>(
 async fn commit_prepared_event_inner(
     conn: &mut AsyncPgConnection,
     request: EventCommitRequest,
-    applet_record: Option<&coland_storage::AppletRecordCommit>,
     realm_organization_proof: Option<&coland_storage::RealmOrganizationProofCommit>,
     event_approvals: Option<&coland_storage::EventApprovalCommit>,
     outcome: &mut EventCommitOutcome,
@@ -2904,8 +2831,7 @@ async fn commit_prepared_event_inner(
     if let Some(selector) = request.device_revocation_gate.as_ref() {
         crate::boxed_future(|| ensure_gate_allowed_in_transaction(conn, selector)).await?;
     }
-    crate::boxed_future(|| ensure_applet_admission_in_transaction(conn, event, applet_record))
-        .await?;
+    crate::boxed_future(|| ensure_applet_admission_in_transaction(conn, event)).await?;
 
     let policy_approvals = if let Some(target) = crate::boxed_future(|| {
         crate::policy_current_states::admit_in_connection(
@@ -3824,7 +3750,6 @@ async fn commit_batch_in_connection(
         Box::pin(commit_one_in_connection(
             conn,
             event,
-            request.applet_record.as_ref(),
             request.realm_organization_proof.as_ref(),
             slot_approvals,
             slot_outcome,
@@ -3864,9 +3789,6 @@ async fn commit_batch_in_connection(
         if updated != 1 {
             return Err(conflict("duplicate_conflict").into());
         }
-    }
-    if let Some(mutation) = request.applet_record {
-        commit_applet_record(conn, mutation).await?;
     }
     for (realm_id, (verification_method, created_at)) in snapshot_contexts {
         enforce_realm_snapshot_capacity_in_connection(
@@ -3933,7 +3855,6 @@ impl EventCommitUnitOfWork for PgEventCommitUnitOfWork {
             events: vec![request],
             realm_organization_proof: None,
             event_approvals: None,
-            applet_record: None,
             applet_authoring_preview: None,
             agent_membership_cascade: None,
         })

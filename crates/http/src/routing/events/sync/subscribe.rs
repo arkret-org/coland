@@ -1085,7 +1085,7 @@ mod account_query_tests {
         .unwrap();
         assert_eq!(empty.filter.unwrap().realm_ids, Some(Vec::new()));
         let bounded = parse_account_subscribe_query("filter=%7B%22window_limit%22%3A0%7D").unwrap();
-        assert_eq!(bounded.filter.unwrap().window_limit, Some(0));
+        assert_eq!(bounded.filter.unwrap().max_window_event_count, Some(0));
         for query in [
             "filter.realm_ids=x",
             "filter=%7B%7D&filter=%7B%7D",

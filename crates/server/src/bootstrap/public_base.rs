@@ -71,7 +71,7 @@ fn relocated_document(
         .ok_or_else(|| anyhow::anyhow!("service document omits endpoints"))?;
     let mut entries = service
         .iter_mut()
-        .filter(|s| s["type"] == "ArkretService" && s["serviceKind"] == "station");
+        .filter(|s| s["type"] == "ArkretService" && s["service_kind"] == "station");
     let endpoint = entries
         .next()
         .ok_or_else(|| anyhow::anyhow!("Station endpoint is missing"))?;

@@ -787,9 +787,14 @@ fn validate_query_shape(vector: &str, body: &Value, query_value: &Value) -> Resu
     }
 
     for filter in query_filters(query_value) {
+        // Use the sole SDK filter owner: the renamed operator is required,
+        // retired keys are rejected, and legitimate boolean filters remain.
+        serde_json::from_value::<arkret_models_collaboration::objects::queries::Filter>(
+            filter.clone(),
+        )
+        .map_err(|_| query_schema_error("query filter violates the registered shape"))?;
         let op = filter
-            .get("op")
-            .or_else(|| filter.get("operator"))
+            .get("operator")
             .and_then(Value::as_str)
             .unwrap_or("eq");
         if !allowed_query_op(op) || vector.contains("unknown_filter_key") {
@@ -851,8 +856,7 @@ fn row_matches_query(row: &Value, query_value: &Value) -> bool {
     query_filters(query_value).into_iter().all(|filter| {
         let field = filter.get("field").and_then(Value::as_str).unwrap_or("");
         let op = filter
-            .get("op")
-            .or_else(|| filter.get("operator"))
+            .get("operator")
             .and_then(Value::as_str)
             .unwrap_or("eq");
         let expected = filter.get("value").unwrap_or(&Value::Null);
@@ -1208,10 +1212,10 @@ mod tests {
             crate::config::AppConfig::test_default(),
             coland_storage_postgres::Db { pool: None },
         );
-        let first_query = json!({"filter": [{"field": "kind", "op": "eq", "value": "task"}]});
+        let first_query = json!({"filter": [{"field": "kind", "operator": "eq", "value": "task"}]});
         let first_digest = digest_json(&query_digest_value(&first_query));
         let second_digest =
-            digest_json(&json!({"filter": [{"field": "kind", "op": "eq", "value": "note"}]}));
+            digest_json(&json!({"filter": [{"field": "kind", "operator": "eq", "value": "note"}]}));
         let cursor_token = mint_query_cursor(&state, 25, &first_digest)
             .await
             .expect("cursor mints");
@@ -1231,7 +1235,7 @@ mod tests {
         assert_eq!(
             digest_json(&query_digest_value(&json!({
                 "cursor": cursor_token,
-                "filter": [{"field": "kind", "op": "eq", "value": "task"}],
+                "filter": [{"field": "kind", "operator": "eq", "value": "task"}],
             }))),
             first_digest
         );
@@ -1260,6 +1264,24 @@ mod tests {
             .expect("barrier cursor mints");
         let decoded = Cursor::decode(&barrier).expect("SDK core cursor shape");
         assert_eq!(decoded.purpose, CursorPurpose::Barrier);
+    }
+
+    #[test]
+    fn query_filter_uses_the_registered_operator_owner() {
+        let body = json!({});
+        let registered = json!({"filter":[{"field":"kind","operator":"eq","value":"task"}]});
+        validate_query_shape("ak.vector.query.filter", &body, &registered).unwrap();
+        let boolean = json!({"filter":[{"and":[{"field":"kind","operator":"eq","value":"task"}]}]});
+        validate_query_shape("ak.vector.query.filter", &body, &boolean).unwrap();
+        for invalid in [
+            json!({"filter":[{"field":"kind","op":"eq","value":"task"}]}),
+            json!({"filter":[{"field":"kind","value":"task"}]}),
+            json!({"filter":[{"field":"kind","operator":"eq","op":"eq","value":"task"}]}),
+        ] {
+            let error =
+                validate_query_shape("ak.vector.query.filter", &body, &invalid).unwrap_err();
+            assert_eq!(error.wire_code(), "schema_violation");
+        }
     }
 
     #[test]

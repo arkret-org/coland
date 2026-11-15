@@ -366,7 +366,7 @@ async fn call_current_handoff_scenario() {
     let mut joined = Box::pin(isolated_request(&fixture, &pool, &service.authority_commit,
         EventKind::CallState, serde_json::json!({"call_id":call_id,
             "focus":{"mode":"sfu","session_focus":"handoff-media"},
-            "roster_delta":{"op":"join","participant":{
+            "roster_delta":{"operation":"join","participant":{
                 "actor_id":watcher,"device_id":device,"focus_id":"handoff-media",
                 "participant_id":participant,"media":{"audio":true,"video":false,"screen":false},
                 "participant_binding":{"expires_at":arkret_canonical::format_timestamp_canonical(expires_at),
@@ -385,7 +385,7 @@ async fn call_current_handoff_scenario() {
         .unwrap();
     let kick_at = joined.authority_commit.commit.committed_at + chrono::TimeDelta::seconds(1);
     let kicked = Box::pin(isolated_request(&fixture, &pool, &joined.authority_commit, EventKind::CallState,
-        serde_json::json!({"call_id":call_id,"moderation_delta":{"op":"remove_participant","removal":{
+        serde_json::json!({"call_id":call_id,"moderation_delta":{"operation":"remove_participant","removal":{
             "actor_id":watcher,"device_id":device,"action":"kick",
             "removed_by":watcher.signing_principal_id(),"removed_at":arkret_canonical::format_timestamp_canonical(kick_at)
         }}}))).await;
@@ -683,7 +683,7 @@ async fn call_current_handoff_scenario() {
         &pool,
         &next_tail,
         EventKind::CallState,
-        serde_json::json!({"call_id":call_id,"roster_delta":{"op":"leave","actor_id":watcher,
+        serde_json::json!({"call_id":call_id,"roster_delta":{"operation":"leave","actor_id":watcher,
             "device_id":device,"expected_commit_id":joined.authority_commit.commit.commit_id}}),
     ))
     .await;

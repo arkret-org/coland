@@ -1316,7 +1316,8 @@ fn validate_revoke_submissions(
         let event = &submission.event;
         if event.kind != EventKind::CapabilityRevoke
             || &event.actor_id != admin_actor
-            || event.scope_ref != plan.effective_scope
+            || event.scope_ref
+                != arkret_wire::ScopeRef::realm(plan.effective_scope.realm_id().clone())
         {
             return Err(AppError::param_invalid(
                 "capability revoke Event kind, actor, or scope does not match the plan",

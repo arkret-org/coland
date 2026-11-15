@@ -103,7 +103,7 @@ async fn obligation_close_grant(fixture: &Fixture, grant: &GrantId) {
         .unwrap();
     let current = rows.iter().find(|row| &row.grant_id == grant).unwrap();
     let event = fixture.admin_event(EventKind::CapabilityRevoke, ScopeRef::Realm { realm_id: fixture.realm.clone() },
-        json!({"grant_id":grant,"expected_commit_id":current.revision,"reason":"exact native obligation source closed"}));
+        json!({"grant_id":grant,"expected_commit_id":current.revision.commit_id,"reason":"exact native obligation source closed"}));
     boxed_step(|| submit_human_event(fixture, event)).await;
 }
 

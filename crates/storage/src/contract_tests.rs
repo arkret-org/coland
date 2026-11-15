@@ -1371,6 +1371,7 @@ pub trait AppletFormalCommitFactory: Send + Sync {
 pub type AppletFormalFinalizer = std::sync::Arc<
     dyn Fn(
             &[arkret_wire::CommittedEventRef],
+            &str,
             Option<serde_json::Value>,
             Option<serde_json::Value>,
         ) -> super::PersistenceResult<super::AppletUnitFinalization>
@@ -1401,8 +1402,8 @@ impl AppletFormalCommitUnit {
                 self.input.clone(),
                 self.author.clone(),
                 self.attester.clone(),
-                std::sync::Arc::new(move |refs| {
-                    finalize(refs, identity.clone(), installation.clone())
+                std::sync::Arc::new(move |refs, install_id| {
+                    finalize(refs, install_id, identity.clone(), installation.clone())
                 }),
             )
             .await
@@ -1560,7 +1561,6 @@ mls_state: None, welcomes: vec![], recipient_queue_capacity: 0 },
             events: batch,
             realm_organization_proof: None,
             event_approvals: None,
-            applet_record: None,
             applet_authoring_preview: None,
             agent_membership_cascade: None,
         })
@@ -1615,8 +1615,8 @@ mls_state: None, welcomes: vec![], recipient_queue_capacity: 0 },
             _ => serde_json::json!(principal),
         };
         let finalize = unit.finalize.clone();
-        unit.finalize = std::sync::Arc::new(move |refs, identity, installation| {
-            let mut result = finalize(refs, identity, installation)?;
+        unit.finalize = std::sync::Arc::new(move |refs, install_id, identity, installation| {
+            let mut result = finalize(refs, install_id, identity, installation)?;
             result.applet_record.record["bots"] = serde_json::json!([{"bot_actor_id": actor}]);
             Ok(result)
         });
@@ -1651,6 +1651,73 @@ mls_state: None, welcomes: vec![], recipient_queue_capacity: 0 },
                 .is_none()
         );
     }
+
+    // Keeping every serialized mirror mutually equal must not replace the
+    // ID which the real accepting transaction selected after its own locks.
+    let changed_id = contract_applet_id();
+    let mut changed = stores
+        .factory
+        .prepare_install(
+            &changed_id,
+            &format!("{namespace}:changed-owned-installation-id"),
+        )
+        .await;
+    let station = arkret_wire::project_did_to_core_id(
+        &Did::new(
+            changed
+                .input
+                .station_verification_method
+                .as_str()
+                .split('#')
+                .next()
+                .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let finalize = changed.finalize.clone();
+    changed.finalize = std::sync::Arc::new(move |refs, owned_id, identity, installation| {
+        let mut result = finalize(refs, owned_id, identity, installation)?;
+        let alternative = if owned_id == "019c8b80-0000-7000-8000-000000000001" {
+            "019c8b80-0000-7000-8000-000000000002"
+        } else {
+            "019c8b80-0000-7000-8000-000000000001"
+        };
+        result.response_body["install_id"] = serde_json::json!(alternative);
+        result.applet_record.record["install_id"] = serde_json::json!(alternative);
+        result.applet_record.record["install_response"] = result.response_body.clone();
+        result.idempotency_record.response_body = result.response_body.clone();
+        Ok(result)
+    });
+    let error = changed
+        .commit(stores.applets)
+        .await
+        .expect_err("a consistent forged mirror cannot choose the accepting installation ID");
+    assert!(
+        matches!(error,PersistenceError::Conflict(ref detail) if detail=="failed_precondition: finalization changed immutable request bindings"),
+        "{error:?}"
+    );
+    assert_contract_event_group_visibility(stores.events, &changed.event_ids, false).await;
+    assert!(
+        stores
+            .applets
+            .get(
+                changed_id.as_str(),
+                changed.input.package.service_id.as_str(),
+                &applet_effective_scope_key(&changed.effective_scope).unwrap()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        stores
+            .applets
+            .get_identity(changed_id.as_str(), station.as_str())
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // Distinct scopes share the Service registration CAS and an insert-only
     // identity winner. The loser must reauthor a new signed registration from
@@ -1703,8 +1770,8 @@ mls_state: None, welcomes: vec![], recipient_queue_capacity: 0 },
         .prepare_install(&scopes_id, &format!("{namespace}:scope-conflict"))
         .await;
     let finalize = conflicting.finalize.clone();
-    conflicting.finalize = std::sync::Arc::new(move |refs, identity, installation| {
-        let mut result = finalize(refs, identity, installation)?;
+    conflicting.finalize = std::sync::Arc::new(move |refs, install_id, identity, installation| {
+        let mut result = finalize(refs, install_id, identity, installation)?;
         result.applet_record.identity.record["registry_id"] =
             serde_json::json!("ak:did_core:web:other-registry.example");
         Ok(result)

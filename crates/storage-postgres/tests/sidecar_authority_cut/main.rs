@@ -6030,7 +6030,7 @@ async fn import_agent_management_policy(
         document.rules[0].review_requirement = Some(
             arkret_models_collaboration::governance::operation_wire::ManagementReviewRequirement {
                 approver_actor_ids: vec![arkret_wire::ActorId::account(controller.clone())],
-                threshold: 1,
+                min_approver_count: 1,
                 max_age_seconds: 60,
             },
         );
@@ -6671,7 +6671,7 @@ async fn management_review_atomic_join_scenario(
                 "created_by":administrator,"created_at":arkret_canonical::format_timestamp_canonical(join.authority_commit.commit.committed_at),
                 "rules":[{"rule_id":"review_original_controller_join","kind":"agent","effect":"require_review",
                     "agent_target":{"kind":"all"},"agent_operations":["join","publish"],
-                    "review_requirement":{"approver_actor_ids":designated_administrators,"threshold":1,"max_age_seconds":max_age_seconds}}]}}),
+                    "review_requirement":{"approver_actor_ids":designated_administrators,"min_approver_count":1,"max_age_seconds":max_age_seconds}}]}}),
         genesis.commit.committed_at.max(join.authority_commit.commit.committed_at)+chrono::TimeDelta::milliseconds(1),
     ))).await;
     fixture_commit_step(&pool, policy.clone()).await.unwrap();
@@ -7094,7 +7094,6 @@ async fn management_review_atomic_join_scenario(
                 }),
                 events: vec![attempt],
                 realm_organization_proof: None,
-                applet_record: None,
                 applet_authoring_preview: None,
                 agent_membership_cascade: None,
             };
@@ -7237,7 +7236,6 @@ async fn management_review_atomic_join_scenario(
             events: vec![attempt],
             event_approvals: Some(prepared),
             realm_organization_proof: None,
-            applet_record: None,
             applet_authoring_preview: None,
             agent_membership_cascade: None,
         };
@@ -7277,7 +7275,6 @@ async fn management_review_atomic_join_scenario(
             methods: vec![vote.clone()],
         }),
         realm_organization_proof: None,
-        applet_record: None,
         applet_authoring_preview: None,
         agent_membership_cascade: None,
     };
@@ -7552,7 +7549,6 @@ async fn management_review_atomic_join_scenario(
         }),
         events: vec![execution_public],
         realm_organization_proof: None,
-        applet_record: None,
         applet_authoring_preview: None,
         agent_membership_cascade: None,
     };

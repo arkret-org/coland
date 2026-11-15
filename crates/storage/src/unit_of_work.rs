@@ -267,7 +267,6 @@ pub struct EventBatchCommitRequest {
     pub events: Vec<EventCommitRequest>,
     pub realm_organization_proof: Option<RealmOrganizationProofCommit>,
     pub event_approvals: Option<crate::EventApprovalCommit>,
-    pub applet_record: Option<AppletRecordCommit>,
     pub applet_authoring_preview: Option<AppletAuthoringPreviewCommit>,
     pub agent_membership_cascade: Option<crate::AgentMembershipCascadeCommit>,
 }

@@ -102,6 +102,24 @@ async fn native_install_admission_rechecks_each_e2ee_choice_and_policy() {
 }
 
 #[tokio::test]
+async fn native_service_epoch_b_revokes_a_and_recovers_exact_originals() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    ordinary_realm::case_future(|| {
+        applet_authoring::realm_native_service_epoch_revoke(database.pool())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn native_terminal_sources_preserve_safe_reaffirmation_and_reject_reinstall() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    ordinary_realm::case_future(|| {
+        applet_authoring::realm_native_continuous_registration_sources(database.pool())
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn native_authority_admission_preserves_identity_sources_and_exact_retries() {
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     Box::pin(applet_authoring::realm_native_authority_admission(
@@ -189,5 +207,14 @@ async fn native_authorization_and_keypackage_upload_recover_exact_originals_afte
     Box::pin(applet_authoring::realm_native_runtime_recovery(
         database.pool(),
     ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_bridge_epoch_restart_recovers_unacknowledged_a_without_duplicate_effects() {
+    let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
+    ordinary_realm::case_future(|| {
+        applet_authoring::realm_native_bridge_epoch_ack_recovery(database.pool())
+    })
     .await;
 }

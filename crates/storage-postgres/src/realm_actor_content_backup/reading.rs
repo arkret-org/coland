@@ -352,9 +352,9 @@ pub(crate) async fn head_for_action(
                 .ok_or_else(|| unavailable("native actor absent"))?
                 .clone(),
             effective_scope: scope.clone(),
-            manager_ref: preparation.input.auth_binding.manager_ref,
-            recovery_ref: preparation.input.auth_binding.recovery_ref,
-            recipient_ref: preparation.input.auth_binding.recipient_ref,
+            manager_ref: preparation.input.authorization_binding.manager_ref,
+            recovery_ref: preparation.input.authorization_binding.recovery_ref,
+            recipient_ref: preparation.input.authorization_binding.recipient_ref,
             authority_commit_id: preparation.selection_ref.commit_id,
             secret_storage: BackupActiveSeriesPointer::Active {
                 active_series_id: record.active_series_id.clone(),
@@ -398,6 +398,75 @@ pub(crate) async fn native_head(
     ))
 }
 
+/// Both key preflight and final verification read the same qualified complete
+/// collector. No second inventory query or independently trusted list exists.
+async fn qualified_inventory_in_connection(
+    conn: &mut AsyncPgConnection,
+    reader: &RealmActorBackupManagerReader,
+) -> PersistenceResult<arkret_models_integration::RealmActorArchiveInventoryManifest> {
+    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &reader.actor.realm_id)
+        .await?;
+    qualify_manager(conn, reader).await?;
+    super::inventory_in_connection(conn, &ActorId::realm(reader.actor.clone())).await
+}
+
+/// Extract the exact external Gov Commit dependencies of the existing SDK
+/// inventory verifier. This only identifies key-material requirements, never
+/// grants disclosure or validates an inventory. Portable foreign histories in
+/// Backup.native_source retain their independent source verifier.
+fn inventory_original_commits(
+    manifest: &arkret_models_integration::RealmActorArchiveInventoryManifest,
+) -> PersistenceResult<Vec<arkret_wire::RealmCommit>> {
+    use arkret_models_integration::RealmActorArchiveInventoryEntry;
+    let mut commits = std::collections::BTreeMap::new();
+    for entry in &manifest.entries {
+        let originals: Vec<_> = match entry {
+            RealmActorArchiveInventoryEntry::Backup(_) => Vec::new(),
+            RealmActorArchiveInventoryEntry::Series(entry) => vec![&entry.source.commit],
+            RealmActorArchiveInventoryEntry::Recipient(entry) => {
+                std::iter::once(&entry.declaration.commit)
+                    .chain(entry.recovery_begin.as_ref().map(|begin| &begin.commit))
+                    .collect()
+            }
+        };
+        for commit in originals {
+            commit
+                .verify_commit_id_matches_content()
+                .map_err(|error| unavailable(&error.to_string()))?;
+            let bytes = arkret_canonical::canonical_json_bytes(commit)
+                .map_err(|error| unavailable(&error.to_string()))?;
+            if let Some((original_bytes, _)) = commits.get(&commit.commit_id) {
+                if original_bytes != &bytes {
+                    return Err(unavailable(
+                        "native inventory has conflicting complete original Commits",
+                    ));
+                }
+            } else {
+                commits.insert(commit.commit_id.clone(), (bytes, commit.clone()));
+            }
+        }
+    }
+    Ok(commits.into_values().map(|(_, commit)| commit).collect())
+}
+
+/// Finish and release every transaction/connection before the HTTP layer may
+/// resolve these locators. No partial inventory is an externally usable result.
+pub(crate) async fn native_inventory_commits(
+    pool: &PgPool,
+    reader: &RealmActorBackupManagerReader,
+) -> PersistenceResult<Vec<arkret_wire::RealmCommit>> {
+    let mut held = crate::account_content_delivery::DeliveryGuard::begin(pool).await?;
+    let commits = {
+        let conn = held.connection();
+        let manifest = qualified_inventory_in_connection(conn, reader).await?;
+        let commits = inventory_original_commits(&manifest)?;
+        qualify_manager(conn, reader).await?;
+        commits
+    };
+    coland_storage::AccountContentDeliveryGuard::finish(held).await?;
+    Ok(commits)
+}
+
 pub(crate) async fn native_inventory(
     pool: &PgPool,
     reader: &RealmActorBackupManagerReader,
@@ -405,11 +474,7 @@ pub(crate) async fn native_inventory(
     let mut held = crate::account_content_delivery::DeliveryGuard::begin(pool).await?;
     let manifest = {
         let conn = held.connection();
-        crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &reader.actor.realm_id)
-            .await?;
-        qualify_manager(conn, reader).await?;
-        let manifest =
-            super::inventory_in_connection(conn, &ActorId::realm(reader.actor.clone())).await?;
+        let manifest = qualified_inventory_in_connection(conn, reader).await?;
         arkret_identity::realm_actor_content_backup::verify_realm_actor_archive_inventory(
             &manifest,
             &reader.authority,

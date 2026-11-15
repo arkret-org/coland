@@ -280,10 +280,12 @@ pub(super) async fn run_configuration(pool: PgPool) {
         "late acknowledgement cannot consume a newer attempt"
     );
     let recovered_edge = make_edge();
-    let recovery = arkret_bridge_runtime::applet_configuration::AppletConfigurationService::new(
-        recovered_edge.clone(),
-    )
-    .unwrap();
+    let recovery =
+        arkret_bridge_runtime::applet_configuration::AppletConfigurationService::with_manager(
+            recovered_edge.clone(),
+            fixture_runtime_manager(&native, recovered_edge.clone()),
+        )
+        .unwrap();
     assert_eq!(
         boxed_step(|| recovery.recover_accepted_configurations())
             .await
@@ -453,7 +455,7 @@ pub(super) async fn run_configuration(pool: PgPool) {
                 "created_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()),
                 "rules":[{"rule_id":"configuration_creation","kind":"applet","effect":"require_review",
                     "applet_target":{"kind":"all"},"applet_operations":["create_bot"],
-                    "review_requirement":{"approver_actor_ids":[administrator],"threshold":1,"max_age_seconds":3600}}]}
+                    "review_requirement":{"approver_actor_ids":[administrator],"min_approver_count":1,"max_age_seconds":3600}}]}
         }));
     boxed_step(|| configuration_admin_event(&factory.fixture, policy)).await;
     request.intent.request_id = format!("ak:request:{}", uuid::Uuid::now_v7())
@@ -1653,11 +1655,16 @@ async fn cross_station_configuration(
         .await
         .unwrap()
         .unwrap();
-    let revoke = governor.admin_event(EventKind::CapabilityRevoke,
-        ScopeRef::Realm { realm_id: governor.realm.clone() }, json!({
+    let revoke = governor.admin_event(
+        EventKind::CapabilityRevoke,
+        ScopeRef::Realm {
+            realm_id: governor.realm.clone(),
+        },
+        json!({
             "grant_id": grant_id,
             "expected_commit_id": original.commit.commit_id
-        }));
+        }),
+    );
     boxed_step(|| configuration_admin_event(governor, revoke)).await;
     let (status, refused) = boxed_step(|| submit(request)).await;
     assert_eq!(

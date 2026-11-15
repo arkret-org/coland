@@ -1984,7 +1984,7 @@ LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
         'expires_at', 'created_at',
         'updated_at', 'ciphertext_digest', 'encryption', 'retention'
     ) AND NOT (payload#>>'{actor_id,kind}' = 'realm' AND member.key IN ('expires_at', 'retention')))
-       OR (payload#>>'{actor_id,kind}' = 'realm' AND member.key = 'auth_binding')
+       OR (payload#>>'{actor_id,kind}' = 'realm' AND member.key = 'authorization_binding')
 $$;
 
 -- First admission survives ordinary ciphertext deletion. Only hashes, public
@@ -3622,13 +3622,17 @@ CREATE TABLE public.applet_registration_instances (
 );
 
 -- The registration accepted with each Service parent is immutable provenance.
--- Realm registration and Circle grant positions are never compared across streams.
+-- Governance originals remain on the Realm stream; install_id freezes the
+-- existing installation instance without mirroring its derived effect scope.
+-- NULL retains registration-only generic provenance; finite terminal consumers
+-- must reject it rather than infer a current installation.
 CREATE TABLE public.applet_grant_registration_sources (
     realm_id text NOT NULL,
     grant_id text NOT NULL,
     applet_id text NOT NULL,
     service_id text NOT NULL,
     registration_event_ref text NOT NULL,
+    install_id text,
     PRIMARY KEY (realm_id, grant_id),
     FOREIGN KEY (realm_id, applet_id, registration_event_ref)
         REFERENCES public.applet_registration_instances (realm_id, applet_id, registration_event_ref)

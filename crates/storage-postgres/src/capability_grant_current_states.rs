@@ -582,7 +582,7 @@ async fn require_non_event_registration_binding(
     let exceeds = || conflict("grant_exceeds_issuer_authority");
     if rule.required_registration_event_kind != arkret_wire::event_kind_str::APPLET_REGISTRATION
         || rule.subject_binding != "registration.service_id"
-        || rule.scope_binding != "grant.resource_exact_registration_scope"
+        || rule.scope_binding != "grant.resource_exact_installation_effective_scope"
         || rule.epoch_binding != "constraint.registration_epoch_exact_registration"
         || rule.requested_action_binding != "grant.action_in_registration.requested_scopes"
     {
@@ -1254,7 +1254,12 @@ pub(crate) fn commit_capability_grant_current_state_in_connection<'a>(
     prepared: Option<&'a coland_storage::EventApprovalCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PersistenceResult<()>> + Send + 'a>> {
     Box::pin(commit_capability_grant_current_state_inner(
-        conn, event, commit, None, prepared,
+        conn,
+        event,
+        commit,
+        None,
+        prepared,
+        AppletGrantInstallation::Current,
     ))
 }
 
@@ -1266,7 +1271,33 @@ pub(crate) fn commit_qualified_capability_grant_current_state_in_connection<'a>(
     prepared: Option<&'a coland_storage::EventApprovalCommit>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PersistenceResult<()>> + Send + 'a>> {
     Box::pin(commit_capability_grant_current_state_inner(
-        conn, event, commit, evidence, prepared,
+        conn,
+        event,
+        commit,
+        evidence,
+        prepared,
+        AppletGrantInstallation::Current,
+    ))
+}
+
+enum AppletGrantInstallation<'a> {
+    Current,
+    Installing(&'a str),
+}
+
+pub(crate) fn commit_installation_grant_current_state_in_connection<'a>(
+    conn: &'a mut AsyncPgConnection,
+    event: &'a arkret_wire::Event,
+    commit: &'a arkret_wire::RealmCommit,
+    installation_id: &'a str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = PersistenceResult<()>> + Send + 'a>> {
+    Box::pin(commit_capability_grant_current_state_inner(
+        conn,
+        event,
+        commit,
+        None,
+        None,
+        AppletGrantInstallation::Installing(installation_id),
     ))
 }
 
@@ -1276,6 +1307,7 @@ async fn commit_capability_grant_current_state_inner(
     commit: &arkret_wire::RealmCommit,
     evidence: Option<&coland_storage::VerifiedAgentScopeEvidence>,
     prepared: Option<&coland_storage::EventApprovalCommit>,
+    installation: AppletGrantInstallation<'_>,
 ) -> PersistenceResult<()> {
     let Some(mutation) = mutation_for_event(event)? else {
         return Ok(());
@@ -1347,17 +1379,14 @@ async fn commit_capability_grant_current_state_inner(
                     ..
                 },
                 Some(target),
-            ) if target.value.issuer_id == event.actor_id => crate::boxed_future(|| {
-                managed_subject_role(
-                    conn,
-                    event,
-                    &target.value.subject,
-                    &target.value.issuer_id,
-                    commit.committed_at,
-                )
-            })
-            .await?
-            .is_some(),
+            ) if target.value.issuer_id == event.actor_id => {
+                let grants =
+                    crate::managed_message_actor::load_current_grants(conn, &event.realm_id, false)
+                        .await?;
+                crate::applet_current_states::finite_source_for_event(conn, event, &grants)
+                    .await?
+                    .is_some()
+            }
             _ => false,
         }
     } else {
@@ -1472,8 +1501,25 @@ async fn commit_capability_grant_current_state_inner(
     let stream_ref =
         serde_json::to_value(&commit.stream_ref).map_err(PersistenceError::database)?;
     if current.is_none() {
-        crate::applet_current_states::retain_service_grant_source(conn, &event.realm_id, &value)
-            .await?;
+        match installation {
+            AppletGrantInstallation::Current => {
+                crate::applet_current_states::retain_service_grant_source(
+                    conn,
+                    &event.realm_id,
+                    &value,
+                )
+                .await?
+            }
+            AppletGrantInstallation::Installing(id) => {
+                crate::applet_current_states::retain_installation_grant_source(
+                    conn,
+                    &event.realm_id,
+                    &value,
+                    id,
+                )
+                .await?
+            }
+        }
     }
     let value = serde_json::to_value(&value).map_err(PersistenceError::database)?;
     sql_query(

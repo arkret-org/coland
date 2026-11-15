@@ -98,7 +98,7 @@ pub(crate) fn verify_realm_device_backup_signature(
     backup
         .validate_ciphertext_digest()
         .map_err(PersistenceError::database)?;
-    let binding = backup.auth_binding.as_ref().ok_or_else(invalid)?;
+    let binding = backup.authorization_binding.as_ref().ok_or_else(invalid)?;
     let fingerprint = arkret_canonical::ed25519_pubkey_to_did_key_multibase(&authority.public_key);
     if backup.actor_id != authority.actor_id
         || backup.actor_id.as_realm_actor_id().is_none()

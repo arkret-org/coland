@@ -209,12 +209,7 @@ pub(crate) fn validate_input(
         if events.iter().any(|e| {
             e.actor_id != input.admin_actor_id
                 || e.realm_id != *basis.effective_scope.realm_id()
-                || e.scope_ref
-                    != if e.kind == EventKind::AppletRegistration {
-                        arkret_wire::ScopeRef::realm(e.realm_id.clone())
-                    } else {
-                        basis.effective_scope.clone()
-                    }
+                || e.scope_ref != arkret_wire::ScopeRef::realm(e.realm_id.clone())
                 || e.executed_by.is_some()
         }) {
             return Err(rejected("admin Event does not bind the installation scope"));
@@ -391,6 +386,7 @@ async fn admit_in_connection(
     for realm in realms {
         crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &realm).await?;
     }
+    let installation_id = choose_installation_id(conn, input).await?;
     let mut current_input = input.clone();
     current_input.accepted_at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
     let input = &current_input;
@@ -550,7 +546,7 @@ async fn admit_in_connection(
             .await?;
         }
         if event.kind == EventKind::CapabilityGrant {
-            crate::capability_grant_current_states::commit_capability_grant_current_state_in_connection(conn,event,&commit, None).await?;
+            crate::capability_grant_current_states::commit_installation_grant_current_state_in_connection(conn,event,&commit,&installation_id).await?;
         }
         crate::applet_current_states::project_applet_event_in_connection(conn, event, &commit)
             .await?;
@@ -561,9 +557,16 @@ async fn admit_in_connection(
             stream_position: commit.stream_position,
         });
     }
-    let finalization = finalize(&refs)?;
+    let finalization = finalize(&refs, &installation_id)?;
     validate_finalized_refs(input, &refs, &finalization.response_body)?;
-    if finalization.applet_record.applet_id != input.package.applet_id
+    if finalization.applet_record.record["effective_scope"]
+        != serde_json::to_value(effective_scope(input)?).map_err(rejected)?
+        || finalization.applet_record.identity.target_station_id != *target_station(input)?
+        || finalization.applet_record.record["install_response"] != finalization.response_body
+        || finalization.applet_record.record["install_id"].as_str()
+            != Some(installation_id.as_str())
+        || finalization.response_body["install_id"].as_str() != Some(installation_id.as_str())
+        || finalization.applet_record.applet_id != input.package.applet_id
         || finalization.applet_record.expected_record != input.expected_installation
         || finalization.applet_record.identity.expected_record != input.expected_identity
         || finalization.idempotency_record.authenticated_actor != input.admin_actor_id
@@ -585,6 +588,67 @@ async fn admit_in_connection(
         response_body: finalization.response_body,
         replayed: false,
     })
+}
+
+/// Only installation owns this existing Applet serial fence. The generic batch
+/// no longer accepts installation mutations, so K cannot be acquired after M/I.
+async fn choose_installation_id(
+    conn: &mut AsyncPgConnection,
+    input: &AppletAuthoringUnitWrite,
+) -> PersistenceResult<String> {
+    sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind::<Text, _>(input.package.applet_id.as_str())
+        .execute(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+    let scope = effective_scope(input)?;
+    let (identity, old) = crate::applet_current_states::lock_installation_records(
+        conn,
+        &input.package.applet_id,
+        &input.package.service_id,
+        scope,
+        target_station(input)?,
+    )
+    .await?;
+    // The actual locked records choose I. Keep the original expected-record
+    // CAS and its error priority at finalization/commit_applet_record; a stale
+    // caller cannot publish this planned ID or any source before that succeeds.
+    let coland_storage::AppletAdmissionRequest::Install(body) = &input.request;
+    let Some(old) = old else {
+        return Ok(uuid::Uuid::now_v7().to_string());
+    };
+    let active = matches!(
+        old["status"].as_str(),
+        Some("installed" | "partially_installed")
+    ) && old.get("revoked_at").is_none_or(serde_json::Value::is_null)
+        && identity.as_ref().is_some_and(|i| {
+            i.get("globally_fenced_at")
+                .is_none_or(serde_json::Value::is_null)
+        });
+    #[derive(diesel::QueryableByName)]
+    struct Registration {
+        #[diesel(sql_type=Jsonb)]
+        value: Value,
+    }
+    let prior=sql_query("SELECT r.value FROM applet_registration_current_states r JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3 AND a.registration_event_ref=$4")
+        .bind::<Text,_>(scope.realm_id().as_str()).bind::<Text,_>(input.package.applet_id.as_str()).bind::<Text,_>(input.package.service_id.as_str())
+        .bind::<Text,_>(old.pointer("/registration_event/event_id").and_then(Value::as_str).ok_or_else(||rejected("accepted installation registration is absent"))?)
+        .get_result::<Registration>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let next = serde_json::to_value(&body.authoring_request_basis.registration_event.payload)
+        .map_err(rejected)?;
+    if active
+        && prior.is_some_and(|p| {
+            crate::applet_current_states::registration_security_value(&p.value)
+                == crate::applet_current_states::registration_security_value(&next)
+        })
+    {
+        return old["install_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| rejected("accepted installation ID is absent"));
+    }
+    Ok(uuid::Uuid::now_v7().to_string())
 }
 
 async fn verify_admin_producer(

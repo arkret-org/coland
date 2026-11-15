@@ -27,7 +27,6 @@ use super::record::{
     applet_identity, applet_record, applet_records, encode_applet_identity, encode_applet_record,
 };
 use super::types::{AppletIdentityRecord, AppletRecord};
-use crate::ids;
 use crate::state::AppState;
 
 pub(super) struct ValidatedAdminInstallEvents {
@@ -136,13 +135,13 @@ pub(super) fn validate_admin_install_events(
             || event.actor_id.as_account_id().map(|a| &a.station_id)
                 != Some(&basis.target_station_id)
             || &event.realm_id != realm_id
-            || event.scope_ref != basis.effective_scope
+            || event.scope_ref != ScopeRef::realm(realm_id.clone())
             || event.producer_proof.is_none()
             || !event_ids.insert(event.event_id.clone())
         {
             return Err(crate::app_error!(
                 AppletInstallPlanMismatch,
-                "every capability_grant_event must be unique, caller-signed, and use the exact effective scope",
+                "every capability_grant_event must be unique, caller-signed, and use its Realm scope",
             ));
         }
         let payload: arkret_models_collaboration::events_payloads::CapabilityGrantPayload =
@@ -332,7 +331,6 @@ pub(super) async fn register_package_install(
         AppletInstallEffectiveStatus::Installed => "installed",
         AppletInstallEffectiveStatus::PartiallyInstalled => "partially_installed",
     };
-    let install_id = ids::generate_install_id();
     let station_verification_method = state
         .service_verification_method("notary-key")
         .map_err(AppError::internal)?;
@@ -366,105 +364,106 @@ pub(super) async fn register_package_install(
     let audit_package = package.clone();
     let admin_actor = owner_actor.clone();
     let station_id = state.service_id().to_owned();
-    let finalizer: coland_storage::AppletUnitFinalizer = std::sync::Arc::new(move |references| {
-        let registration_event_ref = crate::routing::events::event_log::applet_committed_ref(
-            references,
-            &registration_event,
-        )?
-        .event_id;
-        let response = AppletInstallResponseBody {
-            install_id: install_id.clone(),
-            applet_id: package.applet_id.clone(),
-            service_id: package.service_id.clone(),
-            registration_event_ref,
-            registration_epoch: package.registration_epoch.clone(),
-            capability_grant_refs: capability_grant_refs.clone(),
-            e2ee_authorization_refs: e2ee_authorization_refs.clone(),
-            widget_policy_ref: None,
-            effective_status,
-            rejections: denied_scope_values(&package, &approved_actions)
-                .into_iter()
-                .map(|scope| AppletScopeRejection {
-                    requested_scope: Some(scope.requested_scope),
-                    reason_code: scope.reason_code,
-                })
-                .collect(),
-        };
-        response.validate().map_err(|error| {
-            coland_storage::PersistenceError::Internal(format!(
-                "invalid Applet install response: {error}"
-            ))
-        })?;
-        let mut record = AppletRecord {
-            identity: identity.clone(),
-            applet_id: typed_applet_id.clone(),
-            owner_actor_id: registration_event.actor_id.clone(),
-            portal_realm_id: RealmId::new(realm_id.clone()).map_err(|error| {
+    let finalizer: coland_storage::AppletUnitFinalizer =
+        std::sync::Arc::new(move |references, install_id| {
+            let registration_event_ref = crate::routing::events::event_log::applet_committed_ref(
+                references,
+                &registration_event,
+            )?
+            .event_id;
+            let response = AppletInstallResponseBody {
+                install_id: install_id.to_owned(),
+                applet_id: package.applet_id.clone(),
+                service_id: package.service_id.clone(),
+                registration_event_ref,
+                registration_epoch: package.registration_epoch.clone(),
+                capability_grant_refs: capability_grant_refs.clone(),
+                e2ee_authorization_refs: e2ee_authorization_refs.clone(),
+                widget_policy_ref: None,
+                effective_status,
+                rejections: denied_scope_values(&package, &approved_actions)
+                    .into_iter()
+                    .map(|scope| AppletScopeRejection {
+                        requested_scope: Some(scope.requested_scope),
+                        reason_code: scope.reason_code,
+                    })
+                    .collect(),
+            };
+            response.validate().map_err(|error| {
                 coland_storage::PersistenceError::Internal(format!(
-                    "validated portal realm id is invalid: {error}"
+                    "invalid Applet install response: {error}"
                 ))
-            })?,
-            effective_scope: effective_scope.clone(),
-            capabilities: approved_actions.clone(),
-            package: package.clone(),
-            ghost_actors_allowed,
-            status: effective_status_wire.to_owned(),
-            registered_at: now,
-            revoked_at: None,
-            idempotency_key: idempotency_key.clone(),
-            install_body_digest: Hash::new(body_digest.clone()).map_err(|error| {
-                coland_storage::PersistenceError::Internal(format!(
-                    "validated install body digest is invalid: {error}"
-                ))
-            })?,
-            install_id: response.install_id.clone(),
-            install_response: response.clone(),
-            registration_event: registration_event.clone(),
-            capability_grant_events: capability_grant_events.clone(),
-            install_execution: Value::Null,
-            revoke_execution: None,
-            bots: Vec::new(),
-            ghosts: Vec::new(),
-        };
-        record.install_execution = build_install_execution_record(
-            &station_id,
-            &admin_actor.to_string(),
-            &record.idempotency_key,
-            record.install_body_digest.as_str(),
-            &submitted_plan_digest,
-            &record,
-            &response,
-            true,
-        )
-        .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))?;
-        let response_body = serde_json::to_value(&response)
-            .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))?;
-        Ok(coland_storage::AppletUnitFinalization {
-            applet_record: coland_storage::AppletRecordCommit {
+            })?;
+            let mut record = AppletRecord {
+                identity: identity.clone(),
                 applet_id: typed_applet_id.clone(),
-                identity: coland_storage::AppletIdentityCommit {
-                    target_station_id: target_station_id.clone(),
-                    expected_record: expected_identity.clone(),
-                    record: identity_value.clone(),
-                },
-                expected_record: expected_installation.clone(),
-                record: encode_applet_record(&record).map_err(|error| {
-                    coland_storage::PersistenceError::Internal(error.to_string())
+                owner_actor_id: registration_event.actor_id.clone(),
+                portal_realm_id: RealmId::new(realm_id.clone()).map_err(|error| {
+                    coland_storage::PersistenceError::Internal(format!(
+                        "validated portal realm id is invalid: {error}"
+                    ))
                 })?,
-            },
-            idempotency_record: coland_storage::IdempotencyRecord {
-                authenticated_actor: admin_actor.clone(),
-                operation_id: "ak.self.applet.command.install".to_owned(),
+                effective_scope: effective_scope.clone(),
+                capabilities: approved_actions.clone(),
+                package: package.clone(),
+                ghost_actors_allowed,
+                status: effective_status_wire.to_owned(),
+                registered_at: now,
+                revoked_at: None,
                 idempotency_key: idempotency_key.clone(),
-                request_hash: body_digest.clone(),
-                response_status: 201,
-                response_body: response_body.clone(),
-                created_at: now,
-                expires_at: now + chrono::Duration::days(1),
-            },
-            response_body,
-        })
-    });
+                install_body_digest: Hash::new(body_digest.clone()).map_err(|error| {
+                    coland_storage::PersistenceError::Internal(format!(
+                        "validated install body digest is invalid: {error}"
+                    ))
+                })?,
+                install_id: response.install_id.clone(),
+                install_response: response.clone(),
+                registration_event: registration_event.clone(),
+                capability_grant_events: capability_grant_events.clone(),
+                install_execution: Value::Null,
+                revoke_execution: None,
+                bots: Vec::new(),
+                ghosts: Vec::new(),
+            };
+            record.install_execution = build_install_execution_record(
+                &station_id,
+                &admin_actor.to_string(),
+                &record.idempotency_key,
+                record.install_body_digest.as_str(),
+                &submitted_plan_digest,
+                &record,
+                &response,
+                true,
+            )
+            .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))?;
+            let response_body = serde_json::to_value(&response)
+                .map_err(|error| coland_storage::PersistenceError::Internal(error.to_string()))?;
+            Ok(coland_storage::AppletUnitFinalization {
+                applet_record: coland_storage::AppletRecordCommit {
+                    applet_id: typed_applet_id.clone(),
+                    identity: coland_storage::AppletIdentityCommit {
+                        target_station_id: target_station_id.clone(),
+                        expected_record: expected_identity.clone(),
+                        record: identity_value.clone(),
+                    },
+                    expected_record: expected_installation.clone(),
+                    record: encode_applet_record(&record).map_err(|error| {
+                        coland_storage::PersistenceError::Internal(error.to_string())
+                    })?,
+                },
+                idempotency_record: coland_storage::IdempotencyRecord {
+                    authenticated_actor: admin_actor.clone(),
+                    operation_id: "ak.self.applet.command.install".to_owned(),
+                    idempotency_key: idempotency_key.clone(),
+                    request_hash: body_digest.clone(),
+                    response_status: 201,
+                    response_body: response_body.clone(),
+                    created_at: now,
+                    expires_at: now + chrono::Duration::days(1),
+                },
+                response_body,
+            })
+        });
     let accepted =
         crate::routing::events::event_log::submit_applet_authoring_unit(state, input, finalizer)
             .await

@@ -260,6 +260,11 @@ impl AppletStore for PgAppletStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            crate::realm_authorization_cut::lock_realm_authorization_cut(
+                conn,
+                record.install.effective_scope.realm_id(),
+            )
+            .await?;
             Ok(crate::applet_widget_tokens::issue(conn, &record).await?)
         })
         .await
@@ -290,6 +295,11 @@ impl AppletStore for PgAppletStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            crate::realm_authorization_cut::lock_realm_authorization_cut(
+                conn,
+                gate.install.effective_scope.realm_id(),
+            )
+            .await?;
             Ok(crate::applet_widget_tokens::check(conn, gate, at).await?)
         })
         .await
@@ -423,7 +433,11 @@ impl AppletStore for PgAppletStore {
                 .and_then(Value::as_str)
                 != Some(service_id)
             || coland_storage::applet_id_from_record(expected)? != applet_id
+            || expected.get("install_id") != replacement.get("install_id")
             || coland_storage::applet_id_from_record(&replacement)? != applet_id
+            || expected.get("target_station_id") != replacement.get("target_station_id")
+            || coland_storage::applet_effective_scope_key_from_record(expected)?
+                != effective_scope_key
             || coland_storage::applet_effective_scope_key_from_record(&replacement)?
                 != effective_scope_key
         {
@@ -436,10 +450,12 @@ impl AppletStore for PgAppletStore {
             .await
             .map_err(PersistenceError::database)?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            let current=sql_query("SELECT record FROM applet_installations WHERE applet_id=$1 AND effective_scope_key=$2 AND service_id=$3 FOR UPDATE")
-                .bind::<Text,_>(applet_id).bind::<Text,_>(effective_scope_key).bind::<Text,_>(service_id)
-                .get_result::<AppletRegistrationRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-            if current.as_ref().map(|r|&r.record)!=Some(expected) {return Ok(false);}
+            let applet=arkret_wire::AppletId::new(applet_id.to_owned()).map_err(PersistenceError::database)?;
+            let service=arkret_wire::DidCoreId::new(service_id.to_owned()).map_err(PersistenceError::database)?;
+            let scope:arkret_wire::ScopeRef=serde_json::from_value(expected["effective_scope"].clone()).map_err(PersistenceError::database)?;
+            let target=arkret_wire::DidCoreId::new(expected["target_station_id"].as_str().ok_or_else(||PersistenceError::SchemaViolation("Applet target Station is absent".into()))?.to_owned()).map_err(PersistenceError::database)?;
+            let (_,current)=crate::applet_current_states::lock_installation_records(conn,&applet,&service,&scope,&target).await?;
+            if current.as_ref()!=Some(expected){return Ok(false);}
             if expected.get("revoke_execution")!=replacement.get("revoke_execution")
                 && expected.pointer("/revoke_execution/outcome/operation_id") != replacement.pointer("/revoke_execution/outcome/operation_id")
                 && let Some(plan)=replacement.pointer("/revoke_execution/revoke_plan") {
@@ -483,7 +499,11 @@ impl AppletStore for PgAppletStore {
                 .and_then(Value::as_str)
                 != Some(service_id)
             || coland_storage::applet_id_from_record(expected)? != applet_id
+            || expected.get("install_id") != replacement.get("install_id")
             || coland_storage::applet_id_from_record(&replacement)? != applet_id
+            || expected.get("target_station_id") != replacement.get("target_station_id")
+            || coland_storage::applet_effective_scope_key_from_record(expected)?
+                != effective_scope_key
             || coland_storage::applet_effective_scope_key_from_record(&replacement)?
                 != effective_scope_key
         {
@@ -627,16 +647,7 @@ impl AppletStore for PgAppletStore {
                     "applet transaction conflict row disappeared after insert".to_owned(),
                 )
             })?;
-        validate_delivery_binding(&existing)?;
-        if record.delivery_authentication_record_digest
-            != existing.delivery_authentication_record_digest
-            || record.request_digest != existing.request_digest
-        {
-            return Err(PersistenceError::Conflict(
-                "duplicate_conflict: Applet transaction body or authenticated identity changed"
-                    .to_owned(),
-            ));
-        }
+        require_same_delivery(&record, &existing)?;
         Ok(AppletTransactionReplayBegin::Existing(Box::new(existing)))
     }
 
@@ -745,6 +756,45 @@ impl AppletStore for PgAppletStore {
     }
 }
 
+fn require_same_delivery(
+    record: &AppletTransactionReplayRecord,
+    existing: &AppletTransactionReplayRecord,
+) -> PersistenceResult<()> {
+    validate_delivery_binding(existing)?;
+    if record.delivery_authentication_record_digest
+        != existing.delivery_authentication_record_digest
+        || record.request_digest != existing.request_digest
+    {
+        return Err(PersistenceError::Conflict(
+            "duplicate_conflict: Applet transaction body or authenticated identity changed"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Read-only preflight of the original replay slot. The mutating begin below
+/// remains the unique first-owner race/CAS; this lookup never reserves a slot.
+pub(crate) async fn existing_transaction_replay(
+    conn: &mut diesel_async::AsyncPgConnection,
+    record: &AppletTransactionReplayRecord,
+) -> PersistenceResult<Option<AppletTransactionReplayRecord>> {
+    validate_delivery_binding(record)?;
+    let existing = sql_query(applet_transaction_replay_select_sql())
+        .bind::<Text, _>(record.applet_id.as_str())
+        .bind::<Text, _>(&record.source_id)
+        .bind::<Text, _>(&record.idempotency_key)
+        .get_result::<AppletTransactionReplayRow>(&mut *conn)
+        .await
+        .optional()
+        .map_err(PersistenceError::database)?
+        .map(AppletTransactionReplayRecord::from);
+    if let Some(existing) = &existing {
+        require_same_delivery(record, existing)?;
+    }
+    Ok(existing)
+}
+
 fn validate_delivery_binding(record: &AppletTransactionReplayRecord) -> PersistenceResult<()> {
     let typed: arkret_models_integration::AppletDeliveryAuthenticationRecord =
         serde_json::from_value(record.delivery_authentication_record.clone())
@@ -812,6 +862,16 @@ mod tests {
             received_at: chrono::Utc::now(),
             completed_at: None,
         };
+        {
+            let mut conn = pg_conn(&store.pool).await.unwrap();
+            assert!(
+                existing_transaction_replay(&mut conn, &record)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "preflight of a new identity must not allocate its replay slot"
+            );
+        }
         assert!(matches!(
             store
                 .begin_transaction_replay(record.clone())
@@ -822,6 +882,21 @@ mod tests {
         let mut fresh = record.clone();
         fresh.delivery_authentication_record["created"] = serde_json::json!(1_790_000_060);
         fresh.delivery_authentication_record["expires"] = serde_json::json!(1_790_000_360);
+        {
+            let mut conn = pg_conn(&store.pool).await.unwrap();
+            let pending = existing_transaction_replay(&mut conn, &fresh)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                pending.outcome.is_none(),
+                "preflight preserves the actual pending state"
+            );
+            assert_eq!(
+                pending.delivery_authentication_record, record.delivery_authentication_record,
+                "fresh outer times do not replace the frozen original delivery record"
+            );
+        }
         let AppletTransactionReplayBegin::Existing(replay) =
             store.begin_transaction_replay(fresh.clone()).await.unwrap()
         else {
@@ -843,6 +918,14 @@ mod tests {
             serde_json::from_value(changed_key.delivery_authentication_record.clone()).unwrap();
         changed_key.delivery_authentication_record_digest =
             typed.stable_digest().unwrap().to_string();
+        {
+            let mut conn = pg_conn(&store.pool).await.unwrap();
+            assert!(
+                matches!(existing_transaction_replay(&mut conn,&changed_key).await,
+                Err(PersistenceError::Conflict(detail)) if detail.starts_with("duplicate_conflict:")),
+                "current-key rotation with the same identity is detected before any business preflight"
+            );
+        }
         assert!(
             matches!(store.begin_transaction_replay(changed_key.clone()).await,
             Err(PersistenceError::Conflict(detail)) if detail.starts_with("duplicate_conflict:"))
@@ -853,6 +936,45 @@ mod tests {
             Err(PersistenceError::Conflict(detail)) if detail.starts_with("schema_violation:")));
         let mut changed_body = fresh;
         changed_body.request_digest = format!("sha256:{}", "e".repeat(64));
+        {
+            let mut conn = pg_conn(&store.pool).await.unwrap();
+            assert!(
+                matches!(existing_transaction_replay(&mut conn,&changed_body).await,
+                Err(PersistenceError::Conflict(detail)) if detail.starts_with("duplicate_conflict:"))
+            );
+        }
+        let complete = serde_json::to_value(
+            arkret_models_integration::AppletTransactionResponseBody::Rejected {
+                rejections: vec![arkret_models_integration::AppletEventRejection {
+                    event_id: None,
+                    reason_code: arkret_wire::ReasonCode::from_wire("applet_revoked"),
+                    retry_after_ms: None,
+                }],
+                retry_after_ms: None,
+            },
+        )
+        .unwrap();
+        store
+            .complete_transaction_replay(
+                record.applet_id.as_str(),
+                &record.source_id,
+                &record.idempotency_key,
+                complete.clone(),
+            )
+            .await
+            .unwrap();
+        {
+            let mut conn = pg_conn(&store.pool).await.unwrap();
+            let accepted = existing_transaction_replay(&mut conn, &record)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(accepted.outcome, Some(complete));
+            assert_eq!(
+                accepted.delivery_authentication_record,
+                record.delivery_authentication_record
+            );
+        }
         assert!(matches!(store.begin_transaction_replay(changed_body).await,
             Err(PersistenceError::Conflict(detail)) if detail.starts_with("duplicate_conflict:")));
     }

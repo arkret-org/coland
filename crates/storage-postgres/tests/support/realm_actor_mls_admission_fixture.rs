@@ -625,26 +625,18 @@ async fn admission_native_last_resort(
     let mut exact_last_resort = request.clone();
     exact_last_resort.target_keypackage_ref =
         Some(arkret_wire::KeyPackageRef::new(reference.as_str()).unwrap());
-    let signing_input = keypackage_claim_authorization_signing_bytes(
-        &exact_last_resort.unsigned_request(),
-        &exact_last_resort.service_binding,
-        &exact_last_resort.requester_authorization,
-    )
-    .unwrap();
-    let PeerKeyPackageRequesterAuthorization::RealmDevice {
-        verification_method,
-        signature,
-        ..
-    } = &mut exact_last_resort.requester_authorization
-    else {
-        unreachable!()
-    };
-    *signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
-        &[79; 32],
-        verification_method.as_str(),
-        &signing_input,
-    )
-    .unwrap();
+    assert!(
+        keypackage_claim_authorization_signing_bytes(
+            &exact_last_resort.unsigned_request(),
+            &exact_last_resort.service_binding,
+            &exact_last_resort.requester_authorization,
+        )
+        .is_err(),
+        "the strong authoring API must reject the same closed-invalid combination"
+    );
+    // Keep the actual original claim signature on this wire mutation. The
+    // structure is rejected before authorization; the unchanged valid claim
+    // below must still recover its exact accepted consumption.
     assert!(exact_last_resort.validate_shape().is_err());
     let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
     let (status, problem) = boxed_step(|| {

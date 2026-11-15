@@ -53,7 +53,7 @@ fn publish_uses_exact_controller_exceptions_and_is_independent_of_serve() {
         if effect == "require_review" {
             restriction.rules[0].review_requirement = Some(arkret_models_collaboration::governance::operation_wire::ManagementReviewRequirement {
                 approver_actor_ids: vec![ActorId::account(account("controller"))],
-                threshold: 1,
+                min_approver_count: 1,
                 max_age_seconds: 60,
             });
         }

@@ -243,7 +243,9 @@ async fn business_authority(
     };
     let event = fixture.admin_event(
         EventKind::CapabilityGrant,
-        scope.clone(),
+        ScopeRef::Realm {
+            realm_id: scope.realm_id().clone(),
+        },
         json!(CapabilityGrantPayload {
             grant: parent.clone()
         }),
@@ -321,7 +323,7 @@ async fn business_terminal_child(
     let event = signed_event(
         package,
         service_actor,
-        scope,
+        ScopeRef::realm(scope.realm_id().clone()),
         EventKind::CapabilityGrant,
         json!(CapabilityGrantPayload { grant: child }),
         Some(&parent_id),
@@ -2233,6 +2235,45 @@ async fn human_adds_runtime_to_group_in_authority(
         )
     })
     .await;
+    if status != StatusCode::OK {
+        let ledger = fixture
+            .state
+            .test_persistence()
+            .mls_key_packages()
+            .get_peer_claim(
+                claim.service_binding.source_id.as_str(),
+                claim.claim_request_id.as_str(),
+            )
+            .await
+            .expect("failed claim's real ledger can be inspected");
+        eprintln!(
+            "ordinary native target claim failure: ledger_state={:?} use={:?} accepted_outcome={} original_expiry={:?}",
+            ledger.as_ref().map(|row| row.state.as_str()),
+            ledger.as_ref().map(|row| row.key_package_use.as_str()),
+            ledger.as_ref().is_some_and(|row| row.outcome.is_some()),
+            ledger.as_ref().and_then(|row| row.claim_expires_at_unix_ms),
+        );
+        let candidates = fixture
+            .state
+            .test_persistence()
+            .mls_key_packages()
+            .peer_claim_candidates(&claim)
+            .await
+            .expect("failed claim's actual candidate metadata can be inspected");
+        eprintln!(
+            "ordinary native target claim failure: remaining_actual_candidates={:?}",
+            candidates
+                .iter()
+                .map(|row| (
+                    &row.keypackage_ref,
+                    &row.device_authorize_event_id,
+                    &row.effective_scope,
+                    row.lifetime_not_after,
+                    &row.capabilities,
+                ))
+                .collect::<Vec<_>>(),
+        );
+    }
     assert_eq!(
         status,
         StatusCode::OK,

@@ -111,7 +111,7 @@ pub fn signed_control_proof(
     proof.jws = signer.sign_detached_jws(&bytes);
     OrganizationControlProof {
         proof_kind: OrganizationControlProofKind::ResolvedVerificationMethod,
-        quorum_threshold: None,
+        min_signature_count: None,
         proofs: vec![proof],
     }
 }

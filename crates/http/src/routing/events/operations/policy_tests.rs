@@ -82,7 +82,7 @@ fn view_admission_rejects_retired_collection_and_actor_lifecycle_fields() {
     for definition in [
         json!({"collection": {"page_size": 50}}),
         json!({"collection": {"selection_policy": "multiple"}}),
-        json!({"collection": {"grouping": {"wip_limit_enforcement": "warn"}}}),
+        json!({"collection": {"grouping": {"active_strand_count_enforcement": "warn"}}}),
         json!({"state": "tombstoned", "state_changed_at": "2026-07-17T00:00:00.000Z"}),
     ] {
         let operation = op(

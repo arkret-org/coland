@@ -522,7 +522,7 @@ fn check_version_ratchet(
     Ok(())
 }
 
-/// §8.1 publication-time executability: `device_quorum.k` may not exceed the
+/// §8.1 publication-time executability: `device_quorum.min_device_count` may not exceed the
 /// distinct members that are active devices at the same PCR cut.
 async fn check_quorum_members_active(
     conn: &mut AsyncPgConnection,
@@ -532,7 +532,11 @@ async fn check_quorum_members_active(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), PgTransactionError> {
     for method in &policy.methods {
-        let RecoveryMethod::DeviceQuorum { k, member_ids } = method else {
+        let RecoveryMethod::DeviceQuorum {
+            min_device_count: k,
+            member_ids,
+        } = method
+        else {
             continue;
         };
         let mut distinct = member_ids.iter().collect::<Vec<_>>();

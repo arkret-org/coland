@@ -25,7 +25,7 @@ fn unavailable(error: impl std::fmt::Debug) -> AppError {
     )
 }
 
-fn service_error(error: coland_services::ServiceError) -> AppError {
+pub(super) fn service_error(error: coland_services::ServiceError) -> AppError {
     use arkret_wire::ErrorCode;
     use coland_services::ServiceError;
     if error.conflict_code() == Some(coland_storage::ConflictCode::ApprovalRequired) {

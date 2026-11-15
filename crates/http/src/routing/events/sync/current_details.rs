@@ -428,7 +428,7 @@ pub(super) async fn frame(
         Err(_) => return Ok(Some(control("unauthorized"))),
     };
     let window_limit = filter
-        .window_limit
+        .max_window_event_count
         .unwrap_or(ACCOUNT_SYNC_DEFAULT_WINDOW_LIMIT);
     let report_unavailable = after.detail_turn || body.after.is_none();
     let now_ms = chrono::Utc::now().timestamp_millis();

@@ -554,6 +554,7 @@ fn admission_circle_claim_request(
 ) -> KeyPackagesClaimRequestBody {
     let mut request =
         claim_request_with_lifetime(authority, fixture, reference, chrono::Duration::minutes(4));
+    request.effective_scope = scope.clone();
     request.mls_group_id = scope.canonical_mls_group_id().unwrap();
     let input = keypackage_claim_authorization_signing_bytes(
         &request.unsigned_request(),

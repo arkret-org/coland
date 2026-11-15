@@ -198,7 +198,7 @@ fn call_state_projects_independent_state_focus_and_roster_facets() {
             "call_id": call_id,
             "state_transition": {"from": "scheduled", "to": "ringing"},
             "focus": {"mode": "sfu", "session_focus": "fra-1"},
-            "roster_delta": {"op": "join", "participant": participant}
+            "roster_delta": {"operation": "join", "participant": participant}
         }),
     );
 
@@ -280,7 +280,7 @@ fn moderation_removal_is_tagged_with_the_accepted_event_id() {
         realm,
         serde_json::json!({
             "call_id": call_id,
-            "moderation_delta": {"op": "remove_participant", "removal": removal}
+            "moderation_delta": {"operation": "remove_participant", "removal": removal}
         }),
     );
     assert_eq!(
@@ -303,7 +303,7 @@ fn moderation_removal_is_tagged_with_the_accepted_event_id() {
         1,
         serde_json::json!({
             "call_id": call_id,
-            "moderation_delta": {"op": "remove_participant", "removal": removal}
+            "moderation_delta": {"operation": "remove_participant", "removal": removal}
         }),
     );
     assert_eq!(

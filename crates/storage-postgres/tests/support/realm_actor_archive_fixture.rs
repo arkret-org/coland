@@ -209,7 +209,7 @@ impl FixtureManagerArchive {
     }
 }
 
-async fn fixture_archive_inventory(
+pub(super) async fn fixture_archive_inventory(
     fixture: &Fixture,
     service: &NativeService,
     actor: &ActorId,
@@ -298,14 +298,57 @@ async fn fixture_archive_inventory(
     let resolution: arkret_models_identity::AuthenticatedServiceResolution =
         serde_json::from_value(bundle.current_route_record.clone()).unwrap();
     let mut keys = arkret_identity::RealmAuthorityKeyMap::new();
-    for signature in [
+    let mut signatures = vec![
         &bundle.genesis_commit.signature,
         &bundle.current_assertion.signature,
-    ] {
+    ];
+    let mut originals = std::collections::BTreeMap::new();
+    for entry in &manifest.entries {
+        use arkret_models_integration::RealmActorArchiveInventoryEntry;
+        let commits: Vec<_> = match entry {
+            RealmActorArchiveInventoryEntry::Backup(_) => Vec::new(),
+            RealmActorArchiveInventoryEntry::Series(entry) => vec![&entry.source.commit],
+            RealmActorArchiveInventoryEntry::Recipient(entry) => {
+                std::iter::once(&entry.declaration.commit)
+                    .chain(entry.recovery_begin.as_ref().map(|begin| &begin.commit))
+                    .collect()
+            }
+        };
+        for commit in commits {
+            assert_eq!(commit.realm_id, manifest.realm_actor_id.realm_id);
+            assert_eq!(
+                commit.governance_generation, 0,
+                "this manual fixture has only one genuine governor"
+            );
+            commit.verify_commit_id_matches_content().unwrap();
+            let bytes = arkret_canonical::canonical_json_bytes(commit).unwrap();
+            if let Some(original) = originals.insert(commit.commit_id.clone(), bytes.clone()) {
+                assert_eq!(
+                    original, bytes,
+                    "same Commit identity must preserve its complete original"
+                );
+            }
+            signatures.push(&commit.signature);
+        }
+    }
+    for signature in signatures {
         let document = arkret_identity::authenticated_service_document_at(
             &resolution,
             &bundle.current_service_id,
             signature.created_at,
+        )
+        .unwrap();
+        let did = arkret_identity::verification_method_did(signature.verification_method.as_str())
+            .unwrap();
+        assert_eq!(
+            arkret_wire::project_did_to_core_id(&did).unwrap(),
+            bundle.current_service_id
+        );
+        arkret_identity::validate_verification_method_relationship(
+            &document,
+            &signature.verification_method,
+            &did,
+            arkret_identity::DidVerificationRelationship::AssertionMethod,
         )
         .unwrap();
         let key = arkret_identity::public_key_material_from_document(
@@ -313,7 +356,16 @@ async fn fixture_archive_inventory(
             &signature.verification_method,
         )
         .unwrap();
-        keys.insert_at(&signature.verification_method, signature.created_at, key);
+        if let Some(previous) = keys.insert_at(
+            &signature.verification_method,
+            signature.created_at,
+            key.clone(),
+        ) {
+            assert_eq!(
+                previous, key,
+                "one historical signature coordinate must have one original key"
+            );
+        }
     }
     let authority = arkret_identity::verify_realm_authority_bundle(
         &bundle,
@@ -328,7 +380,7 @@ async fn fixture_archive_inventory(
     (manifest, authority, keys, resolution)
 }
 
-async fn fixture_select_native_series(
+pub(super) async fn fixture_select_native_series(
     fixture: &Fixture,
     service: &NativeService,
     actor: &ActorId,
@@ -628,11 +680,21 @@ async fn fixture_native_backup_outcomes(
         .expect("first real Bot portal must first durably PUT its original root");
     assert_eq!(entry.backup.series_id, selection.active_series_id);
     assert_eq!(
-        entry.backup.auth_binding.as_ref().unwrap().recovery_ref,
+        entry
+            .backup
+            .authorization_binding
+            .as_ref()
+            .unwrap()
+            .recovery_ref,
         *current_recovery
     );
     assert_ne!(
-        entry.backup.auth_binding.as_ref().unwrap().recovery_ref,
+        entry
+            .backup
+            .authorization_binding
+            .as_ref()
+            .unwrap()
+            .recovery_ref,
         selection.recovery_ref,
         "new packet binds current Recovery while selected series preserves its historical source"
     );

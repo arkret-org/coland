@@ -1225,7 +1225,6 @@ impl crate::events::EventCommitPort for PersistenceEventCommitter {
                     .collect(),
                 realm_organization_proof: command.realm_organization_proof,
                 event_approvals: command.event_approvals,
-                applet_record: command.applet_record,
                 applet_authoring_preview: command.applet_authoring_preview,
                 agent_membership_cascade: command.agent_membership_cascade,
             })

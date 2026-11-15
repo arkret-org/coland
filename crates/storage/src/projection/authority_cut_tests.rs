@@ -751,3 +751,93 @@ fn ordinary_and_owned_current_windows_match_the_real_sdk_local_temporal_boundari
         }
     }
 }
+
+#[test]
+fn realm_actor_target_uses_its_embedded_realm_and_actual_named_audit_grant() {
+    let holder = actor("auditor");
+    let managed = ActorId::realm(arkret_wire::RealmActorId::new(
+        realm(),
+        "ak:did_core:webvh:z6mkfixtureaudit".parse().unwrap(),
+    ));
+    let target = WireResourceSelector::realm_actor(managed.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&target).unwrap(),
+        serde_json::json!({"kind":"realm_actor","actor_id":managed})
+    );
+    assert!(target.realm_id.is_none());
+    let mut audit = grant(
+        210,
+        holder.clone(),
+        &[CapabilityActionId::REALM_ACTOR_AUDIT],
+        vec![global()],
+    );
+    audit.resources = vec![target.clone()];
+    let id = audit.id.clone();
+    let context = auth(
+        holder.clone(),
+        cut(vec![audit], actor("governor")),
+        Vec::new(),
+    );
+    let facts = crate::OperationFacts::default();
+    let evaluated = context
+        .evaluate_with_approvals_checked(
+            &[CapabilityActionId::REALM_ACTOR_AUDIT],
+            &target,
+            &facts,
+            &[],
+        )
+        .unwrap();
+    let crate::GrantEvaluation::Allowed(paths) = evaluated else {
+        panic!("same-Realm exact audit grant must be a real named allow");
+    };
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].grant.id, id);
+    assert!(paths[0].reservations.is_empty());
+    let absent = auth(holder, cut(Vec::new(), actor("governor")), Vec::new());
+    assert!(
+        absent
+            .evaluate(&[CapabilityActionId::REALM_ACTOR_AUDIT], &target, &facts)
+            .unreserved()
+            .is_empty()
+    );
+}
+
+#[test]
+fn realm_actor_target_rejects_foreign_realm_and_noncanonical_or_all_selectors() {
+    let holder = actor("auditor");
+    let managed = |owner| {
+        ActorId::realm(arkret_wire::RealmActorId::new(
+            owner,
+            "ak:did_core:webvh:z6mkfixtureaudit".parse().unwrap(),
+        ))
+    };
+    let target = WireResourceSelector::realm_actor(managed(realm())).unwrap();
+    let mut audit = grant(
+        211,
+        holder.clone(),
+        &[CapabilityActionId::REALM_ACTOR_AUDIT],
+        vec![global()],
+    );
+    audit.resources = vec![target.clone()];
+    let context = auth(holder, cut(vec![audit], actor("governor")), Vec::new());
+    let foreign =
+        WireResourceSelector::realm_actor(managed(RealmId::from_event_id(&event(212)))).unwrap();
+    let mut missing_actor = target.clone();
+    missing_actor.actor_id = None;
+    let mut surplus_realm = target.clone();
+    surplus_realm.realm_id = Some(realm());
+    let mut all = WireResourceSelector::realm(realm());
+    all.kind = arkret_wire::ResourceSelectorKind::All;
+    for invalid in [foreign, missing_actor, surplus_realm, all] {
+        assert!(
+            context
+                .evaluate_with_approvals_checked(
+                    &[CapabilityActionId::REALM_ACTOR_AUDIT],
+                    &invalid,
+                    &crate::OperationFacts::default(),
+                    &[],
+                )
+                .is_err()
+        );
+    }
+}

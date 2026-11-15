@@ -208,6 +208,22 @@ pub(super) async fn manager_reader(
     request: &mut Request,
     actor: arkret_wire::RealmActorId,
 ) -> Result<coland_storage::RealmActorBackupManagerReader, AppError> {
+    manager_reader_with_bundle(state, request, actor)
+        .await
+        .map(|(reader, _)| reader)
+}
+
+async fn manager_reader_with_bundle(
+    state: &AppState,
+    request: &mut Request,
+    actor: arkret_wire::RealmActorId,
+) -> Result<
+    (
+        coland_storage::RealmActorBackupManagerReader,
+        arkret_wire::RealmAuthorityBundle,
+    ),
+    AppError,
+> {
     let service = crate::routing::extensions::applet_bridge::verify_native_backup_manager_service(
         state, request,
     )
@@ -219,15 +235,18 @@ pub(super) async fn manager_reader(
     let bundle =
         crate::routing::realm_join::local_authority_bundle(state, &actor.realm_id, &nonce).await?;
     let located = crate::routing::realm_join::verify_served_bundle(state, bundle, &nonce).await?;
-    Ok(coland_storage::RealmActorBackupManagerReader {
-        actor,
-        service_id: service.service_id,
-        verification_method: service.verification_method,
-        service_did_document: service.authenticated_document,
-        transport_expires_at: service.expires_at,
-        authority: located.authority,
-        authority_keys: located.keys,
-    })
+    Ok((
+        coland_storage::RealmActorBackupManagerReader {
+            actor,
+            service_id: service.service_id,
+            verification_method: service.verification_method,
+            service_did_document: service.authenticated_document,
+            transport_expires_at: service.expires_at,
+            authority: located.authority,
+            authority_keys: located.keys,
+        },
+        located.bundle,
+    ))
 }
 
 async fn unlock_reader(
@@ -369,7 +388,59 @@ pub(super) async fn inventory(
         ));
     }
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let reader = manager_reader(state, request, query.realm_actor_id.clone()).await?;
+    let (mut reader, bundle) =
+        manager_reader_with_bundle(state, request, query.realm_actor_id.clone()).await?;
+    let commits = state
+        .persistence()
+        .native_backup_inventory_commits(&reader)
+        .await
+        .map_err(storage_error)?;
+    // The preflight has finished its transaction. Method-native resolution may
+    // await network only here, before the original final qualified collector.
+    for commit in &commits {
+        use arkret_identity::RealmAuthorityKeyDirectory as _;
+        if commit.realm_id != reader.actor.realm_id {
+            return Err(unavailable("inventory original belongs to another Realm"));
+        }
+        let expected_service = reader
+            .authority
+            .authority_service_at(commit.governance_generation)
+            .ok_or_else(|| unavailable("inventory original has an unknown authority tenure"))?;
+        let did =
+            arkret_identity::verification_method_did(commit.signature.verification_method.as_str())
+                .map_err(unavailable)?;
+        if &arkret_wire::project_did_to_core_id(&did).map_err(unavailable)? != expected_service {
+            return Err(unavailable(
+                "inventory original method differs from its actual governor",
+            ));
+        }
+        let previous = reader.authority_keys.public_key_at(
+            &commit.signature.verification_method,
+            commit.signature.created_at,
+        );
+        crate::routing::realm_join::insert_historical_method_key(
+            state,
+            &mut reader.authority_keys,
+            &commit.signature.verification_method,
+            commit.signature.created_at,
+            &bundle,
+        )
+        .await?;
+        if let Some(previous) = previous
+            && reader
+                .authority_keys
+                .public_key_at(
+                    &commit.signature.verification_method,
+                    commit.signature.created_at,
+                )
+                .as_ref()
+                != Some(&previous)
+        {
+            return Err(unavailable(
+                "inventory signature coordinate has conflicting historical keys",
+            ));
+        }
+    }
     let manifest = state
         .persistence()
         .native_backup_inventory(&reader)

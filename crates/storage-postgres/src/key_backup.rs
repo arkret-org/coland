@@ -339,6 +339,12 @@ impl KeyBackupStore for PgKeyBackupStore {
     )> {
         crate::realm_actor_content_backup::native_head(&self.pool, context).await
     }
+    async fn native_inventory_commits(
+        &self,
+        reader: &coland_storage::RealmActorBackupManagerReader,
+    ) -> PersistenceResult<Vec<arkret_wire::RealmCommit>> {
+        crate::realm_actor_content_backup::native_inventory_commits(&self.pool, reader).await
+    }
     async fn native_inventory(
         &self,
         reader: &coland_storage::RealmActorBackupManagerReader,

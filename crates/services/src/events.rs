@@ -603,7 +603,6 @@ pub struct CommitAccountDataCas {
 
 pub use coland_storage::{
     AppletAuthoringPreviewCommit as CommitAppletAuthoringPreview,
-    AppletIdentityCommit as CommitAppletIdentity, AppletRecordCommit as CommitAppletRecord,
     ContactProjectionCommit as CommitContactProjection,
 };
 
@@ -613,7 +612,6 @@ pub struct CommitAcceptedEventBatchCommand {
     pub events: Vec<CommitAcceptedEventCommand>,
     pub realm_organization_proof: Option<coland_storage::RealmOrganizationProofCommit>,
     pub event_approvals: Option<coland_storage::EventApprovalCommit>,
-    pub applet_record: Option<CommitAppletRecord>,
     pub applet_authoring_preview: Option<CommitAppletAuthoringPreview>,
     pub agent_membership_cascade: Option<coland_storage::AgentMembershipCascadeCommit>,
 }
@@ -1945,7 +1943,6 @@ mod tests {
             command: CommitAcceptedEventBatchCommand,
         ) -> ServiceResult<CommitAcceptedEventResult> {
             assert_eq!(command.events.len(), 2);
-            assert!(command.applet_record.is_some());
             Ok(CommitAcceptedEventResult {
                 audit_outcome: None,
                 projections_inserted: 2,

@@ -222,6 +222,18 @@ pub trait KeyBackupStore: Send + Sync {
         ))
     }
 
+    /// Resolve only the accepted originals needed for historical-key material.
+    /// This is an internal locator preflight, never a verified inventory or a
+    /// response body; callers still require the full native_inventory gate.
+    async fn native_inventory_commits(
+        &self,
+        _reader: &RealmActorBackupManagerReader,
+    ) -> PersistenceResult<Vec<arkret_wire::RealmCommit>> {
+        Err(crate::PersistenceError::Conflict(format!(
+            "{}: native archive historical-key preflight is unavailable",
+            crate::ConflictCode::TemporarilyUnavailable.as_str(),
+        )))
+    }
     async fn native_inventory(
         &self,
         _reader: &RealmActorBackupManagerReader,

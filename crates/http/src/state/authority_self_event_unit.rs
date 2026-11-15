@@ -659,7 +659,6 @@ fn commit_event_unit_with_idempotency_impl<'a>(
                         events: vec![command],
                         realm_organization_proof,
                         event_approvals,
-                        applet_record: None,
                         applet_authoring_preview: None,
                         agent_membership_cascade: None,
                     },

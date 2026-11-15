@@ -232,7 +232,7 @@ pub(super) async fn authorize_key_backup_delete(
             "recovery_unlock"
         }
         HighRiskAuthorityProof::DeviceQuorum(body) => {
-            let threshold = &body.threshold;
+            let threshold = &body.min_device_count;
             let signatures = &body.signatures;
             expected_policy = Some(
                 verify_device_quorum_delete(
@@ -651,12 +651,12 @@ mod recovery_unlock_session_tests {
 
 /// `device_quorum`: deduplicate by `device_id`, verify every signature over the
 /// same transcript, and require the deduplicated valid count to reach the
-/// principal's currently accepted recovery-policy `k` — which the request's
-/// `threshold` MUST itself equal.
+/// principal's currently accepted recovery-policy `min_device_count` — which the request's
+/// `min_device_count` MUST itself equal.
 async fn verify_device_quorum_delete(
     state: &AppState,
     challenge: &KeysBackupsDeleteChallenge,
-    threshold: u32,
+    threshold: u64,
     signatures: &[HighRiskDeviceQuorumSignature],
     expected_digest: &arkret_identifiers::Hash,
     canonical: &[u8],
@@ -668,7 +668,7 @@ async fn verify_device_quorum_delete(
     // Equality, not `>=`: §7.8.1 says the request threshold MUST equal the
     // policy `k`, so a caller cannot declare a lower bar and cannot silently
     // pass a stale higher one either.
-    if threshold != policy_k {
+    if threshold != u64::from(policy_k) {
         return Err(AppError::capability_denied(format!(
             "key backup delete quorum threshold {threshold} does not equal the accepted recovery \
              policy k={policy_k}"

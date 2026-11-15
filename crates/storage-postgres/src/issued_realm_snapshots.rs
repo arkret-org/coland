@@ -2017,7 +2017,7 @@ pub(crate) async fn freeze_account_realm_window(
                     head_commit_ref: head.commit_id.clone(),
                     next_position: head.stream_position + 1,
                     limited,
-                    window_limit: per_stream_limit,
+                    max_window_event_count: per_stream_limit,
                     complete: true,
                     preview_only: (start > 0 && basis.is_none()).then_some(true),
                     window_start_basis: basis,

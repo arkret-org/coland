@@ -1,6 +1,6 @@
 // Included in realm_actor_mls_fixture; current RealmActor authority only.
 
-async fn grant_boundary_send(
+pub(super) async fn grant_boundary_send(
     fixture: &Fixture,
     package: &AppletPackage,
     event: &Event,
@@ -60,7 +60,69 @@ async fn grant_boundary_assert_rejected(
     );
 }
 
-async fn grant_boundary_assert_accepted(
+// A source-preflight refusal happens before a delivery slot or an Event UOW.
+// Keep it separate from the exact HTTP 200 per-Event outcome above.
+async fn grant_boundary_assert_source_rejected(
+    fixture: &Fixture,
+    event: &Event,
+    status: StatusCode,
+    value: Value,
+    expected_code: arkret_wire::ErrorCode,
+    expected_status: StatusCode,
+    expected_detail: &str,
+) {
+    assert_eq!(status, expected_status, "source-preflight refusal: {value}");
+    let problem: arkret_wire::problem_details::Problem = serde_json::from_value(value).unwrap();
+    assert_eq!(problem.status, expected_status.as_u16());
+    assert_eq!(problem.error_code(), Some(expected_code));
+    assert_eq!(problem.problem_type, expected_code.type_uri());
+    assert_eq!(problem.title, expected_code.title());
+    assert_eq!(problem.detail, expected_detail);
+    assert!(problem.extensions.is_empty());
+    arkret_wire::RequestId::new(problem.instance.as_deref().unwrap()).unwrap();
+    assert!(
+        fixture
+            .state
+            .test_persistence()
+            .authority_commits()
+            .committed_event(&event.event_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a source-refused Event must not acquire a Commit"
+    );
+}
+
+async fn grant_boundary_source_footprint(fixture: &Fixture) -> Value {
+    use diesel::sql_types::Jsonb;
+    use diesel_async::RunQueryDsl as _;
+    #[derive(diesel::QueryableByName)]
+    struct Row {
+        #[diesel(sql_type = Jsonb)]
+        value: Value,
+    }
+    let mut result = boxed_step(|| obligation_mls_footprint(fixture)).await;
+    let mut connection = fixture.pool.get().await.unwrap();
+    for table in [
+        "applet_transactions",
+        "idempotency_keys",
+        "applet_installations",
+        "applet_registration_current_states",
+        "applet_grant_registration_sources",
+        "capability_grant_current_states",
+    ] {
+        let row = diesel::sql_query(format!(
+            "SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]'::jsonb) AS value FROM {table} r"
+        )).get_result::<Row>(&mut connection).await.unwrap();
+        result
+            .as_object_mut()
+            .unwrap()
+            .insert(table.into(), row.value);
+    }
+    result
+}
+
+pub(super) async fn grant_boundary_assert_accepted(
     fixture: &Fixture,
     event: &Event,
     value: Value,
@@ -270,7 +332,7 @@ pub(super) async fn grant_authority_boundaries(
         service.clone(),
         scope.clone(),
         EventKind::CapabilityRelinquish,
-        json!({"grant_id":child,"expected_commit_id":child_revision,"reason":"subject_request"}),
+        json!({"grant_id":child,"expected_commit_id":child_revision.commit_id,"reason":"subject_request"}),
         Some(&parent),
         &signer,
     );
@@ -297,7 +359,7 @@ pub(super) async fn grant_authority_boundaries(
         service.clone(),
         scope.clone(),
         EventKind::CapabilityRevoke,
-        json!({"grant_id":child,"expected_commit_id":child_revision,"reason":"issuer_request"}),
+        json!({"grant_id":child,"expected_commit_id":child_revision.commit_id,"reason":"issuer_request"}),
         Some(&parent),
         &signer,
     );
@@ -343,7 +405,7 @@ pub(super) async fn grant_authority_boundaries(
         service.clone(),
         scope.clone(),
         EventKind::CapabilityRevoke,
-        json!({"grant_id":child,"expected_commit_id":child_revision,"reason":"new original with stale revision"}),
+        json!({"grant_id":child,"expected_commit_id":child_revision.commit_id,"reason":"new original with stale revision"}),
         Some(&parent),
         &signer,
     );
@@ -368,40 +430,52 @@ pub(super) async fn grant_authority_boundaries(
         "error_code":"external_unavailable","retriable":true,"visibility_scope":"realm_members"});
     let mut wrong_applet = payload.clone();
     wrong_applet["applet_id"] = json!(format!("ak:applet:{}", uuid::Uuid::now_v7()));
-    for (event, reason) in [
-        (signed_event(
-            package,
-            service.clone(),
-            scope.clone(),
-            EventKind::AppletBridgeError,
-            payload.clone(),
-            Some(&child),
-            &signer,
-        ), arkret_wire::ErrorCode::CAPABILITY_DENIED),
-        (signed_event(
-            package,
-            service.clone(),
-            scope.clone(),
-            EventKind::AppletBridgeError,
-            wrong_applet,
-            Some(bridge_grant),
-            &signer,
-        ), arkret_wire::ErrorCode::FAILED_PRECONDITION),
+    for (event, code, expected_status, detail) in [
+        (
+            signed_event(
+                package,
+                service.clone(),
+                scope.clone(),
+                EventKind::AppletBridgeError,
+                payload.clone(),
+                Some(&child),
+                &signer,
+            ),
+            arkret_wire::ErrorCode::CapabilityDenied,
+            StatusCode::FORBIDDEN,
+            "conflict: capability_denied: Applet authorization grant names another original producer",
+        ),
+        (
+            signed_event(
+                package,
+                service.clone(),
+                scope.clone(),
+                EventKind::AppletBridgeError,
+                wrong_applet,
+                Some(bridge_grant),
+                &signer,
+            ),
+            arkret_wire::ErrorCode::FailedPrecondition,
+            StatusCode::CONFLICT,
+            "conflict: failed_precondition: bridge audit must bind its exact native Service installation",
+        ),
     ] {
-        let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
+        let before = boxed_step(|| grant_boundary_source_footprint(fixture)).await;
         let (status, problem) = boxed_step(|| grant_boundary_send(fixture, package, &event)).await;
         boxed_step(|| {
-            grant_boundary_assert_rejected(
+            grant_boundary_assert_source_rejected(
                 fixture,
                 &event,
                 status,
                 problem,
-                reason,
+                code,
+                expected_status,
+                detail,
             )
         })
         .await;
         assert_eq!(
-            boxed_step(|| obligation_mls_footprint(fixture)).await,
+            boxed_step(|| grant_boundary_source_footprint(fixture)).await,
             before
         );
     }
@@ -461,20 +535,22 @@ pub(super) async fn grant_authority_boundaries(
         Some(bridge_grant),
         &signer,
     );
-    let before = boxed_step(|| obligation_mls_footprint(fixture)).await;
+    let before = boxed_step(|| grant_boundary_source_footprint(fixture)).await;
     let (status, problem) = boxed_step(|| grant_boundary_send(fixture, package, &fresh)).await;
     boxed_step(|| {
-        grant_boundary_assert_rejected(
+        grant_boundary_assert_source_rejected(
             fixture,
             &fresh,
             status,
             problem,
-            arkret_wire::ErrorCode::CAPABILITY_DENIED,
+            arkret_wire::ErrorCode::AppletRevoked,
+            StatusCode::FORBIDDEN,
+            "conflict: applet_revoked: Applet authorization grant is no longer active",
         )
     })
     .await;
     assert_eq!(
-        boxed_step(|| obligation_mls_footprint(fixture)).await,
+        boxed_step(|| grant_boundary_source_footprint(fixture)).await,
         before
     );
     let retained = fixture

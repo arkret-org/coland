@@ -23,7 +23,9 @@ mod reading;
 pub(crate) use inventory::{inventory_in_connection, validate_archived_namespaces};
 pub(crate) use material::prepare_input_in_connection;
 pub(crate) use publication::{put_native, recover_put};
-pub(crate) use reading::{native_head, native_inventory, native_inventory_delivery};
+pub(crate) use reading::{
+    native_head, native_inventory, native_inventory_commits, native_inventory_delivery,
+};
 pub(crate) use series::admit_series;
 
 /// Business use of a retained native root still requires its accepted public
@@ -35,7 +37,7 @@ pub(crate) async fn current_root_recipient(
     backup.validate().map_err(unavailable)?;
     let actor = &backup.actor_id;
     let binding = backup
-        .auth_binding
+        .authorization_binding
         .as_ref()
         .ok_or_else(|| unavailable("native root has no original binding"))?;
     let (recovery, _) = crate::realm_actor_control::current_source(

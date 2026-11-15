@@ -124,7 +124,10 @@ fn reject_unexecutable_recovery_policy(policy: &RecoveryPolicy) -> Result<(), Ap
                     }
                 }
             }
-            arkret_models_crypto::RecoveryMethod::DeviceQuorum { k, member_ids } => {
+            arkret_models_crypto::RecoveryMethod::DeviceQuorum {
+                min_device_count: k,
+                member_ids,
+            } => {
                 let distinct = member_ids.iter().collect::<BTreeSet<_>>().len();
                 if usize::try_from(*k).unwrap_or(usize::MAX) > distinct {
                     return Err(recovery_policy_unexecutable(format!(

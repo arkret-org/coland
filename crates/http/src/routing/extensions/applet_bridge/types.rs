@@ -339,7 +339,7 @@ impl AppletRecord {
             if event.kind != arkret_wire::EventKind::CapabilityGrant
                 || event.actor_id != self.owner_actor_id
                 || event.realm_id != self.portal_realm_id
-                || event.scope_ref != self.effective_scope
+                || event.scope_ref != ScopeRef::realm(self.portal_realm_id.clone())
                 || !grant_event_ids.insert(event.event_id.clone())
             {
                 return Err("stored capability grant Event envelope is invalid".to_owned());

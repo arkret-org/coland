@@ -282,7 +282,10 @@ pub(crate) async fn commit_authority_position_in_connection(
     accepted_approvals.extend(general_approvals);
     if !reorder {
         let fields = &list.space["fields"];
-        if let Some(limit) = fields.get("wip_limit").and_then(Value::as_i64) {
+        if let Some(limit) = fields
+            .get("max_active_strand_count")
+            .and_then(Value::as_i64)
+        {
             let counts = diesel::sql_query("SELECT COUNT(DISTINCT p.strand_id) FILTER (WHERE s.value->>'state' IN ('active','archived')) AS count, COUNT(*) FILTER (WHERE s.value->>'state' IS NULL OR s.value->>'state' NOT IN ('active','archived','redacted','tombstoned')) AS invalid_count FROM strand_position_current_states p JOIN strand_current_states s ON s.strand_id=p.strand_id AND s.realm_id=p.realm_id WHERE p.realm_id=$1 AND p.board_space_id=$2 AND p.value->>'list_space_id'=$3")
                 .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(board.as_str())
                 .bind::<Text,_>(destination.as_str()).get_result::<CountRow>(&mut *conn).await.map_err(PersistenceError::database)?;
@@ -295,7 +298,10 @@ pub(crate) async fn commit_authority_position_in_connection(
                     .is_none_or(|value| value.list_space_id != destination),
             );
             if counts.count + additional > limit && !wip_override {
-                match fields.get("wip_limit_enforcement").and_then(Value::as_str) {
+                match fields
+                    .get("active_strand_count_enforcement")
+                    .and_then(Value::as_str)
+                {
                     Some("warn") => {
                         tracing::warn!(
                             diagnostic_key = "list_wip_limit_exceeded",

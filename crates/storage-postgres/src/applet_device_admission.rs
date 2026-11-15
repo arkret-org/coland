@@ -263,8 +263,12 @@ pub(crate) async fn installation_identity(
             denied("current Service document does not bind the accepted registration epoch")
         })?;
     let key = coland_storage::applet_effective_scope_key(scope)?;
+    if writer {
+        crate::applet_current_states::lock_existing_installation(conn, applet, service, scope)
+            .await?;
+    }
     let locking = if writer {
-        "FOR UPDATE OF i,m"
+        ""
     } else {
         "FOR SHARE OF i,m NOWAIT"
     };

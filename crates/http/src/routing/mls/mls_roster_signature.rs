@@ -168,7 +168,7 @@ mod tests {
                 "id": format!("{}#station", did.as_str()),
                 "type": "ArkretService",
                 "serviceEndpoint": "https://roster-fixture.example/",
-                "serviceKind": "station"
+                "service_kind": "station"
             }]
         }))
         .unwrap();

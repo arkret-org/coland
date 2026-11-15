@@ -549,6 +549,18 @@ impl AuthorityCommitApplication {
     ) -> ServiceResult<Option<HistoricalProducerSignerFact>> {
         Ok(self.store().producer_signer_fact(event, commit).await?)
     }
+    pub async fn preflight_applet_transaction(
+        &self,
+        events: &[Event],
+        replay: &coland_storage::AppletTransactionReplayRecord,
+        guard: &coland_storage::AppletEventProducerGuard,
+    ) -> ServiceResult<()> {
+        Ok(self
+            .store()
+            .preflight_applet_transaction(events, replay, guard)
+            .await?)
+    }
+
     pub async fn prepare_service_signer_fact(
         &self,
         event: &Event,
@@ -1681,6 +1693,18 @@ impl AuthorityCommitApplication {
         event: &arkret_wire::Event,
     ) -> ServiceResult<arkret_models_integration::AppletRegistrationPayload> {
         Ok(self.store().applet_registration_for_event(event).await?)
+    }
+
+    pub async fn applet_registration(
+        &self,
+        realm: &arkret_wire::RealmId,
+        applet: &arkret_wire::AppletId,
+        service: &arkret_wire::DidCoreId,
+    ) -> ServiceResult<arkret_models_integration::AppletRegistrationPayload> {
+        Ok(self
+            .store()
+            .applet_registration(realm, applet, service)
+            .await?)
     }
 
     pub async fn realm_actor_control_carrier(

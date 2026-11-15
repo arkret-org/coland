@@ -250,7 +250,7 @@ async fn joined_account_needs_call_join_grant_and_other_station_cannot_borrow_it
         EventKind::CallState,
         ActorId::account(member.clone()),
         json!({"call_id":arkret_wire::CallId::from_event_id(&call.authority_commit.event.event_id),
-        "moderation_delta":{"op":"remove_participant","removal":{
+        "moderation_delta":{"operation":"remove_participant","removal":{
             "actor_id":ActorId::account(member.clone()),"action":"ban",
             "removed_by":member.principal_id,"removed_at":arkret_canonical::format_timestamp_canonical(at)
         }}}),
@@ -426,7 +426,7 @@ async fn moderation_entries_retain_bans_kicks_and_guard_the_whole_axis() {
         &call.authority_commit,
         EventKind::CallState,
         founder.clone(),
-        json!({"call_id":call_id,"moderation_delta":{"op":"remove_participant","removal":{
+        json!({"call_id":call_id,"moderation_delta":{"operation":"remove_participant","removal":{
             "actor_id":founder,"action":"ban","removed_by":founder.signing_principal_id(),
             "removed_at":arkret_canonical::format_timestamp_canonical(at)
         }}}),
@@ -437,7 +437,7 @@ async fn moderation_entries_retain_bans_kicks_and_guard_the_whole_axis() {
         &ban.authority_commit,
         EventKind::CallState,
         founder.clone(),
-        json!({"call_id":call_id,"moderation_delta":{"op":"remove_participant","removal":{
+        json!({"call_id":call_id,"moderation_delta":{"operation":"remove_participant","removal":{
             "actor_id":founder,"device_id":"ak:device:01904100-0000-7000-8000-00000000000a",
             "action":"kick","removed_by":founder.signing_principal_id(),
             "removed_at":arkret_canonical::format_timestamp_canonical(at)
@@ -450,7 +450,7 @@ async fn moderation_entries_retain_bans_kicks_and_guard_the_whole_axis() {
             &kick.authority_commit,
             EventKind::CallState,
             founder.clone(),
-            json!({"call_id":call_id,"moderation_delta":{"op":"restore_participant",
+            json!({"call_id":call_id,"moderation_delta":{"operation":"restore_participant",
                 "actor_id":founder,"restored_by":founder.signing_principal_id(),
                 "restored_at":arkret_canonical::format_timestamp_canonical(at),
                 "expected_commit_id":revision.commit_id
@@ -527,7 +527,7 @@ async fn moderation_entries_retain_bans_kicks_and_guard_the_whole_axis() {
             &latest.authority_commit,
             EventKind::CallState,
             founder.clone(),
-            json!({"call_id":call_id,"moderation_delta":{"op":"remove_participant","removal":{
+            json!({"call_id":call_id,"moderation_delta":{"operation":"remove_participant","removal":{
                 "actor_id":founder,"action":"ban","removed_by":founder.signing_principal_id(),
                 "removed_at":arkret_canonical::format_timestamp_canonical(changed_at)
             }}}),
@@ -538,7 +538,7 @@ async fn moderation_entries_retain_bans_kicks_and_guard_the_whole_axis() {
             &remove.authority_commit,
             EventKind::CallState,
             founder.clone(),
-            json!({"call_id":call_id,"moderation_delta":{"op":"restore_participant",
+            json!({"call_id":call_id,"moderation_delta":{"operation":"restore_participant",
                 "actor_id":founder,"restored_by":founder.signing_principal_id(),
                 "restored_at":arkret_canonical::format_timestamp_canonical(changed_at),
                 "expected_commit_id":remove.authority_commit.commit.commit_id
@@ -712,7 +712,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
             EventKind::CallState,
             founder.clone(),
             json!({"call_id":call_id,"focus":{"mode":"sfu","session_focus":"direct-actor"},
-            "roster_delta":{"op":"join","participant":{
+            "roster_delta":{"operation":"join","participant":{
                 "actor_id":founder,"device_id":device,"focus_id":"direct-actor",
                 "participant_id":participant,"media":{"audio":true,"video":false,"screen":false},
                 "participant_binding":{"expires_at":arkret_canonical::format_timestamp_canonical(expires_at),
@@ -814,7 +814,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
         &joined.authority_commit,
         EventKind::CallState,
         founder.clone(),
-        json!({"call_id":call_id,"moderation_delta":{"op":"remove_participant","removal":{
+        json!({"call_id":call_id,"moderation_delta":{"operation":"remove_participant","removal":{
             "actor_id":founder,"device_id":device,"action":"kick",
             "removed_by":founder.signing_principal_id(),"removed_at":arkret_canonical::format_timestamp_canonical(at)
         }}}),
@@ -899,7 +899,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
         &latest.authority_commit,
         EventKind::CallState,
         founder.clone(),
-        json!({"call_id":call_id,"moderation_delta":{"op":"remove_participant","removal":{
+        json!({"call_id":call_id,"moderation_delta":{"operation":"remove_participant","removal":{
             "actor_id":founder,"action":"ban","removed_by":founder.signing_principal_id(),
             "removed_at":arkret_canonical::format_timestamp_canonical(at)
         }}}),
@@ -916,7 +916,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
         &banned.authority_commit,
         EventKind::CallState,
         founder.clone(),
-        json!({"call_id":call_id,"moderation_delta":{"op":"restore_participant",
+        json!({"call_id":call_id,"moderation_delta":{"operation":"restore_participant",
             "actor_id":founder,"restored_by":founder.signing_principal_id(),
             "restored_at":arkret_canonical::format_timestamp_canonical(at),
             "expected_commit_id":banned.authority_commit.commit.commit_id
@@ -947,7 +947,7 @@ async fn full_actor_roster_refresh_rejects_other_station_old_leg_kick_and_leave(
         &latest.authority_commit,
         EventKind::CallState,
         founder.clone(),
-        json!({"call_id":call_id,"roster_delta":{"op":"leave","actor_id":founder,
+        json!({"call_id":call_id,"roster_delta":{"operation":"leave","actor_id":founder,
             "device_id":device,"expected_commit_id":latest_cut.roster_revision.unwrap()}}),
         at + chrono::Duration::seconds(38),
     );

@@ -657,11 +657,16 @@ pub(super) async fn native_boundary_response(
     if let Some(bytes) = bytes {
         request = request.body(bytes);
     }
-    request
+    let request = request
         .add_header("signature-input", signed.signature_input_header, true)
-        .add_header("signature", signed.signature_header, true)
-        .send(&service(state.clone()))
-        .await
+        .add_header("signature", signed.signature_header, true);
+    let router = service(state.clone());
+    // Run the actual owned HTTP request independently, as native serving does.
+    // The signed bytes/nonce are already frozen above; dropping the JoinSet
+    // aborts this child instead of leaking a request or borrowed transaction.
+    let mut requests = tokio::task::JoinSet::new();
+    requests.spawn(async move { boxed_step(|| request.send(&router)).await });
+    requests.join_next().await.unwrap().unwrap()
 }
 
 async fn native_queue_handoff_footprint(fixture: &Fixture) -> Value {

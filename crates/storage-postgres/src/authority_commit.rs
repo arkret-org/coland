@@ -2028,7 +2028,9 @@ async fn commit_transaction_with_device_guard_inner(
             | VerifiedPcrUnit::RealmActorOwner
             | VerifiedPcrUnit::RealmActorGovernance
             | VerifiedPcrUnit::ManagedScopeProfile
-    ) {
+    ) && !(verified_unit == VerifiedPcrUnit::KeyBackupPointer
+        && transaction.event.kind == arkret_wire::EventKind::KeyBackupActiveSeries)
+    {
         return Err(PersistenceError::Conflict("realm_control_atomic_unit_required".into()).into());
     }
     if transaction.event.kind == arkret_wire::EventKind::IdentityResolutionUpdate
@@ -3396,6 +3398,17 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         crate::managed_message_actor::registration(&mut conn, event).await
     }
 
+    async fn applet_registration(
+        &self,
+        realm: &arkret_wire::RealmId,
+        applet: &arkret_wire::AppletId,
+        service: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<arkret_models_integration::AppletRegistrationPayload> {
+        let mut conn = pg_conn(&self.pool).await?;
+        crate::managed_message_actor::registration_for_scope(&mut conn, realm, applet, service)
+            .await
+    }
+
     async fn realm_actor_control_carrier(
         &self,
         metadata: &arkret_models_integration::RealmActorControlHttpMetadata,
@@ -3451,6 +3464,25 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         .map_err(PgTransactionError::into_persistence)
     }
 
+    async fn preflight_applet_transaction(
+        &self,
+        events: &[arkret_wire::Event],
+        replay: &coland_storage::AppletTransactionReplayRecord,
+        guard: &coland_storage::AppletEventProducerGuard,
+    ) -> PersistenceResult<()> {
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *conn)
+                .await?;
+            crate::managed_message_actor::preflight_transaction(conn, events, replay, guard)
+                .await
+                .map_err(Into::into)
+        })
+        .await
+        .map_err(PgTransactionError::into_persistence)
+    }
+
     async fn prepare_service_signer_fact(
         &self,
         event: &arkret_wire::Event,
@@ -3461,6 +3493,16 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
     > {
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
+            if !matches!(
+                event.kind,
+                arkret_wire::EventKind::RealmActorRecoveryBegin
+                    | arkret_wire::EventKind::RealmActorControlReset
+                    | arkret_wire::EventKind::KeyBackupActiveSeries
+            ) {
+                sql_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                    .execute(&mut *conn)
+                    .await?;
+            }
             crate::managed_message_actor::prepare_applet_producer_in_connection(
                 conn, event, guard, at,
             )

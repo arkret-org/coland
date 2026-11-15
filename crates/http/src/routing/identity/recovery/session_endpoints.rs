@@ -72,7 +72,7 @@ fn device_quorum_transcript_body(
     arkret_models_crypto::DeviceQuorumProofBody {
         kind: proof.kind,
         challenge: proof.challenge.clone(),
-        threshold: proof.threshold,
+        min_device_count: proof.min_device_count,
         signatures: proof
             .signatures
             .iter()
@@ -558,7 +558,10 @@ fn materialize_recovery_authorization_rules(
                     .collect(),
                 1,
             ),
-            arkret_models_crypto::RecoveryMethod::DeviceQuorum { k, member_ids } => (
+            arkret_models_crypto::RecoveryMethod::DeviceQuorum {
+                min_device_count: k,
+                member_ids,
+            } => (
                 AuthoritySetIssuerRole::AcceptedDevice,
                 member_ids
                     .iter()
@@ -592,7 +595,7 @@ fn materialize_recovery_authorization_rules(
                     verification_method,
                 })
                 .collect(),
-            threshold,
+            min_signature_count: threshold,
         });
     }
     if rules.is_empty() {
@@ -676,7 +679,10 @@ fn selected_recovery_method_active(
             })
         }
         (
-            RecoveryMethod::DeviceQuorum { k, member_ids },
+            RecoveryMethod::DeviceQuorum {
+                min_device_count: k,
+                member_ids,
+            },
             RecoverySessionProof::DeviceQuorum(proof),
         ) => {
             *k <= proof
@@ -1352,8 +1358,10 @@ async fn verify_device_quorum_recovery_proof(
             .map_err(|e| recovery_signature_error(format!("invalid device quorum proof: {e}")))?;
     let policy: RecoveryPolicy = serde_json::from_value(record.policy_payload.clone())
         .map_err(|e| recovery_proof_authority_error(format!("bound policy invalid: {e}")))?;
-    let Some(arkret_models_crypto::RecoveryMethod::DeviceQuorum { k, member_ids }) =
-        recovery_method(&policy, RecoveryProofKind::DeviceQuorum)
+    let Some(arkret_models_crypto::RecoveryMethod::DeviceQuorum {
+        min_device_count: k,
+        member_ids,
+    }) = recovery_method(&policy, RecoveryProofKind::DeviceQuorum)
     else {
         return Err(recovery_proof_authority_error(
             "device quorum method is not enabled",
@@ -1366,7 +1374,7 @@ async fn verify_device_quorum_recovery_proof(
         .iter()
         .find(|rule| rule.rule_id == "device_quorum")
         .ok_or_else(|| recovery_proof_authority_error("frozen quorum authority missing"))?;
-    if proof.threshold != *k || rule.threshold != *k {
+    if proof.min_device_count != *k || rule.min_signature_count != *k {
         return Err(recovery_proof_authority_error(
             "quorum threshold does not equal the accepted method",
         ));

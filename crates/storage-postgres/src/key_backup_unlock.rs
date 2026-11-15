@@ -327,7 +327,10 @@ fn ensure_selected_recovery_method_active(
             })
         }
         (
-            RecoveryMethod::DeviceQuorum { k, member_ids },
+            RecoveryMethod::DeviceQuorum {
+                min_device_count: k,
+                member_ids,
+            },
             RecoverySessionProof::DeviceQuorum(proof),
         ) => {
             *k <= proof

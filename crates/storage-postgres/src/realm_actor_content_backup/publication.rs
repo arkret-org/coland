@@ -57,12 +57,12 @@ pub(crate) async fn put_native(
         require_publication_policy(conn,&registration,actor,scope,action,arkret_models_collaboration::governance::operation_wire::AppletPolicyOperation::Execute,accepted_at).await?;
         let preparation = super::prepare_input_in_connection(conn,&current,scope).await?;
         backup.validate_native_recipient(&preparation.input.content_backup_recipient).map_err(|error|PersistenceError::SchemaViolation(error.to_string()))?;
-        let binding=backup.auth_binding.as_ref().ok_or_else(||super::unavailable("native packet binding absent"))?;
+        let binding=backup.authorization_binding.as_ref().ok_or_else(||super::unavailable("native packet binding absent"))?;
         if backup.series_id!=preparation.input.active_series_id
-            || binding.manager_ref!=preparation.input.auth_binding.manager_ref
-            || binding.recovery_ref!=preparation.input.auth_binding.recovery_ref
-            || binding.recipient_ref!=preparation.input.auth_binding.recipient_ref
-            || binding.device_generation!=preparation.input.auth_binding.device_generation
+            || binding.manager_ref!=preparation.input.authorization_binding.manager_ref
+            || binding.recovery_ref!=preparation.input.authorization_binding.recovery_ref
+            || binding.recipient_ref!=preparation.input.authorization_binding.recipient_ref
+            || binding.device_generation!=preparation.input.authorization_binding.device_generation
             || backup.encryption.recipient_key_ref.as_deref()
                 !=Some(preparation.input.content_backup_recipient.key_agreement_ref.as_str())
         {return Err(super::unavailable("native packet does not echo the exact current prepare input").into());}

@@ -15,8 +15,8 @@ use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
 
 use crate::capability_grant_current_states::{
-    CapabilityGrantCurrentStateReadRow, RealmAuthorityRootReadRow, decode_authority_root,
-    decode_row, grant_is_active_at, require_current_grant_lineage,
+    CapabilityGrantCurrentStateReadRow, RealmAuthorityRootReadRow, accepted_grant_is_current,
+    decode_authority_root, decode_row, grant_is_active_at,
 };
 
 #[derive(diesel::QueryableByName)]
@@ -24,6 +24,9 @@ struct ValueRow {
     #[diesel(sql_type=Jsonb)]
     value: Value,
 }
+
+mod delivery;
+pub(crate) use delivery::preflight_transaction;
 
 fn delegated_recording_result_actions(
     event: &Event,
@@ -81,9 +84,30 @@ pub(crate) async fn registration_for_scope(
     applet: &arkret_wire::AppletId,
     service: &arkret_wire::DidCoreId,
 ) -> PersistenceResult<AppletRegistrationPayload> {
-    let row=sql_query("SELECT r.value FROM applet_registration_current_states r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3 AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position AND e.kind='ak.applet.registration' AND e.state='committed' FOR SHARE OF r")
-        .bind::<Text,_>(realm.as_str()).bind::<Text,_>(applet.as_str()).bind::<Text,_>(service.as_str()).get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
-        .ok_or_else(||denied("Applet has no accepted current registration"))?;
+    registration_for_scope_read(conn, realm, applet, service, true).await
+}
+
+async fn registration_for_scope_read(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    applet: &arkret_wire::AppletId,
+    service: &arkret_wire::DidCoreId,
+    locking: bool,
+) -> PersistenceResult<AppletRegistrationPayload> {
+    let query = if locking {
+        "SELECT r.value FROM applet_registration_current_states r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3 AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position AND e.kind='ak.applet.registration' AND e.state='committed' FOR SHARE OF r"
+    } else {
+        "SELECT r.value FROM applet_registration_current_states r JOIN realm_commits c ON c.commit_id=r.current_commit_id JOIN canonical_events e ON e.pk=c.event_pk WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3 AND c.realm_id=r.realm_id AND c.stream_position=r.current_stream_position AND e.kind='ak.applet.registration' AND e.state='committed'"
+    };
+    let row = sql_query(query)
+        .bind::<Text, _>(realm.as_str())
+        .bind::<Text, _>(applet.as_str())
+        .bind::<Text, _>(service.as_str())
+        .get_result::<ValueRow>(&mut *conn)
+        .await
+        .optional()
+        .map_err(PersistenceError::database)?
+        .ok_or_else(|| denied("Applet has no accepted current registration"))?;
     serde_json::from_value(row.value).map_err(PersistenceError::database)
 }
 
@@ -103,6 +127,31 @@ pub(crate) fn registered_executor(
             "Applet Event is not authored or executed by its exact Service",
         ))
     }
+}
+
+pub(crate) async fn load_current_grants(
+    conn: &mut AsyncPgConnection,
+    realm: &arkret_wire::RealmId,
+    locking: bool,
+) -> PersistenceResult<
+    BTreeMap<GrantId, arkret_models_collaboration::governance::grant_constraint::CapabilityGrant>,
+> {
+    let query = if locking {
+        "SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_states WHERE realm_id=$1 ORDER BY grant_id FOR SHARE"
+    } else {
+        "SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_states WHERE realm_id=$1 ORDER BY grant_id"
+    };
+    let rows = sql_query(query)
+        .bind::<Text, _>(realm.as_str())
+        .load::<CapabilityGrantCurrentStateReadRow>(&mut *conn)
+        .await
+        .map_err(PersistenceError::database)?;
+    let mut grants = BTreeMap::new();
+    for row in rows {
+        let record = decode_row(row)?;
+        grants.insert(record.grant_id, record.value);
+    }
+    Ok(grants)
 }
 
 /// The caller supplies a fresh DID document, not a verified flag. The current
@@ -133,7 +182,9 @@ pub(crate) fn prepare_applet_producer_in_connection<'a>(
         ) {
             return crate::realm_actor_control::recovery_service_fact(conn, event, guard, at).await;
         }
-        let (fact, _) = require_applet_producer_inner(conn, event, guard, at, None).await?;
+        let grants = load_current_grants(conn, &event.realm_id, false).await?;
+        let (fact, _) =
+            require_applet_producer_inner(conn, event, guard, at, None, &grants).await?;
         Ok(fact.into())
     })
 }
@@ -170,12 +221,14 @@ pub(crate) fn require_applet_producer_in_connection<'a>(
                 Vec::new(),
             ));
         }
+        let grants = load_current_grants(conn, &event.realm_id, true).await?;
         let (fact, approvals) = require_applet_producer_inner(
             conn,
             event,
             guard,
             commit.committed_at,
             Some((commit, prepared)),
+            &grants,
         )
         .await?;
         Ok((fact.into(), approvals))
@@ -191,14 +244,35 @@ async fn require_applet_producer_inner(
         &arkret_wire::RealmCommit,
         Option<&coland_storage::EventApprovalCommit>,
     )>,
+    grants: &BTreeMap<
+        GrantId,
+        arkret_models_collaboration::governance::grant_constraint::CapabilityGrant,
+    >,
 ) -> PersistenceResult<(
     arkret_models_collaboration::authority_commit::ServiceHistoricalSignerFact,
     Vec<crate::approval_admission::QualifiedApproval>,
 )> {
     let mut accepted = Vec::new();
-    let effective_scope = crate::realm_actor_control::effective_scope(event)?;
+    let finite = crate::applet_current_states::finite_source_for_event(conn, event, grants).await?;
+    let cleanup = finite.is_some() && event.kind == EventKind::CapabilityRevoke;
+    let effective_scope = match &finite {
+        Some(source) => source.scope.clone(),
+        None => crate::realm_actor_control::effective_scope(event)?,
+    };
     let creation = crate::realm_actor_control::creation(event)?;
-    let registration = registration(conn, event).await?;
+    let applet = event
+        .applet_id
+        .as_ref()
+        .ok_or_else(|| denied("Applet producer has no applet_id"))?;
+    let source_service = service_for_event(conn, event).await?;
+    let registration = registration_for_scope_read(
+        conn,
+        &event.realm_id,
+        applet,
+        &source_service,
+        acceptance.is_some(),
+    )
+    .await?;
     let service = ActorId::service(registration.service_id.clone());
     let executor = registered_executor(event, &registration)?;
     registration
@@ -206,26 +280,88 @@ async fn require_applet_producer_inner(
         .registration_epoch_evidence
         .validate_against_did_document(&guard.service_did_document)
         .map_err(denied)?;
-    let scope = coland_storage::applet_effective_scope_key(&effective_scope)?;
-    let install=sql_query("SELECT i.record AS value FROM applet_installations i JOIN applet_registration_current_states r ON r.realm_id=$3 AND r.applet_id=i.applet_id AND r.service_id=i.service_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{registration_event,event_id}' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND i.service_id=$4 FOR UPDATE OF i")
+    if !cleanup {
+        let scope = coland_storage::applet_effective_scope_key(&effective_scope)?;
+        let install=sql_query("SELECT i.record AS value FROM applet_installations i JOIN applet_registration_current_states r ON r.realm_id=$3 AND r.applet_id=i.applet_id AND r.service_id=i.service_id JOIN applet_registration_instances a ON a.realm_id=r.realm_id AND a.applet_id=r.applet_id AND a.instance_event_ref=r.instance_event_ref AND a.registration_event_ref=i.record#>>'{registration_event,event_id}' WHERE i.applet_id=$1 AND i.effective_scope_key=$2 AND i.service_id=$4 ")
         .bind::<Text,_>(registration.applet_id.as_str()).bind::<Text,_>(scope).bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(registration.service_id.as_str())
         .get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
-        .ok_or_else(||denied("Applet is not installed on this exact scope"))?;
-    if install
-        .value
-        .pointer("/package/registration_epoch")
-        .and_then(Value::as_str)
-        != Some(registration.registration_epoch.as_str())
-        || install
+        .ok_or_else(||PersistenceError::Conflict("applet_registration_unauthorized: Applet is not installed on this exact scope".into()))?;
+        if acceptance.is_some() {
+            let (identity, locked) = crate::applet_current_states::lock_existing_installation(
+                conn,
+                &registration.applet_id,
+                &registration.service_id,
+                &effective_scope,
+            )
+            .await?;
+            if locked != install.value {
+                return Err(denied("Applet installation changed during acceptance"));
+            }
+            if identity
+                .get("globally_fenced_at")
+                .is_some_and(|v| !v.is_null())
+            {
+                return Err(PersistenceError::Conflict(
+                    "applet_revoked: Applet identity is fenced".into(),
+                ));
+            }
+        } else {
+            let target = install.value["target_station_id"]
+                .as_str()
+                .ok_or_else(|| denied("installation target absent"))?;
+            let identity=sql_query("SELECT record AS value FROM applet_managed_identities WHERE applet_id=$1 AND target_station_id=$2")
+            .bind::<Text,_>(applet.as_str()).bind::<Text,_>(target)
+            .get_result::<ValueRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?
+            .ok_or_else(||denied("installation identity absent"))?;
+            if identity
+                .value
+                .get("globally_fenced_at")
+                .is_some_and(|v| !v.is_null())
+            {
+                return Err(PersistenceError::Conflict(
+                    "applet_revoked: Applet identity is fenced".into(),
+                ));
+            }
+        }
+        if install
             .value
-            .get("revoked_at")
-            .is_some_and(|value| !value.is_null())
-        || !matches!(
-            install.value.get("status").and_then(Value::as_str),
-            Some("installed" | "partially_installed")
+            .pointer("/package/registration_epoch")
+            .and_then(Value::as_str)
+            != Some(registration.registration_epoch.as_str())
+            || install
+                .value
+                .get("revoked_at")
+                .is_some_and(|value| !value.is_null())
+            || !matches!(
+                install.value.get("status").and_then(Value::as_str),
+                Some("installed" | "partially_installed")
+            )
+        {
+            return Err(PersistenceError::Conflict(
+                "applet_revoked: Applet installation epoch is not active".into(),
+            ));
+        }
+        if let Some(source) = &finite
+            && install.value.get("install_id").and_then(Value::as_str)
+                != Some(source.install_id.as_str())
+        {
+            return Err(PersistenceError::Conflict("applet_revoked: finite source belongs to a closed or replaced installation instance".into()));
+        }
+        let original_source = delivery::source(
+            conn,
+            event,
+            applet,
+            &source_service,
+            effective_scope.clone(),
         )
-    {
-        return Err(denied("Applet installation epoch is not active"));
+        .await?;
+        if original_source
+            .install_id
+            .as_deref()
+            .is_some_and(|id| install.value.get("install_id").and_then(Value::as_str) != Some(id))
+        {
+            return Err(PersistenceError::Conflict("applet_revoked: authorization source belongs to a closed or replaced installation instance".into()));
+        }
     }
     let proof = event
         .producer_proof
@@ -268,13 +404,6 @@ async fn require_applet_producer_inner(
         .as_str()
         .parse::<GrantId>()
         .map_err(denied)?;
-    let rows=sql_query("SELECT realm_id,grant_id,status,current_event_id,current_commit_id,current_stream_ref,current_stream_position,value FROM capability_grant_current_states WHERE realm_id=$1 ORDER BY grant_id FOR SHARE")
-        .bind::<Text,_>(event.realm_id.as_str()).load::<CapabilityGrantCurrentStateReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    let mut grants = BTreeMap::new();
-    for row in rows {
-        let record = decode_row(row)?;
-        grants.insert(record.grant_id, record.value);
-    }
     let grant = grants
         .get(&grant_id)
         .ok_or_else(|| denied("Applet authorization grant has no accepted current"))?;
@@ -318,39 +447,15 @@ async fn require_applet_producer_inner(
     }
     // Closing one's own accepted terminal child is issuer control. It does
     // not spend or revive a revoked/expired business parent.
-    let revoking_own_child = if native_service && event.kind == EventKind::CapabilityRevoke {
-        let payload: arkret_models_collaboration::events_payloads::CapabilityRevokePayload =
-            serde_json::from_value(
-                serde_json::to_value(&event.payload).map_err(PersistenceError::database)?,
-            )
-            .map_err(denied)?;
-        if let Some(target) = grants.get(&payload.grant_id) {
-            target.issuer_id == service
-                && target.issuer_authority_refs.iter().all(|source| matches!(source,
-                    arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::Grant { .. }))
-                && target.issuer_authority_refs.iter().any(|source| matches!(source,
-                    arkret_models_collaboration::governance::grant_constraint::IssuerAuthorityRef::Grant {grant_id:parent}
-                        if parent==&grant_id))
-                && crate::capability_grant_current_states::managed_subject_role(
-                    conn,
-                    event,
-                    &target.subject,
-                    &target.issuer_id,
-                    at,
-                )
-                .await?
-                .is_some()
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-    if (!grant_is_active_at(grant, at) && !revoking_own_child)
-        || !matches!(&grant.subject,CapabilitySubject::Actor(actor) if actor==grant_actor)
-    {
+    let revoking_own_child = cleanup;
+    if !matches!(&grant.subject,CapabilitySubject::Actor(actor) if actor==grant_actor) {
         return Err(PersistenceError::Conflict(
-            "capability_denied: Applet authorization grant is not active for the exact original producer".into(),
+            "capability_denied: Applet authorization grant names another original producer".into(),
+        ));
+    }
+    if !grant_is_active_at(grant, at) && !revoking_own_child {
+        return Err(PersistenceError::Conflict(
+            "applet_revoked: Applet authorization grant is no longer active".into(),
         ));
     }
     if matches!(
@@ -397,13 +502,15 @@ async fn require_applet_producer_inner(
             "Applet authorization grant does not name its exact installation scope",
         ));
     }
-    if !grant.constraints.iter().any(|constraint| {
-        constraint.constraint_kind == GrantConstraintKind::AuthorityControl
-            && constraint.constraint_subkind == Some(GrantConstraintSubkind::AppletAuthority)
-            && constraint.applet_id.as_ref() == Some(&registration.applet_id)
-            && constraint.executed_by.as_ref() == Some(&service)
-            && constraint.registration_epoch.as_ref() == Some(&registration.registration_epoch)
-    }) {
+    if !cleanup
+        && !grant.constraints.iter().any(|constraint| {
+            constraint.constraint_kind == GrantConstraintKind::AuthorityControl
+                && constraint.constraint_subkind == Some(GrantConstraintSubkind::AppletAuthority)
+                && constraint.applet_id.as_ref() == Some(&registration.applet_id)
+                && constraint.executed_by.as_ref() == Some(&service)
+                && constraint.registration_epoch.as_ref() == Some(&registration.registration_epoch)
+        })
+    {
         return Err(denied(
             "Applet authorization grant lacks the exact Service and registration epoch binding",
         ));
@@ -590,27 +697,27 @@ async fn require_applet_producer_inner(
     }
     let root=sql_query("SELECT realm_id,controller_actor_id,controller_epoch,authority_generation,authority_event_ref FROM realm_authority_root_current_states WHERE realm_id=$1")
         .bind::<Text,_>(event.realm_id.as_str()).get_result::<RealmAuthorityRootReadRow>(&mut *conn).await.map_err(PersistenceError::database)?;
-    if !revoking_own_child {
-        require_current_grant_lineage(
+    if !revoking_own_child
+        && !accepted_grant_is_current(
             &grant_id,
-            &grants,
+            grants,
             &decode_authority_root(root)?,
             &event.realm_id,
             at,
-        )?;
+        )?
+    {
+        return Err(PersistenceError::Conflict(
+            "applet_revoked: Applet authorization source is no longer current".into(),
+        ));
     }
     #[derive(diesel::QueryableByName)]
     struct CommitSource {
         #[diesel(sql_type=Jsonb)]
         commit_json: Value,
     }
-    let registration_ref = install
-        .value
-        .pointer("/registration_event/event_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| denied("exact installation registration anchor absent"))?;
-    let registration_commit = sql_query("SELECT c.commit_json FROM applet_registration_instances a JOIN realm_commits c ON c.commit_id=a.accepted_commit_id WHERE a.realm_id=$1 AND a.applet_id=$2 AND a.registration_event_ref=$3")
-        .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(registration.applet_id.as_str()).bind::<Text,_>(registration_ref).get_result::<CommitSource>(&mut *conn).await.map_err(PersistenceError::database)?;
+    let registration_commit=sql_query("SELECT c.commit_json FROM applet_registration_current_states r JOIN realm_commits c ON c.commit_id=r.current_commit_id WHERE r.realm_id=$1 AND r.applet_id=$2 AND r.service_id=$3")
+        .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(registration.applet_id.as_str()).bind::<Text,_>(registration.service_id.as_str())
+        .get_result::<CommitSource>(&mut *conn).await.map_err(PersistenceError::database)?;
     let authorization_event = grant_id.as_str().replacen("ak:grant:", "ak:event:", 1);
     let grant_commit = sql_query("SELECT c.commit_json FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE e.envelope->>'event_id'=$1 AND e.realm_id=$2 AND e.kind='ak.capability.grant' AND e.state='committed'")
         .bind::<Text,_>(authorization_event).bind::<Text,_>(event.realm_id.as_str()).get_result::<CommitSource>(&mut *conn).await.map_err(PersistenceError::database)?;

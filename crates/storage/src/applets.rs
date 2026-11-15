@@ -334,7 +334,7 @@ pub type AppletCommitAuthor = std::sync::Arc<
 >;
 
 pub type AppletUnitFinalizer = std::sync::Arc<
-    dyn Fn(&[arkret_wire::CommittedEventRef]) -> PersistenceResult<AppletUnitFinalization>
+    dyn Fn(&[arkret_wire::CommittedEventRef], &str) -> PersistenceResult<AppletUnitFinalization>
         + Send
         + Sync,
 >;

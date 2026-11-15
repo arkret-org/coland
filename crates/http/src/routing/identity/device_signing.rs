@@ -15,7 +15,10 @@ pub(crate) fn policy_device_quorum_threshold(policy: &RecoveryPolicyState) -> Op
         serde_json::from_value(policy.raw_payload.clone()).ok()?;
     policy.validate_shape().ok()?;
     policy.methods.iter().find_map(|method| match method {
-        arkret_models_crypto::RecoveryMethod::DeviceQuorum { k, .. } => Some(*k),
+        arkret_models_crypto::RecoveryMethod::DeviceQuorum {
+            min_device_count: k,
+            ..
+        } => Some(*k),
         _ => None,
     })
 }

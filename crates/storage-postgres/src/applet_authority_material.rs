@@ -17,7 +17,7 @@ use arkret_wire::{
     EventId, EventKind, GrantId,
 };
 use coland_storage::{PersistenceError, PersistenceResult};
-use diesel::sql_types::{BigInt, Binary, Jsonb, Text};
+use diesel::sql_types::{BigInt, Binary, Jsonb, Nullable, Text};
 use diesel::{QueryableByName, sql_query};
 use diesel_async::AsyncPgConnection;
 use horme::{OptionalExtension, RunQueryDsl};
@@ -53,12 +53,24 @@ struct TenureRow {
     service_id: String,
 }
 
-async fn accepted(
+pub(crate) async fn accepted(
     conn: &mut AsyncPgConnection,
     event_id: &EventId,
 ) -> PersistenceResult<CommittedEventFullView> {
+    optional_accepted(conn, event_id)
+        .await?
+        .ok_or_else(unavailable)
+}
+
+pub(crate) async fn optional_accepted(
+    conn: &mut AsyncPgConnection,
+    event_id: &EventId,
+) -> PersistenceResult<Option<CommittedEventFullView>> {
     let row=sql_query("SELECT e.envelope,c.commit_json FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk WHERE e.id=$1 AND e.state='committed'")
-        .bind::<Binary,_>(event_id.token_bytes().to_vec()).get_result::<AcceptedRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?.ok_or_else(unavailable)?;
+        .bind::<Binary,_>(event_id.token_bytes().to_vec()).get_result::<AcceptedRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
     let full = CommittedEventFullView {
         event: decode(row.envelope)?,
         commit: decode(row.commit_json)?,
@@ -85,7 +97,7 @@ async fn accepted(
         .validate_content_address()
         .map_err(PersistenceError::database)?;
 
-    Ok(full)
+    Ok(Some(full))
 }
 
 async fn portable(
@@ -143,6 +155,16 @@ pub(crate) async fn read(
     // mutable installation. A replaced installation may remain a read boundary
     // for this Service while its old grants carry only historical authority.
     let mut source_registration: Option<CommittedEventFullView> = None;
+    let mut source_installation = None;
+    #[derive(QueryableByName)]
+    struct FrozenSource {
+        #[diesel(sql_type=Jsonb)]
+        envelope: Value,
+        #[diesel(sql_type=Jsonb)]
+        commit_json: Value,
+        #[diesel(sql_type=Nullable<Text>)]
+        install_id: Option<String>,
+    }
     for id in &request.grant_ids {
         let event_id =
             EventId::from_token_bytes(id.token_bytes()).map_err(PersistenceError::database)?;
@@ -160,8 +182,13 @@ pub(crate) async fn read(
             })
             .collect::<Vec<_>>();
         if original.event.kind != EventKind::CapabilityGrant
-            || original.event.scope_ref != request.effective_scope
+            || original.event.scope_ref != arkret_wire::ScopeRef::realm(realm.clone())
             || !matches!(&payload.grant.subject,CapabilitySubject::Actor(actor) if actor==&ActorId::service(service.clone()))
+            || !payload
+                .grant
+                .resources
+                .iter()
+                .any(|resource| resource.is_exact_scope(&request.effective_scope))
             || binding.len() != 1
             || binding[0].applet_id.as_ref() != Some(applet)
             || binding[0].executed_by.as_ref() != Some(&ActorId::service(service.clone()))
@@ -174,13 +201,24 @@ pub(crate) async fn read(
             .ok_or_else(unavailable)?;
         // The acceptance transaction freezes each parent's exact registration,
         // including parents issued after installation and Circle-scoped grants.
-        let rows = sql_query("SELECT r.envelope,rc.commit_json FROM applet_grant_registration_sources s JOIN canonical_events r ON r.envelope->>'event_id'=s.registration_event_ref JOIN realm_commits rc ON rc.event_pk=r.pk WHERE s.realm_id=$1 AND s.grant_id=$2 AND s.applet_id=$3 AND s.service_id=$4 AND r.state='committed' AND r.kind='ak.applet.registration' AND r.envelope#>>'{payload,registration_epoch}'=$5")
+        let rows = sql_query("SELECT r.envelope,rc.commit_json,s.install_id FROM applet_grant_registration_sources s JOIN canonical_events r ON r.envelope->>'event_id'=s.registration_event_ref JOIN realm_commits rc ON rc.event_pk=r.pk WHERE s.realm_id=$1 AND s.grant_id=$2 AND s.applet_id=$3 AND s.service_id=$4 AND r.state='committed' AND r.kind='ak.applet.registration' AND r.envelope#>>'{payload,registration_epoch}'=$5")
             .bind::<Text,_>(realm.as_str()).bind::<Text,_>(id.as_str())
             .bind::<Text,_>(applet.as_str()).bind::<Text,_>(service.as_str()).bind::<Text,_>(epoch.as_str())
-            .get_results::<AcceptedRow>(&mut *conn).await.map_err(PersistenceError::database)?;
+            .get_results::<FrozenSource>(&mut *conn).await.map_err(PersistenceError::database)?;
         let [row] = rows.as_slice() else {
             return Err(unavailable());
         };
+        // Registration-only generic parents supply no installation proof.
+        // They neither conflict with nor erase another parent's frozen I.
+        if let Some(id) = &row.install_id {
+            if source_installation
+                .as_ref()
+                .is_some_and(|previous| previous != id)
+            {
+                return Err(unavailable());
+            }
+            source_installation = Some(id.clone());
+        }
         let registration = CommittedEventFullView {
             event: decode(row.envelope.clone())?,
             commit: decode(row.commit_json.clone())?,
@@ -216,7 +254,7 @@ pub(crate) async fn read(
         return Err(unavailable());
     }
     let generation = u64::try_from(tenure.generation).map_err(PersistenceError::database)?;
-    let scope = CommitStreamRef::from_scope(&request.effective_scope, None)
+    let scope = CommitStreamRef::from_scope(&arkret_wire::ScopeRef::realm(realm.clone()), None)
         .map_err(PersistenceError::database)?;
     let stream_key = crate::authority_commit::stream_key(&scope)?;
     let head=sql_query("SELECT commit_json AS value FROM realm_commits WHERE stream_key=$1 ORDER BY stream_position DESC LIMIT 1")
@@ -281,7 +319,7 @@ pub(crate) async fn read(
             .collect::<Vec<_>>();
         if original.event.kind != EventKind::CapabilityGrant
             || GrantId::from_event_id(&original.event.event_id) != *id
-            || original.event.scope_ref != request.effective_scope
+            || original.event.scope_ref != arkret_wire::ScopeRef::realm(realm.clone())
             || current.source.stream_ref != scope
             || !matches!(&payload.grant.subject,CapabilitySubject::Actor(subject) if subject==&actor)
             || !matches!(&current.value.subject, CapabilitySubject::Actor(subject) if subject == &actor)
@@ -316,7 +354,14 @@ pub(crate) async fn read(
         grant_events.push(original);
         current_states.push(present);
     }
-    let current_binding = current_binding(conn, applet, service, &request.effective_scope).await?;
+    let current_binding = current_binding(
+        conn,
+        applet,
+        service,
+        &request.effective_scope,
+        source_installation.as_deref(),
+    )
+    .await?;
     if matches!(
         request.effective_scope,
         arkret_wire::ScopeRef::Circle { .. }
@@ -396,6 +441,7 @@ async fn current_binding(
     applet: &AppletId,
     service: &DidCoreId,
     scope: &arkret_wire::ScopeRef,
+    source_installation: Option<&str>,
 ) -> PersistenceResult<AppletInstallationCurrentBinding> {
     use crate::capability_grant_current_states::{
         RealmAuthorityRootReadRow, accepted_grant_is_current, decode_authority_root,
@@ -406,9 +452,14 @@ async fn current_binding(
         .bind::<Text,_>(applet.as_str()).bind::<Text,_>(scope_key).bind::<Text,_>(service.as_str())
         .get_result::<JsonRow>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
     let Some(install) = install else {
-        return Err(unavailable());
+        return Ok(AppletInstallationCurrentBinding::Inactive);
     };
     let install = install.value;
+    // NULL preserves registration-only generic semantics. A frozen finite
+    // instance never borrows the active state of its same-epoch replacement.
+    if source_installation.is_some_and(|id| install["install_id"].as_str() != Some(id)) {
+        return Ok(AppletInstallationCurrentBinding::Inactive);
+    }
     let package: arkret_models_integration::AppletPackage = decode(install["package"].clone())?;
     if package.applet_id != *applet || install["effective_scope"] != serde_json::json!(scope) {
         return Err(unavailable());
@@ -511,7 +562,7 @@ async fn current_binding(
         let event: arkret_wire::Event = decode(original.clone())?;
         let id = GrantId::from_event_id(&event.event_id);
         let grant = grants.get(&id).ok_or_else(unavailable)?;
-        if event.scope_ref != *scope
+        if event.scope_ref != arkret_wire::ScopeRef::realm(scope.realm_id().clone())
             || !matches!(&grant.subject, CapabilitySubject::Actor(a) if a == &ActorId::service(service.clone()))
         {
             return Err(unavailable());
@@ -525,7 +576,7 @@ async fn current_binding(
                         == Some(GrantConstraintSubkind::AppletAuthority)
             })
             .collect::<Vec<_>>();
-        if event.scope_ref != *scope
+        if event.scope_ref != arkret_wire::ScopeRef::realm(scope.realm_id().clone())
             || event.kind != EventKind::CapabilityGrant
             || bindings.len() != 1
             || bindings[0].applet_id.as_ref() != Some(applet)

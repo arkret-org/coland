@@ -1583,7 +1583,7 @@ fn fixture_route_evidence(
     base_url: &str,
 ) -> arkret_models_identity::AuthenticatedServiceResolution {
     use arkret_models_identity::*;
-    let document:DidDocument=serde_json::from_value(serde_json::json!({"id":did,"service":[{"id":format!("{did}#station"),"type":"ArkretService","serviceKind":"station","serviceEndpoint":base_url}]})).unwrap();
+    let document:DidDocument=serde_json::from_value(serde_json::json!({"id":did,"service":[{"id":format!("{did}#station"),"type":"ArkretService","service_kind":"station","serviceEndpoint":base_url}]})).unwrap();
     let digest = arkret_identity::document_canonical_digest(&document).unwrap();
     let head = digest.to_string();
     let version = format!(

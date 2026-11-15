@@ -1818,7 +1818,7 @@ async fn ensure_service_endpoint(
         .ok_or_else(|| anyhow::anyhow!("service DID omits endpoints"))?;
     let mut entries = services
         .iter_mut()
-        .filter(|e| e["type"] == "ArkretService" && e["serviceKind"] == "station");
+        .filter(|e| e["type"] == "ArkretService" && e["service_kind"] == "station");
     let entry = entries
         .next()
         .ok_or_else(|| anyhow::anyhow!("service DID omits Station endpoint"))?;

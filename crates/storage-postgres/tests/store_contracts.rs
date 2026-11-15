@@ -1504,7 +1504,6 @@ async fn postgres_queue_refuses_a_second_envelope_under_one_event_id() {
         events: vec![event],
         realm_organization_proof: None,
         event_approvals: None,
-        applet_record: None,
         applet_authoring_preview: None,
         agent_membership_cascade: None,
     };
@@ -2783,4 +2782,142 @@ async fn postgres_adapter_satisfies_invite_new_source_ledger_contract() {
         .await
         .unwrap();
     assert_invite_new_source_ledger_contract(&ledger, &holder, &namespace).await;
+}
+
+#[tokio::test]
+async fn postgres_applet_parent_sources_keep_exact_installation_instances() {
+    ordinary_realm::case_future(|| async {
+        use coland_storage::contract_tests::AppletFormalCommitFactory as _;
+        use diesel::sql_types::Text;
+        use horme::RunQueryDsl as _;
+        let database=coland_storage_postgres::test_database::TestDatabase::lease().await;
+        let pool=database.pool();
+        let _db_guard=DB_GUARD.lock().await;
+        let factory=Box::pin(applet_authoring::AppletAuthoringFactory::new(pool.clone())).await;
+        let store=PgAppletStore{pool:pool.clone()};
+        let applet=arkret_wire::AppletId::new(format!("ak:applet:{}",uuid::Uuid::now_v7())).unwrap();
+        let first=ordinary_realm::case_future(||factory.prepare_install(&applet,"instance-target")).await;
+        let accepted=ordinary_realm::case_future(||first.commit(&store)).await.unwrap();
+        let first_body:arkret_models_integration::AppletInstallResponseBody=serde_json::from_value(accepted.response_body.clone()).unwrap();
+        let replay=ordinary_realm::case_future(||first.commit(&store)).await.unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.response_body,accepted.response_body);
+        assert_eq!(replay.committed_event_refs,accepted.committed_event_refs);
+
+        let reaffirm=ordinary_realm::case_future(||factory.prepare_install(&applet,"instance-target")).await;
+        let accepted=ordinary_realm::case_future(||reaffirm.commit(&store)).await.unwrap();
+        assert!(!accepted.replayed);
+        let reaffirm_body:arkret_models_integration::AppletInstallResponseBody=serde_json::from_value(accepted.response_body).unwrap();
+        assert_eq!(reaffirm_body.install_id,first_body.install_id,"continuous safe registration reaffirmation retains the real installation instance");
+
+        // A second real scope keeps the global identity active, so the next
+        // branch isolates scope close/reinstall rather than global reactivation.
+        let keeper=ordinary_realm::case_future(||factory.prepare_install(&applet,"instance-keeper:scope-right")).await;
+        let accepted=ordinary_realm::case_future(||keeper.commit(&store)).await.unwrap();
+        let keeper_body:arkret_models_integration::AppletInstallResponseBody=serde_json::from_value(accepted.response_body).unwrap();
+        assert_ne!(keeper_body.install_id,first_body.install_id);
+        let mixed_generic=ordinary_realm::case_future(||factory.registration_only_parent(
+            &keeper,&first.effective_scope,
+        )).await;
+        let key=coland_storage::applet_effective_scope_key(&first.effective_scope).unwrap();
+        let expected=store.get(applet.as_str(),first_body.service_id.as_str(),&key).await.unwrap().unwrap();
+        let target:arkret_wire::DidCoreId=serde_json::from_value(expected["target_station_id"].clone()).unwrap();
+        let at=arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+        let mut closed=expected.clone();
+        closed["status"]=serde_json::json!("revoked");
+        closed["revoked_at"]=serde_json::json!(arkret_canonical::format_timestamp_canonical(at));
+        let fence=store.fence_installation(applet.as_str(),first_body.service_id.as_str(),&key,target.as_str(),&expected,closed,at).await.unwrap();
+        assert!(fence.updated);
+        assert!(!fence.globally_fenced,"the second accepted scope still owns the same global identity");
+
+        let reinstalled=ordinary_realm::case_future(||factory.prepare_install(&applet,"instance-target")).await;
+        let accepted=ordinary_realm::case_future(||reinstalled.commit(&store)).await.unwrap();
+        let reinstalled_body:arkret_models_integration::AppletInstallResponseBody=serde_json::from_value(accepted.response_body).unwrap();
+        assert_eq!(reinstalled_body.registration_epoch,first_body.registration_epoch);
+        assert_ne!(reinstalled_body.install_id,first_body.install_id,"same epoch cannot revive a closed installation instance");
+        // Read the actual signed historical material after a same-epoch
+        // replacement. A current installation at a new I cannot make the old
+        // accepted parent active, and governance heads remain Realm-scoped.
+        let old_request=arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialRequestBody {
+            effective_scope:first.effective_scope.clone(),
+            grant_ids:first_body.capability_grant_refs.clone(),
+        };
+        let old_material=ordinary_realm::case_future(||store.authority_material(
+            &applet,&first_body.service_id,&target,&old_request,
+        )).await.unwrap();
+        old_material.validate_structural().unwrap();
+        assert_eq!(old_material.registration.event.event_id,first_body.registration_event_ref);
+        assert!(matches!(old_material.current_binding,
+            arkret_models_collaboration::applet_installation_authority::AppletInstallationCurrentBinding::Inactive));
+        for current in &old_material.current_states {
+            let arkret_models_collaboration::exact_current_state::ExactCurrentStateReadResponseBody::Present {
+                effective_stream_head,current_state:arkret_models_collaboration::exact_current_state::ExactCurrentState::CapabilityGrant(row),..
+            }=current else {panic!("old parent returns its exact Grant current");};
+            assert_eq!(row.source_stream_ref,arkret_wire::CommitStreamRef::Realm{realm_id:first.effective_scope.realm_id().clone()});
+            assert_eq!(effective_stream_head.stream_ref,row.source_stream_ref);
+        }
+        let mut wrong_scope=old_request.clone();
+        wrong_scope.effective_scope=keeper.effective_scope.clone();
+        assert!(ordinary_realm::case_future(||store.authority_material(
+            &applet,&first_body.service_id,&target,&wrong_scope,
+        )).await.is_err(),"same Realm/Service does not bind an unrelated Circle resource");
+
+        // NULL generic and Some(I) parents of the same original registration
+        // remain a valid historical material group. NULL supplies no finite I
+        // and cannot erase the known closed instance's Inactive result.
+        let keeper_key=coland_storage::applet_effective_scope_key(&keeper.effective_scope).unwrap();
+        let keeper_record=store.get(applet.as_str(),keeper_body.service_id.as_str(),&keeper_key).await.unwrap().unwrap();
+        let mut keeper_closed=keeper_record.clone();
+        let at=arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
+        keeper_closed["status"]=serde_json::json!("revoked");
+        keeper_closed["revoked_at"]=serde_json::json!(arkret_canonical::format_timestamp_canonical(at));
+        assert!(store.fence_installation(applet.as_str(),keeper_body.service_id.as_str(),
+            &keeper_key,target.as_str(),&keeper_record,keeper_closed,at).await.unwrap().updated);
+        let mut mixed_ids=keeper_body.capability_grant_refs.clone();
+        mixed_ids.push(mixed_generic.clone());
+        let mixed_request=arkret_models_collaboration::applet_installation_authority::AppletAuthorityMaterialRequestBody {
+            effective_scope:keeper.effective_scope.clone(),grant_ids:mixed_ids,
+        };
+        let mixed=ordinary_realm::case_future(||store.authority_material(
+            &applet,&keeper_body.service_id,&target,&mixed_request,
+        )).await.unwrap();
+        mixed.validate_structural().unwrap();
+        assert!(matches!(mixed.current_binding,
+            arkret_models_collaboration::applet_installation_authority::AppletInstallationCurrentBinding::Inactive));
+        assert_eq!(mixed.registration.event.event_id,keeper_body.registration_event_ref);
+        let generic=ordinary_realm::case_future(||factory.registration_only_parent(&reinstalled,&keeper.effective_scope)).await;
+        let mut expected_sources=std::collections::BTreeMap::new();
+        for body in [&first_body,&reaffirm_body,&keeper_body,&reinstalled_body] {
+            for grant in &body.capability_grant_refs {
+                assert!(expected_sources.insert(grant.to_string(),(body.install_id.clone(),body.registration_event_ref.to_string())).is_none());
+            }
+        }
+        #[derive(diesel::QueryableByName)]
+        struct Source {
+            #[diesel(sql_type=Text)] grant_id:String,
+            #[diesel(sql_type=diesel::sql_types::Nullable<Text>)] install_id:Option<String>,
+            #[diesel(sql_type=Text)] registration_event_ref:String,
+            #[diesel(sql_type=Text)] status:String,
+        }
+        let mut conn=pool.get().await.unwrap();
+        let sources=diesel::sql_query("SELECT s.grant_id,s.install_id,s.registration_event_ref,g.status FROM applet_grant_registration_sources s JOIN capability_grant_current_states g ON g.realm_id=s.realm_id AND g.grant_id=s.grant_id WHERE s.applet_id=$1 ORDER BY s.grant_id")
+            .bind::<Text,_>(applet.as_str()).load::<Source>(&mut *conn).await.unwrap();
+        assert_eq!(sources.len(),expected_sources.len()+2);
+        for source in sources {
+            assert_eq!(source.status,"active","closing an installation did not silently revoke or rewrite the old accepted parent");
+            if source.grant_id==mixed_generic.as_str() {
+                assert!(source.install_id.is_none());
+                assert_eq!(source.registration_event_ref,keeper_body.registration_event_ref.as_str());
+                continue;
+            }
+            if source.grant_id==generic.as_str() {
+                assert!(source.install_id.is_none(),"generic multi-resource registration provenance cannot masquerade as finite installation proof");
+                assert_eq!(source.registration_event_ref,reinstalled_body.registration_event_ref.as_str());
+                continue;
+            }
+            let expected=expected_sources.remove(&source.grant_id).expect("only actually accepted parent sources exist");
+            assert_eq!((source.install_id,source.registration_event_ref),(Some(expected.0),expected.1),"each source retains its original accepted instance and registration");
+        }
+        assert!(expected_sources.is_empty());
+    }).await;
 }

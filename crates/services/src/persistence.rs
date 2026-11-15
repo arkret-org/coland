@@ -1088,6 +1088,15 @@ impl PersistenceHandle {
         self.persistence.key_backups().native_head(context).await
     }
 
+    pub async fn native_backup_inventory_commits(
+        &self,
+        reader: &coland_storage::RealmActorBackupManagerReader,
+    ) -> PersistenceResult<Vec<arkret_wire::RealmCommit>> {
+        self.persistence
+            .key_backups()
+            .native_inventory_commits(reader)
+            .await
+    }
     pub async fn native_backup_inventory(
         &self,
         reader: &coland_storage::RealmActorBackupManagerReader,

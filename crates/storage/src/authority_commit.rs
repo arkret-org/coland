@@ -2037,6 +2037,18 @@ pub trait AuthorityCommitStore: Send + Sync {
         ))
     }
 
+    async fn applet_registration(
+        &self,
+        realm: &arkret_wire::RealmId,
+        applet: &arkret_wire::AppletId,
+        service: &arkret_wire::DidCoreId,
+    ) -> PersistenceResult<arkret_models_integration::AppletRegistrationPayload> {
+        let _ = (realm, applet, service);
+        Err(PersistenceError::Conflict(
+            "dependency_missing: accepted current Applet registration unavailable".into(),
+        ))
+    }
+
     async fn realm_actor_control_carrier(
         &self,
         metadata: &arkret_models_integration::RealmActorControlHttpMetadata,
@@ -2070,6 +2082,21 @@ pub trait AuthorityCommitStore: Send + Sync {
         let _ = (event, at);
         Err(crate::PersistenceError::Conflict(
             "dependency_missing: Realm control signer source unavailable".into(),
+        ))
+    }
+
+    /// Validate every authenticated delivery item at one read-only source cut.
+    /// Accepted originals use their retained signer; fresh items use current
+    /// producer authority. Actual UOWs independently recheck all mutable gates.
+    async fn preflight_applet_transaction(
+        &self,
+        events: &[Event],
+        replay: &crate::AppletTransactionReplayRecord,
+        guard: &crate::AppletEventProducerGuard,
+    ) -> PersistenceResult<()> {
+        let _ = (events, replay, guard);
+        Err(crate::PersistenceError::Conflict(
+            "dependency_missing: Applet transaction source cut unavailable".into(),
         ))
     }
 

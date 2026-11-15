@@ -886,12 +886,12 @@ fn verify_control_proof_inner(
     } = context;
     if proof.proof_kind == OrganizationControlProofKind::GovernanceQuorum
         && proof
-            .quorum_threshold
+            .min_signature_count
             .is_some_and(|threshold| proof.proofs.len() < threshold as usize)
     {
         return Err(OrganizationRegistrationError::new(
             OrganizationRegistrationErrorCode::QuorumNotMet,
-            "governance proof count is below quorum_threshold",
+            "governance proof count is below min_signature_count",
         ));
     }
     proof
@@ -914,7 +914,7 @@ fn verify_control_proof_inner(
             resolved_control_methods(document, pinned, organization_did)?
         }
         OrganizationControlProofKind::GovernanceQuorum => {
-            governance_control_methods(document, proof.quorum_threshold)?
+            governance_control_methods(document, proof.min_signature_count)?
         }
     };
 
@@ -1080,7 +1080,7 @@ fn governance_control_methods(
     if declared_threshold != Some(required) {
         return Err(OrganizationRegistrationError::new(
             OrganizationRegistrationErrorCode::QuorumNotMet,
-            "declared quorum_threshold does not match the pinned governance policy",
+            "declared min_signature_count does not match the pinned governance policy",
         ));
     }
     let eligible = threshold
@@ -1342,12 +1342,12 @@ fn validate_declared_governance_quorum(
 ) -> Result<(), OrganizationRegistrationError> {
     if proof.proof_kind == OrganizationControlProofKind::GovernanceQuorum
         && proof
-            .quorum_threshold
+            .min_signature_count
             .is_some_and(|threshold| threshold >= 2 && proof.proofs.len() < threshold as usize)
     {
         return Err(OrganizationRegistrationError::new(
             OrganizationRegistrationErrorCode::QuorumNotMet,
-            "governance proof count is below quorum_threshold",
+            "governance proof count is below min_signature_count",
         ));
     }
     Ok(())
@@ -1616,7 +1616,7 @@ mod tests {
         }
         OrganizationControlProof {
             proof_kind,
-            quorum_threshold: (proof_kind == OrganizationControlProofKind::GovernanceQuorum)
+            min_signature_count: (proof_kind == OrganizationControlProofKind::GovernanceQuorum)
                 .then_some(2),
             proofs,
         }
@@ -2425,9 +2425,9 @@ mod tests {
         actual.insert("ensure_with_governance_quorum_valid", quorum_observation);
         actual.insert("receipt_valid", receipt_observation);
         actual.insert(
-            "quorum_threshold_on_single_signature_branch_is_invalid",
+            "min_signature_count_on_single_signature_branch_is_invalid",
             observe_schema_case(
-                case_named("quorum_threshold_on_single_signature_branch_is_invalid"),
+                case_named("min_signature_count_on_single_signature_branch_is_invalid"),
                 "schema_violation",
             ),
         );

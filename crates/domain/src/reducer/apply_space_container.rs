@@ -641,8 +641,8 @@ fn validate_space_wip_policy(
     kind: &str,
     fields: &std::collections::BTreeMap<String, Value>,
 ) -> Result<(), &'static str> {
-    let limit = fields.get("wip_limit");
-    let enforcement = fields.get("wip_limit_enforcement");
+    let limit = fields.get("max_active_strand_count");
+    let enforcement = fields.get("active_strand_count_enforcement");
     if kind != "list" && (limit.is_some() || enforcement.is_some()) {
         return Err(arkret_wire::ErrorCode::SCHEMA_VIOLATION);
     }

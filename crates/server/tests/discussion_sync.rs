@@ -2,6 +2,10 @@
 //! current membership/history policy. Equal Event timestamps deliberately
 //! prove that the join Commit, rather than arrival time, defines the floor.
 
+#[path = "support/committed_stream.rs"]
+mod committed_stream;
+use committed_stream::scan;
+
 #[path = "../../storage-postgres/tests/support/ordinary_realm.rs"]
 #[allow(dead_code)]
 mod ordinary_realm;
@@ -11,13 +15,9 @@ use arkret_wire::{
     StreamScanRequestBody, StreamScanResponseBody,
 };
 use coland_http::config::AppConfig;
-use coland_http::service;
 use coland_test_support::AppStateTestExt as _;
 use salvo::http::StatusCode;
-use salvo::test::{ResponseExt, TestClient};
 use serde_json::{Value, json};
-
-const SCAN_PATH: &str = "/_arkret/self/streams/scan";
 
 async fn persisted_read_session(
     state: &coland_http::state::AppState,
@@ -83,30 +83,6 @@ async fn persisted_read_session(
         .await
         .unwrap();
     token
-}
-async fn scan(
-    state: &coland_http::state::AppState,
-    token: &str,
-    request: &StreamScanRequestBody,
-) -> (StatusCode, Value) {
-    let canonical_body = String::from_utf8(
-        arkret_canonical::canonical_json_bytes(request).expect("canonical scan request"),
-    )
-    .expect("canonical JSON is UTF-8");
-    let mut response = TestClient::post(format!("http://server{SCAN_PATH}"))
-        .add_header("authorization", format!("Bearer {token}"), true)
-        .add_header(
-            "Arkret-Operation",
-            arkret_wire::ServiceOperationId::SELF_COMMITTED_EVENT_READ_SCAN_V1,
-            true,
-        )
-        .raw_json(canonical_body)
-        .send(&service(state.clone()))
-        .await;
-    (
-        response.status_code.expect("scan status"),
-        response.take_json().await.expect("scan JSON"),
-    )
 }
 
 fn seal_commit(state: &coland_http::state::AppState, commit: &mut arkret_wire::RealmCommit) {

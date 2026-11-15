@@ -5,7 +5,7 @@ pub use coland_domain::reducer::{
 };
 
 use super::{
-    BTreeMap, PersistenceError, PersistenceResult, ProjectedEventOperation, ProjectionEventRecord,
+    PersistenceError, PersistenceResult, ProjectedEventOperation, ProjectionEventRecord,
     RealmMetaRecord, Value, async_trait,
 };
 /// Trait for Realm metadata storage operations.
@@ -16,41 +16,6 @@ pub trait RealmMetaStore: Send + Sync {
     async fn list(&self) -> PersistenceResult<Vec<(String, RealmMetaRecord)>>;
     async fn delete(&self, realm_id: &str) -> PersistenceResult<()>;
 }
-// ── Projection persistence traits ─────────────────────────────────────────
-// The Space/Strand mirror stores below remain available for legacy data and
-// storage compatibility. Their rows are not a source for registered canonical
-// reads, admission, or restart hydration; ObjectCurrentSnapshotStore owns the
-// latter. Other reducer mirrors retain their existing callers.
-
-/// Durable Space-container projection store (mirror of
-/// `projection_space_containers` table).
-#[async_trait]
-pub trait SpaceContainerProjectionStore: Send + Sync {
-    async fn get(
-        &self,
-        container_space_id: &str,
-    ) -> PersistenceResult<Option<SpaceContainerProjectionRecord>>;
-    async fn put(&self, record: &SpaceContainerProjectionRecord) -> PersistenceResult<()>;
-    async fn list_for_realm(
-        &self,
-        realm_id: &str,
-    ) -> PersistenceResult<Vec<SpaceContainerProjectionRecord>>;
-    async fn snapshot_all(&self) -> PersistenceResult<Vec<SpaceContainerProjectionRecord>>;
-    async fn delete(&self, container_space_id: &str) -> PersistenceResult<()>;
-}
-/// Durable Strand projection store (mirror of `projection_strands` table).
-#[async_trait]
-pub trait StrandProjectionStore: Send + Sync {
-    async fn get(&self, strand_id: &str) -> PersistenceResult<Option<StrandProjectionRecord>>;
-    async fn put(&self, record: &StrandProjectionRecord) -> PersistenceResult<()>;
-    async fn list_for_realm(
-        &self,
-        realm_id: &str,
-    ) -> PersistenceResult<Vec<StrandProjectionRecord>>;
-    async fn snapshot_all(&self) -> PersistenceResult<Vec<StrandProjectionRecord>>;
-    async fn delete(&self, strand_id: &str) -> PersistenceResult<()>;
-}
-
 /// One consistent restart snapshot of registered Space and Strand typed
 /// current results. These values come from RealmCommit-backed current rows,
 /// never the older reducer mirror tables.
@@ -1588,60 +1553,6 @@ mod capability_grant_current_state_tests {
             crate::GrantEvaluation::Allowed(_)
         ));
     }
-}
-/// Wire / persistence record for a Space-container projection. Mirrors fields on
-/// `reducer::SpaceContainerProjection` (state stored as the canonical `&str` form
-/// of `SpaceContainerLifecycleState`) so callers can convert without pulling the
-/// reducer enum into the persistence layer.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SpaceContainerProjectionRecord {
-    pub container_space_id: String,
-    pub realm_id: String,
-    pub kind: String,
-    pub title: String,
-    pub fields: BTreeMap<String, Value>,
-    pub scope_circle_id: Option<String>,
-    pub child_scope_policy: Option<String>,
-    pub child_scope_policy_scope_circle_id: Option<String>,
-    pub parent_ref: Option<String>,
-    pub rank: Option<String>,
-    /// One of `active` / `archived` / `tombstoned` per spec.
-    pub state: String,
-    pub state_changed_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub created_by: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_by: Option<String>,
-    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-#[derive(Clone, Debug, PartialEq)]
-pub struct StrandProjectionRecord {
-    pub strand_id: String,
-    pub realm_id: String,
-    pub tracks: BTreeMap<String, arkret_models_collaboration::objects::profiles::StrandTrack>,
-    pub title: String,
-    pub summary: Option<String>,
-    /// Canonical content slot; exactly one of the two is present on an active
-    /// object and both are absent once `state=redacted` (common-fields.md 5.2).
-    pub content: Option<serde_json::Value>,
-    pub encrypted_content: Option<serde_json::Value>,
-    pub fields: BTreeMap<String, serde_json::Value>,
-    pub schema_refs: Vec<String>,
-    /// One of `active` / `archived` / `deleted` / `redacted` per spec.
-    pub state: String,
-    pub state_changed_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Wire spelling of the business-progression stage, absent when the object
-    /// carries no stage (`common-fields.md` §5.3).
-    pub stage: Option<String>,
-    /// Reducer-derived timestamp of the last real stage transition; never
-    /// present without `stage`.
-    pub stage_changed_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub created_by: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_by: Option<String>,
-    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// AKP-0007 — the Circle (`ak:circle:…`) this Strand is scoped to, if any.
-    /// Durable so circle-scoped message visibility survives restart.
-    pub scope_circle_id: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MorphProjectionRecord {

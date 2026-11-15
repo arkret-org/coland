@@ -337,6 +337,13 @@ fn recording_start_requires_consent_before_both_facets_are_written() {
         facet::CALL_RECORDING_RESULT,
         &[call_id.as_str(), recording_id],
     );
+    // Current call-current-fixture.json capture_transcripts recording Start
+    // freezes this MLS reference. This reducer fixture checks payload and facet
+    // behavior; admission owns the accepted MLS source and its authority.
+    let key_ref = serde_json::json!({
+        "algorithm": "MLS",
+        "group_state_ref": "ak:event:ASqQ2HaZ1P42jbEkzon8b1tpiGGU4HDgHVDCjz2X0cYZ"
+    });
 
     // `call-state.md` §5 / `call_recording_start_payload` close the consent gate
     // at the payload boundary: `capture_metadata.retention.consent_confirmed` is pinned to
@@ -350,9 +357,16 @@ fn recording_start_requires_consent_before_both_facets_are_written() {
             "capture_kind": "recording",
             "mode": "audio_video",
             "visible_notice": true,
-            "capture_metadata": {"key_ref":capture_key_ref(),"retention": {"consent_confirmed": consent_confirmed}}
+            "capture_metadata": {
+                "key_ref": key_ref,
+                "retention": {"consent_confirmed": consent_confirmed}
+            }
         })
     };
+    serde_json::from_value::<
+        arkret_models_collaboration::events_payloads::call::CallRecordingStartPayload,
+    >(start_payload(true))
+    .expect("consented recording fixture must be a current legal payload");
     let unconsented = call_input(
         arkret_wire::EventKind::CallRecordingStart.as_str(),
         realm,
@@ -384,6 +398,10 @@ fn recording_start_requires_consent_before_both_facets_are_written() {
     assert_eq!(
         state.facet_value(realm, &capture_result).unwrap()["details"]["retention"]["consent_confirmed"],
         Value::Bool(true)
+    );
+    assert_eq!(
+        state.facet_value(realm, &capture_result).unwrap()["key_ref"],
+        key_ref
     );
 }
 

@@ -61,8 +61,6 @@ pub struct PgPersistenceStore {
     actor_profiles: crate::actor_profiles::PgActorProfileStore,
     recovery_sessions: PgRecoverySessionStore,
     security_transactions: PgSecurityTransactionStore,
-    space_container_projections: PgSpaceContainerProjectionStore,
-    strand_projections: PgStrandProjectionStore,
     object_current_snapshot: crate::object_projection_reads::PgObjectCurrentSnapshotStore,
     morph_projections: PgMorphProjectionStore,
     relation_current_states: PgRelationCurrentStateStore,
@@ -146,8 +144,6 @@ impl PgPersistenceStore {
             actor_profiles: crate::actor_profiles::PgActorProfileStore { pool: pool.clone() },
             recovery_sessions: PgRecoverySessionStore { pool: pool.clone() },
             security_transactions: PgSecurityTransactionStore { pool: pool.clone() },
-            space_container_projections: PgSpaceContainerProjectionStore { pool: pool.clone() },
-            strand_projections: PgStrandProjectionStore { pool: pool.clone() },
             object_current_snapshot: crate::object_projection_reads::PgObjectCurrentSnapshotStore {
                 pool: pool.clone(),
             },
@@ -401,16 +397,8 @@ impl EventProjectionStoreRegistry for PgPersistenceStore {
         &self.key_backups
     }
 
-    fn space_container_projections(&self) -> &dyn SpaceContainerProjectionStore {
-        &self.space_container_projections
-    }
-
     fn circle_projections(&self) -> &dyn CircleProjectionStore {
         &self.circle_projections
-    }
-
-    fn strand_projections(&self) -> &dyn StrandProjectionStore {
-        &self.strand_projections
     }
 
     fn object_current_snapshot(&self) -> &dyn ObjectCurrentSnapshotStore {

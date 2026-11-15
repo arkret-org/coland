@@ -1094,29 +1094,6 @@ impl EventQueryService {
             .current_applet_authoring_preview(subject_key)
             .await
     }
-    /// Local host issuer. Return the opaque secret once; durable state contains only its digest.
-    pub async fn issue_widget_credential(
-        &self,
-        mut record: coland_storage::AppletWidgetTokenRecord,
-    ) -> ServiceResult<(String, coland_storage::AppletWidgetTokenRecord)> {
-        let mut entropy = [0u8; 32];
-        getrandom::fill(&mut entropy).map_err(|error| {
-            crate::ServiceError::Internal(format!("widget credential entropy failed: {error}"))
-        })?;
-        let secret = hex::encode(entropy);
-        record.token_digest =
-            arkret_wire::Hash::new(arkret_canonical::sha256_digest(secret.as_bytes()))
-                .map_err(|error| crate::ServiceError::Internal(error.to_string()))?;
-        record.token_ref = format!("ak:widget_token:{}", uuid::Uuid::now_v7());
-        record.invalidated_at = None;
-        record.issued_at = Utc::now();
-        if !self.applets.issue_widget_token(record.clone()).await? {
-            return Err(crate::ServiceError::Conflict(
-                "widget issuance collided".into(),
-            ));
-        }
-        Ok((secret, record))
-    }
     pub async fn issue_widget_token(
         &self,
         record: coland_storage::AppletWidgetTokenRecord,

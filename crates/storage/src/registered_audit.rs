@@ -23,9 +23,6 @@ impl RegisteredAuditCommit {
     pub fn pair_for(&self, event: &Event) -> bool {
         matches!(self, Self::Pair { request, .. } if request.events.iter().any(|slot| slot.event == *event))
     }
-    pub fn read_for(&self, event: &Event) -> bool {
-        matches!(self, Self::WatchRead { request } if request.audit_submission.event == *event)
-    }
     pub fn canonical_request(&self) -> crate::PersistenceResult<Vec<u8>> {
         match self {
             Self::Pair { request, .. } => arkret_canonical::canonical_json_bytes(request),

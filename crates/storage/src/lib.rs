@@ -8,7 +8,7 @@
 //! `coland-storage-postgres`.
 
 // Crate-private imports shared by the explicitly imported storage modules.
-pub(crate) use std::collections::{BTreeMap, BTreeSet};
+pub(crate) use std::collections::BTreeSet;
 
 pub use arkret_deployment_contracts::agent_session_authority::{
     AgentSessionAuthorityRequest, AgentSessionAuthorityView,
@@ -26,7 +26,10 @@ mod agent_principal;
 pub use agent_draft_pending_intents::*;
 mod records;
 pub use agent_membership_cascades::*;
-pub use agent_principal::{AgentPrincipalRecord, PendingAgentPairingCommitIntent};
+pub use agent_principal::{
+    ActiveAgentRuntimeBinding, AgentPrincipalRecord, AgentRuntimeBindings, OpenAgentPairingHandle,
+    PendingAgentPairingCommitIntent,
+};
 pub use records::*;
 
 mod account_device_signer_evidence;
@@ -744,9 +747,7 @@ pub trait EventProjectionStoreRegistry: Send + Sync {
     fn device_keys(&self) -> &dyn DeviceKeyStore;
     fn one_time_keys(&self) -> &dyn OneTimeKeyStore;
     fn key_backups(&self) -> &dyn KeyBackupStore;
-    fn space_container_projections(&self) -> &dyn SpaceContainerProjectionStore;
     fn circle_projections(&self) -> &dyn CircleProjectionStore;
-    fn strand_projections(&self) -> &dyn StrandProjectionStore;
     fn object_current_snapshot(&self) -> &dyn ObjectCurrentSnapshotStore;
     fn morph_projections(&self) -> &dyn MorphProjectionStore;
     fn relation_current_states(&self) -> &dyn RelationCurrentStateStore;

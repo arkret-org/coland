@@ -323,7 +323,10 @@ async fn fixture_archive_inventory(
     .unwrap();
     // This independent client learns governor keys only from the public,
     // nonce-bound bundle it just verified, never the server's private directory.
-    assert_eq!(resolution.service_kind, arkret_wire::ServiceKind::Station.as_str());
+    assert_eq!(
+        resolution.service_kind,
+        arkret_wire::ServiceKind::Station.as_str()
+    );
     let mut originals = Vec::new();
     for entry in &manifest.entries {
         use arkret_models_integration::RealmActorArchiveInventoryEntry;
@@ -365,7 +368,10 @@ async fn fixture_archive_inventory(
             &signature.verification_method,
             signature.created_at,
         ) {
-            assert_eq!(existing.ed25519_bytes().unwrap(), key.ed25519_bytes().unwrap());
+            assert_eq!(
+                existing.ed25519_bytes().unwrap(),
+                key.ed25519_bytes().unwrap()
+            );
         }
         keys.insert_at(&signature.verification_method, signature.created_at, key);
     }
@@ -676,11 +682,21 @@ async fn fixture_native_backup_outcomes(
         .expect("first real Bot portal must first durably PUT its original root");
     assert_eq!(entry.backup.series_id, selection.active_series_id);
     assert_eq!(
-        entry.backup.authorization_binding.as_ref().unwrap().recovery_ref,
+        entry
+            .backup
+            .authorization_binding
+            .as_ref()
+            .unwrap()
+            .recovery_ref,
         *current_recovery
     );
     assert_ne!(
-        entry.backup.authorization_binding.as_ref().unwrap().recovery_ref,
+        entry
+            .backup
+            .authorization_binding
+            .as_ref()
+            .unwrap()
+            .recovery_ref,
         selection.recovery_ref,
         "new packet binds current Recovery while selected series preserves its historical source"
     );

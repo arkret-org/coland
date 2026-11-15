@@ -2,12 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use coland_storage::SignalRelayRecord;
 pub use coland_storage::{
     AccountNotificationDeltaWrite, NotificationFanoutBasis, NotificationStrandScope,
     RecipientDeliveryRecord, RecipientNotificationRecord, RecipientQueueSelector,
-    StoredAccountNotificationDelta,
 };
-use coland_storage::{AccountPk, SignalRelayRecord};
 use futures_util::stream::BoxStream;
 use serde_json::Value;
 
@@ -39,13 +38,6 @@ pub struct StoreAccountNotificationDeltaCommand {
 }
 
 #[derive(Clone, Debug)]
-pub struct ListAccountNotificationDeltasQuery {
-    pub controller_account_pk: AccountPk,
-    pub recipient_id: String,
-    pub after_position: Option<i64>,
-}
-
-#[derive(Clone, Debug)]
 pub struct ListRecipientNotificationsQuery {
     pub recipient_id: String,
 }
@@ -55,12 +47,6 @@ pub trait NotificationWritePort: Send + Sync {
     async fn store_notification(&self, record: RecipientNotificationRecord) -> ServiceResult<()>;
     async fn store_account_delta(&self, record: AccountNotificationDeltaWrite)
     -> ServiceResult<()>;
-    async fn list_for_account(
-        &self,
-        controller_account_pk: &AccountPk,
-        recipient_id: &str,
-        after_position: Option<i64>,
-    ) -> ServiceResult<Vec<StoredAccountNotificationDelta>>;
     async fn list_for_recipient(
         &self,
         recipient_id: &str,
@@ -182,18 +168,6 @@ pub trait DeviceMessagePort: Send + Sync {
         &self,
         batch: DeviceMessageBatchRecord,
     ) -> ServiceResult<DeviceMessageBatchCommitOutcome>;
-    async fn issue_ack_token(
-        &self,
-        recipient: &str,
-        device_id: &str,
-        queue_position: i64,
-    ) -> ServiceResult<Option<String>>;
-    async fn acknowledge(
-        &self,
-        recipient: &str,
-        device_id: &str,
-        acknowledgement_token: &str,
-    ) -> ServiceResult<Option<usize>>;
     async fn messages_after(
         &self,
         recipient: &str,
@@ -314,19 +288,6 @@ impl DeliveryService {
         self.notifications.store_account_delta(command.record).await
     }
 
-    pub async fn list_account_deltas(
-        &self,
-        query: ListAccountNotificationDeltasQuery,
-    ) -> ServiceResult<Vec<StoredAccountNotificationDelta>> {
-        self.notifications
-            .list_for_account(
-                &query.controller_account_pk,
-                &query.recipient_id,
-                query.after_position,
-            )
-            .await
-    }
-
     pub async fn list_recipient_notifications(
         &self,
         query: ListRecipientNotificationsQuery,
@@ -400,28 +361,6 @@ impl DeliveryService {
     ) -> ServiceResult<DeviceMessageBatchInspection> {
         self.device_messages
             .inspect_batch(request_key, request_digest, items)
-            .await
-    }
-
-    pub async fn issue_device_message_ack_token(
-        &self,
-        recipient: &str,
-        device_id: &str,
-        queue_position: i64,
-    ) -> ServiceResult<Option<String>> {
-        self.device_messages
-            .issue_ack_token(recipient, device_id, queue_position)
-            .await
-    }
-
-    pub async fn acknowledge_device_messages(
-        &self,
-        recipient: &str,
-        device_id: &str,
-        acknowledgement_token: &str,
-    ) -> ServiceResult<Option<usize>> {
-        self.device_messages
-            .acknowledge(recipient, device_id, acknowledgement_token)
             .await
     }
 
@@ -674,22 +613,6 @@ mod tests {
         ) -> ServiceResult<DeviceMessageBatchCommitOutcome> {
             Ok(DeviceMessageBatchCommitOutcome::Stored(Default::default()))
         }
-        async fn issue_ack_token(
-            &self,
-            _recipient: &str,
-            _device_id: &str,
-            _queue_position: i64,
-        ) -> ServiceResult<Option<String>> {
-            Ok(None)
-        }
-        async fn acknowledge(
-            &self,
-            _recipient: &str,
-            _device_id: &str,
-            _ack_token: &str,
-        ) -> ServiceResult<Option<usize>> {
-            Ok(None)
-        }
         async fn messages_after(
             &self,
             _recipient: &str,
@@ -774,15 +697,6 @@ mod tests {
         ) -> ServiceResult<()> {
             *self.0.lock().expect("notification lock") += 1;
             Ok(())
-        }
-
-        async fn list_for_account(
-            &self,
-            _controller_account_pk: &AccountPk,
-            _recipient_id: &str,
-            _after_position: Option<i64>,
-        ) -> ServiceResult<Vec<StoredAccountNotificationDelta>> {
-            Ok(Vec::new())
         }
 
         async fn list_for_recipient(

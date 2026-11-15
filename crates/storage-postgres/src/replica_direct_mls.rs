@@ -26,8 +26,6 @@ struct Cut {
     head: CommitStreamHead,
     current: CurrentState,
     // Include Binding and roster evidence in the cache publication fence.
-    // Legacy local cache entries must be rebound to this stronger native cut.
-    #[serde(default)]
     current_state_entries: Vec<CurrentState>,
     participants: std::collections::BTreeSet<ActorId>,
 }

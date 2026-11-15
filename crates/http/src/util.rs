@@ -230,11 +230,6 @@ pub fn cursor_binding_record_from_state(
     })
 }
 
-/// Active `<digest-suite>:<64 lowercase hex>` hash shape.
-pub fn is_valid_hash_digest(value: &str) -> bool {
-    arkret_identifiers::Hash::new(value.to_owned()).is_ok()
-}
-
 /// 64 lowercase hex characters.
 pub fn is_valid_sha256_hex(value: &str) -> bool {
     value.len() == 64
@@ -287,14 +282,6 @@ pub fn handle_for_did(did: &str) -> String {
 // objects in the protocol are `ak:space:` / `ak:strand:` / `ak:morph:` /
 // `ak:relation:` / `ak:view:`, each driven by its own dedicated event
 // kind.)
-
-/// Allow-list of space-discoverability values.
-pub fn is_valid_discoverability(value: &str) -> bool {
-    matches!(
-        value,
-        "public" | "listed" | "restricted" | "unlisted" | "invite_only" | "secret"
-    )
-}
 
 #[cfg(test)]
 mod tests {

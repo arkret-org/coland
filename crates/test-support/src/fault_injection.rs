@@ -123,11 +123,6 @@ impl FaultInjectingStore {
             injector,
         }
     }
-
-    #[must_use]
-    pub fn fault_injector(&self) -> Arc<FaultInjector> {
-        self.injector.clone()
-    }
 }
 
 impl PersistenceStore for FaultInjectingStore {
@@ -556,14 +551,8 @@ impl coland_storage::EventProjectionStoreRegistry for FaultInjectingStore {
     fn key_backups(&self) -> &dyn coland_storage::KeyBackupStore {
         self.inner.key_backups()
     }
-    fn space_container_projections(&self) -> &dyn coland_storage::SpaceContainerProjectionStore {
-        self.inner.space_container_projections()
-    }
     fn circle_projections(&self) -> &dyn coland_storage::CircleProjectionStore {
         self.inner.circle_projections()
-    }
-    fn strand_projections(&self) -> &dyn coland_storage::StrandProjectionStore {
-        self.inner.strand_projections()
     }
     fn object_current_snapshot(&self) -> &dyn coland_storage::ObjectCurrentSnapshotStore {
         self.inner.object_current_snapshot()

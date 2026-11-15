@@ -1498,15 +1498,6 @@ impl AppState {
         self.account_authority_device_pairing.as_ref()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn test_set_account_authority_device_pairing(
-        &mut self,
-        port: Arc<dyn AccountAuthorityDevicePairingPort>,
-    ) {
-        self.account_authority_device_pairing = port;
-    }
-
     pub(crate) fn agent_participations(&self) -> &AgentParticipationService {
         &self.agent_participations
     }
@@ -1724,21 +1715,6 @@ impl AppState {
             .invalidate_handle_claims_for_subject(&subject_id)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn test_insert_member_identity(&self, record: super::MemberIdentityEventRecord) {
-        self.member_identity.lock().insert(record);
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn test_cache_handle_claim(&self, envelope: Value) -> Option<String> {
-        let record = super::member_identity::handle_claim_record_from_envelope(&envelope)?;
-        let digest = record.digest.clone();
-        self.member_identity.lock().restore_handle_claim(record);
-        Some(digest)
-    }
-
     pub fn next_to_device_position(&self) -> i64 {
         let wall = chrono::Utc::now().timestamp_micros();
         loop {
@@ -1861,12 +1837,6 @@ impl AppState {
         &self.realm_directory
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn test_hlc(&self) -> &ServiceClock {
-        self.hlc()
-    }
-
     /// One content-addressed object as this Station stored it.
     ///
     /// A snapshot manifest commits to its chunks only through their content
@@ -1967,12 +1937,6 @@ impl AppState {
         record: coland_services::identity::DidDocumentState,
     ) -> Result<arkret_identity::DidDocument, String> {
         self.dids.cache_resolved_document_state(record)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn test_account_registration_policy(&self) -> &Arc<Mutex<AccountRegistrationPolicy>> {
-        &self.account_registration_policy
     }
 }
 

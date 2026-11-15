@@ -191,10 +191,6 @@ impl GovernanceService {
         *self.organization_realms.lock() = organization_realms;
     }
 
-    pub fn cached_organization(&self, organization_id: &str) -> Option<OrganizationRecord> {
-        self.organizations.lock().get(organization_id).cloned()
-    }
-
     pub fn cached_organizations(&self) -> Vec<OrganizationRecord> {
         self.organizations.lock().values().cloned().collect()
     }
@@ -204,14 +200,6 @@ impl GovernanceService {
             .lock()
             .get(organization_id)
             .map(|realms| realms.iter().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    pub fn cached_realm_organizations(&self, realm_id: &str) -> Vec<DidCoreId> {
-        self.realm_organizations
-            .lock()
-            .get(realm_id)
-            .map(|organizations| organizations.iter().cloned().collect())
             .unwrap_or_default()
     }
 

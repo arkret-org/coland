@@ -152,15 +152,6 @@ impl ProjectionState {
             })
             .unwrap_or_default()
     }
-
-    /// True when the agent principal has at least one accepted, non-revoked
-    /// agent key authorization.
-    pub fn agent_has_authorized_key(&self, agent_id: &str) -> bool {
-        self.agent_authorized_keys
-            .get(agent_id)
-            .map(|keys| !keys.is_empty())
-            .unwrap_or(false)
-    }
 }
 
 #[cfg(test)]

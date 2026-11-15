@@ -801,16 +801,7 @@ pub(crate) async fn admit_outbound_signal(
 }
 
 #[cfg(feature = "test-support")]
-impl AppState {
-    #[doc(hidden)]
-    pub async fn test_admit_outbound_signal(
-        &self,
-        destination_id: &str,
-        envelope: &SignalEnvelope,
-    ) -> Result<(), AppError> {
-        admit_outbound_signal(self, destination_id, envelope).await
-    }
-}
+impl AppState {}
 
 /// Server-visible checks shared by source dispatch and destination admission.
 pub(crate) async fn admit_signal_outer(

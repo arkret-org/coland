@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn invitation_creation_rejects_legacy_and_unknown_count_members() {
+    fn invitation_creation_rejects_unknown_count_members() {
         let valid = serde_json::json!({
             "public_key": arkret_canonical::base64url_encode([7; 32]),
             "expires_at": "2026-11-12T00:02:00.000Z",
@@ -417,9 +417,5 @@ mod tests {
             extra[member] = serde_json::json!(3);
             assert!(serde_json::from_value::<RealmInviteLinkCreatePayload>(extra).is_err());
         }
-        let mut legacy = valid;
-        legacy.as_object_mut().unwrap().remove("max_use_count");
-        legacy["max_uses"] = serde_json::json!(2);
-        assert!(serde_json::from_value::<RealmInviteLinkCreatePayload>(legacy).is_err());
     }
 }

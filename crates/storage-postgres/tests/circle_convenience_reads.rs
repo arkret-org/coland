@@ -1,55 +1,15 @@
+use ordinary_realm::circle_membership_request as membership;
+
 #[path = "support/historical_human.rs"]
 mod historical_human;
 #[path = "support/hydration.rs"]
 mod hydration;
 
-use arkret_wire::{ActorId, CommitStreamRef, EventKind};
-use coland_storage::{AuthorityCommitStore, AuthorityCommitTransaction, EventCommitUnitOfWork};
+use arkret_wire::{ActorId, EventKind};
+use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
 use coland_storage_postgres::test_database::TestDatabase;
 use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
 use historical_human::ordinary_realm;
-
-fn membership(
-    previous: &AuthorityCommitTransaction,
-    circle: &arkret_wire::CircleId,
-    actor: &ActorId,
-    state: &str,
-    expected: Option<&str>,
-    parent: Option<serde_json::Value>,
-) -> coland_storage::EventCommitRequest {
-    let scope = arkret_wire::ScopeRef::Circle {
-        realm_id: previous.event.realm_id.clone(),
-        circle_id: circle.clone(),
-    };
-    let event = ordinary_realm::event_for_actor(
-        EventKind::CircleMemberState,
-        scope,
-        actor.clone(),
-        {
-            let mut payload = serde_json::json!({"circle_id":circle,"member_id":actor,"membership":state,"expected_membership":expected});
-            if let Some(parent) = parent {
-                payload["parent_membership_revision"] = parent;
-            }
-            payload
-        },
-        previous.commit.committed_at,
-    );
-    let mut request =
-        ordinary_realm::request_for_event(previous, event, previous.commit.committed_at);
-    let stream = CommitStreamRef::Circle {
-        realm_id: previous.event.realm_id.clone(),
-        circle_id: circle.clone(),
-    };
-    if previous.commit.stream_ref != stream {
-        request.authority_commit.commit.stream_position = 0;
-        request.authority_commit.commit.previous_commit_ref = None;
-    }
-    request.authority_commit.commit.stream_ref = stream;
-    request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
-        request.authority_commit.event.clone(),
-    ));
-    request
-}
 
 #[tokio::test]
 async fn durable_circle_directory_and_member_details_follow_accepted_current() {

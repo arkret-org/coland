@@ -244,27 +244,6 @@ pub struct PreparedPrivateInviteDelivery {
     constraints: Option<arkret_wire::ReceivePolicyConstraints>,
 }
 impl PreparedPrivateInviteDelivery {
-    pub fn from_verified_receipt(
-        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequestBody,
-        fact: &arkret_identity::account_device_signer_evidence::VerifiedAccountDeviceHistoricalSignerFact,
-        locator_verified: bool,
-        constraints: Option<arkret_wire::ReceivePolicyConstraints>,
-    ) -> PersistenceResult<Self> {
-        let mut prepared = Self::from_verified_native_receipt(
-            &request.holder_account_id,
-            &request.command,
-            fact,
-            locator_verified,
-            constraints,
-        )?;
-        prepared.request_digest = Some(
-            request
-                .digest()
-                .map_err(|e| crate::PersistenceError::SchemaViolation(e.to_string()))?,
-        );
-        prepared.native_command = None;
-        Ok(prepared)
-    }
     pub fn from_verified_native_receipt(
         holder: &AccountId,
         command: &arkret_models_collaboration::consent_private::ConsentPrivateCommand,

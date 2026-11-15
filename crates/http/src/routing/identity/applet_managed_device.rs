@@ -210,28 +210,6 @@ pub(crate) async fn verify(
     })
 }
 
-/// A component harness for the exact mounted production authentication hoop.
-/// Its downstream echo is not an implementation of any business operation.
-#[cfg(feature = "test-support")]
-pub(crate) fn test_service(state: AppState) -> salvo::Service {
-    use salvo::prelude::*;
-    #[handler]
-    async fn echo(depot: &Depot, res: &mut Response) {
-        let verified = depot
-            .get_typed::<VerifiedAppletManagedDevice>()
-            .expect("production hoop identity");
-        assert_eq!(verified.authority.actor_id, verified.metadata.actor_id);
-        assert!(arkret_wire::applet_managed_device_scope_rule(verified.operation).is_some());
-        res.render(Json(verified.metadata.clone()));
-    }
-    salvo::Service::new(
-        Router::with_path("{**rest}")
-            .hoop(salvo::affix_state::inject(state))
-            .hoop(super::session_pop::verify_session_pop)
-            .goal(echo),
-    )
-}
-
 /// Resolve the real Service identity for one native content response. Storage
 /// independently rechecks registration, exact scope and current installation.
 pub(crate) async fn content_delivery_guard(

@@ -1143,7 +1143,7 @@ async fn verify_invite_commit(
     )
     .await
     .map_err(|error| unavailable(format!("invite_commit signing key is unavailable: {error}")))?;
-    let received = coland_services::committed_receipt::verify_committed_event_receipt_with_fact(
+    let received = coland_services::committed_receipt::verify_committed_event_receipt_with_source(
         state.persistence(),
         &delivery.invite_event,
         &delivery.invite_commit,

@@ -1,7 +1,24 @@
+fn validate_message_content(content: &serde_json::Value) -> Result<(), &'static str> {
+    let operation = arkret_event_draft::test_support::raw_projected_operation(
+        arkret_identifiers::OperationId::new("ak:operation:01904100-0000-7000-8000-57d7d85564c5")
+            .unwrap(),
+        arkret_identifiers::RealmId::new("ak:realm:AQptIWDEF2d4jlsnzTQVXGqZs6h-vPkYXuYqwewKqIjr")
+            .unwrap(),
+        arkret_wire::EventKind::MessageCreate.as_str(),
+        serde_json::json!({
+            "strand_id": "ak:strand:AdkQ-RmB1a8zyc52yl9GWAsodQ_EUle1WAVZqbO7pc19",
+            "track_name": "discussion",
+            "content": content,
+        }),
+    );
+    super::validate_message_operation_payload(&operation)
+}
+
 mod audience_mention_tests {
     use serde_json::json;
 
     use super::super::*;
+    use super::validate_message_content;
 
     #[test]
     fn audience_mention_accepts_here_as_strand_engaged() {
@@ -22,19 +39,23 @@ mod audience_mention_tests {
         });
 
         validate_content_blocks(&content).unwrap();
-        validate_mentions(&content).unwrap();
+        validate_message_content(&content).unwrap();
     }
 
     #[test]
     fn audience_mention_rejects_presence_online_without_profile() {
         let content = json!({
-            "kind": "audience_mention",
-            "audience": "strand_engaged",
-            "mention_text_original": "@online"
+            "kind": "ak.content.text",
+            "body": "@online",
+            "audience_mentions": [{
+                "kind": "audience_mention",
+                "audience": "strand_engaged",
+                "mention_text_original": "@online"
+            }]
         });
 
         assert_eq!(
-            validate_mentions(&content),
+            validate_message_content(&content),
             Err("presence-filtered audience mention requires an explicit profile")
         );
     }
@@ -60,6 +81,7 @@ mod direct_mention_tests {
     use serde_json::json;
 
     use super::super::*;
+    use super::validate_message_content;
 
     const STATION: &str = "ak:did_core:web:bob.station.example";
 
@@ -119,7 +141,7 @@ mod direct_mention_tests {
             }]
         });
 
-        validate_mentions(&content).unwrap();
+        validate_message_content(&content).unwrap();
         assert_eq!(
             mention_subject_account_ids(&content).unwrap(),
             vec![arkret_wire::AccountId::new(
@@ -142,7 +164,10 @@ mod direct_mention_tests {
             }]
         });
 
-        assert_eq!(validate_mentions(&content), Err("mention node is invalid"));
+        assert_eq!(
+            validate_message_content(&content),
+            Err("mention node is invalid")
+        );
     }
 
     /// The same principal at another Station is a different subject: the
@@ -184,7 +209,10 @@ mod direct_mention_tests {
             }]
         });
 
-        assert_eq!(validate_mentions(&content), Err("mention node is invalid"));
+        assert_eq!(
+            validate_message_content(&content),
+            Err("mention node is invalid")
+        );
     }
 
     #[test]
@@ -201,7 +229,7 @@ mod direct_mention_tests {
             });
 
             assert_eq!(
-                validate_mentions(&content),
+                validate_message_content(&content),
                 Err("mention node kind must be mention or audience_mention")
             );
         }
@@ -227,7 +255,10 @@ mod direct_mention_tests {
             ]
         });
 
-        assert_eq!(validate_mentions(&content), Err("mention node is invalid"));
+        assert_eq!(
+            validate_message_content(&content),
+            Err("mention node is invalid")
+        );
     }
 }
 

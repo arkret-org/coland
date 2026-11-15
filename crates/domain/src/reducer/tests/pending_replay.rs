@@ -115,6 +115,10 @@ fn relation_create_waits_for_unknown_endpoint() {
     );
     let relation_id =
         arkret_identifiers::RelationId::from_event_id(&relation.context.event_id).to_string();
+    serde_json::from_value::<
+        arkret_models_collaboration::events_payloads::relation::RelationCreatePayload,
+    >(relation.payload.clone())
+    .expect("current relation create fixture must reach endpoint lookup");
 
     assert!(matches!(
         state.apply(&relation, &hlc),
@@ -142,11 +146,15 @@ fn relation_update_for_missing_current_value_is_not_queued_for_replay() {
                 "from_ref": STRAND,
                 "to_ref": RELATION_TARGET
             },
-            "expected_commit_id": "ak:realm_commit:ARNRmzDi2r78zveOLmoHOb6AephFMwVuGE1fwXmCoeo4",
+            "expected_commit_id": arkret_wire::RealmCommitId::from_digest([1; 32]),
             "relation_id": RELATION,
             "patch": { "fields.label": "m" }
         }),
     );
+    serde_json::from_value::<
+        arkret_models_collaboration::events_payloads::relation::RelationUpdatePayload,
+    >(update.payload.clone())
+    .expect("current relation update fixture must reach current-value lookup");
 
     assert!(matches!(
         state.apply(&update, &hlc),

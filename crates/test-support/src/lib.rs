@@ -12,13 +12,6 @@ pub mod native_tls;
 pub mod pcr_genesis;
 pub mod signed_event;
 
-pub fn fixture_signer_evidence_ref() -> arkret_wire::SignerEvidenceRef {
-    let digest = arkret_wire::Hash::new(format!("sha256:{}", "11".repeat(32)))
-        .expect("fixture signer evidence digest");
-    arkret_wire::SignerEvidenceRef::new(format!("ak:signer_evidence:{digest}"))
-        .expect("fixture signer evidence reference")
-}
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::Path;

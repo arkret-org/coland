@@ -325,9 +325,7 @@ async fn event_read_row_from_projection_json(
         })?;
     let view = super::super::event_log::canonical_event_read_row(state, &record).await?;
     let retained = row["payload"]["retention_tombstone"].as_bool() == Some(true);
-    let erased = row["sender"].as_str()
-        == Some(coland_services::projection::tombstone::ERASED_USER_PLACEHOLDER);
-    if !projection_row_is_redacted_message_tombstone(row) && !retained && !erased {
+    if !projection_row_is_redacted_message_tombstone(row) && !retained {
         return Ok(view);
     }
     Ok(super::super::event_log::withheld_event_read_row(

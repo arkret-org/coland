@@ -1,5 +1,3 @@
-// Current HTTP integration helpers. Legacy Seal/Cell fixtures remain in common.rs for migration
-// reference.
 //! Shared helpers, fixtures, and imports for the coland HTTP-API integration test binary.
 //!
 //! Originally lived inline at the top of the monolithic `http_api` test before the

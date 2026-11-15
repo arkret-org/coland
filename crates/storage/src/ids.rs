@@ -218,12 +218,6 @@ pub fn typed_uuid_part_expect_internal(typed: &str) -> Uuid {
     })
 }
 
-pub fn typed_uuid_part_or_schema_violation(typed: &str) -> Result<Uuid, crate::PersistenceError> {
-    typed_uuid_part(typed).ok_or_else(|| {
-        crate::PersistenceError::SchemaViolation(format!("malformed typed wire ID: {typed:?}"))
-    })
-}
-
 pub fn format_typed_uuid(kind: &str, uuid: &Uuid) -> String {
     format!("ak:{kind}:{uuid}")
 }

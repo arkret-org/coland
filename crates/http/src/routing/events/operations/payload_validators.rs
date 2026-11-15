@@ -59,22 +59,9 @@ pub fn validate_message_operation_payload(operation: &Operation) -> Result<(), &
             .ok_or("message create requires track_name")?;
         validate_read_scope_track(track_name)?;
     }
-    let encrypted = operation
-        .payload
-        .get("encrypted")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-        || operation.payload.get("encrypted_content").is_some();
-    if encrypted {
-        // The encrypted content envelope SHAPE is owned by the registered spec schema
-        // `ak.schema.encrypted_envelope.v1`. Its SDK model owns the closed
-        // shape; this kind-specific check only enforces the carrier choice.
-        if operation.payload.get("encrypted_content").is_none()
-            && operation.payload.get("content").is_none()
-        {
-            return Err("encrypted message operation requires content envelope");
-        }
-    } else if let Some(content) = operation.payload.get("content") {
+    if operation.payload.get("encrypted_content").is_none()
+        && let Some(content) = operation.payload.get("content")
+    {
         validate_content_blocks(content)?;
         arkret_models_collaboration::events_payloads::validate_mentions_in_realm(
             content,

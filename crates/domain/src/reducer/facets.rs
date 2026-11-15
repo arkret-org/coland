@@ -108,11 +108,6 @@ impl FacetRef {
     pub fn subject(&self) -> &str {
         &self.subject
     }
-
-    #[must_use]
-    pub fn is_singleton(&self) -> bool {
-        self.subject.is_empty()
-    }
 }
 
 impl fmt::Display for FacetRef {

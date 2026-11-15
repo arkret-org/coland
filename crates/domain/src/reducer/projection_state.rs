@@ -122,7 +122,7 @@ pub struct ProjectionState {
     /// Server-side Strand projection. Mirrors the canonical state-machine
     /// for ak.strand.create / update / archive / restore. Unlike Space
     /// there is no dedicated `ak.strand.tombstone` event; terminal state
-    /// is reached via `ak.redaction`. Mirror table is `projection_strands`
+    /// is reached via `ak.redaction`. Rebuilt from registered current snapshots
     /// (durable).
     pub strands: BTreeMap<String, StrandProjection>,
     /// AKP-0007 — server-side Circle projection. Mirrors the canonical
@@ -308,20 +308,6 @@ impl ProjectionState {
         self.set_facet(realm_id, FacetRef::singleton(facet), value);
     }
 
-    /// Remove a facet of one Realm.
-    pub fn clear_facet(&mut self, realm_id: &str, facet: &FacetRef) -> Option<Value> {
-        self.facets
-            .remove(&(realm_id.to_owned(), facet.clone()))
-            .map(|settled| settled.value)
-    }
-
-    /// Every settled facet of one Realm, in facet order.
-    pub fn realm_facets(&self, realm_id: &str) -> impl Iterator<Item = (&FacetRef, &Value)> {
-        self.facets
-            .iter()
-            .filter(move |((realm, _), _)| realm == realm_id)
-            .map(|((_, facet), settled)| (facet, &settled.value))
-    }
     /// Settled `container.order` facet value of one parent Space.
     pub fn child_order_facet_value(&self, parent_space_id: &str) -> Value {
         let mut children = self

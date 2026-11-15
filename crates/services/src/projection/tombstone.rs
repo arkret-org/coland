@@ -5,10 +5,6 @@ use serde_json::{Value, json};
 use crate::events::ProjectedEvent as ProjectionEventRecord;
 use crate::governance::RetentionTombstoneRecord;
 
-/// Marker retained for decoding projection rows written by older runtimes.
-/// Current v1 erasure receipts are durable facts and do not synthesize this
-/// value into the shared current projection.
-pub const ERASED_USER_PLACEHOLDER: &str = "[user erased]";
 pub const RETENTION_EXPIRED_PLACEHOLDER: &str = "[expired]";
 
 const TOMBSTONE_DERIVED_FIELD_KEYS: &[&str] = &[
@@ -115,13 +111,6 @@ pub fn message_redactions_from_events(
     redactions
 }
 
-pub fn event_is_visible(event: &ProjectionEventRecord) -> bool {
-    // A redaction Event is durable audit history, but the projected timeline
-    // exposes its target slots after applying tombstones rather than adding a
-    // second visible timeline row for the reducer command itself.
-    !arkret_wire::events::kinds::is_redaction_kind(&event.event_kind)
-}
-
 pub fn tombstone_projection_event_for_message_redaction(
     projection: &coland_domain::reducer::ProjectionState,
     durable_redactions: &HashMap<String, MessageRedactionMarker>,
@@ -152,13 +141,6 @@ pub fn tombstone_projection_event_for_message_redaction(
         redacted_at,
         redaction_ref,
     );
-}
-
-pub fn tombstone_projection_event_for_retention(
-    event: &mut ProjectionEventRecord,
-    tombstone: &RetentionTombstoneRecord,
-) {
-    event.payload = retention_tombstone_payload_value(&event.payload, tombstone);
 }
 
 pub fn stub_pin_projection_event_for_invisible_target(

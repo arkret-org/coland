@@ -99,12 +99,11 @@ pub(super) async fn process_verified_transaction(
                         .map_err(|error| AppError::internal(error.to_string()))?,
                 )
                 .map_err(|error| AppError::internal(error.to_string()))?;
-            let document = crate::jws_verify::resolve_did_document(
+            crate::jws_verify::resolve_did_document(
                 state,
                 &registration.manifest.registration_epoch_evidence.did,
             )
-            .map_err(AppError::param_invalid)?;
-            document
+            .map_err(AppError::param_invalid)?
         };
         match crate::state::submit_applet_event(state, event.clone(), document).await {
             Ok(outcome) => {

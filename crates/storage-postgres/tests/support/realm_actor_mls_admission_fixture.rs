@@ -715,7 +715,7 @@ async fn admission_native_last_resort(
         .unwrap();
     let payload = super::realm_actor_mls_fixture::commit_payload(
         fixture,
-        &group,
+        group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &added.commit,
@@ -1222,7 +1222,7 @@ async fn admission_accepted_self_update(
         .unwrap();
     let payload = super::realm_actor_mls_fixture::commit_payload(
         fixture,
-        &group,
+        group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &update,

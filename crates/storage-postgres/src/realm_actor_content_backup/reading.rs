@@ -27,7 +27,7 @@ pub(crate) struct NativeDelivery {
 }
 
 impl NativeDelivery {
-    pub(crate) fn new(
+    pub(crate) fn boxed_guard(
         held: Box<crate::account_content_delivery::DeliveryGuard>,
         reader: coland_storage::RealmActorBackupReader,
         action: &'static str,
@@ -298,14 +298,12 @@ pub(crate) async fn head_for_action(
         realm_id,
         circle_id,
     } = scope
-    {
-        if !crate::circle_current_states::joined_member_for_content_read_in_connection(
+        && !crate::circle_current_states::joined_member_for_content_read_in_connection(
             conn, realm_id, circle_id, actor,
         )
         .await?
-        {
-            return Err(unavailable("native predecessor Circle membership changed"));
-        }
+    {
+        return Err(unavailable("native predecessor Circle membership changed"));
     }
     let preparation = super::prepare_input_in_connection(conn, &current, scope).await?;
     let record = &preparation.record;
@@ -391,7 +389,7 @@ pub(crate) async fn native_head(
         .map(|entry| entry.metadata.backup_id.clone());
     Ok((
         value,
-        NativeDelivery::new(
+        NativeDelivery::boxed_guard(
             held,
             coland_storage::RealmActorBackupReader::Device(Box::new(context.clone())),
             arkret_wire::ServiceOperationId::SELF_KEYS_BACKUPS_READ_LIST_V1,
@@ -450,7 +448,7 @@ pub(crate) async fn native_inventory_delivery(
             "native archive cut changed before physical page delivery",
         ));
     }
-    Ok(NativeDelivery::new(
+    Ok(NativeDelivery::boxed_guard(
         held,
         coland_storage::RealmActorBackupReader::Manager(Box::new(reader.clone())),
         arkret_wire::ServiceOperationId::SELF_KEYS_BACKUPS_READ_LIST_V1,

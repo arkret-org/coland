@@ -417,9 +417,19 @@ async fn agent_slug_is_reserved_until_accepted_terminal_lifecycle() {
 #[tokio::test]
 async fn concurrent_agent_provisions_cannot_take_one_controller_slug() {
     let f = OriginFixture::new().await;
-    let parent = &f.controller.unit.transactions.last().unwrap().commit;
-    let a = f.replacement_provision(parent, "same-name");
-    let b = f.replacement_provision(parent, "same-name");
+    // The fixture has accepted a custody policy after the founding unit.
+    // Both competitors must extend that same real head to reach admission.
+    let parent = PgAuthorityCommitStore {
+        pool: f.pool.clone(),
+    }
+    .held_stream_head_commit(&arkret_wire::CommitStreamRef::Realm {
+        realm_id: f.controller.unit.transactions[0].event.realm_id.clone(),
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let a = f.replacement_provision(&parent, "same-name");
+    let b = f.replacement_provision(&parent, "same-name");
     let store = PgActorProfileStore {
         pool: f.pool.clone(),
     };
@@ -436,7 +446,7 @@ async fn concurrent_agent_provisions_cannot_take_one_controller_slug() {
     assert_ne!(
         a.is_ok(),
         b.is_ok(),
-        "exactly one provision may reserve the name"
+        "exactly one provision may reserve the name: first={a:?}, second={b:?}"
     );
 }
 

@@ -1321,13 +1321,11 @@ async fn disclosure_facts_in_connection(
                 | CurrentSelector::CallTranscriptArtifact { call_id, .. },
             ..
         } = entry
-        {
-            if let std::collections::btree_map::Entry::Vacant(entry) =
+            && let std::collections::btree_map::Entry::Vacant(entry) =
                 call_creations.entry(call_id.clone())
-            {
-                let fact = call_creation_fact(conn, realm_id, entry.key()).await?;
-                entry.insert(fact);
-            }
+        {
+            let fact = call_creation_fact(conn, realm_id, entry.key()).await?;
+            entry.insert(fact);
         }
     }
     let caller = actor.clone();

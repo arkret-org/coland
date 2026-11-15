@@ -819,7 +819,7 @@ async fn realm_device_prepared_add_writer_wait_crosses_claim_deadline(
     assert_eq!(added.welcomes.len(), 2);
     let payload = super::realm_actor_mls_fixture::commit_payload(
         fixture,
-        &group,
+        group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &added.commit,
@@ -1613,7 +1613,7 @@ async fn realm_device_consume_writer_wait_crosses_device_expiry_at(
         .unwrap();
     let payload = super::realm_actor_mls_fixture::commit_payload(
         fixture,
-        &group,
+        group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &added.commit,

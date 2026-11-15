@@ -259,11 +259,11 @@ fn accepted_approvals(
         vote.input
             .validate_approved_at(commit.committed_at)
             .map_err(PersistenceError::database)?;
-        if let arkret_wire::ApprovalTarget::Event { event_id } = &vote.input.approval_target {
-            if event_id != &start.event_id || vote.input.request_canonical_digest.as_str() != digest
-            {
-                return Err(denied("approval signed another original Event"));
-            }
+        if let arkret_wire::ApprovalTarget::Event { event_id } = &vote.input.approval_target
+            && (event_id != &start.event_id
+                || vote.input.request_canonical_digest.as_str() != digest)
+        {
+            return Err(denied("approval signed another original Event"));
         }
         // The private immutable audit is the original accepting transaction's
         // verified carrier/roster result. Its key is not taken from a ready

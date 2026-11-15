@@ -188,13 +188,15 @@ async fn admit_in_connection(
     let reused=sql_query("SELECT effective_scope AS value FROM realm_actor_backup_series WHERE realm_id=$1 AND actor_id=$2 AND active_series_id=$3 LIMIT 1 FOR SHARE")
         .bind::<Text,_>(event.realm_id.as_str()).bind::<Jsonb,_>(json!(record.actor_id)).bind::<Text,_>(record.active_series_id.as_str())
         .get_result::<JsonRow>(&mut *conn).await.optional()?;
-    if let Some(reused) = reused {
-        if reused.value != json!(scope)
+    if let Some(reused) = reused
+        && (reused.value != json!(scope)
             || previous.as_ref().map(|current| &current.active_series_id)
-                != Some(&record.active_series_id)
-        {
-            return Err(refused("native series identity cannot cross scopes or resurrect an earlier replaced series").into());
-        }
+                != Some(&record.active_series_id))
+    {
+        return Err(refused(
+            "native series identity cannot cross scopes or resurrect an earlier replaced series",
+        )
+        .into());
     }
     let head = previous
         .as_ref()

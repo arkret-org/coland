@@ -89,14 +89,17 @@ pub(super) async fn genesis(
         arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
             arkret_wire::EventAdmissionSubmission::new(event.clone()),
         );
-    let (status, outcome) = fixture
-        .admin_post(
-            "/_arkret/self/events",
-            arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-            &json!(submission),
-            None,
-        )
-        .await;
+    let (status, outcome) = realm_native_fixture::boxed_step(|| async {
+        fixture
+            .admin_post(
+                "/_arkret/self/events",
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                &json!(submission),
+                None,
+            )
+            .await
+    })
+    .await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -156,14 +159,17 @@ pub(super) async fn advance(
                 idempotency_key: arkret_wire::UuidV7::new(uuid::Uuid::now_v7()).unwrap(),
             },
         );
-    let (status, outcome) = fixture
-        .admin_post(
-            "/_arkret/self/events",
-            arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-            &json!(submission),
-            None,
-        )
-        .await;
+    let (status, outcome) = realm_native_fixture::boxed_step(|| async {
+        fixture
+            .admin_post(
+                "/_arkret/self/events",
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                &json!(submission),
+                None,
+            )
+            .await
+    })
+    .await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -197,7 +203,7 @@ pub(super) async fn advance(
     serde_json::from_value(json!({"algorithm":"MLS","group_state_ref":event.event_id})).unwrap()
 }
 
-async fn footprint(fixture: &Fixture) -> Value {
+pub(super) async fn footprint(fixture: &Fixture) -> Value {
     let mut conn = fixture.pool.get().await.unwrap();
     diesel::sql_query("SELECT jsonb_build_object('events',(SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY pk),'[]') FROM canonical_events e WHERE state='committed'),'commits',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY commit_id),'[]') FROM realm_commits c),'capture',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY call_id,selector::text),'[]') FROM call_component_current_states c),'quota',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY to_jsonb(c)::text),'[]') FROM capability_quota_consumptions c)) AS value")
         .get_result::<Current>(&mut *conn).await.unwrap().value
@@ -207,6 +213,7 @@ pub(super) async fn reject_start(
     fixture: &Fixture,
     start: &Event,
     key: Option<Value>,
+    expected_code: arkret_wire::ErrorCode,
     label: &str,
 ) {
     let mut candidate = start.clone();
@@ -231,17 +238,27 @@ pub(super) async fn reject_start(
             arkret_wire::EventAdmissionSubmission::new(candidate)
         )
     );
-    let (status, outcome) = fixture
-        .admin_post(
-            "/_arkret/self/events",
-            arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-            &body,
-            None,
-        )
-        .await;
+    let (status, outcome) = realm_native_fixture::boxed_step(|| async {
+        fixture
+            .admin_post(
+                "/_arkret/self/events",
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                &body,
+                None,
+            )
+            .await
+    })
+    .await;
     assert!(
         status.is_client_error(),
         "{label} must reject at native Start: {status} {outcome}"
+    );
+    let problem: arkret_wire::Problem = serde_json::from_value(outcome).unwrap();
+    assert_eq!(problem.status, status.as_u16());
+    assert_eq!(
+        problem.error_code(),
+        Some(expected_code),
+        "{label} must reach its registered source or schema refusal"
     );
     assert_eq!(
         footprint(fixture).await,
@@ -251,14 +268,29 @@ pub(super) async fn reject_start(
 }
 
 pub(super) async fn before_start(fixture: &Fixture, start: &Event) {
-    reject_start(fixture, start, None, "recording Start missing Q").await;
-    reject_start(fixture, start, Some(Value::Null), "recording Start null Q").await;
+    reject_start(
+        fixture,
+        start,
+        None,
+        arkret_wire::ErrorCode::SchemaViolation,
+        "recording Start missing Q",
+    )
+    .await;
+    reject_start(
+        fixture,
+        start,
+        Some(Value::Null),
+        arkret_wire::ErrorCode::SchemaViolation,
+        "recording Start null Q",
+    )
+    .await;
     let unknown =
         arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [0x19; 32]);
     reject_start(
         fixture,
         start,
         Some(json!({"algorithm":"MLS","group_state_ref":unknown})),
+        arkret_wire::ErrorCode::FailedPrecondition,
         "unaccepted Q",
     )
     .await;
@@ -290,6 +322,7 @@ pub(super) async fn before_start(fixture: &Fixture, start: &Event) {
         fixture,
         start,
         Some(json!(foreign_key)),
+        arkret_wire::ErrorCode::FailedPrecondition,
         "another actual scope's accepted Q",
     )
     .await;
@@ -335,6 +368,7 @@ pub(super) async fn reject_stale_start(
         fixture,
         &candidate,
         Some(key),
+        arkret_wire::ErrorCode::FailedPrecondition,
         "accepted predecessor Q cannot start a new segment",
     )
     .await;
@@ -348,15 +382,18 @@ pub(super) async fn reject_ready(
     label: &str,
 ) {
     let before = footprint(fixture).await;
-    let (status, outcome) = fixture
-        .service_post(
-            package,
-            "/_arkret/peer/events",
-            arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
-            body,
-            label,
-        )
-        .await;
+    let (status, outcome) = realm_native_fixture::boxed_step(|| async {
+        fixture
+            .service_post(
+                package,
+                "/_arkret/peer/events",
+                arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+                body,
+                label,
+            )
+            .await
+    })
+    .await;
     assert!(
         status.is_client_error(),
         "{label} must reject at actual peer HTTP: {status} {outcome}"

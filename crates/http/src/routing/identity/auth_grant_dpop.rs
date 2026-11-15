@@ -839,10 +839,10 @@ fn session_binding_from_introspection(
             ));
         }
         return Ok(SessionEndpointState::AgentRuntime {
-            state: AgentSessionRecord {
+            state: Box::new(AgentSessionRecord {
                 metadata: grant.metadata.clone(),
                 freshness_state: FreshnessState::Fresh,
-            },
+            }),
         });
     }
 

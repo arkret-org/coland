@@ -84,7 +84,7 @@ async fn private_inventory_scenario() {
         EventKind::RealmGovernanceStationChange,
         ActorId::account(fixture.successor.clone()),
         json!({
-            "expected_governance_generation": fixture.commit().governance_generation,
+            "expected_governance_generation": fixture.commit().governance_generation.to_string(),
             "expected_realm_stream_commit_id": fixture.commit().commit_id,
             "new_governance_station_id": "ak:did_core:web:owner-next.example"
         }),
@@ -94,8 +94,8 @@ async fn private_inventory_scenario() {
         ordinary_realm::case_future(|| ordinary_realm::source_request(&source_pool, change)).await;
     let unit_of_work = PgEventCommitUnitOfWork::new(source_pool.clone());
     ordinary_realm::case_future(|| unit_of_work.commit_event(change))
-    .await
-    .expect("freeze the actual outgoing terminal change under the successor's real Device");
+        .await
+        .expect("freeze the actual outgoing terminal change under the successor's real Device");
 
     let (manifest, bytes) = fixture
         .store

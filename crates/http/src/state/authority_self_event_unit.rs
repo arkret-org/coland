@@ -185,6 +185,7 @@ fn decided_at_commit_cut(kind: &arkret_wire::EventKind) -> bool {
             | arkret_wire::EventKind::MemberIdentityUpdate
             | arkret_wire::EventKind::CallCreate
             | arkret_wire::EventKind::CallState
+            | arkret_wire::EventKind::CallRecordingStart
             | arkret_wire::EventKind::RealmMediaService
             | arkret_wire::EventKind::MessageCreate
             | arkret_wire::EventKind::MessageRedact
@@ -858,6 +859,7 @@ mod claim_privacy_tests {
         for kind in [
             arkret_wire::EventKind::MlsHistoryRequest,
             arkret_wire::EventKind::MlsHistoryGrant,
+            arkret_wire::EventKind::CallRecordingStart,
             arkret_wire::EventKind::RealmLink,
             arkret_wire::EventKind::RealmJoinRule,
             arkret_wire::EventKind::RealmHistoryAccess,

@@ -1,7 +1,8 @@
 //! Call capture through real installed Service signing and peer admission.
 use arkret_models_collaboration::authority_commit::{
-    HistoricalProducerSignerFact, PeerAuthorityForwardEventRequestBody,
-    PeerAuthoritySubmitRequestBody,
+    ForwardedAuthorityResponseBody, HistoricalProducerSignerFact,
+    PeerAuthorityForwardEventRequestBody, PeerAuthoritySubmitRequestBody,
+    PeerAuthoritySubmitResponseBody,
 };
 use arkret_models_collaboration::objects::blob::{
     BlobStorageEncryption, BlobStorageEncryptionScheme, BlobVisibility,
@@ -162,9 +163,12 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
     let factory =
         realm_native_fixture::boxed_step(|| AppletAuthoringFactory::new(pool.clone())).await;
     let id = AppletId::new(format!("ak:applet:{}", uuid::Uuid::now_v7())).unwrap();
-    let install = factory.prepare_install(&id, "call-capture").await;
+    let install =
+        realm_native_fixture::boxed_step(|| factory.prepare_install(&id, "call-capture")).await;
     let store = PgAppletStore { pool: pool.clone() };
-    install.commit(&store).await.unwrap();
+    realm_native_fixture::boxed_step(|| install.commit(&store))
+        .await
+        .unwrap();
     let record = store
         .get(
             id.as_str(),
@@ -197,21 +201,26 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
         "issuer_authority_refs":[{"kind":"realm_root","realm_id":factory.fixture.realm,"authority_event_ref":factory.fixture.authority_event_ref,"authority_generation":"0"}],
         "issued_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now())}}));
     let initiator = arkret_wire::GrantId::from_event_id(&permission.event_id);
-    accepted_admin_domain_event(&factory.fixture, permission).await;
+    realm_native_fixture::boxed_step(|| accepted_admin_domain_event(&factory.fixture, permission))
+        .await;
     let media = factory.fixture.admin_event(EventKind::RealmMediaService, scope.clone(), json!({"value":{
         "service_id":package.service_id,"recording_supported":true,"foci":[{"focus_id":"capture-focus","focus_kind":"livekit",
         "token_endpoint":"https://media.example/token","connect_url":"wss://media.example/connect"}]}}));
-    accepted_admin_domain_event(&factory.fixture, media).await;
+    realm_native_fixture::boxed_step(|| accepted_admin_domain_event(&factory.fixture, media)).await;
     let create = factory.fixture.admin_event(
         EventKind::CallCreate,
         scope.clone(),
         json!({"initial_state":"ringing"}),
     );
     let call = arkret_wire::CallId::from_event_id(&create.event_id);
-    accepted_admin_domain_event(&factory.fixture, create).await;
+    realm_native_fixture::boxed_step(|| accepted_admin_domain_event(&factory.fixture, create))
+        .await;
     let active = factory.fixture.admin_event(EventKind::CallState, scope.clone(), json!({"call_id":call,
         "state_transition":{"from":"ringing","to":"active"},"focus":{"mode":"sfu","session_focus":"capture-focus"}}));
-    accepted_admin_domain_event(&factory.fixture, active.clone()).await;
+    realm_native_fixture::boxed_step(|| {
+        accepted_admin_domain_event(&factory.fixture, active.clone())
+    })
+    .await;
     let retention = json!({"consent_confirmed":true,"retention_expires_at":arkret_canonical::format_timestamp_canonical(chrono::Utc::now()+chrono::Duration::hours(1))});
     let mut start = active.clone();
     start.kind = EventKind::CallRecordingStart;
@@ -227,7 +236,28 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
         })
         .await;
     }
-    accepted_admin_domain_event(&factory.fixture, start.clone()).await;
+    let start_submission =
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
+            arkret_wire::EventAdmissionSubmission::new(start.clone()),
+        );
+    let (start_status, start_outcome) = realm_native_fixture::boxed_step(|| async {
+        factory
+            .fixture
+            .admin_post(
+                "/_arkret/self/events",
+                arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
+                &json!(start_submission),
+                None,
+            )
+            .await
+    })
+    .await;
+    assert_eq!(
+        start_status,
+        StatusCode::OK,
+        "actual public recording Start: {start_outcome}"
+    );
+    assert_accepted_event(&factory.fixture, &start).await;
     assert_eq!(consumption_count(&pool, &initiator).await, 1);
     assert_eq!(
         capture_current(&pool, &call, "call_recording_state").await,
@@ -252,7 +282,7 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
         json!({"call_id":call,
         "recording_transition":{"recording_id":"segment-1","from":"recording","to":"stopped"}}),
     );
-    accepted_admin_domain_event(&factory.fixture, stop).await;
+    realm_native_fixture::boxed_step(|| accepted_admin_domain_event(&factory.fixture, stop)).await;
     assert_eq!(
         capture_current(&pool, &call, "call_recording_artifact").await,
         pending
@@ -417,16 +447,19 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
         &start_full.commit.commit_id,
         &service_grant_for("ak.message.create"),
     );
-    let (status, refusal) = factory
-        .fixture
-        .service_post(
-            &package,
-            "/_arkret/peer/events",
-            arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
-            &forward(wrong_producer),
-            "call-ready-wrong-producer-grant",
-        )
-        .await;
+    let (status, refusal) = realm_native_fixture::boxed_step(|| async {
+        factory
+            .fixture
+            .service_post(
+                &package,
+                "/_arkret/peer/events",
+                arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+                &forward(wrong_producer),
+                "call-ready-wrong-producer-grant",
+            )
+            .await
+    })
+    .await;
     assert!(
         status.is_client_error(),
         "wrong producer action: {status} {refusal}"
@@ -460,16 +493,19 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
     )
     .unwrap()
     .expect_verifiable();
-    let (status, refusal) = factory
-        .fixture
-        .service_post(
-            &package,
-            "/_arkret/peer/events",
-            arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
-            &forward(mixed),
-            "call-ready-mixed-axis-without-service-join",
-        )
-        .await;
+    let (status, refusal) = realm_native_fixture::boxed_step(|| async {
+        factory
+            .fixture
+            .service_post(
+                &package,
+                "/_arkret/peer/events",
+                arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+                &forward(mixed),
+                "call-ready-mixed-axis-without-service-join",
+            )
+            .await
+    })
+    .await;
     assert!(
         status.is_client_error(),
         "recording grant cannot authorize another axis: {status} {refusal}"
@@ -479,10 +515,13 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
         pending
     );
     let other_id = AppletId::new(format!("ak:applet:{}", uuid::Uuid::now_v7())).unwrap();
-    let other_install = factory
-        .prepare_install(&other_id, "call-capture-other-service")
-        .await;
-    other_install.commit(&store).await.unwrap();
+    let other_install = realm_native_fixture::boxed_step(|| {
+        factory.prepare_install(&other_id, "call-capture-other-service")
+    })
+    .await;
+    realm_native_fixture::boxed_step(|| other_install.commit(&store))
+        .await
+        .unwrap();
     let other_record = store
         .get(
             other_id.as_str(),
@@ -536,16 +575,19 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
     )
     .unwrap()
     .expect_verifiable();
-    let (status, refusal) = factory
-        .fixture
-        .service_post(
-            &other_package,
-            "/_arkret/peer/events",
-            arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
-            &forward(other),
-            "call-ready-another-real-service",
-        )
-        .await;
+    let (status, refusal) = realm_native_fixture::boxed_step(|| async {
+        factory
+            .fixture
+            .service_post(
+                &other_package,
+                "/_arkret/peer/events",
+                arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+                &forward(other),
+                "call-ready-another-real-service",
+            )
+            .await
+    })
+    .await;
     assert!(
         status.is_client_error(),
         "another actual installed Service is not the original recorder: {status} {refusal}"
@@ -556,20 +598,23 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
     );
     let mut wrong_source = artifact.clone();
     wrong_source["recording_initiator_capability_ref"] = json!(service_grant);
-    let (status, refusal) = factory
-        .fixture
-        .service_post(
-            &package,
-            "/_arkret/peer/events",
-            arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
-            &forward(sign(
-                wrong_source,
-                &start_full.commit.commit_id,
-                &service_grant,
-            )),
-            "call-ready-wrong-initiator",
-        )
-        .await;
+    let (status, refusal) = realm_native_fixture::boxed_step(|| async {
+        factory
+            .fixture
+            .service_post(
+                &package,
+                "/_arkret/peer/events",
+                arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+                &forward(sign(
+                    wrong_source,
+                    &start_full.commit.commit_id,
+                    &service_grant,
+                )),
+                "call-ready-wrong-initiator",
+            )
+            .await
+    })
+    .await;
     assert!(
         status.is_client_error(),
         "changed original source: {status} {refusal}"
@@ -595,20 +640,23 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
             .unwrap();
         row
     };
-    let (status, refusal) = factory
-        .fixture
-        .service_post(
-            &package,
-            "/_arkret/peer/events",
-            arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
-            &forward(sign(
-                artifact.clone(),
-                &start_full.commit.commit_id,
-                &service_grant,
-            )),
-            "call-ready-missing-start-consumption",
-        )
-        .await;
+    let (status, refusal) = realm_native_fixture::boxed_step(|| async {
+        factory
+            .fixture
+            .service_post(
+                &package,
+                "/_arkret/peer/events",
+                arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+                &forward(sign(
+                    artifact.clone(),
+                    &start_full.commit.commit_id,
+                    &service_grant,
+                )),
+                "call-ready-missing-start-consumption",
+            )
+            .await
+    })
+    .await;
     assert!(
         status.is_client_error() || status.is_server_error(),
         "missing original consumption must refuse: {status} {refusal}"
@@ -632,17 +680,20 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
         )
         .unwrap(),
     );
-    let body = serde_json::to_value(request).unwrap();
-    let (status, outcome) = factory
-        .fixture
-        .service_post(
-            &package,
-            "/_arkret/peer/events",
-            arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
-            &body,
-            "call-recording-ready",
-        )
-        .await;
+    let body = serde_json::to_value(&request).unwrap();
+    let (status, outcome) = realm_native_fixture::boxed_step(|| async {
+        factory
+            .fixture
+            .service_post(
+                &package,
+                "/_arkret/peer/events",
+                arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+                &body,
+                "call-recording-ready",
+            )
+            .await
+    })
+    .await;
     assert_eq!(status, StatusCode::OK, "real recording ready: {outcome}");
     let full = source
         .committed_event(&ready.event_id)
@@ -711,16 +762,19 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
         capture_rows, 2,
         "authorized whole-current material must contain both independent capture axes"
     );
-    let (status, replay) = factory
-        .fixture
-        .service_post(
-            &package,
-            "/_arkret/peer/events",
-            arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
-            &body,
-            "call-recording-ready-replay",
-        )
-        .await;
+    let (status, replay) = realm_native_fixture::boxed_step(|| async {
+        factory
+            .fixture
+            .service_post(
+                &package,
+                "/_arkret/peer/events",
+                arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+                &body,
+                "call-recording-ready-replay",
+            )
+            .await
+    })
+    .await;
     assert_eq!(status, StatusCode::OK, "exact ready replay: {replay}");
     assert_eq!(consumption_count(&pool, &initiator).await, 1);
     if matches!(scenario, CaptureScenario::DeactivatedActor) {
@@ -741,8 +795,9 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
             factory
                 .fixture
                 .admin_event(EventKind::RealmPolicyBundle, scope.clone(), policy);
-        accepted_admin_domain_event(&factory.fixture, retain).await;
-        deactivate_actor_checkpoint(&factory).await;
+        realm_native_fixture::boxed_step(|| accepted_admin_domain_event(&factory.fixture, retain))
+            .await;
+        realm_native_fixture::boxed_step(|| deactivate_actor_checkpoint(&factory)).await;
         let (head, quota_count, membership) = {
             let mut conn = pool.get().await.unwrap();
             let count = diesel::sql_query(
@@ -772,24 +827,29 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
         );
         let candidate = sign(artifact.clone(), &full.commit.commit_id, &service_grant);
         let candidate_id = candidate.event_id.clone();
-        let (status, refusal) = factory
-            .fixture
-            .service_post(
-                &package,
-                "/_arkret/peer/events",
-                arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
-                &forward(candidate),
-                "call-ready-deactivated-actor",
-            )
-            .await;
+        let (status, refusal) = realm_native_fixture::boxed_step(|| async {
+            factory
+                .fixture
+                .service_post(
+                    &package,
+                    "/_arkret/peer/events",
+                    arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+                    &forward(candidate),
+                    "call-ready-deactivated-actor",
+                )
+                .await
+        })
+        .await;
         assert_eq!(
             status,
             StatusCode::UNAUTHORIZED,
             "new delegated Account act was not rejected: {status} {refusal}"
         );
+        let problem: arkret_wire::Problem = serde_json::from_value(refusal).unwrap();
+        assert_eq!(problem.status, status.as_u16());
         assert_eq!(
-            refusal["code"],
-            arkret_wire::ErrorCode::ACCOUNT_DEACTIVATED,
+            problem.error_code(),
+            Some(arkret_wire::ErrorCode::AccountDeactivated),
             "inactive Account refusal must be a typed protocol failure, not a server error"
         );
         assert!(
@@ -823,25 +883,41 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
             quota_count
         );
         drop(conn);
-        let (status, replay) = factory
-            .fixture
-            .service_post(
-                &package,
-                "/_arkret/peer/events",
-                arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
-                &body,
-                "call-ready-original-replay-after-deactivation",
-            )
-            .await;
+        let before_replay = key_source_cases::footprint(&factory.fixture).await;
+        let (status, replay) = realm_native_fixture::boxed_step(|| async {
+            factory
+                .fixture
+                .service_post(
+                    &package,
+                    "/_arkret/peer/events",
+                    arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+                    &body,
+                    "call-ready-original-replay-after-deactivation",
+                )
+                .await
+        })
+        .await;
         assert_eq!(
             status,
             StatusCode::OK,
             "deactivation must not rewrite an already accepted original: {replay}"
         );
-        assert_eq!(replay["status"], "duplicate");
+        let replay: PeerAuthoritySubmitResponseBody = serde_json::from_value(replay).unwrap();
+        replay.validate_for_request(&request).unwrap();
+        let PeerAuthoritySubmitResponseBody::AuthorityForward(replay) = replay else {
+            panic!("the exact ready replay must retain its authority-forward branch")
+        };
+        let ForwardedAuthorityResponseBody::Ordinary(
+            arkret_wire::AuthoritySubmitResponseBody::Accepted { commit, .. },
+        ) = replay.response_body
+        else {
+            panic!("the exact ready replay must retain its accepted original Commit")
+        };
+        assert_eq!(commit, full.commit);
         assert_eq!(
-            replay["commit"],
-            serde_json::to_value(&full.commit).unwrap()
+            key_source_cases::footprint(&factory.fixture).await,
+            before_replay,
+            "accepted replay must not change any original, capture current or quota"
         );
         return;
     }
@@ -872,21 +948,27 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
         json!({"grant":refusal_grant}),
     );
     let refusal_id = arkret_wire::GrantId::from_event_id(&refusal_event.event_id);
-    accepted_admin_domain_event(&factory.fixture, refusal_event.clone()).await;
-    let (status, refusal) = factory
-        .fixture
-        .service_post(
-            &package,
-            "/_arkret/peer/events",
-            arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
-            &forward(sign(
-                artifact.clone(),
-                &full.commit.commit_id,
-                &service_grant,
-            )),
-            "call-ready-global-service-denial",
-        )
-        .await;
+    realm_native_fixture::boxed_step(|| {
+        accepted_admin_domain_event(&factory.fixture, refusal_event.clone())
+    })
+    .await;
+    let (status, refusal) = realm_native_fixture::boxed_step(|| async {
+        factory
+            .fixture
+            .service_post(
+                &package,
+                "/_arkret/peer/events",
+                arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+                &forward(sign(
+                    artifact.clone(),
+                    &full.commit.commit_id,
+                    &service_grant,
+                )),
+                "call-ready-global-service-denial",
+            )
+            .await
+    })
+    .await;
     assert!(
         status.is_client_error(),
         "another Service grant's denial cannot be hidden by the selected positive source: {status} {refusal}"
@@ -901,7 +983,10 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
         scope.clone(),
         json!({"grant_id":refusal_id,"expected_commit_id":refusal_full.commit.commit_id}),
     );
-    accepted_admin_domain_event(&factory.fixture, revoke_refusal).await;
+    realm_native_fixture::boxed_step(|| {
+        accepted_admin_domain_event(&factory.fixture, revoke_refusal)
+    })
+    .await;
     let grant_current = source
         .committed_event(
             &arkret_wire::EventId::new(initiator.as_str().replacen("ak:grant:", "ak:event:", 1))
@@ -915,21 +1000,25 @@ async fn registered_call_capture_scenario(pool: PgPool, scenario: CaptureScenari
         scope.clone(),
         json!({"grant_id":initiator,"expected_commit_id":grant_current.commit.commit_id}),
     );
-    accepted_admin_domain_event(&factory.fixture, revoke).await;
-    let (status, refusal) = factory
-        .fixture
-        .service_post(
-            &package,
-            "/_arkret/peer/events",
-            arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
-            &forward(sign(
-                artifact.clone(),
-                &full.commit.commit_id,
-                &service_grant,
-            )),
-            "call-ready-revoked-start-source",
-        )
+    realm_native_fixture::boxed_step(|| accepted_admin_domain_event(&factory.fixture, revoke))
         .await;
+    let (status, refusal) = realm_native_fixture::boxed_step(|| async {
+        factory
+            .fixture
+            .service_post(
+                &package,
+                "/_arkret/peer/events",
+                arkret_wire::ServiceOperationId::PEER_EVENTS_COMMAND_SUBMIT_V1,
+                &forward(sign(
+                    artifact.clone(),
+                    &full.commit.commit_id,
+                    &service_grant,
+                )),
+                "call-ready-revoked-start-source",
+            )
+            .await
+    })
+    .await;
     assert!(
         status.is_client_error(),
         "revoked original source: {status} {refusal}"

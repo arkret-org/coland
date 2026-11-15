@@ -1099,7 +1099,7 @@ pub(super) async fn human_updates_group(
         .unwrap();
     let payload = super::realm_actor_mls_fixture::commit_payload(
         fixture,
-        &group,
+        group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &commit,
@@ -1553,7 +1553,7 @@ async fn commit_add(
         .unwrap();
     let payload = super::realm_actor_mls_fixture::commit_payload(
         fixture,
-        &group,
+        group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &added.commit,
@@ -2461,7 +2461,7 @@ pub(super) async fn human_rotates_out_runtime(
         json!(
             super::realm_actor_mls_fixture::commit_payload(
                 fixture,
-                &group,
+                group,
                 current.current_mls_commit_event_ref.clone(),
                 current.current_key_access_revision,
                 &removed.commit,

@@ -559,11 +559,17 @@ async fn fixture_backup_recovery_toggle(
         json!({"kind":"realm_actor_manager","actor_id":actor}),
     )
     .await;
-    let mut event=fixture.admin_event(EventKind::RealmActorRecoverySet,ScopeRef::RealmControl{realm_id:fixture.realm.clone()},json!({
-        "target_actor_id":actor,"enabled":enabled,
-        "expected_recovery_commit_id":recovery.commit_id,
-        "expected_manager_commit_id":manager.commit_id,
-    }));
+    let mut event = fixture.admin_event(
+        EventKind::RealmActorRecoverySet,
+        ScopeRef::RealmControl {
+            realm_id: fixture.realm.clone(),
+        },
+        json!({
+            "target_actor_id":actor,"enabled":enabled,
+            "expected_recovery_commit_id":recovery.commit_id,
+            "expected_manager_commit_id":manager.commit_id,
+        }),
+    );
     event.authorization_ref = Some(grant.clone().into());
     let event = fixture.sign_admin(event);
     let (status, body) = fixture
@@ -599,8 +605,10 @@ async fn fixture_native_backup_outcomes(
     fixture: &Fixture,
     native: &NativeService,
     devices: &arkret_bridge_runtime::managed_device::ManagedDeviceRuntime,
-    device: &arkret_bridge_runtime::managed_device::ManagedDevice,
-    reader: &arkret_bridge_runtime::managed_device::ManagedDeviceReader,
+    (device, reader): (
+        &arkret_bridge_runtime::managed_device::ManagedDevice,
+        &arkret_bridge_runtime::managed_device::ManagedDeviceReader,
+    ),
     selection: &arkret_models_collaboration::RealmActorKeyBackupActiveSeriesValue,
     current_recovery: &CommittedEventRef,
     daily_path: &std::path::Path,

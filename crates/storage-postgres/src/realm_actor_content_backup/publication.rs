@@ -63,7 +63,7 @@ pub(crate) async fn put_native(
             || binding.recovery_ref!=preparation.input.auth_binding.recovery_ref
             || binding.recipient_ref!=preparation.input.auth_binding.recipient_ref
             || binding.device_generation!=preparation.input.auth_binding.device_generation
-            || backup.encryption.recipient_key_ref.as_ref().map(|reference|reference.as_str())
+            || backup.encryption.recipient_key_ref.as_deref()
                 !=Some(preparation.input.content_backup_recipient.key_agreement_ref.as_str())
         {return Err(super::unavailable("native packet does not echo the exact current prepare input").into());}
         let witness=crate::key_backup_authority::verify_realm_device_backup_signature(backup,&current,accepted_at)?;

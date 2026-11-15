@@ -36,7 +36,10 @@ async fn admission_authorize_recipient(
         .unwrap()
 }
 
-#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
+)]
 async fn admission_add_boundary_recipient(
     fixture: &Fixture,
     package: &AppletPackage,
@@ -136,12 +139,15 @@ async fn admission_add_boundary_recipient(
             &binding,
         )
         .unwrap();
-    let payload = super::realm_actor_mls_fixture::commit_payload(fixture,&group,
+    let payload = super::realm_actor_mls_fixture::commit_payload(
+        fixture,
+        group,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &added.commit,
         binding,
-    ).await
+    )
+    .await
     .unwrap();
     let signer = Ed25519PayloadSigner::new(
         SigningKey::from_bytes(&[79; 32]),
@@ -192,7 +198,7 @@ async fn admission_add_boundary_recipient(
     )
     .unwrap();
     let submission = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
-    recovery_source: None,
+        recovery_source: None,
 
         commit_event: event.clone(),
         welcomes: vec![welcome.clone()],
@@ -349,12 +355,15 @@ async fn admission_native_mls_writer_expiry(
     let update = joined
         .self_update_commit_with_governance_binding(&binding)
         .unwrap();
-    let payload = super::realm_actor_mls_fixture::commit_payload(fixture,&joined,
+    let payload = super::realm_actor_mls_fixture::commit_payload(
+        fixture,
+        &joined,
         current.current_mls_commit_event_ref.clone(),
         current.current_key_access_revision,
         &update,
         binding,
-    ).await
+    )
+    .await
     .unwrap();
     let event = signed_event(
         package,
@@ -370,7 +379,7 @@ async fn admission_native_mls_writer_expiry(
         ),
     );
     let request = SelfAuthoritySubmitRequestBody::MlsCommit(arkret_wire::MlsCommitSubmission {
-    recovery_source: None,
+        recovery_source: None,
 
         commit_event: event.clone(),
         welcomes: vec![],
@@ -484,7 +493,10 @@ async fn admission_native_mls_writer_expiry(
     assert_eq!(group.epoch(), current.epoch);
 }
 
-#[allow(clippy::too_many_arguments, reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit.")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "The fixture keeps independent signed originals, accepted references and source-time coordinates explicit."
+)]
 pub(super) fn admission_native_scope_event(
     package: &AppletPackage,
     candidate: &RealmActorCreatePayload,
@@ -615,9 +627,9 @@ async fn admission_scope_genesis(
         event.payload["created_at"],
         json!(arkret_canonical::format_timestamp_canonical(at))
     );
-    let request = SelfAuthoritySubmitRequestBody::Event(arkret_wire::EventAdmissionSubmission::new(
-        event.clone(),
-    ));
+    let request = SelfAuthoritySubmitRequestBody::Event(
+        arkret_wire::EventAdmissionSubmission::new(event.clone()),
+    );
     let (status, value) = boxed_step(|| {
         admission_scope_post(
             fixture,

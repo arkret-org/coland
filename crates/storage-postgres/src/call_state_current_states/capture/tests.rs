@@ -453,7 +453,6 @@ async fn recording_public_metadata_checks_real_blob_and_never_substitutes_for_se
     let cut = current(&payload, &commit);
     validate_recording_artifact(
         &mut conn,
-        &ready,
         &commit,
         &start,
         &opening,
@@ -487,7 +486,6 @@ async fn recording_public_metadata_checks_real_blob_and_never_substitutes_for_se
         assert!(
             validate_recording_artifact(
                 &mut conn,
-                &ready,
                 &commit,
                 &start,
                 &opening,

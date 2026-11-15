@@ -113,10 +113,10 @@ mod tests {
             actor: "did:web:agent.example".to_owned(),
             audience: "did:webvh:z2dmjYwAPJzv5CZsnAzt8auVZRn1GfuxhpK2t3Q3K3rj4B1x:coland.local:webvh:service".to_owned(),
             session_public_key: Some("{}".to_owned()),
-            endpoint: coland_services::identity::SessionEndpointState::AgentRuntime { state: AgentSessionRecord {
+            endpoint: coland_services::identity::SessionEndpointState::AgentRuntime { state: Box::new(AgentSessionRecord {
                 metadata: crate::routing::identity::auth_grant_dpop::tests::test_agent_metadata(scopes),
                 freshness_state: FreshnessState::Fresh,
-            } },
+            }) },
             session_grant: None,
             expires_at: Utc::now() + chrono::Duration::minutes(5),
             created_at: Utc::now(),

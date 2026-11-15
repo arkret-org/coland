@@ -127,25 +127,23 @@ pub(crate) async fn verify(
         ));
     }
     let scope_rule = arkret_wire::applet_managed_device_scope_rule(operation);
+    // This is only the original action ceiling. Each exact root handler
+    // still checks its native role, target and current transactional gates;
+    // no ordinary business grant is substituted for that consumer.
     if let Some(arkret_wire::ManagedDeviceScopeRule::AllActionsAndControl { control, .. }) =
         scope_rule
-    {
-        if control != arkret_wire::ManagedDeviceControl::NativeRootBackup
+        && (control != arkret_wire::ManagedDeviceControl::NativeRootBackup
             || !matches!(
                 operation,
                 ServiceOperationId::SelfKeysBackupsResourceReplaceV1
                     | ServiceOperationId::SelfKeysBackupsReadListV1
                     | ServiceOperationId::SelfKeysBackupsCommandIssueUnlockChallengeV1
                     | ServiceOperationId::SelfKeysBackupsCommandUnlockV1
-            )
-        {
-            return Err(refused(
-                "no implemented native root consumer for this combined control rule",
-            ));
-        }
-        // This is only the original action ceiling. Each exact root handler
-        // still checks its native role, target and current transactional gates;
-        // no ordinary business grant is substituted for that consumer.
+            ))
+    {
+        return Err(refused(
+            "no implemented native root consumer for this combined control rule",
+        ));
     }
     if let Some(
         arkret_wire::ManagedDeviceScopeRule::AllActions(actions)

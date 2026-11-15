@@ -13,6 +13,9 @@ use diesel_async::{RunQueryDsl as _, SimpleAsyncConnection as _};
 
 use super::{Count, native_owner, ordinary_realm, wait_for_blocked};
 
+const BARRIER_CLEANUP: &str = "DROP TRIGGER pause_owner_lifecycle_writer ON account_lifecycle; \
+                             DROP FUNCTION pause_owner_lifecycle_writer()";
+
 #[tokio::test]
 async fn real_lifecycle_writer_wins_before_owner_account_source_is_read() {
     ordinary_realm::case_future(|| async {
@@ -24,9 +27,9 @@ async fn real_lifecycle_writer_wins_before_owner_account_source_is_read() {
             .get(&fixture.successor).await.unwrap().unwrap();
         let mut barrier = pool.get().await.unwrap();
         barrier.batch_execute(
-            "CREATE FUNCTION pause_owner_lifecycle_writer() RETURNS trigger LANGUAGE plpgsql AS $$ \
+            "CREATE OR REPLACE FUNCTION pause_owner_lifecycle_writer() RETURNS trigger LANGUAGE plpgsql AS $$ \
              BEGIN PERFORM pg_advisory_xact_lock(80641011); RETURN NEW; END $$; \
-             CREATE TRIGGER pause_owner_lifecycle_writer BEFORE INSERT OR UPDATE ON account_lifecycle \
+             CREATE OR REPLACE TRIGGER pause_owner_lifecycle_writer BEFORE INSERT OR UPDATE ON account_lifecycle \
              FOR EACH ROW EXECUTE FUNCTION pause_owner_lifecycle_writer(); \
              SELECT pg_advisory_lock(80641011)"
         ).await.unwrap();
@@ -49,6 +52,7 @@ async fn real_lifecycle_writer_wins_before_owner_account_source_is_read() {
         if writer_waited.is_err() {
             barrier.batch_execute("SELECT pg_advisory_unlock(80641011)").await.unwrap();
             tokio::time::timeout(Duration::from_secs(5), writer).await.unwrap().unwrap().unwrap();
+            barrier.batch_execute(BARRIER_CLEANUP).await.unwrap();
             panic!("the real lifecycle writer never acquired its account row before waiting");
         }
         let owner_pool = pool.clone();
@@ -62,6 +66,7 @@ async fn real_lifecycle_writer_wins_before_owner_account_source_is_read() {
         barrier.batch_execute("SELECT pg_advisory_unlock(80641011)").await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), writer).await.unwrap().unwrap().unwrap();
         let owner_result = tokio::time::timeout(Duration::from_secs(5), owner).await.unwrap().unwrap();
+        barrier.batch_execute(BARRIER_CLEANUP).await.unwrap();
         assert!(owner_waited.is_ok(), "Owner must actually wait for the product account writer");
         assert!(owner_result.is_err(), "a committed native deactivation refuses first acceptance");
         assert!(native_owner::now() < fixture.w1.device_projection_attestation.attestation.expires_at,

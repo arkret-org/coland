@@ -175,7 +175,8 @@ pub(crate) async fn commit_in_connection(
         return Ok(());
     }
     if event.kind == EventKind::CallState {
-        return commit_state(conn, event, commit, prepared, verified_media).await;
+        return crate::boxed_future(|| commit_state(conn, event, commit, prepared, verified_media))
+            .await;
     }
     if event.kind == EventKind::CallRecordingStart {
         return capture::start(conn, event, commit, prepared).await;
@@ -735,7 +736,7 @@ async fn commit_state(
     {
         return Err(conflict("active ban or moderation revision changed"));
     }
-    capture::transitions(conn, event, commit, &payload, &current).await?;
+    crate::boxed_future(|| capture::transitions(conn, event, commit, &payload, &current)).await?;
     if let Some(t) = &payload.state_transition {
         use CallLifecycleState::*;
         let legal = match t.from {

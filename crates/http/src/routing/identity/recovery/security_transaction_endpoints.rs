@@ -96,10 +96,10 @@ async fn load_owned_security_transaction(
         SecurityTransaction::SecurityRotation(_) => None,
     };
     enforce_recovery_grant_transaction_binding(state, session, recovery_session_id).await?;
-    if let SecurityTransaction::Recovery(completed) = &record.resource {
-        if session.require_human_device_id() != completed.recovery_receipt.new_device_id.as_str() {
-            return Err(AppError::not_found("security transaction not found"));
-        }
+    if let SecurityTransaction::Recovery(completed) = &record.resource
+        && session.require_human_device_id() != completed.recovery_receipt.new_device_id.as_str()
+    {
+        return Err(AppError::not_found("security transaction not found"));
     }
     Ok(record)
 }

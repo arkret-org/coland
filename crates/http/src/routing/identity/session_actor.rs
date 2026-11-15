@@ -181,12 +181,12 @@ mod tests {
         let state = state();
         let mut session = session(&state);
         session.endpoint = coland_services::identity::SessionEndpointState::AgentRuntime {
-            state: coland_services::identity::AgentSessionState {
+            state: Box::new(coland_services::identity::AgentSessionState {
                 metadata: crate::routing::identity::auth_grant_dpop::tests::test_agent_metadata(&[
                     "ak.self.committed_event.read.scan.v1",
                 ]),
                 freshness_state: arkret_wire::FreshnessState::Fresh,
-            },
+            }),
         };
         let actor = session_actor_from_credential(&state, &session).unwrap();
         assert_eq!(

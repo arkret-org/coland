@@ -417,7 +417,14 @@ impl Fixture {
                 request = request.add_header("Idempotency-Key", key, true);
             }
             let router = service(self.state.clone());
-            let mut response = realm_native_fixture::boxed_step(|| request.send(&router)).await;
+            // Poll the real HTTP admission as its own owned request, as the
+            // native server does. JoinSet also cancels it if the caller drops;
+            // no fixture/scenario poll frame or borrowed transaction escapes.
+            let mut requests = tokio::task::JoinSet::new();
+            requests.spawn(async move {
+                realm_native_fixture::boxed_step(|| request.send(&router)).await
+            });
+            let mut response = requests.join_next().await.unwrap().unwrap();
             let status = response.status_code.unwrap();
             (status, response.take_json().await.unwrap())
         })
@@ -629,7 +636,11 @@ impl Fixture {
                     true,
                 );
         }
-        let mut response = request.send(&service(self.state.clone())).await;
+        let router = service(self.state.clone());
+        let mut requests = tokio::task::JoinSet::new();
+        requests
+            .spawn(async move { realm_native_fixture::boxed_step(|| request.send(&router)).await });
+        let mut response = requests.join_next().await.unwrap().unwrap();
         (
             response.status_code.unwrap(),
             response.take_json().await.unwrap(),
@@ -1097,12 +1108,26 @@ async fn admin_domain_request(
     let store = PgAuthorityCommitStore {
         pool: fixture.pool.clone(),
     };
-    let stream = arkret_wire::CommitStreamRef::Realm {
-        realm_id: fixture.realm.clone(),
+    assert_eq!(event.realm_id, fixture.realm);
+    let stream =
+        arkret_wire::CommitStreamRef::from_scope(&event.scope_ref, Some(event.realm_id.clone()))
+            .unwrap();
+    let scope_head = store.stream_head(&stream).await.unwrap();
+    let template_head = match &scope_head {
+        Some(head) => head.clone(),
+        // A never-written independent stream has no predecessor. The accepted
+        // Realm head supplies only the builder's real current-authority input;
+        // it is never represented as this scope's head or historical source.
+        None => store
+            .stream_head(&arkret_wire::CommitStreamRef::Realm {
+                realm_id: fixture.realm.clone(),
+            })
+            .await
+            .unwrap()
+            .unwrap(),
     };
-    let head = store.stream_head(&stream).await.unwrap().unwrap();
     let accepted = store
-        .committed_event_by_commit_id(&head.commit_id)
+        .committed_event_by_commit_id(&template_head.commit_id)
         .await
         .unwrap()
         .unwrap();
@@ -1120,11 +1145,15 @@ async fn admin_domain_request(
         welcomes: vec![],
         recipient_queue_capacity: 0,
     };
-    let request = ordinary_realm::request_for_event(
-        &previous,
-        event.clone(),
-        arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
-    );
+    let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now())
+        .max(previous.commit.committed_at);
+    let mut request = ordinary_realm::request_for_event(&previous, event.clone(), at);
+    request.authority_commit.commit.stream_ref = stream;
+    request.authority_commit.commit.stream_position = scope_head
+        .as_ref()
+        .map_or(0, |head| head.stream_position.checked_add(1).unwrap());
+    request.authority_commit.commit.previous_commit_ref =
+        scope_head.as_ref().map(|head| head.commit_id.clone());
     let mut request = ordinary_realm::source_request(&fixture.pool, request).await;
     request.authority_commit.commit.signature =
         arkret_signatures::detached_object::sign_detached_object(
@@ -3210,7 +3239,7 @@ mod realm_native_fixture {
         let archive_public =
             arkret::crypto::hpke::x25519_public_key(archive_private.expose()).unwrap();
         assert_eq!(
-            arkret_canonical::base64url_encode(&archive_public),
+            arkret_canonical::base64url_encode(archive_public),
             arkret_canonical::base64url_encode(&public),
             "durable candidate custody must open to the same key before inception or SCID signing"
         );
@@ -3275,7 +3304,7 @@ mod realm_native_fixture {
             "recovery":{"kind":"manager_native","enabled":true,"content_backup_recipient":{
                 "key_agreement_ref":format!("{}#content-backup",document.id),
                 "hpke_suite":"ak.hpke_x25519_aead_chacha20poly1305.v1",
-                "public_key_base64url":arkret_canonical::base64url_encode(&archive_public)
+                "public_key_base64url":arkret_canonical::base64url_encode(archive_public)
             }}
         });
         let actor: ActorId = serde_json::from_value(value["actor_id"].clone()).unwrap();
@@ -8365,8 +8394,7 @@ mod realm_native_fixture {
                     &factory.fixture,
                     &native,
                     &devices,
-                    &device,
-                    &reader,
+                    (&device, &reader),
                     &selected_series,
                     advanced,
                     &path,

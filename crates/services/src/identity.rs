@@ -1794,7 +1794,7 @@ pub struct SessionIdentityState {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionEndpointState {
     HumanDevice { device_id: String },
-    AgentRuntime { state: AgentSessionState },
+    AgentRuntime { state: Box<AgentSessionState> },
     ServiceSynthetic,
 }
 
@@ -1817,7 +1817,7 @@ impl SessionIdentityState {
 
     pub fn agent_session(&self) -> Option<&AgentSessionState> {
         match &self.endpoint {
-            SessionEndpointState::AgentRuntime { state } => Some(state),
+            SessionEndpointState::AgentRuntime { state } => Some(state.as_ref()),
             SessionEndpointState::HumanDevice { .. } | SessionEndpointState::ServiceSynthetic => {
                 None
             }

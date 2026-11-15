@@ -15,6 +15,9 @@ mod lifecycle;
 #[path = "realm_owner_transfer/mixed_locks.rs"]
 mod mixed_locks;
 
+#[path = "realm_owner_transfer/grant_survival.rs"]
+mod grant_survival;
+
 use std::time::Duration;
 
 use arkret_models_identity::AccountDeviceSignerEvidence;

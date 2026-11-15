@@ -340,10 +340,14 @@ pub(super) async fn transitions(
     current: &coland_storage::CallCurrentCut,
 ) -> PersistenceResult<()> {
     if let Some(transition) = &payload.recording_transition {
-        transition_recording(conn, event, commit, payload, transition, current).await?;
+        crate::boxed_future(|| {
+            transition_recording(conn, event, commit, payload, transition, current)
+        })
+        .await?;
     }
     if let Some(transition) = &payload.transcript_transition {
-        transition_transcript(conn, event, commit, payload, transition).await?;
+        crate::boxed_future(|| transition_transcript(conn, event, commit, payload, transition))
+            .await?;
     }
     Ok(())
 }
@@ -483,10 +487,11 @@ async fn transition_recording(
             .as_ref()
             .ok_or_else(|| invalid("Recording artifact is absent"))?;
         validate_recording_artifact(
-            conn, event, commit, &start, &opening, current, artifact, &old.value,
+            conn, commit, &start, &opening, current, artifact, &old.value,
         )
         .await?;
-        require_recording_initiator(conn, event, commit, &start, artifact).await?;
+        crate::boxed_future(|| require_recording_initiator(conn, event, commit, &start, artifact))
+            .await?;
         require_recording_service_producer(conn, event, commit, &opening, artifact).await?;
     } else {
         if old.value.get("status") == Some(&json!("ready")) {
@@ -637,7 +642,6 @@ async fn transition_transcript(
 
 async fn validate_recording_artifact(
     conn: &mut AsyncPgConnection,
-    event: &Event,
     commit: &RealmCommit,
     start: &Event,
     opening: &CallRecordingStartPayload,
@@ -650,10 +654,10 @@ async fn validate_recording_artifact(
         .encryption
         .validate_start_binding(&start.event_id, opening)
         .map_err(|e| conflict(&e.to_string()))?;
-    let media = media_in_connection(conn, &event.realm_id)
+    let media = media_in_connection(conn, &commit.realm_id)
         .await?
         .ok_or_else(|| conflict("Recording media service is unavailable"))?;
-    if artifact.realm_id != event.realm_id
+    if artifact.realm_id != commit.realm_id
         || artifact.call_id != opening.call_id
         || artifact.recording_id != opening.recording_id
         || artifact.recording_start_event_id != start.event_id
@@ -693,7 +697,7 @@ async fn validate_recording_artifact(
     }
     if let Some(policy) = &artifact.retention_policy_id {
         let row = sql_query("SELECT value,source_stream_ref,current_commit_id,current_stream_position FROM (SELECT p.value,c.stream_ref AS source_stream_ref,p.current_commit_id,p.current_stream_position FROM policy_current_states p JOIN realm_commits c ON c.commit_id=p.current_commit_id AND c.realm_id=p.realm_id AND c.stream_position=p.current_stream_position WHERE p.realm_id=$1 AND p.policy_id=$2) p")
-            .bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(policy.as_str()).get_result::<Axis>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
+            .bind::<Text,_>(commit.realm_id.as_str()).bind::<Text,_>(policy.as_str()).get_result::<Axis>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
         if row.is_none() {
             return Err(conflict(
                 "Recording retention policy current is unavailable",
@@ -704,7 +708,7 @@ async fn validate_recording_artifact(
         .await?
         .ok_or_else(|| conflict("Recording Blob has not entered the Arkret pipeline"))?;
     if blob.redacted
-        || blob.realm_id.as_deref() != Some(event.realm_id.as_str())
+        || blob.realm_id.as_deref() != Some(commit.realm_id.as_str())
         || blob.visibility != arkret_models_collaboration::objects::blob::BlobVisibility::RealmBound
         || blob.encryption.is_none()
         || blob.size_bytes < 0
@@ -771,12 +775,14 @@ async fn require_recording_initiator(
     start: &Event,
     artifact: &CallRecordingArtifact,
 ) -> PersistenceResult<()> {
-    let cited = source_authority::require_source(
-        conn,
-        start,
-        &artifact.recording_initiator_capability_ref,
-        commit.committed_at,
-    )
+    let cited = crate::boxed_future(|| {
+        source_authority::require_source(
+            conn,
+            start,
+            &artifact.recording_initiator_capability_ref,
+            commit.committed_at,
+        )
+    })
     .await?;
     // The cited grant must already have been accepted when capture started;
     // acquiring a grant afterwards cannot retroactively invent provenance.

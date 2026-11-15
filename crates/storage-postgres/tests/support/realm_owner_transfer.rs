@@ -50,6 +50,7 @@ pub struct NativeOwnerTransfer {
     pub request: EventCommitRequest,
     pub component: RealmOwnerTransferAcceptance,
     pub w1: AccountDeviceSignerEvidence,
+    accepted_predecessor: Box<AuthorityCommitTransaction>,
     c_log_entry: Value,
     c_method: DidUrl,
     c_seed: [u8; 32],
@@ -58,7 +59,19 @@ pub struct NativeOwnerTransfer {
 
 impl NativeOwnerTransfer {
     pub fn event(&self) -> &Event {
+        assert_eq!(
+            self.request
+                .authority_commit
+                .commit
+                .previous_commit_ref
+                .as_ref(),
+            Some(&self.accepted_predecessor().commit.commit_id),
+            "the Owner candidate extends the retained accepted original"
+        );
         &self.request.authority_commit.event
+    }
+    pub fn accepted_predecessor(&self) -> &AuthorityCommitTransaction {
+        self.accepted_predecessor.as_ref()
     }
     pub fn commit(&self) -> &RealmCommit {
         &self.request.authority_commit.commit
@@ -99,18 +112,46 @@ impl NativeOwnerTransfer {
         })
         .await;
         let head = join(&self.pool, &discussion.head.authority_commit, &self.author).await;
+        self.transfer_after(&head, &self.successor, &self.author, "ordinary-founder")
+            .await
+    }
+    pub async fn transfer_after(
+        &self,
+        head: &AuthorityCommitTransaction,
+        author: &AccountId,
+        successor: &AccountId,
+        successor_fixture_label: &str,
+    ) -> Self {
+        // The label selects deterministic test custody only. request checks
+        // its full Account against successor, then obtains the real C source.
         request(
             self.pool.clone(),
-            head,
-            self.successor.clone(),
-            self.author.clone(),
+            head.clone(),
+            author.clone(),
+            successor.clone(),
             &self.c_did,
-            "ordinary-founder",
+            successor_fixture_label,
             self.c_log_entry.clone(),
             self.c_method.clone(),
             self.c_seed,
         )
         .await
+    }
+
+    /// Admit a third Human's real PCR, founding Device and Profile, then join
+    /// the business Realm through the same public membership admission.
+    pub async fn joined_human_after(
+        &self,
+        head: &AuthorityCommitTransaction,
+        label: &str,
+    ) -> (AccountId, AuthorityCommitTransaction) {
+        let member = ordinary_realm::case_future(|| {
+            human_profile::admit_for_station_did(&self.pool, self.c_did.clone(), label)
+        })
+        .await;
+        account(&self.pool, &member).await;
+        let joined = ordinary_realm::case_future(|| join(&self.pool, head, &member)).await;
+        (member, joined)
     }
 }
 
@@ -272,6 +313,7 @@ async fn request(
         request: candidate,
         component,
         w1,
+        accepted_predecessor: Box::new(head),
         c_log_entry,
         c_method,
         c_seed,

@@ -104,6 +104,7 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         | EventKind::MemberIdentityUpdate
         | EventKind::CallCreate
         | EventKind::CallState
+        | EventKind::CallRecordingStart
         | EventKind::RealmMediaService
         | EventKind::MessageCreate
         | EventKind::MemberState
@@ -233,6 +234,7 @@ pub(super) fn require_guarded_unit_event(request: &EventAdmissionSubmission) -> 
                     | arkret_wire::EventKind::ScopeReadReceiptPolicy
                     | arkret_wire::EventKind::CallCreate
                     | arkret_wire::EventKind::CallState
+                    | arkret_wire::EventKind::CallRecordingStart
                     | arkret_wire::EventKind::StrandWatchSet
                     | arkret_wire::EventKind::PolicySet
                     | arkret_wire::EventKind::StrandCreate
@@ -997,6 +999,7 @@ mod tests {
             EventKind::RealmSetDefaultStrand,
             EventKind::CallCreate,
             EventKind::CallState,
+            EventKind::CallRecordingStart,
             EventKind::RealmMediaService,
             EventKind::MessageCreate,
             EventKind::MemberState,
@@ -1078,6 +1081,7 @@ mod tests {
             EventKind::RealmSetDefaultStrand,
             EventKind::CallCreate,
             EventKind::CallState,
+            EventKind::CallRecordingStart,
             EventKind::RealmMediaService,
             EventKind::MessageCreate,
             EventKind::MemberState,

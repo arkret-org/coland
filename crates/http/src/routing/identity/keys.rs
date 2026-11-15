@@ -691,7 +691,7 @@ async fn peer_relationship_basis_for_target(
         .authority_commits()
         .device_directory_shared_realm(requester, target)
         .await
-        .map_err(|error| directory_evidence_service_error(error.into()))?
+        .map_err(directory_evidence_service_error)?
     {
         return Ok(Some(
             arkret_models_crypto::PeerKeysRelationshipBasis::RealmMembership { realm_id },

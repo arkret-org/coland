@@ -223,10 +223,10 @@ pub(crate) async fn inventory_in_connection(
             RealmActorArchiveInventoryEntry::Series(entry) => entry.record.recipient_ref.as_ref(),
             RealmActorArchiveInventoryEntry::Recipient(_) => None,
         };
-        if let Some(recipient) = recipient {
-            if !manifest.entries.iter().any(|entry|matches!(entry,RealmActorArchiveInventoryEntry::Recipient(entry) if &entry.recipient_ref==recipient)) {
-                return Err(unavailable("native inventory omits a retained packet or series recipient declaration"));
-            }
+        if let Some(recipient) = recipient
+            && !manifest.entries.iter().any(|entry|matches!(entry,RealmActorArchiveInventoryEntry::Recipient(entry) if &entry.recipient_ref==recipient))
+        {
+            return Err(unavailable("native inventory omits a retained packet or series recipient declaration"));
         }
     }
     Ok(manifest)

@@ -462,7 +462,7 @@ pub(crate) async fn consume_native_unlock(
     }
     Ok((
         response,
-        super::reading::NativeDelivery::new(
+        super::reading::NativeDelivery::boxed_guard(
             held,
             reader.clone(),
             arkret_wire::ServiceOperationId::SELF_KEYS_BACKUPS_COMMAND_UNLOCK_V1,

@@ -83,7 +83,7 @@ async fn known_account_denials(
     for row in rows {
         let record: arkret_models_collaboration::account_status::AccountStatusRecord =
             serde_json::from_value(row.value).map_err(PersistenceError::database)?;
-        record.validate_shape().map_err(|error| denied(error))?;
+        record.validate_shape().map_err(denied)?;
         if record.account_id != *account
             || !matches!(
                 record.status,

@@ -110,6 +110,10 @@ impl Fixture {
         let origin = spawn_introspection_mock(slot.clone(), management_authority.clone()).await;
         let mut config = AppConfig {
             development_mode: true,
+            rate_limiter: coland_http::ratelimit::RateLimiterConfig::resolve(
+                true,
+                Default::default(),
+            ),
             embedded_webvh_registration_bearer: Some("applet-fixture-registration".to_owned()),
             session_grant_introspection_url: Some(format!(
                 "{origin}/_coauth/internal/session-grants/introspect"
@@ -210,6 +214,7 @@ impl Fixture {
             device_id: Some(pcr.history.founding_device_id.clone()),
             audience_id: state.service_core_id(),
             scopes: vec![
+                arkret_wire::ServiceOperationId::ROOT_IDENTITY_RECOVERY_POLICY_COMMAND_PUBLISH_V1,
                 arkret_wire::ServiceOperationId::SELF_ACCOUNT_COMMAND_UPDATE_PROFILE_V1,
                 arkret_wire::ServiceOperationId::SELF_APPLET_INSTALL_COMMAND_PREVIEW_V1,
                 arkret_wire::ServiceOperationId::SELF_APPLET_COMMAND_INSTALL_V1,
@@ -6625,10 +6630,74 @@ mod realm_native_fixture {
                     .is_empty()
             );
         }
+        let packets = archive["tables"]["key_backups"].as_array().unwrap();
+        let retained = fixture
+            .state
+            .test_persistence()
+            .key_backups()
+            .snapshot_all()
+            .await
+            .unwrap();
+        for row in packets {
+            for column in [
+                "backup_kind",
+                "metadata",
+                "series_actor_id",
+                "series_id",
+                "series_sequence",
+            ] {
+                assert!(!row.as_object().unwrap().contains_key(column));
+            }
+            let original = retained
+                .iter()
+                .find(|packet| packet["backup_id"] == row["payload"]["backup_id"])
+                .unwrap();
+            assert_eq!(
+                arkret_canonical::canonical_json_bytes(&row["payload"]).unwrap(),
+                arkret_canonical::canonical_json_bytes(original).unwrap(),
+                "portable custody must retain the complete signed packet verbatim"
+            );
+        }
+        eprintln!(
+            "portable native backup original rows checked: {}",
+            packets.len()
+        );
         store
             .import_management_private_state(&manifest, &bytes)
             .await
             .unwrap();
+        if !packets.is_empty() {
+            let (_, before) = store
+                .export_management_private_state(&fixture.realm)
+                .await
+                .unwrap();
+            for column in ["metadata", "unknown_private_column"] {
+                let mut changed = archive.clone();
+                changed["tables"]["key_backups"][0][column] = json!({"unexpected":true});
+                let changed = arkret_canonical::canonical_json_bytes(&changed).unwrap();
+                let mut bad = manifest.clone();
+                bad.state_digest =
+                    arkret_wire::Hash::new(arkret_canonical::sha256_digest(&changed)).unwrap();
+                let error = store
+                    .import_management_private_state(&bad, &changed)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("unknown or missing private row column"),
+                    "{error}"
+                );
+                let (_, after) = store
+                    .export_management_private_state(&fixture.realm)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    before, after,
+                    "refused private columns must leave exported custody unchanged"
+                );
+            }
+        }
         boxed_step(|| independent_management_archive(fixture, &manifest, &bytes, &archive)).await;
         if has_blob {
             let mut changed = archive.clone();
@@ -8675,6 +8744,14 @@ mod realm_native_fixture {
         eprintln!(
             "real Bridge runtime: reject authenticated malformed content without blocking the stream"
         );
+        boxed_step(|| {
+            realm_actor_mls_fixture::publish_human_root(
+                &factory.fixture,
+                &content_scope,
+                &human_group,
+            )
+        })
+        .await;
         let rejected = boxed_step(|| {
             realm_actor_mls_fixture::invalid_human_messages(
                 &factory.fixture,

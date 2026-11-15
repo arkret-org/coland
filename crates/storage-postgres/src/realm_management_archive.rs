@@ -347,6 +347,22 @@ async fn state(conn: &mut AsyncPgConnection, realm: &RealmId) -> PersistenceResu
                     .ok_or_else(|| invalid("invalid content original"))?
                     .remove("source_backed");
             }
+            if *table == "key_backups" {
+                // These SQL generated projections are recomputed from the
+                // complete original payload on import, never portable inputs.
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| invalid("invalid backup row"))?;
+                for column in [
+                    "backup_kind",
+                    "metadata",
+                    "series_actor_id",
+                    "series_id",
+                    "series_sequence",
+                ] {
+                    object.remove(column);
+                }
+            }
             if *table == "canonical_events" {
                 let object = value
                     .as_object_mut()

@@ -1,6 +1,6 @@
 use arkret_models_collaboration::agent_operations::AgentLifecycleState;
 use arkret_models_collaboration::agent_scope::AgentRuntimeApprovalRequestBody;
-use arkret_wire::{DidUrl, OpaqueLocalId};
+use arkret_wire::{DidUrl, EventId, Hash, OpaqueLocalId};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
@@ -112,5 +112,183 @@ impl AgentPrincipalRecord {
             created_at,
             updated_at: created_at,
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenAgentPairingHandle {
+    pub pairing_request_id: OpaqueLocalId,
+    pub pairing_code: String,
+    pub expires_at: DateTime<Utc>,
+    pub pending_runtime_key_request:
+        Option<arkret_models_collaboration::agent_scope::AgentRuntimeApprovalRequestBody>,
+}
+
+impl OpenAgentPairingHandle {
+    pub fn is_live_at(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at > now
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveAgentRuntimeBinding {
+    pub completed_pairing_request_id: OpaqueLocalId,
+    pub authorized_event_ref: EventId,
+    pub verification_method: DidUrl,
+    pub public_key_digest: Hash,
+    pub key_authorization_event: arkret_wire::Event,
+    pub signer_resolution_evidence_ref: arkret_wire::SignerEvidenceRef,
+    pub current_signer_evidence:
+        arkret_models_identity::authenticated_signer_resolution_evidence::AuthenticatedSignerResolutionEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentRuntimeBindings {
+    pub open_handle: Option<OpenAgentPairingHandle>,
+    pub active_binding: Option<ActiveAgentRuntimeBinding>,
+}
+
+impl AgentPrincipalRecord {
+    /// Reconstruct the two protocol states hidden behind the flat persistence
+    /// columns. Partial tuples are rejected instead of being interpreted as a
+    /// weaker state.
+    pub fn runtime_bindings(&self) -> Result<AgentRuntimeBindings, String> {
+        let active_binding = match self.authorized_event_ref.as_ref() {
+            Some(authorized_event_ref) => {
+                let completed_pairing_request_id =
+                    self.paired_pairing_request_id.clone().ok_or_else(|| {
+                        "active Agent runtime binding is missing paired_pairing_request_id"
+                            .to_owned()
+                    })?;
+                let authorized_event_ref =
+                    EventId::new(authorized_event_ref.clone()).map_err(|error| {
+                        format!("active Agent runtime authorized_event_ref is invalid: {error}")
+                    })?;
+                let verification_method = self
+                    .authorized_verification_method
+                    .clone()
+                    .ok_or_else(|| {
+                        "active Agent runtime binding is missing verification_method".to_owned()
+                    })
+                    .and_then(|value| {
+                        DidUrl::new(value).map_err(|error| {
+                            format!("active Agent runtime verification_method is invalid: {error}")
+                        })
+                    })?;
+                let public_key_digest = self
+                    .authorized_public_key_digest
+                    .clone()
+                    .ok_or_else(|| {
+                        "active Agent runtime binding is missing public_key_digest".to_owned()
+                    })
+                    .and_then(|value| {
+                        Hash::new(value).map_err(|error| {
+                            format!("active Agent runtime public_key_digest is invalid: {error}")
+                        })
+                    })?;
+                let key_authorization_event =
+                    self.authorized_key_event.clone().ok_or_else(|| {
+                        "active Agent runtime binding is missing key_authorization_event".to_owned()
+                    })?;
+                let signer_resolution_evidence_ref =
+                    self.signer_resolution_evidence_ref.clone().ok_or_else(|| {
+                        "active Agent runtime binding is missing signer evidence reference"
+                            .to_owned()
+                    })?;
+                let current_signer_evidence =
+                    self.current_signer_evidence.clone().ok_or_else(|| {
+                        "active Agent runtime binding is missing current signer evidence".to_owned()
+                    })?;
+                // The evidence is content-addressed: recompute the address from
+                // the carried bytes instead of trusting the stored sibling.
+                if !current_signer_evidence
+                    .matches_ref(&signer_resolution_evidence_ref)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(
+                        "active Agent runtime signer evidence reference does not address its evidence"
+                            .to_owned(),
+                    );
+                }
+                let key = arkret_models_identity::agent_signer_evidence::AgentAuthorizedSigningKey::from_event(&key_authorization_event).map_err(|error| error.to_string())?;
+                if key.agent_id.as_str() != self.id
+                    || key.agent_key_authorize_event_id != authorized_event_ref
+                    || key.verification_method != verification_method
+                    || key.public_key_digest != public_key_digest
+                {
+                    return Err(
+                        "active Agent authorization Event does not match its indexed key"
+                            .to_owned(),
+                    );
+                }
+                Some(ActiveAgentRuntimeBinding {
+                    completed_pairing_request_id,
+                    authorized_event_ref,
+                    verification_method,
+                    public_key_digest,
+                    key_authorization_event,
+                    signer_resolution_evidence_ref,
+                    current_signer_evidence,
+                })
+            }
+            None => {
+                if self.paired_pairing_request_id.is_some()
+                    || self.authorized_verification_method.is_some()
+                    || self.authorized_public_key_digest.is_some()
+                    || self.authorized_key_event.is_some()
+                    || self.signer_resolution_evidence_ref.is_some()
+                    || self.current_signer_evidence.is_some()
+                {
+                    return Err(
+                        "Agent runtime authorization columns contain a partial active binding"
+                            .to_owned(),
+                    );
+                }
+                None
+            }
+        };
+
+        let open_handle = match self.pairing_request_id.as_ref() {
+            Some(pairing_request_id)
+                if self.paired_pairing_request_id.as_deref()
+                    != Some(pairing_request_id.as_str()) =>
+            {
+                let pairing_code = self.pairing_code.clone().ok_or_else(|| {
+                    "open Agent pairing handle is missing pairing_code".to_owned()
+                })?;
+                let expires_at = self.pairing_expires_at.ok_or_else(|| {
+                    "open Agent pairing handle is missing pairing_expires_at".to_owned()
+                })?;
+                if self.runtime_key_request.as_ref().is_some_and(|request| {
+                    request.pairing_request_id.as_str() != pairing_request_id.as_str()
+                        || request.agent_id.as_str() != self.id
+                }) {
+                    return Err(
+                        "pending Agent runtime key request does not match its open handle"
+                            .to_owned(),
+                    );
+                }
+                Some(OpenAgentPairingHandle {
+                    pairing_request_id: pairing_request_id.clone(),
+                    pairing_code,
+                    expires_at,
+                    pending_runtime_key_request: self.runtime_key_request.clone(),
+                })
+            }
+            _ => {
+                if self.runtime_key_request.is_some() {
+                    return Err(
+                        "pending Agent runtime key request has no unconsumed pairing handle"
+                            .to_owned(),
+                    );
+                }
+                None
+            }
+        };
+
+        Ok(AgentRuntimeBindings {
+            open_handle,
+            active_binding,
+        })
     }
 }

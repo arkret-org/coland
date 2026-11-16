@@ -7,8 +7,7 @@ use arkret_identifiers::RealmId;
 use chrono::{DateTime, Utc};
 use coland_domain::hlc::ServerHlc;
 use coland_domain::reducer::{
-    ColandMembershipState, ColandRealmState, FacetRef, ProjectionEffect, ProjectionState,
-    object_stage_wire_value,
+    ColandMembershipState, ColandRealmState, ProjectionEffect, ProjectionState,
 };
 use coland_storage::{PersistenceResult, PersistenceStore};
 use parking_lot::{Mutex, MutexGuard};
@@ -126,18 +125,6 @@ pub struct RealmBootstrapProjectionError {
     pub operation_index: usize,
     pub reason: String,
     pub ignored: bool,
-}
-
-#[derive(Clone, Debug)]
-pub enum ProjectionWriteThroughRecord {
-    Morph(crate::events::MorphProjectionRecord),
-    /// The Circle row plus its complete membership set. Membership is written
-    /// as a whole set because it is what the wire validator enforces
-    /// `Circle.members` is a subset of `Realm.members` against.
-    Circle(
-        crate::events::CircleProjectionRecord,
-        Vec<crate::events::CircleMemberProjectionRecord>,
-    ),
 }
 
 impl From<ProjectionEffect> for ProjectionEffectView {
@@ -311,26 +298,6 @@ impl ProjectionService {
         self.state.lock().clone()
     }
 
-    /// Read the indexed membership range without cloning unrelated Realm
-    /// state, message history, or the rest of the account projection.
-    pub fn realm_membership_states(
-        &self,
-        realm_id: &str,
-    ) -> BTreeMap<arkret_wire::ActorId, String> {
-        self.state
-            .lock()
-            .members
-            .range((realm_id.to_owned(), String::new())..)
-            .take_while(|((candidate, _), _)| candidate == realm_id)
-            .filter_map(|((_, actor_id), membership)| {
-                Some((
-                    serde_json::from_str(actor_id).ok()?,
-                    membership.state.clone(),
-                ))
-            })
-            .collect()
-    }
-
     /// The committed `ak.agent.action_approve` Event indexed for one complete
     /// approved Event id. The caller MUST re-read and verify that exact
     /// committed confirmation; the index is never authority by itself.
@@ -487,137 +454,6 @@ impl ProjectionService {
         Ok(())
     }
 
-    /// Cold-project one call's facet from the accepted Event sequence without
-    /// touching live projection state.
-    pub fn project_call_state_facet(
-        &self,
-        operations: &[Operation],
-        realm_id: &str,
-        target: &FacetRef,
-    ) -> Option<Value> {
-        let mut projection = ProjectionState::new();
-        for operation in operations {
-            if let ProjectionEffect::Rejected { reason } =
-                projection.apply_projected(operation, self.clock())
-            {
-                tracing::warn!(
-                    operation_id = %operation.operation_id,
-                    %reason,
-                    "accepted call state operation did not project during cold projection"
-                );
-            }
-        }
-        projection.facet_value(realm_id, target).cloned()
-    }
-
-    pub fn projection_write_through_record(
-        &self,
-        operation: &Operation,
-    ) -> Option<ProjectionWriteThroughRecord> {
-        let kind = crate::operation_semantics::canonical_kind_for_operation(operation)?;
-        let is_morph_kind = matches!(
-            &kind,
-            arkret_wire::EventKind::MorphCreate
-                | arkret_wire::EventKind::MorphUpdate
-                | arkret_wire::EventKind::MorphArchive
-                | arkret_wire::EventKind::MorphRestore
-                | arkret_wire::EventKind::MorphStageSet
-        );
-        let is_circle_kind = matches!(
-            &kind,
-            arkret_wire::EventKind::CircleCreate
-                | arkret_wire::EventKind::CircleUpdate
-                | arkret_wire::EventKind::CircleArchive
-                | arkret_wire::EventKind::CircleRestore
-                | arkret_wire::EventKind::CircleTombstone
-                | arkret_wire::EventKind::CircleMemberState
-        );
-        let is_redaction = kind == arkret_wire::EventKind::Redaction;
-        if !(is_morph_kind || is_circle_kind || is_redaction) {
-            return None;
-        }
-
-        let string_field = |key: &str| {
-            operation
-                .payload
-                .get(key)
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        };
-        let object_id = || {
-            arkret_schema::derived_object_id_for_kind(kind.as_str(), &operation.context.event_id)
-        };
-        let state = self.state.lock();
-        if is_circle_kind {
-            let id = if kind == arkret_wire::EventKind::CircleCreate {
-                object_id()
-            } else {
-                string_field("circle_id").or_else(|| string_field("target_ref"))
-            }?;
-            return state.circles.get(&id).map(|row| {
-                let members = state
-                    .circle_memberships
-                    .iter()
-                    .filter(|((circle_id, _), _)| circle_id == &id)
-                    .map(
-                        |(_, membership)| crate::events::CircleMemberProjectionRecord {
-                            circle_id: membership.circle_id.clone(),
-                            actor_id: membership.member.clone(),
-                            state: membership.state.clone(),
-                            invited_at: membership.invited_at,
-                            joined_at: membership.joined_at,
-                            updated_at: membership.updated_at,
-                        },
-                    )
-                    .collect();
-                ProjectionWriteThroughRecord::Circle(
-                    crate::events::CircleProjectionRecord {
-                        circle_id: row.circle_id.clone(),
-                        realm_id: row.realm_id.clone(),
-                        profile_ref: row.profile_ref.clone(),
-                        title: row.title.clone(),
-                        summary: row.summary.clone(),
-                        display: row.display.clone(),
-                        directory_visibility: row.directory_visibility.clone(),
-                        join_rule: row.join_rule.clone(),
-                        history_access: row.history_access.clone(),
-                        encryption_profile: if row.mls_group_ref.is_some() {
-                            "mls_rfc9420".to_owned()
-                        } else {
-                            "none".to_owned()
-                        },
-                        mls_group_ref: row.mls_group_ref.clone(),
-                        state: row.state.as_str().to_owned(),
-                        state_changed_at: row.state_changed_at,
-                        created_by: row.created_by.clone(),
-                        updated_by: row.updated_by.clone(),
-                        created_at: row.created_at,
-                        updated_at: row.updated_at,
-                    },
-                    members,
-                )
-            });
-        }
-        if is_morph_kind {
-            let id = if kind == arkret_wire::EventKind::MorphCreate {
-                object_id()
-            } else if matches!(
-                kind,
-                arkret_wire::EventKind::MorphUpdate | arkret_wire::EventKind::MorphStageSet
-            ) {
-                string_field("morph_id")
-            } else {
-                string_field("target_ref")
-            }?;
-            return state.morphs.get(&id).map(morph_write_through_record);
-        }
-        let object_ref = operation
-            .payload
-            .get("target_ref")
-            .and_then(Value::as_str)?;
-        state.morphs.get(object_ref).map(morph_write_through_record)
-    }
-
     pub fn install_snapshot(&self, state: ProjectionState) {
         *self.write_state() = state;
     }
@@ -639,20 +475,6 @@ impl ProjectionService {
 
     pub fn apply_projected(&self, operation: &Operation, hlc: &ServerHlc) -> ProjectionEffectView {
         self.write_state().apply_projected(operation, hlc).into()
-    }
-
-    /// All-or-nothing install of one Sidecar-ensure run.
-    ///
-    /// Atomicity belongs to the authority-commit transaction, so the in-memory
-    /// fold must publish the whole run or none of it. `atomic_batch` owns that
-    /// fold; this entry point only discards the per-operation effects the
-    /// Sidecar-ensure caller does not read.
-    pub fn apply_sidecar_ensure_atomic(
-        &self,
-        operations: &[&Operation],
-        hlc: &ServerHlc,
-    ) -> Result<(), String> {
-        self.apply_operations_atomic(operations, hlc).map(|_| ())
     }
 
     pub fn prepare_mls_keypackage_publish(
@@ -711,78 +533,6 @@ impl ProjectionService {
         None
     }
 
-    pub fn preflight_calendar_rejection(&self, operation: &Operation) -> Option<String> {
-        self.preflight_apply_rejection(
-            operation,
-            &[
-                arkret_wire::EventKind::StrandCreate,
-                arkret_wire::EventKind::StrandUpdate,
-                arkret_wire::EventKind::RsvpSet,
-            ],
-        )
-    }
-
-    pub fn preflight_moderation_rejection(&self, operation: &Operation) -> Option<String> {
-        self.preflight_apply_rejection(
-            operation,
-            &[
-                arkret_wire::EventKind::ModerationDecision,
-                arkret_wire::EventKind::ModerationDecisionLift,
-            ],
-        )
-    }
-
-    pub fn preflight_realm_policy_rejection(&self, operation: &Operation) -> Option<String> {
-        self.preflight_apply_rejection(
-            operation,
-            &[
-                arkret_wire::EventKind::RealmPolicyBundle,
-                arkret_wire::EventKind::RealmOwnerTransfer,
-                arkret_wire::EventKind::RealmAuthorityReset,
-            ],
-        )
-    }
-
-    /// Validate a plaintext Poll response against the current accepted Poll
-    /// projection before the Event is made durable. The reducer remains the
-    /// deterministic fold, but semantic rejection must not be deferred until
-    /// the post-commit projection lane.
-    pub fn preflight_poll_rejection(&self, operation: &Operation) -> Option<String> {
-        if coland_domain::kinds::canonical_kind_for_operation(operation)
-            != Some(arkret_wire::EventKind::MessageCreate)
-            || operation
-                .payload
-                .get("content")
-                .and_then(Value::as_object)
-                .and_then(|content| content.get("kind"))
-                .and_then(Value::as_str)
-                != Some("ak.content.poll.response")
-        {
-            return None;
-        }
-        self.preflight_apply_rejection(operation, &[arkret_wire::EventKind::MessageCreate])
-    }
-
-    fn preflight_apply_rejection(
-        &self,
-        operation: &Operation,
-        accepted_kinds: &[arkret_wire::EventKind],
-    ) -> Option<String> {
-        let kind = coland_domain::kinds::canonical_kind_for_operation(operation)?;
-        if !accepted_kinds.contains(&kind) {
-            return None;
-        }
-        match self
-            .state
-            .lock()
-            .clone()
-            .apply_projected(operation, self.clock())
-        {
-            ProjectionEffect::Rejected { reason } => Some(reason),
-            _ => None,
-        }
-    }
-
     pub fn mark_key_packages_revoked(&self, keypackage_ids: &[String]) {
         let mut state = self.write_state();
         for keypackage_id in keypackage_ids {
@@ -793,35 +543,6 @@ impl ProjectionService {
                 row.claimed_at = None;
                 row.claim_expires_at_unix_ms = None;
             }
-        }
-    }
-
-    pub fn mark_key_packages_retired(&self, keypackage_ids: &[String]) {
-        let mut state = self.write_state();
-        for keypackage_id in keypackage_ids {
-            if let Some(row) = state.mls_key_packages.get_mut(keypackage_id)
-                && row.claimed_by.is_none()
-                && row.consumed_at.is_none()
-            {
-                row.claimed_by = Some("retired".to_owned());
-                row.claimed_at = None;
-                row.claim_expires_at_unix_ms = None;
-            }
-        }
-    }
-
-    pub fn mark_key_package_claimed(
-        &self,
-        keypackage_id: &str,
-        claimed_by: String,
-        claimed_at: i64,
-        claim_expires_at_unix_ms: Option<i64>,
-    ) {
-        if let Some(row) = self.write_state().mls_key_packages.get_mut(keypackage_id) {
-            row.claimed_by = Some(claimed_by);
-            row.claimed_at = Some(claimed_at);
-            row.claim_expires_at_unix_ms = claim_expires_at_unix_ms;
-            row.consumed_at = None;
         }
     }
 
@@ -906,32 +627,6 @@ pub(crate) fn restore_invite_acceptance_membership(
             reason: None,
         },
     );
-}
-
-fn morph_write_through_record(
-    row: &coland_domain::reducer::MorphProjection,
-) -> ProjectionWriteThroughRecord {
-    ProjectionWriteThroughRecord::Morph(crate::events::MorphProjectionRecord {
-        morph_id: row.morph_id.clone(),
-        realm_id: row.realm_id.clone(),
-        scope_circle_id: row.scope_circle_id.clone(),
-        morph_kind: row.morph_kind.clone(),
-        title: row.title.clone(),
-        fields: row.fields.clone(),
-        schema_refs: row.schema_refs.clone(),
-        facets: row.facets.clone(),
-        versions: row.versions.clone(),
-        content: row.content.clone(),
-        encrypted_content: row.encrypted_content.clone(),
-        state: row.state.as_str().to_owned(),
-        state_changed_at: row.state_changed_at,
-        stage: row.stage.as_ref().map(object_stage_wire_value),
-        stage_changed_at: row.stage_changed_at,
-        created_by: row.created_by.clone(),
-        created_at: row.created_at,
-        updated_by: row.updated_by.clone(),
-        updated_at: row.updated_at,
-    })
 }
 
 fn key_package_record_from_projection(

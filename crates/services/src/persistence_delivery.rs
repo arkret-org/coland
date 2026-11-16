@@ -28,19 +28,6 @@ impl crate::delivery::NotificationWritePort for PersistenceNotificationWriter {
         Ok(())
     }
 
-    async fn list_for_account(
-        &self,
-        controller_account_pk: &AccountPk,
-        recipient_id: &str,
-        after_position: Option<i64>,
-    ) -> crate::ServiceResult<Vec<StoredAccountNotificationDelta>> {
-        Ok(self
-            .0
-            .notifications()
-            .list_for_account(controller_account_pk, recipient_id, after_position)
-            .await?)
-    }
-
     async fn list_for_recipient(
         &self,
         recipient_id: &str,
@@ -219,32 +206,6 @@ impl crate::delivery::DeviceMessagePort for PersistenceDeviceMessages {
             .0
             .device_messages()
             .inspect_batch(request_key, request_digest, items)
-            .await?)
-    }
-
-    async fn issue_ack_token(
-        &self,
-        recipient: &str,
-        device_id: &str,
-        queue_position: i64,
-    ) -> crate::ServiceResult<Option<String>> {
-        Ok(self
-            .0
-            .device_messages()
-            .issue_ack_token(recipient, device_id, queue_position)
-            .await?)
-    }
-
-    async fn acknowledge(
-        &self,
-        recipient: &str,
-        device_id: &str,
-        acknowledgement_token: &str,
-    ) -> crate::ServiceResult<Option<usize>> {
-        Ok(self
-            .0
-            .device_messages()
-            .ack_with_token(recipient, device_id, acknowledgement_token)
             .await?)
     }
 

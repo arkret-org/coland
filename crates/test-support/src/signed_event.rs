@@ -6,35 +6,6 @@ use serde_json::Value;
 
 pub const FIXTURE_EVENT_SIGNING_SEED: [u8; 32] = [21_u8; 32];
 
-/// A canonical Event record is a storage fixture, not proof of an accepted Commit.
-#[must_use]
-pub fn canonical_event_record(
-    event: &Event,
-    realm_id: Option<&str>,
-    received_at: chrono::DateTime<chrono::Utc>,
-) -> coland_storage::CanonicalEventRecord {
-    let digest_suite = event.event_id.digest_suite_code().digest_suite();
-    coland_storage::CanonicalEventRecord {
-        event_id: event.event_id.to_string(),
-        actor_id: event.actor_id.to_string(),
-        realm_id: realm_id.map(str::to_owned),
-        kind: event.kind.to_string(),
-        schema_id: "ak.schema.event.v1".to_owned(),
-        digest_suite,
-        canonical_digest: event
-            .event_digest_with_digest_suite(digest_suite)
-            .expect("fixture Event digest"),
-        canonical_bytes: arkret_canonical::canonical_json_bytes(
-            &event
-                .digest_payload()
-                .expect("fixture Event digest payload"),
-        )
-        .expect("fixture Event canonical digest bytes"),
-        envelope: serde_json::to_value(event).expect("fixture Event envelope"),
-        received_at,
-    }
-}
-
 /// Author one caller-signed Event; acceptance requires a separate authority Commit.
 #[derive(Clone, Debug)]
 pub struct CallerSignedEvent<'a> {
@@ -139,16 +110,6 @@ pub fn fixture_verification_method(actor_id: &str, device_id: &str) -> DidUrl {
     };
     DidUrl::new(format!("{actor_id}#{device_id}"))
         .expect("fixture verification method is a DID URL")
-}
-
-pub async fn sign_accepted_fixture_event(
-    _state: &coland_http::state::AppState,
-    event: Event,
-    actor_id: &str,
-    device_id: &str,
-    signing_seed: [u8; 32],
-) -> Event {
-    sign_fixture_event(event, actor_id, device_id, signing_seed)
 }
 
 pub fn sign_fixture_event(

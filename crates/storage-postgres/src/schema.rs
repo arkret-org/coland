@@ -1027,50 +1027,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    projection_spaces (pk) {
-        pk -> Int8,
-        id -> Bytea,
-        realm_id -> Text,
-        scope_circle_id -> Nullable<Bytea>,
-        child_scope_policy -> Nullable<Text>,
-        child_scope_policy_scope_circle_id -> Nullable<Bytea>,
-        kind -> Text,
-        title -> Text,
-        fields -> Jsonb,
-        parent_ref -> Nullable<Bytea>,
-        rank -> Nullable<Text>,
-        state -> Text,
-        state_changed_at -> Nullable<Timestamptz>,
-        created_by -> Jsonb,
-        updated_by -> Nullable<Jsonb>,
-        created_at -> Timestamptz,
-        updated_at -> Nullable<Timestamptz>,
-    }
-}
-
-diesel::table! {
-    projection_strands (pk) {
-        pk -> Int8,
-        id -> Bytea,
-        realm_id -> Text,
-        scope_circle_id -> Nullable<Bytea>,
-        tracks -> Jsonb,
-        title -> Text,
-        summary -> Nullable<Text>,
-        content -> Nullable<Jsonb>,
-        encrypted_content -> Nullable<Jsonb>,
-        state -> Text,
-        state_changed_at -> Nullable<Timestamptz>,
-        stage -> Nullable<Text>,
-        stage_changed_at -> Nullable<Timestamptz>,
-        created_by -> Jsonb,
-        updated_by -> Nullable<Jsonb>,
-        created_at -> Timestamptz,
-        updated_at -> Nullable<Timestamptz>,
-    }
-}
-
-diesel::table! {
     push_devices (id) {
         id -> Text,
         actor_id -> Nullable<Text>,
@@ -1532,8 +1488,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     projection_circles,
     projection_events,
     projection_morphs,
-    projection_spaces,
-    projection_strands,
     push_devices,
     push_hard_logout_journal,
     push_registration_handoff_intents,

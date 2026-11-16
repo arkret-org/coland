@@ -8,7 +8,7 @@ on:
     paths:
       - ".github/workflows/release*.y*ml"
       - ".ci/package-release.py"
-      - ".ci/configure-windows-openssl.ps1"
+      - "scripts/configure-windows-openssl.ps1"
 
 permissions:
   contents: read
@@ -68,7 +68,7 @@ jobs:
       - name: Configure static Windows OpenSSL
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./.ci/configure-windows-openssl.ps1
+        run: ./scripts/configure-windows-openssl.ps1
       - name: Configure macOS OpenSSL
         if: runner.os == 'macOS'
         shell: bash

@@ -381,40 +381,8 @@ pub(super) async fn submit_durable_agent_lifecycle(
 
 #[cfg(test)]
 mod tests {
-    use arkret_wire::ServiceOperationId;
 
     use super::*;
-
-    #[test]
-    fn runtime_agent_key_scope_service_actions_are_registered() {
-        let registry = coland_services::protocol_artifacts::operation_ids();
-        for action in [
-            ServiceOperationId::SELF_COMMITTED_EVENT_STREAM_SUBSCRIBE_V1,
-            ServiceOperationId::SELF_COMMITTED_EVENT_READ_SCAN_V1,
-            ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1,
-        ] {
-            assert!(
-                registry.contains(action),
-                "dev fanout agent_key_scope action `{action}` must exist in operation registry"
-            );
-        }
-    }
-
-    #[test]
-    fn deprecated_self_events_scope_tokens_are_not_registered() {
-        let registry = coland_services::protocol_artifacts::operation_ids();
-        for action in [
-            "events.subscribe",
-            "ak.self.events.subscribe",
-            "ak.self-events.subscribe",
-            "ak.self-events.stream.subscribe",
-        ] {
-            assert!(
-                !registry.contains(action),
-                "deprecated self-events shortcut `{action}` must not be used as an agent runtime scope"
-            );
-        }
-    }
 
     // did-usage-and-verification.md §2.2 — the accountability-grant and
     // selector-claim proofs MUST name a `#fragment` DID URL rooted in the
@@ -438,15 +406,5 @@ mod tests {
             "did:webvh:z6mkfixture:example.test:users:bob#device-1",
             controller
         ));
-    }
-
-    #[test]
-    fn fanout_event_timestamp_uses_canonical_millisecond_profile() {
-        let created_at = arkret_canonical::format_timestamp_canonical(Utc::now());
-
-        arkret_canonical::validate_timestamp_canonical(&created_at)
-            .expect("fan-out Event Envelope timestamp must pass the shared validator");
-        assert_eq!(created_at.len(), "2026-07-18T00:00:00.000Z".len());
-        assert!(created_at.ends_with('Z'));
     }
 }

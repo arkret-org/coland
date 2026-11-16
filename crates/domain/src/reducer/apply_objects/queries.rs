@@ -83,23 +83,6 @@ impl ProjectionState {
         msgs
     }
 
-    /// Get messages for a Realm including redacted rows, sorted by creation
-    /// time. Superseded revisions are still dropped (only the latest revision
-    /// of a message survives). The message stream (sync timeline) uses this so
-    /// a redacted message keeps its slot and can be surfaced as a per-message
-    /// tombstone (strand-and-message.md §9) instead of vanishing — the read
-    /// path replaces its body with the redaction tombstone before emitting.
-    pub fn messages_for_realm_including_redacted(&self, realm_id: &str) -> Vec<&MessageState> {
-        let superseded = self.superseded_message_ids();
-        let mut msgs: Vec<_> = self
-            .messages
-            .values()
-            .filter(|m| m.realm_id == realm_id && !superseded.contains(m.event_id.as_str()))
-            .collect();
-        msgs.sort_by_key(|a| a.created_at);
-        msgs
-    }
-
     /// Get messages for a thread, sorted by creation time.
     pub fn messages_for_thread(&self, thread_id: &str) -> Vec<&MessageState> {
         let superseded = self.superseded_message_ids();
@@ -144,15 +127,6 @@ impl ProjectionState {
     pub fn message_realm(&self, target_ref: &str) -> Option<String> {
         self.message_by_target_ref(target_ref)
             .map(|msg| msg.realm_id.clone())
-    }
-
-    /// Resolve the Circle scope inherited by an event targeting a Message.
-    pub fn message_circle_scope(&self, target_ref: &str) -> Option<String> {
-        self.message_by_target_ref(target_ref)
-            .and_then(|message| message.content.get("scope_circle_id"))
-            .and_then(Value::as_str)
-            .filter(|circle_id| circle_id.starts_with("ak:circle:"))
-            .map(ToOwned::to_owned)
     }
 
     /// Projection-layer view of a single message that
@@ -521,27 +495,6 @@ impl ProjectionState {
                 .unwrap_or(&[]),
             operation.created_at,
             parent_membership_allows,
-        )
-    }
-
-    /// The same entry gates govern request-authorized bootstrap disclosure.
-    pub fn check_join_request_gates(
-        &self,
-        realm_id: &str,
-        member: &str,
-        hard_gates_only: bool,
-        is_self_authored: bool,
-        raw_proofs: &[Value],
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), &'static str> {
-        self.check_join_request_gates_with_parent_verdict(
-            realm_id,
-            member,
-            hard_gates_only,
-            is_self_authored,
-            raw_proofs,
-            now,
-            false,
         )
     }
 

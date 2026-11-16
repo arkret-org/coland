@@ -31,6 +31,8 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 arkret-event-draft = { workspace = true, features = ["test-support"] }
+arkret-signatures = { workspace = true, features = ["content-backup"] }
+ed25519-dalek = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 
 [lints]

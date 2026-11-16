@@ -2760,54 +2760,6 @@ CREATE INDEX projection_events_space_idx ON public.projection_events USING btree
 
 CREATE INDEX projection_events_realm_pk_idx ON public.projection_events USING btree (realm_pk, pk);
 
-CREATE TABLE public.projection_strands (
-    pk bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    id bytea NOT NULL CHECK (octet_length(id) = 33),
-    realm_id text NOT NULL,
-    scope_circle_id bytea CHECK (octet_length(scope_circle_id) = 33),
-    tracks jsonb DEFAULT '{"synthesis": {}}'::jsonb NOT NULL,
-    title text NOT NULL,
-    summary text,
-    content jsonb,
-    encrypted_content jsonb,
-    fields jsonb DEFAULT '{}'::jsonb NOT NULL,
-    schema_refs jsonb DEFAULT '[]'::jsonb NOT NULL,
-    state text DEFAULT 'active'::text NOT NULL,
-    state_changed_at timestamp with time zone,
-    -- common-fields.md 3.2 orders the lifecycle cluster state, state_changed_at,
-    -- stage, stage_changed_at ahead of the audit cluster, and requires
-    -- stage_changed_at to sit immediately after stage.
-    stage text,
-    stage_changed_at timestamp with time zone,
-    created_by jsonb NOT NULL,
-    updated_by jsonb,
-    created_at timestamp with time zone NOT NULL,
-    updated_at timestamp with time zone,
-    -- common-fields.md 5.3.1: stage_changed_at must never appear on its own.
-    CONSTRAINT projection_strands_stage_changed_at_requires_stage CHECK (
-        (stage IS NOT NULL) OR (stage_changed_at IS NULL)
-    ),
-    -- common-fields.md 5.3.2 freezes the business-progression enum at 8 values.
-    CONSTRAINT projection_strands_stage_check CHECK ((stage IS NULL) OR (stage = ANY (ARRAY['draft'::text, 'proposed'::text, 'planned'::text, 'in_progress'::text, 'blocked'::text, 'done'::text, 'cancelled'::text, 'superseded'::text]))),
-    -- common-fields.md 5.2: an active object carries exactly one content slot,
-    -- and a redacted one carries neither. Enforcing it here makes the invariant
-    -- checkable from the row alone instead of by replaying the event stream.
-    CONSTRAINT projection_strands_content_slot_check CHECK (
-        (state = 'redacted' AND content IS NULL AND encrypted_content IS NULL)
-        OR (state <> 'redacted' AND NOT (content IS NOT NULL AND encrypted_content IS NOT NULL))
-    ),
-    CONSTRAINT projection_strands_state_check CHECK ((state = ANY (ARRAY['active'::text, 'archived'::text, 'redacted'::text])))
-);
-
-ALTER TABLE ONLY public.projection_strands
-    ADD CONSTRAINT projection_strands_id_key UNIQUE (id);
-
-CREATE INDEX projection_strands_realm_idx ON public.projection_strands USING btree (realm_id);
-
-CREATE INDEX projection_strands_scope_circle_id_idx ON public.projection_strands USING btree (scope_circle_id);
-
-CREATE INDEX projection_strands_state_idx ON public.projection_strands USING btree (state);
-
 CREATE TABLE public.projection_morphs (
     pk bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     id bytea NOT NULL CHECK (octet_length(id) = 33),
@@ -2816,7 +2768,7 @@ CREATE TABLE public.projection_morphs (
     title text,
     state text DEFAULT 'active'::text NOT NULL,
     state_changed_at timestamp with time zone,
-    -- Same lifecycle-cluster ordering as projection_strands
+    -- Lifecycle cluster follows common-fields.md.
     -- (common-fields.md 3.2).
     stage text,
     stage_changed_at timestamp with time zone,
@@ -2831,12 +2783,12 @@ CREATE TABLE public.projection_morphs (
     scope_circle_id bytea CHECK (octet_length(scope_circle_id) = 33),
     created_at timestamp with time zone NOT NULL,
     updated_at timestamp with time zone,
-    -- Same stage invariants as projection_strands (common-fields.md 5.3).
+    -- Stage invariants follow common-fields.md 5.3.
     CONSTRAINT projection_morphs_stage_changed_at_requires_stage CHECK (
         (stage IS NOT NULL) OR (stage_changed_at IS NULL)
     ),
     CONSTRAINT projection_morphs_stage_check CHECK ((stage IS NULL) OR (stage = ANY (ARRAY['draft'::text, 'proposed'::text, 'planned'::text, 'in_progress'::text, 'blocked'::text, 'done'::text, 'cancelled'::text, 'superseded'::text]))),
-    -- Same content-slot invariant as projection_strands.
+    -- Content-slot invariant follows common-fields.md.
     CONSTRAINT projection_morphs_content_slot_check CHECK (
         (state = 'redacted' AND content IS NULL AND encrypted_content IS NULL)
         OR (state <> 'redacted' AND NOT (content IS NOT NULL AND encrypted_content IS NOT NULL))
@@ -2854,40 +2806,6 @@ CREATE INDEX projection_morphs_scope_circle_id_idx ON public.projection_morphs U
 CREATE INDEX projection_morphs_state_idx ON public.projection_morphs USING btree (state);
 
 CREATE INDEX projection_morphs_type_idx ON public.projection_morphs USING btree (morph_kind);
-
-CREATE TABLE public.projection_spaces (
-    pk bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    id bytea NOT NULL CHECK (octet_length(id) = 33),
-    realm_id text NOT NULL,
-    scope_circle_id bytea CHECK (octet_length(scope_circle_id) = 33),
-    child_scope_policy text,
-    child_scope_policy_scope_circle_id bytea CHECK (octet_length(child_scope_policy_scope_circle_id) = 33),
-    kind text NOT NULL,
-    title text NOT NULL,
-    fields jsonb DEFAULT '{}'::jsonb NOT NULL,
-    parent_ref bytea CHECK (octet_length(parent_ref) = 33),
-    rank text,
-    state text DEFAULT 'active'::text NOT NULL,
-    state_changed_at timestamp with time zone,
-    created_by jsonb NOT NULL,
-    updated_by jsonb,
-    created_at timestamp with time zone NOT NULL,
-    updated_at timestamp with time zone,
-    CONSTRAINT projection_spaces_child_scope_policy_check CHECK ((child_scope_policy = ANY (ARRAY['allow_any'::text, 'require_e2ee'::text, 'require_same_scope'::text, 'require_scope_circle_id'::text]))),
-    CONSTRAINT projection_spaces_child_scope_policy_scope_check CHECK (((child_scope_policy <> 'require_scope_circle_id'::text) OR (child_scope_policy_scope_circle_id IS NOT NULL))),
-    CONSTRAINT projection_spaces_state_check CHECK ((state = ANY (ARRAY['active'::text, 'archived'::text, 'tombstoned'::text])))
-);
-
-ALTER TABLE ONLY public.projection_spaces
-    ADD CONSTRAINT projection_spaces_id_key UNIQUE (id);
-
-CREATE INDEX projection_spaces_parent_idx ON public.projection_spaces USING btree (parent_ref) WHERE (parent_ref IS NOT NULL);
-
-CREATE INDEX projection_spaces_realm_idx ON public.projection_spaces USING btree (realm_id);
-
-CREATE INDEX projection_spaces_scope_circle_id_idx ON public.projection_spaces USING btree (scope_circle_id);
-
-CREATE INDEX projection_spaces_state_idx ON public.projection_spaces USING btree (state);
 
 CREATE TABLE public.push_devices (
     id text PRIMARY KEY,

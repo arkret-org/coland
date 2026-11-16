@@ -1,50 +1,16 @@
 //! Scope policy admission, independent replacements and zero-write refusals.
+use ordinary_realm::circle_request;
+
 #[path = "support/ordinary_realm.rs"]
 #[allow(dead_code)]
 mod ordinary_realm;
 use arkret_wire::{CircleId, CommitStreamRef, CurrentSelector, CurrentState, EventKind, ScopeRef};
-use coland_storage::{
-    AuthorityCommitStore, AuthorityCommitTransaction, EventCommitRequest, EventCommitUnitOfWork,
-};
+use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork};
 use coland_storage_postgres::test_database::TestDatabase;
 use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork};
 use diesel::sql_types::BigInt;
 use diesel_async::RunQueryDsl;
 use serde_json::{Value, json};
-fn circle_request(
-    previous: &AuthorityCommitTransaction,
-    circle: &CircleId,
-    kind: EventKind,
-    payload: Value,
-) -> EventCommitRequest {
-    let mut event = ordinary_realm::event_for_actor(
-        kind,
-        ScopeRef::Circle {
-            realm_id: previous.event.realm_id.clone(),
-            circle_id: circle.clone(),
-        },
-        previous.event.actor_id.clone(),
-        payload,
-        previous.commit.committed_at,
-    );
-    ordinary_realm::bind_structural_human_device(&mut event);
-    let mut request =
-        ordinary_realm::request_for_event(previous, event, previous.commit.committed_at);
-    let stream = CommitStreamRef::Circle {
-        realm_id: previous.event.realm_id.clone(),
-        circle_id: circle.clone(),
-    };
-    if previous.commit.stream_ref != stream {
-        request.authority_commit.commit.stream_position = 0;
-        request.authority_commit.commit.previous_commit_ref = None;
-    }
-    request.authority_commit.commit.stream_ref = stream;
-    ordinary_realm::seal_final_commit(&mut request.authority_commit.commit);
-    request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
-        request.authority_commit.event.clone(),
-    ));
-    request
-}
 
 #[derive(diesel::QueryableByName, PartialEq, Debug)]
 struct Counts {

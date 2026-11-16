@@ -8,6 +8,15 @@
 //! writes it in production, and the founding transaction reads it as the
 //! current founding authority.
 
+#[path = "support/terminal_rows.rs"]
+mod terminal_rows;
+use terminal_rows::terminal_persistent_rows;
+
+#[path = "support/sidecar_agent.rs"]
+#[allow(dead_code)]
+mod sidecar_agent;
+use sidecar_agent::{agent_key_authorization, station_genesis_commit, station_successor};
+
 #[path = "../../test-support/src/device_authorization_history.rs"]
 #[allow(dead_code)]
 mod device_authorization_history;
@@ -139,76 +148,6 @@ fn fixture_hash(byte: char) -> Hash {
     Hash::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
 }
 
-fn station_successor(
-    previous: &arkret_wire::RealmCommit,
-    event: &arkret_wire::Event,
-    station_did: &arkret_wire::Did,
-    offset_seconds: i64,
-) -> arkret_wire::RealmCommit {
-    let mut commit = previous.clone();
-    commit.commit_id = arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-        format!("{}:{}:successor", event.event_id, previous.commit_id).as_bytes(),
-    ));
-    commit.stream_position = previous.stream_position + 1;
-    commit.previous_commit_ref = Some(previous.commit_id.clone());
-    commit.event_ref = event.event_id.clone();
-    commit.committed_at = previous.committed_at + chrono::TimeDelta::seconds(offset_seconds);
-    commit.producer_signer_fact_digest = None;
-    let identity =
-        arkret_canonical::canonical::unsigned_value(&commit, &["commit_id", "signature"]).unwrap();
-    commit.commit_id = arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-        arkret_canonical::canonical_json_bytes(&identity).unwrap(),
-    ));
-    let unsigned = arkret_canonical::canonical::unsigned_value(&commit, &["signature"]).unwrap();
-    commit.signature = arkret_signatures::detached_object::sign_detached_object(
-        &unsigned,
-        arkret_wire::DetachedSignatureContext::RealmCommit,
-        DidUrl::new(format!("{station_did}#authority")).unwrap(),
-        commit.committed_at,
-        &ed25519_dalek::SigningKey::from_bytes(&[83; 32]),
-    )
-    .unwrap();
-    commit
-}
-
-fn station_genesis_commit(
-    template: &arkret_wire::RealmCommit,
-    event: &arkret_wire::Event,
-    station_did: &arkret_wire::Did,
-    committed_at: chrono::DateTime<chrono::Utc>,
-) -> arkret_wire::RealmCommit {
-    let realm_id = RealmId::from_event_id(&event.event_id);
-    let mut commit = template.clone();
-    commit.commit_id = arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-        format!("{}:genesis", event.event_id).as_bytes(),
-    ));
-    commit.realm_id = realm_id.clone();
-    commit.stream_ref = arkret_wire::CommitStreamRef::Realm { realm_id };
-    commit.stream_position = 0;
-    commit.previous_commit_ref = None;
-    commit.event_ref = event.event_id.clone();
-    commit.governance_generation = 0;
-    commit.authority_ref =
-        arkret_wire::RealmCommitAuthorityRef::GenesisOrChangeEvent(event.event_id.clone());
-    commit.committed_at = committed_at;
-    commit.producer_signer_fact_digest = None;
-    let identity =
-        arkret_canonical::canonical::unsigned_value(&commit, &["commit_id", "signature"]).unwrap();
-    commit.commit_id = arkret_wire::RealmCommitId::from_digest(arkret_canonical::sha256_bytes(
-        arkret_canonical::canonical_json_bytes(&identity).unwrap(),
-    ));
-    let unsigned = arkret_canonical::canonical::unsigned_value(&commit, &["signature"]).unwrap();
-    commit.signature = arkret_signatures::detached_object::sign_detached_object(
-        &unsigned,
-        arkret_wire::DetachedSignatureContext::RealmCommit,
-        DidUrl::new(format!("{station_did}#authority")).unwrap(),
-        commit.committed_at,
-        &ed25519_dalek::SigningKey::from_bytes(&[83; 32]),
-    )
-    .unwrap();
-    commit
-}
-
 #[allow(clippy::too_many_arguments)]
 fn agent_provision_event(
     controller: &AccountId,
@@ -269,41 +208,6 @@ fn agent_control_event(
     event.authorization_ref =
         Some(arkret_wire::AuthorizationRef::new(authorization_ref.to_owned()).unwrap());
     device_authorization_history::sign_event(event, controller_method.clone(), signing_seed)
-}
-
-fn agent_key_authorization(
-    agent_did: &arkret_wire::Did,
-    controller: &DidCoreId,
-    at: chrono::DateTime<chrono::Utc>,
-) -> serde_json::Value {
-    let method = format!("{agent_did}#runtime-1");
-    let submit = arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1;
-    serde_json::json!({
-        "agent_id": arkret_wire::project_did_to_core_id(agent_did).unwrap(),
-        "key_id": method,
-        "verification_method": method,
-        "public_key": {
-            "kty": "OKP",
-            "kid": method,
-            "algorithm": "Ed25519",
-            "key": arkret_canonical::base64url_encode(
-                ed25519_dalek::SigningKey::from_bytes(&[0x61; 32]).verifying_key().as_bytes()
-            )
-        },
-        "accountable_principal_id": controller,
-        "agent_key_scope": {
-            "actions": [submit],
-            "resources": [{"kind": "operation", "operation": submit}]
-        },
-        "audience": ["ak:did_core:web:direct-conversation.example"],
-        "issued_at": arkret_canonical::format_timestamp_canonical(at),
-        "approval_evidence": {
-            "kind": "pairing_request",
-            "request_canonical_digest": format!("sha256:{}", "d".repeat(64)),
-            "pairing_request_id": format!("agent_pairing_request:{}", uuid::Uuid::now_v7()),
-            "approved_by": controller
-        }
-    })
 }
 
 fn fixture_signature(
@@ -2751,61 +2655,6 @@ async fn controller_owned_agent_founding_reads_provision_and_runtime_key_at_the_
             .unwrap()
             .is_none()
     );
-}
-
-async fn terminal_persistent_rows(pool: &coland_storage_postgres::PgPool) -> serde_json::Value {
-    use diesel_async::RunQueryDsl as _;
-    #[derive(diesel::QueryableByName)]
-    struct Table {
-        #[diesel(sql_type = diesel::sql_types::Text)]
-        tablename: String,
-    }
-    #[derive(diesel::QueryableByName)]
-    struct Rows {
-        #[diesel(sql_type = diesel::sql_types::Jsonb)]
-        value: serde_json::Value,
-    }
-    let mut conn = pool.get().await.unwrap();
-    let tables = diesel::sql_query("SELECT tablename::text AS tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE '%current_states' OR tablename IN ('canonical_events','realm_commits','realm_authorities','federation_outbox','event_federation_outbox','replica_stream_anchors','replica_authorization_rows','replica_authorization_cuts','account_summary_current','account_summary_versions','account_summary_clock','current_state_heads','current_state_versions','direct_conversation_founding_slots')) ORDER BY tablename")
-        .load::<Table>(&mut *conn).await.unwrap();
-    let mut snapshot = serde_json::Map::new();
-    for table in tables {
-        assert!(
-            table
-                .tablename
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-        );
-        let query = format!(
-            "SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text),'[]'::jsonb) AS value FROM public.{} r",
-            table.tablename
-        );
-        let rows = diesel::sql_query(query)
-            .get_result::<Rows>(&mut *conn)
-            .await
-            .unwrap();
-        snapshot.insert(table.tablename, rows.value);
-    }
-    for table in [
-        "canonical_events",
-        "realm_commits",
-        "realm_authorities",
-        "federation_outbox",
-        "event_federation_outbox",
-        "realm_bootstrap_current_states",
-        "replica_stream_anchors",
-        "replica_authorization_rows",
-        "replica_authorization_cuts",
-        "account_summary_current",
-        "account_summary_versions",
-        "account_summary_clock",
-    ] {
-        assert!(
-            snapshot.contains_key(table),
-            "missing acceptance footprint table: {table}"
-        );
-    }
-    serde_json::Value::Object(snapshot)
 }
 
 /// Exercise the durable activation gate with a shape-valid, doubly signed

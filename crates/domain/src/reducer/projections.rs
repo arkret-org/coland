@@ -173,8 +173,7 @@ pub struct MlsKeyPackageProjection {
     pub created_at: i64,
 }
 
-/// Server-side Space-container state cache. Mirrors the
-/// `projection_space_containers` table.
+/// Server-side Space-container cache rebuilt from registered current snapshots.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpaceContainerProjection {
     pub container_space_id: String,
@@ -245,7 +244,7 @@ pub fn object_stage_from_wire_value(value: &str) -> Option<ObjectStage> {
     serde_json::from_value(Value::String(value.to_owned())).ok()
 }
 
-/// Server-side Strand state cache. Mirrors `projection_strands` table.
+/// Server-side Strand state cache rebuilt from registered current snapshots.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StrandProjection {
     pub strand_id: String,

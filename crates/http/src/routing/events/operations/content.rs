@@ -35,19 +35,6 @@ pub fn validate_content_blocks(content: &serde_json::Value) -> Result<(), &'stat
     validate_content_block(content)
 }
 
-/// Canonical mention admission for a Message Content Block tree.
-///
-/// The only admissible shapes are the spec AST nodes — `{"kind":"mention"}`
-/// with a complete `AccountId` `subject_account_id` or Realm `subject_actor_id`, and
-/// `{"kind":"audience_mention"}` with a closed `audience` — both parsed by the
-/// SDK models that own the wire types.
-#[cfg(test)]
-pub fn validate_mentions(content: &serde_json::Value) -> Result<(), &'static str> {
-    arkret_models_collaboration::events_payloads::collect_mention_nodes(content)
-        .map(|_| ())
-        .map_err(|error| error.message())
-}
-
 pub(crate) fn operation_audience_mentions(
     operation: &Operation,
 ) -> Result<Vec<arkret_models_collaboration::events_payloads::AudienceMention>, &'static str> {
@@ -139,23 +126,14 @@ pub fn validate_canonical_json_value_inner(
             for value in object.values() {
                 validate_canonical_json_value_inner(value, false)?;
             }
-            // Generic payload traversal accepts the two canonical timestamp
-            // profiles used by v1: ordinary artifact fields use whole seconds,
-            // while Event-bound create-object fields use fixed milliseconds so
-            // `payload.object.created_at == Event.created_at` remains possible.
-            // Kind-specific validators still enforce the narrower profile for
-            // fields such as invite expiry.
+            // Generic traversal uses the SDK's canonical v1 timestamp profile.
             for (key, value) in object {
                 if key.ends_with("_at")
                     && let Some(s) = value.as_str()
                 {
-                    let canonical_seconds =
-                        arkret_canonical::validate_timestamp_canonical(s).is_ok();
-                    let canonical_millis =
-                        arkret_canonical::validate_timestamp_canonical(s).is_ok();
-                    if !canonical_seconds && !canonical_millis {
+                    if arkret_canonical::validate_timestamp_canonical(s).is_err() {
                         return Err(
-                            "timestamp must use canonical RFC 3339 UTC whole-second or fixed-millisecond form",
+                            "timestamp must use canonical RFC 3339 UTC fixed-millisecond form",
                         );
                     }
                 }

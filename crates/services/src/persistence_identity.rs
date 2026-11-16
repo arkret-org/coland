@@ -728,10 +728,7 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
             .0
             .agents()
             .pending_pairings_after(after_id, limit)
-            .await?
-            .into_iter()
-            .map(application_agent_pairing)
-            .collect())
+            .await?)
     }
 
     async fn pairing_record(
@@ -742,20 +739,14 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
             .0
             .agents()
             .get_by_pairing_request_id(pairing_request_id)
-            .await?
-            .map(application_agent_pairing))
+            .await?)
     }
 
     async fn agent(
         &self,
         agent_id: &str,
     ) -> crate::ServiceResult<Option<crate::identity::AgentPairingState>> {
-        Ok(self
-            .0
-            .agents()
-            .get(agent_id)
-            .await?
-            .map(application_agent_pairing))
+        Ok(self.0.agents().get(agent_id).await?)
     }
 
     async fn agents_for_controller(
@@ -766,20 +757,14 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
             .0
             .agents()
             .list_for_controller(controller_principal_id)
-            .await?
-            .into_iter()
-            .map(application_agent_pairing)
-            .collect())
+            .await?)
     }
 
     async fn save_agent(
         &self,
         agent: crate::identity::AgentPairingState,
     ) -> crate::ServiceResult<()> {
-        self.0
-            .agents()
-            .put(persistence_agent_pairing(agent))
-            .await?;
+        self.0.agents().put(agent).await?;
         Ok(())
     }
 
@@ -805,8 +790,7 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
             .0
             .agents()
             .put_runtime_approval_if_compatible(&write)
-            .await?
-            .map(application_agent_pairing))
+            .await?)
     }
 
     async fn activate_runtime_if_current(
@@ -856,8 +840,7 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
             .0
             .agents()
             .put_pairing_commit_intent_if_compatible(&intent)
-            .await?
-            .map(application_agent_pairing))
+            .await?)
     }
 
     async fn clear_approval_notification_if_current(
@@ -881,92 +864,6 @@ impl crate::identity::AgentPairingPort for PersistenceAgentPairing {
             .agents()
             .enqueue_runtime_message_if_current(command)
             .await?)
-    }
-}
-
-fn application_agent_pairing(
-    record: coland_storage::AgentPrincipalRecord,
-) -> crate::identity::AgentPairingState {
-    crate::identity::AgentPairingState {
-        id: record.id,
-        controller_principal_id: record.controller_principal_id,
-        principal_control_realm_id: record.principal_control_realm_id,
-        controller_authorization_ref: record.controller_authorization_ref,
-        display_name: record.display_name,
-        agent_slug: record.agent_slug,
-        avatar_blob_ref: record.avatar_blob_ref,
-        state: record.state,
-        requested_scope: record.requested_scope,
-        accountability: record.accountability,
-        provision_event_refs: record.provision_event_refs,
-        pairing_request_id: record.pairing_request_id,
-        paired_pairing_request_id: record.paired_pairing_request_id,
-        paired_request_digest: record.paired_request_digest,
-        pending_pairing_commit_intent: record.pending_pairing_commit_intent,
-        pairing_code: record.pairing_code,
-        pairing_expires_at: record.pairing_expires_at,
-        approval_request_id: record.approval_request_id,
-        controller_account_pk: record.controller_account_pk,
-        recipient_id: record.recipient_id,
-        runtime_key_binding_digest: record.runtime_key_binding_digest,
-        runtime_public_key_digest: record.runtime_public_key_digest,
-        runtime_attestation_digest: record.runtime_attestation_digest,
-        runtime_proof_verified_at: record.runtime_proof_verified_at,
-        approval_notification_id: record.approval_notification_id,
-        runtime_key_request: record.runtime_key_request,
-        approval_requested_at: record.approval_requested_at,
-        authorized_event_ref: record.authorized_event_ref,
-        authorized_verification_method: record.authorized_verification_method,
-        authorized_public_key_digest: record.authorized_public_key_digest,
-        authorized_key_event: record.authorized_key_event,
-        signer_resolution_evidence_ref: record.signer_resolution_evidence_ref,
-        current_signer_evidence: record.current_signer_evidence,
-        state_changed_at: record.state_changed_at,
-        created_at: record.created_at,
-        updated_at: record.updated_at,
-    }
-}
-
-fn persistence_agent_pairing(
-    record: crate::identity::AgentPairingState,
-) -> coland_storage::AgentPrincipalRecord {
-    coland_storage::AgentPrincipalRecord {
-        id: record.id,
-        controller_principal_id: record.controller_principal_id,
-        principal_control_realm_id: record.principal_control_realm_id,
-        controller_authorization_ref: record.controller_authorization_ref,
-        display_name: record.display_name,
-        agent_slug: record.agent_slug,
-        avatar_blob_ref: record.avatar_blob_ref,
-        state: record.state,
-        requested_scope: record.requested_scope,
-        accountability: record.accountability,
-        provision_event_refs: record.provision_event_refs,
-        pairing_request_id: record.pairing_request_id,
-        paired_pairing_request_id: record.paired_pairing_request_id,
-        paired_request_digest: record.paired_request_digest,
-        pending_pairing_commit_intent: record.pending_pairing_commit_intent,
-        pairing_code: record.pairing_code,
-        pairing_expires_at: record.pairing_expires_at,
-        approval_request_id: record.approval_request_id,
-        controller_account_pk: record.controller_account_pk,
-        recipient_id: record.recipient_id,
-        runtime_key_binding_digest: record.runtime_key_binding_digest,
-        runtime_public_key_digest: record.runtime_public_key_digest,
-        runtime_attestation_digest: record.runtime_attestation_digest,
-        runtime_proof_verified_at: record.runtime_proof_verified_at,
-        approval_notification_id: record.approval_notification_id,
-        runtime_key_request: record.runtime_key_request,
-        approval_requested_at: record.approval_requested_at,
-        authorized_event_ref: record.authorized_event_ref,
-        authorized_verification_method: record.authorized_verification_method,
-        authorized_public_key_digest: record.authorized_public_key_digest,
-        authorized_key_event: record.authorized_key_event,
-        signer_resolution_evidence_ref: record.signer_resolution_evidence_ref,
-        current_signer_evidence: record.current_signer_evidence,
-        state_changed_at: record.state_changed_at,
-        created_at: record.created_at,
-        updated_at: record.updated_at,
     }
 }
 

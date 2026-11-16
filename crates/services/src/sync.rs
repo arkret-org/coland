@@ -257,10 +257,6 @@ impl SyncService {
         self.cursors.upsert_with_inputs(record, inputs).await
     }
 
-    pub async fn delete_cursor(&self, handle: &str) -> ServiceResult<bool> {
-        self.cursors.delete(handle).await
-    }
-
     pub async fn prune_expired_cursors(&self, now_ms: i64) -> ServiceResult<usize> {
         self.cursors.prune_expired(now_ms).await
     }

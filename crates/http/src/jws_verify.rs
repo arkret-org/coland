@@ -509,36 +509,6 @@ pub(crate) async fn resolve_principal_authorized_device_key_with_account_authori
     })
 }
 
-pub async fn verify_principal_authorized_jws_with_account_authority_async(
-    canonical_bytes: &[u8],
-    jws: &str,
-    verification_method: &str,
-    authority: &arkret_wire::AccountId,
-    expected_device_id: &arkret_identifiers::DeviceId,
-    state: &AppState,
-) -> Result<(), PrincipalAuthorizedJwsError> {
-    let (verification_method, _, accepted, _) =
-        principal_authorized_device_binding_with_account_authority_async(
-            verification_method,
-            authority,
-            expected_device_id,
-            state,
-        )
-        .await?;
-    let outcome = arkret_identity::verify_jws_with_binding(
-        canonical_bytes,
-        jws,
-        &verification_method,
-        &accepted,
-    )
-    .map_err(|error| PrincipalAuthorizedJwsError::Verification(error.to_string()));
-    crate::metrics::record_signature_verify(
-        crate::metrics::SIGNATURE_SCHEME_PINNED_DOCUMENT,
-        outcome.is_ok(),
-    );
-    outcome
-}
-
 /// Verify the accepted-device proof's raw Ed25519 signature against the same
 /// durable PCR authority and current device authorization used for detached
 /// principal JWS verification.
@@ -1047,39 +1017,6 @@ pub async fn resolve_ed25519_pubkey_at(
         Some(&state.config().trust_domain),
     )?;
     Ok(public_key)
-}
-
-/// Resolve and validate a DID-scoped Ed25519 verification method.
-///
-/// This is the shared verifier boundary used by federation, recovery and
-/// other control-plane endpoints that sign canonical JSON transcripts outside
-/// the detached-JWS wrapper. It enforces the same controller and DID-document
-/// membership checks before returning the public key.
-pub async fn resolve_ed25519_verification_key_for_did(
-    state: &AppState,
-    did: &Did,
-    verification_method: &str,
-) -> Result<ResolvedVerificationKey, String> {
-    validate_verification_method_controller(did.as_str(), verification_method)?;
-    let document = resolve_did_document_async(state, did).await?;
-    require_verification_method_in_document(&document, verification_method)?;
-    let public_key =
-        arkret_identity::jws::resolve_ed25519_pubkey_from_document(&document, verification_method)
-            .map_err(|error| error.to_string())?;
-    enforce_selected_key_admission(
-        did,
-        verification_method,
-        &public_key,
-        Some(&state.config().trust_domain),
-    )?;
-    let key_log_head = did_document_key_log_head(state, did, &document).await?;
-    Ok(ResolvedVerificationKey {
-        verification_method: verification_method.to_owned(),
-        algorithm: "Ed25519",
-        public_key,
-        did_document_ref: format!("{}#document", did),
-        key_log_head,
-    })
 }
 
 fn enforce_selected_document_admission(

@@ -324,11 +324,17 @@ mod tests {
     }
 
     #[test]
-    fn progress_rejects_old_wire_wrapper_and_changed_request() {
+    fn progress_rejects_changed_canonical_request() {
         let (_, progress) = fixture();
-        let mut legacy = serde_json::to_value(&progress.outcome).unwrap();
-        legacy["legacy_output_ref"] = serde_json::json!("old-public-operation");
-        assert!(serde_json::from_value::<BackupSeriesEraseOutcome>(legacy).is_err());
+        let outcome = serde_json::to_value(&progress.outcome).unwrap();
+        assert_eq!(
+            serde_json::from_value::<BackupSeriesEraseOutcome>(outcome.clone()).unwrap(),
+            progress.outcome,
+        );
+        let mut unknown = outcome;
+        unknown["unexpected"] = serde_json::json!(true);
+        let error = serde_json::from_value::<BackupSeriesEraseOutcome>(unknown).unwrap_err();
+        assert!(error.to_string().contains("unknown field `unexpected`"));
         let mut changed = progress.clone();
         changed.canonical_request.push(b' ');
         assert!(crate::validate_backup_erase_progress_initial(&changed).is_err());

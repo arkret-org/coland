@@ -1542,33 +1542,6 @@ impl AuthorityCommitApplication {
         Ok(transaction)
     }
 
-    /// [`Self::prepare_self_event_transaction`] for an `ak.mls.genesis` or
-    /// `ak.mls.commit`: the transaction also installs the public transition
-    /// the caller verified and queues every verified Welcome of the Commit.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn prepare_self_mls_transaction(
-        &self,
-        event: &Event,
-        mls_state: coland_storage::MlsStateInstallation,
-        welcomes: Vec<coland_storage::VerifiedMlsWelcome>,
-        local_service_id: &DidCoreId,
-        verification_method: DidUrl,
-        signing_key: &SigningKey,
-        committed_at: DateTime<Utc>,
-    ) -> ServiceResult<AuthorityCommitTransaction> {
-        self.prepare_self_mls_transaction_with_signer_fact(
-            event,
-            mls_state,
-            welcomes,
-            local_service_id,
-            verification_method,
-            signing_key,
-            committed_at,
-            None,
-        )
-        .await
-    }
-
     #[expect(
         clippy::too_many_arguments,
         reason = "Atomic MLS preparation binds state installation and authenticated signer facts to the Event."

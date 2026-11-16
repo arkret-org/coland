@@ -878,3 +878,78 @@ where
 {
     Box::pin(make())
 }
+
+pub fn circle_membership_request(
+    previous: &AuthorityCommitTransaction,
+    circle: &arkret_wire::CircleId,
+    actor: &arkret_wire::ActorId,
+    state: &str,
+    expected: Option<&str>,
+    parent: Option<serde_json::Value>,
+) -> coland_storage::EventCommitRequest {
+    let scope = arkret_wire::ScopeRef::Circle {
+        realm_id: previous.event.realm_id.clone(),
+        circle_id: circle.clone(),
+    };
+    let event = event_for_actor(
+        arkret_wire::EventKind::CircleMemberState,
+        scope,
+        actor.clone(),
+        {
+            let mut payload = serde_json::json!({"circle_id":circle,"member_id":actor,"membership":state,"expected_membership":expected});
+            if let Some(parent) = parent {
+                payload["parent_membership_revision"] = parent;
+            }
+            payload
+        },
+        previous.commit.committed_at,
+    );
+    let mut request = request_for_event(previous, event, previous.commit.committed_at);
+    let stream = arkret_wire::CommitStreamRef::Circle {
+        realm_id: previous.event.realm_id.clone(),
+        circle_id: circle.clone(),
+    };
+    if previous.commit.stream_ref != stream {
+        request.authority_commit.commit.stream_position = 0;
+        request.authority_commit.commit.previous_commit_ref = None;
+    }
+    request.authority_commit.commit.stream_ref = stream;
+    request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
+        request.authority_commit.event.clone(),
+    ));
+    request
+}
+
+pub fn circle_request(
+    previous: &AuthorityCommitTransaction,
+    circle: &arkret_wire::CircleId,
+    kind: arkret_wire::EventKind,
+    payload: serde_json::Value,
+) -> EventCommitRequest {
+    let mut event = event_for_actor(
+        kind,
+        arkret_wire::ScopeRef::Circle {
+            realm_id: previous.event.realm_id.clone(),
+            circle_id: circle.clone(),
+        },
+        previous.event.actor_id.clone(),
+        payload,
+        previous.commit.committed_at,
+    );
+    bind_structural_human_device(&mut event);
+    let mut request = request_for_event(previous, event, previous.commit.committed_at);
+    let stream = arkret_wire::CommitStreamRef::Circle {
+        realm_id: previous.event.realm_id.clone(),
+        circle_id: circle.clone(),
+    };
+    if previous.commit.stream_ref != stream {
+        request.authority_commit.commit.stream_position = 0;
+        request.authority_commit.commit.previous_commit_ref = None;
+    }
+    request.authority_commit.commit.stream_ref = stream;
+    seal_final_commit(&mut request.authority_commit.commit);
+    request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
+        request.authority_commit.event.clone(),
+    ));
+    request
+}

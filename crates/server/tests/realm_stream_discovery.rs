@@ -1,5 +1,7 @@
 //! Real HTTP stream enumeration across the 500-row boundary, frozen heads,
 //! current membership loss, and cursor binding. No domain rows are fabricated.
+use ordinary_realm::circle_membership_request as membership;
+
 #[path = "../../storage-postgres/tests/support/ordinary_realm.rs"]
 #[allow(dead_code)]
 mod ordinary_realm;
@@ -239,48 +241,6 @@ fn seal_commit(state: &coland_http::state::AppState, commit: &mut arkret_wire::R
     )
     .unwrap();
     commit.verify_commit_id_matches_content().unwrap();
-}
-
-fn membership(
-    previous: &AuthorityCommitTransaction,
-    circle: &arkret_wire::CircleId,
-    actor: &ActorId,
-    state: &str,
-    expected: Option<&str>,
-    parent: Option<serde_json::Value>,
-) -> coland_storage::EventCommitRequest {
-    let scope = arkret_wire::ScopeRef::Circle {
-        realm_id: previous.event.realm_id.clone(),
-        circle_id: circle.clone(),
-    };
-    let event = ordinary_realm::event_for_actor(
-        EventKind::CircleMemberState,
-        scope,
-        actor.clone(),
-        {
-            let mut payload = serde_json::json!({"circle_id":circle,"member_id":actor,"membership":state,"expected_membership":expected});
-            if let Some(parent) = parent {
-                payload["parent_membership_revision"] = parent;
-            }
-            payload
-        },
-        previous.commit.committed_at,
-    );
-    let mut request =
-        ordinary_realm::request_for_event(previous, event, previous.commit.committed_at);
-    let stream = CommitStreamRef::Circle {
-        realm_id: previous.event.realm_id.clone(),
-        circle_id: circle.clone(),
-    };
-    if previous.commit.stream_ref != stream {
-        request.authority_commit.commit.stream_position = 0;
-        request.authority_commit.commit.previous_commit_ref = None;
-    }
-    request.authority_commit.commit.stream_ref = stream;
-    request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
-        request.authority_commit.event.clone(),
-    ));
-    request
 }
 
 fn run_http_scenario<F: std::future::Future<Output = ()> + 'static>(make: fn() -> F) {

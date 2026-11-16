@@ -1072,10 +1072,8 @@ pub async fn hydrate_projections_from_persistence(
         }
     }
 
-    // Rebuild the process-local Space/Strand compatibility cache from the same
-    // RealmCommit-backed typed current rows used by canonical list reads.
-    // The retired projection_spaces/projection_strands mirrors must never
-    // resurrect stale state after a restart.
+    // Rebuild the process-local Space/Strand cache from the RealmCommit-backed
+    // typed current rows used by canonical list reads.
     let current_objects = persistence.object_current_snapshot().snapshot().await?;
     for space in current_objects.spaces {
         let id = space.id.ok_or_else(|| {

@@ -20,10 +20,10 @@ use std::path::{Path, PathBuf};
 const HAND_ROLLED_EXCLUSIONS: &[&str] = &[r#"remove("event_id")"#];
 
 fn rust_sources(root: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = fs::read_dir(root)
+        .unwrap_or_else(|error| panic!("read Rust source tree {}: {error}", root.display()));
+    for entry in entries {
+        let entry = entry.expect("read source tree entry");
         let path = entry.path();
         if path.is_dir() {
             rust_sources(&path, out);
@@ -41,11 +41,17 @@ fn no_coland_source_hand_rolls_the_event_digest_preimage() {
         "../http/src",
         "../domain/src",
         "../services/src",
-        "../server",
+        "../storage/src",
+        "../storage-postgres/src",
+        "../storage-postgres/tests",
+        "../test-support/src",
         "src",
+        "tests",
     ] {
         rust_sources(&manifest.join(tree), &mut sources);
     }
+    sources.sort();
+    sources.dedup();
     assert!(!sources.is_empty(), "found no Rust sources to scan");
 
     let mut violations = Vec::new();

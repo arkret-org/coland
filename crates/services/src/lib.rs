@@ -138,11 +138,6 @@ impl ServiceError {
             .error_code()
             .map(|code| Self::protocol(code, detail))
     }
-
-    #[must_use]
-    pub fn is_realm_already_exists(&self) -> bool {
-        self.conflict_code() == Some(coland_storage::ConflictCode::RealmAlreadyExists)
-    }
 }
 
 impl From<coland_storage::PersistenceError> for ServiceError {

@@ -439,44 +439,6 @@ impl ProjectionState {
         strand_position_from_create_payload(object).map(|_| ())
     }
 
-    /// Create-time forbidden-wire fields are rejected, mirroring the
-    /// registry-driven check in `apply_strand_create` so the create fails at
-    /// admission with the same reason instead of only at projection. Reads
-    /// the raw create object for the same reason as
-    /// `check_strand_position_typing`.
-    pub fn check_strand_create_forbidden_wire_fields(
-        &self,
-        operation: &Operation,
-    ) -> Result<(), &'static str> {
-        if crate::kinds::canonical_kind_for_operation(operation)
-            != Some(arkret_wire::EventKind::StrandCreate)
-        {
-            return Ok(());
-        }
-        let Some(object) = operation.payload.get("object").and_then(Value::as_object) else {
-            return Ok(());
-        };
-        strand_forbidden_wire_field_in_create_payload(object)
-    }
-
-    /// Create-time forbidden-wire fields are rejected, mirroring the
-    /// registry-driven check in `apply_morph_create`. Reads the raw create
-    /// object for the same reason as `check_strand_position_typing`.
-    pub fn check_morph_create_forbidden_wire_fields(
-        &self,
-        operation: &Operation,
-    ) -> Result<(), &'static str> {
-        if crate::kinds::canonical_kind_for_operation(operation)
-            != Some(arkret_wire::EventKind::MorphCreate)
-        {
-            return Ok(());
-        }
-        let Some(object) = operation.payload.get("object").and_then(Value::as_object) else {
-            return Ok(());
-        };
-        morph_forbidden_wire_field_in_create_payload(object)
-    }
-
     pub fn check_child_scope_policy_transition(
         &self,
         operation: &Operation,

@@ -1,17 +1,15 @@
 //! Circle-scoped Strand and plaintext Poll use the signed Circle source and
 //! confirmed membership at the accepting PostgreSQL transaction cut.
+use ordinary_realm::circle_request;
+
 #[path = "support/ordinary_realm.rs"]
 #[allow(dead_code)]
 mod ordinary_realm;
 
 use arkret_wire::{
-    CircleId, CommitStreamRef, CurrentSelector, CurrentState, EventKind, MessageId, ScopeRef,
-    StrandId,
+    CircleId, CommitStreamRef, CurrentSelector, CurrentState, EventKind, MessageId, StrandId,
 };
-use coland_storage::{
-    AuthorityCommitStore, AuthorityCommitTransaction, EventCommitRequest, EventCommitUnitOfWork,
-    EventProjectionStoreRegistry,
-};
+use coland_storage::{AuthorityCommitStore, EventCommitUnitOfWork, EventProjectionStoreRegistry};
 use coland_storage_postgres::test_database::TestDatabase;
 use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 use diesel::sql_types::BigInt;
@@ -51,41 +49,6 @@ async fn counts(pool: &PgPool) -> (i64, i64, i64, i64, i64) {
         row.messages,
         row.votes,
     )
-}
-
-fn circle_request(
-    previous: &AuthorityCommitTransaction,
-    circle: &CircleId,
-    kind: EventKind,
-    payload: Value,
-) -> EventCommitRequest {
-    let mut event = ordinary_realm::event_for_actor(
-        kind,
-        ScopeRef::Circle {
-            realm_id: previous.event.realm_id.clone(),
-            circle_id: circle.clone(),
-        },
-        previous.event.actor_id.clone(),
-        payload,
-        previous.commit.committed_at,
-    );
-    ordinary_realm::bind_structural_human_device(&mut event);
-    let mut request =
-        ordinary_realm::request_for_event(previous, event, previous.commit.committed_at);
-    let stream = CommitStreamRef::Circle {
-        realm_id: previous.event.realm_id.clone(),
-        circle_id: circle.clone(),
-    };
-    if previous.commit.stream_ref != stream {
-        request.authority_commit.commit.stream_position = 0;
-        request.authority_commit.commit.previous_commit_ref = None;
-    }
-    request.authority_commit.commit.stream_ref = stream;
-    ordinary_realm::seal_final_commit(&mut request.authority_commit.commit);
-    request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
-        request.authority_commit.event.clone(),
-    ));
-    request
 }
 
 #[tokio::test]

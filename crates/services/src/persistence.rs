@@ -194,13 +194,6 @@ impl PersistenceHandle {
             .await
     }
 
-    pub async fn accepted_realm_organization_relationships(&self, realm_id: &arkret_wire::RealmId, at: chrono::DateTime<chrono::Utc>) -> PersistenceResult<Vec<arkret_models_collaboration::governance::realm_governance::RealmOrganizationRelationshipView>>{
-        self.persistence
-            .realm_organization_statements()
-            .accepted_relationships(realm_id, at)
-            .await
-    }
-
     pub async fn require_organization_moderation_authority(
         &self,
         realm_id: &arkret_wire::RealmId,
@@ -222,17 +215,6 @@ impl PersistenceHandle {
         self.persistence
             .mimi_consent_correlations()
             .bind_decision(id, decision, submission, allow_new)
-            .await
-    }
-    pub async fn consent_historical_basis(
-        &self,
-        holder: &arkret_wire::AccountId,
-        peer: &arkret_wire::ActorId,
-        revision: &arkret_wire::CurrentRevision,
-    ) -> PersistenceResult<Option<coland_storage::CommittedEventRecord>> {
-        self.persistence
-            .consent_current()
-            .historical_basis(holder, peer, revision)
             .await
     }
     pub async fn drain_native_consent_effects(
@@ -333,36 +315,11 @@ impl PersistenceHandle {
             .await
     }
 
-    pub async fn consent_private_command(
-        &self,
-        request: &arkret_models_collaboration::consent_private::ConsentPrivateProxyRequestBody,
-        source: &arkret_wire::DidCoreId,
-        acceptor: &arkret_wire::DidCoreId,
-        quota: &arkret_wire::NewSourceQuotaConstraints,
-    ) -> PersistenceResult<
-        arkret_models_collaboration::consent_private::ConsentPrivateProxyResponseBody,
-    > {
-        self.persistence
-            .consent_current()
-            .private_command(request, source, acceptor, quota)
-            .await
-    }
-
     pub async fn admit_consent(
         &self,
         write: coland_storage::ConsentAdmissionWrite<'_>,
     ) -> PersistenceResult<coland_storage::ConsentAdmissionOutcome> {
         self.persistence.consent_current().admit(write).await
-    }
-
-    pub async fn admit_consented_invite_delivery(
-        &self,
-        write: coland_storage::ConsentDeliveryWrite,
-    ) -> PersistenceResult<Option<coland_storage::AccountDataCasResult>> {
-        self.persistence
-            .consent_current()
-            .admit_invite_delivery(write)
-            .await
     }
 
     pub async fn consent_current(
@@ -954,29 +911,6 @@ impl PersistenceHandle {
             .await?)
     }
 
-    pub async fn contact_verified_mirror(
-        &self,
-        target_holder_principal_id: &str,
-        request_event_id: &str,
-    ) -> crate::ServiceResult<Option<coland_storage::ContactVerifiedMirrorRecord>> {
-        Ok(self
-            .persistence
-            .contact_verified_mirrors()
-            .get(target_holder_principal_id, request_event_id)
-            .await?)
-    }
-
-    pub async fn put_contact_verified_mirror(
-        &self,
-        record: &coland_storage::ContactVerifiedMirrorRecord,
-    ) -> crate::ServiceResult<()> {
-        Ok(self
-            .persistence
-            .contact_verified_mirrors()
-            .put_verified(record)
-            .await?)
-    }
-
     pub async fn agent_cleanup_intent(
         &self,
         cleanup_intent_digest: &arkret_wire::Hash,
@@ -1428,41 +1362,6 @@ impl PersistenceHandle {
             .await?)
     }
 
-    pub async fn pending_device_revocation_cleanup_intents(
-        &self,
-        limit: usize,
-    ) -> crate::ServiceResult<Vec<coland_storage::DeviceRevocationCleanupIntent>> {
-        Ok(self
-            .persistence
-            .device_revocations()
-            .pending_cleanup_intents(limit)
-            .await?)
-    }
-
-    pub async fn complete_device_revocation_material_cleanup(
-        &self,
-        proposal_event_id: &arkret_wire::EventId,
-        completed_at: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<bool> {
-        Ok(self
-            .persistence
-            .device_revocations()
-            .complete_material_cleanup(proposal_event_id, completed_at)
-            .await?)
-    }
-
-    pub async fn complete_device_revocation_mls_obligation(
-        &self,
-        proposal_event_id: &arkret_wire::EventId,
-        completed_at: chrono::DateTime<chrono::Utc>,
-    ) -> crate::ServiceResult<bool> {
-        Ok(self
-            .persistence
-            .device_revocations()
-            .complete_mls_obligation(proposal_event_id, completed_at)
-            .await?)
-    }
-
     pub async fn idempotency_record(
         &self,
         principal_id: &arkret_identifiers::DidCoreId,
@@ -1628,18 +1527,6 @@ impl PersistenceHandle {
             .persistence
             .principal_resolutions()
             .for_realm(pcr_realm_id)
-            .await?)
-    }
-
-    pub async fn compare_and_set_principal_resolution(
-        &self,
-        expected_current_event_ref: Option<&str>,
-        next: coland_storage::PrincipalResolutionRecord,
-    ) -> crate::ServiceResult<coland_storage::PrincipalResolutionCasResult> {
-        Ok(self
-            .persistence
-            .principal_resolutions()
-            .compare_and_set(expected_current_event_ref, next)
             .await?)
     }
 
@@ -1882,18 +1769,6 @@ impl PersistenceHandle {
         &self,
     ) -> &dyn coland_storage::InviteNewSourceLedgerStore {
         self.persistence.invite_new_source_ledger()
-    }
-
-    /// Charge the shared first-contact quota and CAS one holder-private
-    /// Consent request entry in the same durable transaction.
-    pub async fn admit_consent_request_quarantine(
-        &self,
-        input: coland_storage::ConsentRequestQuarantineInput,
-    ) -> PersistenceResult<coland_storage::ConsentRequestQuarantineOutcome> {
-        self.persistence
-            .consent_request_quarantine()
-            .admit(input)
-            .await
     }
 
     pub fn event_services(&self) -> PersistenceEventServices {

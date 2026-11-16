@@ -397,10 +397,7 @@ async fn postgres_notification_relay_delivers_large_payload_by_committed_referen
 #[tokio::test]
 async fn postgres_structured_projection_identities_round_trip() {
     use arkret_wire::{AccountId, ActorId, DidCoreId};
-    use coland_storage::{
-        CircleProjectionStore, MorphProjectionStore, SpaceContainerProjectionStore,
-        StrandProjectionStore,
-    };
+    use coland_storage::{CircleProjectionStore, MorphProjectionStore};
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
     let pool = database.pool();
     let _db_guard = DB_GUARD.lock().await;
@@ -451,52 +448,6 @@ async fn postgres_structured_projection_identities_round_trip() {
             );
         }};
     }
-    round_trip!(
-        PgSpaceContainerProjectionStore,
-        coland_storage::SpaceContainerProjectionRecord {
-            container_space_id: "ak:space:AeJsr0sf3TZ_Cuzj2uLddhd-O-Cywvdj8ypnqpVG8zim".into(),
-            kind: "navigation".into(),
-            title: "identity persistence".into(),
-            fields: Default::default(),
-            scope_circle_id: None,
-            child_scope_policy: None,
-            child_scope_policy_scope_circle_id: None,
-            parent_ref: None,
-            rank: None,
-            realm_id: realm_id.into(),
-            state: "active".into(),
-            state_changed_at: None,
-            created_by: author.clone(),
-            created_at: now,
-            updated_by: None,
-            updated_at: Some(now),
-        },
-        container_space_id
-    );
-    round_trip!(
-        PgStrandProjectionStore,
-        coland_storage::StrandProjectionRecord {
-            strand_id: "ak:strand:AeJsr0sf3TZ_Cuzj2uLddhd-O-Cywvdj8ypnqpVG8zim".into(),
-            tracks: Default::default(),
-            title: "identity persistence".into(),
-            summary: None,
-            content: Some(serde_json::json!({"text":"test"})),
-            encrypted_content: None,
-            fields: Default::default(),
-            schema_refs: vec!["ak.schema.calendar_event.v1".to_owned()],
-            scope_circle_id: None,
-            realm_id: realm_id.into(),
-            state: "active".into(),
-            state_changed_at: None,
-            stage: None,
-            stage_changed_at: None,
-            created_by: author.clone(),
-            created_at: now,
-            updated_by: None,
-            updated_at: Some(now),
-        },
-        strand_id
-    );
     round_trip!(
         PgMorphProjectionStore,
         coland_storage::MorphProjectionRecord {

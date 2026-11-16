@@ -84,60 +84,6 @@ pub fn verify_non_governance_committed_event(
     })
 }
 
-/// Receipt compatibility entry without an immutable Human fact. Ordinary
-/// Human rows remain unavailable here; callers holding the registered fact
-/// use `verify_committed_event_receipt_with_fact`.
-#[allow(clippy::too_many_arguments)]
-pub async fn verify_committed_event_receipt(
-    local_pcr: &dyn DeviceRevocationStore,
-    event: &Event,
-    commit: &RealmCommit,
-    continuity: CommitContinuity<'_>,
-    authority: &VerifiedRealmAuthority,
-    keys: &(dyn RealmAuthorityKeyDirectory + Sync),
-    receiver: &DidCoreId,
-    digest_suite: DigestSuite,
-) -> ServiceResult<ReceivedProducer> {
-    verify_committed_event_receipt_with_fact(
-        local_pcr,
-        event,
-        commit,
-        continuity,
-        authority,
-        keys,
-        receiver,
-        digest_suite,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn verify_committed_event_receipt_with_fact(
-    local_pcr: &dyn DeviceRevocationStore,
-    event: &Event,
-    commit: &RealmCommit,
-    continuity: CommitContinuity<'_>,
-    authority: &VerifiedRealmAuthority,
-    keys: &(dyn RealmAuthorityKeyDirectory + Sync),
-    receiver: &DidCoreId,
-    digest_suite: DigestSuite,
-    fact: Option<&arkret_models_collaboration::authority_commit::HistoricalProducerSignerFact>,
-) -> ServiceResult<ReceivedProducer> {
-    verify_committed_event_receipt_with_source(
-        local_pcr,
-        event,
-        commit,
-        continuity,
-        authority,
-        keys,
-        receiver,
-        digest_suite,
-        fact,
-    )
-    .await
-}
-
 /// Verify either registered original producer source. Neither branch resolves
 /// a current key or replays hidden authorization history at the receiver.
 #[allow(clippy::too_many_arguments)]

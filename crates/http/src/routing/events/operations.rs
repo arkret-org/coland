@@ -9,14 +9,13 @@
 //! - `validate_canonical_json_value` (+ `_inner`) — the canonical number, timestamp, and byte
 //!   encoding gate that operation payloads MUST pass. Field names and map-key grammars belong to
 //!   the kind-specific JSON Schema pass so raw external documents retain their native lexicon.
-//! - `validate_content_blocks` / `validate_mentions` / `validate_content_block` — message body
-//!   shape. Mention admission is canonical-only: the SDK mention models own the `mention` /
-//!   `audience_mention` AST node types.
+//! - `validate_message_operation_payload` — plaintext message body validation and Realm-bound
+//!   mention admission; the SDK owns the canonical `mention` / `audience_mention` AST nodes.
+//! - `validate_content_blocks` / `validate_content_block` — SDK-owned content-block shape.
 //! - `validate_encrypted_payload_envelope` — `ak.profile.encrypted_envelope.v1` envelope shape (MLS
 //!   sender / scheme / version / `key_ref`).
-//! - canonical RFC 3339 UTC-Z timestamp shape for `*_at` fields accepts the SDK's ordinary
-//!   whole-second profile and the Event-bound fixed-millisecond profile; kind-specific validators
-//!   enforce narrower field requirements.
+//! - canonical RFC 3339 UTC-Z timestamp checks for `*_at` fields use the SDK's single
+//!   fixed-millisecond profile; kind-specific validators enforce field-specific requirements.
 //! - `canonical_json_digest` — sha256 over canonical-JSON bytes.
 //!
 //! Spec items still pending here are tracked in `_todos.md` (notably

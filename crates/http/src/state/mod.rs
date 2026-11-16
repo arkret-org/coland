@@ -49,12 +49,9 @@ pub use applet_completion::{
 pub(crate) use authority_contact::{commit_contact_event_unit, verify_contact_producer};
 #[cfg(feature = "test-support")]
 pub(crate) use authority_forward::{
-    admit_forwarded_event, admit_forwarded_mls, content_backup_sources, forward_self_event,
-    fresh_device_request, fresh_forward_request, fresh_producer_agent_evidence,
-    prepare_native_forward_request,
+    admit_forwarded_event, content_backup_sources, forward_self_event, fresh_device_request,
+    fresh_producer_agent_evidence,
 };
-#[cfg(feature = "test-support")]
-pub(crate) use authority_handoff::install as install_test_handoff;
 pub(crate) use authority_producer_validation::{
     verify_account_device_payload_proof, verify_account_device_producer,
     verify_mimi_binding_producer, verify_self_event_producer,

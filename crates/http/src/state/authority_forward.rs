@@ -49,16 +49,6 @@ pub(super) fn wire_refusal(error: arkret_wire::WireError) -> ServiceError {
     )
 }
 
-#[cfg(feature = "test-support")]
-pub(crate) async fn fresh_forward_request(
-    state: &AppState,
-    mut request: PeerAuthoritySubmitRequestBody,
-    destination: &DidCoreId,
-) -> ServiceResult<PeerAuthoritySubmitRequestBody> {
-    fresh_device_request(state, destination, &mut request).await?;
-    Ok(request)
-}
-
 /// Governance Station check of one forwarded Account Device producer.
 ///
 /// `evidence` has already passed the Event-decided presence rule, so `None`

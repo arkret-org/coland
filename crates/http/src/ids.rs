@@ -38,10 +38,6 @@ pub fn generate_install_id() -> String {
     Uuid::now_v7().to_string()
 }
 
-pub fn generate_realm_state_snapshot_id() -> String {
-    generate("realm_state_snapshot")
-}
-
 pub fn generate_request_id() -> String {
     generate("request")
 }

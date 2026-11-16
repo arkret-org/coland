@@ -13,7 +13,7 @@ use chrono::{Duration, Utc};
 use coland_http::state::AppState;
 use coland_services::ServiceError;
 use coland_services::committed_receipt::{
-    CommitContinuity, ReceivedProducer, verify_committed_event_receipt_with_fact,
+    CommitContinuity, ReceivedProducer, verify_committed_event_receipt_with_source,
 };
 use coland_test_support::AppStateTestExt as _;
 use coland_test_support::device_authorization_history::sign_event;
@@ -61,7 +61,7 @@ async fn receive(
 ) -> Result<ReceivedProducer, ServiceError> {
     let store = receiver.test_persistence();
     let fact = fact.cloned().map(Into::into);
-    verify_committed_event_receipt_with_fact(
+    verify_committed_event_receipt_with_source(
         store.device_revocations(),
         event,
         commit,
@@ -193,7 +193,7 @@ fn non_governance_service_receipt_verifies_frozen_source_and_fails_closed_withou
         let receiver_id = receiver.service_core_id();
         macro_rules! check {
             ($commit:expr, $fact:expr) => {
-                verify_committed_event_receipt_with_fact(
+                verify_committed_event_receipt_with_source(
                     store.device_revocations(),
                     &event,
                     $commit,

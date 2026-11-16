@@ -15,7 +15,6 @@ use serde_json::Value;
 
 use crate::hydration::{HydrationProjectionAdapter, hydrate_projections_from_persistence};
 
-mod atomic_batch;
 pub mod tombstone;
 
 /// A confirmed metadata mutation is awaiting reconstruction at its exact head.

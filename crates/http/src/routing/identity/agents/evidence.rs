@@ -88,20 +88,6 @@ fn missing() -> AgentEvidenceAcquisitionFailure {
 /// Rebuild the one compact signer evidence from the accepted authorization.
 /// This does not itself authorize future use of the key; the active PCR rows
 /// are read and checked on every current query.
-#[cfg(feature = "test-support")]
-pub(crate) async fn current_authenticated_agent_signer_evidence(
-    state: &AppState,
-    selector: &AgentSignerEvidenceQuerySelector,
-) -> Result<
-    (
-        AuthenticatedSignerResolutionEvidence,
-        Vec<AuthenticatedSignerResolutionEvidence>,
-    ),
-    AgentEvidenceAcquisitionFailure,
-> {
-    current_authenticated_agent_signer_evidence_for_record(state, selector, None).await
-}
-
 pub(crate) async fn current_authenticated_agent_signer_evidence_for_record(
     state: &AppState,
     selector: &AgentSignerEvidenceQuerySelector,

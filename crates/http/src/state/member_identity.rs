@@ -2,14 +2,10 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
 
-#[cfg(any(test, feature = "test-support"))]
-use arkret_models_identity::HandleClaim;
-#[cfg(test)]
-use arkret_models_identity::HandleClaimStatus;
 pub use coland_storage::{
     HandleClaimEvidenceRecord, MemberIdentityEventRecord, MemberIdentitySubjectKey,
 };
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use serde_json::Value;
 
 /// Disposable Realm/member identity projection. Hydration rebuilds every
@@ -173,147 +169,6 @@ impl MemberIdentityRegistry {
     }
 }
 
-/// Build the storable evidence record for one closed HandleClaim status view.
-/// The durable key is the stable core `claim_digest`; freshness and revocation
-/// state remain explicit mutable status-view fields.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn handle_claim_record_from_envelope(
-    envelope: &Value,
-) -> Option<HandleClaimEvidenceRecord> {
-    let claim: HandleClaim = serde_json::from_value(envelope.clone()).ok()?;
-    claim.validate().ok()?;
-    let status = serde_json::to_value(claim.status)
-        .ok()?
-        .as_str()?
-        .to_owned();
-    let visibility = serde_json::to_value(claim.claim.visibility)
-        .ok()?
-        .as_str()?
-        .to_owned();
-    // The status view carries no digest mirrors; both are recomputed from the
-    // carried `claim` / `revocation` (`conformance/encoding.md` §4.0.1).
-    Some(HandleClaimEvidenceRecord {
-        digest: claim.claim_digest().ok()?.to_string(),
-        subject_id: claim.claim.subject_account_id.principal_id.clone(),
-        issuer_id: claim.claim.issuer_id.clone(),
-        audience: claim.claim.audience.clone(),
-        status,
-        revocation_digest: claim
-            .revocation
-            .as_ref()
-            .and_then(|revocation| revocation.digest().ok())
-            .map(|digest| digest.to_string()),
-        cache_expires_at: claim.cache_expires_at,
-        visibility: Some(visibility),
-        expires_at: claim.claim.expires_at,
-        envelope: envelope.clone(),
-    })
-}
-
-#[cfg(test)]
-pub(crate) fn test_handle_claim(
-    subject_account_id: arkret_wire::AccountId,
-    issuer_id: arkret_wire::DidCoreId,
-    audience: Option<String>,
-    expires_at: chrono::DateTime<chrono::Utc>,
-    status: HandleClaimStatus,
-    handle_aliases: Vec<String>,
-) -> HandleClaim {
-    use arkret_models_identity::{
-        HANDLE_CLAIM_PROOF_DOMAIN, HANDLE_CLAIM_REVOCATION_DOMAIN, HANDLE_CLAIM_STATUS_DOMAIN,
-        Handle, HandleClaimCore, HandleClaimRevocation, HandleClaimRevoker, HandleClaimVariant,
-        HandleVisibility,
-    };
-    use arkret_wire::{DidUrl, Hash, PayloadProof, PayloadProofPurpose};
-
-    let issued_at = expires_at - chrono::Duration::minutes(1);
-    let verification_method = DidUrl::new(format!(
-        "did:{}#handle-claim-fixture",
-        issuer_id
-            .as_str()
-            .strip_prefix("ak:did_core:")
-            .unwrap_or(issuer_id.as_str())
-    ))
-    .unwrap();
-    let placeholder = Hash::new(format!("sha256:{}", "0".repeat(64))).unwrap();
-    let proof = |purpose, domain: &str, payload_digest| PayloadProof {
-        kind: "detached_jws".to_owned(),
-        verification_method: verification_method.clone(),
-        payload_digest,
-        created_at: issued_at,
-        domain: Some(domain.to_owned()),
-        audience: None,
-        proof_purpose: Some(purpose),
-        jws: "eyJhbGciOiJFZERTQSJ9..c2ln".to_owned(),
-    };
-    let mut core = HandleClaimCore {
-        schema: HandleClaimCore::SCHEMA.to_owned(),
-        handle: Handle::parse("alice:coland.local").unwrap(),
-        handle_aliases,
-        subject_account_id: subject_account_id.clone(),
-        issuer_id: issuer_id.clone(),
-        claim: HandleClaimVariant::HandleBinding,
-        visibility: if audience.is_some() {
-            HandleVisibility::Restricted
-        } else {
-            HandleVisibility::Public
-        },
-        audience,
-        issued_at,
-        expires_at: Some(expires_at),
-        source_refs: Vec::new(),
-        proofs: [
-            proof(
-                PayloadProofPurpose::IssuerAttestation,
-                HANDLE_CLAIM_PROOF_DOMAIN,
-                placeholder.clone(),
-            ),
-            proof(
-                PayloadProofPurpose::HolderAcceptance,
-                HANDLE_CLAIM_PROOF_DOMAIN,
-                placeholder.clone(),
-            ),
-        ],
-    };
-    let claim_digest = core.claim_digest().unwrap();
-    core.proofs[0].payload_digest = claim_digest.clone();
-    core.proofs[1].payload_digest = claim_digest.clone();
-    let mut revocation = (status == HandleClaimStatus::Revoked).then(|| HandleClaimRevocation {
-        schema: HandleClaimRevocation::SCHEMA.to_owned(),
-        claim_digest: claim_digest.clone(),
-        revoked_at: issued_at,
-        revoker: HandleClaimRevoker::Issuer {
-            issuer_id: issuer_id.clone(),
-        },
-        proof: proof(
-            PayloadProofPurpose::RevocationAuthorization,
-            HANDLE_CLAIM_REVOCATION_DOMAIN,
-            placeholder.clone(),
-        ),
-    });
-    if let Some(revocation) = revocation.as_mut() {
-        revocation.proof.payload_digest = revocation.digest().unwrap();
-    }
-    let mut claim = HandleClaim {
-        schema: HandleClaim::SCHEMA.to_owned(),
-        claim: core,
-        status,
-        evaluated_at: issued_at,
-        verifier_id: issuer_id,
-        verified_at: (status == HandleClaimStatus::Verified).then_some(issued_at),
-        revocation,
-        cache_expires_at: expires_at.min(issued_at + chrono::Duration::seconds(300)),
-        status_proof: proof(
-            PayloadProofPurpose::StatusAttestation,
-            HANDLE_CLAIM_STATUS_DOMAIN,
-            placeholder,
-        ),
-    };
-    claim.status_proof.payload_digest = claim.status_digest().unwrap();
-    claim.validate().unwrap();
-    claim
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -382,36 +237,6 @@ mod tests {
             registry
                 .snapshot_for_actor(&subject.realm_id, "ak:did_core:web:alice.example")
                 .is_none()
-        );
-    }
-
-    #[test]
-    fn handle_claim_cache_retains_exact_account_evidence_and_rejects_bare_subject() {
-        let account = account_actor("ak:did_core:web:station-a.example")
-            .as_account_id()
-            .unwrap()
-            .clone();
-        let envelope = serde_json::to_value(test_handle_claim(
-            account.clone(),
-            arkret_wire::DidCoreId::new("ak:did_core:web:station-a.example").unwrap(),
-            None,
-            chrono::Utc::now() + chrono::Duration::hours(1),
-            HandleClaimStatus::Verified,
-            Vec::new(),
-        ))
-        .unwrap();
-        let record = handle_claim_record_from_envelope(&envelope).unwrap();
-        assert_eq!(record.subject_id, account.principal_id);
-        assert_eq!(
-            record.envelope["claim"]["subject_account_id"],
-            json!(account)
-        );
-        assert!(
-            handle_claim_record_from_envelope(&json!({
-                "subject_id": "ak:did_core:web:alice.example",
-                "issuer_id": "ak:did_core:web:station-a.example"
-            }))
-            .is_none()
         );
     }
 }

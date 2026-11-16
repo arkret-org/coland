@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use arkret_identifiers::{BlobRef, Did, DidCoreId, EventId, Hash};
+use arkret_identifiers::{BlobRef, Did, DidCoreId, Hash};
 use arkret_models_collaboration::agent_operations::AgentLifecycleState;
 use arkret_models_collaboration::objects::account_status::AccountStatus;
 use arkret_models_identity::service_identity::{

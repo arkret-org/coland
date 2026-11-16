@@ -1269,60 +1269,6 @@ pub(super) async fn forward_self_mls(
     send_forward(state, governance, request, session).await
 }
 
-/// Build a native forwarding fixture from the production evidence helpers.
-#[cfg(feature = "test-support")]
-pub(crate) fn prepare_native_forward_request<'a>(
-    state: &'a AppState,
-    governance: &'a DidCoreId,
-    submission: &'a SelfAuthoritySubmitRequestBody,
-) -> impl std::future::Future<Output = ServiceResult<PeerAuthoritySubmitRequestBody>> + Send + 'a {
-    crate::boxed_future(move || prepare_native_forward_request_inner(state, governance, submission))
-}
-
-#[cfg(feature = "test-support")]
-async fn prepare_native_forward_request_inner(
-    state: &AppState,
-    governance: &DidCoreId,
-    submission: &SelfAuthoritySubmitRequestBody,
-) -> ServiceResult<PeerAuthoritySubmitRequestBody> {
-    let event = match submission {
-        SelfAuthoritySubmitRequestBody::Event(v) => &v.event,
-        SelfAuthoritySubmitRequestBody::MlsCommit(v) => &v.commit_event,
-        _ => {
-            return Err(ServiceError::SchemaViolation(
-                "native forward requires an Event or complete MLS unit".into(),
-            ));
-        }
-    };
-    if matches!(submission, SelfAuthoritySubmitRequestBody::Event(_)) {
-        refuse_bare_native_mls(event)?;
-    }
-    let content_sources = content_backup_sources(state, governance, &[event]).await?;
-    let successor_device_evidence = if event.kind == arkret_wire::EventKind::RealmOwnerTransfer {
-        Some(
-            owner_transfer::acquire(state, event)
-                .await?
-                .evidence()
-                .clone(),
-        )
-    } else {
-        None
-    };
-    let mut request=match submission {
-        SelfAuthoritySubmitRequestBody::Event(v)=>PeerAuthoritySubmitRequestBody::AuthorityForwardEvent(PeerAuthorityForwardEventRequestBody{
-            branch:arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,event_submission:v.clone(),
-            mls_group_state_material:forwarded_mls_public_material(state,event).await?,content_backup_sources:content_sources,producer_device_evidence:None,producer_agent_evidence:None,successor_device_evidence,
-        }),
-        SelfAuthoritySubmitRequestBody::MlsCommit(v)=>PeerAuthoritySubmitRequestBody::AuthorityForwardMls(PeerAuthorityForwardMlsRequestBody{
-            branch:arkret_models_collaboration::authority_commit::AuthorityForwardBranch::AuthorityForward,mls_submission:v.clone().for_origin_forward(None),
-            mls_group_state_material:forwarded_mls_public_material(state,event).await?.ok_or_else(|| ServiceError::SchemaViolation("MLS Commit requires exact public material".into()))?,
-            content_backup_sources:content_sources,producer_device_evidence:None,producer_agent_evidence:None,
-        }),_=>unreachable!("checked native forward branch"),
-    };
-    fresh_device_request(state, governance, &mut request).await?;
-    Ok(request)
-}
-
 /// Recover an exact frozen remote submission before today's producer admission.
 /// The HTTP boundary still authenticates the full Account and standard holder.
 pub(crate) async fn recover_forwarded_original(

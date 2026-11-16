@@ -4,7 +4,6 @@ use arkret_event_draft::EventPayloadExt as _;
 use arkret_identifiers::{CircleId, DidCoreId, RealmId};
 use arkret_models_collaboration::events_payloads::{ContentBlock, RealmPurpose};
 use arkret_models_collaboration::governance::plaintext_visibility::PlaintextVisibleServicesPayload;
-use arkret_models_collaboration::objects::space::ChildScopePolicy;
 use arkret_wire::{CommitStreamRef, Event, PlaintextDataClassKind};
 use coland_domain::reducer::ProjectionState;
 use coland_storage::{CanonicalEventRecord, RealmMetaRecord};
@@ -86,25 +85,6 @@ fn merge_typed_plaintext_services(
 
 fn canonical_value_digest(value: &Value) -> Option<String> {
     arkret_canonical::canonical_sha256(value).ok()
-}
-
-pub fn parse_child_scope_policy(
-    kind: Option<&str>,
-    scope_circle_id: Option<&str>,
-) -> Result<Option<ChildScopePolicy>, &'static str> {
-    let policy = match (kind, scope_circle_id) {
-        (None, None) => return Ok(None),
-        (Some("allow_any"), None) => ChildScopePolicy::AllowAny {},
-        (Some("require_e2ee"), None) => ChildScopePolicy::RequireE2ee {},
-        (Some("require_same_scope"), None) => ChildScopePolicy::RequireSameScope {},
-        (Some("require_scope_circle_id"), Some(scope_circle_id)) => {
-            let scope_circle_id =
-                CircleId::new(scope_circle_id.to_owned()).map_err(|_| "invalid_scope_circle_id")?;
-            ChildScopePolicy::RequireScopeCircleId { scope_circle_id }
-        }
-        _ => return Err("invalid_child_scope_policy"),
-    };
-    Ok(Some(policy))
 }
 
 fn operation_from_hydration_record(

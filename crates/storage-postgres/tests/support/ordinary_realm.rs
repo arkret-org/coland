@@ -147,47 +147,12 @@ pub fn bootstrap_unit(seed: &str) -> OrdinaryRealmBootstrapCommitUnit {
     bootstrap_unit_with_join_rule(seed, "invite")
 }
 
-/// Build the same accepted-state fixture for a test Station whose service DID
-/// was generated from its current `did:webvh` registration identity.
-pub fn bootstrap_unit_for_station(
-    seed: &str,
-    governing_station: &arkret_wire::DidCoreId,
-    governing_did: &arkret_wire::Did,
-) -> OrdinaryRealmBootstrapCommitUnit {
-    bootstrap_unit_with_join_rule_for_station(
-        seed,
-        "invite",
-        "since_join",
-        None,
-        governing_station,
-        Some(governing_did),
-    )
-}
-
 /// [`bootstrap_unit`] whose initial and typed join rule is `join_rule`.
 pub fn bootstrap_unit_with_join_rule(
     seed: &str,
     join_rule: &str,
 ) -> OrdinaryRealmBootstrapCommitUnit {
     bootstrap_unit_with_join_rule_for_station(seed, join_rule, "since_join", None, &station(), None)
-}
-
-/// Build a formal bootstrap for a local Station and its chosen history policy.
-pub fn bootstrap_unit_with_history_for_station(
-    seed: &str,
-    join_rule: &str,
-    history_access: &str,
-    governing_station: &arkret_wire::DidCoreId,
-    governing_did: &arkret_wire::Did,
-) -> OrdinaryRealmBootstrapCommitUnit {
-    bootstrap_unit_with_join_rule_for_station(
-        seed,
-        join_rule,
-        history_access,
-        None,
-        governing_station,
-        Some(governing_did),
-    )
 }
 
 /// A formal ordinary Realm whose founder is the exact accepted Account.

@@ -12,7 +12,9 @@
 
 use std::collections::BTreeMap;
 
-use arkret_identifiers::{Did, Hash};
+use arkret_identifiers::Did;
+#[cfg(test)]
+use arkret_identifiers::Hash;
 use arkret_identity::{DidDocument, DidResolver as _};
 use coland_services::identity::{
     DID_DOCUMENT_HIGH_RISK_TTL_SECS, DidDocumentFreshness, evaluate_did_document_freshness,
@@ -30,17 +32,6 @@ use crate::state::AppState;
 /// or records without freshness evidence, fail closed because coland does not
 /// perform on-demand network refreshes.
 pub const HIGH_RISK_DID_FRESHNESS_MAX_SECS: i64 = DID_DOCUMENT_HIGH_RISK_TTL_SECS;
-
-/// Resolved Ed25519 verification key with the document metadata that
-/// endpoints need to report or bind into audit records.
-#[derive(Clone, Debug)]
-pub struct ResolvedVerificationKey {
-    pub verification_method: String,
-    pub algorithm: &'static str,
-    pub public_key: VerifyingKey,
-    pub did_document_ref: String,
-    pub key_log_head: Hash,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedPrincipalDeviceSignatureBinding {
@@ -1229,66 +1220,6 @@ async fn refresh_embedded_webvh_document_for_high_risk(
     Ok(())
 }
 
-pub fn require_verification_method_in_document(
-    document: &DidDocument,
-    verification_method: &str,
-) -> Result<(), String> {
-    if document
-        .verification_methods
-        .contains_key(verification_method)
-    {
-        return Ok(());
-    }
-    let fragment = verification_method
-        .split_once('#')
-        .map(|(_, fragment)| fragment)
-        .unwrap_or(verification_method);
-    if document.verification_methods.contains_key(fragment) {
-        return Ok(());
-    }
-    Err("verification method is not present in DID document".to_owned())
-}
-
-async fn did_document_key_log_head(
-    state: &AppState,
-    did: &Did,
-    document: &DidDocument,
-) -> Result<Hash, String> {
-    let cached_head = if did.method() == "webvh" {
-        state
-            .dids()
-            .document(did.as_str())
-            .await
-            .map_err(|error| format!("did:webvh document lookup failed: {error}"))?
-            .and_then(|record| record.key_log_head)
-    } else {
-        None
-    };
-    key_log_head_for_method(did, document, cached_head)
-}
-
-fn key_log_head_for_method(
-    did: &Did,
-    document: &DidDocument,
-    cached_head: Option<String>,
-) -> Result<Hash, String> {
-    match did.method() {
-        "webvh" => {
-            let head =
-                cached_head.ok_or_else(|| "did:webvh key-log head is unavailable".to_owned())?;
-            return Hash::new(head)
-                .map_err(|error| format!("did:webvh key-log head is invalid: {error}"));
-        }
-        "web" => {}
-        method => return Err(format!("key-log head is unavailable for did:{method}")),
-    }
-    let value = serde_json::to_value(document)
-        .map_err(|error| format!("DID document serialization failed: {error}"))?;
-    let digest = arkret_canonical::canonical_sha256(&value)
-        .map_err(|error| format!("DID document canonical digest failed: {error}"))?;
-    Hash::new(digest).map_err(|error| format!("DID document digest invalid: {error}"))
-}
-
 #[cfg(test)]
 mod did_binding_tests {
     use coland_storage_postgres::Db;
@@ -1324,33 +1255,6 @@ mod did_binding_tests {
             .await
             .expect("the local service notary must not depend on the external DID allowlist");
         assert_eq!(resolved, state.notary_verifying_key());
-    }
-
-    #[test]
-    fn did_webvh_never_falls_back_to_a_did_web_document_digest() {
-        let did = Did::new("did:webvh:z6mkfixture:principal.example".to_owned()).unwrap();
-        let key = SigningKey::from_bytes(&[8u8; 32]);
-        let document = document_for(&did, &format!("{did}#control-1"), &key);
-
-        let error = key_log_head_for_method(&did, &document, None)
-            .expect_err("did:webvh requires its method-native accepted log head");
-        assert_eq!(error, "did:webvh key-log head is unavailable");
-    }
-
-    #[test]
-    fn did_web_uses_the_canonical_document_digest() {
-        let did = Did::new(PRINCIPAL.to_owned()).unwrap();
-        let key = SigningKey::from_bytes(&[7u8; 32]);
-        let document = document_for(&did, &format!("{did}#control-1"), &key);
-        let expected = Hash::new(
-            arkret_canonical::canonical_sha256(&serde_json::to_value(&document).unwrap()).unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            key_log_head_for_method(&did, &document, None).unwrap(),
-            expected
-        );
     }
 
     fn document_for(did: &Did, verification_method: &str, key: &SigningKey) -> DidDocument {

@@ -15,6 +15,8 @@ mod mls_device_revoke_fixture;
 mod mls_local_add_fixture;
 #[path = "support/mls_public_fixture.rs"]
 mod mls_public_fixture;
+#[path = "support/mls_send_content_fixture.rs"]
+mod mls_send_content_fixture;
 #[path = "support/ordinary_realm.rs"]
 #[expect(
     dead_code,
@@ -43,6 +45,12 @@ use coland_storage_postgres::{
 use diesel::sql_types::{BigInt, Binary, Jsonb, Text, Timestamptz};
 use diesel_async::RunQueryDsl;
 use mls_public_fixture::MlsFixture;
+
+// Complete large Future construction before polling on the default stack.
+#[inline(never)]
+fn heap_future<F: std::future::Future>(make: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
+    Box::pin(make())
+}
 
 fn realm_scope(realm_id: &arkret_wire::RealmId) -> arkret_wire::ScopeRef {
     arkret_wire::ScopeRef::Realm {
@@ -1493,51 +1501,6 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
     );
 }
 
-/// One MLS ciphertext Message body frozen at `epoch` over `group_state_ref`.
-fn ciphertext_message(
-    strand_id: &arkret_wire::StrandId,
-    epoch: u64,
-    group_state_ref: &arkret_wire::EventId,
-) -> serde_json::Value {
-    serde_json::json!({
-        "strand_id": strand_id,
-        "track_name": "discussion",
-        "encrypted_content": coland_test_support::mls_content::envelope_shape(epoch,&(group_state_ref.clone())),
-    })
-}
-
-/// A Message by the account of `device`, signed by that device and guarded
-/// by its exact revocation-gate selector as the self submit preflight pins it.
-fn device_message(
-    previous: &coland_storage::AuthorityCommitTransaction,
-    device: &DeviceRevocationGateSelector,
-    payload: serde_json::Value,
-    did: &arkret_wire::Did,
-    signing_seed: [u8; 32],
-) -> EventCommitRequest {
-    let event = ordinary_realm::event_for_actor(
-        arkret_wire::EventKind::MessageCreate,
-        previous.event.scope_ref.clone(),
-        recipient_actor(device),
-        payload,
-        previous.commit.committed_at,
-    );
-    let signed = device_authorization_history::sign_event(
-        event,
-        arkret_wire::DidUrl::new(format!("{did}#{}", device.device_id)).unwrap(),
-        signing_seed,
-    );
-    let mut request =
-        ordinary_realm::request_for_event(previous, signed, previous.commit.committed_at);
-    request.self_producer_guard = Some(coland_storage::SelfProducerCommitGuard::HumanDevice(
-        device.clone(),
-    ));
-    request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
-        request.authority_commit.event.clone(),
-    ));
-    request
-}
-
 /// The Realm root's grant of `ak.message.create` to `subject`.
 async fn grant_message_create(
     pool: &PgPool,
@@ -1593,6 +1556,21 @@ async fn grant_message_create(
     grant
 }
 
+/// Admit the two actual Device endpoints before freezing this send cut.
+/// Keeping the finite enrollment phase separate also keeps its large Add
+/// return values and UOW temporaries out of the parent test's poll frame.
+async fn admit_send_gate_endpoints(
+    pool: &PgPool,
+    mls: &MlsFixture,
+    previous: Box<EventCommitRequest>,
+    endpoints: [(&DeviceRevocationGateSelector, [u8; 32]); 2],
+) -> Box<mls_send_content_fixture::Enrolled> {
+    Box::pin(mls_send_content_fixture::enroll(
+        pool, mls, previous, endpoints,
+    ))
+    .await
+}
+
 /// encryption-and-audit.md §2.5.2 and §2.4.1: the send gate decides the
 /// actual signer's endpoint authorization at the cut it reads the current
 /// `mls_group`. A revoked device's ciphertext -- even frozen at a stale epoch
@@ -1603,12 +1581,23 @@ async fn grant_message_create(
 /// writes nothing.
 #[tokio::test]
 async fn the_send_gate_refuses_a_revoked_device_at_the_mls_group_cut() {
+    heap_future(case_the_send_gate_refuses_a_revoked_device_at_the_mls_group_cut).await;
+}
+
+async fn case_the_send_gate_refuses_a_revoked_device_at_the_mls_group_cut() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
-    let station = governing_station(&pool).await;
+    let station = local_station(&pool).await;
     let persistence = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
-    let mut source = pcr_genesis::PcrGenesisFixture::new(
-        device_authorization_history::did_web_station(&station),
+    let mut source = pcr_genesis::PcrGenesisFixture::new_with(
+        historical_roster_attestor_resolution()
+            .normalized_did_document
+            .id
+            .clone(),
+        device_authorization_history::DeviceHistoryFixtureOptions {
+            founding_device_signing_seed: [112; 32],
+            ..Default::default()
+        },
     );
     let revoked = Box::pin(source.admit_founding_device(&persistence))
         .await
@@ -1618,8 +1607,17 @@ async fn the_send_gate_refuses_a_revoked_device_at_the_mls_group_cut() {
         .expect("accepted second device");
     let active = active_device.authorization.clone();
 
-    let discussion =
-        Box::new(Box::pin(ordinary_realm::open_discussion(&pool, "mls-send-gate")).await);
+    let discussion = Box::new(
+        Box::pin(ordinary_realm::open_discussion_for_station(
+            &pool,
+            "mls-send-gate",
+            &station,
+            &historical_roster_attestor_resolution()
+                .normalized_did_document
+                .id,
+        ))
+        .await,
+    );
     let realm_id = discussion.realm_id();
     let scope = realm_scope(&realm_id);
     let founder = discussion
@@ -1669,28 +1667,116 @@ async fn the_send_gate_refuses_a_revoked_device_at_the_mls_group_cut() {
         1,
     ));
     Box::pin(uow.commit_event((*commit).clone())).await.unwrap();
+    // PCR acceptance and business membership do not put a Device in the MLS
+    // tree. Accept both real Adds, complete signed claims and Welcomes
+    // before freezing the revocation cut; no endpoint row is injected.
+    let enrolled = Box::pin(admit_send_gate_endpoints(
+        &pool,
+        &mls,
+        commit,
+        [
+            (&revoked, source.history.founding_device_signing_seed),
+            (&active, [43; 32]),
+        ],
+    ))
+    .await;
+    let commit = &enrolled.head;
     let commit_ref = commit.authority_commit.event.event_id.clone();
     let before = groups.current(&scope).await.unwrap().unwrap();
-    assert_eq!(before.value.epoch, 1);
-
-    let strand = &discussion.strand_id;
-    let mut revoked_messages = Vec::new();
-    for payload in [
-        ciphertext_message(strand, 0, &genesis_ref),
-        ciphertext_message(strand, 1, &commit_ref),
+    let current_epoch = before.value.epoch;
+    assert_eq!(
+        current_epoch,
+        commit.authority_commit.mls_state.as_ref().unwrap().epoch
+    );
+    let leaves = mls.tracker(&commit_ref).leaves().unwrap();
+    for (device, seed) in [
+        (&revoked, source.history.founding_device_signing_seed),
+        (&active, [43; 32]),
     ] {
-        let request = device_message(
-            &commit.authority_commit,
-            &revoked,
-            payload,
-            &source.history.did,
-            source.history.founding_device_signing_seed,
+        let signature_key = arkret_canonical::base64url_encode(
+            ed25519_dalek::SigningKey::from_bytes(&seed)
+                .verifying_key()
+                .to_bytes(),
         );
-        revoked_messages.push(Box::new(
-            Box::pin(ordinary_realm::source_request(&pool, request)).await,
-        ));
+        assert_eq!(
+            leaves
+                .iter()
+                .filter(|leaf| leaf.actor_id == recipient_actor(device)
+                    && leaf.signature_key.as_str() == signature_key)
+                .count(),
+            1
+        );
     }
+    let content = Box::pin(mls_send_content_fixture::prepare(
+        &pool,
+        &mls,
+        &enrolled,
+        &mut source,
+    ))
+    .await;
+    let revoked_author = mls_send_content_fixture::Author::new(
+        &revoked,
+        &source.history.did,
+        source.history.founding_device_signing_seed,
+    );
+    let active_author =
+        mls_send_content_fixture::Author::new(&active, &source.history.did, [43; 32]);
+    let strand = &discussion.strand_id;
+    let authorized = Box::pin(content.message(
+        &pool,
+        &commit.authority_commit,
+        &revoked_author,
+        strand,
+        false,
+        "authorized target before revocation",
+    ))
+    .await;
+    Box::pin(uow.commit_event((*authorized).clone()))
+        .await
+        .unwrap();
+    assert_eq!(groups.current(&scope).await.unwrap().unwrap(), before);
+    // Freeze later requests only after a genuine accepted current-epoch send
+    // proves this exact Device's native source and MLS endpoint are usable.
+    let mut revoked_messages = Vec::new();
+    for stale in [true, false] {
+        revoked_messages.push(
+            Box::pin(content.message(
+                &pool,
+                &authorized.authority_commit,
+                &revoked_author,
+                strand,
+                stale,
+                "new target message after accepted pre-send",
+            ))
+            .await,
+        );
+    }
+    assert_eq!(revoked_messages.len(), 2);
+    for request in &revoked_messages {
+        assert_ne!(
+            request.authority_commit.event.event_id,
+            authorized.authority_commit.event.event_id
+        );
+        assert_eq!(
+            request.authority_commit.commit.previous_commit_ref.as_ref(),
+            Some(&authorized.authority_commit.commit.commit_id)
+        );
+    }
+    assert_ne!(
+        revoked_messages[0].authority_commit.event.event_id,
+        revoked_messages[1].authority_commit.event.event_id
+    );
+    assert_eq!(
+        PgAuthorityCommitStore { pool: pool.clone() }
+            .committed_event(&authorized.authority_commit.event.event_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .event,
+        authorized.authority_commit.event
+    );
     mls_device_revoke_fixture::accept_revoke(&pool, &source, &revoked, &active_device).await;
+    Box::pin(content.assert_originals(&pool)).await;
     for request in revoked_messages {
         Box::pin(assert_zero_write_refusal(
             &pool,
@@ -1701,26 +1787,33 @@ async fn the_send_gate_refuses_a_revoked_device_at_the_mls_group_cut() {
     }
     assert_eq!(groups.current(&scope).await.unwrap().unwrap(), before);
 
+    let plaintext_at = arkret_canonical::normalize_timestamp_canonical(
+        chrono::Utc::now().max(authorized.authority_commit.commit.committed_at)
+            + chrono::TimeDelta::milliseconds(1),
+    );
     let plaintext = ordinary_realm::next_request(
-        &commit.authority_commit,
+        &authorized.authority_commit,
         arkret_wire::EventKind::MessageCreate,
         &founder,
         ordinary_realm::message_payload(strand, "plaintext after activation"),
-        at,
+        plaintext_at,
     );
+    let plaintext = Box::pin(ordinary_realm::source_request(&pool, plaintext)).await;
     Box::pin(assert_zero_write_refusal(
         &pool,
         &plaintext,
         ConflictCode::MlsActivationRequired,
     ))
     .await;
-    let stale = ordinary_realm::next_request(
-        &commit.authority_commit,
-        arkret_wire::EventKind::MessageCreate,
-        &founder,
-        ciphertext_message(strand, 0, &genesis_ref),
-        at,
-    );
+    let stale = Box::pin(content.message(
+        &pool,
+        &authorized.authority_commit,
+        &content.founder,
+        strand,
+        true,
+        "founder uses a genuinely old joined epoch",
+    ))
+    .await;
     Box::pin(assert_zero_write_refusal(
         &pool,
         &stale,
@@ -1728,24 +1821,29 @@ async fn the_send_gate_refuses_a_revoked_device_at_the_mls_group_cut() {
     ))
     .await;
 
-    let sibling = device_message(
-        &commit.authority_commit,
-        &active,
-        ciphertext_message(strand, 1, &commit_ref),
-        &source.history.did,
-        [43; 32],
-    );
-    let sibling = Box::pin(ordinary_realm::source_request(&pool, sibling)).await;
-    Box::pin(uow.commit_event(sibling.clone())).await.unwrap();
-    let member = ordinary_realm::next_request(
+    let sibling = Box::pin(content.message(
+        &pool,
+        &authorized.authority_commit,
+        &active_author,
+        strand,
+        false,
+        "live sibling after revocation",
+    ))
+    .await;
+    Box::pin(uow.commit_event((*sibling).clone()))
+        .await
+        .unwrap();
+    let member = Box::pin(content.message(
+        &pool,
         &sibling.authority_commit,
-        arkret_wire::EventKind::MessageCreate,
-        &founder,
-        ciphertext_message(strand, 1, &commit_ref),
-        at,
-    );
-    let member = Box::pin(ordinary_realm::source_request(&pool, member)).await;
-    Box::pin(uow.commit_event(member)).await.unwrap();
+        &content.founder,
+        strand,
+        false,
+        "live founder after revocation",
+    ))
+    .await;
+    Box::pin(uow.commit_event(*member)).await.unwrap();
+    Box::pin(content.assert_originals(&pool)).await;
     let after = groups.current(&scope).await.unwrap().unwrap();
     assert_eq!(
         after.value, before.value,

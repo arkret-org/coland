@@ -228,6 +228,16 @@ impl MlsFixture {
             assert_eq!(original.event.kind, EventKind::MlsGenesis);
         }
         assert_eq!(group.epoch(), candidate.value.as_ref().unwrap().epoch);
+        self.install_leaf_bindings(event, &mut group);
+        let (info, tree) = group.public_group_state_bytes().unwrap();
+        self.tracker(event)
+            .verify_publication(&info, &tree)
+            .unwrap();
+        group
+    }
+
+    /// Bind only the exact scenario roster which the caller read back as accepted.
+    pub fn install_leaf_bindings(&self, event: &EventId, group: &mut ArkretMlsGroup) {
         let endpoints = self.endpoints.borrow();
         let bindings = self
             .tracker(event)
@@ -248,11 +258,6 @@ impl MlsFixture {
             })
             .collect();
         group.install_verified_leaf_bindings(bindings).unwrap();
-        let (info, tree) = group.public_group_state_bytes().unwrap();
-        self.tracker(event)
-            .verify_publication(&info, &tree)
-            .unwrap();
-        group
     }
 
     pub fn register_package(

@@ -26,17 +26,34 @@ pub async fn add(
     revision: u64,
     original: Option<(&MlsKeyPackageRecord, &VerifiedMlsWelcome)>,
 ) -> (EventCommitRequest, MlsKeyPackageRecord) {
-    let base = &previous.authority_commit.event.event_id;
-    let epoch = previous.authority_commit.mls_state.as_ref().unwrap().epoch;
-    let actor = recipient_actor(recipient);
     let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
-        actor.clone(),
+        recipient_actor(recipient),
         arkret_wire::DeviceId::new(recipient.device_id.clone()).unwrap(),
         arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(
             ed25519_dalek::SigningKey::from_bytes(&seed),
         ),
     )
     .unwrap();
+    Box::pin(add_for_identity(
+        pool, mls, previous, recipient, &identity, claim_id, revision, original,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn add_for_identity(
+    pool: &PgPool,
+    mls: &MlsFixture,
+    previous: &EventCommitRequest,
+    recipient: &DeviceRevocationGateSelector,
+    identity: &arkret_mls::ArkretMlsIdentity,
+    claim_id: &str,
+    revision: u64,
+    original: Option<(&MlsKeyPackageRecord, &VerifiedMlsWelcome)>,
+) -> (EventCommitRequest, MlsKeyPackageRecord) {
+    let base = &previous.authority_commit.event.event_id;
+    let epoch = previous.authority_commit.mls_state.as_ref().unwrap().epoch;
+    let actor = recipient_actor(recipient);
     let mut package = original
         .map(|(package, _)| package.clone())
         .unwrap_or_else(|| identity.key_package_record().unwrap());

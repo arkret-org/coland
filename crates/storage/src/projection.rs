@@ -1,4 +1,6 @@
 // Durable adapters replay accepted originals through these shared contracts.
+use std::collections::BTreeMap;
+
 pub use coland_domain::reducer::{
     CommitStreamProjection, MorphProjection, ObjectLifecycleState, ProjectionEffect,
     ProjectionState, ServerHlc, morph_document_body,

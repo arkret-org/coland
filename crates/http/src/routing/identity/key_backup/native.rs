@@ -171,6 +171,62 @@ async fn resolution(
         .map_err(unavailable)
 }
 
+fn inventory_signature_key(
+    signature: &arkret_wire::DetachedObjectSignature,
+    history: &AuthenticatedServiceResolution,
+) -> Result<arkret_signatures::PublicKeyMaterial, AppError> {
+    let service = arkret_wire::detached_signature_service_id(signature).map_err(unavailable)?;
+    if history.service_kind != arkret_wire::ServiceKind::Station.as_str() {
+        return Err(unavailable(
+            "inventory original needs a Station signer history",
+        ));
+    }
+    let document =
+        arkret_identity::authenticated_service_document_at(history, &service, signature.created_at)
+            .map_err(unavailable)?;
+    arkret_identity::validate_verification_method_relationship(
+        &document,
+        &signature.verification_method,
+        &document.id,
+        arkret_identity::DidVerificationRelationship::AssertionMethod,
+    )
+    .map_err(unavailable)?;
+    arkret_identity::public_key_material_from_document(&document, &signature.verification_method)
+        .map_err(unavailable)
+}
+
+async fn inventory_original_resolution(
+    state: &AppState,
+    signature: &arkret_wire::DetachedObjectSignature,
+    current: &AuthenticatedServiceResolution,
+) -> Result<
+    (
+        AuthenticatedServiceResolution,
+        arkret_signatures::PublicKeyMaterial,
+    ),
+    AppError,
+> {
+    let service = arkret_wire::detached_signature_service_id(signature).map_err(unavailable)?;
+    if service == current.service_id
+        && let Ok(key) = inventory_signature_key(signature, current)
+    {
+        return Ok((current.clone(), key));
+    }
+    let did = arkret_identity::verification_method_did(signature.verification_method.as_str())
+        .map_err(unavailable)?;
+    let history = state
+        .dids()
+        .retained_service_resolution(
+            &did,
+            arkret_wire::ServiceKind::Station,
+            signature.created_at,
+        )
+        .await
+        .map_err(unavailable)?;
+    let key = inventory_signature_key(signature, &history)?;
+    Ok((history, key))
+}
+
 pub(super) async fn head(
     depot: &mut salvo::Depot,
     request: &mut Request,
@@ -412,6 +468,8 @@ pub(super) async fn inventory(
         .map_err(storage_error)?;
     // The preflight has finished its transaction. Method-native resolution may
     // await network only here, before the original final qualified collector.
+    let current: AuthenticatedServiceResolution =
+        serde_json::from_value(bundle.current_route_record.clone()).map_err(unavailable)?;
     for commit in &commits {
         use arkret_identity::RealmAuthorityKeyDirectory as _;
         if commit.realm_id != reader.actor.realm_id {
@@ -433,27 +491,23 @@ pub(super) async fn inventory(
             &commit.signature.verification_method,
             commit.signature.created_at,
         );
-        crate::routing::realm_join::insert_historical_method_key(
-            state,
-            &mut reader.authority_keys,
-            &commit.signature.verification_method,
-            commit.signature.created_at,
-            &bundle,
-        )
-        .await?;
+        let (history, key) =
+            inventory_original_resolution(state, &commit.signature, &current).await?;
         if let Some(previous) = previous
-            && reader
-                .authority_keys
-                .public_key_at(
-                    &commit.signature.verification_method,
-                    commit.signature.created_at,
-                )
-                .as_ref()
-                != Some(&previous)
+            && previous.ed25519_bytes().map_err(unavailable)?
+                != key.ed25519_bytes().map_err(unavailable)?
         {
             return Err(unavailable(
                 "inventory signature coordinate has conflicting historical keys",
             ));
+        }
+        reader.authority_keys.insert_at(
+            &commit.signature.verification_method,
+            commit.signature.created_at,
+            key,
+        );
+        if !reader.authority_service_resolutions.contains(&history) {
+            reader.authority_service_resolutions.push(history);
         }
     }
     let manifest = state

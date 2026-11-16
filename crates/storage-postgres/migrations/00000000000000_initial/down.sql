@@ -86,6 +86,7 @@ DROP TABLE IF EXISTS pcr_device_authorization_current_states;
 DROP TABLE IF EXISTS pcr_device_generation_current_states;
 DROP TABLE IF EXISTS replica_stream_anchors CASCADE;
 DROP TABLE IF EXISTS realm_commits CASCADE;
+DROP FUNCTION IF EXISTS public.lock_native_content_realm_authority(text);
 DROP TABLE IF EXISTS realm_authorities CASCADE;
 DROP TABLE IF EXISTS key_backup_unlock_attempt_windows;
 DROP TRIGGER IF EXISTS preserve_agent_pairing_receipt ON agent_principals;

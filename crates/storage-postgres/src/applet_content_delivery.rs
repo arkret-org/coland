@@ -414,8 +414,12 @@ pub(crate) async fn acquire(
     realms.sort();
     realms.dedup();
     for realm in realms {
-        let locked=sql_query("SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1 FOR SHARE NOWAIT")
-            .bind::<Text,_>(realm.as_str()).get_result::<JsonRow>(held.connection()).await.map_err(PersistenceError::database)?;
+        let locked =
+            sql_query("SELECT to_jsonb(a) AS value FROM lock_native_content_realm_authority($1) a")
+                .bind::<Text, _>(realm.as_str())
+                .get_result::<JsonRow>(held.connection())
+                .await
+                .map_err(crate::issued_realm_snapshots::snapshot_cut_error)?;
         if locked.value["service_id"].as_str() != Some(station.as_str()) {
             return Err(refused(
                 "native read has no current local governing barrier",
@@ -1055,14 +1059,12 @@ pub(crate) async fn lock_snapshot_device_authorities(
     realms.sort();
     realms.dedup();
     for realm in realms {
-        let locked = sql_query(
-            "SELECT to_jsonb(a) AS value FROM realm_authorities a \
-             WHERE realm_id=$1 FOR SHARE NOWAIT",
-        )
-        .bind::<Text, _>(realm.as_str())
-        .get_result::<JsonRow>(&mut *conn)
-        .await
-        .map_err(PersistenceError::database)?;
+        let locked =
+            sql_query("SELECT to_jsonb(a) AS value FROM lock_native_content_realm_authority($1) a")
+                .bind::<Text, _>(realm.as_str())
+                .get_result::<JsonRow>(&mut *conn)
+                .await
+                .map_err(crate::issued_realm_snapshots::snapshot_cut_error)?;
         if locked.value["service_id"].as_str() != Some(station.as_str()) {
             return Err(refused(
                 "native snapshot has no current local governing barrier",
@@ -1070,4 +1072,95 @@ pub(crate) async fn lock_snapshot_device_authorities(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod authority_cut_tests {
+    use diesel_async::AsyncConnection;
+
+    use super::*;
+
+    async fn lock_native_authority(
+        conn: &mut diesel_async::AsyncPgConnection,
+        realm: &str,
+    ) -> PersistenceResult<JsonRow> {
+        sql_query("SELECT to_jsonb(a) AS value FROM lock_native_content_realm_authority($1) a")
+            .bind::<Text, _>(realm)
+            .get_result::<JsonRow>(conn)
+            .await
+            .map_err(crate::issued_realm_snapshots::snapshot_cut_error)
+    }
+
+    #[tokio::test]
+    async fn native_authority_share_cut_preserves_row_locks_and_exact_race_classification() {
+        let database = crate::test_database::TestDatabase::lease().await;
+        let pool = database.pool();
+        let mut writer = crate::pg_conn(&pool).await.unwrap();
+        let mut reader = crate::pg_conn(&pool).await.unwrap();
+        let realm = "native-content-authority-lock-fixture";
+        sql_query("INSERT INTO realm_authorities(realm_id,generation,service_id,authority_ref) VALUES($1,0,'ak:did_core:web:station.example','{}')")
+            .bind::<Text, _>(realm)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        writer
+            .transaction::<(), crate::PgTransactionError, _>(async |writer| {
+                sql_query("SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1 FOR UPDATE")
+                    .bind::<Text, _>(realm)
+                    .get_result::<JsonRow>(&mut *writer)
+                    .await?;
+                let raced = reader
+                    .transaction::<(), crate::PgTransactionError, _>(async |reader| {
+                        lock_native_authority(reader, realm).await?;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(crate::PgTransactionError::into_persistence)
+                    .expect_err("the actual conflicting writer must reject NOWAIT");
+                assert_eq!(
+                    raced.conflict_code(),
+                    Some(coland_storage::ConflictCode::TemporarilyUnavailable)
+                );
+                sql_query("SELECT 1").execute(&mut *reader).await?;
+                Ok(())
+            })
+            .await
+            .map_err(crate::PgTransactionError::into_persistence)
+            .unwrap();
+        reader
+            .transaction::<(), crate::PgTransactionError, _>(async |reader| {
+                let current = lock_native_authority(reader, realm).await?;
+                assert_eq!(current.value["realm_id"], realm);
+                assert_eq!(current.value["generation"], 0);
+                let blocked = writer
+                    .transaction::<(), crate::PgTransactionError, _>(async |writer| {
+                        sql_query("SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1 FOR UPDATE NOWAIT")
+                            .bind::<Text, _>(realm)
+                            .get_result::<JsonRow>(&mut *writer)
+                            .await?;
+                        Ok(())
+                    })
+                    .await;
+                assert!(blocked.is_err(), "successful helper retains its row lock until the caller transaction ends");
+                Ok(())
+            })
+            .await
+            .map_err(crate::PgTransactionError::into_persistence)
+            .unwrap();
+        sql_query("SELECT to_jsonb(a) AS value FROM realm_authorities a WHERE realm_id=$1 FOR UPDATE NOWAIT")
+            .bind::<Text, _>(realm)
+            .get_result::<JsonRow>(&mut *writer)
+            .await
+            .unwrap();
+        assert!(matches!(
+            lock_native_authority(&mut reader, "missing-native-authority").await,
+            Err(PersistenceError::Database(_))
+        ));
+        let unrelated = sql_query("SELECT 1 / 0")
+            .execute(&mut *reader)
+            .await
+            .map_err(crate::issued_realm_snapshots::snapshot_cut_error)
+            .expect_err("an unrelated database fault is not a lock race");
+        assert!(matches!(unrelated, PersistenceError::Database(_)));
+    }
 }

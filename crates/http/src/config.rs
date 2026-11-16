@@ -546,6 +546,10 @@ pub struct AppConfig {
     /// spec crypto-media/media-and-blob.md §2.1.
     /// Env: `COLAND_RESUMABLE_UPLOAD_DIR` (default `./coland-resumable-uploads`).
     pub resumable_upload_dir: PathBuf,
+    /// Exact deployment-public/global native Blob references. Empty is closed.
+    /// Absence of a Realm association never grants public sharing by itself.
+    /// Env: `COLAND_PUBLIC_BLOB_REFS`, a JSON array of canonical BlobRef values.
+    pub public_blob_refs: std::collections::BTreeSet<arkret_wire::BlobRef>,
     /// Resumable (tus) blob upload — maximum lifetime of an incomplete
     /// upload part, in seconds. Expired parts are garbage-collected and
     /// never produce a referencable `blob_ref`. Advertised in
@@ -975,6 +979,7 @@ impl AppConfig {
             db_pool_max_size: None,
             db_pool_acquire_timeout_seconds: None,
             resumable_upload_dir: PathBuf::from("./coland-resumable-uploads"),
+            public_blob_refs: Default::default(),
             resumable_upload_incomplete_ttl_seconds: 86_400,
             seed_demo_data: false,
             trust_domain: TrustDomainId::new("ak:trust_domain:coland.local")
@@ -1357,6 +1362,17 @@ impl AppConfig {
                 .and_then(|value| value.trim().parse::<u64>().ok())
                 .unwrap_or(86_400)
                 .max(60);
+        let public_blob_refs = env_non_empty(values, "COLAND_PUBLIC_BLOB_REFS")
+            .map(|raw| serde_json::from_str::<Vec<arkret_wire::BlobRef>>(&raw))
+            .transpose()
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "COLAND_PUBLIC_BLOB_REFS must be canonical Blob references: {error}"
+                )
+            })?
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         let seed_demo_data = env_bool(values, "COLAND_SEED_DEMO_DATA")?.unwrap_or(false);
         // G3.S9 — sovereign enclave toggle + outbound host allow-list.
         //
@@ -1471,6 +1487,7 @@ impl AppConfig {
             db_pool_max_size,
             db_pool_acquire_timeout_seconds,
             resumable_upload_dir,
+            public_blob_refs,
             resumable_upload_incomplete_ttl_seconds,
             seed_demo_data,
             trust_domain,
@@ -2246,6 +2263,47 @@ fn lookup(values: &BTreeMap<String, String>, name: &str) -> Result<String, std::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_public_blob_permission_is_closed_and_uses_exact_typed_references() {
+        let mut values = registered_internal_channel_values();
+        let load = |values: &BTreeMap<String, String>| {
+            AppConfig::from_values(values, StartupOverrides::default())
+        };
+        assert!(load(&values).unwrap().public_blob_refs.is_empty());
+        let first = format!("ak:blob:sha256:{}", "a".repeat(64));
+        let other = format!("ak:blob:sha256:{}", "b".repeat(64));
+        values.insert(
+            "COLAND_PUBLIC_BLOB_REFS".into(),
+            serde_json::json!([first]).to_string(),
+        );
+        let loaded = load(&values).unwrap();
+        assert_eq!(loaded.public_blob_refs.len(), 1);
+        assert!(
+            loaded
+                .public_blob_refs
+                .contains(&arkret_wire::BlobRef::new(first).unwrap())
+        );
+        assert!(
+            !loaded
+                .public_blob_refs
+                .contains(&arkret_wire::BlobRef::new(other).unwrap())
+        );
+        for invalid in [
+            "true",
+            "{}",
+            "[true]",
+            "[\"ak:blob:*\"]",
+            "[\"https://example.com/blob\"]",
+            "[\"ak:blob:abc\"]",
+        ] {
+            values.insert("COLAND_PUBLIC_BLOB_REFS".into(), invalid.into());
+            assert!(
+                load(&values).is_err(),
+                "accepted an untyped public authorization: {invalid}"
+            );
+        }
+    }
 
     #[test]
     fn account_authority_origin_excludes_mount_but_keeps_scheme_host_and_port() {

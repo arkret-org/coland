@@ -1860,6 +1860,21 @@ pub trait AuthorityCommitStore: Send + Sync {
     /// Revalidate complete bytes at this Station's current governing cut and
     /// retain all revocable dependency locks through network handoff. A replica
     /// without a registered authenticated governing barrier must fail closed.
+    /// Hold the native accepted Room, Strand, provider, asset and privacy cut
+    /// for an explicitly deployment-public Blob. This grants no Account read.
+    async fn acquire_mimi_public_blob_delivery(
+        &self,
+        _station: &arkret_wire::DidCoreId,
+        _provider: &arkret_wire::DidCoreId,
+        _room: &arkret_wire::MimiRoomUri,
+        _strand: &arkret_wire::StrandId,
+        _reference: &arkret_wire::BlobRef,
+    ) -> PersistenceResult<(crate::BlobRecord, Box<dyn AccountContentDeliveryGuard>)> {
+        Err(crate::PersistenceError::Conflict(
+            "revision_unavailable: native MIMI asset delivery is unavailable".into(),
+        ))
+    }
+
     async fn acquire_committed_content_delivery(
         &self,
         _account: &arkret_wire::AccountId,

@@ -35,6 +35,21 @@ fn map_issue_error(
     }
 }
 
+fn native_delivery_error(
+    error: coland_http::error::AppError,
+    by_reference: bool,
+) -> coland_http::error::AppError {
+    if error.wire_code() == coland_storage::ConflictCode::TemporarilyUnavailable.as_str() {
+        snapshot_unavailable("a concurrent write prevented snapshot delivery")
+    } else if by_reference {
+        coland_http::error::AppError::capability_denied(
+            "the Realm snapshot is not readable by this caller",
+        )
+    } else {
+        error
+    }
+}
+
 /// Whether `account` is a currently joined member of the Realm on the
 /// governing Station's typed `member_state` current (the same membership the
 /// Snapshot gate, the stream scan and the stream list prove), so a non-member
@@ -208,7 +223,7 @@ pub(crate) async fn native_snapshot(
     let input = coland_storage::AccountContentDeliveryInput::snapshot(&snapshot);
     let guard = applet_managed_device::content_delivery_guard_for_input(state, device, input)
         .await
-        .map_err(|error| if reference.is_some() { denied() } else { error })?;
+        .map_err(|error| native_delivery_error(error, reference.is_some()))?;
     coland_http::result::guarded_json_ok(snapshot, Some(guard))
 }
 
@@ -221,6 +236,29 @@ mod issue_error_tests {
             arkret_canonical::DigestSuite::Sha256,
             [0x5a; 32],
         ))
+    }
+
+    #[test]
+    fn native_delivery_preserves_snapshot_busy_for_head_and_original_reads() {
+        for by_reference in [false, true] {
+            let busy = native_delivery_error(
+                crate::app_error!(TemporarilyUnavailable, "native authority cut is changing"),
+                by_reference,
+            );
+            assert_eq!(busy.wire_code(), "realm_state_snapshot_unavailable");
+            assert_eq!(busy.http_status().as_u16(), 503);
+        }
+        let hidden = native_delivery_error(
+            coland_http::error::AppError::not_found("native content is unavailable"),
+            false,
+        );
+        assert_eq!(hidden.wire_code(), "not_found");
+        let denied = native_delivery_error(
+            coland_http::error::AppError::not_found("native content is unavailable"),
+            true,
+        );
+        assert_eq!(denied.wire_code(), "capability_denied");
+        assert_eq!(denied.http_status().as_u16(), 403);
     }
 
     #[test]

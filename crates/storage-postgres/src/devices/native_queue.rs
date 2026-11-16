@@ -450,8 +450,8 @@ pub(super) async fn read(
     realms.sort();
     realms.dedup();
     for realm in realms {
-        let row=sql_query("SELECT to_jsonb(service_id) AS payload FROM realm_authorities WHERE realm_id=$1 FOR SHARE NOWAIT")
-            .bind::<Text,_>(realm.as_str()).get_result::<JsonPayloadRow>(held.connection()).await.map_err(PersistenceError::database)?;
+        let row=sql_query("SELECT to_jsonb(service_id) AS payload FROM public.lock_native_content_realm_authority($1)")
+            .bind::<Text,_>(realm.as_str()).get_result::<JsonPayloadRow>(held.connection()).await.map_err(crate::issued_realm_snapshots::snapshot_cut_error)?;
         if row.payload.as_str() != Some(authority.governance_service_id.as_str()) {
             return Err(denied("native queue has no local current barrier"));
         }

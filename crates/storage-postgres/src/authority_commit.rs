@@ -21,6 +21,7 @@ use crate::capability_grant_current_states::{
 
 mod handoff_current;
 mod handoff_replica;
+mod mimi_blob_delivery;
 pub(crate) mod replica;
 
 #[derive(Clone)]
@@ -3200,6 +3201,20 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         }).await.map_err(PgTransactionError::into_persistence)
     }
 
+    async fn acquire_mimi_public_blob_delivery(
+        &self,
+        station: &arkret_wire::DidCoreId,
+        provider: &arkret_wire::DidCoreId,
+        room: &arkret_wire::MimiRoomUri,
+        strand: &arkret_wire::StrandId,
+        reference: &arkret_wire::BlobRef,
+    ) -> PersistenceResult<(
+        coland_storage::BlobRecord,
+        Box<dyn coland_storage::AccountContentDeliveryGuard>,
+    )> {
+        mimi_blob_delivery::acquire(&self.pool, station, provider, room, strand, reference).await
+    }
+
     async fn acquire_committed_content_delivery(
         &self,
         account: &arkret_wire::AccountId,
@@ -5890,20 +5905,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         room_uri: &arkret_wire::MimiRoomUri,
     ) -> PersistenceResult<Option<coland_storage::MimiRoomBindingCurrentRecord>> {
         let mut conn = crate::pg_db(&self.pool);
-        sql_query(
-            "SELECT b.mimi_room_uri,b.realm_id,b.current_commit_id,b.current_stream_position,b.current_event_id,b.value,c.stream_ref AS source_stream_ref \
-             FROM mimi_room_binding_current_states b LEFT JOIN realm_commits c \
-             ON c.commit_id=b.current_commit_id AND c.realm_id=b.realm_id \
-             AND c.stream_position=b.current_stream_position AND c.commit_json->>'event_ref'=b.current_event_id \
-             WHERE b.mimi_room_uri=$1",
-        )
-        .bind::<Text, _>(room_uri.as_str())
-        .get_result::<MimiRoomBindingStorageRow>(&mut conn)
-        .await
-        .optional()
-        .map_err(PersistenceError::database)?
-        .map(decode_mimi_room_binding_current)
-        .transpose()
+        sql_query(MIMI_BINDING_CURRENT_SQL)
+            .bind::<Text, _>(room_uri.as_str())
+            .get_result::<MimiRoomBindingStorageRow>(&mut conn)
+            .await
+            .optional()
+            .map_err(PersistenceError::database)?
+            .map(decode_mimi_room_binding_current)
+            .transpose()
     }
 
     async fn agent_owner_direct_scope(
@@ -7283,3 +7292,9 @@ pub(crate) async fn commit_realm_actor_governance_in_connection(
 #[cfg(test)]
 #[path = "authority_commit/native_series_unit_tests.rs"]
 mod native_series_unit_tests;
+
+const MIMI_BINDING_CURRENT_SQL: &str = "SELECT b.mimi_room_uri,b.realm_id,b.current_commit_id,b.current_stream_position,b.current_event_id,b.value,c.stream_ref AS source_stream_ref \
+             FROM mimi_room_binding_current_states b LEFT JOIN realm_commits c \
+             ON c.commit_id=b.current_commit_id AND c.realm_id=b.realm_id \
+             AND c.stream_position=b.current_stream_position AND c.commit_json->>'event_ref'=b.current_event_id \
+             WHERE b.mimi_room_uri=$1";

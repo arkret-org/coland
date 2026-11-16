@@ -1002,6 +1002,23 @@ CREATE TABLE public.realm_authorities (
     )
 );
 
+-- A native delivery must fail before waiting on a writer's governing cut.
+-- Preserve this exact row lock, but translate only SQLSTATE 55P03 into the
+-- transaction-race kind retained by the database driver's public error API.
+CREATE FUNCTION public.lock_native_content_realm_authority(target_realm text)
+RETURNS SETOF public.realm_authorities
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+        SELECT a.* FROM public.realm_authorities a
+        WHERE a.realm_id = target_realm
+        FOR SHARE NOWAIT;
+EXCEPTION WHEN lock_not_available THEN
+    RAISE EXCEPTION 'native content authority cut is changing'
+        USING ERRCODE = '40001';
+END;
+$$;
+
 -- One chain per serialized CommitStreamRef. Realm, Circle and Sidecar
 -- positions are intentionally incomparable: there is no global chain and no
 -- global position. A member Station keeps a Commit whose Event a hosted

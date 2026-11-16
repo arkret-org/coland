@@ -1059,7 +1059,7 @@ async fn boundary_publish_first_root(
             .unwrap(),
         realm_actor_id: candidate.actor_id.as_realm_actor_id().unwrap().clone(),
         created_at: arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now()),
-        author: arkret::crypto::backup::KeyBackupAuthBinding {
+        author: arkret::crypto::backup::KeyBackupAuthorizationBinding {
             device_id: authority.device_id.clone(),
             verification_method: DidUrl::new(format!(
                 "{}#{}",

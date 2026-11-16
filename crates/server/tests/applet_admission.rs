@@ -4,6 +4,8 @@
 #[path = "../../storage-postgres/tests/support/applet_authoring/mod.rs"]
 #[allow(dead_code)]
 mod applet_authoring;
+#[path = "support/native_content_lock_diagnostic.rs"]
+mod native_content_lock_diagnostic;
 #[path = "../../storage-postgres/tests/support/ordinary_realm.rs"]
 #[allow(dead_code)]
 mod ordinary_realm;
@@ -51,15 +53,22 @@ async fn realm_device_mls_remote_account_claim_welcome_and_consume_keep_original
 #[tokio::test]
 async fn realm_runtime_cold_recovery_and_native_messages_use_real_https() {
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
-    Box::pin(applet_authoring::realm_bridge_runtime(database.pool())).await;
+    let pool = database.pool();
+    native_content_lock_diagnostic::run(
+        pool.clone(),
+        Box::pin(applet_authoring::realm_bridge_runtime(pool)),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn realm_runtime_circle_scope_never_becomes_an_account_or_foreign_realm() {
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
-    Box::pin(applet_authoring::realm_bridge_circle_runtime(
-        database.pool(),
-    ))
+    let pool = database.pool();
+    native_content_lock_diagnostic::run(
+        pool.clone(),
+        Box::pin(applet_authoring::realm_bridge_circle_runtime(pool)),
+    )
     .await;
 }
 
@@ -80,15 +89,24 @@ async fn widget_native_inventory_preserves_consent_scope_and_all_three_revoke_mo
 #[tokio::test]
 async fn same_realm_device_cross_circle_pages_ack_only_the_disclosed_prefix() {
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
-    Box::pin(applet_authoring::realm_bridge_cross_circle_queue_boundaries(database.pool())).await;
+    let pool = database.pool();
+    native_content_lock_diagnostic::run(
+        pool.clone(),
+        Box::pin(applet_authoring::realm_bridge_cross_circle_queue_boundaries(pool)),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn realm_device_welcome_checkpoint_lost_consume_and_cold_ack_preserve_originals() {
     let database = coland_storage_postgres::test_database::TestDatabase::lease().await;
-    Box::pin(applet_authoring::realm_bridge_welcome_recovery_boundaries(
-        database.pool(),
-    ))
+    let pool = database.pool();
+    native_content_lock_diagnostic::run(
+        pool.clone(),
+        Box::pin(applet_authoring::realm_bridge_welcome_recovery_boundaries(
+            pool,
+        )),
+    )
     .await;
 }
 

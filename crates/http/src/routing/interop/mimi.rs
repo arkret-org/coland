@@ -58,6 +58,7 @@ struct MimiRoomBindingProjection {
 mod binding;
 mod handlers;
 mod payload;
+mod proxy_download;
 mod signature;
 
 use binding::*;

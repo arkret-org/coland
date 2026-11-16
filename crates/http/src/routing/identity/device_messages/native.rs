@@ -4,6 +4,12 @@ use crate::routing::identity::applet_managed_device::{self, VerifiedAppletManage
 
 fn unavailable(error: coland_services::ServiceError) -> AppError {
     tracing::debug!(%error, "native recipient queue admission unavailable");
+    if error.conflict_code() == Some(coland_storage::ConflictCode::TemporarilyUnavailable) {
+        return crate::app_error!(
+            TemporarilyUnavailable,
+            "native recipient queue authority cut is unavailable"
+        );
+    }
     match error {
         coland_services::ServiceError::Conflict(detail)
             if detail.starts_with("cursor_expired:") =>
@@ -90,4 +96,47 @@ pub(super) async fn ack(
     json_ok(DeviceMessagesAcknowledgementResponseBody {
         pruned_count: count as u64,
     })
+}
+
+#[cfg(test)]
+mod queue_error_tests {
+    use salvo::http::StatusCode;
+
+    use super::*;
+
+    #[test]
+    fn original_typed_queue_authority_busy_stays_503() {
+        let error = unavailable(
+            coland_storage::PersistenceError::Conflict(
+                "temporarily_unavailable: the native authority cut lost a concurrent write race"
+                    .into(),
+            )
+            .into(),
+        );
+        assert_eq!(error.code, arkret_wire::ErrorCode::TemporarilyUnavailable);
+        assert_eq!(error.http_status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn missing_or_refused_queue_is_not_reclassified_by_diagnostic_text() {
+        for error in [
+            coland_storage::PersistenceError::NotFound("native queue".into()),
+            coland_storage::PersistenceError::Conflict(
+                "capability_denied: recipient scope refused".into(),
+            ),
+            coland_storage::PersistenceError::Conflict(
+                "failed_precondition: diagnostic merely mentions temporarily_unavailable".into(),
+            ),
+        ] {
+            let error = unavailable(error.into());
+            assert_eq!(error.http_status(), StatusCode::NOT_FOUND);
+        }
+        let expired = unavailable(
+            coland_storage::PersistenceError::Conflict(
+                "cursor_expired: original expiry ended".into(),
+            )
+            .into(),
+        );
+        assert_eq!(expired.code, arkret_wire::ErrorCode::CursorExpired);
+    }
 }

@@ -595,16 +595,28 @@ pub(super) async fn delivery_guard(
             &input,
         )
         .await
-        .map_err(|error| {
-            tracing::debug!(%error,"native claim delivery refused");
-            peer_claim_failed()
-        })?
+        .map_err(claim_delivery_error)?
         .map(Some)
         .ok_or_else(peer_claim_failed)
 }
 
+fn claim_delivery_error(error: coland_storage::PersistenceError) -> AppError {
+    tracing::debug!(%error, "native claim delivery refused");
+    let error: coland_services::ServiceError = error.into();
+    if error.conflict_code() == Some(coland_storage::ConflictCode::TemporarilyUnavailable) {
+        return claim_error(error);
+    }
+    peer_claim_failed()
+}
+
 pub(super) fn claim_error(error: coland_services::ServiceError) -> AppError {
     tracing::debug!(%error, "native KeyPackage admission refused");
+    if error.conflict_code() == Some(coland_storage::ConflictCode::TemporarilyUnavailable) {
+        return crate::app_error!(
+            TemporarilyUnavailable,
+            "native KeyPackage authority cut is unavailable"
+        );
+    }
     match error {
         coland_services::ServiceError::Conflict(ref detail)
             if detail.starts_with("duplicate_conflict:") =>
@@ -756,5 +768,48 @@ mod consume_error_tests {
             error.message.as_ref(),
             "native consume differs from its original durable delivery"
         );
+    }
+}
+
+#[cfg(test)]
+mod claim_busy_error_tests {
+    use salvo::http::StatusCode;
+
+    use super::*;
+
+    #[test]
+    fn actual_typed_busy_remains_unavailable_at_admission_and_delivery() {
+        let busy = || {
+            coland_storage::PersistenceError::Conflict(
+                "temporarily_unavailable: the native content cut lost a concurrent write race"
+                    .into(),
+            )
+        };
+        for error in [claim_error(busy().into()), claim_delivery_error(busy())] {
+            assert_eq!(error.code, arkret_wire::ErrorCode::TemporarilyUnavailable);
+            assert_eq!(error.http_status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+
+    #[test]
+    fn missing_and_refused_claims_do_not_become_infrastructure_failures() {
+        for error in [
+            coland_storage::PersistenceError::NotFound("native target".into()),
+            coland_storage::PersistenceError::SchemaViolation("invalid target proof".into()),
+            coland_storage::PersistenceError::Conflict(
+                "capability_denied: target scope is not authorized".into(),
+            ),
+            coland_storage::PersistenceError::Conflict(
+                "failed_precondition: diagnostic merely mentions temporarily_unavailable".into(),
+            ),
+        ] {
+            let outcome = claim_delivery_error(error);
+            assert_eq!(outcome.code, arkret_wire::ErrorCode::ClaimFailed);
+            assert_eq!(outcome.http_status(), StatusCode::BAD_REQUEST);
+        }
+        let missing =
+            claim_error(coland_storage::PersistenceError::NotFound("native target".into()).into());
+        assert_eq!(missing.code, arkret_wire::ErrorCode::ClaimFailed);
+        assert_eq!(missing.http_status(), StatusCode::BAD_REQUEST);
     }
 }

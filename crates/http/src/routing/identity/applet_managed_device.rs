@@ -36,6 +36,18 @@ fn authority_error(error: coland_storage::PersistenceError) -> AppError {
     }
 }
 
+fn content_delivery_error(error: coland_services::ServiceError) -> AppError {
+    tracing::debug!(stage = "native_delivery_cut", error = %error, "native content preparation refused");
+    if error.conflict_code() == Some(coland_storage::ConflictCode::TemporarilyUnavailable) {
+        crate::app_error!(
+            TemporarilyUnavailable,
+            "native content authority cut is unavailable"
+        )
+    } else {
+        AppError::not_found("native content is unavailable")
+    }
+}
+
 fn one_header<'a>(req: &'a Request, name: &str) -> Result<&'a str, AppError> {
     let all_values = req.headers().get_all(name);
     let mut values = all_values.iter();
@@ -263,10 +275,7 @@ pub(crate) async fn content_delivery_guard_for_input(
             &input,
         )
         .await
-        .map_err(|error| {
-            tracing::debug!(stage="native_delivery_cut", error=%error, "native content preparation refused");
-            unavailable()
-        })?
+        .map_err(content_delivery_error)?
         .ok_or_else(unavailable)
 }
 
@@ -312,4 +321,28 @@ pub(crate) async fn scope_guard_for_authority(
         effective_scope: effective_scope.clone(),
         service_did_document,
     })
+}
+
+#[cfg(test)]
+mod content_delivery_error_tests {
+    use super::*;
+
+    #[test]
+    fn only_typed_content_cut_races_escape_the_uniform_hidden_denial() {
+        let busy = content_delivery_error(coland_services::ServiceError::Conflict(
+            "temporarily_unavailable: native authority cut is changing".into(),
+        ));
+        assert_eq!(busy.wire_code(), "temporarily_unavailable");
+        assert_eq!(busy.http_status().as_u16(), 503);
+        for error in [
+            coland_services::ServiceError::Conflict(
+                "capability_denied: current permission was revoked".into(),
+            ),
+            coland_services::ServiceError::Database("a real unclassified database fault".into()),
+        ] {
+            let hidden = content_delivery_error(error);
+            assert_eq!(hidden.wire_code(), "not_found");
+            assert_eq!(hidden.http_status().as_u16(), 404);
+        }
+    }
 }

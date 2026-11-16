@@ -266,7 +266,9 @@ mod tests {
             arkret_wire::DidCoreId::new("ak:did_core:web:station.example").unwrap(),
         );
         let actor = super::ActorId::account(account.clone());
-        assert!(super::effective_grants_subject_allowed(&actor, &actor, false));
+        assert!(super::effective_grants_subject_allowed(
+            &actor, &actor, false
+        ));
         for (name, identity) in [
             ("subject_actor_id", actor.to_string()),
             ("subject_account_id", account.to_string()),

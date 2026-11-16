@@ -440,6 +440,24 @@ impl AuthorityCommitApplication {
             .await?)
     }
 
+    /// Native provider asset read without an Account credential or projection.
+    pub async fn acquire_mimi_public_blob_delivery(
+        &self,
+        station: &arkret_wire::DidCoreId,
+        provider: &arkret_wire::DidCoreId,
+        room: &arkret_wire::MimiRoomUri,
+        strand: &arkret_wire::StrandId,
+        reference: &arkret_wire::BlobRef,
+    ) -> ServiceResult<(
+        coland_storage::BlobRecord,
+        Box<dyn coland_storage::AccountContentDeliveryGuard>,
+    )> {
+        Ok(self
+            .store()
+            .acquire_mimi_public_blob_delivery(station, provider, room, strand, reference)
+            .await?)
+    }
+
     pub async fn acquire_committed_content_delivery(
         &self,
         account: &arkret_wire::AccountId,

@@ -573,7 +573,9 @@ async fn blob_get(depot: &mut Depot, req: &mut Request, res: &mut Response) {
     match blob.as_ref() {
         Some(blob) => {
             if let Some(payload) = presign_payload.as_ref()
-                && !presign_payload_matches_blob(blob, payload)
+                && (!presign_payload_matches_blob(blob, payload)
+                    || (blob.realm_id.is_none()
+                        && !public_global_blob_allowed(state, &blob_ref, blob)))
             {
                 render_error(res, StatusCode::NOT_FOUND, "not_found", "not found");
                 return;
@@ -945,6 +947,9 @@ async fn blob_presign(
         .ok()
         .flatten()
         .ok_or_else(|| AppError::not_found("blob not found"))?;
+    if blob.realm_id.is_none() && !public_global_blob_allowed(state, blob_ref, &blob) {
+        return Err(AppError::not_found("blob not found"));
+    }
     if let Some(session) = session.as_ref()
         && !blob_visible_to_session(
             state,
@@ -1072,10 +1077,10 @@ async fn blob_presign(
 const BLOB_PRESIGN_SCHEME: &str = "ak.blob.presign.v1";
 const BLOB_PRESIGN_PROOF_KIND: &str = "detached_jws";
 const BLOB_PRESIGN_KID_FRAGMENT: &str = "notary-key";
-const BLOB_PRESIGN_MAX_TTL_SECONDS: i64 = 300;
+pub(super) const BLOB_PRESIGN_MAX_TTL_SECONDS: i64 = 300;
 const BLOB_PRESIGN_CLOCK_SKEW_SECONDS: i64 = 30;
 
-fn issue_presign_envelope(
+pub(super) fn issue_presign_envelope(
     state: &AppState,
     blob_ref: &str,
     realm_id: Option<&str>,
@@ -1207,6 +1212,19 @@ fn validate_presign_query(
 
 fn blob_presign_kid(state: &AppState) -> String {
     format!("{}#{BLOB_PRESIGN_KID_FRAGMENT}", state.service_id())
+}
+
+/// The deployment-public branch is explicit and exact, never inferred from
+/// a missing Realm or borrowed from an authenticated Account's permissions.
+pub(super) fn public_global_blob_allowed(
+    state: &AppState,
+    reference: &str,
+    blob: &BlobRecord,
+) -> bool {
+    blob.realm_id.is_none()
+        && blob.visibility == BlobVisibility::Public
+        && BlobRef::new(reference)
+            .is_ok_and(|reference| state.config().public_blob_refs.contains(&reference))
 }
 
 fn presign_payload_matches_blob(blob: &BlobRecord, payload: &BlobPresignPayload) -> bool {

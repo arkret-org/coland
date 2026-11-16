@@ -241,6 +241,7 @@ and rollout-only switches that should be managed deliberately.
 | `COLAND_LIVEKIT_API_SECRET` | unset | LiveKit API Secret (`*_FILE` form supported). HMAC-SHA256 signing key for the LiveKit JWT; never exposed in any cell, `/health`, or describe payload. Required together with `COLAND_LIVEKIT_API_KEY` to mint LiveKit backend tokens. |
 | `COLAND_RESUMABLE_UPLOAD_DIR` | `./coland-resumable-uploads` | Directory for resumable-upload staging files. |
 | `COLAND_RESUMABLE_UPLOAD_TTL_SECS` | `86400` | Incomplete resumable-upload TTL; minimum 60 seconds. |
+| `COLAND_PUBLIC_BLOB_REFS` | `[]` | JSON array of canonical native Blob references explicitly published by this deployment as public/global. Exact references only; empty is closed. Applies to realm-less public Blob bearer issuance and every presigned GET/HEAD/Range. Missing Realm metadata never supplies this permission. It cannot authorize Realm-bound, encrypted, actor-private, device-bound, held or redacted content. |
 | `COLAND_SOVEREIGN_ENCLAVE` | `false` | Enables the sovereign-enclave startup and egress security posture; it does not advertise a conformance profile. |
 | `COLAND_SOVEREIGN_ENCLAVE_ALLOWED_OUTBOUND_HOSTS` | empty | Comma-separated outbound host allow-list for sovereign-enclave deployments. |
 | `COLAND_VERIFIED_PROFILES_ARTIFACT` | unset | Path to a cotest `verified-profiles.json` artifact to advertise verified profiles. |
@@ -813,3 +814,20 @@ transaction's durable first outcome.
 The agent FSM is owned by a cell (`ak.component.agent_state.v1`) with
 `lattice = fsm, bottom = reject`. Agent operations `pause`, `resume` and
 `deactivate` (`POST /agents/{id}/deactivate`) transition it.
+
+Public/global Blob publication is a deliberate deployment decision. Removing
+a reference from `COLAND_PUBLIC_BLOB_REFS` and applying the deployment config
+closes subsequent bearer issuance and presigned reads for that reference,
+including URLs still within their original lifetime. The setting is an exact
+typed allowlist, not a URL allowlist, storage prefix, Realm permission or
+fallback for assets without a known classification.
+
+The MIMI native public-asset consumer also requires a current accepted Room
+binding, its active accepted Strand, the authenticated current hub/follower
+provider, a retained accepted Message referencing the exact asset, and a
+current independent asset-privacy result explicitly allowing direct download.
+It issues the existing short-lived read-only local Blob URL and never borrows
+an Account session or grants. A public/global URL is transferable by design;
+Room/provider removal refuses new MIMI requests, while already public bytes
+remain governed by the deployment-public allowlist. Non-public assets and
+provider-proxy/OHTTP/mirror modes are not converted to direct bearer URLs.

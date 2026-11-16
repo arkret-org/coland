@@ -1184,19 +1184,7 @@ pub(super) async fn mimi_proxy_download(
 ) -> JsonResult<MimiProxyDownloadResponseBody> {
     let state = depot.get_typed::<AppState>().expect("state injected");
     let body = body.into_inner();
-    let source = verify_mimi_source_service_signature(state, req, None).await?;
-    if source != body.requester_id.as_str() {
-        return Err(AppError::capability_denied(
-            "MIMI download requester does not match the authenticated provider",
-        ));
-    }
-    enforce_mimi_proxy_download_egress_policy(state, body.asset_ref.as_str())?;
-    // No registered consumer currently serves this opaque reference. Never
-    // return a nonexistent URL, an unchecked asset, or a bearer presign bypass.
-    Err(
-        crate::app_error!(UnsupportedFeature, "MIMI asset proxy is not available")
-            .with_internal_reason("mimi_asset_proxy_unavailable"),
-    )
+    proxy_download::download(state, req, body).await
 }
 
 pub(super) fn enforce_mimi_proxy_download_egress_policy(

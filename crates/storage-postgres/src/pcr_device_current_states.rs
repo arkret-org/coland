@@ -38,7 +38,7 @@ pub(crate) async fn publish_device_list_change_in_connection(
         .bind::<Text, _>(owner)
         .execute(conn)
         .await
-        .map_err(PersistenceError::database)?;
+        .map_err(crate::persistence_query_error)?;
     Ok(())
 }
 

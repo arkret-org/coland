@@ -989,7 +989,7 @@ fn verify_control_proof_inner(
                     )
                 })?;
             let mut eligible = threshold
-                .get("allowed_verification_methods")
+                .get("allowed_kids")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
@@ -1002,7 +1002,7 @@ fn verify_control_proof_inner(
                 arkret_canonical::canonical_sha256(&json!({
                     "threshold": {
                         "min_signature_count": required,
-                        "allowed_verification_methods": eligible,
+                        "allowed_kids": eligible,
                     }
                 }))
                 .map_err(|error| internal(error.to_string()))?,
@@ -1067,12 +1067,10 @@ fn governance_control_methods(
         .ok_or_else(|| {
             OrganizationRegistrationError::proof("organization governance threshold is missing")
         })?;
-    if threshold.keys().any(|name| {
-        !matches!(
-            name.as_str(),
-            "min_signature_count" | "allowed_verification_methods"
-        )
-    }) {
+    if threshold
+        .keys()
+        .any(|name| !matches!(name.as_str(), "min_signature_count" | "allowed_kids"))
+    {
         return Err(OrganizationRegistrationError::proof(
             "organization governance threshold contains an unregistered field",
         ));
@@ -1092,12 +1090,10 @@ fn governance_control_methods(
         ));
     }
     let eligible = threshold
-        .get("allowed_verification_methods")
+        .get("allowed_kids")
         .and_then(Value::as_array)
         .ok_or_else(|| {
-            OrganizationRegistrationError::proof(
-                "organization governance allowed_verification_methods is missing",
-            )
+            OrganizationRegistrationError::proof("organization governance allowed_kids is missing")
         })?
         .iter()
         .map(|value| {
@@ -1408,11 +1404,12 @@ mod tests {
     #[test]
     fn governance_metadata_uses_registered_fields_without_retired_profile_or_threshold_aliases() {
         let method = "did:web:organization.example#governance-key";
-        let canonical = serde_json::json!({"arkret_governance":{"threshold":{"min_signature_count":2,"allowed_verification_methods":[method,"did:web:organization.example#other-key"]}}});
+        let canonical = serde_json::json!({"arkret_governance":{"threshold":{"min_signature_count":2,"allowed_kids":[method,"did:web:organization.example#other-key"]}}});
         assert!(super::governance_control_methods(canonical.as_object().unwrap(), Some(2)).is_ok());
         for (key, value) in [
             ("required", serde_json::json!(1)),
             ("eligible_methods", serde_json::json!([method])),
+            ("allowed_verification_methods", serde_json::json!([method])),
         ] {
             let mut legacy = canonical.clone();
             legacy["arkret_governance"]["threshold"]
@@ -1559,7 +1556,7 @@ mod tests {
             "arkret_governance": {
                 "threshold": {
                     "min_signature_count": 2,
-                    "allowed_verification_methods": [governance_method_1, governance_method_2],
+                    "allowed_kids": [governance_method_1, governance_method_2],
                 }
             }
         });

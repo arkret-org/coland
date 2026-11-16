@@ -129,7 +129,7 @@ pub(crate) async fn read(
     actor: &ActorId,
     proposal: &CommittedEventRef,
 ) -> PersistenceResult<RealmActorRequestStatus> {
-    let row = sql_query("SELECT to_jsonb(r) AS value FROM realm_actor_device_revoke_results r WHERE proposal_commit_id=$1 FOR UPDATE")
+    let row = sql_query("SELECT to_jsonb(r) AS value FROM realm_actor_device_revoke_results r WHERE proposal_commit_id=$1")
         .bind::<Text,_>(proposal.commit_id.as_str()).get_result::<Row>(&mut *conn).await
         .optional().map_err(PersistenceError::database)?
         .ok_or_else(|| invalid("accepted revoke lost its command ledger"))?;

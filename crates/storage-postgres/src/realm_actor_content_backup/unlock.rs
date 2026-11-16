@@ -422,8 +422,6 @@ pub(crate) async fn consume_native_unlock(
     // Durable consumption precedes disclosure. Reacquire the exact head/current
     // manager cut and retain its locks until the response frame is handed off.
     let mut held = crate::account_content_delivery::DeliveryGuard::begin(pool).await?;
-    crate::realm_authorization_cut::lock_realm_authorization_cut(held.connection(), realm).await?;
-    super::lock_namespace(held.connection(), &subject).await?;
     let (id, scope, _) = proof_coordinates(proof)?;
     let (_, source, manager, recovery) = target(
         held.connection(),
@@ -433,6 +431,8 @@ pub(crate) async fn consume_native_unlock(
         arkret_wire::ServiceOperationId::SELF_KEYS_BACKUPS_COMMAND_UNLOCK_V1,
     )
     .await?;
+    // target retained the shared Realm cut while checking current authority.
+    super::read_namespace(held.connection(), &subject).await?;
     let references = match proof {
         KeyBackupUnlockProofBody::Device(p) => (
             &p.manager_ref,

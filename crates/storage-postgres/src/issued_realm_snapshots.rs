@@ -14,18 +14,7 @@ use super::{
 /// from a governing-row change or concurrent refresh of an unchanged issued
 /// object, so it does not establish that a handoff occurred.
 pub(crate) fn snapshot_cut_error(error: impl Into<horme::Error>) -> PersistenceError {
-    use diesel::result::{DatabaseErrorKind, Error};
-    match error.into() {
-        horme::Error::Query(Error::DatabaseError(
-            DatabaseErrorKind::SerializationFailure,
-            info,
-        )) => PersistenceError::Conflict(format!(
-            "{}: the snapshot transaction lost a concurrent write race: {}",
-            coland_storage::ConflictCode::TemporarilyUnavailable.as_str(),
-            info.message(),
-        )),
-        other => PersistenceError::database(other),
-    }
+    crate::persistence_query_error(error)
 }
 
 fn snapshot_write_error(stage: &'static str, error: horme::Error) -> PersistenceError {

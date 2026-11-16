@@ -130,6 +130,10 @@ async fn submit_in_connection(
     conn: &mut AsyncPgConnection,
     submission: &ActorPrivateEventSubmission,
 ) -> Result<ActorPrivateEventSubmitResult, PgTransactionError> {
+    // The selected storage owner can be a controller Account while the
+    // actual signer is its Agent. Fence that owner before any private ledger
+    // read, exact retry disclosure or new effect; canonical logs are untouched.
+    crate::pcr_private_authority::require_active_account_owner(conn, &submission.owner).await?;
     let event = &submission.event;
     lock(conn, format!("actor-private-event:{}", event.event_id)).await?;
     if let Some(row) = sql_query(

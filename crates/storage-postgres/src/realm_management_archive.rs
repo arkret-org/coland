@@ -20,7 +20,11 @@ mod owner_transfer;
 const TABLES: &[(&str, &str)] = &[
     (
         "canonical_events",
-        "t.realm_id=$1 AND t.scope_ref->>'kind'='realm_control'",
+        "t.realm_id=$1 AND (t.scope_ref->>'kind'='realm_control' OR (t.kind='ak.mls.commit' AND t.state<>'committed' AND EXISTS(SELECT 1 FROM idempotency_keys k WHERE k.source_event_pk=t.pk)))",
+    ),
+    (
+        "idempotency_keys",
+        "EXISTS(SELECT 1 FROM canonical_events e WHERE e.pk=t.source_event_pk AND e.realm_id=$1 AND e.kind='ak.mls.commit')",
     ),
     (
         "realm_commits",
@@ -363,6 +367,9 @@ async fn state(conn: &mut AsyncPgConnection, realm: &RealmId) -> PersistenceResu
                     object.remove(column);
                 }
             }
+            if *table == "idempotency_keys" {
+                validate_mls_retry_source(conn, realm, &value).await?;
+            }
             if *table == "canonical_events" {
                 let object = value
                     .as_object_mut()
@@ -378,11 +385,14 @@ async fn state(conn: &mut AsyncPgConnection, realm: &RealmId) -> PersistenceResu
                     | "content_originals"
                     | "mls_welcome_deliveries"
                     | "applet_managed_creation_service_sources"
+                    | "idempotency_keys"
             ) {
                 let field = if matches!(*table, "realm_commits" | "content_originals") {
                     "event_pk"
                 } else if *table == "mls_welcome_deliveries" {
                     "commit_event_pk"
+                } else if *table == "idempotency_keys" {
+                    "source_event_pk"
                 } else {
                     "provision_event_pk"
                 };
@@ -494,6 +504,65 @@ async fn validate_blob_uploads(
     Ok(())
 }
 
+// Source/result validation is shared by export and import. A linked row must
+// describe its actual terminal Event, never a response-body ownership guess.
+async fn validate_mls_retry_source(
+    conn: &mut AsyncPgConnection,
+    realm: &RealmId,
+    row: &Value,
+) -> PersistenceResult<()> {
+    use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody;
+    use arkret_wire::{AuthorityCommitStatus, AuthoritySubmitResponseBody, Event, EventKind};
+    let pk = row["source_event_pk"]
+        .as_i64()
+        .ok_or_else(|| invalid("MLS retry lacks its actual source Event"))?;
+    let source = sql_query("SELECT jsonb_build_object('event',e.envelope,'state',e.state,'reason',e.rejection_reason,'commit',(SELECT c.commit_json FROM realm_commits c WHERE c.event_pk=e.pk)) AS value FROM canonical_events e WHERE e.pk=$1 AND e.realm_id=$2 AND e.kind='ak.mls.commit'")
+        .bind::<BigInt,_>(pk).bind::<Text,_>(realm.as_str())
+        .get_result::<JsonRow>(&mut *conn).await.map_err(PersistenceError::database)?.value;
+    let event: Event = serde_json::from_value(source["event"].clone()).map_err(invalid)?;
+    event.validate_for_submit_structural().map_err(invalid)?;
+    let actor: arkret_wire::ActorId =
+        serde_json::from_value(row["authenticated_actor"].clone()).map_err(invalid)?;
+    let _: arkret_wire::UuidV7 =
+        serde_json::from_value(row["idempotency_key"].clone()).map_err(invalid)?;
+    if event.kind != EventKind::MlsCommit
+        || &event.realm_id != realm
+        || &actor != event.actual_signer()
+        || row["actor_key"] != json!(actor.canonical_key().map_err(invalid)?)
+        || row["operation_id"]
+            != json!(arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1)
+        || row["response_status"] != json!(200)
+        || !row["request_hash"].as_str().is_some_and(|value| {
+            value.starts_with("sha256:") && Hash::new(value.to_owned()).is_ok()
+        })
+    {
+        return Err(invalid("MLS retry namespace or source binding is invalid"));
+    }
+    let response: SelfAuthoritySubmitResponseBody =
+        serde_json::from_value(row["response_body"].clone()).map_err(invalid)?;
+    match response {
+        SelfAuthoritySubmitResponseBody::Ordinary(AuthoritySubmitResponseBody::Accepted {
+            status: AuthorityCommitStatus::Committed,
+            commit,
+        }) if source["state"] == json!("committed")
+            && source["commit"] == serde_json::to_value(&commit).map_err(invalid)?
+            && commit.event_ref == event.event_id
+            && commit.realm_id == *realm => {}
+        SelfAuthoritySubmitResponseBody::Ordinary(AuthoritySubmitResponseBody::Rejected {
+            status: arkret_wire::AuthorityRejectionStatus::Rejected,
+            reason_code,
+        }) if source["state"] == json!("rejected")
+            && source["commit"].is_null()
+            && source["reason"] == json!(reason_code) => {}
+        _ => {
+            return Err(invalid(
+                "MLS retry outcome differs from its actual terminal source",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn verify_import(
     conn: &mut AsyncPgConnection,
     manifest: &ManagementPrivateHandoffManifest,
@@ -582,12 +651,25 @@ impl PgAuthorityCommitStore {
                 for source in tables[*table].as_array().ok_or_else(|| invalid("private domain is not rows"))? {
                     let mut row=source.clone();
                     if *table=="canonical_events" { row["realm_pk"]=json!(realm_pk); }
-                    if matches!(*table,"realm_commits"|"content_originals"|"mls_welcome_deliveries"|"applet_managed_creation_service_sources") {
-                        let field=if matches!(*table,"realm_commits"|"content_originals") {"event_pk"} else if *table=="mls_welcome_deliveries" {"commit_event_pk"} else {"provision_event_pk"};
+                    if matches!(*table,"realm_commits"|"content_originals"|"mls_welcome_deliveries"|"applet_managed_creation_service_sources"|"idempotency_keys") {
+                        let field=if matches!(*table,"realm_commits"|"content_originals") {"event_pk"} else if *table=="mls_welcome_deliveries" {"commit_event_pk"} else if *table=="idempotency_keys" {"source_event_pk"} else {"provision_event_pk"};
                         let id=row[field].as_str().ok_or_else(|| invalid("private Commit Event identity missing"))?;
                         let pk=sql_query("SELECT pk FROM canonical_events WHERE envelope->>'event_id'=$1 AND realm_id=$2")
                             .bind::<Text,_>(id).bind::<Text,_>(manifest.realm_id.as_str()).get_result::<Pk>(&mut *conn).await?.pk;
                         row[field]=json!(pk);
+                    }
+                    if *table=="idempotency_keys" {
+                        validate_mls_retry_source(conn, &manifest.realm_id, &row).await?;
+                        // A hosting mirror is not the authoritative source row. Only
+                        // the exact same complete result may acquire its imported source.
+                        sql_query("DELETE FROM idempotency_keys WHERE source_event_pk IS NULL AND actor_key=$1 AND authenticated_actor=$2 AND operation_id=$3 AND idempotency_key=$4 AND request_hash=$5 AND response_status=$6 AND response_body=$7")
+                            .bind::<Text,_>(row["actor_key"].as_str().ok_or_else(|| invalid("MLS retry actor key missing"))?)
+                            .bind::<Jsonb,_>(&row["authenticated_actor"])
+                            .bind::<Text,_>(row["operation_id"].as_str().ok_or_else(|| invalid("MLS retry operation missing"))?)
+                            .bind::<Text,_>(row["idempotency_key"].as_str().ok_or_else(|| invalid("MLS retry key missing"))?)
+                            .bind::<Text,_>(row["request_hash"].as_str().ok_or_else(|| invalid("MLS retry hash missing"))?)
+                            .bind::<diesel::sql_types::Integer,_>(200_i32)
+                            .bind::<Jsonb,_>(&row["response_body"]).execute(&mut *conn).await?;
                     }
                     let sql_nulls=row.as_object_mut().ok_or_else(|| invalid("private row is not an object"))?
                         .remove("__sql_nulls").ok_or_else(|| invalid("missing SQL null inventory"))?;

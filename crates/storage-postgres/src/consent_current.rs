@@ -367,7 +367,7 @@ impl ConsentCurrentStore for PgConsentCurrentStore {
             envelope: Value,
         }
         let mut conn = pg_conn(&self.pool).await?;
-        let rows=sql_query("SELECT c.commit_json,e.envelope FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.commit_id=$1 UNION ALL SELECT f.accepted_commit_json AS commit_json,e.envelope FROM authority_forward_attempts f JOIN canonical_events e ON e.pk=f.event_pk WHERE f.original_submission_json IS NOT NULL AND f.accepted_commit_json->>'commit_id'=$1")
+        let rows=sql_query("SELECT c.commit_json,e.envelope FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE c.commit_id=$1 UNION ALL SELECT f.terminal_outcome_json->'commit' AS commit_json,e.envelope FROM authority_forward_attempts f JOIN canonical_events e ON e.pk=f.event_pk WHERE f.original_submission_json IS NOT NULL AND f.terminal_outcome_json#>>'{commit,commit_id}'=$1")
             .bind::<Text,_>(revision.commit_id.as_str()).get_results::<Basis>(&mut conn).await.map_err(PersistenceError::database)?;
         let mut result: Option<coland_storage::CommittedEventRecord> = None;
         for row in rows {

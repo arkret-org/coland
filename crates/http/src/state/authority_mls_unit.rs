@@ -56,7 +56,7 @@ use super::authority_self_event_unit::{AdmittedProducer, SelfEventUnitEffects};
 pub(super) struct MlsUnitInstallation {
     pub(super) state: MlsStateInstallation,
     pub(super) welcomes: Vec<VerifiedMlsWelcome>,
-    pub(super) native_request: Option<super::authority_managed_device::mls::NativeMlsRequest>,
+    pub(super) native_request: Option<super::authority_managed_device::mls::MlsRequest>,
 }
 
 fn refused(code: ConflictCode, detail: impl std::fmt::Display) -> ServiceError {
@@ -116,7 +116,7 @@ pub(super) fn admit_native_mls_event<'a>(
     group_state_material: Option<&'a MlsGroupStateMaterial>,
     producer: AdmittedProducer,
     producer_key: &'a arkret_signatures::PublicKeyMaterial,
-    native_request: Option<super::authority_managed_device::mls::NativeMlsRequest>,
+    native_request: Option<super::authority_managed_device::mls::MlsRequest>,
 ) -> impl std::future::Future<Output = ServiceResult<AuthoritySubmitResponseBody>> + Send + 'a {
     crate::boxed_future(move || {
         admit_mls_event_inner(
@@ -138,10 +138,24 @@ async fn admit_mls_event_inner(
     group_state_material: Option<&MlsGroupStateMaterial>,
     producer: AdmittedProducer,
     producer_key: &arkret_signatures::PublicKeyMaterial,
-    native_request: Option<super::authority_managed_device::mls::NativeMlsRequest>,
+    native_request: Option<super::authority_managed_device::mls::MlsRequest>,
 ) -> ServiceResult<AuthoritySubmitResponseBody> {
+    if let Some(context) = native_request.as_ref()
+        && let Some(original) = context.replay(state).await?
+    {
+        return ordinary_retry_outcome(original);
+    }
     if let Some(outcome) = super::authority_self_event_unit::exact_replay(state, event).await? {
-        return Ok(outcome);
+        return match native_request.as_ref() {
+            Some(context) => match context.replay(state).await? {
+                Some(original) => ordinary_retry_outcome(original),
+                None => Err(ServiceError::Conflict(
+                    "duplicate_conflict: MLS Event already has a different complete retry unit"
+                        .into(),
+                )),
+            },
+            None => Ok(outcome),
+        };
     }
     if !matches!(&event.scope_ref, ScopeRef::Realm { realm_id } | ScopeRef::Circle { realm_id, .. } | ScopeRef::Sidecar { realm_id, .. } if realm_id == &event.realm_id)
     {
@@ -165,7 +179,7 @@ async fn admit_mls_event_inner(
     let refusal_source = native_guard
         .as_deref()
         .map(coland_storage::ManagedMlsRefusalSource::Local);
-    let native_refusal = refusal_source.zip(refusal_record.as_ref());
+    let native_refusal = refusal_source;
     let refusal_authority = if event.kind == EventKind::MlsCommit {
         state
             .authority_commits()
@@ -201,6 +215,7 @@ async fn admit_mls_event_inner(
                             authority,
                             arkret_wire::ReasonCode::GOVERNANCE_BINDING_MISMATCH,
                             native_refusal,
+                            refusal_record.as_ref(),
                         )
                         .await;
                 }
@@ -222,7 +237,7 @@ async fn admit_mls_event_inner(
             mls: Some(MlsUnitInstallation {
                 state: installation,
                 welcomes,
-                native_request,
+                native_request: native_request.clone(),
             }),
             content_backup_source: None,
         },
@@ -246,6 +261,7 @@ async fn admit_mls_event_inner(
                     authority,
                     arkret_wire::ReasonCode::GOVERNANCE_BINDING_MISMATCH,
                     native_refusal,
+                    refusal_record.as_ref(),
                 )
                 .await;
         }
@@ -261,10 +277,34 @@ async fn admit_mls_event_inner(
             .ok_or_else(|| failed_precondition("MLS refusal has no current authority"))?;
         return state
             .authority_commits()
-            .finalize_mls_rejection(event, &authority, reason_code, native_refusal)
+            .finalize_mls_rejection(
+                event,
+                &authority,
+                reason_code,
+                native_refusal,
+                refusal_record.as_ref(),
+            )
             .await;
     }
+    if let Some(context) = native_request.as_ref() {
+        return match context.replay(state).await? {
+            Some(original) => ordinary_retry_outcome(original),
+            None => Err(ServiceError::Conflict(
+                "duplicate_conflict: MLS Event completed under a different complete retry unit"
+                    .into(),
+            )),
+        };
+    }
     Ok(outcome)
+}
+
+fn ordinary_retry_outcome(
+    outcome: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody,
+) -> ServiceResult<AuthoritySubmitResponseBody> {
+    match outcome {
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(outcome) => Ok(outcome),
+        _ => Err(ServiceError::internal("complete MLS retry stored an aggregate outcome")),
+    }
 }
 
 /// Sign the original local claim's Add proof after the covering Commit has

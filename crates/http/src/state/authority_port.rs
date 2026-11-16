@@ -25,6 +25,15 @@ use coland_services::{ServiceError, ServiceResult};
 
 use super::AppState;
 
+fn ordinary_mls_outcome(
+    outcome: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody,
+) -> ServiceResult<AuthoritySubmitResponseBody> {
+    match outcome {
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(outcome) => Ok(outcome),
+        _ => Err(ServiceError::internal("complete MLS retry stored an aggregate outcome")),
+    }
+}
+
 /// The self Event admission unit a kind reaches on this Station.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SelfEventRoute {
@@ -33,7 +42,7 @@ enum SelfEventRoute {
     /// `ak.identity.accountability_grant`: the issuer-PCR accountability unit.
     AccountabilityGrant,
     Consent,
-    /// `ak.mls.genesis` and `ak.mls.commit`: the MLS public-transition unit.
+    /// `ak.mls.genesis`: the Event-carried MLS public-transition unit.
     Mls,
     /// Kinds with an atomic native authorization/source cut in their scope.
     GuardedUnit,
@@ -52,7 +61,10 @@ fn self_event_route(kind: &arkret_wire::EventKind) -> ServiceResult<SelfEventRou
         EventKind::KeyBackupActiveSeries => Ok(SelfEventRoute::KeyBackupPointer),
         EventKind::IdentityAccountabilityGrant => Ok(SelfEventRoute::AccountabilityGrant),
         EventKind::ConsentReplace => Ok(SelfEventRoute::Consent),
-        EventKind::MlsGenesis | EventKind::MlsCommit => Ok(SelfEventRoute::Mls),
+        EventKind::MlsGenesis => Ok(SelfEventRoute::Mls),
+        EventKind::MlsCommit => Err(ServiceError::SchemaViolation(
+            "MLS Commit requires the complete MlsCommitSubmission".into(),
+        )),
         EventKind::MlsHistoryRequest
         | EventKind::MlsHistoryGrant
         | EventKind::RealmActorStatusSet
@@ -545,6 +557,7 @@ impl AuthorityProtocolPort for AppState {
             .validate()
             .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
         let event = &request.event;
+        super::authority_forward::refuse_bare_mls_commit(event)?;
         super::authority_self_event_unit::validate_replay_event_identity(event)?;
         refuse_deferred_call_payload(event)?;
         refuse_actor_private_event(&event.kind)?;
@@ -778,53 +791,68 @@ impl AuthorityProtocolPort for AppState {
         session: &SessionIdentityState,
         request: MlsCommitSubmission,
     ) -> ServiceResult<AuthoritySubmitResponseBody> {
+        use arkret_models_collaboration::authority_commit::{
+            SelfAuthoritySubmitRequestBody, SelfAuthoritySubmitResponseBody,
+        };
+
         request
             .validate()
             .map_err(|error| ServiceError::SchemaViolation(error.to_string()))?;
         let event = &request.commit_event;
         super::authority_self_event_unit::validate_replay_event_identity(event)?;
-        if self
-            .authority_commits()
-            .queued_event(&event.event_id)
+        super::authority_forward::validate_recovery_caller(self, session, event).await?;
+        let retry = super::authority_managed_device::mls::MlsRequest::from_request(
+            &SelfAuthoritySubmitRequestBody::MlsCommit(request.clone()),
+        )?
+        .ok_or_else(|| ServiceError::internal("complete MLS retry identity is absent"))?;
+        if let Some(original) = retry.replay(self).await? {
+            return ordinary_mls_outcome(original);
+        }
+        let result = async {
+            let event = &request.commit_event;
+            if let Some(original) = super::authority_forward::recover_forwarded_original(
+                self,
+                session,
+                &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::MlsCommit(
+                    request.clone(),
+                ),
+            )
             .await?
-            .is_some()
-        {
-            super::authority_forward::validate_recovery_caller(self, session, event).await?;
-            if let Some(original) =
-                super::authority_self_event_unit::exact_replay(self, event).await?
             {
                 return Ok(original);
             }
+            if super::authority_self_event_unit::exact_replay(self, event).await?.is_some() {
+                return Err(ServiceError::Conflict(
+                    "duplicate_conflict: MLS Event already has a different complete retry unit".into(),
+                ));
+            }
+            let (producer_guard, producer_key) =
+                super::authority_producer_validation::verify_self_event_producer_key(
+                    self, session, event,
+                )
+                .await?;
+            if let Some(governance) = remote_governance(self, &event.realm_id).await? {
+                return super::authority_forward::forward_self_mls(self, &governance, request, session)
+                    .await;
+            }
+            super::authority_mls_unit::admit_native_mls_event(
+                self,
+                event,
+                &request.welcomes,
+                None,
+                super::authority_self_event_unit::AdmittedProducer::Local(Box::new(producer_guard)),
+                &producer_key,
+                Some(retry.clone()),
+            ).await
+        }.await;
+        if let Some(original) = retry.replay(self).await? {
+            return ordinary_mls_outcome(original);
         }
-        if let Some(original) = super::authority_forward::recover_forwarded_original(
-            self,
-            session,
-            &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::MlsCommit(
-                request.clone(),
-            ),
+        ordinary_mls_outcome(
+            retry
+                .retain_outcome(self, SelfAuthoritySubmitResponseBody::Ordinary(result?))
+                .await?,
         )
-        .await?
-        {
-            return Ok(original);
-        }
-        let (producer_guard, producer_key) =
-            super::authority_producer_validation::verify_self_event_producer_key(
-                self, session, event,
-            )
-            .await?;
-        if let Some(governance) = remote_governance(self, &event.realm_id).await? {
-            return super::authority_forward::forward_self_mls(self, &governance, request, session)
-                .await;
-        }
-        super::authority_mls_unit::admit_mls_event(
-            self,
-            event,
-            &request.welcomes,
-            None,
-            super::authority_self_event_unit::AdmittedProducer::Local(Box::new(producer_guard)),
-            &producer_key,
-        )
-        .await
     }
 
     async fn submit_peer_authority_forward_event(
@@ -939,9 +967,14 @@ mod tests {
             self_event_route(&EventKind::IdentityAccountabilityGrant).unwrap(),
             SelfEventRoute::AccountabilityGrant
         );
-        for kind in [EventKind::MlsGenesis, EventKind::MlsCommit] {
-            assert_eq!(self_event_route(&kind).unwrap(), SelfEventRoute::Mls);
-        }
+        assert_eq!(
+            self_event_route(&EventKind::MlsGenesis).unwrap(),
+            SelfEventRoute::Mls
+        );
+        assert!(matches!(
+            self_event_route(&EventKind::MlsCommit),
+            Err(coland_services::ServiceError::SchemaViolation(_))
+        ));
         for kind in [EventKind::ConsentReplace] {
             assert_eq!(self_event_route(&kind).unwrap(), SelfEventRoute::Consent);
         }

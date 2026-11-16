@@ -600,9 +600,8 @@ pub(super) async fn delivery_guard(
         .ok_or_else(peer_claim_failed)
 }
 
-fn claim_delivery_error(error: coland_storage::PersistenceError) -> AppError {
+fn claim_delivery_error(error: coland_services::ServiceError) -> AppError {
     tracing::debug!(%error, "native claim delivery refused");
-    let error: coland_services::ServiceError = error.into();
     if error.conflict_code() == Some(coland_storage::ConflictCode::TemporarilyUnavailable) {
         return claim_error(error);
     }
@@ -785,7 +784,10 @@ mod claim_busy_error_tests {
                     .into(),
             )
         };
-        for error in [claim_error(busy().into()), claim_delivery_error(busy())] {
+        for error in [
+            claim_error(busy().into()),
+            claim_delivery_error(busy().into()),
+        ] {
             assert_eq!(error.code, arkret_wire::ErrorCode::TemporarilyUnavailable);
             assert_eq!(error.http_status(), StatusCode::SERVICE_UNAVAILABLE);
         }
@@ -803,7 +805,7 @@ mod claim_busy_error_tests {
                 "failed_precondition: diagnostic merely mentions temporarily_unavailable".into(),
             ),
         ] {
-            let outcome = claim_delivery_error(error);
+            let outcome = claim_delivery_error(error.into());
             assert_eq!(outcome.code, arkret_wire::ErrorCode::ClaimFailed);
             assert_eq!(outcome.http_status(), StatusCode::BAD_REQUEST);
         }

@@ -93,7 +93,7 @@ pub(crate) async fn require_authority_cut(
         service_id: String,
     }
     let cut = sql_query(
-        "SELECT generation,service_id FROM realm_authorities WHERE realm_id=$1 FOR UPDATE",
+        "SELECT generation,service_id FROM realm_authorities WHERE realm_id=$1 FOR SHARE",
     )
     .bind::<Text, _>(authority.realm_id().as_str())
     .get_result::<Cut>(conn)
@@ -133,12 +133,8 @@ pub(crate) async fn qualify_manager(
     {
         return Err(unavailable("native archive transport or authority expired"));
     }
-    crate::realm_actor_control::require_current_governor(
-        conn,
-        &reader.actor.realm_id,
-        reader.authority.current_service_id(),
-    )
-    .await?;
+    // The shared authority cut already checks this same Realm's exact service
+    // and generation. Do not upgrade a manager's read to the writer lock.
     crate::realm_management_archive::require_unfrozen(conn, &reader.actor.realm_id).await?;
     let cut = crate::realm_authorization_cut::RealmAuthorizationCut::read(
         conn,
@@ -375,12 +371,8 @@ pub(crate) async fn native_head(
     let mut held = crate::account_content_delivery::DeliveryGuard::begin(pool).await?;
     let value = {
         let conn = held.connection();
-        crate::realm_authorization_cut::lock_realm_authorization_cut(
-            conn,
-            &context.endpoint.authority.realm_id,
-        )
-        .await?;
-        super::lock_namespace(conn, &context.endpoint.authority.actor_id).await?;
+        require_authority_cut(conn, &context.authority).await?;
+        super::read_namespace(conn, &context.endpoint.authority.actor_id).await?;
         head_in_connection(conn, context).await?
     };
     let expected_head = value
@@ -404,10 +396,8 @@ async fn qualified_inventory_in_connection(
     conn: &mut AsyncPgConnection,
     reader: &RealmActorBackupManagerReader,
 ) -> PersistenceResult<arkret_models_integration::RealmActorArchiveInventoryManifest> {
-    crate::realm_authorization_cut::lock_realm_authorization_cut(conn, &reader.actor.realm_id)
-        .await?;
     qualify_manager(conn, reader).await?;
-    super::inventory_in_connection(conn, &ActorId::realm(reader.actor.clone())).await
+    super::inventory_for_delivery(conn, &ActorId::realm(reader.actor.clone())).await
 }
 
 /// Extract the exact external Gov Commit dependencies of the existing SDK
@@ -589,14 +579,9 @@ pub(crate) async fn native_inventory_delivery(
     manifest: &arkret_models_integration::RealmActorArchiveInventoryManifest,
 ) -> PersistenceResult<Box<dyn coland_storage::AccountContentDeliveryGuard>> {
     let mut held = crate::account_content_delivery::DeliveryGuard::begin(pool).await?;
-    crate::realm_authorization_cut::lock_realm_authorization_cut(
-        held.connection(),
-        &reader.actor.realm_id,
-    )
-    .await?;
     let (manager, _) = qualify_manager(held.connection(), reader).await?;
     let revision =
-        super::lock_namespace(held.connection(), &ActorId::realm(reader.actor.clone())).await?;
+        super::read_namespace(held.connection(), &ActorId::realm(reader.actor.clone())).await?;
     if manifest.realm_actor_id != reader.actor
         || manifest.manager_ref != manager
         || manifest.archive_revision != revision

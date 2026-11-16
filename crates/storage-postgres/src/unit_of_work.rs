@@ -3185,13 +3185,27 @@ async fn commit_prepared_event_inner(
         }
     }
     if let Some(record) = request.idempotency.as_ref() {
-        if event.kind == arkret_wire::EventKind::MlsCommit
-            && matches!(
-                request.self_producer_guard,
-                Some(coland_storage::SelfProducerCommitGuard::AppletManagedDevice(_))
-            )
-        {
-            crate::idempotency::record_native_mls_idempotency_in_connection(conn, record).await?;
+        if event.kind == arkret_wire::EventKind::MlsCommit {
+            if matches!(authority_write, AuthorityCommitWriteOutcome::Duplicate) {
+                // An already accepted Event cannot acquire a second retry identity.
+                // The exact RealmCommit comparison above binds this full response.
+                let stored =
+                    crate::idempotency::require_mls_idempotency_in_connection(conn, record, event)
+                        .await?;
+                if stored.response_status != record.response_status
+                    || stored.response_body != record.response_body
+                {
+                    return Err(conflict(
+                        "duplicate_conflict: MLS retry outcome differs from the original Commit",
+                    )
+                    .into());
+                }
+            } else {
+                crate::idempotency::record_native_mls_idempotency_in_connection(
+                    conn, record, event,
+                )
+                .await?;
+            }
         } else {
             record_idempotency_in_connection(conn, record).await?;
         }

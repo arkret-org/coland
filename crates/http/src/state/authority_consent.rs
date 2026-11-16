@@ -40,7 +40,7 @@ pub(crate) async fn accepted_original(
         {
             return Ok(None);
         }
-        attempt.accepted_commit
+        attempt.accepted_commit().cloned()
     } else {
         None
     };

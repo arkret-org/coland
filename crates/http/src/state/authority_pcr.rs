@@ -213,10 +213,6 @@ pub(crate) async fn submit_from_host(
     }
     state
         .authority_commits()
-        .queue_event(event, crate::wire::now())
-        .await?;
-    state
-        .authority_commits()
         .retain_forwarded_submission(
             event,
             &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody::Event(
@@ -249,7 +245,7 @@ pub(crate) async fn submit_from_host(
             .await?;
         state
             .authority_commits()
-            .retain_forwarded_acceptance(event, commit, crate::wire::now())
+            .retain_forwarded_outcome(event, &outcome, crate::wire::now())
             .await?;
     }
     // This witness authorizes no replica read or private current.

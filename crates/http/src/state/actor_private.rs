@@ -157,7 +157,9 @@ pub(crate) fn actor_private_refusal(error: ServiceError) -> AppError {
         ServiceError::SchemaViolation(detail) => AppError::schema_violation(detail.clone()),
         ServiceError::Conflict(detail) => match error.conflict_code() {
             Some(
-                code @ (ConflictCode::DeviceRevoked
+                code @ (ConflictCode::AccountDeactivated
+                | ConflictCode::AccountErased
+                | ConflictCode::DeviceRevoked
                 | ConflictCode::DeviceRevocationPending
                 | ConflictCode::DeviceGenerationFenced
                 | ConflictCode::DeviceUnauthorized
@@ -168,7 +170,18 @@ pub(crate) fn actor_private_refusal(error: ServiceError) -> AppError {
                 | ConflictCode::TemporarilyUnavailable),
             ) => coland_http::error::ErrorCode::from_wire(code.as_str()).map_or_else(
                 || AppError::internal(format!("unregistered refusal code {code}")),
-                |wire| AppError::from_rejection(wire, detail.clone()),
+                |wire| {
+                    let error = AppError::from_rejection(wire, detail.clone());
+                    if matches!(
+                        code,
+                        ConflictCode::AccountDeactivated | ConflictCode::AccountErased
+                    ) {
+                        error
+                            .with_status_context(arkret_wire::ErrorStatusContext::ProtectedResource)
+                    } else {
+                        error
+                    }
+                },
             ),
             _ => AppError::capability_denied(detail.clone()),
         },
@@ -179,5 +192,32 @@ pub(crate) fn actor_private_refusal(error: ServiceError) -> AppError {
         ServiceError::Database(_) | ServiceError::Internal(_) => {
             AppError::internal(error.to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod owner_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn actor_private_terminal_owner_refusals_keep_the_registered_protected_resource_status() {
+        for code in [
+            coland_storage::ConflictCode::AccountDeactivated,
+            coland_storage::ConflictCode::AccountErased,
+        ] {
+            let error = actor_private_refusal(ServiceError::Conflict(format!(
+                "{}: exact owner terminal",
+                code.as_str()
+            )));
+            assert_eq!(error.wire_code(), code.as_str());
+            assert_eq!(error.http_status().as_u16(), 401);
+        }
+        let database =
+            actor_private_refusal(ServiceError::Database("actual database failure".into()));
+        assert_eq!(database.http_status().as_u16(), 500);
+        assert_ne!(
+            database.wire_code(),
+            coland_storage::ConflictCode::AccountErased.as_str()
+        );
     }
 }

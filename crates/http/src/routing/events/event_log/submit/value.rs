@@ -1,30 +1,5 @@
 use super::*;
 
-pub(in crate::routing) async fn submit_event_value(
-    _state: &AppState,
-    _session: &SessionRecord,
-    envelope: Value,
-) -> Result<SubmittedEventOutcome, SubmitOneError> {
-    let event: Event = serde_json::from_value(envelope).map_err(|error| {
-        SubmitOneError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "schema_violation",
-            error.to_string(),
-        )
-    })?;
-    arkret_schema::validate_event_for_submit(&event).map_err(|error| {
-        SubmitOneError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "schema_violation",
-            error.to_string(),
-        )
-    })?;
-    Err(SubmitOneError::new(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "service_unavailable",
-        "internal Event authoring awaits guarded Event/RealmCommit admission",
-    ))
-}
 /// Submit only the caller-signed Event effects listed in an Applet revoke
 /// plan. The Applet endpoint has already bound each submission to the current
 /// plan; the ordinary self authority port still verifies its producer and

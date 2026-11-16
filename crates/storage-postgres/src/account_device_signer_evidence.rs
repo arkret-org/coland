@@ -27,14 +27,20 @@ mod owner_transfer;
 
 fn retention_transaction_error(error: PgTransactionError) -> PersistenceError {
     match error {
-        PgTransactionError::Diesel(diesel::result::Error::DatabaseError(
-            diesel::result::DatabaseErrorKind::SerializationFailure,
-            _,
-        )) => PersistenceError::Conflict(format!(
-            "{}: account-device evidence retention lost its concurrent transaction cut",
-            ConflictCode::TemporarilyUnavailable,
-        )),
-        other => other.into_persistence(),
+        PgTransactionError::Diesel(error) => {
+            let error = crate::persistence_query_error(error);
+            if error.conflict_code() == Some(ConflictCode::TemporarilyUnavailable) {
+                // Keep the original domain detail; SQL error classification
+                // belongs to the shared PostgreSQL owner.
+                PersistenceError::Conflict(format!(
+                    "{}: account-device evidence retention lost its concurrent transaction cut",
+                    ConflictCode::TemporarilyUnavailable,
+                ))
+            } else {
+                error
+            }
+        }
+        PgTransactionError::Storage(error) => error,
     }
 }
 

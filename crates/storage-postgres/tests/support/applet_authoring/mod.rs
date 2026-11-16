@@ -3923,12 +3923,29 @@ mod realm_native_fixture {
         use diesel::sql_types::{Jsonb, Text};
         use diesel_async::RunQueryDsl as _;
         let device = boxed_step(|| authorize_device(fixture, candidate, creation, 81)).await;
+        let read_only_device =
+            boxed_step(|| authorize_device(fixture, candidate, creation, 82)).await;
         let store = fixture.state.test_persistence();
+        let original_read_only_authority = store
+            .device_revocations()
+            .applet_managed_device_authority(
+                &candidate.actor_id,
+                &read_only_device,
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap()
+            .expect("the separately authorized Device is initially current");
         let mut pending = Vec::new();
-        for index in 0..3 {
+        for index in 0..4 {
+            let proposed_device = if index == 3 {
+                &read_only_device
+            } else {
+                &device
+            };
             let at = arkret_canonical::normalize_timestamp_canonical(chrono::Utc::now());
             let payload: DeviceRevokePayload = serde_json::from_value(json!({
-                "device_id":device,"revoked_by":candidate.actor_id.signing_principal_id(),
+                "device_id":proposed_device,"revoked_by":candidate.actor_id.signing_principal_id(),
                 "revoked_at":arkret_canonical::format_timestamp_canonical(at),"reason":format!("revoke_{index}")
             }))
             .unwrap();
@@ -4099,6 +4116,77 @@ mod realm_native_fixture {
                 "rejecting one proposal must not clear other pending proposals"
             );
         }
+        // A rejected proposal remains a real durable outcome. The public
+        // current lookup opens REPEATABLE READ, READ ONLY and must validate
+        // that existing result without attempting SELECT FOR UPDATE.
+        let (read_only_digest, read_only_outcome, read_only_authority) = &pending[3];
+        assert!(
+            store
+                .device_revocations()
+                .applet_managed_device_authority(
+                    &candidate.actor_id,
+                    &read_only_device,
+                    chrono::Utc::now(),
+                )
+                .await
+                .is_err(),
+            "the independent pending proposal still fences its own Device"
+        );
+        let mut rejected = read_only_outcome.clone();
+        let RealmActorRequestStatus::DeviceRevoke {
+            state, decided_at, ..
+        } = &mut rejected
+        else {
+            unreachable!()
+        };
+        *state = RealmActorDeviceRevocationState::Rejected;
+        *decided_at = Some(arkret_canonical::normalize_timestamp_canonical(
+            chrono::Utc::now(),
+        ));
+        store
+            .authority_commits()
+            .finish_realm_actor_device_revocation(
+                &candidate.actor_id,
+                read_only_authority,
+                &rejected,
+            )
+            .await
+            .unwrap();
+        let (status, response) =
+            boxed_step(|| revoke_material(fixture, candidate, creation, read_only_digest)).await;
+        assert_eq!(status, StatusCode::OK, "real rejected outcome: {response}");
+        let material: RealmActorMaterialResponseBody = serde_json::from_value(response).unwrap();
+        let RealmActorMaterial::RequestStatus { request_status, .. } = material.material else {
+            unreachable!()
+        };
+        assert_eq!(json!(request_status), json!(rejected));
+        assert_eq!(
+            store
+                .device_revocations()
+                .applet_managed_device_authority(
+                    &candidate.actor_id,
+                    &read_only_device,
+                    chrono::Utc::now(),
+                )
+                .await
+                .expect("read-only lookup must validate a retained rejected proposal"),
+            Some(original_read_only_authority.clone()),
+            "rejecting the independent proposal preserves the exact original Device authority"
+        );
+        assert_eq!(
+            store
+                .device_revocations()
+                .native_backup_put_device_credential(
+                    &candidate.actor_id,
+                    &read_only_device,
+                    chrono::Utc::now(),
+                )
+                .await
+                .expect(
+                    "read-only native PUT credential lookup validates the same durable rejection"
+                ),
+            Some(original_read_only_authority),
+        );
         let (digest, outcome, _) = &pending[2];
         let RealmActorRequestStatus::DeviceRevoke { proposal_ref, .. } = outcome else {
             unreachable!()

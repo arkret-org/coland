@@ -799,14 +799,14 @@ impl AuthorityCommitApplication {
         Ok(())
     }
 
-    pub async fn retain_forwarded_acceptance(
+    pub async fn retain_forwarded_outcome(
         &self,
         event: &Event,
-        commit: &arkret_wire::RealmCommit,
+        outcome: &arkret_wire::AuthoritySubmitResponseBody,
         at: DateTime<Utc>,
     ) -> ServiceResult<()> {
         self.store()
-            .retain_forwarded_acceptance(event, commit, at)
+            .retain_forwarded_outcome(event, outcome, at)
             .await?;
         Ok(())
     }
@@ -843,14 +843,12 @@ impl AuthorityCommitApplication {
         event: &Event,
         authority: &CurrentRealmAuthority,
         reason_code: &str,
-        native: Option<(
-            coland_storage::ManagedMlsRefusalSource<'_>,
-            &coland_storage::IdempotencyRecord,
-        )>,
+        native: Option<coland_storage::ManagedMlsRefusalSource<'_>>,
+        retry_record: Option<&coland_storage::IdempotencyRecord>,
     ) -> ServiceResult<AuthoritySubmitResponseBody> {
         Ok(self
             .store()
-            .finalize_mls_rejection(event, authority, reason_code, native)
+            .finalize_mls_rejection(event, authority, reason_code, native, retry_record)
             .await?)
     }
 

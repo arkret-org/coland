@@ -324,7 +324,7 @@ pub(crate) async fn mark_agent_draft_consumed(
     .bind::<Timestamptz, _>(consumed_at)
     .execute(&mut *conn)
     .await
-    .map_err(PersistenceError::database)?;
+    .map_err(crate::persistence_query_error)?;
     if affected != 1 {
         return Err(PersistenceError::Conflict(
             "failed_precondition: Agent draft pending source changed before consumption".to_owned(),
@@ -347,7 +347,7 @@ async fn expire_available(
     .bind::<Timestamptz, _>(protocol_time)
     .execute(conn)
     .await
-    .map_err(PersistenceError::database)?;
+    .map_err(crate::persistence_query_error)?;
     Ok(())
 }
 
@@ -396,7 +396,7 @@ pub(crate) async fn commit_agent_draft_pending_intent_in_connection(
     .bind::<Timestamptz, _>(record.created_at)
     .execute(&mut *conn)
     .await
-    .map_err(PersistenceError::database)?;
+    .map_err(crate::persistence_query_error)?;
     if inserted == 1 {
         return Ok(());
     }

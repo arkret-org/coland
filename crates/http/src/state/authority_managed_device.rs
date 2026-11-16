@@ -39,7 +39,7 @@ async fn submit_inner(
     metadata
         .validate()
         .map_err(|e| ServiceError::SchemaViolation(e.to_string()))?;
-    let native_mls = mls::NativeMlsRequest::from_request(&request)?;
+    let native_mls = mls::MlsRequest::from_request(&request)?;
     let (submission, welcomes, typed_mls) = match request {
         SelfAuthoritySubmitRequestBody::Event(submission) => (submission, Vec::new(), false),
         SelfAuthoritySubmitRequestBody::MlsCommit(submission) => (
@@ -101,7 +101,13 @@ async fn submit_inner(
     if let Some(original) = unit::exact_replay(state, event).await? {
         let original = SelfAuthoritySubmitResponseBody::Ordinary(original);
         return match native_mls.as_ref() {
-            Some(context) => context.retain_outcome(state, original).await,
+            Some(context) => match context.replay(state).await? {
+                Some(original) => Ok(original),
+                None => Err(ServiceError::Conflict(
+                    "duplicate_conflict: MLS Event already has a different complete retry unit"
+                        .into(),
+                )),
+            },
             None => Ok(original),
         };
     }

@@ -140,7 +140,7 @@ pub(super) async fn require_publication_policy(
         PolicyResourceKind, PolicyResourceSelector,
     };
     let policies =
-        crate::policy_current_states::read_scoped_applet_management_policies_in_connection(
+        crate::policy_current_states::read_scoped_applet_management_policies_for_delivery(
             conn,
             scope.realm_id(),
             scope.circle_id(),

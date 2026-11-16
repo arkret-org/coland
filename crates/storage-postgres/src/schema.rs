@@ -743,6 +743,7 @@ diesel::table! {
         authenticated_actor -> Jsonb,
         operation_id -> Text,
         idempotency_key -> Text,
+        source_event_pk -> Nullable<Int8>,
         request_hash -> Text,
         response_status -> Int4,
         response_body -> Jsonb,

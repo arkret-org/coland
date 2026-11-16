@@ -16,6 +16,14 @@ pub(crate) async fn record_idempotency_in_connection(
     conn: &mut diesel_async::AsyncPgConnection,
     record: &IdempotencyRecord,
 ) -> PersistenceResult<()> {
+    record_idempotency_with_source_in_connection(conn, record, None).await
+}
+
+async fn record_idempotency_with_source_in_connection(
+    conn: &mut diesel_async::AsyncPgConnection,
+    record: &IdempotencyRecord,
+    source_event_pk: Option<i64>,
+) -> PersistenceResult<()> {
     let actor_key = actor_key(&record.authenticated_actor)?;
     let actor_value = actor_value(&record.authenticated_actor)?;
     // First-writer-wins under a concurrent race: the earliest row stays,
@@ -23,8 +31,8 @@ pub(crate) async fn record_idempotency_in_connection(
     sql_query(
         "INSERT INTO idempotency_keys \
          (actor_key, authenticated_actor, operation_id, idempotency_key, request_hash, response_status, \
-          response_body, created_at, expires_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+          response_body, created_at, expires_at, source_event_pk) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
          ON CONFLICT (actor_key, operation_id, idempotency_key) DO NOTHING",
     )
     .bind::<Text, _>(&actor_key)
@@ -36,6 +44,7 @@ pub(crate) async fn record_idempotency_in_connection(
     .bind::<Jsonb, _>(&record.response_body)
     .bind::<Timestamptz, _>(record.created_at)
     .bind::<Timestamptz, _>(record.expires_at)
+    .bind::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>, _>(source_event_pk)
     .execute(conn)
     .await
     .map(|_| ())
@@ -46,20 +55,67 @@ pub(crate) async fn record_idempotency_in_connection(
 pub(crate) async fn record_native_mls_idempotency_in_connection(
     conn: &mut diesel_async::AsyncPgConnection,
     record: &IdempotencyRecord,
+    event: &arkret_wire::Event,
 ) -> PersistenceResult<()> {
-    record_idempotency_in_connection(conn, record).await?;
+    require_mls_source_identity(record, event)?;
+    #[derive(diesel::QueryableByName)]
+    struct Source {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        pk: i64,
+    }
+    let token = crate::ids::parse_event_id(event.event_id.as_str())
+        .ok_or_else(|| PersistenceError::SchemaViolation("invalid MLS source Event ID".into()))?;
+    let source = sql_query("SELECT pk FROM canonical_events WHERE id=$1 AND envelope=$2 AND kind='ak.mls.commit' AND state IN ('committed','rejected')")
+        .bind::<diesel::sql_types::Binary,_>(token.to_vec())
+        .bind::<Jsonb,_>(serde_json::to_value(event).map_err(PersistenceError::database)?)
+        .get_result::<Source>(conn).await.optional().map_err(PersistenceError::database)?
+        .ok_or_else(|| PersistenceError::Conflict("failed_precondition: MLS result has no exact terminal source Event".into()))?;
+    record_idempotency_with_source_in_connection(conn, record, Some(source.pk)).await?;
+    require_mls_idempotency_in_connection(conn, record, event)
+        .await
+        .map(|_| ())
+}
+
+fn require_mls_source_identity(
+    record: &IdempotencyRecord,
+    event: &arkret_wire::Event,
+) -> PersistenceResult<()> {
+    if event.kind != arkret_wire::EventKind::MlsCommit
+        || &record.authenticated_actor != event.actual_signer()
+        || record.operation_id != arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1
+    {
+        return Err(PersistenceError::SchemaViolation(
+            "MLS result namespace differs from its exact source Event".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Read the winning complete unit without creating a new identity for an
+/// Event already accepted under a different retry key.
+pub(crate) async fn require_mls_idempotency_in_connection(
+    conn: &mut diesel_async::AsyncPgConnection,
+    record: &IdempotencyRecord,
+    event: &arkret_wire::Event,
+) -> PersistenceResult<IdempotencyRecord> {
+    require_mls_source_identity(record, event)?;
+    let token = crate::ids::parse_event_id(event.event_id.as_str())
+        .ok_or_else(|| PersistenceError::SchemaViolation("invalid MLS source Event ID".into()))?;
     let stored = sql_query(
-        "SELECT authenticated_actor,operation_id,idempotency_key,request_hash,response_status,response_body,created_at,expires_at \
-         FROM idempotency_keys WHERE actor_key=$1 AND operation_id=$2 AND idempotency_key=$3 FOR UPDATE",
+        "SELECT k.authenticated_actor,k.operation_id,k.idempotency_key,k.request_hash,k.response_status,k.response_body,k.created_at,k.expires_at \
+         FROM idempotency_keys k JOIN canonical_events e ON e.pk=k.source_event_pk WHERE k.actor_key=$1 AND k.operation_id=$2 AND k.idempotency_key=$3 AND e.id=$4 AND e.envelope=$5 AND e.kind='ak.mls.commit' FOR UPDATE OF k",
     ).bind::<Text,_>(actor_key(&record.authenticated_actor)?)
         .bind::<Text,_>(&record.operation_id).bind::<Text,_>(&record.idempotency_key)
-        .get_result::<IdempotencyRow>(conn).await.map_err(PersistenceError::database)?;
+        .bind::<diesel::sql_types::Binary,_>(token.to_vec())
+        .bind::<Jsonb,_>(serde_json::to_value(event).map_err(PersistenceError::database)?)
+        .get_result::<IdempotencyRow>(conn).await.optional().map_err(PersistenceError::database)?
+        .ok_or_else(|| PersistenceError::Conflict("duplicate_conflict: MLS Event has another complete retry unit".into()))?;
     if stored.request_hash != record.request_hash {
         return Err(PersistenceError::Conflict(
             "duplicate_conflict: native MLS retry key binds a different complete unit".into(),
         ));
     }
-    Ok(())
+    stored.try_into()
 }
 
 /// A completed command cannot be replaced by a later worker's response.
@@ -248,7 +304,7 @@ impl IdempotencyStore for PgIdempotencyStore {
 
     async fn prune_expired(&self, now: chrono::DateTime<Utc>) -> PersistenceResult<usize> {
         let mut conn = crate::pg_db(&self.pool);
-        sql_query("DELETE FROM idempotency_keys WHERE expires_at <= $1")
+        sql_query("DELETE FROM idempotency_keys WHERE expires_at <= $1 AND source_event_pk IS NULL")
             .bind::<Timestamptz, _>(now)
             .execute(&mut conn)
             .await

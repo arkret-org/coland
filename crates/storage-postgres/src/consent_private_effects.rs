@@ -10,6 +10,9 @@ pub(crate) async fn mark_pending(
     holder: &AccountId,
     realm: &RealmId,
 ) -> PersistenceResult<()> {
+    if !crate::pcr_private_authority::is_active_human_account(conn, holder).await? {
+        return Ok(());
+    }
     sql_query("INSERT INTO consent_private_effect_jobs(holder_account_id,realm_id,sequence) VALUES($1,$2,1) ON CONFLICT(holder_account_id) DO UPDATE SET realm_id=EXCLUDED.realm_id,sequence=consent_private_effect_jobs.sequence+1")
         .bind::<Jsonb,_>(serde_json::to_value(holder).map_err(coland_storage::PersistenceError::database)?).bind::<Text,_>(realm.as_str()).execute(conn).await.map_err(coland_storage::PersistenceError::database)?;
     Ok(())
@@ -56,6 +59,7 @@ pub(crate) async fn prepare(
     conn.transaction::<_,PgTransactionError,_>(async |conn| {
         let cut=crate::pcr_private_authority::lock_holder(conn,holder,Some(issuer)).await?;
         crate::pcr_private_authority::require_transferable(conn,&cut.realm_id).await?;
+        crate::pcr_private_authority::require_active_human_account(conn,holder).await?;
         let job=sql_query("SELECT sequence FROM consent_private_effect_jobs WHERE holder_account_id=$1 AND realm_id=$2")
             .bind::<Jsonb,_>(serde_json::to_value(holder).map_err(PersistenceError::database)?).bind::<Text,_>(cut.realm_id.as_str())
             .get_result::<Sequence>(&mut *conn).await.optional()?;

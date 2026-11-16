@@ -430,7 +430,7 @@ impl NotificationStore for PgNotificationStore {
         .execute(&mut *conn)
         .await
         .map(|_| ())
-        .map_err(PersistenceError::database)
+        .map_err(crate::persistence_query_error)
     }
 
     async fn put_account_delta(
@@ -487,7 +487,7 @@ impl NotificationStore for PgNotificationStore {
         .execute(&mut conn)
         .await
         .map(|_| ())
-        .map_err(PersistenceError::database)
+        .map_err(crate::persistence_query_error)
     }
 
     async fn list_for_recipient(

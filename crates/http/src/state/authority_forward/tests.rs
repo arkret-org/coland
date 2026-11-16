@@ -3,7 +3,7 @@ use arkret_wire::{AuthorityCommitStatus, AuthorityRejectionStatus, RealmId, Scop
 use super::*;
 use crate::routing::federation::outbox::PeerSubmitResponse;
 
-fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequestBody {
+pub(super) fn forwarded_request(seed: u8) -> PeerAuthoritySubmitRequestBody {
     use arkret_models_crypto::{
         AccountDeviceEventAuthorization, DeviceAuthorizationWindow, DeviceStatus,
         ForwardDeviceProjectionAttestationCore,
@@ -637,4 +637,21 @@ fn forwarded_target_original_gate_never_upgrades_withheld_target() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn original_result_retry_requires_both_http_404_and_typed_not_found() {
+    let problem = arkret_wire::Problem::new("not_found", 404, "missing complete original");
+    let body = serde_json::to_vec(&problem).unwrap();
+    for status in [200, 400, 401, 403, 404, 409, 429, 500, 503] {
+        let error = relayed_refusal(status, &body);
+        assert_eq!(is_original_result_miss(status, &error), status == 404);
+    }
+    for error in [
+        ServiceError::Database("unavailable".into()),
+        ServiceError::SchemaViolation("invalid".into()),
+        ServiceError::Conflict("duplicate_conflict: changed complete unit".into()),
+    ] {
+        assert!(!is_original_result_miss(404, &error));
+    }
 }

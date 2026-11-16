@@ -7,6 +7,12 @@
 #[path = "../../test-support/src/device_authorization_history.rs"]
 #[allow(dead_code)]
 mod device_authorization_history;
+#[path = "support/frozen_database.rs"]
+mod frozen_database;
+#[path = "support/mls_device_revoke_fixture.rs"]
+mod mls_device_revoke_fixture;
+#[path = "support/mls_public_fixture.rs"]
+mod mls_public_fixture;
 #[path = "support/ordinary_realm.rs"]
 #[expect(
     dead_code,
@@ -21,14 +27,11 @@ mod pcr_genesis;
     reason = "This integration uses the shared database support without its contract-schema helpers."
 )]
 mod support;
-
-use arkret_models_crypto::{MlsCommitEnvelope, MlsCommitPayload, MlsGovernanceBindingPayload};
+use arkret_models_crypto::MlsGovernanceBindingPayload;
 use coland_storage::{
     AuthorityCommitStore, ConflictCode, DeviceMessageStore, DeviceRevocationGateSelector,
-    EventCommitRequest, EventCommitUnitOfWork, IdentityStoreRegistry,
-    MlsConsumedProposalInstallation, MlsGroupCurrentStore, MlsInstalledBase, MlsKeyPackageStore,
-    MlsProposalLeafProvenance, MlsStateInstallation, MlsWelcomeClaimLedgerKey,
-    RecipientQueueSelector, VerifiedMlsWelcome,
+    EventCommitRequest, EventCommitUnitOfWork, MlsGroupCurrentStore, MlsKeyPackageStore,
+    MlsWelcomeClaimLedgerKey, RecipientQueueSelector, VerifiedMlsWelcome,
 };
 use coland_storage_postgres::test_database::TestDatabase;
 use coland_storage_postgres::{
@@ -37,126 +40,12 @@ use coland_storage_postgres::{
 };
 use diesel::sql_types::{BigInt, Binary, Jsonb, Text, Timestamptz};
 use diesel_async::RunQueryDsl;
+use mls_public_fixture::MlsFixture;
 
 fn realm_scope(realm_id: &arkret_wire::RealmId) -> arkret_wire::ScopeRef {
     arkret_wire::ScopeRef::Realm {
         realm_id: realm_id.clone(),
     }
-}
-
-fn blob(seed: char) -> String {
-    format!("ak:blob:sha256:{}", seed.to_string().repeat(64))
-}
-
-fn genesis_payload(
-    realm_id: &arkret_wire::RealmId,
-    at: chrono::DateTime<chrono::Utc>,
-) -> serde_json::Value {
-    serde_json::json!({
-        "cipher_suite": "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
-        "group_info_ref": blob('3'),
-        "ratchet_tree_ref": blob('4'),
-        "creator_leaf_authority": {
-            "leaf_signature_key_base64url": arkret_canonical::base64url_encode([7_u8; 32]),
-            "endpoint": {"kind": "device", "device_id": format!("ak:device:{}", uuid::Uuid::now_v7())},
-            "authorization_event_ref": arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [8_u8; 32]),
-        },
-        "governance_binding":
-            MlsGovernanceBindingPayload::realm(realm_id.clone(), None, 0, 0, 0).unwrap(),
-        "created_at": arkret_canonical::format_timestamp_canonical(at),
-    })
-}
-
-fn commit_payload(
-    realm_id: &arkret_wire::RealmId,
-    base: &arkret_wire::EventId,
-    previous_epoch: u64,
-    revision: u64,
-    commit_bytes: &[u8],
-) -> serde_json::Value {
-    let binding = MlsGovernanceBindingPayload::realm(
-        realm_id.clone(),
-        Some(base.clone()),
-        previous_epoch,
-        previous_epoch + 1,
-        revision,
-    )
-    .unwrap();
-    let envelope = MlsCommitEnvelope {
-        group_id: binding.mls_group_id().unwrap(),
-        epoch: previous_epoch + 1,
-        commit: arkret_wire::base64url::base64url_encode(commit_bytes),
-        commit_digest: arkret_wire::Hash::new(arkret_canonical::sha256_digest(commit_bytes))
-            .unwrap(),
-        ratchet_tree: None,
-    };
-    serde_json::to_value(
-        MlsCommitPayload::new(
-            base.clone(),
-            revision,
-            &envelope,
-            binding,
-            arkret_wire::BlobRef::new(format!("ak:blob:sha256:{:064x}", 2 * (previous_epoch + 1)))
-                .unwrap(),
-            arkret_wire::BlobRef::new(format!(
-                "ak:blob:sha256:{:064x}",
-                2 * (previous_epoch + 1) + 1
-            ))
-            .unwrap(),
-        )
-        .unwrap(),
-    )
-    .unwrap()
-}
-
-fn with_installation(
-    mut request: EventCommitRequest,
-    base: Option<(&arkret_wire::EventId, u64)>,
-    epoch: u64,
-) -> EventCommitRequest {
-    let scope = request.authority_commit.event.scope_ref.clone();
-    // A joined member hosted by another Station receives the Commit Event,
-    // never its Welcomes, through committed replication.
-    request.realm_fanout_source = Some(arkret_wire::EventAdmissionSubmission::new(
-        request.authority_commit.event.clone(),
-    ));
-    request.authority_commit.mls_state = Some(MlsStateInstallation {
-        effective_scope: scope,
-        base: base.map(|(reference, epoch)| MlsInstalledBase {
-            current_mls_commit_event_ref: reference.clone(),
-            epoch,
-        }),
-        epoch,
-        public_state: format!("public-state-{epoch}").into_bytes(),
-        member_principals: Default::default(),
-        consumed_proposals: Vec::new(),
-        public_blobs: if base.is_some() {
-            let payload: MlsCommitPayload = serde_json::from_value(
-                serde_json::to_value(&request.authority_commit.event.payload).unwrap(),
-            )
-            .unwrap();
-            [payload.group_info_ref(), payload.ratchet_tree_ref()]
-                .into_iter()
-                .map(|reference| {
-                    let sha256 = reference
-                        .as_str()
-                        .strip_prefix("ak:blob:sha256:")
-                        .unwrap()
-                        .to_owned();
-                    coland_storage::MlsPublicBlob {
-                        blob_ref: reference.clone(),
-                        sha256: sha256.clone(),
-                        size_bytes: 11,
-                        storage_backend: "local".to_owned(),
-                        storage_key: format!("sha256/{sha256}"),
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        },
-    });
-    request
 }
 
 fn welcome(
@@ -387,40 +276,34 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let groups = PgMlsGroupCurrentStore { pool: pool.clone() };
 
-    let mut genesis = with_installation(
+    let mls = MlsFixture::new(pool.clone(), &discussion.head.authority_commit);
+
+    let genesis = mls.with_installation(
         ordinary_realm::next_request(
             &discussion.head.authority_commit,
             arkret_wire::EventKind::MlsGenesis,
             &founder,
-            genesis_payload(&realm_id, at),
+            mls.genesis_payload(&realm_id, at),
             at,
         ),
         None,
         0,
     );
-    // encryption-and-audit.md §5.1.2: a forwarded Genesis stores the two
-    // Blobs it carried with its Commit.
-    let carried = |seed: char| coland_storage::MlsPublicBlob {
-        blob_ref: arkret_wire::BlobRef::new(blob(seed)).unwrap(),
-        sha256: seed.to_string().repeat(64),
-        size_bytes: 11,
-        storage_backend: "local".to_owned(),
-        storage_key: format!("sha256/{}", seed.to_string().repeat(64)),
-    };
-    genesis
-        .authority_commit
-        .mls_state
-        .as_mut()
-        .unwrap()
-        .public_blobs = vec![carried('3'), carried('4')];
+    // Both actual RFC publications are stored atomically with Genesis.
     uow.commit_event(genesis.clone()).await.unwrap();
     let blobs = coland_storage_postgres::PgBlobStore { pool: pool.clone() };
-    for seed in ['3', '4'] {
-        let stored = coland_storage::BlobStore::get(&blobs, &blob(seed))
+    for blob in &genesis
+        .authority_commit
+        .mls_state
+        .as_ref()
+        .unwrap()
+        .public_blobs
+    {
+        let stored = coland_storage::BlobStore::get(&blobs, blob.blob_ref.as_str())
             .await
             .unwrap()
-            .expect("the carried Blob is stored with the Genesis Commit");
-        assert_eq!(stored.storage_key, carried(seed).storage_key);
+            .expect("the actual publication is stored with the Genesis Commit");
+        assert_eq!(stored.storage_key, blob.storage_key);
         assert_eq!(stored.realm_id.as_deref(), Some(realm_id.as_str()));
     }
     let genesis_ref = genesis.authority_commit.event.event_id.clone();
@@ -438,21 +321,36 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
             epoch: 0,
             current_key_access_revision: 0,
             covered_key_access_revision: 0,
-            public_tree_ref: arkret_wire::BlobRef::new(blob('4')).unwrap(),
+            public_tree_ref: genesis
+                .authority_commit
+                .mls_state
+                .as_ref()
+                .unwrap()
+                .public_blobs[1]
+                .blob_ref
+                .clone(),
         }
     );
     assert_eq!(
         installed.current_commit_id,
         genesis.authority_commit.commit.commit_id
     );
-    assert_eq!(installed.public_state, b"public-state-0");
+    assert_eq!(
+        installed.public_state,
+        genesis
+            .authority_commit
+            .mls_state
+            .as_ref()
+            .unwrap()
+            .public_state
+    );
 
-    let second_genesis = with_installation(
+    let second_genesis = mls.with_installation(
         ordinary_realm::next_request(
             &genesis.authority_commit,
             arkret_wire::EventKind::MlsGenesis,
             &founder,
-            genesis_payload(&realm_id, at + chrono::TimeDelta::seconds(1)),
+            mls.genesis_payload(&realm_id, at + chrono::TimeDelta::seconds(1)),
             at + chrono::TimeDelta::seconds(1),
         ),
         None,
@@ -465,12 +363,12 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
     )
     .await;
 
-    let uncovered = with_installation(
+    let uncovered = mls.with_installation(
         ordinary_realm::next_request(
             &genesis.authority_commit,
             arkret_wire::EventKind::MlsCommit,
             &founder,
-            commit_payload(&realm_id, &genesis_ref, 0, 1, b"uncovered"),
+            mls.commit_payload(&realm_id, &genesis_ref, 0, 1).await,
             at,
         ),
         Some((&genesis_ref, 0)),
@@ -485,12 +383,12 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
     ))
     .await
     .principal_id;
-    let foreign = with_installation(
+    let foreign = mls.with_installation(
         ordinary_realm::next_request(
             &genesis.authority_commit,
             arkret_wire::EventKind::MlsCommit,
             &outsider,
-            commit_payload(&realm_id, &genesis_ref, 0, 0, b"foreign"),
+            mls.commit_payload(&realm_id, &genesis_ref, 0, 0).await,
             at,
         ),
         Some((&genesis_ref, 0)),
@@ -499,12 +397,12 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
     let foreign = Box::pin(ordinary_realm::source_request(&pool, foreign)).await;
     assert_zero_write_refusal(&pool, &foreign, ConflictCode::CapabilityDenied).await;
 
-    let commit = with_installation(
+    let commit = mls.with_installation(
         ordinary_realm::next_request(
             &genesis.authority_commit,
             arkret_wire::EventKind::MlsCommit,
             &founder,
-            commit_payload(&realm_id, &genesis_ref, 0, 0, b"first"),
+            mls.commit_payload(&realm_id, &genesis_ref, 0, 0).await,
             at,
         ),
         Some((&genesis_ref, 0)),
@@ -535,27 +433,42 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
         commit.authority_commit.event.event_id
     );
     assert_eq!(advanced.value.genesis_event_ref, genesis_ref);
-    for seed in ['3', '4'] {
+    for blob in &genesis
+        .authority_commit
+        .mls_state
+        .as_ref()
+        .unwrap()
+        .public_blobs
+    {
         assert!(
-            coland_storage::BlobStore::get(&blobs, &blob(seed))
+            coland_storage::BlobStore::get(&blobs, blob.blob_ref.as_str())
                 .await
                 .unwrap()
                 .is_some(),
-            "advancing current must preserve the original Genesis artifacts"
+            "advancing current preserves both original RFC publications"
         );
     }
     assert_eq!(
         advanced.current_commit_id,
         commit.authority_commit.commit.commit_id
     );
-    assert_eq!(advanced.public_state, b"public-state-1");
+    assert_eq!(
+        advanced.public_state,
+        commit
+            .authority_commit
+            .mls_state
+            .as_ref()
+            .unwrap()
+            .public_state
+    );
+    assert_ne!(advanced.public_state, installed.public_state);
 
-    let stale = with_installation(
+    let stale = mls.with_installation(
         ordinary_realm::next_request(
             &commit.authority_commit,
             arkret_wire::EventKind::MlsCommit,
             &founder,
-            commit_payload(&realm_id, &genesis_ref, 0, 0, b"stale"),
+            mls.commit_payload(&realm_id, &genesis_ref, 0, 0).await,
             at,
         ),
         Some((&genesis_ref, 0)),
@@ -575,6 +488,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
             &authority,
             "governance_binding_mismatch",
             None,
+            None,
         )
         .await
         .unwrap();
@@ -592,6 +506,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
                 &authority,
                 "different_late_reason",
                 None,
+                None,
             )
             .await
             .unwrap(),
@@ -606,6 +521,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
             &commit.authority_commit.event,
             &stale_authority,
             "governance_binding_mismatch",
+            None,
             None,
         )
         .await
@@ -651,12 +567,13 @@ async fn consumed_proposals_freeze_with_winning_commit_and_same_tuple_replacemen
         .clone();
     let at = discussion.committed_at();
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let genesis = with_installation(
+    let mls = MlsFixture::new(pool.clone(), &discussion.head.authority_commit);
+    let genesis = mls.with_installation(
         ordinary_realm::next_request(
             &discussion.head.authority_commit,
             arkret_wire::EventKind::MlsGenesis,
             &founder,
-            genesis_payload(&realm_id, at),
+            mls.genesis_payload(&realm_id, at),
             at,
         ),
         None,
@@ -664,66 +581,98 @@ async fn consumed_proposals_freeze_with_winning_commit_and_same_tuple_replacemen
     );
     uow.commit_event(genesis.clone()).await.unwrap();
     let genesis_ref = genesis.authority_commit.event.event_id.clone();
-    let leaf = MlsProposalLeafProvenance {
-        leaf_index: 1,
-        actor_id: genesis.authority_commit.event.actor_id.clone(),
-        signature_key: arkret_wire::Base64UrlString::new(arkret_canonical::base64url_encode(
-            [7_u8; 32],
-        ))
-        .unwrap(),
-    };
-    let proposal = |ordinal, proposal_type, wire, before, after| MlsConsumedProposalInstallation {
-        ordinal,
-        proposal_ref: vec![wire],
-        proposal_type,
-        proposal_wire: vec![wire],
-        sender_leaf: leaf.clone(),
-        target_before: before,
-        target_after: after,
-    };
-    let mut first = with_installation(
-        ordinary_realm::next_request(
-            &genesis.authority_commit,
-            arkret_wire::EventKind::MlsCommit,
-            &founder,
-            commit_payload(&realm_id, &genesis_ref, 0, 0, b"first-proposal"),
-            at,
-        ),
-        Some((&genesis_ref, 0)),
-        1,
+    let recipient_source = pcr_genesis::PcrGenesisFixture::new_with(
+        device_authorization_history::did_web_station(&ordinary_realm::station()),
+        device_authorization_history::DeviceHistoryFixtureOptions {
+            local_id: "mls-provenance-member".into(),
+            founding_device_signing_seed: [109; 32],
+            ..Default::default()
+        },
     );
-    first
-        .authority_commit
-        .mls_state
-        .as_mut()
-        .unwrap()
-        .consumed_proposals = vec![
-        proposal(0, 1, 11, None, Some(leaf.clone())),
-        proposal(1, 7, 12, None, None),
-    ];
+    let selector = recipient_source
+        .admit_founding_device(&coland_storage_postgres::PgPersistenceStore::new(
+            pool.clone(),
+        ))
+        .await
+        .unwrap();
+    let actor = recipient_actor(&selector);
+    join(&pool, &genesis, &actor).await;
+    let identity = arkret_mls::ArkretMlsIdentity::new_human_device(
+        actor.clone(),
+        recipient_source.history.founding_device_id.clone(),
+        arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(
+            ed25519_dalek::SigningKey::from_bytes(
+                &recipient_source.history.founding_device_signing_seed,
+            ),
+        ),
+    )
+    .unwrap();
+    let claimed = || {
+        let mut package = identity.key_package_record().unwrap();
+        package.state = arkret_models_crypto::MlsKeyPackageState::Claimed;
+        package.claim_id = Some(claim_id());
+        package
+    };
+    let mut group = mls.accepted_private_group(&genesis_ref).await;
+    let mut tracker = mls.tracker(&genesis_ref);
+    let binding =
+        MlsGovernanceBindingPayload::realm(realm_id.clone(), Some(genesis_ref.clone()), 0, 1, 0)
+            .unwrap();
+    let first_package = claimed();
+    let added = group
+        .add_member_with_governance_binding(&first_package, &binding)
+        .unwrap();
+    let first_proposals = mls_public_fixture::consume(&mut tracker, &added.commit);
+    mls.register_package(
+        &first_package,
+        &first_proposals,
+        &selector.authorization_ref.event_id,
+    );
+    let first = mls.transition(
+        &genesis.authority_commit,
+        group,
+        tracker,
+        added.commit,
+        binding,
+        &genesis_ref,
+        first_proposals.clone(),
+        at,
+    );
     uow.commit_event(first.clone()).await.unwrap();
     let first_ref = first.authority_commit.event.event_id.clone();
-
-    let mut replacement = with_installation(
-        ordinary_realm::next_request(
-            &first.authority_commit,
-            arkret_wire::EventKind::MlsCommit,
-            &founder,
-            commit_payload(&realm_id, &first_ref, 1, 0, b"replacement"),
-            at,
-        ),
-        Some((&first_ref, 1)),
-        2,
-    );
-    replacement
-        .authority_commit
-        .mls_state
-        .as_mut()
+    let leaf = first_proposals
+        .iter()
+        .find_map(|p| p.target_after.as_ref())
         .unwrap()
-        .consumed_proposals = vec![
-        proposal(0, 3, 21, Some(leaf.clone()), None),
-        proposal(1, 1, 22, None, Some(leaf.clone())),
-    ];
+        .clone();
+
+    let mut group = mls.accepted_private_group(&first_ref).await;
+    let mut tracker = mls.tracker(&first_ref);
+    let binding =
+        MlsGovernanceBindingPayload::realm(realm_id.clone(), Some(first_ref.clone()), 1, 2, 0)
+            .unwrap();
+    let replacement_package = claimed();
+    let replaced = group
+        .replace_member_endpoint(&replacement_package, &actor, Some(&binding))
+        .unwrap();
+    let replacement_proposals = mls_public_fixture::consume(&mut tracker, &replaced.commit);
+    mls.register_package(
+        &replacement_package,
+        &replacement_proposals,
+        &selector.authorization_ref.event_id,
+    );
+    assert_eq!(replacement_proposals[0].target_after.as_ref(), Some(&leaf));
+    assert_eq!(replacement_proposals[2].target_before.as_ref(), Some(&leaf));
+    let replacement = mls.transition(
+        &first.authority_commit,
+        group,
+        tracker,
+        replaced.commit,
+        binding,
+        &first_ref,
+        replacement_proposals.clone(),
+        at,
+    );
     uow.commit_event(replacement.clone()).await.unwrap();
     let replacement_ref = replacement.authority_commit.event.event_id.clone();
 
@@ -738,35 +687,44 @@ async fn consumed_proposals_freeze_with_winning_commit_and_same_tuple_replacemen
     .load::<ProvenanceRow>(&mut *conn)
     .await
     .unwrap();
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 5);
     assert_eq!(rows[0].commit_event_ref, first_ref.as_str());
     assert_eq!(rows[1].commit_event_ref, first_ref.as_str());
     assert_eq!(rows[2].commit_event_ref, replacement_ref.as_str());
     assert_eq!(rows[3].commit_event_ref, replacement_ref.as_str());
+    assert_eq!(rows[4].commit_event_ref, replacement_ref.as_str());
     assert_eq!(
         rows.iter()
             .map(|row| row.consumed_proposal_ordinal)
             .collect::<Vec<_>>(),
-        vec![0, 1, 0, 1]
+        vec![0, 1, 0, 1, 2]
     );
     assert_eq!(
         rows.iter()
-            .map(|row| row.proposal_wire[0])
+            .map(|row| row.proposal_wire.as_slice())
             .collect::<Vec<_>>(),
-        vec![11, 12, 21, 22]
+        first_proposals
+            .iter()
+            .chain(&replacement_proposals)
+            .map(|p| p.proposal_wire.as_slice())
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         rows.iter().map(|row| row.proposal_type).collect::<Vec<_>>(),
-        vec![1, 7, 3, 1]
+        vec![1, 7, 1, 7, 3]
     );
-    assert!(
-        rows.iter()
-            .all(|row| row.sender_actor_id == serde_json::to_value(&leaf.actor_id).unwrap())
-    );
+    assert!(rows.iter().all(|row| row.sender_actor_id
+        == serde_json::to_value(&genesis.authority_commit.event.actor_id).unwrap()));
     assert!(rows[1].target_before_actor_id.is_none());
     assert!(rows[1].target_after_actor_id.is_none());
-    assert!(rows[2].target_after_actor_id.is_none());
-    assert_eq!(rows[0].target_after_actor_id, rows[3].target_after_actor_id);
+    assert!(rows[3].target_before_actor_id.is_none());
+    assert!(rows[3].target_after_actor_id.is_none());
+    assert!(rows[4].target_after_actor_id.is_none());
+    assert_eq!(rows[0].target_after_actor_id, rows[2].target_after_actor_id);
+    assert_eq!(
+        rows[0].target_after_actor_id,
+        rows[4].target_before_actor_id
+    );
     let invalid_group_context = diesel::sql_query(
         "INSERT INTO mls_consumed_proposal_provenance \
          (realm_id,scope_key,commit_event_ref,commit_stream_position,epoch,consumed_proposal_ordinal, \
@@ -792,25 +750,28 @@ async fn consumed_proposals_freeze_with_winning_commit_and_same_tuple_replacemen
     );
     drop(conn);
 
-    let mut stale = with_installation(
-        ordinary_realm::next_request(
-            &replacement.authority_commit,
-            arkret_wire::EventKind::MlsCommit,
-            &founder,
-            commit_payload(&realm_id, &first_ref, 1, 0, b"stale-provenance"),
-            at,
-        ),
-        Some((&first_ref, 1)),
-        2,
+    let mut group = mls.accepted_private_group(&first_ref).await;
+    let mut tracker = mls.tracker(&first_ref);
+    let binding =
+        MlsGovernanceBindingPayload::realm(realm_id.clone(), Some(first_ref.clone()), 1, 2, 0)
+            .unwrap();
+    let stale_package = claimed();
+    let replaced = group
+        .replace_member_endpoint(&stale_package, &actor, Some(&binding))
+        .unwrap();
+    let stale_proposals = mls_public_fixture::consume(&mut tracker, &replaced.commit);
+    let stale = mls.transition(
+        &replacement.authority_commit,
+        group,
+        tracker,
+        replaced.commit,
+        binding,
+        &first_ref,
+        stale_proposals,
+        at,
     );
-    stale
-        .authority_commit
-        .mls_state
-        .as_mut()
-        .unwrap()
-        .consumed_proposals = vec![proposal(0, 1, 31, None, Some(leaf.clone()))];
     assert_zero_write_refusal(&pool, &stale, ConflictCode::GovernanceBindingMismatch).await;
-    assert_eq!(provenance_count(&pool).await, 4);
+    assert_eq!(provenance_count(&pool).await, 5);
 }
 
 /// A member's public Genesis material read is decided at one accepted Realm
@@ -834,12 +795,13 @@ async fn realm_mls_material_read_authorizes_exact_member_and_target_cut() {
         .signing_principal_id()
         .clone();
     let at = discussion.committed_at();
-    let genesis = with_installation(
+    let mls = MlsFixture::new(pool.clone(), &discussion.head.authority_commit);
+    let genesis = mls.with_installation(
         ordinary_realm::next_request(
             &discussion.head.authority_commit,
             arkret_wire::EventKind::MlsGenesis,
             &founder,
-            genesis_payload(&realm_id, at),
+            mls.genesis_payload(&realm_id, at),
             at,
         ),
         None,
@@ -945,12 +907,13 @@ async fn realm_mls_material_peer_uses_joined_target_cut_not_prejoin_genesis_cut(
     let realm_id = unit.transactions[0].event.realm_id.clone();
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
     let founder = account.principal_id.clone();
-    let genesis = with_installation(
+    let mls = MlsFixture::new(pool.clone(), unit.transactions.last().unwrap());
+    let genesis = mls.with_installation(
         ordinary_realm::next_request(
             unit.transactions.last().unwrap(),
             arkret_wire::EventKind::MlsGenesis,
             &founder,
-            genesis_payload(&realm_id, at),
+            mls.genesis_payload(&realm_id, at),
             at,
         ),
         None,
@@ -980,12 +943,12 @@ async fn realm_mls_material_peer_uses_joined_target_cut_not_prejoin_genesis_cut(
         join.authority_commit.event.clone(),
     ));
     uow.commit_event(join.clone()).await.unwrap();
-    let target = with_installation(
+    let target = mls.with_installation(
         ordinary_realm::next_request(
             &join.authority_commit,
             arkret_wire::EventKind::MlsCommit,
             &founder,
-            commit_payload(&realm_id, &genesis_ref, 0, 1, b"member-target-cut"),
+            mls.commit_payload(&realm_id, &genesis_ref, 0, 1).await,
             at,
         ),
         Some((&genesis_ref, 0)),
@@ -1193,7 +1156,8 @@ async fn realm_mls_material_read_rejects_wrong_genesis_ref() {
     let realm_id = discussion.realm_id();
     let station = ordinary_realm::station();
     let at = discussion.committed_at();
-    let genesis = with_installation(
+    let mls = MlsFixture::new(pool.clone(), &discussion.head.authority_commit);
+    let genesis = mls.with_installation(
         ordinary_realm::next_request(
             &discussion.head.authority_commit,
             arkret_wire::EventKind::MlsGenesis,
@@ -1204,7 +1168,7 @@ async fn realm_mls_material_read_rejects_wrong_genesis_ref() {
                 .actor_id
                 .signing_principal_id()
                 .clone(),
-            genesis_payload(&realm_id, at),
+            mls.genesis_payload(&realm_id, at),
             at,
         ),
         None,
@@ -1215,7 +1179,7 @@ async fn realm_mls_material_read_rejects_wrong_genesis_ref() {
         .await
         .unwrap();
     let event = &genesis.authority_commit.event;
-    let target = with_installation(
+    let target = mls.with_installation(
         ordinary_realm::next_request(
             &genesis.authority_commit,
             arkret_wire::EventKind::MlsCommit,
@@ -1226,7 +1190,7 @@ async fn realm_mls_material_read_rejects_wrong_genesis_ref() {
                 .actor_id
                 .signing_principal_id()
                 .clone(),
-            commit_payload(&realm_id, &event.event_id, 0, 0, b"genesis-selector-target"),
+            mls.commit_payload(&realm_id, &event.event_id, 0, 0).await,
             at,
         ),
         Some((&event.event_id, 0)),
@@ -1283,7 +1247,8 @@ async fn realm_mls_material_read_rejects_target_retention_and_redaction() {
     let realm_id = discussion.realm_id();
     let station = ordinary_realm::station();
     let at = discussion.committed_at();
-    let genesis = with_installation(
+    let mls = MlsFixture::new(pool.clone(), &discussion.head.authority_commit);
+    let genesis = mls.with_installation(
         ordinary_realm::next_request(
             &discussion.head.authority_commit,
             arkret_wire::EventKind::MlsGenesis,
@@ -1294,7 +1259,7 @@ async fn realm_mls_material_read_rejects_target_retention_and_redaction() {
                 .actor_id
                 .signing_principal_id()
                 .clone(),
-            genesis_payload(&realm_id, at),
+            mls.genesis_payload(&realm_id, at),
             at,
         ),
         None,
@@ -1417,12 +1382,13 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
         .clone();
     let at = discussion.committed_at();
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let genesis = with_installation(
+    let mls = MlsFixture::new(pool.clone(), &discussion.head.authority_commit);
+    let genesis = mls.with_installation(
         ordinary_realm::next_request(
             &discussion.head.authority_commit,
             arkret_wire::EventKind::MlsGenesis,
             &founder,
-            genesis_payload(&realm_id, at),
+            mls.genesis_payload(&realm_id, at),
             at,
         ),
         None,
@@ -1433,12 +1399,12 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
 
     let first_claim = claim_id();
     let first_key = live_claim(&pool, station.as_str(), &first_claim).await;
-    let mut commit = with_installation(
+    let mut commit = mls.with_installation(
         ordinary_realm::next_request(
             &genesis.authority_commit,
             arkret_wire::EventKind::MlsCommit,
             &founder,
-            commit_payload(&realm_id, &genesis_ref, 0, 0, b"add"),
+            mls.commit_payload(&realm_id, &genesis_ref, 0, 0).await,
             at,
         ),
         Some((&genesis_ref, 0)),
@@ -1475,12 +1441,12 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
 
     let second_claim = claim_id();
     let second_key = live_claim(&pool, station.as_str(), &second_claim).await;
-    let mut full = with_installation(
+    let mut full = mls.with_installation(
         ordinary_realm::next_request(
             &commit.authority_commit,
             arkret_wire::EventKind::MlsCommit,
             &founder,
-            commit_payload(&realm_id, &commit_ref, 1, 0, b"full"),
+            mls.commit_payload(&realm_id, &commit_ref, 1, 0).await,
             at,
         ),
         Some((&commit_ref, 1)),
@@ -1495,12 +1461,12 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
     full.authority_commit.recipient_queue_capacity = 1;
     assert_zero_write_refusal(&pool, &full, ConflictCode::RecipientQueueAtCapacity).await;
 
-    let mut reused = with_installation(
+    let mut reused = mls.with_installation(
         ordinary_realm::next_request(
             &commit.authority_commit,
             arkret_wire::EventKind::MlsCommit,
             &founder,
-            commit_payload(&realm_id, &commit_ref, 1, 0, b"reused"),
+            mls.commit_payload(&realm_id, &commit_ref, 1, 0).await,
             at,
         ),
         Some((&commit_ref, 1)),
@@ -1565,23 +1531,7 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
         1
     );
 
-    persistence
-        .device_revocations()
-        .commit_revocation(&coland_storage::DeviceRevocationTransition {
-            selector: recipient.clone(),
-            revoke_ref: arkret_wire::CommittedEventRef {
-                event_id: arkret_wire::EventId::from_digest(
-                    arkret_canonical::DigestSuite::Sha256,
-                    [0x52; 32],
-                ),
-                commit_id: arkret_wire::RealmCommitId::from_digest([0x53; 32]),
-                stream_ref: recipient.authorization_ref.stream_ref.clone(),
-                stream_position: recipient.authorization_ref.stream_position + 10,
-            },
-            committed_at: chrono::Utc::now(),
-        })
-        .await
-        .unwrap();
+    mls_device_revoke_fixture::accept_revoke(&pool, &source, &recipient, &second_device).await;
     assert!(
         queue
             .list_recipient_deliveries(&endpoint(&recipient), 0, 10)
@@ -1718,10 +1668,10 @@ async fn the_send_gate_refuses_a_revoked_device_at_the_mls_group_cut() {
     let revoked = Box::pin(source.admit_founding_device(&persistence))
         .await
         .expect("accepted founding device");
-    let active = Box::pin(source.admit_accepted_device(&persistence, [43; 32]))
+    let active_device = Box::pin(source.admit_accepted_device(&persistence, [43; 32]))
         .await
-        .expect("accepted second device")
-        .authorization;
+        .expect("accepted second device");
+    let active = active_device.authorization.clone();
 
     let discussion =
         Box::new(Box::pin(ordinary_realm::open_discussion(&pool, "mls-send-gate")).await);
@@ -1746,12 +1696,13 @@ async fn the_send_gate_refuses_a_revoked_device_at_the_mls_group_cut() {
         ))
         .await,
     );
-    let genesis = Box::new(with_installation(
+    let mls = MlsFixture::new(pool.clone(), &discussion.head.authority_commit);
+    let genesis = Box::new(mls.with_installation(
         ordinary_realm::next_request(
             &grant.authority_commit,
             arkret_wire::EventKind::MlsGenesis,
             &founder,
-            genesis_payload(&realm_id, at),
+            mls.genesis_payload(&realm_id, at),
             at,
         ),
         None,
@@ -1761,12 +1712,12 @@ async fn the_send_gate_refuses_a_revoked_device_at_the_mls_group_cut() {
         .await
         .unwrap();
     let genesis_ref = genesis.authority_commit.event.event_id.clone();
-    let commit = Box::new(with_installation(
+    let commit = Box::new(mls.with_installation(
         ordinary_realm::next_request(
             &genesis.authority_commit,
             arkret_wire::EventKind::MlsCommit,
             &founder,
-            commit_payload(&realm_id, &genesis_ref, 0, 0, b"epoch-one"),
+            mls.commit_payload(&realm_id, &genesis_ref, 0, 0).await,
             at,
         ),
         Some((&genesis_ref, 0)),
@@ -1794,23 +1745,7 @@ async fn the_send_gate_refuses_a_revoked_device_at_the_mls_group_cut() {
             Box::pin(ordinary_realm::source_request(&pool, request)).await,
         ));
     }
-    persistence
-        .device_revocations()
-        .commit_revocation(&coland_storage::DeviceRevocationTransition {
-            selector: revoked.clone(),
-            revoke_ref: arkret_wire::CommittedEventRef {
-                event_id: arkret_wire::EventId::from_digest(
-                    arkret_canonical::DigestSuite::Sha256,
-                    [0x54; 32],
-                ),
-                commit_id: arkret_wire::RealmCommitId::from_digest([0x55; 32]),
-                stream_ref: revoked.authorization_ref.stream_ref.clone(),
-                stream_position: revoked.authorization_ref.stream_position + 10,
-            },
-            committed_at: chrono::Utc::now(),
-        })
-        .await
-        .unwrap();
+    mls_device_revoke_fixture::accept_revoke(&pool, &source, &revoked, &active_device).await;
     for request in revoked_messages {
         Box::pin(assert_zero_write_refusal(
             &pool,
@@ -2184,7 +2119,14 @@ async fn same_station_add_installs_signed_history_atomically() {
         .unwrap();
     drop(conn);
     let persistence = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
-    let recipient = pcr_genesis::PcrGenesisFixture::new(station_did.clone())
+    let recipient_source = pcr_genesis::PcrGenesisFixture::new_with(
+        station_did.clone(),
+        device_authorization_history::DeviceHistoryFixtureOptions {
+            founding_device_signing_seed: [110; 32],
+            ..Default::default()
+        },
+    );
+    let recipient = recipient_source
         .admit_founding_device(&persistence)
         .await
         .unwrap();
@@ -2206,12 +2148,13 @@ async fn same_station_add_installs_signed_history_atomically() {
     let at = discussion.committed_at();
     join(&pool, &discussion.head, &recipient_actor(&recipient)).await;
     let uow = PgEventCommitUnitOfWork::new(pool.clone());
-    let genesis = with_installation(
+    let mls = MlsFixture::new(pool.clone(), &discussion.head.authority_commit);
+    let genesis = mls.with_installation(
         ordinary_realm::next_request(
             &discussion.head.authority_commit,
             arkret_wire::EventKind::MlsGenesis,
             &founder,
-            genesis_payload(&realm_id, at),
+            mls.genesis_payload(&realm_id, at),
             at,
         ),
         None,
@@ -2219,96 +2162,44 @@ async fn same_station_add_installs_signed_history_atomically() {
     );
     uow.commit_event(genesis.clone()).await.unwrap();
     let genesis_ref = genesis.authority_commit.event.event_id.clone();
-    let mut commit = with_installation(
-        ordinary_realm::next_request(
-            &genesis.authority_commit,
-            arkret_wire::EventKind::MlsCommit,
-            &founder,
-            commit_payload(&realm_id, &genesis_ref, 0, 0, b"local signed add"),
-            at,
-        ),
-        Some((&genesis_ref, 0)),
-        1,
-    );
     let claim_id = claim_id();
-    let delivery = welcome(&commit, &recipient, &claim_id);
     let actor = recipient_actor(&recipient);
-    let device_id = match &delivery.recipient_endpoint {
-        arkret_wire::MlsWelcomeRecipientEndpoint::Device { device_id } => device_id.clone(),
-        _ => unreachable!(),
-    };
-    let founder_device =
-        arkret_wire::DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
-    let founder_actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-        founder.clone(),
-        station.clone(),
-    ));
-    let mut group =
-        arkret_mls::ArkretMlsIdentity::new_test_human_device(founder_actor, founder_device)
-            .unwrap()
-            .create_group_with_governance_binding(
-                &realm_scope(&realm_id),
-                &MlsGovernanceBindingPayload::realm(realm_id.clone(), None, 0, 0, 0).unwrap(),
-            )
-            .unwrap();
-    let (group_info, tree) = group.public_group_state_bytes().unwrap();
-    let mut tracker = arkret_mls::MlsPublicGroupTracker::from_external(
-        &group_info,
-        &tree,
-        group.group_id().as_str(),
-        0,
+    let device_id = arkret_wire::DeviceId::new(recipient.device_id.clone()).unwrap();
+    let mut group = mls.accepted_private_group(&genesis_ref).await;
+    let mut tracker = mls.tracker(&genesis_ref);
+    let member_identity = arkret_mls::ArkretMlsIdentity::new_human_device(
+        actor.clone(),
+        device_id,
+        arkret_mls::ArkretMlsSigner::from_ed25519_signing_key(
+            ed25519_dalek::SigningKey::from_bytes(
+                &recipient_source.history.founding_device_signing_seed,
+            ),
+        ),
     )
     .unwrap();
-    let member_identity =
-        arkret_mls::ArkretMlsIdentity::new_test_human_device(actor.clone(), device_id).unwrap();
     let mut package = member_identity.key_package_record().unwrap();
     package.state = arkret_models_crypto::MlsKeyPackageState::Claimed;
     package.claim_id = Some(claim_id.clone());
+    let binding =
+        MlsGovernanceBindingPayload::realm(realm_id.clone(), Some(genesis_ref.clone()), 0, 1, 0)
+            .unwrap();
     let added = group
-        .add_member_with_governance_binding(
-            &package,
-            &MlsGovernanceBindingPayload::realm(
-                realm_id.clone(),
-                Some(genesis_ref.clone()),
-                0,
-                1,
-                0,
-            )
-            .unwrap(),
-        )
+        .add_member_with_governance_binding(&package, &binding)
         .unwrap();
-    let arkret_mls::MlsPublicHandshakeTransition::Commit {
-        consumed_proposals, ..
-    } = tracker
-        .process_public_handshake(
-            &arkret_canonical::base64url_decode(&added.commit.commit).unwrap(),
-        )
-        .unwrap()
-    else {
-        panic!("a real Add must produce a Commit")
-    };
-    let leaf = |leaf: arkret_mls::MlsPublicEndpointLeaf| MlsProposalLeafProvenance {
-        leaf_index: leaf.leaf_index,
-        actor_id: leaf.actor_id,
-        signature_key: leaf.signature_key,
-    };
-    commit
-        .authority_commit
-        .mls_state
-        .as_mut()
-        .unwrap()
-        .consumed_proposals = consumed_proposals
-        .into_iter()
-        .map(|proposal| MlsConsumedProposalInstallation {
-            ordinal: proposal.ordinal,
-            proposal_ref: proposal.proposal_ref,
-            proposal_type: proposal.proposal_type,
-            proposal_wire: proposal.proposal_wire,
-            sender_leaf: leaf(proposal.sender_leaf),
-            target_before: proposal.target_before.map(leaf),
-            target_after: proposal.target_after.map(leaf),
-        })
-        .collect();
+    let proposals = mls_public_fixture::consume(&mut tracker, &added.commit);
+    mls.register_package(&package, &proposals, &recipient.authorization_ref.event_id);
+    let mut commit = mls.transition(
+        &genesis.authority_commit,
+        group,
+        tracker,
+        added.commit,
+        binding,
+        &genesis_ref,
+        proposals,
+        at,
+    );
+    let mut delivery = welcome(&commit, &recipient, &claim_id);
+    mls.seal_welcome(&mut delivery, &added.welcome);
     let parsed = arkret_mls::verify_add_proposal_leaf(
         &commit
             .authority_commit
@@ -2387,7 +2278,7 @@ async fn same_station_add_installs_signed_history_atomically() {
     );
 }
 
-/// encryption-and-audit.md §2.2 "跨站 recipient": the governance Station
+/// encryption-and-audit.md §2.2 cross-Station recipient: the governance Station
 /// verifies everything but the claim of a Welcome whose recipient another
 /// Station hosts and writes it, in submission order, into the Commit's
 /// committed-replication intent to exactly that Station, next to the local
@@ -2428,12 +2319,13 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
     for joined in [&first, &second, &bystander] {
         join(&pool, &discussion.head, joined).await;
     }
-    let genesis = with_installation(
+    let mls = MlsFixture::new(pool.clone(), &discussion.head.authority_commit);
+    let genesis = mls.with_installation(
         ordinary_realm::next_request(
             &discussion.head.authority_commit,
             arkret_wire::EventKind::MlsGenesis,
             &founder,
-            genesis_payload(&realm_id, at),
+            mls.genesis_payload(&realm_id, at),
             at,
         ),
         None,
@@ -2442,20 +2334,20 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
     uow.commit_event(genesis.clone()).await.unwrap();
     let genesis_ref = genesis.authority_commit.event.event_id.clone();
 
-    let add = |bytes: &[u8]| {
-        with_installation(
+    let add = async || {
+        mls.with_installation(
             ordinary_realm::next_request(
                 &genesis.authority_commit,
                 arkret_wire::EventKind::MlsCommit,
                 &founder,
-                commit_payload(&realm_id, &genesis_ref, 0, 0, bytes),
+                mls.commit_payload(&realm_id, &genesis_ref, 0, 0).await,
                 at,
             ),
             Some((&genesis_ref, 0)),
             1,
         )
     };
-    let mut stranger = add(b"stranger");
+    let mut stranger = add().await;
     stranger.authority_commit.welcomes = vec![remote_welcome(
         &stranger,
         &member("mls-remote-stranger", remote_station),
@@ -2465,107 +2357,69 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
     assert!(replication_payloads(&pool, &stranger).await.is_empty());
     assert!(frozen_remote_welcomes(&pool, &stranger).await.is_empty());
 
-    let mut commit = add(b"cross-station add");
+    let mut commit = add().await;
     let mut welcomes = vec![
         remote_welcome(&commit, &first),
         remote_welcome(&commit, &second),
     ];
     welcomes.sort_by(|left, right| left.delivery.welcome_id.cmp(&right.delivery.welcome_id));
-    // Feed storage the exact Add and GCE consumed by a real RFC 9420 Commit.
-    // The ingress below reparses the frozen Add; arbitrary fixture bytes must
-    // never be enough to install a historical recipient authority proof.
-    let founder_device =
-        arkret_wire::DeviceId::new(format!("ak:device:{}", uuid::Uuid::now_v7())).unwrap();
-    let member_device = welcomes
+    let mut group = mls.accepted_private_group(&genesis_ref).await;
+    let mut tracker = mls.tracker(&genesis_ref);
+    let packages = welcomes
         .iter()
-        .find(|welcome| welcome.delivery.recipient_actor_id == first)
-        .and_then(|welcome| match &welcome.delivery.recipient_endpoint {
-            arkret_wire::MlsWelcomeRecipientEndpoint::Device { device_id } => {
-                Some(device_id.clone())
-            }
-            _ => None,
-        })
-        .unwrap();
-    let founder_actor = arkret_wire::ActorId::account(arkret_wire::AccountId::new(
-        founder.clone(),
-        station.clone(),
-    ));
-    let mut group =
-        arkret_mls::ArkretMlsIdentity::new_test_human_device(founder_actor, founder_device)
-            .unwrap()
-            .create_group_with_governance_binding(
-                &realm_scope(&realm_id),
-                &MlsGovernanceBindingPayload::realm(realm_id.clone(), None, 0, 0, 0).unwrap(),
+        .map(|welcome| {
+            let arkret_wire::MlsWelcomeRecipientEndpoint::Device { device_id } =
+                &welcome.delivery.recipient_endpoint
+            else {
+                unreachable!()
+            };
+            let identity = arkret_mls::ArkretMlsIdentity::new_test_human_device(
+                welcome.delivery.recipient_actor_id.clone(),
+                device_id.clone(),
             )
             .unwrap();
-    let (group_info, tree) = group.public_group_state_bytes().unwrap();
-    let mut tracker = arkret_mls::MlsPublicGroupTracker::from_external(
-        &group_info,
-        &tree,
-        group.group_id().as_str(),
-        0,
-    )
-    .unwrap();
-    let member_identity =
-        arkret_mls::ArkretMlsIdentity::new_test_human_device(first.clone(), member_device).unwrap();
-    let mut member_keypackage = member_identity.key_package_record().unwrap();
-    member_keypackage.state = arkret_models_crypto::MlsKeyPackageState::Claimed;
-    member_keypackage.claim_id = Some(
-        welcomes
-            .iter()
-            .find(|welcome| welcome.delivery.recipient_actor_id == first)
-            .unwrap()
-            .delivery
-            .keypackage_claim_ref
-            .to_string(),
-    );
-    let add_result = group
-        .add_member_with_governance_binding(
-            &member_keypackage,
-            &MlsGovernanceBindingPayload::realm(
-                realm_id.clone(),
-                Some(genesis_ref.clone()),
-                0,
-                1,
-                0,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-    let transition = tracker
-        .process_public_handshake(
-            &arkret_canonical::base64url::base64url_decode(add_result.commit.commit.as_bytes())
-                .unwrap(),
-        )
-        .unwrap();
-    let arkret_mls::MlsPublicHandshakeTransition::Commit {
-        consumed_proposals, ..
-    } = transition
-    else {
-        panic!("the real Add transition must be a Commit")
-    };
-    let leaf = |leaf: arkret_mls::MlsPublicEndpointLeaf| MlsProposalLeafProvenance {
-        leaf_index: leaf.leaf_index,
-        actor_id: leaf.actor_id,
-        signature_key: leaf.signature_key,
-    };
-    commit
-        .authority_commit
-        .mls_state
-        .as_mut()
-        .unwrap()
-        .consumed_proposals = consumed_proposals
-        .into_iter()
-        .map(|proposal| MlsConsumedProposalInstallation {
-            ordinal: proposal.ordinal,
-            proposal_ref: proposal.proposal_ref,
-            proposal_type: proposal.proposal_type,
-            proposal_wire: proposal.proposal_wire,
-            sender_leaf: leaf(proposal.sender_leaf),
-            target_before: proposal.target_before.map(leaf),
-            target_after: proposal.target_after.map(leaf),
+            let mut package = identity.key_package_record().unwrap();
+            package.state = arkret_models_crypto::MlsKeyPackageState::Claimed;
+            package.claim_id = Some(welcome.delivery.keypackage_claim_ref.to_string());
+            package
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let member_keypackage = packages
+        .iter()
+        .find(|p| p.actor_id == first)
+        .unwrap()
+        .clone();
+    let binding =
+        MlsGovernanceBindingPayload::realm(realm_id.clone(), Some(genesis_ref.clone()), 0, 1, 0)
+            .unwrap();
+    let added = group
+        .add_members_with_governance_binding(&packages, &binding)
+        .unwrap();
+    let proposals = mls_public_fixture::consume(&mut tracker, &added.commit);
+    let remote_authorization =
+        arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [71; 32]);
+    for package in &packages {
+        mls.register_package(package, &proposals, &remote_authorization);
+    }
+    commit = mls.transition(
+        &genesis.authority_commit,
+        group,
+        tracker,
+        added.commit,
+        binding,
+        &genesis_ref,
+        proposals,
+        at,
+    );
+    for welcome in &mut welcomes {
+        welcome.delivery.commit_event_ref = commit.authority_commit.event.event_id.clone();
+        let draft = added
+            .welcomes
+            .iter()
+            .find(|draft| draft.keypackage_claim_ref == welcome.delivery.keypackage_claim_ref)
+            .unwrap();
+        mls.seal_welcome(&mut welcome.delivery, draft);
+    }
     commit.authority_commit.welcomes = welcomes.clone();
     commit.authority_commit.recipient_queue_capacity = 4;
     uow.commit_event(commit.clone()).await.unwrap();
@@ -2598,7 +2452,13 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
         .unwrap()
         .consumed_proposals
         .iter()
-        .find(|proposal| proposal.proposal_type == 1)
+        .find(|proposal| {
+            proposal.proposal_type == 1
+                && proposal
+                    .target_after
+                    .as_ref()
+                    .is_some_and(|leaf| leaf.actor_id == first)
+        })
         .unwrap();
     let add_leaf = arkret_mls::verify_add_proposal_leaf(&add_proposal.proposal_wire).unwrap();
     assert_eq!(add_leaf.actor_id, first);
@@ -2788,6 +2648,40 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
         frozen_roster_attestor_resolution(&pool).await,
         original_resolution
     );
+    let second_welcome = welcomes
+        .iter()
+        .find(|w| w.delivery.recipient_actor_id == second)
+        .unwrap();
+    let second_package = packages.iter().find(|p| p.actor_id == second).unwrap();
+    let second_leaf = commit
+        .authority_commit
+        .mls_state
+        .as_ref()
+        .unwrap()
+        .consumed_proposals
+        .iter()
+        .filter(|p| p.proposal_type == 1)
+        .map(|p| arkret_mls::verify_add_proposal_leaf(&p.proposal_wire).unwrap())
+        .find(|leaf| leaf.actor_id == second)
+        .unwrap();
+    let second_verified = coland_storage::VerifiedMlsAddAuthorityAttestation {
+        claim_issuer_resolution: verified.claim_issuer_resolution.clone(),
+        source_station_id: verified.source_station_id.clone(),
+        attestor_resolution: verified.attestor_resolution.clone(),
+        request: signed_remote_add_attestation(
+            &commit,
+            &genesis_ref,
+            second_welcome,
+            second_package,
+            &station,
+            second_leaf.leaf_signature_key,
+        ),
+    };
+    governance
+        .install_mls_add_authority_attestation(&second_verified, &station)
+        .await
+        .unwrap();
+    assert_eq!(installed_add_attestation_count(&pool).await, 2);
     let roster = governance
         .mls_roster_authority_read(&roster_request, &station, None)
         .await
@@ -2795,10 +2689,17 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
     let coland_storage::MlsRosterAuthorityRead::Authorized { facts: Some(facts) } = roster else {
         panic!("complete installed Add history is authorized for the founder")
     };
-    assert_eq!(facts.records.len(), 2);
-    assert_eq!(facts.historical_add_proofs.len(), 1);
+    assert_eq!(facts.records.len(), 3);
+    assert_eq!(facts.historical_add_proofs.len(), 2);
     assert_eq!(
-        arkret_canonical::canonical_json_bytes(&facts.historical_add_proofs[0]).unwrap(),
+        arkret_canonical::canonical_json_bytes(
+            facts
+                .historical_add_proofs
+                .iter()
+                .find(|p| p.attestation.welcome_id == first_welcome.delivery.welcome_id)
+                .unwrap()
+        )
+        .unwrap(),
         arkret_canonical::canonical_json_bytes(&verified.request).unwrap(),
         "the private original claim outcome is selected from the same governing cut"
     );
@@ -2811,13 +2712,25 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
         arkret_models_collaboration::mls_roster_authority::MlsRosterRecord::Genesis { genesis_event_ref, .. }
             if genesis_event_ref == &genesis_ref
     ));
-    assert!(matches!(
-        &facts.records[1],
-        arkret_models_collaboration::mls_roster_authority::MlsRosterRecord::Add { commit_event_ref, consumed_proposal_ordinal, attestor_resolution, .. }
-            if commit_event_ref == &commit.authority_commit.event.event_id
-                && *consumed_proposal_ordinal == 0
-                && arkret_canonical::canonical_json_bytes(attestor_resolution).unwrap() == original_resolution
-    ));
+    let expected_ordinal = commit
+        .authority_commit
+        .mls_state
+        .as_ref()
+        .unwrap()
+        .consumed_proposals
+        .iter()
+        .find(|p| {
+            p.target_after
+                .as_ref()
+                .is_some_and(|leaf| leaf.actor_id == first)
+        })
+        .unwrap()
+        .ordinal;
+    assert!(facts.records.iter().any(|record|matches!(record,
+        arkret_models_collaboration::mls_roster_authority::MlsRosterRecord::Add {commit_event_ref,consumed_proposal_ordinal,attestor_resolution,..}
+        if commit_event_ref==&commit.authority_commit.event.event_id
+            && *consumed_proposal_ordinal==expected_ordinal
+            && arkret_canonical::canonical_json_bytes(attestor_resolution).unwrap()==original_resolution)));
     let conflicting_replay = coland_storage::VerifiedMlsAddAuthorityAttestation {
         claim_issuer_resolution: verified.claim_issuer_resolution.clone(),
         source_station_id: verified.source_station_id.clone(),
@@ -2842,7 +2755,7 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
             .is_err(),
         "same Welcome with a different signed historical claim must not replace the winner"
     );
-    assert_eq!(installed_add_attestation_count(&pool).await, 1);
+    assert_eq!(installed_add_attestation_count(&pool).await, 2);
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
         "UPDATE mls_add_authority_attestations SET attestor_resolution_canonical_json=$1",
@@ -2911,12 +2824,12 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
     );
 
     let commit_ref = commit.authority_commit.event.event_id.clone();
-    let later = with_installation(
+    let later = mls.with_installation(
         ordinary_realm::next_request(
             &commit.authority_commit,
             arkret_wire::EventKind::MlsCommit,
             &founder,
-            commit_payload(&realm_id, &commit_ref, 1, 0, b"later epoch"),
+            mls.commit_payload(&realm_id, &commit_ref, 1, 0).await,
             at,
         ),
         Some((&commit_ref, 1)),
@@ -2971,4 +2884,1051 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
         ),
         "an installed Add with missing signed historical proof cannot be disclosed"
     );
+}
+
+// These tests exercise the ordinary Self/Peer shared PG unit, not transport
+// authentication or RFC MLS cryptographic verification. The established fixture
+// supplies accepted Realm/PCR sources and verifier-owned MLS installations.
+async fn mls_retry_base(
+    pool: &PgPool,
+    seed: &str,
+) -> (EventCommitRequest, DeviceRevocationGateSelector, MlsFixture) {
+    let station = local_station(pool).await;
+    let persistence = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
+    let source = pcr_genesis::PcrGenesisFixture::new(
+        device_authorization_history::did_web_station(&station),
+    );
+    let recipient = source.admit_founding_device(&persistence).await.unwrap();
+    let discussion = ordinary_realm::open_discussion_for_station(
+        pool,
+        seed,
+        &station,
+        &device_authorization_history::did_web_station(&station),
+    )
+    .await;
+    join(pool, &discussion.head, &recipient_actor(&recipient)).await;
+    let mls = MlsFixture::new(pool.clone(), &discussion.head.authority_commit);
+    let genesis = mls.with_installation(
+        ordinary_realm::next_request(
+            &discussion.head.authority_commit,
+            arkret_wire::EventKind::MlsGenesis,
+            discussion
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            mls.genesis_payload(&discussion.realm_id(), discussion.committed_at()),
+            discussion.committed_at(),
+        ),
+        None,
+        0,
+    );
+    PgEventCommitUnitOfWork::new(pool.clone())
+        .commit_event(genesis.clone())
+        .await
+        .unwrap();
+    (genesis, recipient, mls)
+}
+
+async fn mls_retry_commit(
+    mls: &MlsFixture,
+    previous: &EventCommitRequest,
+    recipient: &DeviceRevocationGateSelector,
+    claim_id: &str,
+    claim: MlsWelcomeClaimLedgerKey,
+    revision: u64,
+) -> EventCommitRequest {
+    let epoch = previous.authority_commit.mls_state.as_ref().unwrap().epoch;
+    let base = &previous.authority_commit.event.event_id;
+    let mut request = mls.with_installation(
+        ordinary_realm::next_request(
+            &previous.authority_commit,
+            arkret_wire::EventKind::MlsCommit,
+            previous
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            mls.commit_payload(
+                &previous.authority_commit.event.realm_id,
+                base,
+                epoch,
+                revision,
+            )
+            .await,
+            previous.authority_commit.commit.committed_at,
+        ),
+        Some((base, epoch)),
+        epoch + 1,
+    );
+    request.authority_commit.welcomes = vec![VerifiedMlsWelcome {
+        delivery: welcome(&request, recipient, claim_id),
+        claim: Some(claim),
+        applet_device_scope_guard: None,
+        roster_witness: None,
+    }];
+    request.authority_commit.recipient_queue_capacity = 10;
+    assert!(request.self_producer_guard.is_none());
+    assert!(request.authority_commit.event.applet_id.is_none());
+    request
+}
+
+fn mls_complete_retry_record(
+    request: &EventCommitRequest,
+    key: uuid::Uuid,
+    outcome: arkret_wire::AuthoritySubmitResponseBody,
+) -> coland_storage::IdempotencyRecord {
+    use arkret_models_collaboration::authority_commit::{
+        SelfAuthoritySubmitRequestBody, SelfAuthoritySubmitResponseBody,
+    };
+    let submission = arkret_wire::MlsCommitSubmission {
+        commit_event: request.authority_commit.event.clone(),
+        welcomes: request
+            .authority_commit
+            .welcomes
+            .iter()
+            .map(|w| w.delivery.clone())
+            .collect(),
+        idempotency_key: arkret_wire::UuidV7::new(key).unwrap(),
+        recovery_source: None,
+    };
+    submission.validate().unwrap();
+    let body = SelfAuthoritySubmitRequestBody::MlsCommit(submission);
+    let bytes = arkret_canonical::canonical_json_bytes(&body).unwrap();
+    let at = request.authority_commit.commit.committed_at;
+    coland_storage::IdempotencyRecord {
+        authenticated_actor: request.authority_commit.event.actual_signer().clone(),
+        operation_id: arkret_wire::ServiceOperationId::SELF_EVENTS_COMMAND_SUBMIT_V1.into(),
+        idempotency_key: key.to_string(),
+        request_hash: arkret_canonical::sha256_digest(&bytes),
+        response_status: 200,
+        response_body: serde_json::to_value(SelfAuthoritySubmitResponseBody::Ordinary(outcome))
+            .unwrap(),
+        created_at: at,
+        expires_at: at + chrono::Duration::days(30),
+    }
+}
+
+fn mls_committed_retry_record(
+    request: &EventCommitRequest,
+    key: uuid::Uuid,
+) -> coland_storage::IdempotencyRecord {
+    mls_complete_retry_record(
+        request,
+        key,
+        arkret_wire::AuthoritySubmitResponseBody::Accepted {
+            status: arkret_wire::AuthorityCommitStatus::Committed,
+            commit: request.authority_commit.commit.clone(),
+        },
+    )
+}
+
+// All durable MLS effects, including the claim binding and complete request
+// ledger. Sequence gaps are not durable accepted effects and are not compared.
+async fn mls_complete_retry_footprint(pool: &PgPool) -> serde_json::Value {
+    #[derive(diesel::QueryableByName)]
+    struct Rows {
+        #[diesel(sql_type = Jsonb)]
+        value: serde_json::Value,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let mut result = serde_json::Map::new();
+    for table in [
+        "canonical_events",
+        "realm_commits",
+        "realm_commit_event_kinds",
+        "realm_authorities",
+        "current_state_heads",
+        "current_state_versions",
+        "mls_group_current_states",
+        "mls_endpoint_current_bindings",
+        "mls_consumed_proposal_provenance",
+        "mls_welcome_deliveries",
+        "mls_welcome_provenance",
+        "peer_keypackage_claims",
+        "keypackage_claim_welcome_bindings",
+        "mls_add_authority_attestations",
+        "mls_add_authority_attestation_outbox",
+        "blobs",
+        "projection_events",
+        "federation_outbox",
+        "event_federation_outbox",
+        "idempotency_keys",
+    ] {
+        let rows = diesel::sql_query(format!(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]'::jsonb) AS value FROM public.{table} t"
+        )).get_result::<Rows>(&mut *conn).await.unwrap();
+        result.insert(table.into(), rows.value);
+    }
+    serde_json::Value::Object(result)
+}
+
+async fn assert_original_mls_retry(pool: &PgPool, original: &coland_storage::IdempotencyRecord) {
+    use coland_storage::IdempotencyStore;
+    let stored = coland_storage_postgres::PgIdempotencyStore { pool: pool.clone() }
+        .get(
+            &original.authenticated_actor,
+            &original.operation_id,
+            &original.idempotency_key,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored, *original);
+    assert_eq!(
+        arkret_canonical::canonical_json_bytes(&stored.response_body).unwrap(),
+        arkret_canonical::canonical_json_bytes(&original.response_body).unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn ordinary_mls_complete_retry_returns_original_committed_outcome_without_aliases() {
+    use coland_storage::IdempotencyStore;
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let (genesis, recipient, mls) = mls_retry_base(&pool, "mls-complete-committed").await;
+    let claim_id = claim_id();
+    let claim = live_claim(&pool, recipient.station_id.as_str(), &claim_id).await;
+    let mut request = mls_retry_commit(&mls, &genesis, &recipient, &claim_id, claim, 0).await;
+    let key = uuid::Uuid::now_v7();
+    let original = mls_committed_retry_record(&request, key);
+    request.idempotency = Some(original.clone());
+    let uow = PgEventCommitUnitOfWork::new(pool.clone());
+    assert!(
+        uow.commit_event(request.clone())
+            .await
+            .unwrap()
+            .event_inserted
+    );
+    assert_original_mls_retry(&pool, &original).await;
+    let before = mls_complete_retry_footprint(&pool).await;
+    assert!(
+        !uow.commit_event(request.clone())
+            .await
+            .unwrap()
+            .event_inserted
+    );
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let mut old_authority = store
+        .current_authority(&request.authority_commit.event.realm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    old_authority.generation += 1;
+    let recovered = store
+        .finalize_mls_rejection(
+            &request.authority_commit.event,
+            &old_authority,
+            "late_current_failure",
+            None,
+            Some(&original),
+        )
+        .await
+        .unwrap();
+    let recovered = serde_json::to_value(
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(
+            recovered,
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        arkret_canonical::canonical_json_bytes(&recovered).unwrap(),
+        arkret_canonical::canonical_json_bytes(&original.response_body).unwrap()
+    );
+    assert_eq!(mls_complete_retry_footprint(&pool).await, before);
+
+    // The Event is unchanged, while one signed Welcome byte changes the full hash.
+    let mut changed = request.clone();
+    changed.authority_commit.welcomes[0]
+        .delivery
+        .ciphertext_base64url = arkret_wire::Base64UrlString::new("Y2hhbmdlZA").unwrap();
+    let changed_record = mls_committed_retry_record(&changed, key);
+    assert_ne!(changed_record.request_hash, original.request_hash);
+    changed.idempotency = Some(changed_record.clone());
+    assert_eq!(
+        uow.commit_event(changed).await.unwrap_err().conflict_code(),
+        Some(ConflictCode::DuplicateConflict)
+    );
+    assert_eq!(
+        store
+            .finalize_mls_rejection(
+                &request.authority_commit.event,
+                &old_authority,
+                "late_current_failure",
+                None,
+                Some(&changed_record)
+            )
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::DuplicateConflict)
+    );
+
+    let alias = mls_committed_retry_record(&request, uuid::Uuid::now_v7());
+    let mut aliased = request.clone();
+    aliased.idempotency = Some(alias.clone());
+    assert_eq!(
+        uow.commit_event(aliased).await.unwrap_err().conflict_code(),
+        Some(ConflictCode::DuplicateConflict)
+    );
+    assert_eq!(
+        store
+            .finalize_mls_rejection(
+                &request.authority_commit.event,
+                &old_authority,
+                "late_current_failure",
+                None,
+                Some(&alias)
+            )
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::DuplicateConflict)
+    );
+    assert!(
+        coland_storage_postgres::PgIdempotencyStore { pool: pool.clone() }
+            .get(
+                &alias.authenticated_actor,
+                &alias.operation_id,
+                &alias.idempotency_key
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut wrong_outcome = request.clone();
+    wrong_outcome.idempotency.as_mut().unwrap().response_body = serde_json::to_value(
+        arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(
+            arkret_wire::AuthoritySubmitResponseBody::Accepted {
+                status: arkret_wire::AuthorityCommitStatus::Duplicate,
+                commit: request.authority_commit.commit.clone(),
+            },
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        uow.commit_event(wrong_outcome)
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::DuplicateConflict)
+    );
+    assert_original_mls_retry(&pool, &original).await;
+    assert_eq!(mls_complete_retry_footprint(&pool).await, before);
+}
+
+#[tokio::test]
+async fn ordinary_mls_conflicting_complete_key_rolls_back_every_effect_after_ledger_wait() {
+    use diesel::sql_types::{Bool, Integer};
+    use diesel_async::SimpleAsyncConnection;
+    #[derive(diesel::QueryableByName)]
+    struct Pid {
+        #[diesel(sql_type = Integer)]
+        pid: i32,
+    }
+    #[derive(diesel::QueryableByName)]
+    struct Waiting {
+        #[diesel(sql_type = Bool)]
+        waiting: bool,
+    }
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let (genesis, recipient, mls) = mls_retry_base(&pool, "mls-complete-conflict").await;
+    let first_claim_id = claim_id();
+    let first_claim = live_claim(&pool, recipient.station_id.as_str(), &first_claim_id).await;
+    let mut first =
+        mls_retry_commit(&mls, &genesis, &recipient, &first_claim_id, first_claim, 0).await;
+    let key = uuid::Uuid::now_v7();
+    let original = mls_committed_retry_record(&first, key);
+    first.idempotency = Some(original.clone());
+    PgEventCommitUnitOfWork::new(pool.clone())
+        .commit_event(first.clone())
+        .await
+        .unwrap();
+    let second_claim_id = claim_id();
+    let second_claim = live_claim(&pool, recipient.station_id.as_str(), &second_claim_id).await;
+    let mut candidate =
+        mls_retry_commit(&mls, &first, &recipient, &second_claim_id, second_claim, 0).await;
+    let conflicting = mls_committed_retry_record(&candidate, key);
+    assert_ne!(conflicting.request_hash, original.request_hash);
+    candidate.idempotency = Some(conflicting);
+    let before = mls_complete_retry_footprint(&pool).await;
+
+    // Hold only the committed retry row. The contender reaches the final ledger
+    // check after its Event, current, Welcome and claim writes on another connection.
+    let mut holder = pool.get().await.unwrap();
+    holder.batch_execute("BEGIN").await.unwrap();
+    let pid = diesel::sql_query("SELECT pg_backend_pid() AS pid FROM idempotency_keys WHERE actor_key=$1 AND operation_id=$2 AND idempotency_key=$3 FOR UPDATE")
+        .bind::<Text,_>(original.authenticated_actor.canonical_key().unwrap())
+        .bind::<Text,_>(&original.operation_id).bind::<Text,_>(&original.idempotency_key)
+        .get_result::<Pid>(&mut *holder).await.unwrap().pid;
+    let attempted = candidate.clone();
+    let writer_pool = pool.clone();
+    let writer = tokio::spawn(async move {
+        PgEventCommitUnitOfWork::new(writer_pool)
+            .commit_event(attempted)
+            .await
+    });
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let mut observer = pool.get().await.unwrap();
+        loop {
+            let waiting = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.wait_event_type='Lock' AND a.query ILIKE '%idempotency_keys%') AS waiting")
+                .bind::<Integer,_>(pid).get_result::<Waiting>(&mut *observer).await.unwrap().waiting;
+            if waiting { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await;
+    // Always release the real lock before an assertion can unwind this test.
+    holder.batch_execute("ROLLBACK").await.unwrap();
+    assert!(
+        observed.is_ok(),
+        "the candidate must reach the complete-unit ledger barrier"
+    );
+    let error = tokio::time::timeout(std::time::Duration::from_secs(30), writer)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.conflict_code(), Some(ConflictCode::DuplicateConflict));
+    assert_eq!(mls_complete_retry_footprint(&pool).await, before);
+    assert_original_mls_retry(&pool, &original).await;
+    assert!(
+        PgAuthorityCommitStore { pool: pool.clone() }
+            .committed_event(&candidate.authority_commit.event.event_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        coland_storage_postgres::PgMlsKeyPackageStore { pool: pool.clone() }
+            .get_claim_welcome_binding(&second_claim_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // A new unit with a new key really is admissible: the same installation,
+    // Welcome and claim commit successfully once the conflicting key is removed.
+    let fresh = mls_committed_retry_record(&candidate, uuid::Uuid::now_v7());
+    candidate.idempotency = Some(fresh.clone());
+    assert!(
+        PgEventCommitUnitOfWork::new(pool.clone())
+            .commit_event(candidate)
+            .await
+            .unwrap()
+            .event_inserted
+    );
+    assert!(
+        coland_storage_postgres::PgMlsKeyPackageStore { pool: pool.clone() }
+            .get_claim_welcome_binding(&second_claim_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_original_mls_retry(&pool, &fresh).await;
+}
+
+#[tokio::test]
+async fn ordinary_mls_complete_retry_preserves_original_rejected_outcome_without_aliases() {
+    use coland_storage::IdempotencyStore;
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let (genesis, recipient, mls) = mls_retry_base(&pool, "mls-complete-rejected").await;
+    let claim_id = claim_id();
+    let claim = live_claim(&pool, recipient.station_id.as_str(), &claim_id).await;
+    let mut request = mls_retry_commit(&mls, &genesis, &recipient, &claim_id, claim, 1).await;
+    let original = mls_complete_retry_record(
+        &request,
+        uuid::Uuid::now_v7(),
+        arkret_wire::AuthoritySubmitResponseBody::Rejected {
+            status: arkret_wire::AuthorityRejectionStatus::Rejected,
+            reason_code: "governance_binding_mismatch".into(),
+        },
+    );
+    request.idempotency = Some(original.clone());
+    let unaccepted = mls_complete_retry_footprint(&pool).await;
+    assert_zero_write_refusal(&pool, &request, ConflictCode::GovernanceBindingMismatch).await;
+    assert_eq!(mls_complete_retry_footprint(&pool).await, unaccepted);
+    let store = PgAuthorityCommitStore { pool: pool.clone() };
+    let authority = store
+        .current_authority(&request.authority_commit.event.realm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let first = store
+        .finalize_mls_rejection(
+            &request.authority_commit.event,
+            &authority,
+            "governance_binding_mismatch",
+            None,
+            Some(&original),
+        )
+        .await
+        .unwrap();
+    let before = mls_complete_retry_footprint(&pool).await;
+    let replay = store
+        .finalize_mls_rejection(
+            &request.authority_commit.event,
+            &authority,
+            "different_late_reason",
+            None,
+            Some(&original),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay, first);
+    let bytes = arkret_canonical::canonical_json_bytes(
+        &arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(
+            replay,
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        bytes,
+        arkret_canonical::canonical_json_bytes(&original.response_body).unwrap()
+    );
+    let alias = mls_complete_retry_record(&request, uuid::Uuid::now_v7(), first.clone());
+    assert_eq!(
+        store
+            .finalize_mls_rejection(
+                &request.authority_commit.event,
+                &authority,
+                "different_late_reason",
+                None,
+                Some(&alias)
+            )
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::DuplicateConflict)
+    );
+    let key = uuid::Uuid::parse_str(&original.idempotency_key).unwrap();
+    request.authority_commit.welcomes[0]
+        .delivery
+        .ciphertext_base64url = arkret_wire::Base64UrlString::new("Y2hhbmdlZA").unwrap();
+    let changed = mls_complete_retry_record(&request, key, first);
+    assert_ne!(changed.request_hash, original.request_hash);
+    assert_eq!(
+        store
+            .finalize_mls_rejection(
+                &request.authority_commit.event,
+                &authority,
+                "different_late_reason",
+                None,
+                Some(&changed)
+            )
+            .await
+            .unwrap_err()
+            .conflict_code(),
+        Some(ConflictCode::DuplicateConflict)
+    );
+    assert!(
+        coland_storage_postgres::PgIdempotencyStore { pool: pool.clone() }
+            .get(
+                &alias.authenticated_actor,
+                &alias.operation_id,
+                &alias.idempotency_key
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_original_mls_retry(&pool, &original).await;
+    assert_eq!(mls_complete_retry_footprint(&pool).await, before);
+    assert_eq!(welcome_count(&pool).await, 0);
+    assert!(
+        coland_storage_postgres::PgMlsKeyPackageStore { pool: pool.clone() }
+            .get_claim_welcome_binding(&claim_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+async fn mls_result_source_pk(
+    pool: &PgPool,
+    record: &coland_storage::IdempotencyRecord,
+) -> Option<i64> {
+    #[derive(diesel::QueryableByName)]
+    struct Source {
+        #[diesel(sql_type = diesel::sql_types::Nullable<BigInt>)]
+        pk: Option<i64>,
+    }
+    let mut conn = pool.get().await.unwrap();
+    let rows = diesel::sql_query("SELECT source_event_pk AS pk FROM idempotency_keys WHERE actor_key=$1 AND operation_id=$2 AND idempotency_key=$3")
+        .bind::<Text,_>(record.authenticated_actor.canonical_key().unwrap())
+        .bind::<Text,_>(&record.operation_id).bind::<Text,_>(&record.idempotency_key)
+        .get_results::<Source>(&mut *conn).await.unwrap();
+    assert!(rows.len() <= 1);
+    rows.as_slice().first().and_then(|row| row.pk)
+}
+
+async fn mls_original_pk(pool: &PgPool, event: &arkret_wire::Event) -> i64 {
+    #[derive(diesel::QueryableByName)]
+    struct Source {
+        #[diesel(sql_type = BigInt)]
+        pk: i64,
+    }
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("SELECT pk FROM canonical_events WHERE id=$1")
+        .bind::<Binary, _>(
+            coland_storage::ids::parse_event_id(event.event_id.as_str())
+                .unwrap()
+                .to_vec(),
+        )
+        .get_result::<Source>(&mut *conn)
+        .await
+        .unwrap()
+        .pk
+}
+
+#[tokio::test]
+async fn mls_source_results_survive_generic_cache_gc_and_follow_actual_source_deletion() {
+    use coland_storage::IdempotencyStore;
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    let (genesis, recipient, mls) = mls_retry_base(&pool, "mls-result-retention").await;
+    let id = claim_id();
+    let claim = live_claim(&pool, recipient.station_id.as_str(), &id).await;
+    let mut accepted = mls_retry_commit(&mls, &genesis, &recipient, &id, claim, 0).await;
+    let original = mls_committed_retry_record(&accepted, uuid::Uuid::now_v7());
+    accepted.idempotency = Some(original.clone());
+    PgEventCommitUnitOfWork::new(pool.clone())
+        .commit_event(accepted.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        mls_result_source_pk(&pool, &original).await,
+        Some(mls_original_pk(&pool, &accepted.authority_commit.event).await)
+    );
+    let id = claim_id();
+    let claim = live_claim(&pool, recipient.station_id.as_str(), &id).await;
+    let rejected = mls_retry_commit(&mls, &accepted, &recipient, &id, claim, 1).await;
+    let rejected_record = mls_complete_retry_record(
+        &rejected,
+        uuid::Uuid::now_v7(),
+        arkret_wire::AuthoritySubmitResponseBody::Rejected {
+            status: arkret_wire::AuthorityRejectionStatus::Rejected,
+            reason_code: "governance_binding_mismatch".into(),
+        },
+    );
+    assert_zero_write_refusal(&pool, &rejected, ConflictCode::GovernanceBindingMismatch).await;
+    let authority = PgAuthorityCommitStore { pool: pool.clone() }
+        .current_authority(&accepted.authority_commit.event.realm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    PgAuthorityCommitStore { pool: pool.clone() }
+        .finalize_mls_rejection(
+            &rejected.authority_commit.event,
+            &authority,
+            "governance_binding_mismatch",
+            None,
+            Some(&rejected_record),
+        )
+        .await
+        .unwrap();
+    let keys = coland_storage_postgres::PgIdempotencyStore { pool: pool.clone() };
+    // This is deliberately an unbound cache-control row, not an accepted unit.
+    let mut cache = original.clone();
+    cache.idempotency_key = uuid::Uuid::now_v7().to_string();
+    keys.record(&cache).await.unwrap();
+    assert!(mls_result_source_pk(&pool, &cache).await.is_none());
+    assert!(
+        keys.prune_expired(original.expires_at + chrono::Duration::seconds(1))
+            .await
+            .unwrap()
+            >= 1
+    );
+    assert!(
+        keys.get(
+            &cache.authenticated_actor,
+            &cache.operation_id,
+            &cache.idempotency_key
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert_original_mls_retry(&pool, &original).await;
+    assert_original_mls_retry(&pool, &rejected_record).await;
+    let replay = PgAuthorityCommitStore { pool: pool.clone() }
+        .finalize_mls_rejection(
+            &accepted.authority_commit.event,
+            &authority,
+            "late_failure",
+            None,
+            Some(&original),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        replay,
+        arkret_wire::AuthoritySubmitResponseBody::Accepted {
+            status: arkret_wire::AuthorityCommitStatus::Committed,
+            ..
+        }
+    ));
+    // Exercise the real FK retention dependency on a no-Commit refusal source.
+    // This is not a claim that Account erasure or shared-Event policy was run.
+    let mut conn = pool.get().await.unwrap();
+    assert_eq!(
+        diesel::sql_query("DELETE FROM canonical_events WHERE id=$1 AND state='rejected'")
+            .bind::<Binary, _>(
+                coland_storage::ids::parse_event_id(
+                    rejected.authority_commit.event.event_id.as_str()
+                )
+                .unwrap()
+                .to_vec()
+            )
+            .execute(&mut *conn)
+            .await
+            .unwrap(),
+        1
+    );
+    drop(conn);
+    assert!(
+        keys.get(
+            &rejected_record.authenticated_actor,
+            &rejected_record.operation_id,
+            &rejected_record.idempotency_key
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert_original_mls_retry(&pool, &original).await;
+}
+
+#[tokio::test]
+async fn mls_native_private_import_preserves_exact_source_results_with_remapped_local_keys() {
+    use coland_storage::IdempotencyStore;
+    let source = TestDatabase::lease().await;
+    let target = TestDatabase::lease().await;
+    assert_ne!(source.url(), target.url());
+    let incoming: arkret_wire::DidCoreId =
+        "ak:did_core:web:mls-import-target.example".parse().unwrap();
+    target.bind_device_inventory_station(incoming.as_str());
+    let pool = source.pool();
+    let (genesis, recipient, mls) = mls_retry_base(&pool, "mls-native-retry-import").await;
+    let id = claim_id();
+    let claim = live_claim(&pool, recipient.station_id.as_str(), &id).await;
+    let mut accepted = mls_retry_commit(&mls, &genesis, &recipient, &id, claim, 0).await;
+    let original = mls_committed_retry_record(&accepted, uuid::Uuid::now_v7());
+    accepted.idempotency = Some(original.clone());
+    PgEventCommitUnitOfWork::new(pool.clone())
+        .commit_event(accepted.clone())
+        .await
+        .unwrap();
+    let id = claim_id();
+    let claim = live_claim(&pool, recipient.station_id.as_str(), &id).await;
+    let rejected = mls_retry_commit(&mls, &accepted, &recipient, &id, claim, 1).await;
+    let refused = mls_complete_retry_record(
+        &rejected,
+        uuid::Uuid::now_v7(),
+        arkret_wire::AuthoritySubmitResponseBody::Rejected {
+            status: arkret_wire::AuthorityRejectionStatus::Rejected,
+            reason_code: "governance_binding_mismatch".into(),
+        },
+    );
+    assert_zero_write_refusal(&pool, &rejected, ConflictCode::GovernanceBindingMismatch).await;
+    let old = PgAuthorityCommitStore { pool: pool.clone() };
+    let authority = old
+        .current_authority(&accepted.authority_commit.event.realm_id)
+        .await
+        .unwrap()
+        .unwrap();
+    old.finalize_mls_rejection(
+        &rejected.authority_commit.event,
+        &authority,
+        "governance_binding_mismatch",
+        None,
+        Some(&refused),
+    )
+    .await
+    .unwrap();
+    let source_refused_pk = mls_original_pk(&pool, &rejected.authority_commit.event).await;
+    let station = &genesis.authority_commit.expected_authority.service_id;
+    let other = ordinary_realm::open_discussion_for_station(
+        &pool,
+        "mls-other-result-realm",
+        station,
+        &device_authorization_history::did_web_station(station),
+    )
+    .await;
+    join(&pool, &other.head, &recipient_actor(&recipient)).await;
+    let other_genesis = mls.with_installation(
+        ordinary_realm::next_request(
+            &other.head.authority_commit,
+            arkret_wire::EventKind::MlsGenesis,
+            other
+                .head
+                .authority_commit
+                .event
+                .actor_id
+                .signing_principal_id(),
+            mls.genesis_payload(&other.realm_id(), other.committed_at()),
+            other.committed_at(),
+        ),
+        None,
+        0,
+    );
+    PgEventCommitUnitOfWork::new(pool.clone())
+        .commit_event(other_genesis.clone())
+        .await
+        .unwrap();
+    let id = claim_id();
+    let claim = live_claim(&pool, recipient.station_id.as_str(), &id).await;
+    let mut other_mls = mls_retry_commit(&mls, &other_genesis, &recipient, &id, claim, 0).await;
+    let other_record = mls_committed_retry_record(&other_mls, uuid::Uuid::now_v7());
+    other_mls.idempotency = Some(other_record.clone());
+    PgEventCommitUnitOfWork::new(pool.clone())
+        .commit_event(other_mls.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        other_record.authenticated_actor,
+        original.authenticated_actor
+    );
+    assert_ne!(
+        other_mls.authority_commit.event.realm_id,
+        accepted.authority_commit.event.realm_id
+    );
+    let change = ordinary_realm::next_request(
+        &accepted.authority_commit,
+        arkret_wire::EventKind::RealmGovernanceStationChange,
+        accepted
+            .authority_commit
+            .event
+            .actor_id
+            .signing_principal_id(),
+        serde_json::json!({"expected_governance_generation":"0",
+            "expected_realm_stream_commit_id":accepted.authority_commit.commit.commit_id,
+            "new_governance_station_id":incoming}),
+        accepted.authority_commit.commit.committed_at + chrono::Duration::seconds(1),
+    );
+    PgEventCommitUnitOfWork::new(pool.clone())
+        .commit_event(change)
+        .await
+        .unwrap();
+    let realm = accepted.authority_commit.event.realm_id.clone();
+    let keys = coland_storage_postgres::PgIdempotencyStore { pool: pool.clone() };
+    let mut unrelated_cache = original.clone();
+    unrelated_cache.idempotency_key = uuid::Uuid::now_v7().to_string();
+    keys.record(&unrelated_cache).await.unwrap();
+    let (manifest, bytes) = old.export_management_private_state(&realm).await.unwrap();
+    let archive: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let rows = archive["tables"]["idempotency_keys"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "export only the source-bound Realm results");
+    assert!(
+        rows.iter()
+            .all(|row| row["source_event_pk"].as_str().is_some())
+    );
+    assert!(
+        rows.iter().any(|row| row["source_event_pk"]
+            == serde_json::json!(accepted.authority_commit.event.event_id))
+    );
+    assert!(
+        rows.iter().any(|row| row["source_event_pk"]
+            == serde_json::json!(rejected.authority_commit.event.event_id))
+    );
+    assert_eq!(
+        archive["tables"]["canonical_events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "the no-Commit refusal source is a private dependency, not a fabricated Commit"
+    );
+    frozen_database::copy_frozen_archive_preserving_deployment(
+        source.url(),
+        target.url(),
+        &target.pool(),
+    )
+    .await;
+    let target_pool = target.pool();
+    let mut conn = target_pool.get().await.unwrap();
+    diesel::sql_query("DELETE FROM idempotency_keys")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    diesel::sql_query("DELETE FROM canonical_events WHERE id=$1 AND state='rejected'")
+        .bind::<Binary, _>(
+            coland_storage::ids::parse_event_id(rejected.authority_commit.event.event_id.as_str())
+                .unwrap()
+                .to_vec(),
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    #[derive(diesel::QueryableByName)]
+    struct Sequence {
+        #[diesel(sql_type = BigInt)]
+        value: i64,
+    }
+    let _ = diesel::sql_query("SELECT setval(pg_get_serial_sequence('public.canonical_events','pk'),(SELECT max(pk)+1000 FROM canonical_events),true) AS value")
+        .get_result::<Sequence>(&mut *conn).await.unwrap().value;
+    drop(conn);
+    let incoming_store = PgAuthorityCommitStore {
+        pool: target_pool.clone(),
+    };
+    // Mutated private bytes receive a matching test manifest hash so these
+    // negatives reach source validation, rather than only a transport digest gate.
+    // No altered manifest is ever presented as a valid dual-signed handoff.
+    for fault in [
+        "missing_source",
+        "wrong_source",
+        "wrong_actor",
+        "wrong_outcome",
+    ] {
+        let before = mls_complete_retry_footprint(&target_pool).await;
+        let mut changed = archive.clone();
+        let index = changed["tables"]["idempotency_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|row| row["idempotency_key"] == serde_json::json!(refused.idempotency_key))
+            .unwrap();
+        match fault {
+            "missing_source" => changed["tables"]["canonical_events"] = serde_json::json!([]),
+            "wrong_source" => {
+                changed["tables"]["idempotency_keys"][index]["source_event_pk"] =
+                    serde_json::json!(other_mls.authority_commit.event.event_id)
+            }
+            "wrong_actor" => {
+                changed["tables"]["idempotency_keys"][index]["authenticated_actor"] =
+                    serde_json::json!(recipient_actor(&recipient));
+                changed["tables"]["idempotency_keys"][index]["actor_key"] =
+                    serde_json::json!(recipient_actor(&recipient).canonical_key().unwrap());
+            }
+            _ => {
+                changed["tables"]["idempotency_keys"][index]["response_body"]["reason_code"] =
+                    serde_json::json!("different_refusal")
+            }
+        }
+        let changed = arkret_canonical::canonical_json_bytes(&changed).unwrap();
+        let mut changed_manifest = manifest.clone();
+        changed_manifest.state_digest =
+            arkret_wire::Hash::new(arkret_canonical::sha256_digest(&changed)).unwrap();
+        assert!(
+            incoming_store
+                .import_management_private_state(&changed_manifest, &changed)
+                .await
+                .is_err(),
+            "{fault}"
+        );
+        assert_eq!(
+            mls_complete_retry_footprint(&target_pool).await,
+            before,
+            "{fault}"
+        );
+    }
+    let target_keys = coland_storage_postgres::PgIdempotencyStore {
+        pool: target_pool.clone(),
+    };
+    let mut conflicting_cache = original.clone();
+    conflicting_cache.request_hash = arkret_canonical::sha256_digest(b"another complete request");
+    target_keys.record(&conflicting_cache).await.unwrap();
+    let before = mls_complete_retry_footprint(&target_pool).await;
+    assert!(
+        incoming_store
+            .import_management_private_state(&manifest, &bytes)
+            .await
+            .is_err()
+    );
+    assert_eq!(mls_complete_retry_footprint(&target_pool).await, before);
+    let mut conn = target_pool.get().await.unwrap();
+    diesel::sql_query("DELETE FROM idempotency_keys WHERE actor_key=$1 AND operation_id=$2 AND idempotency_key=$3")
+        .bind::<Text,_>(original.authenticated_actor.canonical_key().unwrap())
+        .bind::<Text,_>(&original.operation_id).bind::<Text,_>(&original.idempotency_key)
+        .execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let mut mirror = original.clone();
+    mirror.created_at += chrono::Duration::seconds(1);
+    mirror.expires_at += chrono::Duration::days(1);
+    target_keys.record(&mirror).await.unwrap();
+    assert!(mls_result_source_pk(&target_pool, &mirror).await.is_none());
+    incoming_store
+        .import_management_private_state(&manifest, &bytes)
+        .await
+        .unwrap();
+    assert_original_mls_retry(&target_pool, &original).await;
+    assert_original_mls_retry(&target_pool, &refused).await;
+    let target_refused_pk = mls_original_pk(&target_pool, &rejected.authority_commit.event).await;
+    assert_ne!(
+        target_refused_pk, source_refused_pk,
+        "local surrogate keys are actually different"
+    );
+    assert_eq!(
+        mls_result_source_pk(&target_pool, &refused).await,
+        Some(target_refused_pk)
+    );
+    assert_eq!(
+        mls_result_source_pk(&target_pool, &original).await,
+        Some(mls_original_pk(&target_pool, &accepted.authority_commit.event).await)
+    );
+    let (_, reexported) = incoming_store
+        .export_management_private_state(&realm)
+        .await
+        .unwrap();
+    assert_eq!(
+        reexported, bytes,
+        "normalize every local FK to its immutable original EventId"
+    );
+    assert!(
+        target_keys
+            .get(
+                &unrelated_cache.authenticated_actor,
+                &unrelated_cache.operation_id,
+                &unrelated_cache.idempotency_key
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        target_keys
+            .get(
+                &other_record.authenticated_actor,
+                &other_record.operation_id,
+                &other_record.idempotency_key
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "do not export all results for the same actor"
+    );
+    let before = mls_complete_retry_footprint(&target_pool).await;
+    incoming_store
+        .import_management_private_state(&manifest, &bytes)
+        .await
+        .unwrap();
+    assert_eq!(mls_complete_retry_footprint(&target_pool).await, before);
+    for (event, record) in [
+        (&accepted.authority_commit.event, &original),
+        (&rejected.authority_commit.event, &refused),
+    ] {
+        let result = incoming_store
+            .finalize_mls_rejection(event, &authority, "late_reason", None, Some(record))
+            .await
+            .unwrap();
+        let body = serde_json::to_value(
+            arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(result)).unwrap();
+        assert_eq!(
+            arkret_canonical::canonical_json_bytes(&body).unwrap(),
+            arkret_canonical::canonical_json_bytes(&record.response_body).unwrap()
+        );
+        let mut alias = record.clone();
+        alias.idempotency_key = uuid::Uuid::now_v7().to_string();
+        assert_eq!(
+            incoming_store
+                .finalize_mls_rejection(event, &authority, "late_reason", None, Some(&alias))
+                .await
+                .unwrap_err()
+                .conflict_code(),
+            Some(ConflictCode::DuplicateConflict)
+        );
+    }
+    assert_eq!(mls_complete_retry_footprint(&target_pool).await, before);
 }

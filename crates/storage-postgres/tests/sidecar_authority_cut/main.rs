@@ -2292,6 +2292,13 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
             use arkret_models_collaboration::authority_commit::SelfAuthoritySubmitRequestBody;
             let origin_database = TestDatabase::lease().await;
             let origin_pool = origin_database.pool();
+            if let Some(owner) = accepted.event.actual_signer().as_account_id() {
+                let mut conn = origin_pool.get().await.unwrap();
+                diesel::sql_query("INSERT INTO accounts(principal_id,station_id) VALUES($1,$2) ON CONFLICT(principal_id,station_id) DO NOTHING")
+                    .bind::<diesel::sql_types::Text,_>(owner.principal_id.as_str())
+                    .bind::<diesel::sql_types::Text,_>(owner.station_id.as_str())
+                    .execute(&mut *conn).await.unwrap();
+            }
             let origin = PgAuthorityCommitStore {
                 pool: origin_pool.clone(),
             };
@@ -2312,11 +2319,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
                 .await
                 .unwrap();
             origin
-                .retain_forwarded_acceptance(
-                    &accepted.event,
-                    &accepted.commit,
-                    accepted.commit.committed_at,
-                )
+                .retain_forwarded_outcome(&accepted.event, &arkret_wire::AuthoritySubmitResponseBody::Accepted {status: arkret_wire::AuthorityCommitStatus::Committed, commit: accepted.commit.clone()}, accepted.commit.committed_at)
                 .await
                 .unwrap();
             drop(origin);
@@ -2332,7 +2335,7 @@ async fn consumed_sidecar_agent_scenario(future_case: Option<OwnedWelcomeCase>) 
             assert!(retained.committed.is_none());
             let attempt = retained.forward_attempt.unwrap();
             assert_eq!(attempt.original_submission, Some(submission.clone()));
-            assert_eq!(attempt.accepted_commit, Some(accepted.commit.clone()));
+            assert_eq!(attempt.accepted_commit().cloned(), Some(accepted.commit.clone()));
             assert_eq!(
                 attempt.status,
                 coland_storage::ForwardAttemptStatus::Forwarding

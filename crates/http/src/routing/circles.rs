@@ -23,19 +23,20 @@
 //! - `GET    /_arkret/self/circles/{circle_id}`                  read Circle
 //! - `POST   /_arkret/self/circles/{circle_id}/members`          add member
 //! - `DELETE /_arkret/self/circles/{circle_id}/members/{actor}`  remove member
-//! - `POST   /_arkret/self/circles/{circle_id}/scope-rotate`     rotate MLS scope (501 until wired)
+//! - `POST   /_arkret/self/circles/{circle_id}/scope-rotate`     submit one complete MLS scope
+//!   rotation
 //!
-//! `scope-rotate` intentionally returns `501 unsupported_feature` until the
-//! MLS genesis / commit / welcome cascade is wired end-to-end. It must not
-//! acknowledge a rotation without actually changing the cryptographic scope.
+//! `scope-rotate` preserves the complete caller-signed MLS unit and returns its
+//! original authority outcome; path/framing checks never substitute for admission.
 
-use arkret_identifiers::{CircleId, EventId, RealmId};
+use arkret_event_draft::EventPayloadExt as _;
+use arkret_identifiers::{CircleId, RealmId};
 use arkret_models_collaboration::governance::circle::{
     Circle, CircleCreateRequestBody, CircleList, CircleMemberDeleteRequestBody,
     CircleMemberRequestBody, CircleMembership, CircleMembershipResponseBody, CircleReadView,
-    CircleScopeRotateRequestBody, CircleScopeRotateResponseBody, CircleState, CircleView,
+    CircleView,
 };
-use arkret_wire::{ActorId, Event};
+use arkret_wire::{ActorId, Event, MlsCommitSubmission, ScopeRef};
 use coland_http::error::AppError;
 use coland_http::result::{JsonResult, json_ok};
 use coland_services::identity::SessionIdentityState as SessionRecord;
@@ -47,7 +48,6 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::AuthArgs;
-use crate::routing::events::event_log::submit_event_value;
 use crate::state::AppState;
 
 pub(crate) fn router() -> Router {
@@ -75,25 +75,6 @@ where
 fn parse_stored_circle_actor(value: &str) -> Result<ActorId, AppError> {
     serde_json::from_str(value)
         .map_err(|error| AppError::internal(format!("stored circle ActorId: {error}")))
-}
-
-fn scope_rotate_failed(reason: &'static str, detail: impl Into<String>) -> AppError {
-    crate::app_error!(FailedPrecondition, detail.into()).with_rejection_code(reason)
-}
-
-async fn durable_circle_view(
-    state: &AppState,
-    circle_id: &str,
-    actor: &ActorId,
-) -> Result<CircleView, AppError> {
-    let id = CircleId::new(circle_id.to_owned())
-        .map_err(|e| AppError::param_invalid(format!("circle_id: {e}")))?;
-    state
-        .authority_commits()
-        .circle_view_for_actor(&id, actor)
-        .await
-        .map_err(|e| AppError::internal(e.to_string()))?
-        .ok_or_else(|| AppError::not_found("circle not found"))
 }
 
 fn accepted_create_view(event: &Event, circle_id: CircleId) -> Result<CircleView, AppError> {
@@ -126,106 +107,32 @@ fn accepted_create_view(event: &Event, circle_id: CircleId) -> Result<CircleView
     })
 }
 
-fn validate_scope_rotate_events(
-    circle: &CircleView,
-    events: &[Event],
-) -> Result<Option<String>, AppError> {
-    if circle.state != CircleState::Active {
-        return Err(scope_rotate_failed(
-            "circle_not_active",
-            "circle scope rotation requires an active Circle",
+fn validate_scope_rotate_submission(
+    circle_id: &CircleId,
+    submission: &MlsCommitSubmission,
+) -> Result<(), AppError> {
+    submission
+        .validate()
+        .map_err(|error| AppError::schema_violation(error.to_string()))?;
+    let event = &submission.commit_event;
+    if !matches!(&event.scope_ref, ScopeRef::Circle { realm_id, circle_id: target }
+        if target == circle_id && realm_id == &event.realm_id)
+    {
+        return Err(AppError::schema_violation(
+            "MLS Commit scope must match the exact path Circle and its parent Realm",
         ));
     }
-    // An installed `mls_group_ref` is what makes a Circle scope MLS-backed:
-    // the reducer sets it from the Circle's own accepted `ak.mls.genesis` and
-    // never clears it, so `None` is exactly the plaintext scope this rotation
-    // cannot act on.
-    if circle.mls_group_id.is_none() {
-        return Err(scope_rotate_failed(
-            "circle_scope_not_mls_backed",
-            "circle scope rotation requires an installed RFC 9420 group",
-        ));
-    }
-    if events.is_empty() {
-        return Err(scope_rotate_failed(
-            "mls_rotate_events_required",
-            "circle scope rotation requires at least one ak.mls.commit event",
-        ));
-    }
-
-    let mut saw_commit = false;
-    let mut group_ref = circle.mls_group_id.clone();
-    for event in events {
-        let kind = &event.kind;
-        match kind {
-            arkret_wire::EventKind::MlsGenesis | arkret_wire::EventKind::MlsCommit => {}
-            _ => {
-                return Err(scope_rotate_failed(
-                    "mls_rotate_event_kind_invalid",
-                    format!("circle scope rotation cannot submit {kind}"),
-                ));
-            }
-        }
-        if event.realm_id.as_str() != circle.realm_id.as_str() {
-            return Err(scope_rotate_failed(
-                "mls_rotate_realm_mismatch",
-                "MLS rotate event realm_id must match the Circle realm_id",
-            ));
-        }
-        match &event.scope_ref {
-            arkret_wire::ScopeRef::Circle {
-                realm_id,
-                circle_id,
-            } if realm_id.as_str() == circle.realm_id.as_str()
-                && circle_id.as_str() == circle.circle_id.as_str() => {}
-            _ => {
-                return Err(scope_rotate_failed(
-                    "mls_rotate_scope_mismatch",
-                    "MLS rotate event scope_ref must match the Circle scope",
-                ));
-            }
-        }
-        let event_group_ref = mls_event_group_ref(&event.payload).ok_or_else(|| {
-            scope_rotate_failed(
-                "mls_rotate_group_missing",
-                "MLS rotate event payload requires mls_group_id or group_id",
-            )
-        })?;
-        match group_ref.as_deref() {
-            Some(expected) if expected != event_group_ref => {
-                return Err(scope_rotate_failed(
-                    "mls_rotate_group_mismatch",
-                    "MLS rotate events must target the Circle's current MLS group",
-                ));
-            }
-            Some(_) => {}
-            None => group_ref = Some(event_group_ref),
-        }
-        if kind == &arkret_wire::EventKind::MlsCommit {
-            saw_commit = true;
-        }
-    }
-
-    if !saw_commit {
-        return Err(scope_rotate_failed(
-            "mls_rotate_commit_required",
-            "circle scope rotation requires a ak.mls.commit event",
-        ));
-    }
-
-    Ok(group_ref)
-}
-
-/// The group an `ak.mls.commit` / `ak.mls.genesis` in a circle scope rotation
-/// names. `mls_commit_payload` / `mls_genesis_payload` require `mls_group_id`
-/// and are `additionalProperties:false`; `group_id` is an
-/// `encrypted-envelope.schema.json` field, not an MLS payload field.
-fn mls_event_group_ref(payload: &std::collections::BTreeMap<String, Value>) -> Option<String> {
-    payload
-        .get("mls_group_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+    let payload = event
+        .as_mls_commit()
+        .map_err(|error| AppError::schema_violation(error.to_string()))?;
+    let group = event
+        .scope_ref
+        .canonical_mls_group_id()
+        .map_err(|error| AppError::schema_violation(error.to_string()))?;
+    let bytes = arkret_canonical::base64url_decode(payload.commit_base64url())
+        .map_err(|error| AppError::schema_violation(error.to_string()))?;
+    arkret_mls::require_public_commit_update_path(&bytes, group.as_str(), payload.base_epoch())
+        .map_err(|error| AppError::schema_violation(error.to_string()))
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────
@@ -554,85 +461,76 @@ async fn delete_circle_member(
     })
 }
 
-#[endpoint(
-    operation_id = "ak.self.circle.command.rotate_scope",
-    summary = "Rotate a circle's scope",
-    tags("circles")
-)]
+#[handler]
 #[tracing::instrument(skip_all, fields(op = "ak.self.circle.command.rotate_scope.v1"))]
-async fn post_scope_rotate(
-    aa: AuthArgs,
-    circle_id: PathParam<String>,
-    body: JsonBody<CircleScopeRotateRequestBody>,
-    depot: &mut Depot,
-    req: &mut Request,
-) -> JsonResult<CircleScopeRotateResponseBody> {
+async fn post_scope_rotate(req: &mut Request, depot: &Depot, res: &mut Response) {
+    use arkret_models_collaboration::authority_commit::{
+        SelfAuthoritySubmitRequestBody, SelfAuthoritySubmitResponseBody,
+    };
+    use arkret_wire::{ErrorCode, ServiceOperationId};
+
     let state = depot.get_typed::<AppState>().expect("state injected");
-    let session = aa.authenticated_session(state, req).await?;
-    let circle_id = circle_id.into_inner();
-    let actor =
-        crate::routing::identity::session_actor::session_actor_from_credential(state, &session)?;
-    let body = body.into_inner();
-    let circle = durable_circle_view(state, &circle_id, &actor).await?;
-    validate_scope_rotate_events(&circle, &body.events)?;
-
-    let mut accepted = Vec::new();
-    let mut duplicate = Vec::new();
-    let mut rejected = Vec::new();
-    let mut quarantine = Vec::new();
-
-    for event in body.events {
-        let event_id = event.event_id.clone();
-        let envelope = serde_json::to_value(event).map_err(|e| {
-            crate::app_error!(
-                ParamInvalid,
-                format!("event envelope cannot be encoded: {e}"),
-            )
-            .with_wire_code("json_invalid")
-        })?;
-        match submit_event_value(state, &session, envelope).await {
-            Ok(response) => {
-                let typed_id = EventId::new(response.event_id.clone())
-                    .map_err(|e| AppError::internal(format!("event_id: {e}")))?;
-                accepted.push(typed_id.clone());
-                if response.duplicate {
-                    duplicate.push(typed_id);
-                }
-            }
-            Err(error) => {
-                if let Some(event_id) = error.quarantine_event_id() {
-                    let typed_id = EventId::new(event_id)
-                        .map_err(|e| AppError::internal(format!("event_id: {e}")))?;
-                    quarantine.push(typed_id);
-                } else {
-                    rejected.push(json!({
-                        "id": event_id,
-                        "reason_code": error.code(),
-                        "detail": error.message(),
-                    }));
-                }
-            }
+    super::authority_commit::no_store(res);
+    let circle_id = match req
+        .param::<String>("circle_id")
+        .and_then(|value| CircleId::new(value).ok())
+    {
+        Some(value) => value,
+        None => {
+            return crate::error::render_error_code(
+                ErrorCode::SchemaViolation,
+                res,
+                "invalid Circle path",
+            );
         }
+    };
+    let Some(submission) =
+        super::authority_commit::parse_closed_body::<MlsCommitSubmission>(req, res).await
+    else {
+        return;
+    };
+    if let Err(error) = validate_scope_rotate_submission(&circle_id, &submission) {
+        return crate::routing::render_error(
+            res,
+            error.http_status(),
+            error.wire_code(),
+            &error.message,
+        );
     }
-
-    if !rejected.is_empty() || !quarantine.is_empty() {
-        return Err(AppError::param_invalid(format!(
-            "mls scope rotation rejected {} event(s) and quarantined {} event(s)",
-            rejected.len(),
-            quarantine.len()
-        )));
+    let request = SelfAuthoritySubmitRequestBody::MlsCommit(submission);
+    let result = if let Ok(device) = depot.get_typed::<
+        crate::routing::identity::applet_managed_device::VerifiedAppletManagedDevice
+    >() {
+        if device.operation != ServiceOperationId::SelfCircleCommandRotateScopeV1 {
+            return crate::error::render_error_code(ErrorCode::Unauthenticated, res, "managed operation differs from actual route");
+        }
+        state.authority().submit_managed_device(&device.metadata, &device.authority, request.clone()).await
+    } else {
+        let Some(session) = crate::routing::auth_or_render(state, req, res).await else { return; };
+        if let Err(error) = crate::routing::identity::session_actor::validated_session_actor(state, &session).await {
+            return crate::routing::render_error(res, error.http_status(), error.wire_code(), &error.message);
+        }
+        if let Err(error) = crate::routing::events::require_agent_session_scope(
+            &session, ServiceOperationId::SELF_CIRCLE_COMMAND_ROTATE_SCOPE_V1,
+        ) {
+            return crate::routing::render_error(res, error.http_status(), error.wire_code(), &error.message);
+        }
+        state.authority().submit_self(&session, request.clone(), &[]).await
+    };
+    match result.and_then(|outcome| {
+        outcome
+            .validate_for_request(&request)
+            .map_err(|error| coland_services::ServiceError::Internal(error.to_string()))?;
+        match outcome {
+            SelfAuthoritySubmitResponseBody::Ordinary(outcome) => Ok(outcome),
+            _ => Err(coland_services::ServiceError::Internal(
+                "MLS unit returned an aggregate outcome".into(),
+            )),
+        }
+    }) {
+        Ok(outcome) => res.render(Json(outcome)),
+        Err(error) => super::authority_commit::render_service_error(res, error),
     }
-
-    let mls_group_ref = durable_circle_view(state, &circle_id, &actor)
-        .await?
-        .mls_group_id;
-
-    json_ok(CircleScopeRotateResponseBody {
-        circle_id: CircleId::new(circle_id)
-            .map_err(|e| AppError::param_invalid(format!("circle_id: {e}")))?,
-        mls_group_id: mls_group_ref,
-        note: Some("mls scope rotation accepted via canonical ak.mls events".to_owned()),
-    })
 }
 
 #[cfg(test)]
@@ -931,22 +829,5 @@ mod tests {
     fn reserved_sidecar_short_names_are_not_ordinary() {
         assert!("SC-ABC234".starts_with("SC-"));
         assert!(!"Project Alpha".starts_with("SC-"));
-    }
-
-    /// `ak.mls.commit` / `ak.mls.genesis` name the group `mls_group_id`
-    /// (`event-payload.schema.json#/$defs/mls_commit_payload`,
-    /// `#/$defs/mls_genesis_payload`, both `additionalProperties:false`).
-    /// `group_id` is the `encrypted-envelope.schema.json` field and never
-    /// identifies an MLS group here.
-    #[test]
-    fn mls_event_group_ref_reads_mls_group_id() {
-        let canonical = std::collections::BTreeMap::from([(
-            "mls_group_id".to_owned(),
-            json!("mls-group-AZEvldDJcWI9IRHqP2BMibDDfc59Ax_LwrbsrQmeD6Ml"),
-        )]);
-        assert_eq!(
-            mls_event_group_ref(&canonical).as_deref(),
-            Some("mls-group-AZEvldDJcWI9IRHqP2BMibDDfc59Ax_LwrbsrQmeD6Ml")
-        );
     }
 }

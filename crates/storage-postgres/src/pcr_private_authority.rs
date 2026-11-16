@@ -345,21 +345,94 @@ async fn lock_holder_mode(
 
 /// Native Human private effects use the same current lifecycle boundary as
 /// the hosting projection. The authority lock precedes the account row lock.
+pub(crate) async fn is_active_human_account(
+    conn: &mut AsyncPgConnection,
+    holder: &AccountId,
+) -> PersistenceResult<bool> {
+    #[derive(diesel::QueryableByName)]
+    struct Active {
+        #[diesel(sql_type = Bool)]
+        active: bool,
+    }
+    let row = sql_query("SELECT lock_active_account_private_state($1,$2) AS active")
+        .bind::<Text, _>(holder.principal_id.as_str())
+        .bind::<Text, _>(holder.station_id.as_str())
+        .get_result::<Active>(&mut *conn)
+        .await
+        .map_err(crate::persistence_query_error)?;
+    Ok(row.active)
+}
+
 pub(crate) async fn require_active_human_account(
     conn: &mut AsyncPgConnection,
     holder: &AccountId,
 ) -> PersistenceResult<()> {
-    #[derive(diesel::QueryableByName)]
-    struct Active {
-        #[diesel(sql_type=Bool)]
-        active: bool,
-    }
-    let row=sql_query("SELECT TRUE AS active FROM accounts a LEFT JOIN account_lifecycle l ON l.account_pk=a.pk WHERE a.principal_id=$1 AND a.station_id=$2 AND a.disabled_at IS NULL AND COALESCE(l.state NOT IN ('deactivated','erasure_pending'),TRUE) FOR SHARE OF a").bind::<Text,_>(holder.principal_id.as_str()).bind::<Text,_>(holder.station_id.as_str()).get_result::<Active>(&mut *conn).await.optional().map_err(PersistenceError::database)?;
-    if !row.is_some_and(|r| r.active) {
+    if !is_active_human_account(conn, holder).await? {
         return Err(unavailable("holder account is no longer active"));
     }
     Ok(())
 }
+
+/// An authenticated owner writes only before any private row/ledger is read.
+/// Unlike an opaque cross-owner disclosure check, this boundary preserves the
+/// registered terminal Account problem. The pure predicate remains the only
+/// permission condition; the lifecycle read only classifies an actual denial.
+pub(crate) async fn require_active_account_owner(
+    conn: &mut AsyncPgConnection,
+    owner: &AccountId,
+) -> PersistenceResult<()> {
+    if is_active_human_account(conn, owner).await? {
+        return Ok(());
+    }
+    #[derive(diesel::QueryableByName)]
+    struct Present {
+        #[diesel(sql_type = Bool)]
+        present: bool,
+    }
+    #[derive(diesel::QueryableByName)]
+    struct State {
+        #[diesel(sql_type = Bool)]
+        active: bool,
+        #[diesel(sql_type = diesel::sql_types::Nullable<Text>)]
+        state: Option<String>,
+    }
+    // A terminal fast-false need not lock in a derived writer. This owner
+    // boundary has not touched private rows, so it can safely wait for the
+    // Account row before classifying state in the next current snapshot.
+    let present = sql_query(
+        "SELECT TRUE AS present FROM accounts WHERE principal_id=$1 AND station_id=$2 FOR SHARE",
+    )
+    .bind::<Text, _>(owner.principal_id.as_str())
+    .bind::<Text, _>(owner.station_id.as_str())
+    .get_result::<Present>(&mut *conn)
+    .await
+    .optional()
+    .map_err(crate::persistence_query_error)?;
+    if !present.is_some_and(|row| row.present) {
+        return Err(unavailable("the private owner Account is unavailable"));
+    }
+    let current = sql_query("SELECT account_private_state_allowed($1,$2) AS active,l.state FROM accounts a LEFT JOIN account_lifecycle l ON l.account_pk=a.pk WHERE a.principal_id=$1 AND a.station_id=$2")
+        .bind::<Text, _>(owner.principal_id.as_str())
+        .bind::<Text, _>(owner.station_id.as_str())
+        .get_result::<State>(&mut *conn).await
+        .map_err(crate::persistence_query_error)?;
+    if current.active {
+        return Ok(());
+    }
+    let code = match current.state.as_deref() {
+        Some("deactivated") => coland_storage::ConflictCode::AccountDeactivated,
+        Some("erasure_pending") => coland_storage::ConflictCode::AccountErased,
+        _ => return Err(unavailable("the private owner Account is unavailable")),
+    };
+    Err(PersistenceError::Conflict(format!(
+        "{}: the exact private owner Account is terminal",
+        code.as_str(),
+    )))
+}
+
+#[cfg(test)]
+#[path = "pcr_private_authority/active_account_tests.rs"]
+mod active_account_tests;
 
 /// Recheck immutable genesis restrictions even when reading an installed tenure.
 /// A persisted handoff is not evidence that a fixed-governor Realm could migrate.

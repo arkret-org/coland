@@ -368,6 +368,23 @@ pub(crate) fn json_string_array(value: Value) -> Vec<String> {
     }
 }
 
+/// Preserve PostgreSQL's typed transaction-race kind before error text is
+/// materialized. Business denials and every other database/acquire kind retain
+/// their existing classification; this does not retry a transaction itself.
+pub(crate) fn persistence_query_error(error: impl Into<horme::Error>) -> PersistenceError {
+    match error.into() {
+        horme::Error::Query(diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::SerializationFailure,
+            info,
+        )) => PersistenceError::Conflict(format!(
+            "{}: the database transaction lost a concurrent write race: {}",
+            coland_storage::ConflictCode::TemporarilyUnavailable.as_str(),
+            info.message(),
+        )),
+        other => PersistenceError::database(other),
+    }
+}
+
 pub(crate) enum PgTransactionError {
     Storage(PersistenceError),
     Diesel(diesel::result::Error),
@@ -377,7 +394,7 @@ impl PgTransactionError {
     pub(crate) fn into_persistence(self) -> PersistenceError {
         match self {
             Self::Storage(error) => error,
-            Self::Diesel(error) => PersistenceError::database(error),
+            Self::Diesel(error) => persistence_query_error(error),
         }
     }
 }

@@ -1042,6 +1042,17 @@ mod forward_retention {
         };
         let origin_db = TestDatabase::lease().await;
         let pool = origin_db.pool();
+        // This is H's real hosting Account row, not a replica installation.
+        let mut conn = pool.get().await.unwrap();
+        for transaction in &source.unit.transactions {
+            if let Some(owner) = transaction.event.actual_signer().as_account_id() {
+                sql_query("INSERT INTO accounts(principal_id,station_id) VALUES($1,$2) ON CONFLICT(principal_id,station_id) DO NOTHING")
+                    .bind::<diesel::sql_types::Text,_>(owner.principal_id.as_str())
+                    .bind::<diesel::sql_types::Text,_>(owner.station_id.as_str())
+                    .execute(&mut *conn).await.unwrap();
+            }
+        }
+        drop(conn);
         let store = PgAuthorityCommitStore { pool: pool.clone() };
         let before = installed(&pool).await;
         assert!(
@@ -1067,9 +1078,12 @@ mod forward_retention {
                 .await
                 .unwrap();
             let missing_intent = store
-                .retain_forwarded_acceptance(
+                .retain_forwarded_outcome(
                     &original.event,
-                    &original.commit,
+                    &arkret_wire::AuthoritySubmitResponseBody::Accepted {
+                        status: arkret_wire::AuthorityCommitStatus::Committed,
+                        commit: original.commit.clone(),
+                    },
                     original.commit.committed_at,
                 )
                 .await
@@ -1093,9 +1107,12 @@ mod forward_retention {
                 .await
                 .unwrap();
             store
-                .retain_forwarded_acceptance(
+                .retain_forwarded_outcome(
                     &original.event,
-                    &original.commit,
+                    &arkret_wire::AuthoritySubmitResponseBody::Accepted {
+                        status: arkret_wire::AuthorityCommitStatus::Committed,
+                        commit: original.commit.clone(),
+                    },
                     original.commit.committed_at,
                 )
                 .await
@@ -1111,7 +1128,10 @@ mod forward_retention {
             assert!(queued.committed.is_none());
             let attempt = queued.forward_attempt.unwrap();
             assert_eq!(attempt.original_submission, Some(intent.clone()));
-            assert_eq!(attempt.accepted_commit, Some(transaction.commit.clone()));
+            assert_eq!(
+                attempt.accepted_commit().cloned(),
+                Some(transaction.commit.clone())
+            );
             assert_eq!(attempt.status, ForwardAttemptStatus::Forwarding);
             reopened
                 .record_forward_attempt(
@@ -1119,6 +1139,19 @@ mod forward_retention {
                     ForwardAttemptStatus::Rejected,
                     Some("not_authorized"),
                     transaction.commit.committed_at,
+                )
+                .await
+                .unwrap();
+            // A scan Duplicate witness and an actual Committed response
+            // denote the same ordinary Event result, preserving the first.
+            reopened
+                .retain_forwarded_outcome(
+                    &transaction.event,
+                    &arkret_wire::AuthoritySubmitResponseBody::Accepted {
+                        status: arkret_wire::AuthorityCommitStatus::Duplicate,
+                        commit: transaction.commit.clone(),
+                    },
+                    transaction.commit.committed_at + chrono::Duration::seconds(1),
                 )
                 .await
                 .unwrap();
@@ -1130,14 +1163,26 @@ mod forward_retention {
                 .forward_attempt
                 .unwrap();
             assert_eq!(retained.original_submission, Some(intent));
-            assert_eq!(retained.accepted_commit, Some(transaction.commit.clone()));
+            assert_eq!(
+                retained.accepted_commit().cloned(),
+                Some(transaction.commit.clone())
+            );
+            assert_eq!(retained.terminal_outcome, attempt.terminal_outcome);
+            assert_eq!(retained.attempted_at, attempt.attempted_at);
             assert_eq!(retained.status, ForwardAttemptStatus::Forwarding);
             assert!(retained.reason_code.is_none());
             let mut fork = transaction.commit.clone();
             fork.committed_at += chrono::TimeDelta::milliseconds(1);
             historical_human::seal_commit(&mut fork, &source.pcr.history.station_did);
             let error = reopened
-                .retain_forwarded_acceptance(&transaction.event, &fork, fork.committed_at)
+                .retain_forwarded_outcome(
+                    &transaction.event,
+                    &arkret_wire::AuthoritySubmitResponseBody::Accepted {
+                        status: arkret_wire::AuthorityCommitStatus::Committed,
+                        commit: fork.clone(),
+                    },
+                    fork.committed_at,
+                )
                 .await
                 .unwrap_err();
             assert_eq!(
@@ -1156,9 +1201,12 @@ mod forward_retention {
             wrong_id.commit_id = arkret_wire::RealmCommitId::from_digest([42; 32]);
             assert!(
                 reopened
-                    .retain_forwarded_acceptance(
+                    .retain_forwarded_outcome(
                         &transaction.event,
-                        &wrong_id,
+                        &arkret_wire::AuthoritySubmitResponseBody::Accepted {
+                            status: arkret_wire::AuthorityCommitStatus::Committed,
+                            commit: wrong_id.clone()
+                        },
                         wrong_id.committed_at
                     )
                     .await

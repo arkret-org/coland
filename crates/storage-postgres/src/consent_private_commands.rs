@@ -146,6 +146,8 @@ pub(crate) async fn execute(
             return Err(unavailable("holder Device is no longer active").into());
         }
     }
+    crate::pcr_private_authority::require_active_human_account(conn, &request.holder_account_id)
+        .await?;
     let digest = request.digest().map_err(invalid)?;
     let holder = serde_json::to_value(&request.holder_account_id).map_err(invalid)?;
     let generation = i64::try_from(cut.generation).map_err(invalid)?;

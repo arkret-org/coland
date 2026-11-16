@@ -1634,11 +1634,21 @@ pub(crate) async fn ensure_forwarded_target(
                 .await
                 .map_err(temporary)?;
                 require_forward_source(state, session, event, located).await?;
-                // Retain the original acknowledgement before installing its Full.
-                commits
-                    .retain_forwarded_acceptance(event, commit, crate::wire::now())
-                    .await
-                    .map_err(temporary)?;
+                // Ordinary Event identity is complete by itself. A scan cannot
+                // reconstruct the original complete MLS retry status or key.
+                if event.kind != arkret_wire::EventKind::MlsCommit {
+                    commits
+                        .retain_forwarded_outcome(
+                            event,
+                            &arkret_wire::AuthoritySubmitResponseBody::Accepted {
+                                status: arkret_wire::AuthorityCommitStatus::Duplicate,
+                                commit: commit.clone(),
+                            },
+                            crate::wire::now(),
+                        )
+                        .await
+                        .map_err(temporary)?;
+                }
             }
             require_forward_source(state, session, event, located).await?;
             let own_circle_leave = if is_target

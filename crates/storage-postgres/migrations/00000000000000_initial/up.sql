@@ -316,6 +316,84 @@ CREATE TABLE public.account_lifecycle (
 
 CREATE INDEX account_lifecycle_state_idx ON public.account_lifecycle USING btree (state, changed_at);
 
+-- One state predicate for private Account writers and derived projections.
+-- Derived AFTER UPDATE projections must never wait for Account locks after
+-- private source-row locks. They use the nonwaiting projection gate below.
+CREATE FUNCTION public.account_private_state_allowed(principal TEXT, station TEXT)
+RETURNS BOOLEAN LANGUAGE sql VOLATILE AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM accounts a
+        LEFT JOIN account_lifecycle l ON l.account_pk=a.pk
+        WHERE a.principal_id=principal AND a.station_id=station
+          AND a.disabled_at IS NULL
+          AND COALESCE(l.state NOT IN ('deactivated','erasure_pending'),TRUE)
+    );
+$$;
+-- Permission and new-source writers take this lock before any private row.
+-- A lifecycle-only writer locks accounts without updating its MVCC tuple:
+-- recheck in the next READ COMMITTED snapshot after an Account lock wait.
+CREATE FUNCTION public.lock_active_account_private_state(principal TEXT, station TEXT)
+RETURNS BOOLEAN LANGUAGE plpgsql VOLATILE AS $$
+DECLARE allowed BOOLEAN;
+BEGIN
+    IF current_setting('transaction_isolation') NOT IN ('read committed','read uncommitted') THEN
+        RAISE EXCEPTION 'private Account writers require READ COMMITTED isolation'
+            USING ERRCODE='25000';
+    END IF;
+    PERFORM 1 FROM accounts a
+    WHERE a.principal_id=principal AND a.station_id=station
+      AND account_private_state_allowed(principal,station)
+    FOR SHARE OF a;
+    IF NOT FOUND THEN
+        RETURN FALSE;
+    END IF;
+    SELECT account_private_state_allowed(principal,station) INTO allowed;
+    RETURN allowed;
+END;
+$$;
+-- A derived writer can already own a private source row. Never wait for
+-- Account here: an eraser can own Account and be waiting for that source.
+-- Only lock_not_available is handled; still-active contention aborts with
+-- the database driver's typed, retryable serialization-failure kind.
+CREATE FUNCTION public.lock_account_private_projection(principal TEXT, station TEXT)
+RETURNS BOOLEAN LANGUAGE plpgsql VOLATILE AS $$
+DECLARE allowed BOOLEAN;
+BEGIN
+    IF current_setting('transaction_isolation') NOT IN ('read committed','read uncommitted') THEN
+        RAISE EXCEPTION 'private Account projections require READ COMMITTED isolation'
+            USING ERRCODE='25000';
+    END IF;
+    BEGIN
+        PERFORM 1 FROM accounts a
+        WHERE a.principal_id=principal AND a.station_id=station
+          AND account_private_state_allowed(principal,station)
+        FOR SHARE OF a NOWAIT;
+        IF NOT FOUND THEN
+            RETURN FALSE;
+        END IF;
+    EXCEPTION WHEN lock_not_available THEN
+        IF account_private_state_allowed(principal,station) THEN
+            RAISE EXCEPTION 'private Account projection lost a concurrent lifecycle cut'
+                USING ERRCODE='40001';
+        END IF;
+        RETURN FALSE;
+    END;
+    SELECT account_private_state_allowed(principal,station) INTO allowed;
+    RETURN allowed;
+END;
+$$;
+CREATE FUNCTION public.account_private_actor_allowed(actor TEXT)
+RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+DECLARE subject JSONB := actor::jsonb;
+BEGIN
+    IF subject->>'kind'='account' THEN
+        RETURN lock_account_private_projection(
+            subject#>>'{account_id,principal_id}',subject#>>'{account_id,station_id}');
+    END IF;
+    RETURN TRUE;
+END;
+$$;
+
 CREATE TABLE public.account_status_replica_records (
     account_authority_id text NOT NULL CHECK (account_authority_id LIKE 'ak:did_core:%'),
     account_id jsonb NOT NULL,
@@ -961,21 +1039,21 @@ BEFORE UPDATE ON public.canonical_events
 FOR EACH ROW EXECUTE FUNCTION public.enforce_canonical_event_immutability();
 
 -- A forward attempt is local transport state, not an Event admission result.
--- A current-cut refusal can be overwritten by an exact retry or by the
--- eventual committed replica without changing canonical_events.state.
+-- A local attempt status can be superseded by an exact retry or replica
+-- without changing canonical_events.state. A verified terminal outcome is immutable.
 CREATE TABLE public.authority_forward_attempts (
-    -- Local frozen intent and verified acknowledgement; neither is installed state.
+    -- Local frozen intent and verified governing result; neither is installed state.
     original_submission_json jsonb,
     peer_request_json jsonb,
-    accepted_commit_json jsonb,
+    terminal_outcome_json jsonb,
     -- Local first-attempt cut for an own Circle leave result, never a wire field.
     circle_leave_parent_revision jsonb,
     event_pk bigint PRIMARY KEY REFERENCES public.canonical_events(pk) ON DELETE RESTRICT,
     status text NOT NULL CHECK (status IN ('forwarding', 'rejected', 'temporarily_unavailable')),
     reason_code text,
     attempted_at timestamptz NOT NULL,
-    CONSTRAINT authority_forward_accepted_intent_check CHECK (
-        accepted_commit_json IS NULL OR original_submission_json IS NOT NULL
+    CONSTRAINT authority_forward_terminal_intent_check CHECK (
+        terminal_outcome_json IS NULL OR original_submission_json IS NOT NULL
     ),
     CONSTRAINT authority_forward_peer_intent_check CHECK (
         peer_request_json IS NULL OR original_submission_json IS NOT NULL
@@ -2555,6 +2633,34 @@ CREATE INDEX notifications_source_idx ON public.notifications USING btree (sourc
 
 CREATE INDEX notifications_strand_idx ON public.notifications USING btree (strand_id);
 
+-- INSERT is the only path that can recreate a purged notification. It also
+-- runs before the conflict UPDATE of an UPSERT. Existing-row updates retain
+-- their original lock order; the final erasure transaction removes those rows.
+CREATE FUNCTION public.fence_private_account_notification_insert() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE subject JSONB := NEW.recipient_actor_id::jsonb;
+BEGIN
+    IF NEW.controller_account_pk IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM accounts a WHERE a.pk=NEW.controller_account_pk
+          AND NEW.recipient_actor_id::jsonb->>'kind'='account'
+          AND a.principal_id=NEW.recipient_actor_id::jsonb#>>'{account_id,principal_id}'
+          AND a.station_id=NEW.recipient_actor_id::jsonb#>>'{account_id,station_id}'
+    ) THEN
+        RAISE EXCEPTION 'notification controller Account and recipient disagree'
+            USING ERRCODE='23514', CONSTRAINT='notifications_exact_controller_account';
+    END IF;
+    IF subject->>'kind'='account' AND NOT lock_active_account_private_state(
+        subject#>>'{account_id,principal_id}',subject#>>'{account_id,station_id}'
+    ) THEN
+        RETURN NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER private_account_notification_insert
+    BEFORE INSERT ON public.notifications
+    FOR EACH ROW EXECUTE FUNCTION public.fence_private_account_notification_insert();
+
 CREATE FUNCTION public.project_agent_runtime_approval_notification() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -3226,6 +3332,7 @@ CREATE TABLE public.idempotency_keys (
     authenticated_actor jsonb NOT NULL,
     operation_id text NOT NULL,
     idempotency_key text NOT NULL,
+    source_event_pk bigint REFERENCES public.canonical_events(pk) ON DELETE CASCADE,
     request_hash text NOT NULL,
     response_status integer NOT NULL,
     response_body jsonb NOT NULL,
@@ -3235,6 +3342,9 @@ CREATE TABLE public.idempotency_keys (
 );
 
 CREATE INDEX idempotency_keys_expiry_idx ON public.idempotency_keys USING btree (expires_at);
+-- Source-owned MLS results follow their actual Event/Account retention and Realm handoff.
+CREATE INDEX idempotency_keys_source_event_idx ON public.idempotency_keys (source_event_pk)
+    WHERE source_event_pk IS NOT NULL;
 
 CREATE TABLE public.webvh_documents (
     id text PRIMARY KEY,
@@ -3699,6 +3809,9 @@ CREATE INDEX account_sync_cursor_global_floor ON account_sync_cursor_retention(g
 CREATE FUNCTION project_account_global_value(a TEXT,c TEXT,k TEXT,p JSONB,d BOOLEAN) RETURNS VOID LANGUAGE plpgsql AS $$
 DECLARE r BIGINT; cp BIGINT;
 BEGIN
+    IF NOT account_private_actor_allowed(a) THEN
+        RETURN;
+    END IF;
     UPDATE account_global_clock SET revision=revision+1 WHERE singleton RETURNING revision INTO r;
     INSERT INTO account_global_channel_clocks(actor_key,channel,position)
         VALUES(a,c,1)

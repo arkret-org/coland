@@ -1,4 +1,5 @@
 //! Public native assets remain bound to accepted Room and current privacy facts.
+use arkret_event_draft::EventPayloadExt as _;
 use arkret_models_collaboration::events_payloads::mimi::{
     MimiLocalProviderRole, MimiRoomBindingStatus,
 };

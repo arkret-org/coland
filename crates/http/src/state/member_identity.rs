@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use arkret_models_identity::HandleClaim;
 #[cfg(test)]
 use arkret_models_identity::HandleClaimStatus;
 pub use coland_storage::{
     HandleClaimEvidenceRecord, MemberIdentityEventRecord, MemberIdentitySubjectKey,
 };
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use serde_json::Value;
 
 /// Disposable Realm/member identity projection. Hydration rebuilds every
@@ -171,43 +171,6 @@ impl MemberIdentityRegistry {
 
         Some(MemberIdentitySnapshot { effective })
     }
-}
-
-/// Build the storable evidence record for one closed HandleClaim status view.
-/// The durable key is the stable core `claim_digest`; freshness and revocation
-/// state remain explicit mutable status-view fields.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn handle_claim_record_from_envelope(
-    envelope: &Value,
-) -> Option<HandleClaimEvidenceRecord> {
-    let claim: HandleClaim = serde_json::from_value(envelope.clone()).ok()?;
-    claim.validate().ok()?;
-    let status = serde_json::to_value(claim.status)
-        .ok()?
-        .as_str()?
-        .to_owned();
-    let visibility = serde_json::to_value(claim.claim.visibility)
-        .ok()?
-        .as_str()?
-        .to_owned();
-    // The status view carries no digest mirrors; both are recomputed from the
-    // carried `claim` / `revocation` (`conformance/encoding.md` §4.0.1).
-    Some(HandleClaimEvidenceRecord {
-        digest: claim.claim_digest().ok()?.to_string(),
-        subject_id: claim.claim.subject_account_id.principal_id.clone(),
-        issuer_id: claim.claim.issuer_id.clone(),
-        audience: claim.claim.audience.clone(),
-        status,
-        revocation_digest: claim
-            .revocation
-            .as_ref()
-            .and_then(|revocation| revocation.digest().ok())
-            .map(|digest| digest.to_string()),
-        cache_expires_at: claim.cache_expires_at,
-        visibility: Some(visibility),
-        expires_at: claim.claim.expires_at,
-        envelope: envelope.clone(),
-    })
 }
 
 #[cfg(test)]
@@ -382,36 +345,6 @@ mod tests {
             registry
                 .snapshot_for_actor(&subject.realm_id, "ak:did_core:web:alice.example")
                 .is_none()
-        );
-    }
-
-    #[test]
-    fn handle_claim_cache_retains_exact_account_evidence_and_rejects_bare_subject() {
-        let account = account_actor("ak:did_core:web:station-a.example")
-            .as_account_id()
-            .unwrap()
-            .clone();
-        let envelope = serde_json::to_value(test_handle_claim(
-            account.clone(),
-            arkret_wire::DidCoreId::new("ak:did_core:web:station-a.example").unwrap(),
-            None,
-            chrono::Utc::now() + chrono::Duration::hours(1),
-            HandleClaimStatus::Verified,
-            Vec::new(),
-        ))
-        .unwrap();
-        let record = handle_claim_record_from_envelope(&envelope).unwrap();
-        assert_eq!(record.subject_id, account.principal_id);
-        assert_eq!(
-            record.envelope["claim"]["subject_account_id"],
-            json!(account)
-        );
-        assert!(
-            handle_claim_record_from_envelope(&json!({
-                "subject_id": "ak:did_core:web:alice.example",
-                "issuer_id": "ak:did_core:web:station-a.example"
-            }))
-            .is_none()
         );
     }
 }

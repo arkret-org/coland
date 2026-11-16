@@ -233,6 +233,29 @@ fn draft_propose(
     )
 }
 
+// These rows establish private-cache ownership only. The storage fixture
+// still omits a PCR producer guard and earns no native authority credit.
+async fn seed_owner(pool: &PgPool, owner: &AccountId) {
+    use diesel_async::RunQueryDsl as _;
+    let mut conn = pool.get().await.unwrap();
+    diesel::sql_query("INSERT INTO accounts(principal_id,station_id,payload) VALUES($1,$2,'{}'::jsonb) ON CONFLICT(station_id,principal_id) DO NOTHING")
+        .bind::<diesel::sql_types::Text, _>(owner.principal_id.as_str())
+        .bind::<diesel::sql_types::Text, _>(owner.station_id.as_str())
+        .execute(&mut *conn).await.unwrap();
+}
+
+async fn terminal_owner(pool: &PgPool, owner: &AccountId, state: &str) {
+    use diesel_async::RunQueryDsl as _;
+    let mut conn = pool.get().await.unwrap();
+    // Match the lifecycle owner's actual Account X barrier and status-only
+    // mutation. The accepted-record/receipt authority is verified elsewhere.
+    diesel::sql_query("WITH held AS MATERIALIZED (SELECT pk FROM accounts WHERE principal_id=$1 AND station_id=$2 FOR UPDATE) INSERT INTO account_lifecycle(account_pk,state,changed_at) SELECT pk,$3,NOW() FROM held ON CONFLICT(account_pk) DO UPDATE SET state=EXCLUDED.state,changed_at=EXCLUDED.changed_at")
+        .bind::<diesel::sql_types::Text, _>(owner.principal_id.as_str())
+        .bind::<diesel::sql_types::Text, _>(owner.station_id.as_str())
+        .bind::<diesel::sql_types::Text, _>(state)
+        .execute(&mut *conn).await.unwrap();
+}
+
 async fn count(pool: &PgPool, table: &str) -> i64 {
     use diesel_async::RunQueryDsl as _;
     #[derive(diesel::QueryableByName)]
@@ -281,6 +304,7 @@ fn refused(result: ActorPrivateEventSubmitResult) -> ActorPrivateEventRefusal {
 async fn push_route_revision_cas_replays_exactly_and_refuses_stale_writes_with_zero_writes() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
+    seed_owner(&pool, &holder()).await;
     let store = PgActorPrivateEventStore::new(pool.clone());
 
     let create = push_route(0, false, 1);
@@ -361,6 +385,7 @@ async fn push_route_revision_cas_replays_exactly_and_refuses_stale_writes_with_z
 async fn action_request_and_rejection_are_create_once_and_the_target_state_is_terminal() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
+    seed_owner(&pool, &holder()).await;
     let store = PgActorPrivateEventStore::new(pool.clone());
 
     // A rejection of a request that does not exist writes nothing.
@@ -438,6 +463,7 @@ async fn action_request_and_rejection_are_create_once_and_the_target_state_is_te
 async fn draft_proposal_creates_one_available_pending_intent_without_a_realm_commit() {
     let database = TestDatabase::lease().await;
     let pool = database.pool();
+    seed_owner(&pool, &holder()).await;
     let store = PgActorPrivateEventStore::new(pool.clone());
 
     let proposal = draft_propose("draft-1", 60_000, 1);
@@ -474,4 +500,94 @@ async fn draft_proposal_creates_one_available_pending_intent_without_a_realm_com
     // The proposal is Station-private: no Realm Event or RealmCommit exists.
     assert_eq!(count(&pool, "realm_commits").await, 0);
     assert_eq!(count(&pool, "canonical_events").await, 0);
+}
+
+#[tokio::test]
+async fn terminal_private_owner_refuses_both_new_effects_and_old_private_ledger_disclosure() {
+    for (state, expected) in [
+        (
+            "deactivated",
+            coland_storage::ConflictCode::AccountDeactivated,
+        ),
+        (
+            "erasure_pending",
+            coland_storage::ConflictCode::AccountErased,
+        ),
+    ] {
+        let database = TestDatabase::lease().await;
+        let pool = database.pool();
+        seed_owner(&pool, &holder()).await;
+        seed_owner(&pool, &agent()).await;
+        let store = PgActorPrivateEventStore::new(pool.clone());
+        let original = push_route(0, false, 1);
+        accepted(store.submit(&original).await.unwrap());
+        let ledger_before = count(&pool, "actor_private_events").await;
+        terminal_owner(&pool, &holder(), state).await;
+        // Even an exact old private outcome is gated before the ledger read.
+        assert_eq!(
+            store.submit(&original).await.unwrap_err().conflict_code(),
+            Some(expected)
+        );
+        let next = push_route(1, false, 2);
+        assert_eq!(
+            store.submit(&next).await.unwrap_err().conflict_code(),
+            Some(expected)
+        );
+        // The signer is an active Agent Account, but the private owner is the
+        // terminal controller Account. Signer activity cannot grant ownership.
+        let agent_request = action_request("terminal-controller-request", 60_000, 3);
+        assert_ne!(
+            agent_request.event.actor_id.as_account_id(),
+            Some(&agent_request.owner)
+        );
+        assert_eq!(
+            store
+                .submit(&agent_request)
+                .await
+                .unwrap_err()
+                .conflict_code(),
+            Some(expected)
+        );
+        assert_eq!(count(&pool, "actor_private_events").await, ledger_before);
+        assert_eq!(count(&pool, "agent_action_requests").await, 0);
+        assert_eq!(count(&pool, "device_push_routes").await, 1);
+        assert_eq!(count(&pool, "canonical_events").await, 0);
+        assert_eq!(count(&pool, "realm_commits").await, 0);
+    }
+}
+
+#[tokio::test]
+async fn private_owner_gate_keeps_the_full_account_pair_and_does_not_reclassify_agent_targets() {
+    let database = TestDatabase::lease().await;
+    let pool = database.pool();
+    seed_owner(&pool, &holder()).await;
+    seed_owner(&pool, &agent()).await;
+    let other = AccountId::new(
+        holder().principal_id,
+        DidCoreId::new("ak:did_core:web:other-owner-station.example").unwrap(),
+    );
+    seed_owner(&pool, &other).await;
+    terminal_owner(&pool, &other, "erasure_pending").await;
+    let store = PgActorPrivateEventStore::new(pool.clone());
+    // Another Station's same principal is terminal; this controller's complete
+    // Account pair is active. A Realm-shaped pending target is not its owner.
+    accepted(
+        store
+            .submit(&action_request("active-controller-request", 60_000, 1))
+            .await
+            .unwrap(),
+    );
+    let mut payload = push_route_payload(0, false);
+    payload["account_id"] = serde_json::to_value(agent()).unwrap();
+    let event = signed(EventKind::DevicePushRoute, &agent(), payload.clone(), 2);
+    let agent_route = submission(
+        event,
+        agent(),
+        ActorPrivateEventEffect::DevicePushRoute(serde_json::from_value(payload).unwrap()),
+    );
+    accepted(store.submit(&agent_route).await.unwrap());
+    assert_eq!(count(&pool, "actor_private_events").await, 2);
+    assert_eq!(count(&pool, "agent_action_requests").await, 1);
+    assert_eq!(count(&pool, "canonical_events").await, 0);
+    assert_eq!(count(&pool, "realm_commits").await, 0);
 }

@@ -178,10 +178,9 @@ pub(crate) async fn project(
         if held.generation>generation || (held.generation==generation && (held.service_id!=source.as_str() || held.authority_ref!=serde_json::to_value(&authority.authority_ref).map_err(PersistenceError::database)? || held.last_handoff_ref.as_deref()!=authority.last_handoff_ref.as_ref().map(|r|r.as_str()))) {
             return Err(unavailable("known governing authority rejects the verified publication chain").into());
         }
-        #[derive(diesel::QueryableByName)] struct Recipient {#[diesel(sql_type=BigInt)] #[diesel(column_name=pk)] _pk:i64}
-        let recipient=sql_query("SELECT a.pk FROM accounts a LEFT JOIN account_lifecycle l ON l.account_pk=a.pk WHERE a.principal_id=$1 AND a.station_id=$2 AND a.disabled_at IS NULL AND COALESCE(l.state NOT IN ('deactivated','erasure_pending'),TRUE) FOR SHARE OF a")
-            .bind::<Text,_>(request.holder_account_id.principal_id.as_str()).bind::<Text,_>(request.holder_account_id.station_id.as_str()).get_result::<Recipient>(&mut *conn).await.optional()?;
-        if recipient.is_none() {return Err(PersistenceError::NotFound("private effect recipient is unavailable".into()).into());}
+        if !crate::pcr_private_authority::is_active_human_account(conn,&request.holder_account_id).await? {
+            return Err(PersistenceError::NotFound("private effect recipient is unavailable".into()).into());
+        }
         if !crate::pcr_private_authority::native_inception(conn,&request.realm_id).await? {return Err(unavailable("target is not an accepted PCR").into());}
         let existing=sql_query("SELECT realm_id,governance_generation,head_stream_position,head_commit_id,cell_revisions FROM consent_private_proxy_cuts WHERE holder_account_id=$1 FOR UPDATE")
             .bind::<Jsonb,_>(&holder).get_result::<Cut>(&mut *conn).await.optional()?;

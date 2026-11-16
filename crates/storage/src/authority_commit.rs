@@ -120,9 +120,9 @@ pub enum QueuedEventStatus {
     Rejected,
 }
 
-/// Last local attempt to forward an already queued Event. This is not an
-/// authority decision: a rejection at one cut may be superseded by exact
-/// replay at a later cut, while the Event row remains queued until replica.
+/// Last local attempt to forward an already queued Event. This status is
+/// not an authority decision: a local refusal may be superseded by retry.
+/// A separately retained terminal outcome remains exact and immutable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForwardAttemptStatus {
     Forwarding,
@@ -148,11 +148,20 @@ pub struct ForwardAttemptRecord {
     /// Frozen signed source siblings and complete peer unit, only for exact transport retry.
     pub peer_request:
         Option<Box<arkret_models_collaboration::authority_commit::PeerAuthoritySubmitRequestBody>>,
-    /// Verified governing acceptance witness, not an installed replica.
-    pub accepted_commit: Option<RealmCommit>,
+    /// Verified governing result, never an installed replica or a current-state grant.
+    pub terminal_outcome: Option<arkret_wire::AuthoritySubmitResponseBody>,
     pub status: ForwardAttemptStatus,
     pub reason_code: Option<String>,
     pub attempted_at: DateTime<Utc>,
+}
+
+impl ForwardAttemptRecord {
+    pub fn accepted_commit(&self) -> Option<&RealmCommit> {
+        match self.terminal_outcome.as_ref() {
+            Some(arkret_wire::AuthoritySubmitResponseBody::Accepted { commit, .. }) => Some(commit),
+            _ => None,
+        }
+    }
 }
 
 /// Per-request verified identity for the native MLS refusal transaction; never wire or current
@@ -2626,15 +2635,15 @@ pub trait AuthorityCommitStore: Send + Sync {
         ))
     }
 
-    /// CAS-retain a verified governing acknowledgement against the queued original.
+    /// CAS-retain a verified governing outcome against the queued original.
     /// It is not chain continuity, disclosure, or an installed RealmCommit.
-    async fn retain_forwarded_acceptance(
+    async fn retain_forwarded_outcome(
         &self,
         event: &Event,
-        commit: &RealmCommit,
+        outcome: &arkret_wire::AuthoritySubmitResponseBody,
         at: DateTime<Utc>,
     ) -> PersistenceResult<()> {
-        let _ = (event, commit, at);
+        let _ = (event, outcome, at);
         Err(crate::PersistenceError::Conflict(
             "dependency_missing: forwarded original retention is not implemented by this store"
                 .to_owned(),
@@ -2662,9 +2671,10 @@ pub trait AuthorityCommitStore: Send + Sync {
         event: &Event,
         authority: &CurrentRealmAuthority,
         reason_code: &str,
-        native: Option<(ManagedMlsRefusalSource<'_>, &crate::IdempotencyRecord)>,
+        native: Option<ManagedMlsRefusalSource<'_>>,
+        retry_record: Option<&crate::IdempotencyRecord>,
     ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
-        let _ = (event, authority, reason_code, native);
+        let _ = (event, authority, reason_code, native, retry_record);
         Err(crate::PersistenceError::Conflict(
             "temporarily_unavailable: durable MLS refusal is unavailable".into(),
         ))

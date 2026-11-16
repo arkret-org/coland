@@ -68,7 +68,7 @@ struct EventRow {
     #[diesel(sql_type = Nullable<Jsonb>)]
     forward_peer_request: Option<Value>,
     #[diesel(sql_type = Nullable<Jsonb>)]
-    forward_accepted_commit: Option<Value>,
+    forward_terminal_outcome: Option<Value>,
     #[diesel(sql_type = Nullable<Text>)]
     forward_reason_code: Option<String>,
     #[diesel(sql_type = Nullable<Timestamptz>)]
@@ -1611,6 +1611,37 @@ async fn handoff_inventory_in_connection(
         .collect::<PersistenceResult<Vec<_>>>()?;
     keyed.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(keyed.into_iter().map(|(_, entry)| entry).collect())
+}
+
+async fn require_forward_private_owner(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+) -> PersistenceResult<()> {
+    if let Some(owner) = event.actual_signer().as_account_id() {
+        crate::pcr_private_authority::require_active_account_owner(conn, owner).await?;
+    }
+    Ok(())
+}
+
+async fn lock_forward_private_projection(
+    conn: &mut AsyncPgConnection,
+    event: &arkret_wire::Event,
+) -> PersistenceResult<bool> {
+    let Some(owner) = event.actual_signer().as_account_id() else {
+        return Ok(true);
+    };
+    #[derive(QueryableByName)]
+    struct Active {
+        #[diesel(sql_type = Bool)]
+        active: bool,
+    }
+    let current = sql_query("SELECT lock_account_private_projection($1,$2) AS active")
+        .bind::<Text, _>(owner.principal_id.as_str())
+        .bind::<Text, _>(owner.station_id.as_str())
+        .get_result::<Active>(&mut *conn)
+        .await
+        .map_err(crate::persistence_query_error)?;
+    Ok(current.active)
 }
 
 /// Queue one producer Event on a caller-owned connection.
@@ -4626,7 +4657,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             // that Account's latest accepted membership predecessor instead.
             let row = sql_query(
                 "SELECT e.envelope,c.commit_json,f.circle_leave_parent_revision,f.original_submission_json AS submission_json, \
-                 f.accepted_commit_json AS accepted_json,k.producer_source_fact AS fact_json, \
+                 f.terminal_outcome_json->'commit' AS accepted_json,k.producer_source_fact AS fact_json, \
                  m.value AS member_value,j.envelope AS join_envelope,jc.commit_json AS join_commit_json \
                  FROM canonical_events e JOIN realm_commits c ON c.event_pk=e.pk \
                  JOIN authority_forward_attempts f ON f.event_pk=e.pk \
@@ -4664,7 +4695,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                        AND oe.envelope->'payload'->'member_id'=oe.envelope->'actor_id')) \
                    AND jc.realm_id=c.realm_id AND jc.stream_key=c.stream_key AND jc.stream_ref=c.stream_ref \
                    AND jc.stream_position<c.stream_position \
-                   AND f.original_submission_json IS NOT NULL AND f.accepted_commit_json IS NOT NULL \
+                   AND f.original_submission_json IS NOT NULL AND f.terminal_outcome_json->'commit' IS NOT NULL \
                    AND k.producer_source_fact IS NOT NULL"
             ).bind::<Binary,_>(event.event_id.token_bytes().to_vec())
              .bind::<Text,_>(actor.to_string()).bind::<Text,_>(commit.commit_id.as_str())
@@ -5279,7 +5310,6 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         }
         let token = ids::parse_event_id(event.event_id.as_str())
             .ok_or_else(|| invalid("invalid Event token"))?;
-        let mut conn = crate::pg_db(&self.pool);
         // Freeze the parent cut before sending the original own Circle leave.
         // Its old canonical join may already be effective-invalid after a
         // parent rejoin; that does not authorize content, but the new exact
@@ -5300,6 +5330,10 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         } else {
             false
         };
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+        require_forward_private_owner(conn, event).await?;
+        queue_event_in_connection(conn, event, at).await?;
         let written = sql_query(
             "INSERT INTO authority_forward_attempts (event_pk,status,reason_code,attempted_at,original_submission_json,circle_leave_parent_revision) \
              SELECT e.pk,'forwarding',NULL,$3,$2, \
@@ -5319,13 +5353,14 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
          .bind::<Timestamptz,_>(at).bind::<Jsonb,_>(serde_json::to_value(event).map_err(PersistenceError::database)?)
          .bind::<Bool,_>(own_circle_leave).bind::<Text,_>(event.realm_id.as_str()).bind::<Text,_>(event.actor_id.to_string())
          .bind::<Text,_>(stream_key(&arkret_wire::CommitStreamRef::Realm { realm_id: event.realm_id.clone() })?)
-         .execute(&mut conn).await.map_err(PersistenceError::database)?;
+         .execute(&mut *conn).await?;
         if written != 1 {
             return Err(forward_original_conflict(
                 "forward intent differs from its queued original",
-            ));
+            ).into());
         }
         Ok(())
+        }).await.map_err(PgTransactionError::into_persistence)
     }
 
     async fn freeze_forwarded_peer_request(
@@ -5365,7 +5400,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             #[diesel(sql_type=Nullable<Jsonb>)]
             body: Option<Value>,
             #[diesel(sql_type=Nullable<Jsonb>)]
-            accepted: Option<Value>,
+            terminal: Option<Value>,
         }
         let incoming = serde_json::to_value(request).map_err(PersistenceError::database)?;
         let stable =
@@ -5374,11 +5409,12 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             )
             .map_err(invalid)?;
         let original = serde_json::to_value(&original).map_err(PersistenceError::database)?;
-        let event = serde_json::to_value(event).map_err(PersistenceError::database)?;
+        let event_json = serde_json::to_value(event).map_err(PersistenceError::database)?;
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_,PgTransactionError,_>(async |conn| {
-            let frozen=sql_query("SELECT f.peer_request_json AS body,f.accepted_commit_json AS accepted FROM authority_forward_attempts f JOIN canonical_events e ON f.event_pk=e.pk WHERE e.id=$1 AND f.original_submission_json=$2 AND e.envelope=$3 FOR UPDATE OF f")
-                .bind::<Binary,_>(token.to_vec()).bind::<Jsonb,_>(&original).bind::<Jsonb,_>(&event)
+            require_forward_private_owner(conn, event).await?;
+            let frozen=sql_query("SELECT f.peer_request_json AS body,f.terminal_outcome_json AS terminal FROM authority_forward_attempts f JOIN canonical_events e ON f.event_pk=e.pk WHERE e.id=$1 AND f.original_submission_json=$2 AND e.envelope=$3 FOR UPDATE OF f")
+                .bind::<Binary,_>(token.to_vec()).bind::<Jsonb,_>(&original).bind::<Jsonb,_>(&event_json)
                 .get_result::<Frozen>(&mut *conn).await.optional()?
                 .ok_or_else(||forward_original_conflict("frozen peer request has no exact original"))?;
             if let Some(previous)=frozen.body.as_ref() {
@@ -5388,7 +5424,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                     return Err(forward_original_conflict("forward retry changed its complete stable business body").into());
                 }
             }
-            if frozen.accepted.is_some() {
+            if frozen.terminal.is_some() {
                 // This row is an origin transport attempt, not G's source
                 // archive. An acknowledgement never turns its newer W2 into
                 // the W1 that G actually froze at first acceptance.
@@ -5398,61 +5434,80 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             }
             // The same unaccepted business Event may refresh only registered
             // dynamic evidence even after a timeout left status=forwarding.
-            sql_query("UPDATE authority_forward_attempts SET peer_request_json=$2,status='forwarding',reason_code=NULL,attempted_at=$3 WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1) AND accepted_commit_json IS NULL")
+            sql_query("UPDATE authority_forward_attempts SET peer_request_json=$2,status='forwarding',reason_code=NULL,attempted_at=$3 WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1) AND terminal_outcome_json IS NULL")
                 .bind::<Binary,_>(token.to_vec()).bind::<Jsonb,_>(&incoming).bind::<Timestamptz,_>(at)
                 .execute(&mut *conn).await?;
             Ok(Box::new(decode_json(incoming.clone(),"fresh frozen peer request")?))
         }).await.map_err(PgTransactionError::into_persistence)
     }
 
-    async fn retain_forwarded_acceptance(
+    async fn retain_forwarded_outcome(
         &self,
         event: &arkret_wire::Event,
-        commit: &arkret_wire::RealmCommit,
+        outcome: &arkret_wire::AuthoritySubmitResponseBody,
         at: chrono::DateTime<chrono::Utc>,
     ) -> PersistenceResult<()> {
-        event
-            .validate_for_submit_structural()
-            .map_err(|e| invalid(e.to_string()))?;
+        use arkret_wire::AuthoritySubmitResponseBody;
+        event.validate_for_submit_structural().map_err(invalid)?;
         event
             .verify_event_id_matches_content_with_digest_suite(
                 event.event_id.digest_suite_code().digest_suite(),
             )
             .map_err(invalid)?;
-        commit
-            .validate_shape()
-            .map_err(|e| invalid(e.to_string()))?;
-        commit.verify_commit_id_matches_content().map_err(invalid)?;
-        if commit.event_ref != event.event_id
-            || commit.realm_id != event.realm_id
-            || commit.stream_ref
-                != arkret_wire::CommitStreamRef::from_scope(
-                    &event.scope_ref,
-                    Some(event.realm_id.clone()),
-                )
-                .map_err(|e| invalid(e.to_string()))?
-        {
+        outcome.validate_shape().map_err(invalid)?;
+        if let AuthoritySubmitResponseBody::Accepted { commit, .. } = outcome {
+            commit.verify_commit_id_matches_content().map_err(invalid)?;
+            if commit.event_ref != event.event_id
+                || commit.realm_id != event.realm_id
+                || commit.stream_ref
+                    != arkret_wire::CommitStreamRef::from_scope(
+                        &event.scope_ref,
+                        Some(event.realm_id.clone()),
+                    )
+                    .map_err(invalid)?
+            {
+                return Err(invalid(
+                    "forward outcome does not bind its exact Event and stream",
+                ));
+            }
+        } else if event.kind != arkret_wire::EventKind::MlsCommit {
             return Err(invalid(
-                "forward acceptance does not bind its exact Event and stream",
+                "only a complete MLS forward retains a terminal refusal",
             ));
         }
         let token = ids::parse_event_id(event.event_id.as_str())
             .ok_or_else(|| invalid("invalid Event token"))?;
-        let mut conn = crate::pg_db(&self.pool);
-        let written = sql_query(
-            "UPDATE authority_forward_attempts f SET accepted_commit_json=$2,status='forwarding',reason_code=NULL,attempted_at=$3 \
-             FROM canonical_events e WHERE f.event_pk=e.pk AND e.id=$1 AND e.envelope=$4 \
-               AND f.original_submission_json IS NOT NULL \
-               AND (f.accepted_commit_json IS NULL OR f.accepted_commit_json=$2)"
-        ).bind::<Binary,_>(token.to_vec()).bind::<Jsonb,_>(serde_json::to_value(commit).map_err(PersistenceError::database)?)
-         .bind::<Timestamptz,_>(at).bind::<Jsonb,_>(serde_json::to_value(event).map_err(PersistenceError::database)?)
-         .execute(&mut conn).await.map_err(PersistenceError::database)?;
-        if written != 1 {
-            return Err(forward_original_conflict(
-                "forward acceptance differs from its frozen original",
-            ));
-        }
-        Ok(())
+        let incoming = serde_json::to_value(outcome).map_err(PersistenceError::database)?;
+        let event_json = serde_json::to_value(event).map_err(PersistenceError::database)?;
+        let is_mls = event.kind == arkret_wire::EventKind::MlsCommit;
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            // G already answered. A terminal hosting owner skips only this
+            // optional private copy, not G's authenticated authority result.
+            if !lock_forward_private_projection(conn, event).await? {
+                return Ok(());
+            }
+            let written = sql_query(
+                "UPDATE authority_forward_attempts f SET \
+                   terminal_outcome_json=COALESCE(f.terminal_outcome_json,$2), \
+                   peer_request_json=CASE WHEN $5 THEN NULL ELSE f.peer_request_json END, \
+                   status=CASE WHEN COALESCE(f.terminal_outcome_json,$2)->>'status'='rejected' THEN 'rejected' ELSE 'forwarding' END, \
+                   reason_code=COALESCE(f.terminal_outcome_json,$2)->>'reason_code', \
+                   attempted_at=CASE WHEN f.terminal_outcome_json IS NULL THEN $3 ELSE f.attempted_at END \
+                 FROM canonical_events e WHERE f.event_pk=e.pk AND e.id=$1 AND e.envelope=$4 \
+                   AND f.original_submission_json IS NOT NULL \
+                   AND (NOT $5 OR f.original_submission_json ? 'commit_event') \
+                   AND (f.terminal_outcome_json IS NULL OR \
+                     CASE WHEN $5 THEN f.terminal_outcome_json=$2 \
+                     ELSE f.terminal_outcome_json->'commit'=$2->'commit' END)"
+            ).bind::<Binary,_>(token.to_vec()).bind::<Jsonb,_>(&incoming)
+             .bind::<Timestamptz,_>(at).bind::<Jsonb,_>(&event_json).bind::<Bool,_>(is_mls)
+             .execute(&mut *conn).await?;
+            if written != 1 {
+                return Err(forward_original_conflict("forward outcome differs from its frozen original").into());
+            }
+            Ok(())
+        }).await.map_err(PgTransactionError::into_persistence)
     }
 
     async fn record_forward_attempt(
@@ -5467,28 +5522,29 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         }
         let token = ids::parse_event_id(event_id.as_str())
             .ok_or_else(|| invalid("Event id is not a canonical Event token"))?;
-        let mut conn = crate::pg_db(&self.pool);
-        let written = sql_query(
-            "INSERT INTO authority_forward_attempts (event_pk,status,reason_code,attempted_at) \
-             SELECT pk,$2,$3,$4 FROM canonical_events WHERE id=$1 \
-             ON CONFLICT (event_pk) DO UPDATE SET \
-             status=CASE WHEN authority_forward_attempts.accepted_commit_json IS NOT NULL THEN 'forwarding' ELSE EXCLUDED.status END, \
-             reason_code=CASE WHEN authority_forward_attempts.accepted_commit_json IS NOT NULL THEN NULL ELSE EXCLUDED.reason_code END, \
-             attempted_at=EXCLUDED.attempted_at",
-        )
-        .bind::<Binary, _>(token.to_vec())
-        .bind::<Text, _>(status.as_str())
-        .bind::<Nullable<Text>, _>(reason_code)
-        .bind::<Timestamptz, _>(attempted_at)
-        .execute(&mut conn)
-        .await
-        .map_err(PersistenceError::database)?;
-        if written != 1 {
-            return Err(PersistenceError::Internal(
-                "forward attempt has no queued Event".to_owned(),
-            ));
-        }
-        Ok(())
+        let mut conn = pg_conn(&self.pool).await?;
+        conn.transaction::<_, PgTransactionError, _>(async |conn| {
+            #[derive(QueryableByName)]
+            struct Original { #[diesel(sql_type = Jsonb)] envelope: Value }
+            let Some(original) = sql_query("SELECT envelope FROM canonical_events WHERE id=$1")
+                .bind::<Binary,_>(token.to_vec()).get_result::<Original>(&mut *conn).await.optional()? else {
+                // The hosting owner may have erased this local transport row.
+                return Ok(());
+            };
+            let event: arkret_wire::Event = decode_json(original.envelope, "forward Event")?;
+            if !lock_forward_private_projection(conn, &event).await? { return Ok(()); }
+            sql_query(
+                "INSERT INTO authority_forward_attempts(event_pk,status,reason_code,attempted_at) \
+                 SELECT pk,$2,$3,$4 FROM canonical_events WHERE id=$1 \
+                 ON CONFLICT(event_pk) DO UPDATE SET \
+                 status=CASE WHEN authority_forward_attempts.terminal_outcome_json IS NOT NULL THEN authority_forward_attempts.status ELSE EXCLUDED.status END, \
+                 reason_code=CASE WHEN authority_forward_attempts.terminal_outcome_json IS NOT NULL THEN authority_forward_attempts.reason_code ELSE EXCLUDED.reason_code END, \
+                 attempted_at=CASE WHEN authority_forward_attempts.terminal_outcome_json IS NOT NULL THEN authority_forward_attempts.attempted_at ELSE EXCLUDED.attempted_at END"
+            ).bind::<Binary,_>(token.to_vec()).bind::<Text,_>(status.as_str())
+             .bind::<Nullable<Text>,_>(reason_code).bind::<Timestamptz,_>(attempted_at)
+             .execute(&mut *conn).await?;
+            Ok(())
+        }).await.map_err(PgTransactionError::into_persistence)
     }
 
     async fn finalize_mls_rejection(
@@ -5496,10 +5552,8 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         event: &arkret_wire::Event,
         authority: &CurrentRealmAuthority,
         reason_code: &str,
-        native: Option<(
-            coland_storage::ManagedMlsRefusalSource<'_>,
-            &coland_storage::IdempotencyRecord,
-        )>,
+        native: Option<coland_storage::ManagedMlsRefusalSource<'_>>,
+        retry_record: Option<&coland_storage::IdempotencyRecord>,
     ) -> PersistenceResult<arkret_wire::AuthoritySubmitResponseBody> {
         if event.kind != arkret_wire::EventKind::MlsCommit || event.realm_id != authority.realm_id {
             return Err(invalid(
@@ -5518,7 +5572,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
         }
         let mut conn = pg_conn(&self.pool).await?;
         conn.transaction::<_, PgTransactionError, _>(async move |conn| {
-            let producer = native.map(|(source, _)| match source {
+            let producer = native.map(|source| match source {
                 coland_storage::ManagedMlsRefusalSource::Local(guard) => SelfProducerCommitGuard::AppletManagedDevice(Box::new(guard.clone())),
             });
             crate::agent_management_review::lock_candidate_current_realms_in_connection(conn, event, None, producer.as_ref(), &[]).await?;
@@ -5529,15 +5583,28 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             let existing = sql_query("SELECT c.commit_json FROM realm_commits c JOIN canonical_events e ON e.pk=c.event_pk WHERE e.id=$1")
                 .bind::<Binary,_>(token.to_vec()).get_result::<CommitRow>(&mut *conn).await.optional()?;
             if let Some(existing) = existing {
+                let original: arkret_wire::RealmCommit = decode_json(existing.commit_json, "original MLS Commit")?;
+                if let Some(expected) = retry_record {
+                    let stored = crate::idempotency::require_mls_idempotency_in_connection(conn, expected, event).await?;
+                    let stored: arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody =
+                        serde_json::from_value(stored.response_body).map_err(PersistenceError::database)?;
+                    let arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(outcome) = stored else {
+                        return Err(invalid("MLS retry stored an aggregate outcome").into());
+                    };
+                    if !matches!(&outcome, arkret_wire::AuthoritySubmitResponseBody::Accepted {commit, ..} if commit == &original) {
+                        return Err(invalid("MLS retry outcome differs from the original Commit").into());
+                    }
+                    return Ok(outcome);
+                }
                 return Ok(arkret_wire::AuthoritySubmitResponseBody::Accepted {
                     status: arkret_wire::AuthorityCommitStatus::Duplicate,
-                    commit: decode_json(existing.commit_json, "original MLS Commit")?,
+                    commit: original,
                 });
             }
             if !same_authority(&current, authority) {
                 return Err(PersistenceError::Conflict("temporarily_unavailable: MLS refusal authority changed".into()).into());
             }
-            if let Some((source, _)) = native {
+            if let Some(source) = native {
                 crate::boxed_future(|| crate::applet_device_admission::require_mls_permission_source(conn, event, source.into(), chrono::Utc::now(), true)).await?;
                 // A formerly stale key-access coordinate may have caught up
                 // while this refusal waited for the exclusive authority cut.
@@ -5561,7 +5628,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 #[diesel(sql_type = Text)]
                 rejection_reason: String,
             }
-            sql_query("UPDATE canonical_events SET state='rejected',rejection_reason=$2 WHERE id=$1 AND state='queued'")
+            let newly_rejected = sql_query("UPDATE canonical_events SET state='rejected',rejection_reason=$2 WHERE id=$1 AND state='queued'")
                 .bind::<Binary,_>(token.to_vec()).bind::<Text,_>(reason_code)
                 .execute(&mut *conn).await?;
             let refused = sql_query("SELECT rejection_reason FROM canonical_events WHERE id=$1 AND state='rejected'")
@@ -5570,10 +5637,20 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                 status: arkret_wire::AuthorityRejectionStatus::Rejected,
                 reason_code: refused.rejection_reason,
             };
-            if let Some((source, record)) = native {
+            if let Some(record) = retry_record {
                 let mut record = record.clone();
                 record.response_body = serde_json::to_value(arkret_models_collaboration::authority_commit::SelfAuthoritySubmitResponseBody::Ordinary(outcome.clone())).map_err(PersistenceError::database)?;
-                crate::idempotency::record_native_mls_idempotency_in_connection(conn, &record).await?;
+                if newly_rejected == 0 {
+                    // Terminal Event identity includes its original complete retry key.
+                    let stored = crate::idempotency::require_mls_idempotency_in_connection(conn, &record, event).await?;
+                    if stored.response_status != record.response_status || stored.response_body != record.response_body {
+                        return Err(PersistenceError::Conflict("duplicate_conflict: MLS retry outcome differs from the original refusal".into()).into());
+                    }
+                } else {
+                    crate::idempotency::record_native_mls_idempotency_in_connection(conn, &record, event).await?;
+                }
+            }
+            if let Some(source) = native {
                 crate::boxed_future(|| crate::applet_device_admission::require_mls_permission_source(conn, event, source.into(), chrono::Utc::now(), false)).await?;
             }
             Ok(outcome)
@@ -5591,7 +5668,7 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
             "SELECT e.envelope, e.state, e.received_at, e.rejection_reason, c.commit_json, \
                     f.status AS forward_status, f.reason_code AS forward_reason_code, \
                     f.attempted_at AS forward_attempted_at, \
-                    f.original_submission_json AS forward_original_submission, f.peer_request_json AS forward_peer_request, f.accepted_commit_json AS forward_accepted_commit \
+                    f.original_submission_json AS forward_original_submission, f.peer_request_json AS forward_peer_request, f.terminal_outcome_json AS forward_terminal_outcome \
              FROM canonical_events e LEFT JOIN realm_commits c ON c.event_pk = e.pk \
              LEFT JOIN authority_forward_attempts f ON f.event_pk=e.pk \
              WHERE e.id = $1",
@@ -5632,9 +5709,9 @@ impl AuthorityCommitStore for PgAuthorityCommitStore {
                             .forward_original_submission
                             .map(|v| decode_json(v, "forward original submission"))
                             .transpose()?,
-                        accepted_commit: row
-                            .forward_accepted_commit
-                            .map(|v| decode_json(v, "forward accepted witness"))
+                        terminal_outcome: row
+                            .forward_terminal_outcome
+                            .map(|v| decode_json(v, "forward terminal outcome"))
                             .transpose()?,
                         status: match status.as_str() {
                             "forwarding" => ForwardAttemptStatus::Forwarding,

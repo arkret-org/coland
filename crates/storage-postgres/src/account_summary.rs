@@ -9,7 +9,7 @@
 
 use arkret_models_collaboration::events_payloads::realm::RealmProfile;
 use coland_storage::{PersistenceError, PersistenceResult};
-use diesel::sql_types::{BigInt, Bool, Jsonb, Nullable, Text};
+use diesel::sql_types::{Array, BigInt, Bool, Jsonb, Nullable, Text};
 use diesel_async::AsyncPgConnection;
 use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::Value;
@@ -163,13 +163,35 @@ pub(crate) async fn publish_realm_account_summary_in_connection(
     if members.is_empty() {
         return Ok(());
     }
+    // Members are sorted by their complete Actor key before any private cache
+    // row is locked. A terminal recipient is suppressed; it cannot veto a
+    // different member's legitimate Realm authority transaction.
+    let mut active_members = Vec::new();
+    for member in members {
+        let actor: arkret_wire::ActorId =
+            serde_json::from_str(&member.member_id).map_err(PersistenceError::database)?;
+        if let Some(account) = actor.as_account_id()
+            && !crate::pcr_private_authority::is_active_human_account(conn, account).await?
+        {
+            continue;
+        }
+        active_members.push(member);
+    }
+    if active_members.is_empty() {
+        return Ok(());
+    }
     let title = realm_title(conn, realm_id).await?;
     let default_strand_id = realm_default_strand_id(conn, realm_id).await?;
+    let active_keys = active_members
+        .iter()
+        .map(|member| member.member_id.as_str())
+        .collect::<Vec<_>>();
     let existing = diesel::sql_query(
         "SELECT actor_key,membership,title,default_strand_id,available \
-         FROM account_summary_current WHERE realm_id=$1 FOR UPDATE",
+         FROM account_summary_current WHERE realm_id=$1 AND actor_key=ANY($2) FOR UPDATE",
     )
     .bind::<Text, _>(realm_id.as_str())
+    .bind::<Array<Text>, _>(&active_keys)
     .load::<SummaryRow>(&mut *conn)
     .await
     .map_err(PersistenceError::database)?
@@ -187,7 +209,7 @@ pub(crate) async fn publish_realm_account_summary_in_connection(
     })
     .collect::<std::collections::BTreeMap<_, _>>();
     let mut changed = Vec::new();
-    for member in members {
+    for member in active_members {
         let summary = derive(
             &member.membership,
             title.as_deref(),
@@ -259,7 +281,7 @@ pub(crate) async fn publish_realm_account_summary_in_connection(
         .bind::<Nullable<Text>, _>(summary.default_strand_id.as_deref())
         .execute(&mut *conn)
         .await
-        .map_err(PersistenceError::database)?;
+        .map_err(crate::persistence_query_error)?;
     }
     Ok(())
 }

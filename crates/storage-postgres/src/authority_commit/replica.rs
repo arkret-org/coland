@@ -1998,7 +1998,7 @@ async fn accepted_own_circle_cleanup_in_connection(
         member_value: Value,
     }
     let row = sql_query(
-        "SELECT f.original_submission_json AS submission_json,f.accepted_commit_json AS accepted_json, \
+        "SELECT f.original_submission_json AS submission_json,f.terminal_outcome_json->'commit' AS accepted_json, \
             f.circle_leave_parent_revision AS parent_revision,j.envelope AS join_envelope, \
             jc.commit_json AS join_commit_json,m.value AS member_value \
          FROM canonical_events e JOIN authority_forward_attempts f ON f.event_pk=e.pk \
@@ -2007,7 +2007,7 @@ async fn accepted_own_circle_cleanup_in_connection(
          JOIN canonical_events j ON j.pk=jc.event_pk \
          JOIN circle_member_state_current_states m ON m.realm_id=a.realm_id AND m.circle_id=$4 AND m.member_id=$5 \
          WHERE e.id=$1 AND e.envelope=$6 AND e.state='queued' AND j.state='committed' \
-           AND f.original_submission_json IS NOT NULL AND f.accepted_commit_json=$7 \
+           AND f.original_submission_json IS NOT NULL AND f.terminal_outcome_json->'commit'=$7 \
            AND f.circle_leave_parent_revision IS NOT NULL AND a.anchor_commit_id IS NOT NULL \
            AND a.member_account_id=$8 AND jc.stream_ref=$9 AND jc.stream_position<$10 \
            AND m.membership='join' AND m.source_stream_ref=jc.stream_ref \

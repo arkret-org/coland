@@ -816,7 +816,11 @@ impl PgAccountDataStore {
         let mut conn = pg_conn(&self.pool)
             .await
             .map_err(PersistenceError::database)?;
-        compare_account_data_in_transaction(&mut conn, record, expected_revision, None).await
+        conn.transaction::<_, crate::PgTransactionError, _>(async |conn| {
+            Ok(compare_account_data_in_transaction(conn, record, expected_revision, None).await?)
+        })
+        .await
+        .map_err(crate::PgTransactionError::into_persistence)
     }
 }
 pub(crate) async fn compare_account_data_in_transaction(
@@ -825,6 +829,11 @@ pub(crate) async fn compare_account_data_in_transaction(
     expected_revision: u64,
     source_event_id: Option<&arkret_wire::EventId>,
 ) -> PersistenceResult<AccountDataCasResult> {
+    let actor: arkret_wire::ActorId =
+        serde_json::from_str(&record.actor).map_err(PersistenceError::database)?;
+    if let Some(account) = actor.as_account_id() {
+        crate::pcr_private_authority::require_active_account_owner(conn, account).await?;
+    }
     let expected_revision = i64::try_from(expected_revision).map_err(|_| {
         PersistenceError::Conflict("account_data revision exceeds i64 storage range".to_owned())
     })?;
@@ -896,7 +905,7 @@ pub(crate) async fn compare_account_data_in_transaction(
         .get_result::<AccountDataStorageRow>(&mut *conn)
         .await
         .optional()
-        .map_err(PersistenceError::database)?;
+        .map_err(crate::persistence_query_error)?;
     if let Some(applied) = applied {
         return Ok(AccountDataCasResult::Applied(applied.into()));
     }

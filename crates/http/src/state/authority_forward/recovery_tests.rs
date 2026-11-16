@@ -6,6 +6,7 @@
 mod circle_current_coverage_tests;
 #[path = "../../../../storage-postgres/tests/support/historical_human.rs"]
 mod historical_human;
+mod mls_original_outcome_tests;
 mod realm_terminal_fanout_tests;
 mod realm_terminal_peer_tests;
 #[path = "../../../../storage-postgres/tests/support/sql_fault_matrix.rs"]
@@ -994,7 +995,14 @@ async fn accepted_forward_witness_recovery_scenario() {
         .await
         .unwrap();
     store
-        .retain_forwarded_acceptance(event, commit, commit.committed_at)
+        .retain_forwarded_outcome(
+            event,
+            &arkret_wire::AuthoritySubmitResponseBody::Accepted {
+                status: arkret_wire::AuthorityCommitStatus::Committed,
+                commit: (*(commit)).clone(),
+            },
+            commit.committed_at,
+        )
         .await
         .unwrap();
     drop(store);
@@ -1008,7 +1016,7 @@ async fn accepted_forward_witness_recovery_scenario() {
         .unwrap();
     assert!(queued.committed.is_none());
     let witness = queued.forward_attempt.unwrap();
-    assert_eq!(witness.accepted_commit, Some(commit.clone()));
+    assert_eq!(witness.accepted_commit().cloned(), Some(commit.clone()));
     assert_eq!(witness.original_submission, Some(intent));
     let session = authenticated_context(&origin_pool, &human).await;
     let route =
@@ -1318,8 +1326,7 @@ async fn accepted_forward_witness_recovery_scenario() {
             .forward_attempt
             .as_ref()
             .unwrap()
-            .accepted_commit
-            .as_ref(),
+            .accepted_commit(),
         Some(commit)
     );
     let mut bad_fact_page = page.clone();
@@ -1813,7 +1820,14 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         .await
         .unwrap();
     store
-        .retain_forwarded_acceptance(event, commit, commit.committed_at)
+        .retain_forwarded_outcome(
+            event,
+            &arkret_wire::AuthoritySubmitResponseBody::Accepted {
+                status: arkret_wire::AuthorityCommitStatus::Committed,
+                commit: (*(commit)).clone(),
+            },
+            commit.committed_at,
+        )
         .await
         .unwrap();
     assert!(
@@ -2100,7 +2114,14 @@ async fn accepted_own_opening_join_without_anchor_uses_original_peer_fact_then_s
         .await
         .unwrap();
     store
-        .retain_forwarded_acceptance(bob_event, bob_commit, bob_commit.committed_at)
+        .retain_forwarded_outcome(
+            bob_event,
+            &arkret_wire::AuthoritySubmitResponseBody::Accepted {
+                status: arkret_wire::AuthorityCommitStatus::Committed,
+                commit: (*(bob_commit)).clone(),
+            },
+            bob_commit.committed_at,
+        )
         .await
         .unwrap();
     let opening_scan = StreamScanRequestBody {
@@ -2582,7 +2603,14 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             .await
             .unwrap();
         store
-            .retain_forwarded_acceptance(event, commit, commit.committed_at)
+            .retain_forwarded_outcome(
+                event,
+                &arkret_wire::AuthoritySubmitResponseBody::Accepted {
+                    status: arkret_wire::AuthorityCommitStatus::Committed,
+                    commit: (*(commit)).clone(),
+                },
+                commit.committed_at,
+            )
             .await
             .unwrap();
         assert!(
@@ -2880,7 +2908,14 @@ fn accepted_own_leave_scenario() -> std::pin::Pin<Box<impl std::future::Future<O
             .await
             .unwrap();
         store
-            .retain_forwarded_acceptance(le, lc, lc.committed_at)
+            .retain_forwarded_outcome(
+                le,
+                &arkret_wire::AuthoritySubmitResponseBody::Accepted {
+                    status: arkret_wire::AuthorityCommitStatus::Committed,
+                    commit: (*(lc)).clone(),
+                },
+                lc.committed_at,
+            )
             .await
             .unwrap();
         let scan = StreamScanRequestBody {
@@ -3347,7 +3382,14 @@ async fn circle_own_leave_bound_result_cases(
             .await
             .unwrap();
         store
-            .retain_forwarded_acceptance(event, commit, commit.committed_at)
+            .retain_forwarded_outcome(
+                event,
+                &arkret_wire::AuthoritySubmitResponseBody::Accepted {
+                    status: arkret_wire::AuthorityCommitStatus::Committed,
+                    commit: (*(commit)).clone(),
+                },
+                commit.committed_at,
+            )
             .await
             .unwrap();
         if index == 3 {
@@ -3508,7 +3550,7 @@ async fn circle_own_leave_bound_result_cases(
             );
             // A typed terminal row cannot replace the original acceptance witness.
             let mut conn = origin_pool.get().await.unwrap();
-            diesel::sql_query("UPDATE authority_forward_attempts SET accepted_commit_json=NULL WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1)")
+            diesel::sql_query("UPDATE authority_forward_attempts SET terminal_outcome_json=NULL WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1)")
                 .bind::<diesel::sql_types::Binary,_>(event.event_id.token_bytes().to_vec())
                 .execute(&mut *conn).await.unwrap();
             drop(conn);
@@ -3524,9 +3566,9 @@ async fn circle_own_leave_bound_result_cases(
                     .unwrap()
             );
             let mut conn = origin_pool.get().await.unwrap();
-            diesel::sql_query("UPDATE authority_forward_attempts SET accepted_commit_json=$2 WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1)")
+            diesel::sql_query("UPDATE authority_forward_attempts SET terminal_outcome_json=$2 WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1)")
                 .bind::<diesel::sql_types::Binary,_>(event.event_id.token_bytes().to_vec())
-                .bind::<diesel::sql_types::Jsonb,_>(serde_json::to_value(commit).unwrap())
+                .bind::<diesel::sql_types::Jsonb,_>(serde_json::to_value(arkret_wire::AuthoritySubmitResponseBody::Accepted {status: arkret_wire::AuthorityCommitStatus::Committed, commit: commit.clone()}).unwrap())
                 .execute(&mut *conn).await.unwrap();
             drop(conn);
             // A changed parent cut cannot borrow the old Circle opening proof.
@@ -3637,7 +3679,14 @@ async fn circle_cleanup_parent_rejoin(
             .await
             .unwrap();
         store
-            .retain_forwarded_acceptance(event, commit, commit.committed_at)
+            .retain_forwarded_outcome(
+                event,
+                &arkret_wire::AuthoritySubmitResponseBody::Accepted {
+                    status: arkret_wire::AuthorityCommitStatus::Committed,
+                    commit: (*(commit)).clone(),
+                },
+                commit.committed_at,
+            )
             .await
             .unwrap();
         let scan = StreamScanRequestBody {
@@ -3817,7 +3866,7 @@ async fn circle_cleanup_install_refusals(
     let original_intent =
         SelfAuthoritySubmitRequestBody::Event(EventAdmissionSubmission::new(event.clone()));
     for keep_original in [true, false] {
-        diesel::sql_query("UPDATE authority_forward_attempts SET accepted_commit_json=NULL,original_submission_json=$2 WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1)")
+        diesel::sql_query("UPDATE authority_forward_attempts SET terminal_outcome_json=NULL,original_submission_json=$2 WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1)")
             .bind::<diesel::sql_types::Binary,_>(event.event_id.token_bytes().to_vec())
             .bind::<diesel::sql_types::Nullable<diesel::sql_types::Jsonb>,_>(keep_original.then(||serde_json::to_value(&original_intent).unwrap()))
             .execute(&mut *conn).await.unwrap();
@@ -3832,10 +3881,10 @@ async fn circle_cleanup_install_refusals(
         );
         assert_eq!(opening_footprint(pool, &event.realm_id).await, baseline);
         conn = pool.get().await.unwrap();
-        diesel::sql_query("UPDATE authority_forward_attempts SET original_submission_json=$2,accepted_commit_json=$3 WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1)")
+        diesel::sql_query("UPDATE authority_forward_attempts SET original_submission_json=$2,terminal_outcome_json=$3 WHERE event_pk=(SELECT pk FROM canonical_events WHERE id=$1)")
             .bind::<diesel::sql_types::Binary,_>(event.event_id.token_bytes().to_vec())
             .bind::<diesel::sql_types::Jsonb,_>(serde_json::to_value(&original_intent).unwrap())
-            .bind::<diesel::sql_types::Jsonb,_>(serde_json::to_value(commit).unwrap())
+            .bind::<diesel::sql_types::Jsonb,_>(serde_json::to_value(arkret_wire::AuthoritySubmitResponseBody::Accepted {status: arkret_wire::AuthorityCommitStatus::Committed, commit: commit.clone()}).unwrap())
             .execute(&mut *conn).await.unwrap();
     }
     diesel::sql_query("UPDATE member_state_current_states SET current_stream_position=current_stream_position+1 WHERE realm_id=$1 AND member_id=$2")

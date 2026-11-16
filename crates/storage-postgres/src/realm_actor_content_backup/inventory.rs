@@ -13,7 +13,10 @@ use diesel::{QueryableByName, sql_query};
 use horme::RunQueryDsl;
 use serde_json::{Value, json};
 
-use super::{AsyncPgConnection, PersistenceError, PersistenceResult, lock_namespace, unavailable};
+use super::{
+    AsyncPgConnection, PersistenceError, PersistenceResult, lock_namespace, read_namespace,
+    unavailable,
+};
 
 #[derive(QueryableByName)]
 struct PacketRow {
@@ -52,10 +55,27 @@ pub(crate) async fn inventory_in_connection(
     conn: &mut AsyncPgConnection,
     actor: &ActorId,
 ) -> PersistenceResult<RealmActorArchiveInventoryManifest> {
+    let archive_revision = lock_namespace(conn, actor).await?;
+    collect_inventory(conn, actor, archive_revision).await
+}
+
+/// The authenticated delivery caller holds a shared parent Realm cut.
+pub(crate) async fn inventory_for_delivery(
+    conn: &mut AsyncPgConnection,
+    actor: &ActorId,
+) -> PersistenceResult<RealmActorArchiveInventoryManifest> {
+    let archive_revision = read_namespace(conn, actor).await?;
+    collect_inventory(conn, actor, archive_revision).await
+}
+
+async fn collect_inventory(
+    conn: &mut AsyncPgConnection,
+    actor: &ActorId,
+    archive_revision: u64,
+) -> PersistenceResult<RealmActorArchiveInventoryManifest> {
     let subject = actor
         .as_realm_actor_id()
         .ok_or_else(|| unavailable("native archive requires a full Realm actor"))?;
-    let archive_revision = lock_namespace(conn, actor).await?;
     let (manager, manager_ref) = crate::realm_actor_control::current_source(
         conn,
         actor,

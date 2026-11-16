@@ -20,7 +20,9 @@ mod series;
 mod unlock;
 pub(crate) use unlock::{consume_native_unlock, issue_native_unlock};
 mod reading;
-pub(crate) use inventory::{inventory_in_connection, validate_archived_namespaces};
+pub(crate) use inventory::{
+    inventory_for_delivery, inventory_in_connection, validate_archived_namespaces,
+};
 pub(crate) use material::prepare_input_in_connection;
 pub(crate) use publication::{put_native, recover_put};
 pub(crate) use reading::{
@@ -265,17 +267,39 @@ pub(crate) async fn require_manager_resume_ready(
     Ok(())
 }
 
-/// Called only with the parent Realm authorization lock already held. This is
-/// the same advisory lock used by immutable packet identity reservation.
+/// Called only with the parent Realm authorization write lock already held.
+/// The advisory lock also serializes immutable packet identity reservation.
 pub(crate) async fn lock_namespace(
     conn: &mut AsyncPgConnection,
     actor: &ActorId,
 ) -> PersistenceResult<u64> {
+    namespace_revision(conn, actor, true).await
+}
+
+/// A shared parent Realm cut freezes every namespace mutator. Readers retain
+/// a compatible namespace row lock without reserving a writer's advisory lock.
+pub(crate) async fn read_namespace(
+    conn: &mut AsyncPgConnection,
+    actor: &ActorId,
+) -> PersistenceResult<u64> {
+    namespace_revision(conn, actor, false).await
+}
+
+async fn namespace_revision(
+    conn: &mut AsyncPgConnection,
+    actor: &ActorId,
+    exclusive: bool,
+) -> PersistenceResult<u64> {
     let subject = actor
         .as_realm_actor_id()
         .ok_or_else(|| unavailable("native backup namespace requires a full Realm actor"))?;
-    crate::key_backup::lock_backup_series_in_connection(conn, actor).await?;
-    let row = sql_query("SELECT archive_revision FROM realm_actor_backup_namespaces WHERE realm_id=$1 AND actor_id=$2 FOR UPDATE")
+    if exclusive {
+        crate::key_backup::lock_backup_series_in_connection(conn, actor).await?;
+    }
+    let row = sql_query(format!(
+        "SELECT archive_revision FROM realm_actor_backup_namespaces WHERE realm_id=$1 AND actor_id=$2{}",
+        if exclusive { " FOR UPDATE" } else { " FOR SHARE" }
+    ))
         .bind::<Text, _>(subject.realm_id.as_str())
         .bind::<Jsonb, _>(json!(actor))
         .get_result::<Revision>(&mut *conn)

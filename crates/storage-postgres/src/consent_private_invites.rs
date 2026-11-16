@@ -7,7 +7,7 @@ use coland_storage::{
     PersistenceResult, PreparedPrivateInviteDelivery,
 };
 use diesel::sql_query;
-use diesel::sql_types::{BigInt, Bool, Jsonb, Text};
+use diesel::sql_types::{BigInt, Jsonb, Text};
 use diesel_async::AsyncPgConnection;
 use horme::{OptionalExtension as _, RunQueryDsl};
 use serde_json::{Value, json};
@@ -20,11 +20,6 @@ struct Cell {
     revision: i64,
     #[diesel(sql_type=Jsonb)]
     content: Value,
-}
-#[derive(diesel::QueryableByName)]
-struct Disabled {
-    #[diesel(sql_type=Bool)]
-    disabled: bool,
 }
 fn deferred(
     at: chrono::DateTime<chrono::Utc>,
@@ -92,9 +87,7 @@ pub(crate) async fn admit(
     if &delivery.invite_address.account_id != holder {
         return Err(invalid("delivery belongs to another holder").into());
     }
-    let disabled=sql_query("SELECT (a.disabled_at IS NOT NULL OR COALESCE(l.state IN ('deactivated','erasure_pending'),FALSE)) AS disabled FROM accounts a LEFT JOIN account_lifecycle l ON l.account_pk=a.pk WHERE a.principal_id=$1 AND a.station_id=$2 FOR SHARE OF a")
-        .bind::<Text,_>(holder.principal_id.as_str()).bind::<Text,_>(holder.station_id.as_str()).get_result::<Disabled>(&mut *conn).await?;
-    if disabled.disabled {
+    if !crate::pcr_private_authority::is_active_human_account(conn, holder).await? {
         return Ok(deferred(at, None));
     }
     let policy = crate::consent_private_commands::policy_in_connection(conn, holder).await?;

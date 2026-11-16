@@ -2332,6 +2332,26 @@ pub(crate) async fn commit_applet_record(
     Ok(())
 }
 
+/// The existing source-bound owner decides the complete retry identity.
+/// A committed PG unit also preserves its original response bytes, while
+/// rejection finalization remains free to recover a prior terminal outcome.
+async fn require_committed_mls_result(
+    conn: &mut AsyncPgConnection,
+    record: &coland_storage::IdempotencyRecord,
+    event: &arkret_wire::Event,
+) -> PersistenceResult<()> {
+    let stored =
+        crate::idempotency::require_mls_idempotency_in_connection(conn, record, event).await?;
+    if stored.response_status != record.response_status
+        || stored.response_body != record.response_body
+    {
+        return Err(conflict(
+            "duplicate_conflict: MLS retry outcome differs from the original Commit",
+        ));
+    }
+    Ok(())
+}
+
 /// Install every write one accepted Event produces.
 #[allow(
     clippy::too_many_arguments,
@@ -2467,6 +2487,11 @@ async fn commit_one_inner(
     )
     .await?
     {
+        if event.kind == arkret_wire::EventKind::MlsCommit
+            && let Some(record) = request.idempotency.as_ref()
+        {
+            require_committed_mls_result(conn, record, event).await?;
+        }
         return Ok(());
     }
 
@@ -3189,17 +3214,7 @@ async fn commit_prepared_event_inner(
             if matches!(authority_write, AuthorityCommitWriteOutcome::Duplicate) {
                 // An already accepted Event cannot acquire a second retry identity.
                 // The exact RealmCommit comparison above binds this full response.
-                let stored =
-                    crate::idempotency::require_mls_idempotency_in_connection(conn, record, event)
-                        .await?;
-                if stored.response_status != record.response_status
-                    || stored.response_body != record.response_body
-                {
-                    return Err(conflict(
-                        "duplicate_conflict: MLS retry outcome differs from the original Commit",
-                    )
-                    .into());
-                }
+                require_committed_mls_result(conn, record, event).await?;
             } else {
                 crate::idempotency::record_native_mls_idempotency_in_connection(
                     conn, record, event,

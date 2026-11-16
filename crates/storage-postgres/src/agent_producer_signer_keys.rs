@@ -577,12 +577,17 @@ pub(crate) async fn native_current_human_device_source_in_connection(
     .await
     .map_err(PgTransactionError::into_persistence)?
     .ok_or_else(|| reject("Account Device historical locked PCR cut is unavailable"))?;
-    if cut.authority.realm_id != first.authority.realm_id
-        || cut.admission() != arkret_wire::AccountDeviceRevocationAdmissionDecision::Allow
-    {
+    if cut.authority.realm_id != first.authority.realm_id {
         return Err(reject(
-            "Account Device historical device is not active at the locked PCR cut",
+            "Account Device historical locked PCR differs from its original source",
         ));
+    }
+    if let Some(code) = cut.admission().error_code() {
+        // Preserve the SDK's single current-device decision classification.
+        // A locked terminal source must not become an untyped Conflict.
+        return Err(PersistenceError::Conflict(format!(
+            "{code}: Account Device is not active at the locked PCR cut",
+        )));
     }
     let accepted = cut
         .authority

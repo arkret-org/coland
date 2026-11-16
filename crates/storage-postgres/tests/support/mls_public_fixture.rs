@@ -157,7 +157,7 @@ impl MlsFixture {
         epoch: u64,
         revision: u64,
     ) -> serde_json::Value {
-        let mut group = self.accepted_private_group(base).await;
+        let mut group = Box::pin(self.accepted_private_group(base)).await;
         assert_eq!(
             group.scope(),
             &ScopeRef::Realm {

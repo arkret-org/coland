@@ -11,6 +11,8 @@ mod device_authorization_history;
 mod frozen_database;
 #[path = "support/mls_device_revoke_fixture.rs"]
 mod mls_device_revoke_fixture;
+#[path = "support/mls_local_add_fixture.rs"]
+mod mls_local_add_fixture;
 #[path = "support/mls_public_fixture.rs"]
 mod mls_public_fixture;
 #[path = "support/ordinary_realm.rs"]
@@ -96,35 +98,6 @@ fn claim_id() -> String {
     format!("ak:keypackage_claim:{}", uuid::Uuid::now_v7())
 }
 
-/// One live claim ledger row as the claim service leaves it after a
-/// successful same-Station claim.
-async fn live_claim(pool: &PgPool, station: &str, claim_id: &str) -> MlsWelcomeClaimLedgerKey {
-    let key = MlsWelcomeClaimLedgerKey {
-        source_id: station.to_owned(),
-        claim_request_id: uuid::Uuid::now_v7().simple().to_string(),
-        request_digest: format!("sha256:{}", "6".repeat(64)),
-    };
-    let now = chrono::Utc::now();
-    let mut conn = pool.get().await.unwrap();
-    diesel::sql_query(
-        "INSERT INTO peer_keypackage_claims \
-         (source_id,claim_request_id,request_digest,key_package_use,keypackage_id,outcome, \
-          terminal_receipt,consume_receipt,claim_expires_at_unix_ms,expires_at,state,updated_at) \
-         VALUES ($1,$2,$3,'single_use',NULL,$4,NULL,NULL,$5,$6,'claimed',$7)",
-    )
-    .bind::<Text, _>(&key.source_id)
-    .bind::<Text, _>(&key.claim_request_id)
-    .bind::<Text, _>(&key.request_digest)
-    .bind::<Jsonb, _>(serde_json::json!({"claims": [{"claim_id": claim_id}]}))
-    .bind::<BigInt, _>(now.timestamp_millis() + 3_600_000)
-    .bind::<BigInt, _>(now.timestamp() + 86_400)
-    .bind::<BigInt, _>(now.timestamp())
-    .execute(&mut *conn)
-    .await
-    .unwrap();
-    key
-}
-
 /// The recipient joins the Realm as an Invite acceptance would leave it.
 async fn join(pool: &PgPool, head: &EventCommitRequest, member: &arkret_wire::ActorId) {
     let basis = &head.authority_commit;
@@ -154,8 +127,9 @@ async fn local_station(pool: &PgPool) -> arkret_wire::DidCoreId {
     let mut conn = pool.get().await.unwrap();
     diesel::sql_query(
         "INSERT INTO device_inventory_station(singleton,station_id) \
-         VALUES(TRUE,'ak:did_core:web:mls-admission.example') ON CONFLICT(singleton) DO NOTHING",
+         VALUES(TRUE,$1) ON CONFLICT(singleton) DO NOTHING",
     )
+    .bind::<Text, _>(historical_roster_attestor_resolution().service_id.as_str())
     .execute(&mut *conn)
     .await
     .unwrap();
@@ -376,25 +350,7 @@ async fn mls_genesis_and_commit_install_the_group_at_their_commits() {
     );
     assert_zero_write_refusal(&pool, &uncovered, ConflictCode::GovernanceBindingMismatch).await;
 
-    let outsider = Box::pin(ordinary_realm::human_profile::admit(
-        &pool,
-        &genesis.authority_commit.expected_authority.service_id,
-        "mls-outsider",
-    ))
-    .await
-    .principal_id;
-    let foreign = mls.with_installation(
-        ordinary_realm::next_request(
-            &genesis.authority_commit,
-            arkret_wire::EventKind::MlsCommit,
-            &outsider,
-            mls.commit_payload(&realm_id, &genesis_ref, 0, 0).await,
-            at,
-        ),
-        Some((&genesis_ref, 0)),
-        1,
-    );
-    let foreign = Box::pin(ordinary_realm::source_request(&pool, foreign)).await;
+    let foreign = Box::pin(mls_local_add_fixture::left_member_commit(&pool)).await;
     assert_zero_write_refusal(&pool, &foreign, ConflictCode::CapabilityDenied).await;
 
     let commit = mls.with_installation(
@@ -1353,8 +1309,15 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
     let pool = database.pool();
     let station = local_station(&pool).await;
     let persistence = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
-    let mut source = pcr_genesis::PcrGenesisFixture::new(
-        device_authorization_history::did_web_station(&station),
+    let mut source = pcr_genesis::PcrGenesisFixture::new_with(
+        historical_roster_attestor_resolution()
+            .normalized_did_document
+            .id
+            .clone(),
+        device_authorization_history::DeviceHistoryFixtureOptions {
+            founding_device_signing_seed: [112; 32],
+            ..Default::default()
+        },
     );
     let recipient = source
         .admit_founding_device(&persistence)
@@ -1369,7 +1332,9 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
         &pool,
         "mls-welcome-queue",
         &station,
-        &device_authorization_history::did_web_station(&station),
+        &historical_roster_attestor_resolution()
+            .normalized_did_document
+            .id,
     )
     .await;
     let realm_id = discussion.realm_id();
@@ -1395,27 +1360,20 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
         0,
     );
     uow.commit_event(genesis.clone()).await.unwrap();
-    let genesis_ref = genesis.authority_commit.event.event_id.clone();
 
     let first_claim = claim_id();
-    let first_key = live_claim(&pool, station.as_str(), &first_claim).await;
-    let mut commit = mls.with_installation(
-        ordinary_realm::next_request(
-            &genesis.authority_commit,
-            arkret_wire::EventKind::MlsCommit,
-            &founder,
-            mls.commit_payload(&realm_id, &genesis_ref, 0, 0).await,
-            at,
-        ),
-        Some((&genesis_ref, 0)),
-        1,
-    );
-    commit.authority_commit.welcomes = vec![VerifiedMlsWelcome {
-        delivery: welcome(&commit, &recipient, &first_claim),
-        claim: Some(first_key.clone()),
-        applet_device_scope_guard: None,
-        roster_witness: None,
-    }];
+    let (mut commit, first_package) = Box::pin(mls_local_add_fixture::add(
+        &pool,
+        &mls,
+        &genesis,
+        &recipient,
+        [112; 32],
+        &first_claim,
+        0,
+        None,
+    ))
+    .await;
+    let first_key = commit.authority_commit.welcomes[0].claim.clone().unwrap();
     commit.authority_commit.recipient_queue_capacity = 1;
     assert_zero_write_refusal(&pool, &commit, ConflictCode::FailedPrecondition).await;
     join(&pool, &discussion.head, &recipient_actor(&recipient)).await;
@@ -1440,44 +1398,31 @@ async fn mls_commit_welcome_queue_is_atomic_exact_endpoint_and_revocation_gated(
     );
 
     let second_claim = claim_id();
-    let second_key = live_claim(&pool, station.as_str(), &second_claim).await;
-    let mut full = mls.with_installation(
-        ordinary_realm::next_request(
-            &commit.authority_commit,
-            arkret_wire::EventKind::MlsCommit,
-            &founder,
-            mls.commit_payload(&realm_id, &commit_ref, 1, 0).await,
-            at,
-        ),
-        Some((&commit_ref, 1)),
-        2,
-    );
-    full.authority_commit.welcomes = vec![VerifiedMlsWelcome {
-        delivery: welcome(&full, &recipient, &second_claim),
-        claim: Some(second_key),
-        applet_device_scope_guard: None,
-        roster_witness: None,
-    }];
+    let (mut full, _) = Box::pin(mls_local_add_fixture::add(
+        &pool,
+        &mls,
+        &commit,
+        &recipient,
+        [112; 32],
+        &second_claim,
+        0,
+        None,
+    ))
+    .await;
     full.authority_commit.recipient_queue_capacity = 1;
     assert_zero_write_refusal(&pool, &full, ConflictCode::RecipientQueueAtCapacity).await;
 
-    let mut reused = mls.with_installation(
-        ordinary_realm::next_request(
-            &commit.authority_commit,
-            arkret_wire::EventKind::MlsCommit,
-            &founder,
-            mls.commit_payload(&realm_id, &commit_ref, 1, 0).await,
-            at,
-        ),
-        Some((&commit_ref, 1)),
-        2,
-    );
-    reused.authority_commit.welcomes = vec![VerifiedMlsWelcome {
-        delivery: welcome(&reused, &recipient, &first_claim),
-        claim: Some(first_key),
-        applet_device_scope_guard: None,
-        roster_witness: None,
-    }];
+    let (mut reused, _) = Box::pin(mls_local_add_fixture::add(
+        &pool,
+        &mls,
+        &commit,
+        &recipient,
+        [112; 32],
+        &first_claim,
+        0,
+        Some((&first_package, &commit.authority_commit.welcomes[0])),
+    ))
+    .await;
     reused.authority_commit.recipient_queue_capacity = 10;
     assert_zero_write_refusal(&pool, &reused, ConflictCode::DuplicateConflict).await;
 
@@ -1901,6 +1846,29 @@ fn signed_remote_add_attestation(
     station: &arkret_wire::DidCoreId,
     leaf_key: arkret_wire::Base64UrlString,
 ) -> arkret_models_collaboration::mls_roster_authority::MlsAttestAddRequestBody {
+    signed_add_attestation(
+        commit,
+        genesis_ref,
+        welcome,
+        keypackage,
+        station,
+        leaf_key,
+        arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [71_u8; 32]),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn signed_add_attestation(
+    commit: &EventCommitRequest,
+    genesis_ref: &arkret_wire::EventId,
+    welcome: &VerifiedMlsWelcome,
+    keypackage: &arkret_models_crypto::MlsKeyPackageRecord,
+    station: &arkret_wire::DidCoreId,
+    leaf_key: arkret_wire::Base64UrlString,
+    authorization_event_ref: arkret_wire::EventId,
+    original_claim: Option<arkret_models_crypto::KeyPackagesClaimResponseBody>,
+) -> arkret_models_collaboration::mls_roster_authority::MlsAttestAddRequestBody {
     use arkret_models_collaboration::mls_roster_authority::{
         MlsAddAuthorityAttestation, MlsAttestAddRequestBody,
     };
@@ -1925,8 +1893,6 @@ fn signed_remote_add_attestation(
         arkret_wire::MlsWelcomeRecipientEndpoint::Device { device_id } => device_id.clone(),
         _ => panic!("fixture uses a device"),
     };
-    let authorization_event_ref =
-        arkret_wire::EventId::from_digest(arkret_canonical::DigestSuite::Sha256, [71_u8; 32]);
     let record = KeyPackageClaimRecord {
         claim_id: delivery.keypackage_claim_ref.to_string(),
         keypackage_ref: keypackage.keypackage_ref.to_string(),
@@ -1949,7 +1915,10 @@ fn signed_remote_add_attestation(
         last_resort: None,
     };
     record.validate_shape().unwrap();
-    let claim_request: PeerKeyPackagesClaimFields = serde_json::from_value(serde_json::json!({
+    let outcome = match original_claim {
+        Some(outcome) => outcome,
+        None => {
+            let claim_request: PeerKeyPackagesClaimFields = serde_json::from_value(serde_json::json!({
         "claim_request_id": uuid::Uuid::now_v7().simple().to_string(),
         "intended_realm_id": delivery.realm_id,
         "effective_scope": delivery.effective_scope,
@@ -1962,36 +1931,46 @@ fn signed_remote_add_attestation(
         "expires_at": arkret_canonical::format_timestamp_canonical(at + chrono::Duration::hours(1)),
     }))
     .unwrap();
-    let mut receipt = PeerKeyPackageClaimReceipt {
-        claim_authority_ref: None,
-        claim_request_id: claim_request.claim_request_id.clone(),
-        request_digest: arkret_wire::Hash::new(format!("sha256:{}", "6".repeat(64))).unwrap(),
-        claims_digest: arkret_wire::Hash::new(
-            arkret_canonical::canonical_sha256(&[&record]).unwrap(),
-        )
-        .unwrap(),
-        source_id: station.clone(),
-        destination_id: delivery
-            .recipient_actor_id
-            .fixed_route_service_id()
-            .expect("fixture recipient is an Account")
-            .clone(),
-        request: claim_request,
-        claimed_at: at,
-        expires_at: at + chrono::Duration::hours(1),
-        signature: placeholder(),
+            let mut receipt = PeerKeyPackageClaimReceipt {
+                claim_authority_ref: None,
+                claim_request_id: claim_request.claim_request_id.clone(),
+                request_digest: arkret_wire::Hash::new(
+                    arkret_canonical::canonical_sha256(&claim_request).unwrap(),
+                )
+                .unwrap(),
+                claims_digest: arkret_wire::Hash::new(
+                    arkret_canonical::canonical_sha256(&[&record]).unwrap(),
+                )
+                .unwrap(),
+                source_id: station.clone(),
+                destination_id: delivery
+                    .recipient_actor_id
+                    .fixed_route_service_id()
+                    .expect("fixture recipient is an Account")
+                    .clone(),
+                request: claim_request,
+                claimed_at: at,
+                expires_at: at + chrono::Duration::hours(1),
+                signature: placeholder(),
+            };
+            receipt.signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
+                &[19; 32],
+                &method,
+                &peer_keypackage_claim_receipt_signing_bytes(&receipt).unwrap(),
+            )
+            .unwrap();
+            KeyPackagesClaimResponseBody {
+                claim_request_id: receipt.claim_request_id.clone(),
+                claims: vec![record.clone()],
+                claim_receipt: receipt,
+            }
+        }
     };
-    receipt.signature = arkret_signatures::keypackages::sign_keypackage_signing_input(
-        &[19; 32],
-        &method,
-        &peer_keypackage_claim_receipt_signing_bytes(&receipt).unwrap(),
-    )
-    .unwrap();
-    let outcome = KeyPackagesClaimResponseBody {
-        claim_request_id: receipt.claim_request_id.clone(),
-        claims: vec![record],
-        claim_receipt: receipt.clone(),
-    };
+    assert_eq!(
+        arkret_canonical::canonical_json_bytes(&outcome.claims).unwrap(),
+        arkret_canonical::canonical_json_bytes(&[record]).unwrap(),
+    );
+    let receipt = outcome.claim_receipt.clone();
     let mut attestation = MlsAddAuthorityAttestation {
         claim_authority_ref: None,
         attestor_station_id: delivery
@@ -2005,7 +1984,7 @@ fn signed_remote_add_attestation(
         genesis_event_ref: genesis_ref.clone(),
         commit_event_ref: delivery.commit_event_ref.clone(),
         commit_stream_position: commit.authority_commit.commit.stream_position,
-        epoch: 1,
+        epoch: commit.authority_commit.mls_state.as_ref().unwrap().epoch,
         welcome_id: delivery.welcome_id.clone(),
         claim_id: delivery.keypackage_claim_ref.clone(),
         actor_id: delivery.recipient_actor_id.clone(),
@@ -2216,13 +2195,15 @@ async fn same_station_add_installs_signed_history_atomically() {
         applet_device_scope_guard: None,
         roster_witness: None,
     };
-    let proof = signed_remote_add_attestation(
+    let proof = signed_add_attestation(
         &commit,
         &genesis_ref,
         &local,
         &package,
         &station,
         parsed.leaf_signature_key,
+        recipient.authorization_ref.event_id.clone(),
+        None,
     );
     let receipt = &proof.claim_outcome.claim_receipt;
     let key = MlsWelcomeClaimLedgerKey {
@@ -2886,25 +2867,36 @@ async fn a_remote_recipient_welcome_rides_the_commit_replication_intent() {
     );
 }
 
-// These tests exercise the ordinary Self/Peer shared PG unit, not transport
-// authentication or RFC MLS cryptographic verification. The established fixture
-// supplies accepted Realm/PCR sources and verifier-owned MLS installations.
+// These tests exercise the ordinary Self/Peer shared PG unit over real RFC
+// transitions, signed Welcomes and signed local claim/history originals. The
+// fixture supplies the claim-service port; it does not claim HTTP coverage.
 async fn mls_retry_base(
     pool: &PgPool,
     seed: &str,
 ) -> (EventCommitRequest, DeviceRevocationGateSelector, MlsFixture) {
     let station = local_station(pool).await;
     let persistence = coland_storage_postgres::PgPersistenceStore::new(pool.clone());
-    let source = pcr_genesis::PcrGenesisFixture::new(
-        device_authorization_history::did_web_station(&station),
+    let source = pcr_genesis::PcrGenesisFixture::new_with(
+        historical_roster_attestor_resolution()
+            .normalized_did_document
+            .id
+            .clone(),
+        device_authorization_history::DeviceHistoryFixtureOptions {
+            founding_device_signing_seed: [112; 32],
+            ..Default::default()
+        },
     );
-    let recipient = source.admit_founding_device(&persistence).await.unwrap();
-    let discussion = ordinary_realm::open_discussion_for_station(
+    let recipient = Box::pin(source.admit_founding_device(&persistence))
+        .await
+        .unwrap();
+    let discussion = Box::pin(ordinary_realm::open_discussion_for_station(
         pool,
         seed,
         &station,
-        &device_authorization_history::did_web_station(&station),
-    )
+        &historical_roster_attestor_resolution()
+            .normalized_did_document
+            .id,
+    ))
     .await;
     join(pool, &discussion.head, &recipient_actor(&recipient)).await;
     let mls = MlsFixture::new(pool.clone(), &discussion.head.authority_commit);
@@ -2932,43 +2924,17 @@ async fn mls_retry_base(
 }
 
 async fn mls_retry_commit(
+    pool: &PgPool,
     mls: &MlsFixture,
     previous: &EventCommitRequest,
     recipient: &DeviceRevocationGateSelector,
     claim_id: &str,
-    claim: MlsWelcomeClaimLedgerKey,
     revision: u64,
 ) -> EventCommitRequest {
-    let epoch = previous.authority_commit.mls_state.as_ref().unwrap().epoch;
-    let base = &previous.authority_commit.event.event_id;
-    let mut request = mls.with_installation(
-        ordinary_realm::next_request(
-            &previous.authority_commit,
-            arkret_wire::EventKind::MlsCommit,
-            previous
-                .authority_commit
-                .event
-                .actor_id
-                .signing_principal_id(),
-            mls.commit_payload(
-                &previous.authority_commit.event.realm_id,
-                base,
-                epoch,
-                revision,
-            )
-            .await,
-            previous.authority_commit.commit.committed_at,
-        ),
-        Some((base, epoch)),
-        epoch + 1,
-    );
-    request.authority_commit.welcomes = vec![VerifiedMlsWelcome {
-        delivery: welcome(&request, recipient, claim_id),
-        claim: Some(claim),
-        applet_device_scope_guard: None,
-        roster_witness: None,
-    }];
-    request.authority_commit.recipient_queue_capacity = 10;
+    let (request, _) = Box::pin(mls_local_add_fixture::add(
+        pool, mls, previous, recipient, [112; 32], claim_id, revision, None,
+    ))
+    .await;
     assert!(request.self_producer_guard.is_none());
     assert!(request.authority_commit.event.applet_id.is_none());
     request
@@ -3087,10 +3053,12 @@ async fn ordinary_mls_complete_retry_returns_original_committed_outcome_without_
     use coland_storage::IdempotencyStore;
     let database = TestDatabase::lease().await;
     let pool = database.pool();
-    let (genesis, recipient, mls) = mls_retry_base(&pool, "mls-complete-committed").await;
+    let (genesis, recipient, mls) = Box::pin(mls_retry_base(&pool, "mls-complete-committed")).await;
     let claim_id = claim_id();
-    let claim = live_claim(&pool, recipient.station_id.as_str(), &claim_id).await;
-    let mut request = mls_retry_commit(&mls, &genesis, &recipient, &claim_id, claim, 0).await;
+    let mut request = Box::pin(mls_retry_commit(
+        &pool, &mls, &genesis, &recipient, &claim_id, 0,
+    ))
+    .await;
     let key = uuid::Uuid::now_v7();
     let original = mls_committed_retry_record(&request, key);
     request.idempotency = Some(original.clone());
@@ -3234,11 +3202,17 @@ async fn ordinary_mls_conflicting_complete_key_rolls_back_every_effect_after_led
     }
     let database = TestDatabase::lease().await;
     let pool = database.pool();
-    let (genesis, recipient, mls) = mls_retry_base(&pool, "mls-complete-conflict").await;
+    let (genesis, recipient, mls) = Box::pin(mls_retry_base(&pool, "mls-complete-conflict")).await;
     let first_claim_id = claim_id();
-    let first_claim = live_claim(&pool, recipient.station_id.as_str(), &first_claim_id).await;
-    let mut first =
-        mls_retry_commit(&mls, &genesis, &recipient, &first_claim_id, first_claim, 0).await;
+    let mut first = Box::pin(mls_retry_commit(
+        &pool,
+        &mls,
+        &genesis,
+        &recipient,
+        &first_claim_id,
+        0,
+    ))
+    .await;
     let key = uuid::Uuid::now_v7();
     let original = mls_committed_retry_record(&first, key);
     first.idempotency = Some(original.clone());
@@ -3247,42 +3221,61 @@ async fn ordinary_mls_conflicting_complete_key_rolls_back_every_effect_after_led
         .await
         .unwrap();
     let second_claim_id = claim_id();
-    let second_claim = live_claim(&pool, recipient.station_id.as_str(), &second_claim_id).await;
-    let mut candidate =
-        mls_retry_commit(&mls, &first, &recipient, &second_claim_id, second_claim, 0).await;
+    let mut candidate = Box::pin(mls_retry_commit(
+        &pool,
+        &mls,
+        &first,
+        &recipient,
+        &second_claim_id,
+        0,
+    ))
+    .await;
     let conflicting = mls_committed_retry_record(&candidate, key);
     assert_ne!(conflicting.request_hash, original.request_hash);
     candidate.idempotency = Some(conflicting);
     let before = mls_complete_retry_footprint(&pool).await;
 
-    // Hold only the committed retry row. The contender reaches the final ledger
-    // check after its Event, current, Welcome and claim writes on another connection.
+    // Hold a genuine uncommitted MVCC version of the original retry row,
+    // without changing any key or value. The contender's late INSERT must
+    // resolve that writer before its complete-unit conflict can be classified.
     let mut holder = pool.get().await.unwrap();
     holder.batch_execute("BEGIN").await.unwrap();
-    let pid = diesel::sql_query("SELECT pg_backend_pid() AS pid FROM idempotency_keys WHERE actor_key=$1 AND operation_id=$2 AND idempotency_key=$3 FOR UPDATE")
+    let pid = diesel::sql_query("UPDATE idempotency_keys SET request_hash=request_hash WHERE actor_key=$1 AND operation_id=$2 AND idempotency_key=$3 RETURNING pg_backend_pid() AS pid")
         .bind::<Text,_>(original.authenticated_actor.canonical_key().unwrap())
         .bind::<Text,_>(&original.operation_id).bind::<Text,_>(&original.idempotency_key)
         .get_result::<Pid>(&mut *holder).await.unwrap().pid;
     let attempted = candidate.clone();
     let writer_pool = pool.clone();
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         PgEventCommitUnitOfWork::new(writer_pool)
             .commit_event(attempted)
             .await
     });
     let observed = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        let mut observer = pool.get().await.unwrap();
-        loop {
-            let waiting = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.wait_event_type='Lock' AND a.query ILIKE '%idempotency_keys%') AS waiting")
-                .bind::<Integer,_>(pid).get_result::<Waiting>(&mut *observer).await.unwrap().waiting;
-            if waiting { break; }
-            tokio::task::yield_now().await;
+        tokio::select! {
+            result = &mut writer => Err(result),
+            () = async {
+                let mut observer = pool.get().await.unwrap();
+                loop {
+                    let waiting = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND $1=ANY(pg_blocking_pids(a.pid)) AND a.wait_event_type='Lock' AND a.query ILIKE '%idempotency_keys%') AS waiting")
+                        .bind::<Integer,_>(pid).get_result::<Waiting>(&mut *observer).await.unwrap().waiting;
+                    if waiting { break; }
+                    tokio::task::yield_now().await;
+                }
+            } => Ok(()),
         }
     }).await;
     // Always release the real lock before an assertion can unwind this test.
     holder.batch_execute("ROLLBACK").await.unwrap();
+    let waited = match observed {
+        Ok(Ok(())) => true,
+        Ok(Err(result)) => {
+            panic!("candidate completed before the complete-unit ledger barrier: {result:?}")
+        }
+        Err(_) => false,
+    };
     assert!(
-        observed.is_ok(),
+        waited,
         "the candidate must reach the complete-unit ledger barrier"
     );
     let error = tokio::time::timeout(std::time::Duration::from_secs(30), writer)
@@ -3334,10 +3327,12 @@ async fn ordinary_mls_complete_retry_preserves_original_rejected_outcome_without
     use coland_storage::IdempotencyStore;
     let database = TestDatabase::lease().await;
     let pool = database.pool();
-    let (genesis, recipient, mls) = mls_retry_base(&pool, "mls-complete-rejected").await;
+    let (genesis, recipient, mls) = Box::pin(mls_retry_base(&pool, "mls-complete-rejected")).await;
     let claim_id = claim_id();
-    let claim = live_claim(&pool, recipient.station_id.as_str(), &claim_id).await;
-    let mut request = mls_retry_commit(&mls, &genesis, &recipient, &claim_id, claim, 1).await;
+    let mut request = Box::pin(mls_retry_commit(
+        &pool, &mls, &genesis, &recipient, &claim_id, 1,
+    ))
+    .await;
     let original = mls_complete_retry_record(
         &request,
         uuid::Uuid::now_v7(),
@@ -3488,10 +3483,9 @@ async fn mls_source_results_survive_generic_cache_gc_and_follow_actual_source_de
     use coland_storage::IdempotencyStore;
     let database = TestDatabase::lease().await;
     let pool = database.pool();
-    let (genesis, recipient, mls) = mls_retry_base(&pool, "mls-result-retention").await;
+    let (genesis, recipient, mls) = Box::pin(mls_retry_base(&pool, "mls-result-retention")).await;
     let id = claim_id();
-    let claim = live_claim(&pool, recipient.station_id.as_str(), &id).await;
-    let mut accepted = mls_retry_commit(&mls, &genesis, &recipient, &id, claim, 0).await;
+    let mut accepted = Box::pin(mls_retry_commit(&pool, &mls, &genesis, &recipient, &id, 0)).await;
     let original = mls_committed_retry_record(&accepted, uuid::Uuid::now_v7());
     accepted.idempotency = Some(original.clone());
     PgEventCommitUnitOfWork::new(pool.clone())
@@ -3503,8 +3497,7 @@ async fn mls_source_results_survive_generic_cache_gc_and_follow_actual_source_de
         Some(mls_original_pk(&pool, &accepted.authority_commit.event).await)
     );
     let id = claim_id();
-    let claim = live_claim(&pool, recipient.station_id.as_str(), &id).await;
-    let rejected = mls_retry_commit(&mls, &accepted, &recipient, &id, claim, 1).await;
+    let rejected = Box::pin(mls_retry_commit(&pool, &mls, &accepted, &recipient, &id, 1)).await;
     let rejected_record = mls_complete_retry_record(
         &rejected,
         uuid::Uuid::now_v7(),
@@ -3604,26 +3597,27 @@ async fn mls_source_results_survive_generic_cache_gc_and_follow_actual_source_de
 #[tokio::test]
 async fn mls_native_private_import_preserves_exact_source_results_with_remapped_local_keys() {
     use coland_storage::IdempotencyStore;
-    let source = TestDatabase::lease().await;
-    let target = TestDatabase::lease().await;
+    let source = Box::pin(TestDatabase::lease()).await;
+    let target = Box::pin(TestDatabase::lease()).await;
     assert_ne!(source.url(), target.url());
     let incoming: arkret_wire::DidCoreId =
         "ak:did_core:web:mls-import-target.example".parse().unwrap();
     target.bind_device_inventory_station(incoming.as_str());
     let pool = source.pool();
-    let (genesis, recipient, mls) = mls_retry_base(&pool, "mls-native-retry-import").await;
+    let (genesis, recipient, mls) =
+        Box::pin(mls_retry_base(&pool, "mls-native-retry-import")).await;
     let id = claim_id();
-    let claim = live_claim(&pool, recipient.station_id.as_str(), &id).await;
-    let mut accepted = mls_retry_commit(&mls, &genesis, &recipient, &id, claim, 0).await;
+    let mut accepted =
+        Box::new(Box::pin(mls_retry_commit(&pool, &mls, &genesis, &recipient, &id, 0)).await);
     let original = mls_committed_retry_record(&accepted, uuid::Uuid::now_v7());
     accepted.idempotency = Some(original.clone());
     PgEventCommitUnitOfWork::new(pool.clone())
-        .commit_event(accepted.clone())
+        .commit_event((*accepted).clone())
         .await
         .unwrap();
     let id = claim_id();
-    let claim = live_claim(&pool, recipient.station_id.as_str(), &id).await;
-    let rejected = mls_retry_commit(&mls, &accepted, &recipient, &id, claim, 1).await;
+    let rejected =
+        Box::new(Box::pin(mls_retry_commit(&pool, &mls, &accepted, &recipient, &id, 1)).await);
     let refused = mls_complete_retry_record(
         &rejected,
         uuid::Uuid::now_v7(),
@@ -3650,41 +3644,54 @@ async fn mls_native_private_import_preserves_exact_source_results_with_remapped_
     .unwrap();
     let source_refused_pk = mls_original_pk(&pool, &rejected.authority_commit.event).await;
     let station = &genesis.authority_commit.expected_authority.service_id;
-    let other = ordinary_realm::open_discussion_for_station(
+    let other = Box::pin(ordinary_realm::open_discussion_for_station(
         &pool,
         "mls-other-result-realm",
         station,
-        &device_authorization_history::did_web_station(station),
-    )
+        &historical_roster_attestor_resolution()
+            .normalized_did_document
+            .id,
+    ))
     .await;
     join(&pool, &other.head, &recipient_actor(&recipient)).await;
-    let other_genesis = mls.with_installation(
-        ordinary_realm::next_request(
-            &other.head.authority_commit,
-            arkret_wire::EventKind::MlsGenesis,
-            other
-                .head
-                .authority_commit
-                .event
-                .actor_id
-                .signing_principal_id(),
-            mls.genesis_payload(&other.realm_id(), other.committed_at()),
-            other.committed_at(),
+    let other_genesis = Box::new(
+        mls.with_installation(
+            ordinary_realm::next_request(
+                &other.head.authority_commit,
+                arkret_wire::EventKind::MlsGenesis,
+                other
+                    .head
+                    .authority_commit
+                    .event
+                    .actor_id
+                    .signing_principal_id(),
+                mls.genesis_payload(&other.realm_id(), other.committed_at()),
+                other.committed_at(),
+            ),
+            None,
+            0,
         ),
-        None,
-        0,
     );
     PgEventCommitUnitOfWork::new(pool.clone())
-        .commit_event(other_genesis.clone())
+        .commit_event((*other_genesis).clone())
         .await
         .unwrap();
     let id = claim_id();
-    let claim = live_claim(&pool, recipient.station_id.as_str(), &id).await;
-    let mut other_mls = mls_retry_commit(&mls, &other_genesis, &recipient, &id, claim, 0).await;
+    let mut other_mls = Box::new(
+        Box::pin(mls_retry_commit(
+            &pool,
+            &mls,
+            &other_genesis,
+            &recipient,
+            &id,
+            0,
+        ))
+        .await,
+    );
     let other_record = mls_committed_retry_record(&other_mls, uuid::Uuid::now_v7());
     other_mls.idempotency = Some(other_record.clone());
     PgEventCommitUnitOfWork::new(pool.clone())
-        .commit_event(other_mls.clone())
+        .commit_event((*other_mls).clone())
         .await
         .unwrap();
     assert_eq!(
@@ -3741,11 +3748,11 @@ async fn mls_native_private_import_preserves_exact_source_results_with_remapped_
         1,
         "the no-Commit refusal source is a private dependency, not a fabricated Commit"
     );
-    frozen_database::copy_frozen_archive_preserving_deployment(
+    Box::pin(frozen_database::copy_frozen_archive_preserving_deployment(
         source.url(),
         target.url(),
         &target.pool(),
-    )
+    ))
     .await;
     let target_pool = target.pool();
     let mut conn = target_pool.get().await.unwrap();

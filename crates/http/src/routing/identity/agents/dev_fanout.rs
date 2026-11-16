@@ -6,8 +6,6 @@
 //! controller or writing a development-only proof shape into durable history.
 
 use arkret_wire::Event;
-#[cfg(test)]
-use chrono::Utc;
 use coland_http::error::AppError;
 use serde_json::Value;
 

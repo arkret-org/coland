@@ -12,7 +12,9 @@
 
 use std::collections::BTreeMap;
 
-use arkret_identifiers::{Did, Hash};
+use arkret_identifiers::Did;
+#[cfg(test)]
+use arkret_identifiers::Hash;
 use arkret_identity::{DidDocument, DidResolver as _};
 use coland_services::identity::{
     DID_DOCUMENT_HIGH_RISK_TTL_SECS, DidDocumentFreshness, evaluate_did_document_freshness,
@@ -30,17 +32,6 @@ use crate::state::AppState;
 /// or records without freshness evidence, fail closed because coland does not
 /// perform on-demand network refreshes.
 pub const HIGH_RISK_DID_FRESHNESS_MAX_SECS: i64 = DID_DOCUMENT_HIGH_RISK_TTL_SECS;
-
-/// Resolved Ed25519 verification key with the document metadata that
-/// endpoints need to report or bind into audit records.
-#[derive(Clone, Debug)]
-pub struct ResolvedVerificationKey {
-    pub verification_method: String,
-    pub algorithm: &'static str,
-    pub public_key: VerifyingKey,
-    pub did_document_ref: String,
-    pub key_log_head: Hash,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedPrincipalDeviceSignatureBinding {
@@ -1227,26 +1218,6 @@ async fn refresh_embedded_webvh_document_for_high_risk(
         .cache_resolved_did_document(record.clone())
         .map_err(|error| format!("DID document refresh cache failed: {error}"))?;
     Ok(())
-}
-
-pub fn require_verification_method_in_document(
-    document: &DidDocument,
-    verification_method: &str,
-) -> Result<(), String> {
-    if document
-        .verification_methods
-        .contains_key(verification_method)
-    {
-        return Ok(());
-    }
-    let fragment = verification_method
-        .split_once('#')
-        .map(|(_, fragment)| fragment)
-        .unwrap_or(verification_method);
-    if document.verification_methods.contains_key(fragment) {
-        return Ok(());
-    }
-    Err("verification method is not present in DID document".to_owned())
 }
 
 #[cfg(test)]

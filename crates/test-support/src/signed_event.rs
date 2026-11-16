@@ -1,7 +1,7 @@
 //! Signed Event fixtures using the current admission envelope.
 
 use arkret_identifiers::RealmId;
-use arkret_wire::{DidUrl, Event, EventAdmissionSubmission, ScopeRef};
+use arkret_wire::{DidUrl, Event, ScopeRef};
 use serde_json::Value;
 
 pub const FIXTURE_EVENT_SIGNING_SEED: [u8; 32] = [21_u8; 32];
@@ -93,11 +93,6 @@ impl<'a> CallerSignedEvent<'a> {
     #[must_use]
     pub fn build_value(self) -> Value {
         serde_json::to_value(self.build()).expect("SDK Event serializes")
-    }
-
-    #[must_use]
-    pub fn build_submission(self) -> EventAdmissionSubmission {
-        EventAdmissionSubmission::new(self.build())
     }
 }
 

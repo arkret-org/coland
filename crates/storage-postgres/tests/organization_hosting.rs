@@ -24,7 +24,7 @@ use arkret_models_collaboration::account_status::{
 use arkret_models_collaboration::objects::account_status::AccountStatus;
 use arkret_wire::*;
 use coland_storage::{
-    AccountStatusReplicaAppend, ActorProfileStore as _, AuthorityCommitStore as _, ConflictCode,
+    AccountStatusReplicaAppend, ActorProfileStore as _, ConflictCode, PersistenceStore as _,
     PrincipalResolutionStore as _, SyncStoreRegistry as _,
 };
 use coland_storage_postgres::test_database::TestDatabase;
@@ -290,11 +290,12 @@ async fn hosting_source_and_original_install_are_atomic_cold_and_do_not_duplicat
         .is_err()
     );
     assert!(
-        fixture
-            .g
-            .organization_pcr_genesis_original(request, &fixture.hosting)
-            .await
-            .is_err()
+        PgActorProfileStore {
+            pool: fixture.g.pool.clone(),
+        }
+        .organization_pcr_genesis_original(request, &fixture.hosting)
+        .await
+        .is_err()
     );
     assert_eq!(
         cold.organization_hosting_intent(&request.event_submission, &fixture.hosting)
@@ -626,7 +627,6 @@ impl DeviceFixture {
         &mut self,
         hosting_owner: bool,
     ) -> arkret_models_collaboration::authority_commit::PeerAuthorityForwardEventRequestBody {
-        use coland_storage::IdentityStoreRegistry as _;
         let original = &self.base.native.write.request.event_submission;
         let prepared = if hosting_owner {
             self.base
@@ -698,15 +698,15 @@ async fn finite_device_original_is_the_exact_bundle_projection_and_cold_result()
     let original = fixture.prepare().await;
     let outcome = fixture.base.admit_g().await;
     assert_eq!(
-        fixture
-            .base
-            .g
-            .organization_pcr_genesis_original(
-                &fixture.base.native.write.request,
-                &fixture.base.hosting
-            )
-            .await
-            .unwrap(),
+        PgActorProfileStore {
+            pool: fixture.base.g.pool.clone(),
+        }
+        .organization_pcr_genesis_original(
+            &fixture.base.native.write.request,
+            &fixture.base.hosting
+        )
+        .await
+        .unwrap(),
         Some(outcome.clone())
     );
     let (bundle, freshness, keys) = fixture.base.certificate().await;

@@ -14,7 +14,7 @@ use coland_storage_postgres::test_database::TestDatabase;
 use coland_storage_postgres::{PgAuthorityCommitStore, PgEventCommitUnitOfWork, PgPool};
 use diesel::sql_types::BigInt;
 use diesel_async::RunQueryDsl;
-use serde_json::{Value, json};
+use serde_json::json;
 
 #[derive(diesel::QueryableByName)]
 struct Counts {
